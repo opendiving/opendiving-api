@@ -1,0 +1,8 @@
+services:
+  web:
+    user: root  # Run as root for tests to allow global package installation
+    environment:
+      - PYTHONPATH=/usr/local/lib/python3.11/site-packages
+    command: bash -c "pip install faker pytest-asyncio pytest-mock && pytest tests/ -v"
+    volumes:
+      - ./tests:/code/tests
