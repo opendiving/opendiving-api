@@ -1,10 +1,5 @@
 [project]
-name = "fastapi-boilerplate"
-version = "0.1.0"
-description = "A fully Async FastAPI boilerplate using SQLAlchemy and Pydantic 2"
-authors = [{ name = "Igor Magalhaes", email = "igor.magalhaes.r@gmail.com" }]
-license = { text = "MIT" }
-readme = "README.md"
+name = "opendiving-api"
 requires-python = "~=3.11"
 dependencies = [
     "python-dotenv>=1.0.0",
