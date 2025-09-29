@@ -359,94 +359,6 @@ wheels = [
 ]
 
 [[package]]
-name = "fastapi-boilerplate"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "alembic" },
-    { name = "arq" },
-    { name = "asyncpg" },
-    { name = "bcrypt" },
-    { name = "crudadmin" },
-    { name = "fastapi" },
-    { name = "fastcrud" },
-    { name = "greenlet" },
-    { name = "gunicorn" },
-    { name = "httptools" },
-    { name = "httpx" },
-    { name = "mypy" },
-    { name = "psycopg2-binary" },
-    { name = "pydantic", extra = ["email"] },
-    { name = "pydantic-settings" },
-    { name = "python-dotenv" },
-    { name = "python-jose" },
-    { name = "python-multipart" },
-    { name = "redis" },
-    { name = "ruff" },
-    { name = "sqlalchemy" },
-    { name = "sqlalchemy-utils" },
-    { name = "uuid" },
-    { name = "uuid6" },
-    { name = "uvicorn" },
-    { name = "uvloop" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "faker" },
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-mock" },
-    { name = "ruff" },
-    { name = "types-redis" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest-asyncio" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "alembic", specifier = ">=1.13.1" },
-    { name = "arq", specifier = ">=0.25.0" },
-    { name = "asyncpg", specifier = ">=0.29.0" },
-    { name = "bcrypt", specifier = ">=4.1.1" },
-    { name = "crudadmin", specifier = ">=0.4.2" },
-    { name = "faker", marker = "extra == 'dev'", specifier = ">=26.0.0" },
-    { name = "fastapi", specifier = ">=0.109.1" },
-    { name = "fastcrud", specifier = ">=0.15.5" },
-    { name = "greenlet", specifier = ">=2.0.2" },
-    { name = "gunicorn", specifier = ">=23.0.0" },
-    { name = "httptools", specifier = ">=0.6.1" },
-    { name = "httpx", specifier = ">=0.26.0" },
-    { name = "mypy", specifier = ">=1.16.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
-    { name = "psycopg2-binary", specifier = ">=2.9.9" },
-    { name = "pydantic", extras = ["email"], specifier = ">=2.6.1" },
-    { name = "pydantic-settings", specifier = ">=2.0.3" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4.2" },
-    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.14.0" },
-    { name = "python-dotenv", specifier = ">=1.0.0" },
-    { name = "python-jose", specifier = ">=3.3.0" },
-    { name = "python-multipart", specifier = ">=0.0.9" },
-    { name = "redis", specifier = ">=5.0.1" },
-    { name = "ruff", specifier = ">=0.11.13" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
-    { name = "sqlalchemy", specifier = ">=2.0.25" },
-    { name = "sqlalchemy-utils", specifier = ">=0.41.1" },
-    { name = "types-redis", marker = "extra == 'dev'", specifier = ">=4.6.0" },
-    { name = "uuid", specifier = ">=1.30" },
-    { name = "uuid6", specifier = ">=2024.1.12" },
-    { name = "uvicorn", specifier = ">=0.27.0" },
-    { name = "uvloop", specifier = ">=0.19.0" },
-]
-provides-extras = ["dev"]
-
-[package.metadata.requires-dev]
-dev = [{ name = "pytest-asyncio", specifier = ">=1.0.0" }]
-
-[[package]]
 name = "fastcrud"
 version = "0.15.12"
 source = { registry = "https://pypi.org/simple" }
@@ -764,6 +676,94 @@ sdist = { url = "https://files.pythonhosted.org/packages/a2/6e/371856a3fb9d31ca8
 wheels = [
     { url = "https://files.pythonhosted.org/packages/79/7b/2c79738432f5c924bef5071f933bcc9efd0473bac3b4aa584a6f7c1c8df8/mypy_extensions-1.1.0-py3-none-any.whl", hash = "sha256:1be4cccdb0f2482337c4743e60421de3a356cd97508abadd57d47403e94f5505", size = 4963, upload-time = "2025-04-22T14:54:22.983Z" },
 ]
+
+[[package]]
+name = "opendiving-api"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "alembic" },
+    { name = "arq" },
+    { name = "asyncpg" },
+    { name = "bcrypt" },
+    { name = "crudadmin" },
+    { name = "fastapi" },
+    { name = "fastcrud" },
+    { name = "greenlet" },
+    { name = "gunicorn" },
+    { name = "httptools" },
+    { name = "httpx" },
+    { name = "mypy" },
+    { name = "psycopg2-binary" },
+    { name = "pydantic", extra = ["email"] },
+    { name = "pydantic-settings" },
+    { name = "python-dotenv" },
+    { name = "python-jose" },
+    { name = "python-multipart" },
+    { name = "redis" },
+    { name = "ruff" },
+    { name = "sqlalchemy" },
+    { name = "sqlalchemy-utils" },
+    { name = "uuid" },
+    { name = "uuid6" },
+    { name = "uvicorn" },
+    { name = "uvloop" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "faker" },
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-mock" },
+    { name = "ruff" },
+    { name = "types-redis" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest-asyncio" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "alembic", specifier = ">=1.13.1" },
+    { name = "arq", specifier = ">=0.25.0" },
+    { name = "asyncpg", specifier = ">=0.29.0" },
+    { name = "bcrypt", specifier = ">=4.1.1" },
+    { name = "crudadmin", specifier = ">=0.4.2" },
+    { name = "faker", marker = "extra == 'dev'", specifier = ">=26.0.0" },
+    { name = "fastapi", specifier = ">=0.109.1" },
+    { name = "fastcrud", specifier = ">=0.15.5" },
+    { name = "greenlet", specifier = ">=2.0.2" },
+    { name = "gunicorn", specifier = ">=23.0.0" },
+    { name = "httptools", specifier = ">=0.6.1" },
+    { name = "httpx", specifier = ">=0.26.0" },
+    { name = "mypy", specifier = ">=1.16.0" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
+    { name = "psycopg2-binary", specifier = ">=2.9.9" },
+    { name = "pydantic", extras = ["email"], specifier = ">=2.6.1" },
+    { name = "pydantic-settings", specifier = ">=2.0.3" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4.2" },
+    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.14.0" },
+    { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "python-jose", specifier = ">=3.3.0" },
+    { name = "python-multipart", specifier = ">=0.0.9" },
+    { name = "redis", specifier = ">=5.0.1" },
+    { name = "ruff", specifier = ">=0.11.13" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
+    { name = "sqlalchemy", specifier = ">=2.0.25" },
+    { name = "sqlalchemy-utils", specifier = ">=0.41.1" },
+    { name = "types-redis", marker = "extra == 'dev'", specifier = ">=4.6.0" },
+    { name = "uuid", specifier = ">=1.30" },
+    { name = "uuid6", specifier = ">=2024.1.12" },
+    { name = "uvicorn", specifier = ">=0.27.0" },
+    { name = "uvloop", specifier = ">=0.19.0" },
+]
+provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest-asyncio", specifier = ">=1.0.0" }]
 
 [[package]]
 name = "packaging"
