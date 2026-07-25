@@ -8,9 +8,16 @@ from ...api.dependencies import get_current_superuser, get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import ForbiddenException, NotFoundException
 from ...core.utils.cache import cache
+from ...crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
 from ...crud.crud_dives import crud_dives
 from ...crud.crud_users import crud_users
-from ...schemas.dive import DiveCreate, DiveCreateInternal, DiveRead, DiveUpdate
+from ...schemas.dive import (
+    DiveCreateInternal,
+    DiveCreateRequest,
+    DiveRead,
+    DiveReadWithMixtures,
+    DiveUpdateRequest,
+)
 from ...schemas.parsed_dive import ParsedDiveSchema
 from ...schemas.user import UserRead
 from ...services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file
@@ -35,14 +42,14 @@ async def parse_dive_xml(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.post("/{username}/dive", response_model=DiveRead, status_code=201)
+@router.post("/{username}/dive", response_model=DiveReadWithMixtures, status_code=201)
 async def write_dive(
         request: Request,
         username: str,
-        dive: DiveCreate,
+        dive: DiveCreateRequest,
         current_user: Annotated[dict, Depends(get_current_user)],
         db: Annotated[AsyncSession, Depends(async_get_db)],
-) -> DiveRead:
+) -> DiveReadWithMixtures:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
     )
@@ -53,17 +60,20 @@ async def write_dive(
     if current_user["id"] != db_user.id:
         raise ForbiddenException()
 
-    dive_internal_dict = dive.model_dump()
+    dive_internal_dict = dive.model_dump(exclude={"mixtures"})
     dive_internal_dict["user_id"] = db_user.id
 
     dive_internal = DiveCreateInternal(**dive_internal_dict)
     created_dive = await crud_dives.create(db=db, object=dive_internal)
 
+    await replace_mixtures_for_dive(db=db, dive_id=created_dive.id, mixtures=dive.mixtures)
+
     dive_read = await crud_dives.get(db=db, id=created_dive.id, schema_to_select=DiveRead)
     if dive_read is None:
         raise NotFoundException("Created dive not found")
 
-    return cast(DiveRead, dive_read)
+    mixtures = await get_mixtures_for_dive(db=db, dive_id=created_dive.id)
+    return DiveReadWithMixtures(**cast(dict[str, Any], dive_read), mixtures=mixtures)
 
 
 @router.get("/{username}/dives", response_model=PaginatedListResponse[DiveRead])
@@ -100,11 +110,11 @@ async def read_dives(
     return response
 
 
-@router.get("/{username}/dive/{id}", response_model=DiveRead)
+@router.get("/{username}/dive/{id}", response_model=DiveReadWithMixtures)
 @cache(key_prefix="{username}_dive_cache", resource_id_name="id")
 async def read_dive(
         request: Request, username: str, id: int, db: Annotated[AsyncSession, Depends(async_get_db)]
-) -> DiveRead:
+) -> DiveReadWithMixtures:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
     )
@@ -118,7 +128,8 @@ async def read_dive(
     if db_dive is None:
         raise NotFoundException("Dive not found")
 
-    return cast(DiveRead, db_dive)
+    mixtures = await get_mixtures_for_dive(db=db, dive_id=id)
+    return DiveReadWithMixtures(**cast(dict[str, Any], db_dive), mixtures=mixtures)
 
 
 @router.patch("/{username}/dive/{id}")
@@ -127,7 +138,7 @@ async def patch_dive(
         request: Request,
         username: str,
         id: int,
-        values: DiveUpdate,
+        values: DiveUpdateRequest,
         current_user: Annotated[dict, Depends(get_current_user)],
         db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
@@ -145,7 +156,13 @@ async def patch_dive(
     if db_dive is None:
         raise NotFoundException("Dive not found")
 
-    await crud_dives.update(db=db, object=values, id=id)
+    update_data = values.model_dump(exclude={"mixtures"}, exclude_unset=True)
+    if update_data:
+        await crud_dives.update(db=db, object=update_data, id=id)
+
+    if values.mixtures is not None:
+        await replace_mixtures_for_dive(db=db, dive_id=id, mixtures=values.mixtures)
+
     return {"message": "Dive updated"}
 
 

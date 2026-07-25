@@ -4,6 +4,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.schemas import PersistentDeletion, TimestampSchema, UUIDSchema
+from .dive_mixture import DiveMixtureCreate, DiveMixtureRead
 
 
 class DiveBase(BaseModel):
@@ -29,12 +30,22 @@ class DiveRead(DiveBase):
     created_at: datetime
 
 
+class DiveReadWithMixtures(DiveRead):
+    mixtures: Annotated[list[DiveMixtureRead], Field(default_factory=list)]
+
+
 class DiveCreate(DiveBase):
     model_config = ConfigDict(extra="forbid")
 
 
 class DiveCreateInternal(DiveCreate):
     user_id: int
+
+
+class DiveCreateRequest(DiveCreate):
+    """Request body for creating a dive, including its gas mixtures."""
+
+    mixtures: Annotated[list[DiveMixtureCreate], Field(default_factory=list)]
 
 
 class DiveUpdate(BaseModel):
@@ -57,6 +68,16 @@ class DiveUpdate(BaseModel):
             default=None,
         ),
     ]
+
+
+class DiveUpdateRequest(DiveUpdate):
+    """Request body for updating a dive, including replacing its gas mixtures.
+
+    If `mixtures` is omitted, existing mixtures are left untouched. If provided
+    (even as an empty list), all existing mixtures are replaced with the given list.
+    """
+
+    mixtures: Annotated[list[DiveMixtureCreate] | None, Field(default=None)]
 
 
 class DiveUpdateInternal(DiveUpdate):
