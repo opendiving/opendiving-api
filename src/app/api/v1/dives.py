@@ -92,6 +92,8 @@ async def read_dives(
         limit=items_per_page,
         user_id=db_user.id,
         is_deleted=False,
+        sort_columns="start_time",
+        sort_orders="desc",
     )
 
     response: dict[str, Any] = paginated_response(crud_data=dives_data, page=page, items_per_page=items_per_page)
