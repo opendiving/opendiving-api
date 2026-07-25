@@ -16,6 +16,7 @@ class DiveBase(BaseModel):
     avg_depth: Annotated[float | None, Field(default=None)]
     bottom_temperature: Annotated[int | None, Field(default=None)]
     visibility: Annotated[int | None, Field(default=None, description="Underwater visibility in meters")]
+    trip_id: Annotated[int | None, Field(default=None, description="ID of the trip this dive belongs to")]
 
     notes: Annotated[str, Field(default="")]
 
@@ -60,6 +61,7 @@ class DiveUpdate(BaseModel):
     avg_depth: Annotated[float | None, Field(default=None)]
     bottom_temperature: Annotated[int | None, Field(default=None)]
     visibility: Annotated[int | None, Field(default=None, description="Underwater visibility in meters")]
+    trip_id: Annotated[int | None, Field(default=None, description="ID of the trip this dive belongs to")]
     notes: Annotated[
         str | None,
         Field(
