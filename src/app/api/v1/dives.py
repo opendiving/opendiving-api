@@ -78,7 +78,10 @@ async def write_dive(
 
 @router.get("/{username}/dives", response_model=PaginatedListResponse[DiveRead])
 @cache(
-    key_prefix="{username}_dives:page_{page}:items_per_page:{items_per_page}:trip_{trip_id}",
+    key_prefix=(
+        "{username}_dives:page_{page}:items_per_page:{items_per_page}"
+        ":trip_{trip_id}:site_{dive_site_id}"
+    ),
     resource_id_name="username",
     expiration=60,
 )
@@ -89,6 +92,7 @@ async def read_dives(
         page: int = 1,
         items_per_page: int = 10,
         trip_id: int | None = None,
+        dive_site_id: int | None = None,
 ) -> dict:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
@@ -100,6 +104,8 @@ async def read_dives(
     filters: dict[str, Any] = {"user_id": db_user.id, "is_deleted": False}
     if trip_id is not None:
         filters["trip_id"] = trip_id
+    if dive_site_id is not None:
+        filters["dive_site_id"] = dive_site_id
 
     dives_data = await crud_dives.get_multi(
         db=db,
