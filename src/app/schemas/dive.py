@@ -11,10 +11,10 @@ class DiveBase(BaseModel):
     start_time: Annotated[datetime, Field(examples=[datetime.now()])]
     duration: Annotated[int, Field(examples=[2048], description="Dive duration in seconds")]
 
-    max_depth: Annotated[float, Field(default=None)]
-    avg_depth: Annotated[float, Field(default=None)]
-    bottom_temperature: Annotated[int, Field(default=None)]
-    visibility: Annotated[int, Field(default=None, description="Underwater visibility in meters")]
+    max_depth: Annotated[float | None, Field(default=None)]
+    avg_depth: Annotated[float | None, Field(default=None)]
+    bottom_temperature: Annotated[int | None, Field(default=None)]
+    visibility: Annotated[int | None, Field(default=None, description="Underwater visibility in meters")]
 
     notes: Annotated[str, Field(default="")]
 

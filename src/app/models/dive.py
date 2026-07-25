@@ -19,10 +19,10 @@ class Dive(Base):
     notes: Mapped[str] = mapped_column(String(63206))
     uuid: Mapped[uuid_pkg.UUID] = mapped_column(UUID(as_uuid=True), default_factory=uuid7, unique=True)
 
-    max_depth: Mapped[float] = mapped_column(Float, default=None)
-    avg_depth: Mapped[float] = mapped_column(Float, default=None)
-    bottom_temperature: Mapped[int] = mapped_column(Integer, default=None)
-    visibility: Mapped[int] = mapped_column(Integer, default=None)
+    max_depth: Mapped[float | None] = mapped_column(Float, default=None)
+    avg_depth: Mapped[float | None] = mapped_column(Float, default=None)
+    bottom_temperature: Mapped[int | None] = mapped_column(Integer, default=None)
+    visibility: Mapped[int | None] = mapped_column(Integer, default=None)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default_factory=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
