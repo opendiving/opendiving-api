@@ -22,6 +22,7 @@ class Dive(Base):
     max_depth: Mapped[float] = mapped_column(Float, default=None)
     avg_depth: Mapped[float] = mapped_column(Float, default=None)
     bottom_temperature: Mapped[int] = mapped_column(Integer, default=None)
+    visibility: Mapped[int] = mapped_column(Integer, default=None)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default_factory=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)

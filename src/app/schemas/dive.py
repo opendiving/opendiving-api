@@ -14,6 +14,7 @@ class DiveBase(BaseModel):
     max_depth: Annotated[float, Field(default=None)]
     avg_depth: Annotated[float, Field(default=None)]
     bottom_temperature: Annotated[int, Field(default=None)]
+    visibility: Annotated[int, Field(default=None, description="Underwater visibility in meters")]
 
     notes: Annotated[str, Field(default="")]
 
@@ -40,6 +41,14 @@ class DiveUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     dive_number: Annotated[int | None, Field(examples=[5], default=None)]
+    start_time: Annotated[datetime | None, Field(examples=[datetime.now()], default=None)]
+    duration: Annotated[
+        int | None, Field(examples=[2048], description="Dive duration in seconds", default=None)
+    ]
+    max_depth: Annotated[float | None, Field(default=None)]
+    avg_depth: Annotated[float | None, Field(default=None)]
+    bottom_temperature: Annotated[int | None, Field(default=None)]
+    visibility: Annotated[int | None, Field(default=None, description="Underwater visibility in meters")]
     notes: Annotated[
         str | None,
         Field(
