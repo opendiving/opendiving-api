@@ -1,7 +1,7 @@
 import uuid as uuid_pkg
 from datetime import UTC, datetime
 
-from sqlalchemy import UUID, DateTime, ForeignKey, Integer, String
+from sqlalchemy import UUID, DateTime, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 from uuid6 import uuid7
 
@@ -19,8 +19,8 @@ class Dive(Base):
     notes: Mapped[str] = mapped_column(String(63206))
     uuid: Mapped[uuid_pkg.UUID] = mapped_column(UUID(as_uuid=True), default_factory=uuid7, unique=True)
 
-    max_depth: Mapped[int] = mapped_column(Integer, default=None)
-    avg_depth: Mapped[int] = mapped_column(Integer, default=None)
+    max_depth: Mapped[float] = mapped_column(Float, default=None)
+    avg_depth: Mapped[float] = mapped_column(Float, default=None)
     bottom_temperature: Mapped[int] = mapped_column(Integer, default=None)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default_factory=lambda: datetime.now(UTC))

@@ -11,9 +11,28 @@ from ...core.utils.cache import cache
 from ...crud.crud_dives import crud_dives
 from ...crud.crud_users import crud_users
 from ...schemas.dive import DiveCreate, DiveCreateInternal, DiveRead, DiveUpdate
+from ...schemas.parsed_dive import ParsedDiveSchema
 from ...schemas.user import UserRead
+from ...services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file
 
 router = APIRouter(tags=["dives"])
+
+
+@router.post("/dive/parse-xml", response_model=ParsedDiveSchema)
+async def parse_dive_xml(
+        file: Annotated[UploadFile, File(description="Dive-computer export file (e.g. Suunto XML)")],
+) -> ParsedDiveSchema:
+    """Upload a dive-computer export file and receive the parsed dive data as JSON."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Missing filename")
+
+    content = await file.read()
+    try:
+        return parse_dive_file(file.filename, content)
+    except UnsupportedDiveFileError as exc:
+        raise HTTPException(status_code=415, detail=str(exc)) from exc
+    except DiveParseError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/{username}/dive", response_model=DiveRead, status_code=201)
