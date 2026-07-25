@@ -1,5 +1,6 @@
 from typing import Annotated, Any, cast
-from fastapi import APIRouter, Depends, Request
+
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastcrud.paginated import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,11 +18,11 @@ router = APIRouter(tags=["dives"])
 
 @router.post("/{username}/dive", response_model=DiveRead, status_code=201)
 async def write_dive(
-    request: Request,
-    username: str,
-    dive: DiveCreate,
-    current_user: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(async_get_db)],
+        request: Request,
+        username: str,
+        dive: DiveCreate,
+        current_user: Annotated[dict, Depends(get_current_user)],
+        db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveRead:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
@@ -34,7 +35,7 @@ async def write_dive(
         raise ForbiddenException()
 
     dive_internal_dict = dive.model_dump()
-    dive_internal_dict["created_by_user_id"] = db_user.id
+    dive_internal_dict["user_id"] = db_user.id
 
     dive_internal = DiveCreateInternal(**dive_internal_dict)
     created_dive = await crud_dives.create(db=db, object=dive_internal)
@@ -53,11 +54,11 @@ async def write_dive(
     expiration=60,
 )
 async def read_dives(
-    request: Request,
-    username: str,
-    db: Annotated[AsyncSession, Depends(async_get_db)],
-    page: int = 1,
-    items_per_page: int = 10,
+        request: Request,
+        username: str,
+        db: Annotated[AsyncSession, Depends(async_get_db)],
+        page: int = 1,
+        items_per_page: int = 10,
 ) -> dict:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
@@ -70,7 +71,7 @@ async def read_dives(
         db=db,
         offset=compute_offset(page, items_per_page),
         limit=items_per_page,
-        created_by_user_id=db_user.id,
+        user_id=db_user.id,
         is_deleted=False,
     )
 
@@ -81,7 +82,7 @@ async def read_dives(
 @router.get("/{username}/dive/{id}", response_model=DiveRead)
 @cache(key_prefix="{username}_dive_cache", resource_id_name="id")
 async def read_dive(
-    request: Request, username: str, id: int, db: Annotated[AsyncSession, Depends(async_get_db)]
+        request: Request, username: str, id: int, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> DiveRead:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
@@ -91,7 +92,7 @@ async def read_dive(
 
     db_user = cast(UserRead, db_user)
     db_dive = await crud_dives.get(
-        db=db, id=id, created_by_user_id=db_user.id, is_deleted=False, schema_to_select=DiveRead
+        db=db, id=id, user_id=db_user.id, is_deleted=False, schema_to_select=DiveRead
     )
     if db_dive is None:
         raise NotFoundException("Dive not found")
@@ -102,12 +103,12 @@ async def read_dive(
 @router.patch("/{username}/dive/{id}")
 @cache("{username}_dive_cache", resource_id_name="id", pattern_to_invalidate_extra=["{username}_dives:*"])
 async def patch_dive(
-    request: Request,
-    username: str,
-    id: int,
-    values: DiveUpdate,
-    current_user: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(async_get_db)],
+        request: Request,
+        username: str,
+        id: int,
+        values: DiveUpdate,
+        current_user: Annotated[dict, Depends(get_current_user)],
+        db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
@@ -130,11 +131,11 @@ async def patch_dive(
 @router.delete("/{username}/dive/{id}")
 @cache("{username}_dive_cache", resource_id_name="id", to_invalidate_extra={"{username}_dives": "{username}"})
 async def erase_dive(
-    request: Request,
-    username: str,
-    id: int,
-    current_user: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(async_get_db)],
+        request: Request,
+        username: str,
+        id: int,
+        current_user: Annotated[dict, Depends(get_current_user)],
+        db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
@@ -155,10 +156,10 @@ async def erase_dive(
     return {"message": "Dive deleted"}
 
 
-@router.delete("/{username}/db_dive/{id}", dependencies=[Depends(get_current_superuser)])
+@router.delete("/{username}/dive/{id}", dependencies=[Depends(get_current_superuser)])
 @cache("{username}_dive_cache", resource_id_name="id", to_invalidate_extra={"{username}_dives": "{username}"})
 async def erase_db_dive(
-    request: Request, username: str, id: int, db: Annotated[AsyncSession, Depends(async_get_db)]
+        request: Request, username: str, id: int, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> dict[str, str]:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
