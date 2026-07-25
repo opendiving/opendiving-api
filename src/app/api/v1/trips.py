@@ -36,7 +36,7 @@ async def write_trip(
     if await trip_name_exists(db=db, user_id=db_user.id, name=trip.name):
         raise DuplicateValueException("A trip with this name already exists")
 
-    trip_internal = TripCreateInternal(name=trip.name, user_id=db_user.id)
+    trip_internal = TripCreateInternal(**trip.model_dump(), user_id=db_user.id)
     created_trip = await crud_trips.create(db=db, object=trip_internal)
 
     trip_read = await crud_trips.get(db=db, id=created_trip.id, schema_to_select=TripRead)
