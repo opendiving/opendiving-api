@@ -78,7 +78,7 @@ async def write_dive(
 
 @router.get("/{username}/dives", response_model=PaginatedListResponse[DiveRead])
 @cache(
-    key_prefix="{username}_dives:page_{page}:items_per_page:{items_per_page}",
+    key_prefix="{username}_dives:page_{page}:items_per_page:{items_per_page}:trip_{trip_id}",
     resource_id_name="username",
     expiration=60,
 )
@@ -88,6 +88,7 @@ async def read_dives(
         db: Annotated[AsyncSession, Depends(async_get_db)],
         page: int = 1,
         items_per_page: int = 10,
+        trip_id: int | None = None,
 ) -> dict:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
@@ -96,14 +97,17 @@ async def read_dives(
         raise NotFoundException("User not found")
 
     db_user = cast(UserRead, db_user)
+    filters: dict[str, Any] = {"user_id": db_user.id, "is_deleted": False}
+    if trip_id is not None:
+        filters["trip_id"] = trip_id
+
     dives_data = await crud_dives.get_multi(
         db=db,
         offset=compute_offset(page, items_per_page),
         limit=items_per_page,
-        user_id=db_user.id,
-        is_deleted=False,
         sort_columns="start_time",
         sort_orders="desc",
+        **filters,
     )
 
     response: dict[str, Any] = paginated_response(crud_data=dives_data, page=page, items_per_page=items_per_page)

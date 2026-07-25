@@ -6,8 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import get_current_user
 from ...core.db.database import async_get_db
-from ...core.exceptions.http_exceptions import ForbiddenException, NotFoundException
-from ...crud.crud_trips import crud_trips
+from ...core.exceptions.http_exceptions import DuplicateValueException, ForbiddenException, NotFoundException
+from ...crud.crud_trips import crud_trips, trip_name_exists
 from ...crud.crud_users import crud_users
 from ...schemas.trip import TripCreate, TripCreateInternal, TripRead, TripUpdate
 from ...schemas.user import UserRead
@@ -32,6 +32,9 @@ async def write_trip(
     db_user = cast(UserRead, db_user)
     if current_user["id"] != db_user.id:
         raise ForbiddenException()
+
+    if await trip_name_exists(db=db, user_id=db_user.id, name=trip.name):
+        raise DuplicateValueException("A trip with this name already exists")
 
     trip_internal = TripCreateInternal(name=trip.name, user_id=db_user.id)
     created_trip = await crud_trips.create(db=db, object=trip_internal)
@@ -114,6 +117,11 @@ async def patch_trip(
     db_trip = await crud_trips.get(db=db, id=id, user_id=db_user.id, is_deleted=False, schema_to_select=TripRead)
     if db_trip is None:
         raise NotFoundException("Trip not found")
+
+    if values.name is not None and await trip_name_exists(
+            db=db, user_id=db_user.id, name=values.name, exclude_id=id
+    ):
+        raise DuplicateValueException("A trip with this name already exists")
 
     update_data = values.model_dump(exclude_unset=True)
     if update_data:
