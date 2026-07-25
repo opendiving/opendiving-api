@@ -22,18 +22,8 @@ class Dive(TimestampSchema, DiveBase, UUIDSchema, PersistentDeletion):
     user_id: int
 
 
-class DiveRead(BaseModel):
+class DiveRead(DiveBase):
     id: int
-    dive_number: Annotated[int, Field(examples=[5])]
-    notes: Annotated[
-        str,
-        Field(
-            min_length=1,
-            max_length=63206,
-            examples=["This is my dive notes."],
-            json_schema_extra={"format": "textarea"},
-        ),
-    ]
     user_id: int
     created_at: datetime
 
@@ -53,7 +43,6 @@ class DiveUpdate(BaseModel):
     notes: Annotated[
         str | None,
         Field(
-            min_length=1,
             max_length=63206,
             examples=["This is my updated dive notes."],
             default=None,
