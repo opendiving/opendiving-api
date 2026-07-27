@@ -8,6 +8,9 @@ from ..core.schemas import PersistentDeletion, TimestampSchema
 
 class DiveSiteBase(BaseModel):
     name: Annotated[str, Field(min_length=1, max_length=255, examples=["Blue Hole"])]
+    location: Annotated[
+        str | None, Field(default=None, max_length=255, examples=["Koh Tao, Thailand"])
+    ]
 
 
 class DiveSite(TimestampSchema, DiveSiteBase, PersistentDeletion):
@@ -32,6 +35,9 @@ class DiveSiteUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: Annotated[str | None, Field(min_length=1, max_length=255, default=None)]
+    location: Annotated[
+        str | None, Field(default=None, max_length=255, examples=["Koh Tao, Thailand"])
+    ]
 
 
 class DiveSiteUpdateInternal(DiveSiteUpdate):
