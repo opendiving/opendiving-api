@@ -21,6 +21,7 @@ from ...schemas.dive import (
 from ...schemas.parsed_dive import ParsedDiveSchema
 from ...schemas.user import UserRead
 from ...services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file
+from ...services.dive_stats import recalculate_dive_stats
 
 router = APIRouter(tags=["dives"])
 
@@ -67,6 +68,7 @@ async def write_dive(
     created_dive = await crud_dives.create(db=db, object=dive_internal)
 
     await replace_mixtures_for_dive(db=db, dive_id=created_dive.id, mixtures=dive.mixtures)
+    await recalculate_dive_stats(db=db, user_id=db_user.id)
 
     dive_read = await crud_dives.get(db=db, id=created_dive.id, schema_to_select=DiveRead)
     if dive_read is None:
@@ -173,6 +175,9 @@ async def patch_dive(
     if values.mixtures is not None:
         await replace_mixtures_for_dive(db=db, dive_id=id, mixtures=values.mixtures)
 
+    if update_data or values.mixtures is not None:
+        await recalculate_dive_stats(db=db, user_id=db_user.id)
+
     return {"message": "Dive updated"}
 
 
@@ -200,6 +205,7 @@ async def erase_dive(
         raise NotFoundException("Dive not found")
 
     await crud_dives.delete(db=db, id=id)
+    await recalculate_dive_stats(db=db, user_id=db_user.id)
 
     return {"message": "Dive deleted"}
 
@@ -219,5 +225,7 @@ async def erase_db_dive(
     if db_dive is None:
         raise NotFoundException("Dive not found")
 
+    db_dive = cast(DiveRead, db_dive)
     await crud_dives.db_delete(db=db, id=id)
+    await recalculate_dive_stats(db=db, user_id=db_dive.user_id)
     return {"message": "Dive deleted from the database"}

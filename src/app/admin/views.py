@@ -8,9 +8,11 @@ from ..core.security import get_password_hash
 from ..models.dive import Dive
 from ..models.tier import Tier
 from ..models.user import User
+from ..models.user_dive_stats import UserDiveStats
 from ..schemas.dive import DiveCreate, DiveUpdate
 from ..schemas.tier import TierCreate, TierUpdate
 from ..schemas.user import UserCreate, UserCreateInternal, UserUpdate
+from ..schemas.user_dive_stats import UserDiveStatsUpdate
 
 
 def register_admin_views(admin: CRUDAdmin) -> None:
@@ -48,4 +50,11 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         create_schema=DiveCreate,
         update_schema=DiveUpdate,
         allowed_actions={"view", "create", "update", "delete"},
+    )
+
+    admin.add_view(
+        model=UserDiveStats,
+        create_schema=UserDiveStatsUpdate,
+        update_schema=UserDiveStatsUpdate,
+        allowed_actions={"view"},
     )

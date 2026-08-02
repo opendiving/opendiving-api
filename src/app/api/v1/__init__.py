@@ -5,6 +5,7 @@ from .login import router as login_router
 from .logout import router as logout_router
 from .dives import router as dives_router
 from .dive_sites import router as dive_sites_router
+from .dive_stats import router as dive_stats_router
 from .rate_limits import router as rate_limits_router
 from .tasks import router as tasks_router
 from .tiers import router as tiers_router
@@ -19,6 +20,7 @@ router.include_router(users_router)
 router.include_router(trips_router)
 router.include_router(dive_sites_router)
 router.include_router(dives_router)
+router.include_router(dive_stats_router)
 router.include_router(tasks_router)
 router.include_router(tiers_router)
 router.include_router(rate_limits_router)

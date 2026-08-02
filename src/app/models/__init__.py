@@ -5,3 +5,4 @@ from .rate_limit import RateLimit
 from .tier import Tier
 from .trip import Trip
 from .user import User
+from .user_dive_stats import UserDiveStats
