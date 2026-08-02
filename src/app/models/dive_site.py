@@ -20,12 +20,15 @@ class DiveSite(Base):
     is_deleted: Mapped[bool] = mapped_column(default=False, index=True)
 
     __table_args__ = (
-        # Case-insensitive uniqueness per user, ignoring soft-deleted dive sites so a
-        # name can be reused once its previous dive site has been "deleted".
+        # Case-insensitive uniqueness per user on (name, location), ignoring soft-deleted
+        # dive sites so the combination can be reused once a site has been "deleted".
+        # COALESCE maps NULL location to '' so two NULL-location sites with the same name
+        # are also considered duplicates.
         Index(
-            "ux_dive_site_user_id_name_lower",
+            "ux_dive_site_user_id_name_location_lower",
             "user_id",
             func.lower(name),
+            func.coalesce(func.lower(location), ""),
             unique=True,
             postgresql_where=is_deleted.is_(False),
         ),

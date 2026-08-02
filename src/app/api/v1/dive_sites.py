@@ -33,8 +33,8 @@ async def write_dive_site(
     if current_user["id"] != db_user.id:
         raise ForbiddenException()
 
-    if await dive_site_name_exists(db=db, user_id=db_user.id, name=dive_site.name):
-        raise DuplicateValueException("A dive site with this name already exists")
+    if await dive_site_name_exists(db=db, user_id=db_user.id, name=dive_site.name, location=dive_site.location):
+        raise DuplicateValueException("A dive site with this name already exists at this location")
 
     dive_site_internal = DiveSiteCreateInternal(**dive_site.model_dump(), user_id=db_user.id)
     created_dive_site = await crud_dive_sites.create(db=db, object=dive_site_internal)
@@ -122,10 +122,14 @@ async def patch_dive_site(
     if db_dive_site is None:
         raise NotFoundException("Dive site not found")
 
-    if values.name is not None and await dive_site_name_exists(
-            db=db, user_id=db_user.id, name=values.name, exclude_id=id
+    db_dive_site = cast(DiveSiteRead, db_dive_site)
+    effective_name = values.name if values.name is not None else db_dive_site.name
+    effective_location = values.location if "location" in values.model_fields_set else db_dive_site.location
+
+    if (values.name is not None or "location" in values.model_fields_set) and await dive_site_name_exists(
+            db=db, user_id=db_user.id, name=effective_name, location=effective_location, exclude_id=id
     ):
-        raise DuplicateValueException("A dive site with this name already exists")
+        raise DuplicateValueException("A dive site with this name already exists at this location")
 
     update_data = values.model_dump(exclude_unset=True)
     if update_data:

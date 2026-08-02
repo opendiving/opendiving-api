@@ -18,18 +18,23 @@ crud_dive_sites = CRUDDiveSite(DiveSite)
 
 
 async def dive_site_name_exists(
-        db: AsyncSession, user_id: int, name: str, exclude_id: int | None = None
+        db: AsyncSession, user_id: int, name: str, location: str | None = None, exclude_id: int | None = None
 ) -> bool:
-    """Case-insensitive check for whether a non-deleted dive site with this name already exists for the user.
+    """Case-insensitive check for whether a non-deleted dive site with the same (name, location)
+    already exists for the user.
 
-    Mirrors the `ux_dive_site_user_id_name_lower` partial unique index, which enforces the same rule
-    (case-insensitively, ignoring soft-deleted dive sites) at the database level as a safety net.
+    Mirrors the `ux_dive_site_user_id_name_location_lower` partial unique index. Two sites with
+    NULL location and the same name are treated as duplicates.
     """
     stmt = select(DiveSite.id).where(
         DiveSite.user_id == user_id,
         DiveSite.is_deleted.is_(False),
         func.lower(DiveSite.name) == name.strip().lower(),
     )
+    if location is None:
+        stmt = stmt.where(DiveSite.location.is_(None))
+    else:
+        stmt = stmt.where(func.lower(DiveSite.location) == location.strip().lower())
     if exclude_id is not None:
         stmt = stmt.where(DiveSite.id != exclude_id)
 
