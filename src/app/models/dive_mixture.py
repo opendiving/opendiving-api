@@ -13,6 +13,6 @@ class DiveMixture(Base):
     volume: Mapped[float] = mapped_column(Float)
     start_pressure: Mapped[float | None] = mapped_column(Float, default=None)
     end_pressure: Mapped[float | None] = mapped_column(Float, default=None)
-    po2: Mapped[float] = mapped_column(Float, default=1.4)
     oxygen: Mapped[float] = mapped_column(Float, default=21.0)
+    helium: Mapped[float] = mapped_column(Float, default=0.0)
     name: Mapped[str | None] = mapped_column(String(50), default=None)

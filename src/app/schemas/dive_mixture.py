@@ -14,8 +14,8 @@ class DiveMixtureBase(BaseModel):
     end_pressure: Annotated[
         float | None, Field(default=None, examples=[50.0], description="Ending pressure in bar")
     ]
-    po2: Annotated[float, Field(default=1.4, description="Partial pressure of oxygen set-point in bar")]
     oxygen: Annotated[float, Field(default=21.0, description="Oxygen percentage")]
+    helium: Annotated[float, Field(default=0.0, description="Helium percentage")]
 
 
 class DiveMixtureCreate(DiveMixtureBase):

@@ -74,6 +74,22 @@ explicitly-provided values, but the dumped dict always includes the key).
 
 Always pair `Field(default=None)` with an `X | None` type annotation.
 
+## `DiveMixture.po2` was replaced with `helium`
+
+Mixtures originally tracked a PO₂ set-point (bar); this was replaced with a
+`helium` percentage (for trimix), handled identically to `oxygen` - a plain
+required `float` on both the model and `DiveMixtureBase`, defaulting to `0.0`
+(vs. oxygen's `21.0`), with the same 0-100 range validation on the frontend
+(`diveMixtureSchema`). This was a genuine schema swap (not an added column), so
+applying it to the live dev DB per the "no migration tool" workflow above took
+two manual steps rather than one:
+```sql
+ALTER TABLE dive_mixture ADD COLUMN helium DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+ALTER TABLE dive_mixture DROP COLUMN po2;
+```
+There's no meaningful way to backfill `helium` from old `po2` values (they
+measure different things), so existing mixtures just got `helium = 0`.
+
 ## Mixtures are always replaced wholesale, never upserted by id
 
 `crud_dive_mixtures.replace_mixtures_for_dive()` deletes all of a dive's existing
