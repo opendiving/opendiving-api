@@ -26,10 +26,16 @@ class Dive(TimestampSchema, DiveBase, UUIDSchema, PersistentDeletion):
     user_id: int
 
 
+class DiveSiteInfo(BaseModel):
+    name: str
+    location: str | None = None
+
+
 class DiveRead(DiveBase):
     id: int
     user_id: int
     created_at: datetime
+    dive_site: DiveSiteInfo | None = None
 
 
 class DiveReadWithMixtures(DiveRead):

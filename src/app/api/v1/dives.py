@@ -2,6 +2,7 @@ from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastcrud.paginated import PaginatedListResponse, compute_offset, paginated_response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import get_current_superuser, get_current_user
@@ -9,6 +10,7 @@ from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import ForbiddenException, NotFoundException
 from ...core.utils.cache import cache
 from ...crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
+from ...models.dive_site import DiveSite
 from ...crud.crud_dives import crud_dives
 from ...crud.crud_users import crud_users
 from ...schemas.dive import (
@@ -117,6 +119,20 @@ async def read_dives(
         sort_orders="desc",
         **filters,
     )
+
+    # Enrich each dive with its site name via a single batched lookup.
+    dive_site_ids = {
+        d["dive_site_id"] for d in dives_data["data"] if d.get("dive_site_id") is not None
+    }
+    if dive_site_ids:
+        result = await db.execute(
+            select(DiveSite.id, DiveSite.name, DiveSite.location).where(DiveSite.id.in_(dive_site_ids))
+        )
+        site_map: dict[int, dict] = {row.id: {"name": row.name, "location": row.location} for row in result}
+    else:
+        site_map = {}
+    for dive in dives_data["data"]:
+        dive["dive_site"] = site_map.get(dive.get("dive_site_id"))
 
     response: dict[str, Any] = paginated_response(crud_data=dives_data, page=page, items_per_page=items_per_page)
     return response
