@@ -17,7 +17,6 @@ class DiveBase(BaseModel):
     bottom_temperature: Annotated[float | None, Field(default=None)]
     visibility: Annotated[int | None, Field(default=None, description="Underwater visibility in meters")]
     trip_id: Annotated[int | None, Field(default=None, description="ID of the trip this dive belongs to")]
-    dive_site_id: Annotated[int | None, Field(default=None, description="ID of the dive site this dive was made at")]
 
     notes: Annotated[str, Field(default="")]
 
@@ -27,6 +26,7 @@ class Dive(TimestampSchema, DiveBase, UUIDSchema, PersistentDeletion):
 
 
 class DiveSiteInfo(BaseModel):
+    id: int
     name: str
     location: str | None = None
 
@@ -35,7 +35,9 @@ class DiveRead(DiveBase):
     id: int
     user_id: int
     created_at: datetime
-    dive_site: DiveSiteInfo | None = None
+    dive_sites: Annotated[
+        list[DiveSiteInfo], Field(default_factory=list, description="Dive sites visited, in the order visited")
+    ]
 
 
 class DiveReadWithMixtures(DiveRead):
@@ -51,9 +53,13 @@ class DiveCreateInternal(DiveCreate):
 
 
 class DiveCreateRequest(DiveCreate):
-    """Request body for creating a dive, including its gas mixtures."""
+    """Request body for creating a dive, including its gas mixtures and dive site(s)."""
 
     mixtures: Annotated[list[DiveMixtureCreate], Field(default_factory=list)]
+    dive_site_ids: Annotated[
+        list[int],
+        Field(default_factory=list, description="IDs of the dive sites visited, in the order visited"),
+    ]
 
 
 class DiveUpdate(BaseModel):
@@ -69,7 +75,6 @@ class DiveUpdate(BaseModel):
     bottom_temperature: Annotated[float | None, Field(default=None)]
     visibility: Annotated[int | None, Field(default=None, description="Underwater visibility in meters")]
     trip_id: Annotated[int | None, Field(default=None, description="ID of the trip this dive belongs to")]
-    dive_site_id: Annotated[int | None, Field(default=None, description="ID of the dive site this dive was made at")]
     notes: Annotated[
         str | None,
         Field(
@@ -81,13 +86,18 @@ class DiveUpdate(BaseModel):
 
 
 class DiveUpdateRequest(DiveUpdate):
-    """Request body for updating a dive, including replacing its gas mixtures.
+    """Request body for updating a dive, including replacing its gas mixtures and dive site(s).
 
-    If `mixtures` is omitted, existing mixtures are left untouched. If provided
-    (even as an empty list), all existing mixtures are replaced with the given list.
+    If `mixtures`/`dive_site_ids` is omitted, the existing mixtures/dive sites are left
+    untouched. If provided (even as an empty list), all existing mixtures/dive sites are
+    replaced with the given list.
     """
 
     mixtures: Annotated[list[DiveMixtureCreate] | None, Field(default=None)]
+    dive_site_ids: Annotated[
+        list[int] | None,
+        Field(default=None, description="IDs of the dive sites visited, in the order visited"),
+    ]
 
 
 class DiveUpdateInternal(DiveUpdate):

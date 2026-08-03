@@ -21,6 +21,35 @@ Practical workflow used throughout this project for adding a column to an existi
 If this project grows past the prototyping stage, introducing real Alembic
 migrations is worth doing so schema changes are versioned and repeatable.
 
+## Dive sites are many-to-many with dives via a join table
+
+A dive can be logged at more than one dive site (e.g. a drift dive that crosses
+several named sites), so `dive` does **not** have a `dive_site_id` column.
+Instead `dive_dive_site` (model `DiveDiveSite`) joins `dive`/`dive_site`, with a
+`position` column preserving the order the sites were visited in (0 = primary
+site, used wherever only one site can be shown, e.g. "Site Name +2" in list
+views). Both FKs are `ON DELETE CASCADE` - deleting a dive removes its rows in
+the join table (not the sites), and hard-deleting a dive site (superuser only;
+normal deletes are soft) removes it from any dive's site list without
+affecting the rest of that dive.
+
+`crud_dive_dive_sites.py` mirrors the `crud_dive_mixtures.py` pattern:
+`replace_dive_sites_for_dive()` deletes-and-reinserts a dive's full site list on
+every create/update (never diffed/upserted), exactly like mixtures. The API's
+`dive_site_id` query filter on `GET /dives` still works the same from the
+client's perspective, but now matches any dive that *includes* that site
+(via a subquery over the join table) rather than an exact single-column match.
+
+Applying this schema change to an existing local DB (per the "no migration
+tool" workflow above): the new `dive_dive_site` table is created automatically
+by `create_all()`, but you'll need to manually backfill it from the old
+`dive.dive_site_id` column and drop that column, e.g.:
+```sql
+INSERT INTO dive_dive_site (dive_id, dive_site_id, position)
+SELECT id, dive_site_id, 0 FROM dive WHERE dive_site_id IS NOT NULL;
+ALTER TABLE dive DROP COLUMN dive_site_id;
+```
+
 ## `Mapped[X]` vs `Mapped[X | None]` on `MappedAsDataclass`
 
 `Base` extends both `DeclarativeBase` and `MappedAsDataclass`. On this setup,

@@ -2,7 +2,6 @@ from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastcrud.paginated import PaginatedListResponse, compute_offset, paginated_response
-from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,8 +9,13 @@ from ...api.dependencies import get_current_superuser, get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import ForbiddenException, NotFoundException
 from ...core.utils.cache import cache
+from ...crud.crud_dive_dive_sites import (
+    get_dive_ids_for_dive_site,
+    get_dive_sites_for_dive,
+    get_dive_sites_for_dives,
+    replace_dive_sites_for_dive,
+)
 from ...crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
-from ...models.dive_site import DiveSite
 from ...crud.crud_dives import crud_dives
 from ...crud.crud_users import crud_users
 from ...schemas.dive import (
@@ -33,7 +37,7 @@ def _fk_error_detail(exc: IntegrityError) -> str:
     msg = str(exc.orig)
     if "dive_trip_id_fkey" in msg:
         return "Trip not found."
-    if "dive_dive_site_id_fkey" in msg:
+    if "dive_site_id_fkey" in msg:
         return "Dive site not found."
     return "Invalid reference: a related record does not exist."
 
@@ -73,7 +77,7 @@ async def write_dive(
     if current_user["id"] != db_user.id:
         raise ForbiddenException()
 
-    dive_internal_dict = dive.model_dump(exclude={"mixtures"})
+    dive_internal_dict = dive.model_dump(exclude={"mixtures", "dive_site_ids"})
     dive_internal_dict["user_id"] = db_user.id
 
     dive_internal = DiveCreateInternal(**dive_internal_dict)
@@ -84,6 +88,11 @@ async def write_dive(
         raise HTTPException(status_code=422, detail=_fk_error_detail(e)) from e
 
     await replace_mixtures_for_dive(db=db, dive_id=created_dive.id, mixtures=dive.mixtures)
+    try:
+        await replace_dive_sites_for_dive(db=db, dive_id=created_dive.id, dive_site_ids=dive.dive_site_ids)
+    except IntegrityError as e:
+        await db.rollback()
+        raise HTTPException(status_code=422, detail=_fk_error_detail(e)) from e
     await recalculate_dive_stats(db=db, user_id=db_user.id)
 
     dive_read = await crud_dives.get(db=db, id=created_dive.id, schema_to_select=DiveRead)
@@ -91,7 +100,10 @@ async def write_dive(
         raise NotFoundException("Created dive not found")
 
     mixtures = await get_mixtures_for_dive(db=db, dive_id=created_dive.id)
-    return DiveReadWithMixtures(**cast(dict[str, Any], dive_read), mixtures=mixtures)
+    dive_sites = await get_dive_sites_for_dive(db=db, dive_id=created_dive.id)
+    return DiveReadWithMixtures(
+        **cast(dict[str, Any], dive_read), mixtures=mixtures, dive_sites=dive_sites
+    )
 
 
 @router.get("/{username}/dives", response_model=PaginatedListResponse[DiveRead])
@@ -123,7 +135,10 @@ async def read_dives(
     if trip_id is not None:
         filters["trip_id"] = trip_id
     if dive_site_id is not None:
-        filters["dive_site_id"] = dive_site_id
+        # Match dives that include this site among their (possibly several) dive
+        # sites. `[-1]` is a sentinel that safely yields an empty result set when
+        # no dive references this site, rather than relying on `IN ()` semantics.
+        filters["id__in"] = await get_dive_ids_for_dive_site(db=db, dive_site_id=dive_site_id) or [-1]
 
     dives_data = await crud_dives.get_multi(
         db=db,
@@ -134,19 +149,12 @@ async def read_dives(
         **filters,
     )
 
-    # Enrich each dive with its site name via a single batched lookup.
-    dive_site_ids = {
-        d["dive_site_id"] for d in dives_data["data"] if d.get("dive_site_id") is not None
-    }
-    if dive_site_ids:
-        result = await db.execute(
-            select(DiveSite.id, DiveSite.name, DiveSite.location).where(DiveSite.id.in_(dive_site_ids))
-        )
-        site_map: dict[int, dict] = {row.id: {"name": row.name, "location": row.location} for row in result}
-    else:
-        site_map = {}
+    # Enrich each dive with its dive site(s) via a single batched lookup.
+    sites_by_dive = await get_dive_sites_for_dives(
+        db=db, dive_ids=[d["id"] for d in dives_data["data"]]
+    )
     for dive in dives_data["data"]:
-        dive["dive_site"] = site_map.get(dive.get("dive_site_id"))
+        dive["dive_sites"] = sites_by_dive.get(dive["id"], [])
 
     response: dict[str, Any] = paginated_response(crud_data=dives_data, page=page, items_per_page=items_per_page)
     return response
@@ -171,7 +179,8 @@ async def read_dive(
         raise NotFoundException("Dive not found")
 
     mixtures = await get_mixtures_for_dive(db=db, dive_id=id)
-    return DiveReadWithMixtures(**cast(dict[str, Any], db_dive), mixtures=mixtures)
+    dive_sites = await get_dive_sites_for_dive(db=db, dive_id=id)
+    return DiveReadWithMixtures(**cast(dict[str, Any], db_dive), mixtures=mixtures, dive_sites=dive_sites)
 
 
 @router.patch("/{username}/dive/{id}")
@@ -198,7 +207,7 @@ async def patch_dive(
     if db_dive is None:
         raise NotFoundException("Dive not found")
 
-    update_data = values.model_dump(exclude={"mixtures"}, exclude_unset=True)
+    update_data = values.model_dump(exclude={"mixtures", "dive_site_ids"}, exclude_unset=True)
     if update_data:
         try:
             await crud_dives.update(db=db, object=update_data, id=id)
@@ -209,7 +218,14 @@ async def patch_dive(
     if values.mixtures is not None:
         await replace_mixtures_for_dive(db=db, dive_id=id, mixtures=values.mixtures)
 
-    if update_data or values.mixtures is not None:
+    if values.dive_site_ids is not None:
+        try:
+            await replace_dive_sites_for_dive(db=db, dive_id=id, dive_site_ids=values.dive_site_ids)
+        except IntegrityError as e:
+            await db.rollback()
+            raise HTTPException(status_code=422, detail=_fk_error_detail(e)) from e
+
+    if update_data or values.mixtures is not None or values.dive_site_ids is not None:
         await recalculate_dive_stats(db=db, user_id=db_user.id)
 
     return {"message": "Dive updated"}

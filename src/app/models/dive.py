@@ -26,9 +26,6 @@ class Dive(Base):
     trip_id: Mapped[int | None] = mapped_column(
         ForeignKey("trip.id", ondelete="SET NULL"), default=None, index=True
     )
-    dive_site_id: Mapped[int | None] = mapped_column(
-        ForeignKey("dive_site.id", ondelete="SET NULL"), default=None, index=True
-    )
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default_factory=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)

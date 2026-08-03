@@ -1,4 +1,5 @@
 from .dive import Dive
+from .dive_dive_site import DiveDiveSite
 from .dive_mixture import DiveMixture
 from .dive_site import DiveSite
 from .rate_limit import RateLimit
