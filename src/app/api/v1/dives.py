@@ -3,6 +3,7 @@ from typing import Annotated, Any, cast
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastcrud.paginated import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import get_current_superuser, get_current_user
@@ -26,6 +27,15 @@ from ...services.dive_parsers import DiveParseError, UnsupportedDiveFileError, p
 from ...services.dive_stats import recalculate_dive_stats
 
 router = APIRouter(tags=["dives"])
+
+
+def _fk_error_detail(exc: IntegrityError) -> str:
+    msg = str(exc.orig)
+    if "dive_trip_id_fkey" in msg:
+        return "Trip not found."
+    if "dive_dive_site_id_fkey" in msg:
+        return "Dive site not found."
+    return "Invalid reference: a related record does not exist."
 
 
 @router.post("/dive/parse-xml", response_model=ParsedDiveSchema)
@@ -67,7 +77,11 @@ async def write_dive(
     dive_internal_dict["user_id"] = db_user.id
 
     dive_internal = DiveCreateInternal(**dive_internal_dict)
-    created_dive = await crud_dives.create(db=db, object=dive_internal)
+    try:
+        created_dive = await crud_dives.create(db=db, object=dive_internal)
+    except IntegrityError as e:
+        await db.rollback()
+        raise HTTPException(status_code=422, detail=_fk_error_detail(e)) from e
 
     await replace_mixtures_for_dive(db=db, dive_id=created_dive.id, mixtures=dive.mixtures)
     await recalculate_dive_stats(db=db, user_id=db_user.id)
@@ -186,7 +200,11 @@ async def patch_dive(
 
     update_data = values.model_dump(exclude={"mixtures"}, exclude_unset=True)
     if update_data:
-        await crud_dives.update(db=db, object=update_data, id=id)
+        try:
+            await crud_dives.update(db=db, object=update_data, id=id)
+        except IntegrityError as e:
+            await db.rollback()
+            raise HTTPException(status_code=422, detail=_fk_error_detail(e)) from e
 
     if values.mixtures is not None:
         await replace_mixtures_for_dive(db=db, dive_id=id, mixtures=values.mixtures)
