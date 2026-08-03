@@ -67,8 +67,8 @@ async def read_trips(
         limit=items_per_page,
         user_id=db_user.id,
         is_deleted=False,
-        sort_columns="name",
-        sort_orders="asc",
+        sort_columns="start_date",
+        sort_orders="desc",
     )
 
     response: dict[str, Any] = paginated_response(crud_data=trips_data, page=page, items_per_page=items_per_page)
