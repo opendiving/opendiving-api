@@ -11,6 +11,7 @@ class DiveSiteBase(BaseModel):
     location: Annotated[
         str | None, Field(default=None, max_length=255, examples=["Koh Tao, Thailand"])
     ]
+    notes: Annotated[str, Field(default="", max_length=63206)]
 
 
 class DiveSite(TimestampSchema, DiveSiteBase, PersistentDeletion):
@@ -38,6 +39,7 @@ class DiveSiteUpdate(BaseModel):
     location: Annotated[
         str | None, Field(default=None, max_length=255, examples=["Koh Tao, Thailand"])
     ]
+    notes: Annotated[str | None, Field(default=None, max_length=63206)]
 
 
 class DiveSiteUpdateInternal(DiveSiteUpdate):

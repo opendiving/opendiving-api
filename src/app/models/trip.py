@@ -14,6 +14,7 @@ class Trip(Base):
     name: Mapped[str] = mapped_column(String(255))
     start_date: Mapped[date] = mapped_column(Date)
 
+    notes: Mapped[str] = mapped_column(String(63206), default="")
     location: Mapped[str | None] = mapped_column(String(255), default=None)
     end_date: Mapped[date | None] = mapped_column(Date, default=None)
 

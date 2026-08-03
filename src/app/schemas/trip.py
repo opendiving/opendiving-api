@@ -18,6 +18,7 @@ class TripBase(BaseModel):
     ]
     start_date: Annotated[date | None, Field(default=None, examples=["2024-06-01"])]
     end_date: Annotated[date | None, Field(default=None, examples=["2024-06-08"])]
+    notes: Annotated[str, Field(default="", max_length=63206)]
 
     @model_validator(mode="after")
     def check_date_range(self) -> "TripBase":
@@ -53,6 +54,7 @@ class TripUpdate(BaseModel):
     ]
     start_date: Annotated[date | None, Field(default=None)]
     end_date: Annotated[date | None, Field(default=None)]
+    notes: Annotated[str | None, Field(default=None, max_length=63206)]
 
     @model_validator(mode="after")
     def check_date_range(self) -> "TripUpdate":
