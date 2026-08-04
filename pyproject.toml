@@ -102,6 +102,7 @@ filterwarnings = [
 [dependency-groups]
 dev = [
     "pytest-asyncio>=1.0.0",
+    "httpx2>=0.1.0",
 ]
 
 [tool.mypy]
