@@ -41,7 +41,7 @@ def _fk_error_detail(exc: IntegrityError) -> str:
 
 
 def _dive_owner_id(db_dive: Any) -> int:
-    return db_dive["user_id"] if isinstance(db_dive, dict) else db_dive.user_id
+    return cast(int, db_dive["user_id"] if isinstance(db_dive, dict) else db_dive.user_id)
 
 
 @router.post("/dive/parse-xml", response_model=ParsedDiveSchema, dependencies=[Depends(get_current_user)])
@@ -162,7 +162,7 @@ async def read_dives(
         raise ForbiddenException()
 
     return await _cached_read_dives(
-        request=request,
+        request,
         user_id=user_id,
         db=db,
         page=page,
@@ -202,7 +202,7 @@ async def read_dive(
     if _dive_owner_id(db_dive) != current_user["id"]:
         raise ForbiddenException()
 
-    return await _cached_read_dive(request=request, id=id, db=db)
+    return await _cached_read_dive(request, id=id, db=db)
 
 
 @router.patch("/dive/{id}")

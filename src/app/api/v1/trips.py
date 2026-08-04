@@ -14,7 +14,7 @@ router = APIRouter(tags=["trips"])
 
 
 def _trip_owner_id(db_trip: Any) -> int:
-    return db_trip["user_id"] if isinstance(db_trip, dict) else db_trip.user_id
+    return cast(int, db_trip["user_id"] if isinstance(db_trip, dict) else db_trip.user_id)
 
 
 @router.post("/trip", response_model=TripRead, status_code=201)

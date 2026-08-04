@@ -14,7 +14,7 @@ router = APIRouter(tags=["dive_sites"])
 
 
 def _dive_site_owner_id(db_dive_site: Any) -> int:
-    return db_dive_site["user_id"] if isinstance(db_dive_site, dict) else db_dive_site.user_id
+    return cast(int, db_dive_site["user_id"] if isinstance(db_dive_site, dict) else db_dive_site.user_id)
 
 
 @router.post("/dive-site", response_model=DiveSiteRead, status_code=201)
