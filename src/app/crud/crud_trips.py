@@ -9,9 +9,7 @@ CRUDTrip = FastCRUD[Trip, TripCreateInternal, TripUpdate, TripUpdateInternal, Tr
 crud_trips = CRUDTrip(Trip)
 
 
-async def trip_name_exists(
-        db: AsyncSession, user_id: int, name: str, exclude_id: int | None = None
-) -> bool:
+async def trip_name_exists(db: AsyncSession, user_id: int, name: str, exclude_id: int | None = None) -> bool:
     """Case-insensitive check for whether a non-deleted trip with this name already exists for the user.
 
     Mirrors the `ux_trip_user_id_name_lower` partial unique index, which enforces the same rule

@@ -118,14 +118,13 @@ class TestPatchUser:
         """Test successful user update."""
         username = current_user_dict["username"]
         user_update = UserUpdate(name="New Name")
-        
-        
+
         user_dict = sample_user_read.model_dump()
         user_dict["username"] = username
 
         with patch("src.app.api.v1.users.crud_users") as mock_crud:
-            mock_crud.get = AsyncMock(return_value=user_dict)  
-            mock_crud.exists = AsyncMock(return_value=False)  
+            mock_crud.get = AsyncMock(return_value=user_dict)
+            mock_crud.exists = AsyncMock(return_value=False)
             mock_crud.update = AsyncMock(return_value=None)
 
             result = await patch_user(Mock(), user_update, username, current_user_dict, mock_db)
@@ -142,7 +141,7 @@ class TestPatchUser:
         user_dict["username"] = username
 
         with patch("src.app.api.v1.users.crud_users") as mock_crud:
-            mock_crud.get = AsyncMock(return_value=user_dict)  
+            mock_crud.get = AsyncMock(return_value=user_dict)
 
             with pytest.raises(ForbiddenException):
                 await patch_user(Mock(), user_update, username, current_user_dict, mock_db)

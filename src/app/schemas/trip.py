@@ -13,9 +13,7 @@ def _validate_date_range(start_date: date | None, end_date: date | None) -> None
 
 class TripBase(BaseModel):
     name: Annotated[str, Field(min_length=1, max_length=255, examples=["Red Sea Liveaboard 2024"])]
-    location: Annotated[
-        str | None, Field(default=None, max_length=255, examples=["Koh Tao, Thailand"])
-    ]
+    location: Annotated[str | None, Field(default=None, max_length=255, examples=["Koh Tao, Thailand"])]
     start_date: Annotated[date | None, Field(default=None, examples=["2024-06-01"])]
     end_date: Annotated[date | None, Field(default=None, examples=["2024-06-08"])]
     notes: Annotated[str, Field(default="", max_length=63206)]
@@ -49,9 +47,7 @@ class TripUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: Annotated[str | None, Field(min_length=1, max_length=255, default=None)]
-    location: Annotated[
-        str | None, Field(default=None, max_length=255, examples=["Koh Tao, Thailand"])
-    ]
+    location: Annotated[str | None, Field(default=None, max_length=255, examples=["Koh Tao, Thailand"])]
     start_date: Annotated[date | None, Field(default=None)]
     end_date: Annotated[date | None, Field(default=None)]
     notes: Annotated[str | None, Field(default=None, max_length=63206)]

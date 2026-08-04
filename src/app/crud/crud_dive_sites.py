@@ -18,7 +18,7 @@ crud_dive_sites = CRUDDiveSite(DiveSite)
 
 
 async def dive_site_name_exists(
-        db: AsyncSession, user_id: int, name: str, location: str | None = None, exclude_id: int | None = None
+    db: AsyncSession, user_id: int, name: str, location: str | None = None, exclude_id: int | None = None
 ) -> bool:
     """Case-insensitive check for whether a non-deleted dive site with the same (name, location)
     already exists for the user.

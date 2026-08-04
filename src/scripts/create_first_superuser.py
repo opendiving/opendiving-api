@@ -1,10 +1,10 @@
 import asyncio
 import logging
-from uuid6 import uuid7 #126
 from datetime import UTC, datetime
 
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, MetaData, String, Table, insert, select
 from sqlalchemy.dialects.postgresql import UUID
+from uuid6 import uuid7  # 126
 
 from ..app.core.config import settings
 from ..app.core.db.database import AsyncSession, async_engine, local_session

@@ -16,7 +16,7 @@ router = APIRouter(tags=["dive-stats"])
 
 @router.get("/{username}/dive-stats", response_model=UserDiveStatsRead)
 async def read_dive_stats(
-        request: Request, username: str, db: Annotated[AsyncSession, Depends(async_get_db)]
+    request: Request, username: str, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> UserDiveStatsRead:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True

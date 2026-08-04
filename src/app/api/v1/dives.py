@@ -44,7 +44,7 @@ def _fk_error_detail(exc: IntegrityError) -> str:
 
 @router.post("/dive/parse-xml", response_model=ParsedDiveSchema)
 async def parse_dive_xml(
-        file: Annotated[UploadFile, File(description="Dive-computer export file (e.g. Suunto XML)")],
+    file: Annotated[UploadFile, File(description="Dive-computer export file (e.g. Suunto XML)")],
 ) -> ParsedDiveSchema:
     """Upload a dive-computer export file and receive the parsed dive data as JSON."""
     if not file.filename:
@@ -61,11 +61,11 @@ async def parse_dive_xml(
 
 @router.post("/{username}/dive", response_model=DiveReadWithMixtures, status_code=201)
 async def write_dive(
-        request: Request,
-        username: str,
-        dive: DiveCreateRequest,
-        current_user: Annotated[dict, Depends(get_current_user)],
-        db: Annotated[AsyncSession, Depends(async_get_db)],
+    request: Request,
+    username: str,
+    dive: DiveCreateRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveReadWithMixtures:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
@@ -103,28 +103,23 @@ async def write_dive(
 
     mixtures = await get_mixtures_for_dive(db=db, dive_id=created_dive.id)
     dive_sites = await get_dive_sites_for_dive(db=db, dive_id=created_dive.id)
-    return DiveReadWithMixtures(
-        **cast(dict[str, Any], dive_read), mixtures=mixtures, dive_sites=dive_sites
-    )
+    return DiveReadWithMixtures(**cast(dict[str, Any], dive_read), mixtures=mixtures, dive_sites=dive_sites)
 
 
 @router.get("/{username}/dives", response_model=PaginatedListResponse[DiveRead])
 @cache(
-    key_prefix=(
-        "{username}_dives:page_{page}:items_per_page:{items_per_page}"
-        ":trip_{trip_id}:site_{dive_site_id}"
-    ),
+    key_prefix=("{username}_dives:page_{page}:items_per_page:{items_per_page}:trip_{trip_id}:site_{dive_site_id}"),
     resource_id_name="username",
     expiration=60,
 )
 async def read_dives(
-        request: Request,
-        username: str,
-        db: Annotated[AsyncSession, Depends(async_get_db)],
-        page: int = 1,
-        items_per_page: int = 10,
-        trip_id: int | None = None,
-        dive_site_id: int | None = None,
+    request: Request,
+    username: str,
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    page: int = 1,
+    items_per_page: int = 10,
+    trip_id: int | None = None,
+    dive_site_id: int | None = None,
 ) -> dict:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
@@ -152,9 +147,7 @@ async def read_dives(
     )
 
     # Enrich each dive with its dive site(s) via a single batched lookup.
-    sites_by_dive = await get_dive_sites_for_dives(
-        db=db, dive_ids=[d["id"] for d in dives_data["data"]]
-    )
+    sites_by_dive = await get_dive_sites_for_dives(db=db, dive_ids=[d["id"] for d in dives_data["data"]])
     for dive in dives_data["data"]:
         dive["dive_sites"] = sites_by_dive.get(dive["id"], [])
 
@@ -165,7 +158,7 @@ async def read_dives(
 @router.get("/{username}/dive/{id}", response_model=DiveReadWithMixtures)
 @cache(key_prefix="{username}_dive_cache", resource_id_name="id")
 async def read_dive(
-        request: Request, username: str, id: int, db: Annotated[AsyncSession, Depends(async_get_db)]
+    request: Request, username: str, id: int, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> DiveReadWithMixtures:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
@@ -174,9 +167,7 @@ async def read_dive(
         raise NotFoundException("User not found")
 
     db_user = cast(UserRead, db_user)
-    db_dive = await crud_dives.get(
-        db=db, id=id, user_id=db_user.id, is_deleted=False, schema_to_select=DiveRead
-    )
+    db_dive = await crud_dives.get(db=db, id=id, user_id=db_user.id, is_deleted=False, schema_to_select=DiveRead)
     if db_dive is None:
         raise NotFoundException("Dive not found")
 
@@ -188,12 +179,12 @@ async def read_dive(
 @router.patch("/{username}/dive/{id}")
 @cache("{username}_dive_cache", resource_id_name="id", pattern_to_invalidate_extra=["{username}_dives:*"])
 async def patch_dive(
-        request: Request,
-        username: str,
-        id: int,
-        values: DiveUpdateRequest,
-        current_user: Annotated[dict, Depends(get_current_user)],
-        db: Annotated[AsyncSession, Depends(async_get_db)],
+    request: Request,
+    username: str,
+    id: int,
+    values: DiveUpdateRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
@@ -236,11 +227,11 @@ async def patch_dive(
 @router.delete("/{username}/dive/{id}")
 @cache("{username}_dive_cache", resource_id_name="id", to_invalidate_extra={"{username}_dives": "{username}"})
 async def erase_dive(
-        request: Request,
-        username: str,
-        id: int,
-        current_user: Annotated[dict, Depends(get_current_user)],
-        db: Annotated[AsyncSession, Depends(async_get_db)],
+    request: Request,
+    username: str,
+    id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
@@ -265,7 +256,7 @@ async def erase_dive(
 @router.delete("/{username}/dive/{id}", dependencies=[Depends(get_current_superuser)])
 @cache("{username}_dive_cache", resource_id_name="id", to_invalidate_extra={"{username}_dives": "{username}"})
 async def erase_db_dive(
-        request: Request, username: str, id: int, db: Annotated[AsyncSession, Depends(async_get_db)]
+    request: Request, username: str, id: int, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> dict[str, str]:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True

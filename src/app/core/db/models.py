@@ -1,10 +1,10 @@
 import uuid as uuid_pkg
-from uuid6 import uuid7
 from datetime import UTC, datetime
 
 from sqlalchemy import Boolean, DateTime, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
+from uuid6 import uuid7
 
 
 class UUIDMixin:

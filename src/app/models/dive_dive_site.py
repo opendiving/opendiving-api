@@ -20,6 +20,4 @@ class DiveDiveSite(Base):
     dive_site_id: Mapped[int] = mapped_column(ForeignKey("dive_site.id", ondelete="CASCADE"), index=True)
     position: Mapped[int] = mapped_column(Integer, default=0)
 
-    __table_args__ = (
-        UniqueConstraint("dive_id", "dive_site_id", name="ux_dive_dive_site_dive_id_dive_site_id"),
-    )
+    __table_args__ = (UniqueConstraint("dive_id", "dive_site_id", name="ux_dive_dive_site_dive_id_dive_site_id"),)

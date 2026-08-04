@@ -17,11 +17,11 @@ router = APIRouter(tags=["dive_sites"])
 
 @router.post("/{username}/dive-site", response_model=DiveSiteRead, status_code=201)
 async def write_dive_site(
-        request: Request,
-        username: str,
-        dive_site: DiveSiteCreate,
-        current_user: Annotated[dict, Depends(get_current_user)],
-        db: Annotated[AsyncSession, Depends(async_get_db)],
+    request: Request,
+    username: str,
+    dive_site: DiveSiteCreate,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveSiteRead:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
@@ -52,11 +52,11 @@ async def write_dive_site(
 
 @router.get("/{username}/dive-sites", response_model=PaginatedListResponse[DiveSiteRead])
 async def read_dive_sites(
-        request: Request,
-        username: str,
-        db: Annotated[AsyncSession, Depends(async_get_db)],
-        page: int = 1,
-        items_per_page: int = 10,
+    request: Request,
+    username: str,
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    page: int = 1,
+    items_per_page: int = 10,
 ) -> dict:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
@@ -75,15 +75,13 @@ async def read_dive_sites(
         sort_orders="asc",
     )
 
-    response: dict[str, Any] = paginated_response(
-        crud_data=dive_sites_data, page=page, items_per_page=items_per_page
-    )
+    response: dict[str, Any] = paginated_response(crud_data=dive_sites_data, page=page, items_per_page=items_per_page)
     return response
 
 
 @router.get("/{username}/dive-site/{id}", response_model=DiveSiteRead)
 async def read_dive_site(
-        request: Request, username: str, id: int, db: Annotated[AsyncSession, Depends(async_get_db)]
+    request: Request, username: str, id: int, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> DiveSiteRead:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
@@ -103,12 +101,12 @@ async def read_dive_site(
 
 @router.patch("/{username}/dive-site/{id}")
 async def patch_dive_site(
-        request: Request,
-        username: str,
-        id: int,
-        values: DiveSiteUpdate,
-        current_user: Annotated[dict, Depends(get_current_user)],
-        db: Annotated[AsyncSession, Depends(async_get_db)],
+    request: Request,
+    username: str,
+    id: int,
+    values: DiveSiteUpdate,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
@@ -131,7 +129,7 @@ async def patch_dive_site(
     effective_location = values.location if "location" in values.model_fields_set else db_dive_site.location
 
     if (values.name is not None or "location" in values.model_fields_set) and await dive_site_name_exists(
-            db=db, user_id=db_user.id, name=effective_name, location=effective_location, exclude_id=id
+        db=db, user_id=db_user.id, name=effective_name, location=effective_location, exclude_id=id
     ):
         raise DuplicateValueException("A dive site with this name already exists at this location")
 
@@ -144,11 +142,11 @@ async def patch_dive_site(
 
 @router.delete("/{username}/dive-site/{id}")
 async def erase_dive_site(
-        request: Request,
-        username: str,
-        id: int,
-        current_user: Annotated[dict, Depends(get_current_user)],
-        db: Annotated[AsyncSession, Depends(async_get_db)],
+    request: Request,
+    username: str,
+    id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True

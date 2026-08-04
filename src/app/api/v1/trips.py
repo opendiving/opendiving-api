@@ -17,11 +17,11 @@ router = APIRouter(tags=["trips"])
 
 @router.post("/{username}/trip", response_model=TripRead, status_code=201)
 async def write_trip(
-        request: Request,
-        username: str,
-        trip: TripCreate,
-        current_user: Annotated[dict, Depends(get_current_user)],
-        db: Annotated[AsyncSession, Depends(async_get_db)],
+    request: Request,
+    username: str,
+    trip: TripCreate,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> TripRead:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
@@ -37,9 +37,7 @@ async def write_trip(
         raise DuplicateValueException("A trip with this name already exists")
 
     trip_internal = TripCreateInternal(**trip.model_dump(), user_id=db_user.id)
-    created_trip = await crud_trips.create(
-        db=db, object=trip_internal, schema_to_select=TripRead, return_as_model=True
-    )
+    created_trip = await crud_trips.create(db=db, object=trip_internal, schema_to_select=TripRead, return_as_model=True)
 
     trip_read = await crud_trips.get(db=db, id=created_trip.id, schema_to_select=TripRead, return_as_model=True)
     if trip_read is None:
@@ -50,11 +48,11 @@ async def write_trip(
 
 @router.get("/{username}/trips", response_model=PaginatedListResponse[TripRead])
 async def read_trips(
-        request: Request,
-        username: str,
-        db: Annotated[AsyncSession, Depends(async_get_db)],
-        page: int = 1,
-        items_per_page: int = 10,
+    request: Request,
+    username: str,
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    page: int = 1,
+    items_per_page: int = 10,
 ) -> dict:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
@@ -79,7 +77,7 @@ async def read_trips(
 
 @router.get("/{username}/trip/{id}", response_model=TripRead)
 async def read_trip(
-        request: Request, username: str, id: int, db: Annotated[AsyncSession, Depends(async_get_db)]
+    request: Request, username: str, id: int, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> TripRead:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
@@ -99,12 +97,12 @@ async def read_trip(
 
 @router.patch("/{username}/trip/{id}")
 async def patch_trip(
-        request: Request,
-        username: str,
-        id: int,
-        values: TripUpdate,
-        current_user: Annotated[dict, Depends(get_current_user)],
-        db: Annotated[AsyncSession, Depends(async_get_db)],
+    request: Request,
+    username: str,
+    id: int,
+    values: TripUpdate,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
@@ -120,9 +118,7 @@ async def patch_trip(
     if db_trip is None:
         raise NotFoundException("Trip not found")
 
-    if values.name is not None and await trip_name_exists(
-            db=db, user_id=db_user.id, name=values.name, exclude_id=id
-    ):
+    if values.name is not None and await trip_name_exists(db=db, user_id=db_user.id, name=values.name, exclude_id=id):
         raise DuplicateValueException("A trip with this name already exists")
 
     update_data = values.model_dump(exclude_unset=True)
@@ -134,11 +130,11 @@ async def patch_trip(
 
 @router.delete("/{username}/trip/{id}")
 async def erase_trip(
-        request: Request,
-        username: str,
-        id: int,
-        current_user: Annotated[dict, Depends(get_current_user)],
-        db: Annotated[AsyncSession, Depends(async_get_db)],
+    request: Request,
+    username: str,
+    id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
     db_user = await crud_users.get(
         db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True

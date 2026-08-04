@@ -1,11 +1,11 @@
 from fastapi import APIRouter
 
+from .dive_sites import router as dive_sites_router
+from .dive_stats import router as dive_stats_router
+from .dives import router as dives_router
 from .health import router as health_router
 from .login import router as login_router
 from .logout import router as logout_router
-from .dives import router as dives_router
-from .dive_sites import router as dive_sites_router
-from .dive_stats import router as dive_stats_router
 from .rate_limits import router as rate_limits_router
 from .tasks import router as tasks_router
 from .tiers import router as tiers_router

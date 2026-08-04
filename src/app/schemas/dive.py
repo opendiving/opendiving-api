@@ -67,9 +67,7 @@ class DiveUpdate(BaseModel):
 
     dive_number: Annotated[int | None, Field(examples=[5], default=None)]
     start_time: Annotated[datetime | None, Field(examples=[datetime.now()], default=None)]
-    duration: Annotated[
-        int | None, Field(examples=[2048], description="Dive duration in seconds", default=None)
-    ]
+    duration: Annotated[int | None, Field(examples=[2048], description="Dive duration in seconds", default=None)]
     max_depth: Annotated[float | None, Field(default=None)]
     avg_depth: Annotated[float | None, Field(default=None)]
     bottom_temperature: Annotated[float | None, Field(default=None)]

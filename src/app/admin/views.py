@@ -1,4 +1,3 @@
-
 from crudadmin import CRUDAdmin
 from crudadmin.admin_interface.model_view import PasswordTransformer
 

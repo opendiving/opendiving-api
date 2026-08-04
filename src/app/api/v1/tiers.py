@@ -23,9 +23,7 @@ async def write_tier(
         raise DuplicateValueException("Tier Name not available")
 
     tier_internal = TierCreateInternal(**tier_internal_dict)
-    created_tier = await crud_tiers.create(
-        db=db, object=tier_internal, schema_to_select=TierRead, return_as_model=True
-    )
+    created_tier = await crud_tiers.create(db=db, object=tier_internal, schema_to_select=TierRead, return_as_model=True)
 
     tier_read = await crud_tiers.get(db=db, id=created_tier.id, schema_to_select=TierRead, return_as_model=True)
     if tier_read is None:

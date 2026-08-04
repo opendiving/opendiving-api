@@ -24,7 +24,7 @@ fake = Faker()
 
 
 @pytest.fixture(scope="session")
-def client() -> Generator[TestClient, Any, None]:
+def client() -> Generator[TestClient, Any]:
     with TestClient(app) as _client:
         yield _client
     app.dependency_overrides = {}
@@ -32,7 +32,7 @@ def client() -> Generator[TestClient, Any, None]:
 
 
 @pytest.fixture
-def db() -> Generator[Session, Any, None]:
+def db() -> Generator[Session, Any]:
     session = local_session()
     yield session
     session.close()
