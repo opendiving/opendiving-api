@@ -37,6 +37,7 @@ class TripRead(TripBase):
 class TripCreate(TripBase):
     model_config = ConfigDict(extra="forbid")
     start_date: Annotated[date, Field(examples=["2024-06-01"])]
+    user_id: Annotated[int, Field(description="ID of the user this trip belongs to")]
 
 
 class TripCreateInternal(TripCreate):

@@ -24,6 +24,7 @@ class DiveSiteRead(DiveSiteBase):
 
 class DiveSiteCreate(DiveSiteBase):
     model_config = ConfigDict(extra="forbid")
+    user_id: Annotated[int, Field(description="ID of the user this dive site belongs to")]
 
 
 class DiveSiteCreateInternal(DiveSiteCreate):

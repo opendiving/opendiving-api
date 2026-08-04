@@ -5,10 +5,10 @@ from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...api.dependencies import get_current_superuser, get_current_user
+from ...api.dependencies import get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import ForbiddenException, NotFoundException
-from ...core.utils.cache import cache
+from ...core.utils.cache import cache, delete_keys_by_pattern
 from ...crud.crud_dive_dive_sites import (
     get_dive_ids_for_dive_site,
     get_dive_sites_for_dive,
@@ -17,7 +17,6 @@ from ...crud.crud_dive_dive_sites import (
 )
 from ...crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
 from ...crud.crud_dives import crud_dives
-from ...crud.crud_users import crud_users
 from ...schemas.dive import (
     DiveCreateInternal,
     DiveCreateRequest,
@@ -26,7 +25,6 @@ from ...schemas.dive import (
     DiveUpdateRequest,
 )
 from ...schemas.parsed_dive import ParsedDiveSchema
-from ...schemas.user import UserRead
 from ...services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file
 from ...services.dive_stats import recalculate_dive_stats
 
@@ -40,6 +38,10 @@ def _fk_error_detail(exc: IntegrityError) -> str:
     if "dive_site_id_fkey" in msg:
         return "Dive site not found."
     return "Invalid reference: a related record does not exist."
+
+
+def _dive_owner_id(db_dive: Any) -> int:
+    return db_dive["user_id"] if isinstance(db_dive, dict) else db_dive.user_id
 
 
 @router.post("/dive/parse-xml", response_model=ParsedDiveSchema)
@@ -59,26 +61,17 @@ async def parse_dive_xml(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.post("/{username}/dive", response_model=DiveReadWithMixtures, status_code=201)
+@router.post("/dive", response_model=DiveReadWithMixtures, status_code=201)
 async def write_dive(
     request: Request,
-    username: str,
     dive: DiveCreateRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveReadWithMixtures:
-    db_user = await crud_users.get(
-        db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
-    )
-    if db_user is None:
-        raise NotFoundException("User not found")
-
-    db_user = cast(UserRead, db_user)
-    if current_user["id"] != db_user.id:
+    if current_user["id"] != dive.user_id:
         raise ForbiddenException()
 
     dive_internal_dict = dive.model_dump(exclude={"mixtures", "dive_site_ids"})
-    dive_internal_dict["user_id"] = db_user.id
 
     dive_internal = DiveCreateInternal(**dive_internal_dict)
     try:
@@ -95,7 +88,8 @@ async def write_dive(
     except IntegrityError as e:
         await db.rollback()
         raise HTTPException(status_code=422, detail=_fk_error_detail(e)) from e
-    await recalculate_dive_stats(db=db, user_id=db_user.id)
+    await recalculate_dive_stats(db=db, user_id=dive.user_id)
+    await delete_keys_by_pattern(f"user_{dive.user_id}_dives:*")
 
     dive_read = await crud_dives.get(db=db, id=created_dive.id, schema_to_select=DiveRead)
     if dive_read is None:
@@ -106,29 +100,27 @@ async def write_dive(
     return DiveReadWithMixtures(**cast(dict[str, Any], dive_read), mixtures=mixtures, dive_sites=dive_sites)
 
 
-@router.get("/{username}/dives", response_model=PaginatedListResponse[DiveRead])
 @cache(
-    key_prefix=("{username}_dives:page_{page}:items_per_page:{items_per_page}:trip_{trip_id}:site_{dive_site_id}"),
-    resource_id_name="username",
+    key_prefix=("user_{user_id}_dives:page_{page}:items_per_page:{items_per_page}:trip_{trip_id}:site_{dive_site_id}"),
+    resource_id_name="user_id",
     expiration=60,
 )
-async def read_dives(
+async def _cached_read_dives(
     request: Request,
-    username: str,
-    db: Annotated[AsyncSession, Depends(async_get_db)],
-    page: int = 1,
-    items_per_page: int = 10,
-    trip_id: int | None = None,
-    dive_site_id: int | None = None,
+    user_id: int,
+    db: AsyncSession,
+    page: int,
+    items_per_page: int,
+    trip_id: int | None,
+    dive_site_id: int | None,
 ) -> dict:
-    db_user = await crud_users.get(
-        db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
-    )
-    if not db_user:
-        raise NotFoundException("User not found")
+    """Fetches (and caches) a user's paginated dive list.
 
-    db_user = cast(UserRead, db_user)
-    filters: dict[str, Any] = {"user_id": db_user.id, "is_deleted": False}
+    This is only ever called after the caller's authorization has already been checked by
+    `read_dives` below - it must not be called directly from a route, since the `@cache`
+    decorator serves cached responses without re-running any authorization logic.
+    """
+    filters: dict[str, Any] = {"user_id": user_id, "is_deleted": False}
     if trip_id is not None:
         filters["trip_id"] = trip_id
     if dive_site_id is not None:
@@ -155,19 +147,39 @@ async def read_dives(
     return response
 
 
-@router.get("/{username}/dive/{id}", response_model=DiveReadWithMixtures)
-@cache(key_prefix="{username}_dive_cache", resource_id_name="id")
-async def read_dive(
-    request: Request, username: str, id: int, db: Annotated[AsyncSession, Depends(async_get_db)]
-) -> DiveReadWithMixtures:
-    db_user = await crud_users.get(
-        db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
-    )
-    if db_user is None:
-        raise NotFoundException("User not found")
+@router.get("/dives", response_model=PaginatedListResponse[DiveRead])
+async def read_dives(
+    request: Request,
+    user_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    page: int = 1,
+    items_per_page: int = 10,
+    trip_id: int | None = None,
+    dive_site_id: int | None = None,
+) -> dict:
+    if current_user["id"] != user_id:
+        raise ForbiddenException()
 
-    db_user = cast(UserRead, db_user)
-    db_dive = await crud_dives.get(db=db, id=id, user_id=db_user.id, is_deleted=False, schema_to_select=DiveRead)
+    return await _cached_read_dives(
+        request=request,
+        user_id=user_id,
+        db=db,
+        page=page,
+        items_per_page=items_per_page,
+        trip_id=trip_id,
+        dive_site_id=dive_site_id,
+    )
+
+
+@cache(key_prefix="dive_cache", resource_id_name="id")
+async def _cached_read_dive(request: Request, id: int, db: AsyncSession) -> DiveReadWithMixtures:
+    """Fetches (and caches) a single dive by id, regardless of owner.
+
+    Like `_cached_read_dives`, this must only be called after authorization has already
+    been checked, since `@cache` can serve a cached response without re-checking it.
+    """
+    db_dive = await crud_dives.get(db=db, id=id, is_deleted=False, schema_to_select=DiveRead)
     if db_dive is None:
         raise NotFoundException("Dive not found")
 
@@ -176,29 +188,39 @@ async def read_dive(
     return DiveReadWithMixtures(**cast(dict[str, Any], db_dive), mixtures=mixtures, dive_sites=dive_sites)
 
 
-@router.patch("/{username}/dive/{id}")
-@cache("{username}_dive_cache", resource_id_name="id", pattern_to_invalidate_extra=["{username}_dives:*"])
+@router.get("/dive/{id}", response_model=DiveReadWithMixtures)
+async def read_dive(
+    request: Request,
+    id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> DiveReadWithMixtures:
+    db_dive = await crud_dives.get(db=db, id=id, is_deleted=False, schema_to_select=DiveRead)
+    if db_dive is None:
+        raise NotFoundException("Dive not found")
+
+    if _dive_owner_id(db_dive) != current_user["id"]:
+        raise ForbiddenException()
+
+    return await _cached_read_dive(request=request, id=id, db=db)
+
+
+@router.patch("/dive/{id}")
+@cache("dive_cache", resource_id_name="id")
 async def patch_dive(
     request: Request,
-    username: str,
     id: int,
     values: DiveUpdateRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    db_user = await crud_users.get(
-        db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
-    )
-    if db_user is None:
-        raise NotFoundException("User not found")
-
-    db_user = cast(UserRead, db_user)
-    if current_user["id"] != db_user.id:
-        raise ForbiddenException()
-
     db_dive = await crud_dives.get(db=db, id=id, is_deleted=False, schema_to_select=DiveRead)
     if db_dive is None:
         raise NotFoundException("Dive not found")
+
+    owner_id = _dive_owner_id(db_dive)
+    if owner_id != current_user["id"]:
+        raise ForbiddenException()
 
     update_data = values.model_dump(exclude={"mixtures", "dive_site_ids"}, exclude_unset=True)
     if update_data:
@@ -219,56 +241,30 @@ async def patch_dive(
             raise HTTPException(status_code=422, detail=_fk_error_detail(e)) from e
 
     if update_data or values.mixtures is not None or values.dive_site_ids is not None:
-        await recalculate_dive_stats(db=db, user_id=db_user.id)
+        await recalculate_dive_stats(db=db, user_id=owner_id)
+        await delete_keys_by_pattern(f"user_{owner_id}_dives:*")
 
     return {"message": "Dive updated"}
 
 
-@router.delete("/{username}/dive/{id}")
-@cache("{username}_dive_cache", resource_id_name="id", to_invalidate_extra={"{username}_dives": "{username}"})
+@router.delete("/dive/{id}")
+@cache("dive_cache", resource_id_name="id")
 async def erase_dive(
     request: Request,
-    username: str,
     id: int,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    db_user = await crud_users.get(
-        db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
-    )
-    if db_user is None:
-        raise NotFoundException("User not found")
-
-    db_user = cast(UserRead, db_user)
-    if current_user["id"] != db_user.id:
-        raise ForbiddenException()
-
     db_dive = await crud_dives.get(db=db, id=id, is_deleted=False, schema_to_select=DiveRead)
     if db_dive is None:
         raise NotFoundException("Dive not found")
 
+    owner_id = _dive_owner_id(db_dive)
+    if owner_id != current_user["id"]:
+        raise ForbiddenException()
+
     await crud_dives.delete(db=db, id=id)
-    await recalculate_dive_stats(db=db, user_id=db_user.id)
+    await recalculate_dive_stats(db=db, user_id=owner_id)
+    await delete_keys_by_pattern(f"user_{owner_id}_dives:*")
 
     return {"message": "Dive deleted"}
-
-
-@router.delete("/{username}/dive/{id}", dependencies=[Depends(get_current_superuser)])
-@cache("{username}_dive_cache", resource_id_name="id", to_invalidate_extra={"{username}_dives": "{username}"})
-async def erase_db_dive(
-    request: Request, username: str, id: int, db: Annotated[AsyncSession, Depends(async_get_db)]
-) -> dict[str, str]:
-    db_user = await crud_users.get(
-        db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
-    )
-    if db_user is None:
-        raise NotFoundException("User not found")
-
-    db_dive = await crud_dives.get(db=db, id=id, is_deleted=False, schema_to_select=DiveRead, return_as_model=True)
-    if db_dive is None:
-        raise NotFoundException("Dive not found")
-
-    db_dive = cast(DiveRead, db_dive)
-    await crud_dives.db_delete(db=db, id=id)
-    await recalculate_dive_stats(db=db, user_id=db_dive.user_id)
-    return {"message": "Dive deleted from the database"}

@@ -128,22 +128,6 @@ async def erase_user(
     return {"message": "User deleted"}
 
 
-@router.delete("/db_user/{username}", dependencies=[Depends(get_current_superuser)])
-async def erase_db_user(
-    request: Request,
-    username: str,
-    db: Annotated[AsyncSession, Depends(async_get_db)],
-    token: str = Depends(oauth2_scheme),
-) -> dict[str, str]:
-    db_user = await crud_users.exists(db=db, username=username)
-    if not db_user:
-        raise NotFoundException("User not found")
-
-    await crud_users.db_delete(db=db, username=username)
-    await blacklist_token(token=token, db=db)
-    return {"message": "User deleted from the database"}
-
-
 @router.get("/user/{username}/rate_limits", dependencies=[Depends(get_current_superuser)])
 async def read_user_rate_limits(
     request: Request, username: str, db: Annotated[AsyncSession, Depends(async_get_db)]

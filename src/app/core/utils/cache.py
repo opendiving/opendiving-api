@@ -185,6 +185,19 @@ async def _delete_keys_by_pattern(pattern: str) -> None:
             break
 
 
+async def delete_keys_by_pattern(pattern: str) -> None:
+    """Public wrapper around `_delete_keys_by_pattern` for ad-hoc cache invalidation from
+    inside an endpoint handler.
+
+    This is needed for handlers whose invalidation target can only be computed after a DB
+    lookup inside the handler body (e.g. the owning user's id resolved from a fetched
+    object), and therefore can't be expressed via the `@cache` decorator's `to_invalidate_extra`
+    / `pattern_to_invalidate_extra` kwarg-based templating, which only has access to the
+    decorated function's raw call arguments.
+    """
+    await _delete_keys_by_pattern(pattern)
+
+
 def cache(
     key_prefix: str,
     resource_id_name: Any = None,

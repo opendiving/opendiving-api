@@ -8,35 +8,29 @@ from ...api.dependencies import get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import DuplicateValueException, ForbiddenException, NotFoundException
 from ...crud.crud_trips import crud_trips, trip_name_exists
-from ...crud.crud_users import crud_users
 from ...schemas.trip import TripCreate, TripCreateInternal, TripRead, TripUpdate
-from ...schemas.user import UserRead
 
 router = APIRouter(tags=["trips"])
 
 
-@router.post("/{username}/trip", response_model=TripRead, status_code=201)
+def _trip_owner_id(db_trip: Any) -> int:
+    return db_trip["user_id"] if isinstance(db_trip, dict) else db_trip.user_id
+
+
+@router.post("/trip", response_model=TripRead, status_code=201)
 async def write_trip(
     request: Request,
-    username: str,
     trip: TripCreate,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> TripRead:
-    db_user = await crud_users.get(
-        db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
-    )
-    if db_user is None:
-        raise NotFoundException("User not found")
-
-    db_user = cast(UserRead, db_user)
-    if current_user["id"] != db_user.id:
+    if current_user["id"] != trip.user_id:
         raise ForbiddenException()
 
-    if await trip_name_exists(db=db, user_id=db_user.id, name=trip.name):
+    if await trip_name_exists(db=db, user_id=trip.user_id, name=trip.name):
         raise DuplicateValueException("A trip with this name already exists")
 
-    trip_internal = TripCreateInternal(**trip.model_dump(), user_id=db_user.id)
+    trip_internal = TripCreateInternal(**trip.model_dump())
     created_trip = await crud_trips.create(db=db, object=trip_internal, schema_to_select=TripRead, return_as_model=True)
 
     trip_read = await crud_trips.get(db=db, id=created_trip.id, schema_to_select=TripRead, return_as_model=True)
@@ -46,26 +40,23 @@ async def write_trip(
     return cast(TripRead, trip_read)
 
 
-@router.get("/{username}/trips", response_model=PaginatedListResponse[TripRead])
+@router.get("/trips", response_model=PaginatedListResponse[TripRead])
 async def read_trips(
     request: Request,
-    username: str,
+    user_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     page: int = 1,
     items_per_page: int = 10,
 ) -> dict:
-    db_user = await crud_users.get(
-        db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
-    )
-    if not db_user:
-        raise NotFoundException("User not found")
+    if current_user["id"] != user_id:
+        raise ForbiddenException()
 
-    db_user = cast(UserRead, db_user)
     trips_data = await crud_trips.get_multi(
         db=db,
         offset=compute_offset(page, items_per_page),
         limit=items_per_page,
-        user_id=db_user.id,
+        user_id=user_id,
         is_deleted=False,
         sort_columns="start_date",
         sort_orders="desc",
@@ -75,50 +66,43 @@ async def read_trips(
     return response
 
 
-@router.get("/{username}/trip/{id}", response_model=TripRead)
+@router.get("/trip/{id}", response_model=TripRead)
 async def read_trip(
-    request: Request, username: str, id: int, db: Annotated[AsyncSession, Depends(async_get_db)]
+    request: Request,
+    id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> TripRead:
-    db_user = await crud_users.get(
-        db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
-    )
-    if db_user is None:
-        raise NotFoundException("User not found")
-
-    db_user = cast(UserRead, db_user)
-    db_trip = await crud_trips.get(
-        db=db, id=id, user_id=db_user.id, is_deleted=False, schema_to_select=TripRead, return_as_model=True
-    )
+    db_trip = await crud_trips.get(db=db, id=id, is_deleted=False, schema_to_select=TripRead, return_as_model=True)
     if db_trip is None:
         raise NotFoundException("Trip not found")
 
-    return cast(TripRead, db_trip)
+    db_trip = cast(TripRead, db_trip)
+    if db_trip.user_id != current_user["id"]:
+        raise ForbiddenException()
+
+    return db_trip
 
 
-@router.patch("/{username}/trip/{id}")
+@router.patch("/trip/{id}")
 async def patch_trip(
     request: Request,
-    username: str,
     id: int,
     values: TripUpdate,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    db_user = await crud_users.get(
-        db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
-    )
-    if db_user is None:
-        raise NotFoundException("User not found")
-
-    db_user = cast(UserRead, db_user)
-    if current_user["id"] != db_user.id:
-        raise ForbiddenException()
-
-    db_trip = await crud_trips.get(db=db, id=id, user_id=db_user.id, is_deleted=False, schema_to_select=TripRead)
+    db_trip = await crud_trips.get(db=db, id=id, is_deleted=False, schema_to_select=TripRead, return_as_model=True)
     if db_trip is None:
         raise NotFoundException("Trip not found")
 
-    if values.name is not None and await trip_name_exists(db=db, user_id=db_user.id, name=values.name, exclude_id=id):
+    db_trip = cast(TripRead, db_trip)
+    if db_trip.user_id != current_user["id"]:
+        raise ForbiddenException()
+
+    if values.name is not None and await trip_name_exists(
+        db=db, user_id=db_trip.user_id, name=values.name, exclude_id=id
+    ):
         raise DuplicateValueException("A trip with this name already exists")
 
     update_data = values.model_dump(exclude_unset=True)
@@ -128,27 +112,19 @@ async def patch_trip(
     return {"message": "Trip updated"}
 
 
-@router.delete("/{username}/trip/{id}")
+@router.delete("/trip/{id}")
 async def erase_trip(
     request: Request,
-    username: str,
     id: int,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    db_user = await crud_users.get(
-        db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
-    )
-    if db_user is None:
-        raise NotFoundException("User not found")
-
-    db_user = cast(UserRead, db_user)
-    if current_user["id"] != db_user.id:
-        raise ForbiddenException()
-
-    db_trip = await crud_trips.get(db=db, id=id, user_id=db_user.id, is_deleted=False, schema_to_select=TripRead)
+    db_trip = await crud_trips.get(db=db, id=id, is_deleted=False, schema_to_select=TripRead)
     if db_trip is None:
         raise NotFoundException("Trip not found")
+
+    if _trip_owner_id(db_trip) != current_user["id"]:
+        raise ForbiddenException()
 
     await crud_trips.delete(db=db, id=id)
 

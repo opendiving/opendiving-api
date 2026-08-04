@@ -124,8 +124,58 @@ site combobox creates a new record and expects to immediately see/select it in t
 list. Caching the list endpoint (even with a short TTL) would let the combobox
 show stale data right after creating a new trip/site. If caching is added back for
 these endpoints, the create/update/delete handlers must invalidate the list cache
-key pattern (note: even `dives.py`'s own `write_dive` doesn't currently invalidate
-the dives list cache - this is a known, currently-accepted gap, not a model to copy).
+key pattern - `dives.py`'s `write_dive`/`patch_dive`/`erase_dive` now do this via
+`delete_keys_by_pattern(f"user_{user_id}_dives:*")` after they learn the owning
+user's id, which is the model to copy.
+
+## `/{username}/...` resource routes were flattened to `/...` + explicit ids
+
+`dives.py`/`dive_sites.py`/`trips.py`/`dive_stats.py` used to nest every route
+under `/{username}/...` (e.g. `POST /{username}/dive`, `GET /{username}/dives`,
+`GET /{username}/dive/{id}`) and resolve `username` to a user id via a `crud_users`
+lookup on every request. These were changed to flat routes that take the user id
+directly instead of a username:
+- `POST /dive`, `/trip`, `/dive-site`: the request body now carries `user_id`
+  directly (added to `DiveCreateRequest`/`TripCreate`/`DiveSiteCreate`). The
+  handler checks `current_user["id"] == body.user_id` and raises `403` on mismatch
+  - it does not trust the body's `user_id` on its own.
+- `GET /dives`, `/trips`, `/dive-sites`, `/dive-stats`: take `user_id` as a query
+  param instead of a path segment. The handler checks `current_user["id"] ==
+  user_id` and raises `403` on mismatch. These endpoints are no longer public -
+  they previously had no auth dependency at all (readable by anyone who knew a
+  username).
+- `GET/PATCH/DELETE /dive/{id}`, `/trip/{id}`, `/dive-site/{id}`: no longer take
+  a username at all. The handler fetches the object by `id` alone, then checks
+  the fetched object's `user_id` against `current_user["id"]`, raising `404` if
+  the object doesn't exist and `403` if it exists but belongs to someone else.
+
+This flattening also surfaced a pre-existing route collision: the superuser-only
+hard-delete `erase_db_dive` used to sit at the exact same
+`DELETE /{username}/dive/{id}` path/method as the regular owner `erase_dive`, so
+FastAPI (which matches routes in registration order) always dispatched to
+`erase_dive` and `erase_db_dive` was unreachable dead code. Rather than give it
+its own path, `erase_db_dive` (and its `users.py` counterpart `erase_db_user`,
+which lived at a working but separate `DELETE /db_user/{username}`) were removed
+entirely: there is intentionally **no way to hard-delete a dive, dive site,
+trip, or user through the API** - `crud.delete()` (soft delete, flips
+`is_deleted`/`deleted_at`) is the only delete path exposed to API clients for
+any model with `PersistentDeletion`. A real hard-purge (e.g. for GDPR erasure
+requests) should be done directly against the DB or via the `crudadmin` panel
+(which is a separate system - see below - and unaffected by this), not exposed
+as a REST endpoint.
+
+**Gotcha - `@cache` and per-request authorization don't mix directly.** The
+`@cache` decorator short-circuits GET requests by returning the cached response
+*before* the wrapped function body ever runs (see `core/utils/cache.py`). If the
+authorization check lived inside a `@cache`-decorated function, an unauthorized
+user could request the exact same cache key (e.g. `GET /dive/{id}` for someone
+else's dive, or `GET /dives?user_id=<victim>`) and get served the cached victim's
+data straight from Redis without the check ever executing. `dives.py` avoids this
+by splitting each cached GET into a private `_cached_read_*` helper (pure data
+fetch, no auth) and a public route function that performs the `403` check *first*
+and only calls the cached helper once the request is already authorized. Do not
+put authorization logic inside a `@cache`-decorated function - always gate access
+in the (uncached) caller.
 
 ## Date-only vs datetime fields
 

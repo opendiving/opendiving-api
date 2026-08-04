@@ -55,6 +55,7 @@ class DiveCreateInternal(DiveCreate):
 class DiveCreateRequest(DiveCreate):
     """Request body for creating a dive, including its gas mixtures and dive site(s)."""
 
+    user_id: Annotated[int, Field(description="ID of the user this dive belongs to")]
     mixtures: Annotated[list[DiveMixtureCreate], Field(default_factory=list)]
     dive_site_ids: Annotated[
         list[int],
