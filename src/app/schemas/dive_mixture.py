@@ -22,7 +22,22 @@ class DiveMixtureCreate(DiveMixtureBase):
     model_config = ConfigDict(extra="forbid")
 
 
+class DiveMixtureCreateInternal(DiveMixtureCreate):
+    dive_id: int
+
+
 class DiveMixtureRead(DiveMixtureBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+
+
+class DiveMixtureUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: Annotated[str | None, Field(default=None, max_length=50, description="Mixture name/label")]
+    volume: Annotated[float | None, Field(default=None, description="Cylinder volume in liters")]
+    start_pressure: Annotated[float | None, Field(default=None, description="Starting pressure in bar")]
+    end_pressure: Annotated[float | None, Field(default=None, description="Ending pressure in bar")]
+    oxygen: Annotated[float | None, Field(default=None, description="Oxygen percentage")]
+    helium: Annotated[float | None, Field(default=None, description="Helium percentage")]
