@@ -43,7 +43,7 @@ async def write_user(
     return cast(UserRead, user_read)
 
 
-@router.get("/users", response_model=PaginatedListResponse[UserRead])
+@router.get("/users", response_model=PaginatedListResponse[UserRead], dependencies=[Depends(get_current_user)])
 async def read_users(
     request: Request, db: Annotated[AsyncSession, Depends(async_get_db)], page: int = 1, items_per_page: int = 10
 ) -> dict:
@@ -58,15 +58,15 @@ async def read_users(
     return response
 
 
-@router.get("/user/me/", response_model=UserRead)
+@router.get("/user/me", response_model=UserRead)
 async def read_users_me(request: Request, current_user: Annotated[dict, Depends(get_current_user)]) -> dict:
     return current_user
 
 
-@router.get("/user/{username}", response_model=UserRead)
-async def read_user(request: Request, username: str, db: Annotated[AsyncSession, Depends(async_get_db)]) -> UserRead:
+@router.get("/user/{id}", response_model=UserRead, dependencies=[Depends(get_current_user)])
+async def read_user(request: Request, id: int, db: Annotated[AsyncSession, Depends(async_get_db)]) -> UserRead:
     db_user = await crud_users.get(
-        db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
+        db=db, id=id, is_deleted=False, schema_to_select=UserRead, return_as_model=True
     )
     if db_user is None:
         raise NotFoundException("User not found")
@@ -74,15 +74,15 @@ async def read_user(request: Request, username: str, db: Annotated[AsyncSession,
     return cast(UserRead, db_user)
 
 
-@router.patch("/user/{username}")
+@router.patch("/user/{id}")
 async def patch_user(
     request: Request,
     values: UserUpdate,
-    username: str,
+    id: int,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    db_user = await crud_users.get(db=db, username=username)
+    db_user = await crud_users.get(db=db, id=id)
     if db_user is None:
         raise NotFoundException("User not found")
 
@@ -93,7 +93,7 @@ async def patch_user(
         db_username = db_user.username
         db_email = db_user.email
 
-    if db_username != current_user["username"]:
+    if current_user["id"] != id:
         raise ForbiddenException()
 
     if values.email is not None and values.email != db_email:
@@ -104,35 +104,35 @@ async def patch_user(
         if await crud_users.exists(db=db, username=values.username):
             raise DuplicateValueException("Username not available")
 
-    await crud_users.update(db=db, object=values, username=username)
+    await crud_users.update(db=db, object=values, id=id)
     return {"message": "User updated"}
 
 
-@router.delete("/user/{username}")
+@router.delete("/user/{id}")
 async def erase_user(
     request: Request,
-    username: str,
+    id: int,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     token: str = Depends(oauth2_scheme),
 ) -> dict[str, str]:
-    db_user = await crud_users.get(db=db, username=username, schema_to_select=UserRead)
+    db_user = await crud_users.get(db=db, id=id, schema_to_select=UserRead)
     if not db_user:
         raise NotFoundException("User not found")
 
-    if username != current_user["username"]:
+    if current_user["id"] != id:
         raise ForbiddenException()
 
-    await crud_users.delete(db=db, username=username)
+    await crud_users.delete(db=db, id=id)
     await blacklist_token(token=token, db=db)
     return {"message": "User deleted"}
 
 
-@router.get("/user/{username}/rate_limits", dependencies=[Depends(get_current_superuser)])
+@router.get("/user/{id}/rate_limits", dependencies=[Depends(get_current_superuser)])
 async def read_user_rate_limits(
-    request: Request, username: str, db: Annotated[AsyncSession, Depends(async_get_db)]
+    request: Request, id: int, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> dict[str, Any]:
-    db_user = await crud_users.get(db=db, username=username, schema_to_select=UserRead, return_as_model=True)
+    db_user = await crud_users.get(db=db, id=id, schema_to_select=UserRead, return_as_model=True)
     if db_user is None:
         raise NotFoundException("User not found")
 
@@ -154,11 +154,11 @@ async def read_user_rate_limits(
     return user_dict
 
 
-@router.get("/user/{username}/tier")
+@router.get("/user/{id}/tier", dependencies=[Depends(get_current_user)])
 async def read_user_tier(
-    request: Request, username: str, db: Annotated[AsyncSession, Depends(async_get_db)]
+    request: Request, id: int, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> dict | None:
-    db_user = await crud_users.get(db=db, username=username, schema_to_select=UserRead, return_as_model=True)
+    db_user = await crud_users.get(db=db, id=id, schema_to_select=UserRead, return_as_model=True)
     if db_user is None:
         raise NotFoundException("User not found")
 
@@ -181,11 +181,11 @@ async def read_user_tier(
     return user_dict
 
 
-@router.patch("/user/{username}/tier", dependencies=[Depends(get_current_superuser)])
+@router.patch("/user/{id}/tier", dependencies=[Depends(get_current_superuser)])
 async def patch_user_tier(
-    request: Request, username: str, values: UserTierUpdate, db: Annotated[AsyncSession, Depends(async_get_db)]
+    request: Request, id: int, values: UserTierUpdate, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> dict[str, str]:
-    db_user = await crud_users.get(db=db, username=username, schema_to_select=UserRead, return_as_model=True)
+    db_user = await crud_users.get(db=db, id=id, schema_to_select=UserRead, return_as_model=True)
     if db_user is None:
         raise NotFoundException("User not found")
 
@@ -194,5 +194,5 @@ async def patch_user_tier(
     if db_tier is None:
         raise NotFoundException("Tier not found")
 
-    await crud_users.update(db=db, object=values.model_dump(), username=username)
+    await crud_users.update(db=db, object=values.model_dump(), id=id)
     return {"message": f"User {db_user.name} Tier updated"}

@@ -164,6 +164,36 @@ requests) should be done directly against the DB or via the `crudadmin` panel
 (which is a separate system - see below - and unaffected by this), not exposed
 as a REST endpoint.
 
+## `/user/{username}/...` routes were changed to `/user/{id}/...`
+
+`users.py`'s single-user routes (`GET/PATCH/DELETE /user/{username}`,
+`GET /user/{username}/rate_limits`, `GET/PATCH /user/{username}/tier`) took a
+username path segment, unlike every other resource (`/dive/{id}`, `/trip/{id}`,
+`/dive-site/{id}`) which takes a numeric id. These were changed to `/user/{id}`
+for consistency. `patch_user`'s ownership check changed from comparing
+`current_user["username"]` against the *target* username in the path (which
+could itself be changed by the same request body) to comparing
+`current_user["id"]` against the path `id` directly - a request can still change
+its own `username` via the body, that's unrelated to which user is being edited.
+`GET /user/me` (an exact literal path, not a `{username}`/`{id}` placeholder) is
+unaffected and still resolves the caller's own record from their token.
+
+## All `/user*`/`/users`/`/dive/parse-xml` endpoints require auth, except signup
+
+`GET /users`, `GET /user/{id}`, and `GET /user/{id}/tier` used to have no auth
+dependency at all - readable by anyone, unauthenticated. `POST /dive/parse-xml`
+was the same. These now all require `Depends(get_current_user)` (added via the
+route's `dependencies=[...]`, since the handlers don't otherwise need the
+current user's identity - they aren't per-owner checks, just "must be logged in").
+`GET /user/{id}/rate_limits` and `PATCH /user/{id}/tier` already required
+`get_current_superuser` (a stricter form of auth), so were left as-is.
+
+**`POST /user` (signup) is the one deliberate exception** - it cannot require
+auth, since a brand-new user has no token yet; that's the whole point of the
+endpoint. If self-service signup is ever disabled in favor of admin-only user
+creation, this would need `get_current_superuser` instead, but that's a product
+decision, not a security fix.
+
 **Gotcha - `@cache` and per-request authorization don't mix directly.** The
 `@cache` decorator short-circuits GET requests by returning the cached response
 *before* the wrapped function body ever runs (see `core/utils/cache.py`). If the

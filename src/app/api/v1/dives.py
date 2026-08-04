@@ -44,7 +44,7 @@ def _dive_owner_id(db_dive: Any) -> int:
     return db_dive["user_id"] if isinstance(db_dive, dict) else db_dive.user_id
 
 
-@router.post("/dive/parse-xml", response_model=ParsedDiveSchema)
+@router.post("/dive/parse-xml", response_model=ParsedDiveSchema, dependencies=[Depends(get_current_user)])
 async def parse_dive_xml(
     file: Annotated[UploadFile, File(description="Dive-computer export file (e.g. Suunto XML)")],
 ) -> ParsedDiveSchema:
