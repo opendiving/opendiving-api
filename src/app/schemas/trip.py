@@ -1,9 +1,10 @@
+import uuid as uuid_pkg
 from datetime import date, datetime
 from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..core.schemas import NOTES_MAX_LENGTH, PersistentDeletion, TimestampSchema
+from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema
 
 
 def _validate_date_range(start_date: date | None, end_date: date | None) -> None:
@@ -24,11 +25,21 @@ class TripBase(BaseModel):
         return self
 
 
-class Trip(TimestampSchema, TripBase, PersistentDeletion):
-    user_id: int
+class TripRead(TripBase, PublicUUIDSchema):
+    """Public representation of a trip, keyed by its opaque `uuid` rather than the
+    sequential internal `id` (which is never exposed over the API).
+    """
+
+    user_uuid: uuid_pkg.UUID
+    created_at: datetime
 
 
-class TripRead(TripBase):
+class TripReadInternal(TripBase, PublicUUIDSchema):
+    """Mirrors the actual `trip` table columns (integer PK/FK), for server-side lookups
+    only - never returned directly over the API (use `TripRead` for the public shape,
+    which additionally resolves `user_id` to the owning user's `uuid`).
+    """
+
     id: int
     user_id: int
     created_at: datetime
@@ -37,10 +48,12 @@ class TripRead(TripBase):
 class TripCreate(TripBase):
     model_config = ConfigDict(extra="forbid")
     start_date: Annotated[date, Field(examples=["2024-06-01"])]
-    user_id: Annotated[int, Field(description="ID of the user this trip belongs to")]
+    user_uuid: Annotated[uuid_pkg.UUID, Field(description="Public id of the user this trip belongs to")]
 
 
-class TripCreateInternal(TripCreate):
+class TripCreateInternal(TripBase):
+    model_config = ConfigDict(extra="forbid")
+    start_date: Annotated[date, Field(examples=["2024-06-01"])]
     user_id: int
 
 

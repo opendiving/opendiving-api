@@ -1,3 +1,4 @@
+import uuid as uuid_pkg
 from datetime import datetime
 from typing import Annotated
 
@@ -11,13 +12,21 @@ class UserDiveStatsBase(BaseModel):
     species_seen: Annotated[int, Field(default=0, examples=[0])]
 
 
-class UserDiveStats(UserDiveStatsBase):
-    user_id: int
-    created_at: datetime
-    updated_at: datetime | None = None
-
-
 class UserDiveStatsRead(UserDiveStatsBase):
+    """Public representation, keyed by the owning user's opaque `uuid` rather than the
+    sequential internal `user_id` (which is never exposed over the API).
+    """
+
+    user_uuid: uuid_pkg.UUID
+    created_at: datetime
+
+
+class UserDiveStatsReadInternal(UserDiveStatsBase):
+    """Mirrors the actual `user_dive_stats` table columns (integer FK), for server-side
+    lookups only - never returned directly over the API (use `UserDiveStatsRead` for the
+    public shape, which additionally resolves `user_id` to the owning user's `uuid`).
+    """
+
     user_id: int
     created_at: datetime
 

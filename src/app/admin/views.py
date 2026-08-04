@@ -9,7 +9,7 @@ from ..models.dive_site import DiveSite
 from ..models.trip import Trip
 from ..models.user import User
 from ..models.user_dive_stats import UserDiveStats
-from ..schemas.dive import DiveCreateInternal, DiveUpdate
+from ..schemas.dive import DiveCreateInternal, DiveUpdateInternal
 from ..schemas.dive_dive_site import DiveDiveSiteCreate, DiveDiveSiteUpdate
 from ..schemas.dive_mixture import DiveMixtureCreateInternal, DiveMixtureUpdate
 from ..schemas.dive_site import DiveSiteCreateInternal, DiveSiteUpdate
@@ -44,7 +44,7 @@ def register_admin_views(admin: CRUDAdmin) -> None:
     admin.add_view(
         model=Dive,
         create_schema=DiveCreateInternal,
-        update_schema=DiveUpdate,
+        update_schema=DiveUpdateInternal,
         allowed_actions={"view", "create", "update", "delete"},
     )
 

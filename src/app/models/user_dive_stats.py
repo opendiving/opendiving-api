@@ -1,12 +1,11 @@
-from datetime import UTC, datetime
-
-from sqlalchemy import DateTime, Float, ForeignKey, Integer
+from sqlalchemy import Float, ForeignKey, Integer
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.db.database import Base
+from ..core.db.models import TimestampMixin
 
 
-class UserDiveStats(Base):
+class UserDiveStats(Base, TimestampMixin):
     """Aggregate dive statistics for a user.
 
     One row per user, kept in sync by `services.dive_stats.recalculate_dive_stats`
@@ -22,6 +21,3 @@ class UserDiveStats(Base):
     max_depth: Mapped[float] = mapped_column(Float, default=0)
     total_time: Mapped[int] = mapped_column(Integer, default=0, doc="Total dive time in seconds")
     species_seen: Mapped[int] = mapped_column(Integer, default=0)
-
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default_factory=lambda: datetime.now(UTC))
-    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)

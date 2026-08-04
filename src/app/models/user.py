@@ -1,15 +1,11 @@
-import uuid as uuid_pkg
-from datetime import UTC, datetime
-
-from sqlalchemy import DateTime, String
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Boolean, String
 from sqlalchemy.orm import Mapped, mapped_column
-from uuid6 import uuid7
 
 from ..core.db.database import Base
+from ..core.db.models import PublicUUIDMixin, SoftDeleteMixin, TimestampMixin
 
 
-class User(Base):
+class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "user"
 
     id: Mapped[int] = mapped_column(autoincrement=True, primary_key=True, init=False)
@@ -20,9 +16,9 @@ class User(Base):
     hashed_password: Mapped[str] = mapped_column(String)
 
     profile_image_url: Mapped[str] = mapped_column(String, default="https://profileimageurl.com")
-    uuid: Mapped[uuid_pkg.UUID] = mapped_column(UUID(as_uuid=True), default_factory=uuid7, unique=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default_factory=lambda: datetime.now(UTC))
-    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
-    is_deleted: Mapped[bool] = mapped_column(default=False, index=True)
     is_superuser: Mapped[bool] = mapped_column(default=False)
+
+    # Overrides `SoftDeleteMixin.is_deleted` to add an index: unlike Dive/Trip/DiveSite
+    # (each of which has a compound partial index that already covers `is_deleted` as a
+    # leading/predicate column), no other index on this table covers it.
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, index=True, kw_only=True)

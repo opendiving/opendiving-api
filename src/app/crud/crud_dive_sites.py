@@ -1,3 +1,5 @@
+import uuid as uuid_pkg
+
 from fastcrud import FastCRUD
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6,34 +8,40 @@ from ..models.dive_site import DiveSite
 from ..schemas.dive_site import (
     DiveSiteCreateInternal,
     DiveSiteDelete,
-    DiveSiteRead,
+    DiveSiteReadInternal,
     DiveSiteUpdate,
     DiveSiteUpdateInternal,
 )
 
 CRUDDiveSite = FastCRUD[
-    DiveSite, DiveSiteCreateInternal, DiveSiteUpdate, DiveSiteUpdateInternal, DiveSiteDelete, DiveSiteRead
+    DiveSite, DiveSiteCreateInternal, DiveSiteUpdate, DiveSiteUpdateInternal, DiveSiteDelete, DiveSiteReadInternal
 ]
 crud_dive_sites = CRUDDiveSite(DiveSite)
 
 
-async def dive_site_ids_belong_to_user(db: AsyncSession, dive_site_ids: list[int], user_id: int) -> bool:
-    """Check whether every given (non-deleted) dive site id belongs to the given user.
+async def resolve_dive_site_ids_for_user(
+    db: AsyncSession, dive_site_uuids: list[uuid_pkg.UUID], user_id: int
+) -> dict[uuid_pkg.UUID, int] | None:
+    """Resolve dive site public `uuid`s to their internal `id`s, scoped to non-deleted
+    dive sites belonging to the given user.
 
-    Used to prevent a user from linking another user's dive site(s) to their own dive.
+    Returns `None` if any given uuid doesn't resolve to a dive site owned by the user
+    (used to prevent a user from linking another user's dive site(s) to their own dive).
     """
-    unique_ids = set(dive_site_ids)
-    if not unique_ids:
-        return True
+    unique_uuids = set(dive_site_uuids)
+    if not unique_uuids:
+        return {}
 
-    stmt = select(DiveSite.id).where(
-        DiveSite.id.in_(unique_ids),
+    stmt = select(DiveSite.uuid, DiveSite.id).where(
+        DiveSite.uuid.in_(unique_uuids),
         DiveSite.user_id == user_id,
         DiveSite.is_deleted.is_(False),
     )
     result = await db.execute(stmt)
-    matched_ids = {row[0] for row in result}
-    return matched_ids == unique_ids
+    mapping = {row.uuid: row.id for row in result}
+    if mapping.keys() != unique_uuids:
+        return None
+    return mapping
 
 
 async def dive_site_name_exists(

@@ -1,14 +1,13 @@
-import uuid as uuid_pkg
-from datetime import UTC, datetime
+from datetime import datetime
 
-from sqlalchemy import UUID, CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, Text
-from sqlalchemy.orm import Mapped, mapped_column
-from uuid6 import uuid7
+from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, Text
+from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
+from ..core.db.models import PublicUUIDMixin, SoftDeleteMixin, TimestampMixin
 
 
-class Dive(Base):
+class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "dive"
 
     id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, unique=True, primary_key=True, init=False)
@@ -17,7 +16,6 @@ class Dive(Base):
     start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     duration: Mapped[int] = mapped_column(Integer)
     notes: Mapped[str] = mapped_column(Text)
-    uuid: Mapped[uuid_pkg.UUID] = mapped_column(UUID(as_uuid=True), default_factory=uuid7, unique=True)
 
     max_depth: Mapped[float | None] = mapped_column(Float, default=None)
     avg_depth: Mapped[float | None] = mapped_column(Float, default=None)
@@ -25,30 +23,28 @@ class Dive(Base):
     visibility: Mapped[int | None] = mapped_column(Integer, default=None)
     trip_id: Mapped[int | None] = mapped_column(ForeignKey("trip.id", ondelete="SET NULL"), default=None, index=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default_factory=lambda: datetime.now(UTC))
-    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
-    is_deleted: Mapped[bool] = mapped_column(default=False)
-
-    __table_args__ = (
-        # Mirrors the frontend's Zod validation (`lib/validations/dive.ts`) at the DB
-        # layer, so direct API calls or bugs can't insert nonsensical dive data.
-        CheckConstraint("duration > 0", name="ck_dive_duration_positive"),
-        CheckConstraint("visibility IS NULL OR visibility >= 0", name="ck_dive_visibility_non_negative"),
-        CheckConstraint("max_depth IS NULL OR max_depth > 0", name="ck_dive_max_depth_positive"),
-        CheckConstraint("avg_depth IS NULL OR avg_depth > 0", name="ck_dive_avg_depth_positive"),
-        # Serves `_cached_read_dives` (`GET /dives`, by far the hottest query on this
-        # table): `WHERE user_id = ... AND is_deleted = false ORDER BY start_time DESC`.
-        # `is_deleted` isn't a column here - the partial predicate already pins it to
-        # `false`, so Postgres can use this index for both the filter and the sort
-        # without a separate sort step, while staying smaller than a 3-column index.
-        # This replaces the old standalone `is_deleted` index, which was low-value as a
-        # leading column (mostly `false`) and unused elsewhere on this table (every
-        # other dive lookup filters by the `id` primary key instead).
-        Index(
-            "ix_dive_user_id_start_time",
-            "user_id",
-            start_time.desc(),
-            postgresql_where=is_deleted.is_(False),
-        ),
-    )
+    @declared_attr.directive
+    @classmethod
+    def __table_args__(cls) -> tuple:
+        return (
+            # Mirrors the frontend's Zod validation (`lib/validations/dive.ts`) at the DB
+            # layer, so direct API calls or bugs can't insert nonsensical dive data.
+            CheckConstraint("duration > 0", name="ck_dive_duration_positive"),
+            CheckConstraint("visibility IS NULL OR visibility >= 0", name="ck_dive_visibility_non_negative"),
+            CheckConstraint("max_depth IS NULL OR max_depth > 0", name="ck_dive_max_depth_positive"),
+            CheckConstraint("avg_depth IS NULL OR avg_depth > 0", name="ck_dive_avg_depth_positive"),
+            # Serves `_cached_read_dives` (`GET /dives`, by far the hottest query on this
+            # table): `WHERE user_id = ... AND is_deleted = false ORDER BY start_time DESC`.
+            # `is_deleted` isn't a column here - the partial predicate already pins it to
+            # `false`, so Postgres can use this index for both the filter and the sort
+            # without a separate sort step, while staying smaller than a 3-column index.
+            # This replaces the old standalone `is_deleted` index, which was low-value as a
+            # leading column (mostly `false`) and unused elsewhere on this table (every
+            # other dive lookup filters by the `id` primary key instead).
+            Index(
+                "ix_dive_user_id_start_time",
+                "user_id",
+                cls.start_time.desc(),
+                postgresql_where=cls.is_deleted.is_(False),
+            ),
+        )

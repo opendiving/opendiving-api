@@ -9,6 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm.session import Session
+from uuid6 import uuid7
 
 from src.app.core.config import settings
 from src.app.main import app
@@ -71,21 +72,15 @@ def sample_user_data():
 
 @pytest.fixture
 def sample_user_read():
-    """Generate a sample UserRead object."""
-    from uuid6 import uuid7
-
+    """Generate a sample UserRead object (the public, uuid-keyed shape)."""
     from src.app.schemas.user import UserRead
 
     return UserRead(
-        id=1,
         uuid=uuid7(),
         name=fake.name(),
         username=fake.user_name(),
         email=fake.email(),
         profile_image_url=fake.image_url(),
-        is_superuser=False,
-        created_at=fake.date_time(),
-        updated_at=fake.date_time(),
     )
 
 
@@ -94,6 +89,7 @@ def current_user_dict():
     """Mock current user from auth dependency."""
     return {
         "id": 1,
+        "uuid": uuid7(),
         "username": fake.user_name(),
         "email": fake.email(),
         "name": fake.name(),
