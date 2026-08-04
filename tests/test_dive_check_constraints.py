@@ -185,3 +185,26 @@ class TestDiveMixtureCheckConstraints:
     def test_valid_mixture_is_allowed(self, db: Session, dive: Dive) -> None:
         db.add(_make_mixture(dive.id, volume=12, oxygen=21, helium=0))
         db.commit()
+
+    def test_end_pressure_greater_than_start_pressure_is_rejected(self, db: Session, dive: Dive) -> None:
+        _assert_violates(
+            db,
+            _make_mixture(dive.id, start_pressure=50, end_pressure=200),
+            "ck_dive_mixture_pressure_order",
+        )
+
+    def test_end_pressure_equal_to_start_pressure_is_allowed(self, db: Session, dive: Dive) -> None:
+        db.add(_make_mixture(dive.id, start_pressure=200, end_pressure=200))
+        db.commit()
+
+    def test_end_pressure_less_than_start_pressure_is_allowed(self, db: Session, dive: Dive) -> None:
+        db.add(_make_mixture(dive.id, start_pressure=200, end_pressure=50))
+        db.commit()
+
+    def test_null_start_pressure_is_allowed(self, db: Session, dive: Dive) -> None:
+        db.add(_make_mixture(dive.id, start_pressure=None, end_pressure=50))
+        db.commit()
+
+    def test_null_end_pressure_is_allowed(self, db: Session, dive: Dive) -> None:
+        db.add(_make_mixture(dive.id, start_pressure=200, end_pressure=None))
+        db.commit()

@@ -61,6 +61,7 @@ _MIXTURE_CONSTRAINT_MESSAGES = {
     "ck_dive_mixture_oxygen_range": "Oxygen percentage must be between 0 and 100.",
     "ck_dive_mixture_helium_range": "Helium percentage must be between 0 and 100.",
     "ck_dive_mixture_oxygen_helium_sum": "Oxygen and helium percentages cannot sum to more than 100.",
+    "ck_dive_mixture_pressure_order": "End pressure cannot be greater than start pressure.",
 }
 
 

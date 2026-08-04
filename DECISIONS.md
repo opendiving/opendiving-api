@@ -23,16 +23,17 @@ migrations is worth doing so schema changes are versioned and repeatable.
 
 ## Domain `CheckConstraint`s need a manual `ALTER TABLE` on existing DBs
 
-`DiveMixture` (`oxygen`/`helium` 0-100, `oxygen + helium <= 100`, `volume > 0`)
-and `Dive` (`duration > 0`, `visibility >= 0`, `max_depth > 0`, `avg_depth > 0`)
-declare `CheckConstraint`s in `__table_args__` as DB-level backstops for
-validation that otherwise only lives in the frontend Zod schemas
-(`lib/validations/dive.ts`). `max_depth`/`avg_depth`/`visibility` are nullable
-`max_depth`/`avg_depth`/`visibility` are nullable columns; Postgres already
-treats a `CHECK` as satisfied whenever it evaluates to `NULL` (e.g. plain
-`max_depth > 0` when `max_depth` is `NULL`), so the explicit `<col> IS NULL OR
-<col> > 0` (or `>= 0` for `visibility`) isn't strictly required, but is kept
-for clarity about the intent.
+`DiveMixture` (`oxygen`/`helium` 0-100, `oxygen + helium <= 100`, `volume > 0`,
+`end_pressure <= start_pressure`) and `Dive` (`duration > 0`, `visibility >= 0`,
+`max_depth > 0`, `avg_depth > 0`) declare `CheckConstraint`s in `__table_args__`
+as DB-level backstops for validation that otherwise only lives in the frontend
+Zod schemas (`lib/validations/dive.ts`). `max_depth`/`avg_depth`/`visibility`/
+`start_pressure`/`end_pressure` are nullable columns; Postgres already treats a
+`CHECK` as satisfied whenever it evaluates to `NULL` (e.g. plain `max_depth >
+0` when `max_depth` is `NULL`), so the explicit `<col> IS NULL OR <col> > 0`
+(or `>= 0` for `visibility`, or `... IS NULL OR ... IS NULL OR ...` for the
+pressure ordering check) isn't strictly required, but is kept for clarity
+about the intent.
 `create_all()` never alters existing tables (see above), these constraints
 only apply to brand-new `dive`/`dive_mixture` tables. On an already-running
 dev DB, add them by hand:
@@ -42,6 +43,7 @@ ALTER TABLE dive_mixture ADD CONSTRAINT ck_dive_mixture_volume_positive CHECK (v
 ALTER TABLE dive_mixture ADD CONSTRAINT ck_dive_mixture_oxygen_range CHECK (oxygen >= 0 AND oxygen <= 100);
 ALTER TABLE dive_mixture ADD CONSTRAINT ck_dive_mixture_helium_range CHECK (helium >= 0 AND helium <= 100);
 ALTER TABLE dive_mixture ADD CONSTRAINT ck_dive_mixture_oxygen_helium_sum CHECK (oxygen + helium <= 100);
+ALTER TABLE dive_mixture ADD CONSTRAINT ck_dive_mixture_pressure_order CHECK (start_pressure IS NULL OR end_pressure IS NULL OR end_pressure <= start_pressure);
 ALTER TABLE dive ADD CONSTRAINT ck_dive_duration_positive CHECK (duration > 0);
 ALTER TABLE dive ADD CONSTRAINT ck_dive_visibility_non_negative CHECK (visibility IS NULL OR visibility >= 0);
 ALTER TABLE dive ADD CONSTRAINT ck_dive_max_depth_positive CHECK (max_depth IS NULL OR max_depth > 0);

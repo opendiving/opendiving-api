@@ -78,6 +78,12 @@ class TestMixtureErrorDetail:
             == "Oxygen and helium percentages cannot sum to more than 100."
         )
 
+    def test_pressure_order(self):
+        assert (
+            _mixture_error_detail(_integrity_error("ck_dive_mixture_pressure_order"))
+            == "End pressure cannot be greater than start pressure."
+        )
+
     def test_unknown_violation_falls_back_to_generic_message(self):
         exc = IntegrityError("INSERT ...", {}, Exception("some other constraint"))
         assert _mixture_error_detail(exc) == "Invalid gas mixture."

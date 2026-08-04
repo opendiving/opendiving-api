@@ -24,4 +24,8 @@ class DiveMixture(Base):
         CheckConstraint("oxygen >= 0 AND oxygen <= 100", name="ck_dive_mixture_oxygen_range"),
         CheckConstraint("helium >= 0 AND helium <= 100", name="ck_dive_mixture_helium_range"),
         CheckConstraint("oxygen + helium <= 100", name="ck_dive_mixture_oxygen_helium_sum"),
+        CheckConstraint(
+            "start_pressure IS NULL OR end_pressure IS NULL OR end_pressure <= start_pressure",
+            name="ck_dive_mixture_pressure_order",
+        ),
     )
