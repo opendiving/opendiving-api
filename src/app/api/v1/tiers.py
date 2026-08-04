@@ -1,7 +1,7 @@
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Request
-from fastcrud.paginated import PaginatedListResponse, compute_offset, paginated_response
+from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import get_current_superuser
@@ -23,9 +23,11 @@ async def write_tier(
         raise DuplicateValueException("Tier Name not available")
 
     tier_internal = TierCreateInternal(**tier_internal_dict)
-    created_tier = await crud_tiers.create(db=db, object=tier_internal)
+    created_tier = await crud_tiers.create(
+        db=db, object=tier_internal, schema_to_select=TierRead, return_as_model=True
+    )
 
-    tier_read = await crud_tiers.get(db=db, id=created_tier.id, schema_to_select=TierRead)
+    tier_read = await crud_tiers.get(db=db, id=created_tier.id, schema_to_select=TierRead, return_as_model=True)
     if tier_read is None:
         raise NotFoundException("Created tier not found")
 
@@ -44,7 +46,7 @@ async def read_tiers(
 
 @router.get("/tier/{name}", response_model=TierRead)
 async def read_tier(request: Request, name: str, db: Annotated[AsyncSession, Depends(async_get_db)]) -> TierRead:
-    db_tier = await crud_tiers.get(db=db, name=name, schema_to_select=TierRead)
+    db_tier = await crud_tiers.get(db=db, name=name, schema_to_select=TierRead, return_as_model=True)
     if db_tier is None:
         raise NotFoundException("Tier not found")
 

@@ -1,5 +1,4 @@
 from datetime import UTC, datetime
-from typing import Optional
 
 from redis.asyncio import ConnectionPool, Redis
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,11 +10,11 @@ logger = logging.getLogger(__name__)
 
 
 class RateLimiter:
-    _instance: Optional["RateLimiter"] = None
-    pool: Optional[ConnectionPool] = None
-    client: Optional[Redis] = None
+    _instance: RateLimiter | None = None
+    pool: ConnectionPool | None = None
+    client: Redis | None = None
 
-    def __new__(cls) -> "RateLimiter":
+    def __new__(cls) -> RateLimiter:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance

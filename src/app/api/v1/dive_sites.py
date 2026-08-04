@@ -1,7 +1,7 @@
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Request
-from fastcrud.paginated import PaginatedListResponse, compute_offset, paginated_response
+from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import get_current_user
@@ -37,9 +37,13 @@ async def write_dive_site(
         raise DuplicateValueException("A dive site with this name already exists at this location")
 
     dive_site_internal = DiveSiteCreateInternal(**dive_site.model_dump(), user_id=db_user.id)
-    created_dive_site = await crud_dive_sites.create(db=db, object=dive_site_internal)
+    created_dive_site = await crud_dive_sites.create(
+        db=db, object=dive_site_internal, schema_to_select=DiveSiteRead, return_as_model=True
+    )
 
-    dive_site_read = await crud_dive_sites.get(db=db, id=created_dive_site.id, schema_to_select=DiveSiteRead)
+    dive_site_read = await crud_dive_sites.get(
+        db=db, id=created_dive_site.id, schema_to_select=DiveSiteRead, return_as_model=True
+    )
     if dive_site_read is None:
         raise NotFoundException("Created dive site not found")
 
@@ -89,7 +93,7 @@ async def read_dive_site(
 
     db_user = cast(UserRead, db_user)
     db_dive_site = await crud_dive_sites.get(
-        db=db, id=id, user_id=db_user.id, is_deleted=False, schema_to_select=DiveSiteRead
+        db=db, id=id, user_id=db_user.id, is_deleted=False, schema_to_select=DiveSiteRead, return_as_model=True
     )
     if db_dive_site is None:
         raise NotFoundException("Dive site not found")
@@ -117,7 +121,7 @@ async def patch_dive_site(
         raise ForbiddenException()
 
     db_dive_site = await crud_dive_sites.get(
-        db=db, id=id, user_id=db_user.id, is_deleted=False, schema_to_select=DiveSiteRead
+        db=db, id=id, user_id=db_user.id, is_deleted=False, schema_to_select=DiveSiteRead, return_as_model=True
     )
     if db_dive_site is None:
         raise NotFoundException("Dive site not found")

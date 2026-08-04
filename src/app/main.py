@@ -12,7 +12,7 @@ admin = create_admin_interface()
 
 
 @asynccontextmanager
-async def lifespan_with_admin(app: FastAPI) -> AsyncGenerator[None, None]:
+async def lifespan_with_admin(app: FastAPI) -> AsyncGenerator[None]:
     """Custom lifespan that includes admin initialization."""
     # Get the default lifespan
     default_lifespan = lifespan_factory(settings)

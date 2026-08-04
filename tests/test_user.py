@@ -73,7 +73,7 @@ class TestReadUser:
 
             assert result == sample_user_read
             mock_crud.get.assert_called_once_with(
-                db=mock_db, username=username, is_deleted=False, schema_to_select=UserRead
+                db=mock_db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
             )
 
     @pytest.mark.asyncio

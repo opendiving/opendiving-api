@@ -1,7 +1,7 @@
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Request
-from fastcrud.paginated import PaginatedListResponse, compute_offset, paginated_response
+from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import get_current_superuser, get_current_user
@@ -34,9 +34,11 @@ async def write_user(
     del user_internal_dict["password"]
 
     user_internal = UserCreateInternal(**user_internal_dict)
-    created_user = await crud_users.create(db=db, object=user_internal)
+    created_user = await crud_users.create(
+        db=db, object=user_internal, schema_to_select=UserRead, return_as_model=True
+    )
 
-    user_read = await crud_users.get(db=db, id=created_user.id, schema_to_select=UserRead)
+    user_read = await crud_users.get(db=db, id=created_user.id, schema_to_select=UserRead, return_as_model=True)
     if user_read is None:
         raise NotFoundException("Created user not found")
 
@@ -65,7 +67,9 @@ async def read_users_me(request: Request, current_user: Annotated[dict, Depends(
 
 @router.get("/user/{username}", response_model=UserRead)
 async def read_user(request: Request, username: str, db: Annotated[AsyncSession, Depends(async_get_db)]) -> UserRead:
-    db_user = await crud_users.get(db=db, username=username, is_deleted=False, schema_to_select=UserRead)
+    db_user = await crud_users.get(
+        db=db, username=username, is_deleted=False, schema_to_select=UserRead, return_as_model=True
+    )
     if db_user is None:
         raise NotFoundException("User not found")
 
@@ -147,7 +151,7 @@ async def erase_db_user(
 async def read_user_rate_limits(
     request: Request, username: str, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> dict[str, Any]:
-    db_user = await crud_users.get(db=db, username=username, schema_to_select=UserRead)
+    db_user = await crud_users.get(db=db, username=username, schema_to_select=UserRead, return_as_model=True)
     if db_user is None:
         raise NotFoundException("User not found")
 
@@ -157,7 +161,7 @@ async def read_user_rate_limits(
         user_dict["tier_rate_limits"] = []
         return user_dict
 
-    db_tier = await crud_tiers.get(db=db, id=db_user.tier_id, schema_to_select=TierRead)
+    db_tier = await crud_tiers.get(db=db, id=db_user.tier_id, schema_to_select=TierRead, return_as_model=True)
     if db_tier is None:
         raise NotFoundException("Tier not found")
 
@@ -173,7 +177,7 @@ async def read_user_rate_limits(
 async def read_user_tier(
     request: Request, username: str, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> dict | None:
-    db_user = await crud_users.get(db=db, username=username, schema_to_select=UserRead)
+    db_user = await crud_users.get(db=db, username=username, schema_to_select=UserRead, return_as_model=True)
     if db_user is None:
         raise NotFoundException("User not found")
 
@@ -181,7 +185,7 @@ async def read_user_tier(
     if db_user.tier_id is None:
         return None
 
-    db_tier = await crud_tiers.get(db=db, id=db_user.tier_id, schema_to_select=TierRead)
+    db_tier = await crud_tiers.get(db=db, id=db_user.tier_id, schema_to_select=TierRead, return_as_model=True)
     if not db_tier:
         raise NotFoundException("Tier not found")
 
@@ -200,7 +204,7 @@ async def read_user_tier(
 async def patch_user_tier(
     request: Request, username: str, values: UserTierUpdate, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> dict[str, str]:
-    db_user = await crud_users.get(db=db, username=username, schema_to_select=UserRead)
+    db_user = await crud_users.get(db=db, username=username, schema_to_select=UserRead, return_as_model=True)
     if db_user is None:
         raise NotFoundException("User not found")
 

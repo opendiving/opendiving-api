@@ -21,7 +21,7 @@ class TripBase(BaseModel):
     notes: Annotated[str, Field(default="", max_length=63206)]
 
     @model_validator(mode="after")
-    def check_date_range(self) -> "TripBase":
+    def check_date_range(self) -> TripBase:
         _validate_date_range(self.start_date, self.end_date)
         return self
 
@@ -57,7 +57,7 @@ class TripUpdate(BaseModel):
     notes: Annotated[str | None, Field(default=None, max_length=63206)]
 
     @model_validator(mode="after")
-    def check_date_range(self) -> "TripUpdate":
+    def check_date_range(self) -> TripUpdate:
         _validate_date_range(self.start_date, self.end_date)
         return self
 

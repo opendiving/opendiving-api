@@ -1,7 +1,7 @@
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
-from fastcrud.paginated import PaginatedListResponse, compute_offset, paginated_response
+from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -82,7 +82,9 @@ async def write_dive(
 
     dive_internal = DiveCreateInternal(**dive_internal_dict)
     try:
-        created_dive = await crud_dives.create(db=db, object=dive_internal)
+        created_dive = await crud_dives.create(
+            db=db, object=dive_internal, schema_to_select=DiveRead, return_as_model=True
+        )
     except IntegrityError as e:
         await db.rollback()
         raise HTTPException(status_code=422, detail=_fk_error_detail(e)) from e
@@ -271,7 +273,7 @@ async def erase_db_dive(
     if db_user is None:
         raise NotFoundException("User not found")
 
-    db_dive = await crud_dives.get(db=db, id=id, is_deleted=False, schema_to_select=DiveRead)
+    db_dive = await crud_dives.get(db=db, id=id, is_deleted=False, schema_to_select=DiveRead, return_as_model=True)
     if db_dive is None:
         raise NotFoundException("Dive not found")
 

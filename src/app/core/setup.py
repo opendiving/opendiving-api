@@ -204,7 +204,10 @@ def create_application(
     application.include_router(router)
 
     if isinstance(settings, ClientSideCacheSettings):
-        application.add_middleware(ClientCacheMiddleware, max_age=settings.CLIENT_CACHE_MAX_AGE)
+        # Starlette's `_MiddlewareFactory` protocol doesn't precisely match how
+        # `BaseHTTPMiddleware` subclasses are typed; this is the standard, documented
+        # way to register middleware and works correctly at runtime.
+        application.add_middleware(ClientCacheMiddleware, max_age=settings.CLIENT_CACHE_MAX_AGE)  # type: ignore[arg-type]
 
     if isinstance(settings, EnvironmentSettings):
         if settings.ENVIRONMENT != EnvironmentOption.PRODUCTION:

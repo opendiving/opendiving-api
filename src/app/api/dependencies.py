@@ -34,10 +34,7 @@ async def get_current_user(
         user = await crud_users.get(db=db, username=token_data.username_or_email, is_deleted=False)
 
     if user:
-        if hasattr(user, 'model_dump'):
-            return user.model_dump()
-        else:
-            return user
+        return user
 
     raise UnauthorizedException("User not authenticated.")
 
@@ -84,10 +81,12 @@ async def rate_limiter_dependency(
     path = sanitize_path(request.url.path)
     if user:
         user_id = user["id"]
-        tier = await crud_tiers.get(db, id=user["tier_id"], schema_to_select=TierRead)
+        tier = await crud_tiers.get(db, id=user["tier_id"], schema_to_select=TierRead, return_as_model=True)
         if tier:
             tier = cast(TierRead, tier)
-            rate_limit = await crud_rate_limits.get(db=db, tier_id=tier.id, path=path, schema_to_select=RateLimitRead)
+            rate_limit = await crud_rate_limits.get(
+                db=db, tier_id=tier.id, path=path, schema_to_select=RateLimitRead, return_as_model=True
+            )
             if rate_limit:
                 rate_limit = cast(RateLimitRead, rate_limit)
                 limit, period = rate_limit.limit, rate_limit.period

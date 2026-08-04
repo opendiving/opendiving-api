@@ -1,7 +1,7 @@
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Request
-from fastcrud.paginated import PaginatedListResponse, compute_offset, paginated_response
+from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import get_current_user
@@ -37,9 +37,11 @@ async def write_trip(
         raise DuplicateValueException("A trip with this name already exists")
 
     trip_internal = TripCreateInternal(**trip.model_dump(), user_id=db_user.id)
-    created_trip = await crud_trips.create(db=db, object=trip_internal)
+    created_trip = await crud_trips.create(
+        db=db, object=trip_internal, schema_to_select=TripRead, return_as_model=True
+    )
 
-    trip_read = await crud_trips.get(db=db, id=created_trip.id, schema_to_select=TripRead)
+    trip_read = await crud_trips.get(db=db, id=created_trip.id, schema_to_select=TripRead, return_as_model=True)
     if trip_read is None:
         raise NotFoundException("Created trip not found")
 
@@ -87,7 +89,7 @@ async def read_trip(
 
     db_user = cast(UserRead, db_user)
     db_trip = await crud_trips.get(
-        db=db, id=id, user_id=db_user.id, is_deleted=False, schema_to_select=TripRead
+        db=db, id=id, user_id=db_user.id, is_deleted=False, schema_to_select=TripRead, return_as_model=True
     )
     if db_trip is None:
         raise NotFoundException("Trip not found")
