@@ -19,8 +19,16 @@ jobs:
       - name: Install package with dev dependencies
         run: uv sync --extra dev
 
-      - name: Run tests
-        run: uv run pytest
+      - name: Run tests with coverage
+        id: tests
+        run: uv run pytest --cov=src/app --cov-report=term-missing
         env:
           ENVIRONMENT: local
           SECRET_KEY: test-secret-key-for-testing-only
+
+      # Runs whenever the tests step actually executed (pass or fail), but
+      # not if it was skipped entirely because an earlier step failed first.
+      - name: Write coverage summary
+        if: always() && steps.tests.outcome != 'skipped'
+        run: |
+          { echo "## Test Coverage"; echo; uv run coverage report --format=markdown; } >> "$GITHUB_STEP_SUMMARY"
