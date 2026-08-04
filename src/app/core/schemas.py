@@ -6,6 +6,12 @@ from pydantic import BaseModel, Field, field_serializer
 from uuid6 import uuid7
 
 
+# Free-text "notes" fields (Dive, DiveSite, Trip) are stored as unbounded `Text`
+# columns in Postgres (VARCHAR(n) and TEXT perform identically there), so this
+# limit exists purely to keep payloads sane - not because of any storage constraint.
+NOTES_MAX_LENGTH = 10_000
+
+
 class HealthCheck(BaseModel):
     name: str
     version: str

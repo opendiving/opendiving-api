@@ -3,13 +3,13 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..core.schemas import PersistentDeletion, TimestampSchema
+from ..core.schemas import NOTES_MAX_LENGTH, PersistentDeletion, TimestampSchema
 
 
 class DiveSiteBase(BaseModel):
     name: Annotated[str, Field(min_length=1, max_length=255, examples=["Blue Hole"])]
     location: Annotated[str | None, Field(default=None, max_length=255, examples=["Koh Tao, Thailand"])]
-    notes: Annotated[str, Field(default="", max_length=63206)]
+    notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
 
 
 class DiveSite(TimestampSchema, DiveSiteBase, PersistentDeletion):
@@ -36,7 +36,7 @@ class DiveSiteUpdate(BaseModel):
 
     name: Annotated[str | None, Field(min_length=1, max_length=255, default=None)]
     location: Annotated[str | None, Field(default=None, max_length=255, examples=["Koh Tao, Thailand"])]
-    notes: Annotated[str | None, Field(default=None, max_length=63206)]
+    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
 
 
 class DiveSiteUpdateInternal(DiveSiteUpdate):

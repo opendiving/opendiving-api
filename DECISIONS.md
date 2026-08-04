@@ -21,6 +21,38 @@ Practical workflow used throughout this project for adding a column to an existi
 If this project grows past the prototyping stage, introducing real Alembic
 migrations is worth doing so schema changes are versioned and repeatable.
 
+## Domain `CheckConstraint`s need a manual `ALTER TABLE` on existing DBs
+
+`DiveMixture` (`oxygen`/`helium` 0-100, `oxygen + helium <= 100`, `volume > 0`)
+and `Dive` (`duration > 0`, `visibility >= 0`, `max_depth > 0`, `avg_depth > 0`)
+declare `CheckConstraint`s in `__table_args__` as DB-level backstops for
+validation that otherwise only lives in the frontend Zod schemas
+(`lib/validations/dive.ts`). `max_depth`/`avg_depth`/`visibility` are nullable
+`max_depth`/`avg_depth`/`visibility` are nullable columns; Postgres already
+treats a `CHECK` as satisfied whenever it evaluates to `NULL` (e.g. plain
+`max_depth > 0` when `max_depth` is `NULL`), so the explicit `<col> IS NULL OR
+<col> > 0` (or `>= 0` for `visibility`) isn't strictly required, but is kept
+for clarity about the intent.
+`create_all()` never alters existing tables (see above), these constraints
+only apply to brand-new `dive`/`dive_mixture` tables. On an already-running
+dev DB, add them by hand:
+
+```sql
+ALTER TABLE dive_mixture ADD CONSTRAINT ck_dive_mixture_volume_positive CHECK (volume > 0);
+ALTER TABLE dive_mixture ADD CONSTRAINT ck_dive_mixture_oxygen_range CHECK (oxygen >= 0 AND oxygen <= 100);
+ALTER TABLE dive_mixture ADD CONSTRAINT ck_dive_mixture_helium_range CHECK (helium >= 0 AND helium <= 100);
+ALTER TABLE dive_mixture ADD CONSTRAINT ck_dive_mixture_oxygen_helium_sum CHECK (oxygen + helium <= 100);
+ALTER TABLE dive ADD CONSTRAINT ck_dive_duration_positive CHECK (duration > 0);
+ALTER TABLE dive ADD CONSTRAINT ck_dive_visibility_non_negative CHECK (visibility IS NULL OR visibility >= 0);
+ALTER TABLE dive ADD CONSTRAINT ck_dive_max_depth_positive CHECK (max_depth IS NULL OR max_depth > 0);
+ALTER TABLE dive ADD CONSTRAINT ck_dive_avg_depth_positive CHECK (avg_depth IS NULL OR avg_depth > 0);
+```
+
+A constraint violation surfaces as an `IntegrityError`/`asyncpg.CheckViolationError`
+from the DB layer, not a Pydantic validation error - if adding more of these,
+make sure callers (or a shared exception handler) turn that into a sensible
+4xx response instead of a raw 500.
+
 ## Dive sites are many-to-many with dives via a join table
 
 A dive can be logged at more than one dive site (e.g. a drift dive that crosses
@@ -49,6 +81,81 @@ INSERT INTO dive_dive_site (dive_id, dive_site_id, position)
 SELECT id, dive_site_id, 0 FROM dive WHERE dive_site_id IS NOT NULL;
 ALTER TABLE dive DROP COLUMN dive_site_id;
 ```
+
+`dive_dive_site.dive_id` originally had its own single-column index, but the
+`UniqueConstraint("dive_id", "dive_site_id")` already produces a composite
+index with `dive_id` as its leading column, which fully serves the `WHERE
+dive_id = ...` filter used by `get_dive_sites_for_dive`/`get_dive_sites_for_dives`
+- making the standalone index pure write overhead. It was replaced with a
+composite `Index("ix_dive_dive_site_dive_id_position", "dive_id", "position")`,
+which additionally lets Postgres satisfy those queries' `ORDER BY position`
+from the index instead of sorting. `dive_site_id` keeps its own index since
+it's not a leading column of any other index. On an existing local DB, apply
+with:
+```sql
+DROP INDEX ix_dive_dive_site_dive_id;
+CREATE INDEX ix_dive_dive_site_dive_id_position ON dive_dive_site (dive_id, position);
+```
+
+## Hot list queries needed composite indexes, not independent single-column ones
+
+The paginated `GET /dives`, `/trips`, `/dive-sites` list endpoints all run the
+same shape of query: `WHERE user_id = ... AND is_deleted = false ORDER BY
+<some column> LIMIT ... OFFSET ...`. `dive`/`trip`/`dive_site` each only had
+independent single-column indexes on `user_id` and `is_deleted`; Postgres can
+use at most one of those per scan and still has to sort the result
+separately - the `is_deleted` index in particular was nearly useless as a
+leading column since the vast majority of rows have `is_deleted = false`.
+
+Each table's standalone `is_deleted` index was replaced with a single partial
+composite index matching its list endpoint's actual filter/sort, serving the
+whole query directly (filter, exclude soft-deleted rows, *and* the
+`ORDER BY` - no separate sort step):
+```python
+# Dive: _cached_read_dives / GET /dives, ORDER BY start_time DESC
+Index("ix_dive_user_id_start_time", "user_id", start_time.desc(), postgresql_where=is_deleted.is_(False))
+# Trip: read_trips / GET /trips, ORDER BY start_date DESC
+Index("ix_trip_user_id_start_date", "user_id", start_date.desc(), postgresql_where=is_deleted.is_(False))
+# DiveSite: read_dive_sites / GET /dive-sites, ORDER BY name ASC
+Index("ix_dive_site_user_id_name", "user_id", "name", postgresql_where=is_deleted.is_(False))
+```
+`is_deleted` isn't a column in any of these - the partial `WHERE` predicate
+already pins it to `false`, which is both smaller and more selective than a
+3-column `(user_id, is_deleted, <sort col>)` index would be. This mirrors the
+`func.lower(name)` partial unique indexes on `Trip`/`DiveSite` (see
+"Case-insensitive per-user uniqueness" above), just non-unique. Note
+`ix_dive_site_user_id_name` is deliberately a *separate* index from the
+existing `ux_dive_site_user_id_name_location_lower` unique index, not a
+replacement for it - the unique index is keyed on `lower(name)` and can't
+satisfy a plain (case-sensitive) `ORDER BY name`.
+
+The old standalone `is_deleted` index on all three tables was dropped
+entirely: every other lookup on these tables filters by the `id` primary key
+instead (or, for `trip_name_exists`/`dive_site_name_exists`, is already
+covered by the `user_id`-leading unique indexes), so it had no other use.
+Each table's `user_id` single-column index is kept, since not every query on
+these tables excludes soft-deleted rows (e.g. `recalculate_dive_stats`'s
+aggregate does, but relies on the new composite index the same way
+`_cached_read_dives` does).
+
+Verified by compiling and comparing against the intended DDL before applying,
+same as the other partial indexes in this file. On an existing local DB,
+apply with:
+```sql
+DROP INDEX ix_dive_is_deleted;
+CREATE INDEX ix_dive_user_id_start_time ON dive (user_id, start_time DESC) WHERE is_deleted = false;
+
+DROP INDEX ix_trip_is_deleted;
+CREATE INDEX ix_trip_user_id_start_date ON trip (user_id, start_date DESC) WHERE is_deleted = false;
+
+DROP INDEX ix_dive_site_is_deleted;
+CREATE INDEX ix_dive_site_user_id_name ON dive_site (user_id, name) WHERE is_deleted = false;
+```
+
+`User.is_deleted` was deliberately left as a standalone index: `read_users`
+(superuser-only, not a hot path) filters by `is_deleted` alone with no other
+column to build a composite index around, so there's no equivalent win
+available there.
 
 ## `Mapped[X]` vs `Mapped[X | None]` on `MappedAsDataclass`
 
@@ -116,17 +223,40 @@ previous record is "deleted"). This is enforced two ways:
 
 If adding a new "named, user-owned, soft-deletable" entity, mirror this pattern.
 
-## Caching is deliberately skipped for trips/dive sites
+## `trips.py`/`dive_sites.py` caching mirrors `dives.py`
 
-`dives.py` list/read endpoints use the `@cache` decorator (Redis-backed), but
-`trips.py`/`dive_sites.py` do not. This is intentional: the dive form's trip/dive
-site combobox creates a new record and expects to immediately see/select it in the
-list. Caching the list endpoint (even with a short TTL) would let the combobox
-show stale data right after creating a new trip/site. If caching is added back for
-these endpoints, the create/update/delete handlers must invalidate the list cache
-key pattern - `dives.py`'s `write_dive`/`patch_dive`/`erase_dive` now do this via
-`delete_keys_by_pattern(f"user_{user_id}_dives:*")` after they learn the owning
-user's id, which is the model to copy.
+`trips.py`/`dive_sites.py` list/read endpoints now use the same `@cache`
+decorator (Redis-backed) as `dives.py`, copying its structure exactly:
+- List (`GET /trips`, `GET /dive-sites`): a private `_cached_read_trips` /
+  `_cached_read_dive_sites` helper, decorated with `@cache(key_prefix="user_{user_id}_...",
+  resource_id_name="user_id", expiration=60)`, called from the public route only
+  *after* the `current_user["id"] != user_id` ownership check.
+- Single item (`GET /trip/{id}`, `GET /dive-site/{id}`): a private
+  `_cached_read_trip` / `_cached_read_dive_site` helper decorated with
+  `@cache(key_prefix="trip_cache"/"dive_site_cache", resource_id_name="id")`,
+  called only after the fetched object's owner has been checked against
+  `current_user["id"]`.
+- Same "auth before cache" rule as `dives.py` (see the `@cache`/authorization
+  gotcha further below) - never put the ownership check inside a
+  `@cache`-decorated function.
+
+This was previously skipped on purpose: the dive form's trip/dive site combobox
+creates a new record and expects to immediately see/select it in the list, and a
+stale cached list would break that. It's safe now because every mutation
+invalidates the relevant cache keys, same as `dives.py`:
+- `write_trip`/`write_dive_site` call `delete_keys_by_pattern(f"user_{user_id}_trips:*")`
+  / `f"user_{user_id}_dive_sites:*"` right after creating the record (there's no
+  single-item cache to invalidate yet, since the id is new).
+- `patch_trip`/`erase_trip` and `patch_dive_site`/`erase_dive_site` are decorated
+  directly with `@cache("trip_cache"/"dive_site_cache", resource_id_name="id")`
+  (exactly like `patch_dive`/`erase_dive`), which auto-invalidates the single-item
+  cache key on any non-GET call. They *additionally* call
+  `delete_keys_by_pattern(f"user_{owner_id}_trips:*")` / `"..._dive_sites:*"`
+  manually in the handler body to invalidate the list cache, since the list key's
+  `user_id` is only known after fetching the record (for `patch`/`erase`) and
+  can't be expressed via the decorator's kwarg-templated `to_invalidate_extra`.
+  `patch_trip`/`patch_dive_site` only invalidate the list when `update_data` is
+  non-empty, since an empty patch changes nothing worth invalidating.
 
 ## `/{username}/...` resource routes were flattened to `/...` + explicit ids
 

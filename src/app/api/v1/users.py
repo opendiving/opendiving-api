@@ -4,15 +4,12 @@ from fastapi import APIRouter, Depends, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...api.dependencies import get_current_superuser, get_current_user
+from ...api.dependencies import get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import DuplicateValueException, ForbiddenException, NotFoundException
 from ...core.security import blacklist_token, get_password_hash, oauth2_scheme
-from ...crud.crud_rate_limit import crud_rate_limits
-from ...crud.crud_tier import crud_tiers
 from ...crud.crud_users import crud_users
-from ...schemas.tier import TierRead
-from ...schemas.user import UserCreate, UserCreateInternal, UserRead, UserTierUpdate, UserUpdate
+from ...schemas.user import UserCreate, UserCreateInternal, UserRead, UserUpdate
 
 router = APIRouter(tags=["users"])
 
@@ -126,73 +123,3 @@ async def erase_user(
     await crud_users.delete(db=db, id=id)
     await blacklist_token(token=token, db=db)
     return {"message": "User deleted"}
-
-
-@router.get("/user/{id}/rate_limits", dependencies=[Depends(get_current_superuser)])
-async def read_user_rate_limits(
-    request: Request, id: int, db: Annotated[AsyncSession, Depends(async_get_db)]
-) -> dict[str, Any]:
-    db_user = await crud_users.get(db=db, id=id, schema_to_select=UserRead, return_as_model=True)
-    if db_user is None:
-        raise NotFoundException("User not found")
-
-    db_user = cast(UserRead, db_user)
-    user_dict = db_user.model_dump()
-    if db_user.tier_id is None:
-        user_dict["tier_rate_limits"] = []
-        return user_dict
-
-    db_tier = await crud_tiers.get(db=db, id=db_user.tier_id, schema_to_select=TierRead, return_as_model=True)
-    if db_tier is None:
-        raise NotFoundException("Tier not found")
-
-    db_tier = cast(TierRead, db_tier)
-    db_rate_limits = await crud_rate_limits.get_multi(db=db, tier_id=db_tier.id)
-
-    user_dict["tier_rate_limits"] = db_rate_limits["data"]
-
-    return user_dict
-
-
-@router.get("/user/{id}/tier", dependencies=[Depends(get_current_user)])
-async def read_user_tier(
-    request: Request, id: int, db: Annotated[AsyncSession, Depends(async_get_db)]
-) -> dict | None:
-    db_user = await crud_users.get(db=db, id=id, schema_to_select=UserRead, return_as_model=True)
-    if db_user is None:
-        raise NotFoundException("User not found")
-
-    db_user = cast(UserRead, db_user)
-    if db_user.tier_id is None:
-        return None
-
-    db_tier = await crud_tiers.get(db=db, id=db_user.tier_id, schema_to_select=TierRead, return_as_model=True)
-    if not db_tier:
-        raise NotFoundException("Tier not found")
-
-    db_tier = cast(TierRead, db_tier)
-
-    user_dict = db_user.model_dump()
-    tier_dict = db_tier.model_dump()
-
-    for key, value in tier_dict.items():
-        user_dict[f"tier_{key}"] = value
-
-    return user_dict
-
-
-@router.patch("/user/{id}/tier", dependencies=[Depends(get_current_superuser)])
-async def patch_user_tier(
-    request: Request, id: int, values: UserTierUpdate, db: Annotated[AsyncSession, Depends(async_get_db)]
-) -> dict[str, str]:
-    db_user = await crud_users.get(db=db, id=id, schema_to_select=UserRead, return_as_model=True)
-    if db_user is None:
-        raise NotFoundException("User not found")
-
-    db_user = cast(UserRead, db_user)
-    db_tier = await crud_tiers.get(db=db, id=values.tier_id, schema_to_select=TierRead)
-    if db_tier is None:
-        raise NotFoundException("Tier not found")
-
-    await crud_users.update(db=db, object=values.model_dump(), id=id)
-    return {"message": f"User {db_user.name} Tier updated"}

@@ -17,6 +17,25 @@ CRUDDiveSite = FastCRUD[
 crud_dive_sites = CRUDDiveSite(DiveSite)
 
 
+async def dive_site_ids_belong_to_user(db: AsyncSession, dive_site_ids: list[int], user_id: int) -> bool:
+    """Check whether every given (non-deleted) dive site id belongs to the given user.
+
+    Used to prevent a user from linking another user's dive site(s) to their own dive.
+    """
+    unique_ids = set(dive_site_ids)
+    if not unique_ids:
+        return True
+
+    stmt = select(DiveSite.id).where(
+        DiveSite.id.in_(unique_ids),
+        DiveSite.user_id == user_id,
+        DiveSite.is_deleted.is_(False),
+    )
+    result = await db.execute(stmt)
+    matched_ids = {row[0] for row in result}
+    return matched_ids == unique_ids
+
+
 async def dive_site_name_exists(
     db: AsyncSession, user_id: int, name: str, location: str | None = None, exclude_id: int | None = None
 ) -> bool:

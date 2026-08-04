@@ -16,7 +16,9 @@ from ...crud.crud_dive_dive_sites import (
     replace_dive_sites_for_dive,
 )
 from ...crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
+from ...crud.crud_dive_sites import dive_site_ids_belong_to_user
 from ...crud.crud_dives import crud_dives
+from ...crud.crud_trips import trip_belongs_to_user
 from ...schemas.dive import (
     DiveCreateInternal,
     DiveCreateRequest,
@@ -31,13 +33,40 @@ from ...services.dive_stats import recalculate_dive_stats
 router = APIRouter(tags=["dives"])
 
 
+_DIVE_CONSTRAINT_MESSAGES = {
+    "ck_dive_duration_positive": "Duration must be positive.",
+    "ck_dive_visibility_non_negative": "Visibility must be zero or positive.",
+    "ck_dive_max_depth_positive": "Max depth must be positive.",
+    "ck_dive_avg_depth_positive": "Average depth must be positive.",
+}
+
+
 def _fk_error_detail(exc: IntegrityError) -> str:
     msg = str(exc.orig)
     if "dive_trip_id_fkey" in msg:
         return "Trip not found."
     if "dive_site_id_fkey" in msg:
         return "Dive site not found."
+    for constraint, detail in _DIVE_CONSTRAINT_MESSAGES.items():
+        if constraint in msg:
+            return detail
     return "Invalid reference: a related record does not exist."
+
+
+_MIXTURE_CONSTRAINT_MESSAGES = {
+    "ck_dive_mixture_volume_positive": "Volume must be positive.",
+    "ck_dive_mixture_oxygen_range": "Oxygen percentage must be between 0 and 100.",
+    "ck_dive_mixture_helium_range": "Helium percentage must be between 0 and 100.",
+    "ck_dive_mixture_oxygen_helium_sum": "Oxygen and helium percentages cannot sum to more than 100.",
+}
+
+
+def _mixture_error_detail(exc: IntegrityError) -> str:
+    msg = str(exc.orig)
+    for constraint, detail in _MIXTURE_CONSTRAINT_MESSAGES.items():
+        if constraint in msg:
+            return detail
+    return "Invalid gas mixture."
 
 
 def _dive_owner_id(db_dive: Any) -> int:
@@ -71,6 +100,12 @@ async def write_dive(
     if current_user["id"] != dive.user_id:
         raise ForbiddenException()
 
+    if dive.trip_id is not None and not await trip_belongs_to_user(db=db, trip_id=dive.trip_id, user_id=dive.user_id):
+        raise HTTPException(status_code=422, detail="Trip not found.")
+
+    if not await dive_site_ids_belong_to_user(db=db, dive_site_ids=dive.dive_site_ids, user_id=dive.user_id):
+        raise HTTPException(status_code=422, detail="Dive site not found.")
+
     dive_internal_dict = dive.model_dump(exclude={"mixtures", "dive_site_ids"})
 
     dive_internal = DiveCreateInternal(**dive_internal_dict)
@@ -82,7 +117,11 @@ async def write_dive(
         await db.rollback()
         raise HTTPException(status_code=422, detail=_fk_error_detail(e)) from e
 
-    await replace_mixtures_for_dive(db=db, dive_id=created_dive.id, mixtures=dive.mixtures)
+    try:
+        await replace_mixtures_for_dive(db=db, dive_id=created_dive.id, mixtures=dive.mixtures)
+    except IntegrityError as e:
+        await db.rollback()
+        raise HTTPException(status_code=422, detail=_mixture_error_detail(e)) from e
     try:
         await replace_dive_sites_for_dive(db=db, dive_id=created_dive.id, dive_site_ids=dive.dive_site_ids)
     except IntegrityError as e:
@@ -222,6 +261,14 @@ async def patch_dive(
     if owner_id != current_user["id"]:
         raise ForbiddenException()
 
+    if values.trip_id is not None and not await trip_belongs_to_user(db=db, trip_id=values.trip_id, user_id=owner_id):
+        raise HTTPException(status_code=422, detail="Trip not found.")
+
+    if values.dive_site_ids is not None and not await dive_site_ids_belong_to_user(
+        db=db, dive_site_ids=values.dive_site_ids, user_id=owner_id
+    ):
+        raise HTTPException(status_code=422, detail="Dive site not found.")
+
     update_data = values.model_dump(exclude={"mixtures", "dive_site_ids"}, exclude_unset=True)
     if update_data:
         try:
@@ -231,7 +278,11 @@ async def patch_dive(
             raise HTTPException(status_code=422, detail=_fk_error_detail(e)) from e
 
     if values.mixtures is not None:
-        await replace_mixtures_for_dive(db=db, dive_id=id, mixtures=values.mixtures)
+        try:
+            await replace_mixtures_for_dive(db=db, dive_id=id, mixtures=values.mixtures)
+        except IntegrityError as e:
+            await db.rollback()
+            raise HTTPException(status_code=422, detail=_mixture_error_detail(e)) from e
 
     if values.dive_site_ids is not None:
         try:

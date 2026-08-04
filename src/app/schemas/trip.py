@@ -3,7 +3,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..core.schemas import PersistentDeletion, TimestampSchema
+from ..core.schemas import NOTES_MAX_LENGTH, PersistentDeletion, TimestampSchema
 
 
 def _validate_date_range(start_date: date | None, end_date: date | None) -> None:
@@ -16,7 +16,7 @@ class TripBase(BaseModel):
     location: Annotated[str | None, Field(default=None, max_length=255, examples=["Koh Tao, Thailand"])]
     start_date: Annotated[date | None, Field(default=None, examples=["2024-06-01"])]
     end_date: Annotated[date | None, Field(default=None, examples=["2024-06-08"])]
-    notes: Annotated[str, Field(default="", max_length=63206)]
+    notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
 
     @model_validator(mode="after")
     def check_date_range(self) -> TripBase:
@@ -51,7 +51,7 @@ class TripUpdate(BaseModel):
     location: Annotated[str | None, Field(default=None, max_length=255, examples=["Koh Tao, Thailand"])]
     start_date: Annotated[date | None, Field(default=None)]
     end_date: Annotated[date | None, Field(default=None)]
-    notes: Annotated[str | None, Field(default=None, max_length=63206)]
+    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
 
     @model_validator(mode="after")
     def check_date_range(self) -> TripUpdate:

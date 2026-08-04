@@ -2,8 +2,6 @@ from .dive import Dive
 from .dive_dive_site import DiveDiveSite
 from .dive_mixture import DiveMixture
 from .dive_site import DiveSite
-from .rate_limit import RateLimit
-from .tier import Tier
 from .trip import Trip
 from .user import User
 from .user_dive_stats import UserDiveStats

@@ -1,6 +1,6 @@
 from datetime import UTC, date, datetime
 
-from sqlalchemy import Date, DateTime, ForeignKey, Index, String, func
+from sqlalchemy import Date, DateTime, ForeignKey, Index, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.db.database import Base
@@ -14,14 +14,14 @@ class Trip(Base):
     name: Mapped[str] = mapped_column(String(255))
     start_date: Mapped[date] = mapped_column(Date)
 
-    notes: Mapped[str] = mapped_column(String(63206), default="")
+    notes: Mapped[str] = mapped_column(Text, default="")
     location: Mapped[str | None] = mapped_column(String(255), default=None)
     end_date: Mapped[date | None] = mapped_column(Date, default=None)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default_factory=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
-    is_deleted: Mapped[bool] = mapped_column(default=False, index=True)
+    is_deleted: Mapped[bool] = mapped_column(default=False)
 
     __table_args__ = (
         # Case-insensitive uniqueness per user, ignoring soft-deleted trips so a
@@ -31,6 +31,16 @@ class Trip(Base):
             "user_id",
             func.lower(name),
             unique=True,
+            postgresql_where=is_deleted.is_(False),
+        ),
+        # Serves `read_trips` (`GET /trips`): `WHERE user_id = ... AND is_deleted =
+        # false ORDER BY start_date DESC`. Replaces the old standalone `is_deleted`
+        # index, which was low-value as a leading column and unused elsewhere on this
+        # table (every other trip lookup filters by the `id` primary key instead).
+        Index(
+            "ix_trip_user_id_start_date",
+            "user_id",
+            start_date.desc(),
             postgresql_where=is_deleted.is_(False),
         ),
     )

@@ -86,7 +86,6 @@ def sample_user_read():
         is_superuser=False,
         created_at=fake.date_time(),
         updated_at=fake.date_time(),
-        tier_id=None,
     )
 
 

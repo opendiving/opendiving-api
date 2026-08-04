@@ -3,7 +3,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..core.schemas import PersistentDeletion, TimestampSchema, UUIDSchema
+from ..core.schemas import NOTES_MAX_LENGTH, PersistentDeletion, TimestampSchema, UUIDSchema
 from .dive_mixture import DiveMixtureCreate, DiveMixtureRead
 
 
@@ -18,7 +18,7 @@ class DiveBase(BaseModel):
     visibility: Annotated[int | None, Field(default=None, description="Underwater visibility in meters")]
     trip_id: Annotated[int | None, Field(default=None, description="ID of the trip this dive belongs to")]
 
-    notes: Annotated[str, Field(default="")]
+    notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
 
 
 class Dive(TimestampSchema, DiveBase, UUIDSchema, PersistentDeletion):
@@ -77,7 +77,7 @@ class DiveUpdate(BaseModel):
     notes: Annotated[
         str | None,
         Field(
-            max_length=63206,
+            max_length=NOTES_MAX_LENGTH,
             examples=["This is my updated dive notes."],
             default=None,
         ),
