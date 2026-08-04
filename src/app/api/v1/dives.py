@@ -11,7 +11,6 @@ from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import ForbiddenException, NotFoundException
 from ...core.utils.cache import cache, delete_keys_by_pattern
 from ...crud.crud_dive_dive_sites import (
-    get_dive_ids_for_dive_site,
     get_dive_sites_for_dive,
     get_dive_sites_for_dives,
     replace_dive_sites_for_dive,
@@ -223,10 +222,10 @@ async def _cached_read_dives(
     if trip_id is not None:
         filters["trip_id"] = trip_id
     if dive_site_id is not None:
-        # Match dives that include this site among their (possibly several) dive
-        # sites. `[-1]` is a sentinel that safely yields an empty result set when
-        # no dive references this site, rather than relying on `IN ()` semantics.
-        filters["id__in"] = await get_dive_ids_for_dive_site(db=db, dive_site_id=dive_site_id) or [-1]
+        # Match dives that include this site among their (possibly several) dive sites,
+        # via a single `IN (subquery)` condition rather than resolving matching dive ids
+        # in a separate round trip.
+        filters["id__at_dive_site"] = dive_site_id
 
     dives_data = await crud_dives.get_multi(
         db=db,

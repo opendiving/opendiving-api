@@ -34,10 +34,6 @@ async def get_dive_sites_for_dives(db: AsyncSession, dive_ids: list[int]) -> dic
     return sites_by_dive
 
 
-async def get_dive_ids_for_dive_site(db: AsyncSession, dive_site_id: int) -> list[int]:
-    """Return the ids of every dive that includes the given dive site."""
-    result = await db.execute(select(DiveDiveSite.dive_id).where(DiveDiveSite.dive_site_id == dive_site_id))
-    return [row[0] for row in result]
 
 
 async def replace_dive_sites_for_dive(
