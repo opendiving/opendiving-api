@@ -27,8 +27,6 @@ dependencies = [
     "fastcrud>=0.15.5",
     "crudadmin>=0.4.2",
     "gunicorn>=23.0.0",
-    "ruff>=0.11.13",
-    "mypy>=1.16.0",
     "defusedxml>=0.7.1",
 ]
 
