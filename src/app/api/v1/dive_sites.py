@@ -2,13 +2,14 @@ import uuid as uuid_pkg
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Request
-from fastcrud import PaginatedListResponse, compute_offset, paginated_response
+from fastcrud import PaginatedListResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import DuplicateValueException, ForbiddenException, NotFoundException
-from ...core.utils.cache import cache, delete_keys_by_pattern
+from ...core.utils.cache import cache
+from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...crud.crud_dive_sites import crud_dive_sites, dive_site_name_exists
 from ...schemas.dive_site import (
     DiveSiteCreate,
@@ -34,6 +35,18 @@ def _to_public_dive_site(
     return DiveSiteRead(**{k: v for k, v in data.items() if k not in ("id", "user_id")}, user_uuid=user_uuid)
 
 
+_dive_site_cache: OwnedResourceCache[DiveSiteReadInternal, DiveSiteRead] = OwnedResourceCache(
+    resource_name="dive_sites",
+    resource_label="Dive site",
+    item_cache_prefix="dive_site_cache",
+    crud=crud_dive_sites,
+    schema_to_select=DiveSiteReadInternal,
+    to_public=lambda db_dive_site, user_uuid: _to_public_dive_site(db_dive_site, user_uuid=user_uuid),
+    sort_columns="name",
+    sort_orders="asc",
+)
+
+
 @router.post("/dive-site", response_model=DiveSiteRead, status_code=201)
 async def write_dive_site(
     request: Request,
@@ -54,7 +67,7 @@ async def write_dive_site(
     created_dive_site = await crud_dive_sites.create(
         db=db, object=dive_site_internal, schema_to_select=DiveSiteReadInternal, return_as_model=True
     )
-    await delete_keys_by_pattern(f"user_{current_user['id']}_dive_sites:*")
+    await _dive_site_cache.invalidate_list(current_user["id"])
 
     dive_site_read = await crud_dive_sites.get(
         db=db, id=created_dive_site.id, schema_to_select=DiveSiteReadInternal, return_as_model=True
@@ -63,45 +76,6 @@ async def write_dive_site(
         raise NotFoundException("Created dive site not found")
 
     return _to_public_dive_site(cast(DiveSiteReadInternal, dive_site_read), user_uuid=current_user["uuid"])
-
-
-@cache(
-    key_prefix="user_{user_id}_dive_sites:page_{page}:items_per_page:{items_per_page}",
-    resource_id_name="user_id",
-    expiration=60,
-)
-async def _cached_read_dive_sites(
-    request: Request,
-    user_id: int,
-    user_uuid: uuid_pkg.UUID,
-    db: AsyncSession,
-    page: int,
-    items_per_page: int,
-) -> dict:
-    """Fetches (and caches) a user's paginated dive site list.
-
-    This is only ever called after the caller's authorization has already been checked by
-    `read_dive_sites` below - it must not be called directly from a route, since the `@cache`
-    decorator serves cached responses without re-running any authorization logic.
-
-    Keyed and filtered by the internal integer `user_id` (rather than the caller-supplied
-    `user_uuid`) since that's already known to be the current user's id at this point.
-    """
-    dive_sites_data = await crud_dive_sites.get_multi(
-        db=db,
-        offset=compute_offset(page, items_per_page),
-        limit=items_per_page,
-        user_id=user_id,
-        is_deleted=False,
-        sort_columns="name",
-        sort_orders="asc",
-    )
-    dive_sites_data["data"] = [
-        _to_public_dive_site(site, user_uuid=user_uuid).model_dump() for site in dive_sites_data["data"]
-    ]
-
-    response: dict[str, Any] = paginated_response(crud_data=dive_sites_data, page=page, items_per_page=items_per_page)
-    return response
 
 
 @router.get("/dive-sites", response_model=PaginatedListResponse[DiveSiteRead])
@@ -116,27 +90,9 @@ async def read_dive_sites(
     if current_user["uuid"] != user_uuid:
         raise ForbiddenException()
 
-    return await _cached_read_dive_sites(
+    return await _dive_site_cache.read_list(
         request, user_id=current_user["id"], user_uuid=user_uuid, db=db, page=page, items_per_page=items_per_page
     )
-
-
-@cache(key_prefix="dive_site_cache", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
-async def _cached_read_dive_site(
-    request: Request, uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession
-) -> DiveSiteRead:
-    """Fetches (and caches) a single dive site by uuid, regardless of owner.
-
-    Like `_cached_read_dive_sites`, this must only be called after authorization has already
-    been checked, since `@cache` can serve a cached response without re-checking it.
-    """
-    db_dive_site = await crud_dive_sites.get(
-        db=db, uuid=uuid, is_deleted=False, schema_to_select=DiveSiteReadInternal, return_as_model=True
-    )
-    if db_dive_site is None:
-        raise NotFoundException("Dive site not found")
-
-    return _to_public_dive_site(cast(DiveSiteReadInternal, db_dive_site), user_uuid=owner_uuid)
 
 
 @router.get("/dive-site/{uuid}", response_model=DiveSiteRead)
@@ -156,7 +112,7 @@ async def read_dive_site(
     if db_dive_site.user_id != current_user["id"]:
         raise ForbiddenException()
 
-    return await _cached_read_dive_site(request, uuid=uuid, owner_uuid=current_user["uuid"], db=db)
+    return await _dive_site_cache.read_item(request, uuid=uuid, owner_uuid=current_user["uuid"], db=db)
 
 
 @router.patch("/dive-site/{uuid}")
@@ -193,7 +149,7 @@ async def patch_dive_site(
     update_data = values.model_dump(exclude_unset=True)
     if update_data:
         await crud_dive_sites.update(db=db, object=update_data, uuid=uuid)
-        await delete_keys_by_pattern(f"user_{db_dive_site.user_id}_dive_sites:*")
+        await _dive_site_cache.invalidate_list(db_dive_site.user_id)
 
     return {"message": "Dive site updated"}
 
@@ -215,6 +171,6 @@ async def erase_dive_site(
         raise ForbiddenException()
 
     await crud_dive_sites.delete(db=db, uuid=uuid)
-    await delete_keys_by_pattern(f"user_{owner_id}_dive_sites:*")
+    await _dive_site_cache.invalidate_list(owner_id)
 
     return {"message": "Dive site deleted"}

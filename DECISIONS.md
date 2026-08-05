@@ -227,38 +227,56 @@ If adding a new "named, user-owned, soft-deletable" entity, mirror this pattern.
 
 ## `trips.py`/`dive_sites.py` caching mirrors `dives.py`
 
-`trips.py`/`dive_sites.py` list/read endpoints now use the same `@cache`
-decorator (Redis-backed) as `dives.py`, copying its structure exactly:
-- List (`GET /trips`, `GET /dive-sites`): a private `_cached_read_trips` /
-  `_cached_read_dive_sites` helper, decorated with `@cache(key_prefix="user_{user_id}_...",
-  resource_id_name="user_id", expiration=60)`, called from the public route only
-  *after* the `current_user["id"] != user_id` ownership check.
-- Single item (`GET /trip/{id}`, `GET /dive-site/{id}`): a private
-  `_cached_read_trip` / `_cached_read_dive_site` helper decorated with
-  `@cache(key_prefix="trip_cache"/"dive_site_cache", resource_id_name="id")`,
-  called only after the fetched object's owner has been checked against
-  `current_user["id"]`.
+`trips.py`/`dive_sites.py` list/read endpoints use the same `@cache` decorator
+(Redis-backed) as `dives.py`, at first by copying its structure exactly and
+now via a shared `OwnedResourceCache` factory
+(`core/utils/owned_resource_cache.py`) that both routers instantiate once,
+since the two had become byte-for-byte identical aside from names/schemas:
+- List (`GET /trips`, `GET /dive-sites`): `OwnedResourceCache.read_list`, a
+  `@cache(key_prefix="user_{user_id}_...", resource_id_name="user_id",
+  expiration=60)`-wrapped `get_multi` + public-shape conversion, called from
+  the public route only *after* the `current_user["id"] != user_id` ownership
+  check.
+- Single item (`GET /trip/{id}`, `GET /dive-site/{id}`):
+  `OwnedResourceCache.read_item`, a `@cache(key_prefix="trip_cache"/
+  "dive_site_cache", resource_id_name="id")`-wrapped `get` + public-shape
+  conversion, called only after the fetched object's owner has been checked
+  against `current_user["id"]`.
 - Same "auth before cache" rule as `dives.py` (see the `@cache`/authorization
   gotcha further below) - never put the ownership check inside a
-  `@cache`-decorated function.
+  `@cache`-decorated function. `OwnedResourceCache` enforces this by design:
+  it only exposes the cached read helpers, not the ownership check, which
+  stays in each route.
 
 This was previously skipped on purpose: the dive form's trip/dive site combobox
 creates a new record and expects to immediately see/select it in the list, and a
 stale cached list would break that. It's safe now because every mutation
 invalidates the relevant cache keys, same as `dives.py`:
-- `write_trip`/`write_dive_site` call `delete_keys_by_pattern(f"user_{user_id}_trips:*")`
-  / `f"user_{user_id}_dive_sites:*"` right after creating the record (there's no
+- `write_trip`/`write_dive_site` call `OwnedResourceCache.invalidate_list(user_id)`
+  (which runs `delete_keys_by_pattern(f"user_{user_id}_trips:*")` /
+  `f"user_{user_id}_dive_sites:*"`) right after creating the record (there's no
   single-item cache to invalidate yet, since the id is new).
 - `patch_trip`/`erase_trip` and `patch_dive_site`/`erase_dive_site` are decorated
   directly with `@cache("trip_cache"/"dive_site_cache", resource_id_name="id")`
   (exactly like `patch_dive`/`erase_dive`), which auto-invalidates the single-item
   cache key on any non-GET call. They *additionally* call
-  `delete_keys_by_pattern(f"user_{owner_id}_trips:*")` / `"..._dive_sites:*"`
-  manually in the handler body to invalidate the list cache, since the list key's
-  `user_id` is only known after fetching the record (for `patch`/`erase`) and
-  can't be expressed via the decorator's kwarg-templated `to_invalidate_extra`.
-  `patch_trip`/`patch_dive_site` only invalidate the list when `update_data` is
-  non-empty, since an empty patch changes nothing worth invalidating.
+  `OwnedResourceCache.invalidate_list(owner_id)` manually in the handler body to
+  invalidate the list cache, since the list key's `user_id` is only known after
+  fetching the record (for `patch`/`erase`) and can't be expressed via the
+  decorator's kwarg-templated `to_invalidate_extra`. `patch_trip`/`patch_dive_site`
+  only invalidate the list when `update_data` is non-empty, since an empty patch
+  changes nothing worth invalidating.
+
+`OwnedResourceCache` intentionally covers only this read/cache/invalidate slice,
+not the full create/patch/delete routes: those still differ per resource (e.g.
+per-user name uniqueness checks, extra fields like `dive_site`'s `location`),
+so each resource keeps writing its own route bodies. `dives.py` itself still
+hand-rolls its own `_cached_read_dives`/`_cached_read_dive`, since its list/read
+logic does more than a straight `get_multi`/`get` (extra `trip_id`/`dive_site_id`
+filters, enrichment with related trip/dive-site uuids, mixtures) - it doesn't fit
+`OwnedResourceCache`'s shape, so it wasn't forced through it. New simple
+per-user owned resources should use `OwnedResourceCache` rather than
+hand-copying this pattern again.
 
 ## `/{username}/...` resource routes were flattened to `/...` + explicit ids
 
