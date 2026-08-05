@@ -440,3 +440,42 @@ indexes) costs more than a sequential index-only walk.
 Worth revisiting if a true bulk-import endpoint is added (recompute once per
 batch instead of once per row) or if per-user dive counts grow enough that
 even an index-only scan becomes a bottleneck.
+
+## The Arq worker now does one real thing: purging expired `token_blacklist` rows
+
+The worker (`core/worker/`) previously only registered a `sample_background_task`
+demo job, exercised solely by a matching `POST/GET /tasks` API (`api/v1/tasks.py`)
+that existed only to enqueue and poll it. `token_blacklist` (see "Domain
+`CheckConstraint`s" above for how other tables get DB-level backstops) grows one
+row per logout/account-deletion (`blacklist_token(s)` in `core/security.py`) and
+nothing ever deleted rows once their `expires_at` had passed - blacklist entries
+only need to be kept until the token they reference would have expired
+naturally, since an expired JWT is already rejected on its own regardless of the
+blacklist check.
+
+`purge_expired_tokens` (`core/worker/functions.py`) now runs as an hourly cron
+job (`core/worker/settings.py`, `arq.cron.cron(..., minute=0, run_at_startup=True)`)
+and deletes any row with `expires_at < now()`. It checks `count()` before calling
+`crud_token_blacklist.delete()` because `fastcrud`'s `delete()` raises
+`NoResultFound` when zero rows match its filters - not an error condition here,
+since most hourly runs will have nothing to purge.
+
+The now-pointless demo path was removed as part of this: `sample_background_task`,
+`api/v1/tasks.py` (and its `tasks_router` registration in `api/v1/__init__.py`),
+and `schemas/job.py`. That in turn left the API-side Arq "queue" plumbing
+(`core/utils/queue.py`, `create_redis_queue_pool`/`close_redis_queue_pool` and
+their `RedisQueueSettings` wiring in `core/setup.py`) with zero callers - nothing
+in the API enqueues jobs anymore, since the only job that exists now runs purely
+on a cron schedule inside the worker process itself - so that was deleted too.
+`RedisQueueSettings`/`REDIS_QUEUE_HOST`/`REDIS_QUEUE_PORT` stay in `core/config.py`;
+the worker process still needs them to build its own `RedisSettings` connection in
+`core/worker/settings.py`, independent of the API process.
+
+`TokenBlacklist.expires_at` (`core/db/token_blacklist.py`) picked up `index=True`
+so the cron job's `WHERE expires_at < ...` (both the `count()` check and the
+`delete()`) isn't a sequential scan as the table grows. Per the "no migration
+tool" section above, this only takes effect for brand-new tables via
+`create_all()`; on an existing local DB, add it by hand:
+```sql
+CREATE INDEX ix_token_blacklist_expires_at ON token_blacklist (expires_at);
+```

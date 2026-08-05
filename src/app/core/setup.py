@@ -5,8 +5,6 @@ from typing import Any
 import anyio
 import fastapi
 import redis.asyncio as redis
-from arq import create_pool
-from arq.connections import RedisSettings
 from fastapi import APIRouter, Depends, FastAPI
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
@@ -21,12 +19,11 @@ from .config import (
     EnvironmentOption,
     EnvironmentSettings,
     RedisCacheSettings,
-    RedisQueueSettings,
     settings,
 )
 from .db.database import Base
 from .db.database import async_engine as engine
-from .utils import cache, queue
+from .utils import cache
 
 
 # -------------- database --------------
@@ -46,16 +43,6 @@ async def close_redis_cache_pool() -> None:
         await cache.client.aclose()  # type: ignore
 
 
-# -------------- queue --------------
-async def create_redis_queue_pool() -> None:
-    queue.pool = await create_pool(RedisSettings(host=settings.REDIS_QUEUE_HOST, port=settings.REDIS_QUEUE_PORT))
-
-
-async def close_redis_queue_pool() -> None:
-    if queue.pool is not None:
-        await queue.pool.aclose()  # type: ignore
-
-
 # -------------- application --------------
 async def set_threadpool_tokens(number_of_tokens: int = 100) -> None:
     limiter = anyio.to_thread.current_default_thread_limiter()
@@ -63,14 +50,7 @@ async def set_threadpool_tokens(number_of_tokens: int = 100) -> None:
 
 
 def lifespan_factory(
-    settings: (
-        DatabaseSettings
-        | RedisCacheSettings
-        | AppSettings
-        | ClientSideCacheSettings
-        | RedisQueueSettings
-        | EnvironmentSettings
-    ),
+    settings: DatabaseSettings | RedisCacheSettings | AppSettings | ClientSideCacheSettings | EnvironmentSettings,
     create_tables_on_start: bool = True,
 ) -> Callable[[FastAPI], _AsyncGeneratorContextManager[Any]]:
     """Factory to create a lifespan async context manager for a FastAPI app."""
@@ -88,9 +68,6 @@ def lifespan_factory(
             if isinstance(settings, RedisCacheSettings):
                 await create_redis_cache_pool()
 
-            if isinstance(settings, RedisQueueSettings):
-                await create_redis_queue_pool()
-
             if create_tables_on_start:
                 await create_tables()
 
@@ -102,23 +79,13 @@ def lifespan_factory(
             if isinstance(settings, RedisCacheSettings):
                 await close_redis_cache_pool()
 
-            if isinstance(settings, RedisQueueSettings):
-                await close_redis_queue_pool()
-
     return lifespan
 
 
 # -------------- application --------------
 def create_application(
     router: APIRouter,
-    settings: (
-        DatabaseSettings
-        | RedisCacheSettings
-        | AppSettings
-        | ClientSideCacheSettings
-        | RedisQueueSettings
-        | EnvironmentSettings
-    ),
+    settings: DatabaseSettings | RedisCacheSettings | AppSettings | ClientSideCacheSettings | EnvironmentSettings,
     create_tables_on_start: bool = True,
     lifespan: Callable[[FastAPI], _AsyncGeneratorContextManager[Any]] | None = None,
     **kwargs: Any,
@@ -141,7 +108,6 @@ def create_application(
         - DatabaseSettings: Adds event handlers for initializing database tables during startup.
         - RedisCacheSettings: Sets up event handlers for creating and closing a Redis cache pool.
         - ClientSideCacheSettings: Integrates middleware for client-side caching.
-        - RedisQueueSettings: Sets up event handlers for creating and closing a Redis queue pool.
         - EnvironmentSettings: Conditionally sets documentation URLs and integrates custom routes for API documentation
           based on the environment type.
 
@@ -158,9 +124,9 @@ def create_application(
         A fully configured FastAPI application instance.
 
     The function configures the FastAPI application with different features and behaviors
-    based on the provided settings. It includes setting up database connections, Redis pools
-    for caching and queue, client-side caching, and customizing the API documentation
-    based on the environment settings.
+    based on the provided settings. It includes setting up database connections, a Redis
+    cache pool, client-side caching, and customizing the API documentation based on the
+    environment settings.
     """
     # --- before creating application ---
     if isinstance(settings, AppSettings):

@@ -6,7 +6,6 @@ from .dives import router as dives_router
 from .health import router as health_router
 from .login import router as login_router
 from .logout import router as logout_router
-from .tasks import router as tasks_router
 from .trips import router as trips_router
 from .users import router as users_router
 
@@ -19,4 +18,3 @@ router.include_router(trips_router)
 router.include_router(dive_sites_router)
 router.include_router(dives_router)
 router.include_router(dive_stats_router)
-router.include_router(tasks_router)
