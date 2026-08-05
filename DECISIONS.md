@@ -346,3 +346,57 @@ in the (uncached) caller.
 Don't mix these up when adding new date fields - decide up front whether a field
 is a point in time (`datetime`) or a calendar date (`date`), since the frontend
 handles each very differently (see the web app's `DECISIONS.md`).
+
+## `recalculate_dive_stats`'s aggregate is backed by a covering index, not incremental counters
+
+`services/dive_stats.py`'s `recalculate_dive_stats` reruns `COUNT`/`MAX`/`SUM`
+over *all* of a user's non-deleted dives on every create/update/delete,
+synchronously in the request path. That's O(n) in the user's dive count on
+every write.
+
+An incremental (delta-based) version of this was prototyped - maintaining
+`total_dives`/`total_time` as O(1) running counters, with `max_depth` falling
+back to a `MAX(max_depth)` re-scan only when the dive that changed/was
+deleted was at the current max - but it was rejected as more complexity than
+this project's actual scale (dive counts in the thousands, rarely tens of
+thousands, per user) justifies: it also trades the old approach's immunity to
+lost updates (full recompute always overwrites the row with a value freshly
+derived from `dive`, so concurrent writers converge safely) for read-modify-write
+counters that need explicit row locking to stay correct.
+
+Instead, `ix_dive_user_id_stats` - `(user_id) INCLUDE (max_depth, duration)
+WHERE is_deleted = false` - lets the aggregate run as an index-only scan
+(no heap fetch per dive) rather than changing its algorithmic shape. It's
+still O(n), just with a much smaller constant factor per row, which is a
+reasonable trade for keeping `recalculate_dive_stats` simple and correct by
+construction. `max_depth`/`duration` are `INCLUDE`d rather than key columns -
+they're only read by this aggregate, never filtered or sorted on, so they
+don't need to be part of the index's sort key (which would also make it
+unusable for a plain `MAX(max_depth)` backward-scan optimization if that's
+ever needed standalone).
+
+The aggregate also had to switch from `func.count(Dive.id)` to `func.count()`
+(`COUNT(*)`): `id` isn't in the index (key or `INCLUDE`d), so counting it
+would force a heap fetch per row and silently defeat the covering index even
+though the two forms are equivalent here (`id` is a non-null primary key).
+Verified with `EXPLAIN (ANALYZE, BUFFERS)` against the docker-compose `db`
+service (temporarily dropping the competing `ix_dive_user_id` inside a
+rolled-back transaction to force the planner's hand) - only after that change
+does the plan show `Index Only Scan using ix_dive_user_id_stats` with `Heap
+Fetches: 0`. With `Dive.id` still in the `SELECT`, Postgres used a regular
+`Index Scan` (heap fetches happened) despite `ix_dive_user_id_stats` existing.
+
+On an existing local DB, apply with:
+```sql
+CREATE INDEX ix_dive_user_id_stats ON dive (user_id) INCLUDE (max_depth, duration) WHERE is_deleted = false;
+```
+
+Note that on a small table (a few hundred rows in local dev), the planner
+correctly prefers a plain sequential scan over any index - that's expected,
+not a sign the index isn't working. It becomes worthwhile as a user's dive
+count grows large enough that random heap access (via the old row-only
+indexes) costs more than a sequential index-only walk.
+
+Worth revisiting if a true bulk-import endpoint is added (recompute once per
+batch instead of once per row) or if per-user dive counts grow enough that
+even an index-only scan becomes a bottleneck.

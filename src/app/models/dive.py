@@ -47,4 +47,16 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
                 cls.start_time.desc(),
                 postgresql_where=cls.is_deleted.is_(False),
             ),
+            # Serves `services.dive_stats.recalculate_dive_stats`'s
+            # `COUNT`/`MAX(max_depth)`/`SUM(duration)` aggregate, run after every dive
+            # create/update/delete. `max_depth`/`duration` are `INCLUDE`d (not index key
+            # columns) purely so Postgres can answer the aggregate as an index-only scan
+            # instead of a heap fetch per matching dive - they aren't used for filtering or
+            # ordering, so they don't need to be part of the index's sort key.
+            Index(
+                "ix_dive_user_id_stats",
+                "user_id",
+                postgresql_where=cls.is_deleted.is_(False),
+                postgresql_include=["max_depth", "duration"],
+            ),
         )

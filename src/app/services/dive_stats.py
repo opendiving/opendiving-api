@@ -15,10 +15,17 @@ async def recalculate_dive_stats(db: AsyncSession, user_id: int, commit: bool = 
     (soft or hard) for the affected user, and always reflects their current set of
     non-deleted dives. `species_seen` is not derived from dives yet, so existing
     values are preserved (defaulting to 0 for a brand-new record).
+
+    The aggregate query is backed by a covering index (`ix_dive_user_id_stats`) so it
+    runs as an index-only scan rather than one heap fetch per dive - see DECISIONS.md.
     """
     result = await db.execute(
         select(
-            func.count(Dive.id),
+            # `func.count()` (`COUNT(*)`) rather than `func.count(Dive.id)`: `id` isn't part
+            # of `ix_dive_user_id_stats`, so counting it would force a heap fetch per row
+            # (defeating the point of the covering index) even though `id` is never null and
+            # the two forms are equivalent here.
+            func.count(),
             func.coalesce(func.max(Dive.max_depth), 0),
             func.coalesce(func.sum(Dive.duration), 0),
         ).where(Dive.user_id == user_id, Dive.is_deleted.is_(False))
