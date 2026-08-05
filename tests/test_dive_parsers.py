@@ -58,6 +58,27 @@ NOT_A_DIVE_XML = """<?xml version="1.0" encoding="utf-8"?>
 
 MALFORMED_XML = b"<Dive><Unclosed>"
 
+# "Billion laughs" style entity-expansion attack: a handful of nested entity
+# definitions that expand exponentially when resolved, aimed at exhausting memory/CPU.
+BILLION_LAUGHS_XML = b"""<?xml version="1.0"?>
+<!DOCTYPE lolz [
+ <!ENTITY lol "lol">
+ <!ELEMENT lolz (#PCDATA)>
+ <!ENTITY lol1 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
+ <!ENTITY lol2 "&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;">
+ <!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">
+]>
+<lolz>&lol3;</lolz>
+"""
+
+# XXE attempt: tries to read a local file via an external entity.
+XXE_XML = b"""<?xml version="1.0"?>
+<!DOCTYPE Dive [
+ <!ENTITY xxe SYSTEM "file:///etc/passwd">
+]>
+<Dive>&xxe;</Dive>
+"""
+
 
 class TestSuuntoXmlParserCanParse:
     def test_recognizes_valid_suunto_file(self):
@@ -74,6 +95,12 @@ class TestSuuntoXmlParserCanParse:
 
     def test_extension_check_is_case_insensitive(self):
         assert SuuntoXmlParser.can_parse("EXPORT.XML", VALID_SUUNTO_XML.encode()) is True
+
+    def test_rejects_billion_laughs_entity_expansion_without_raising(self):
+        assert SuuntoXmlParser.can_parse("evil.xml", BILLION_LAUGHS_XML) is False
+
+    def test_rejects_xxe_without_raising(self):
+        assert SuuntoXmlParser.can_parse("evil.xml", XXE_XML) is False
 
 
 class TestSuuntoXmlParserParse:
@@ -112,6 +139,14 @@ class TestSuuntoXmlParserParse:
     def test_raises_dive_parse_error_on_malformed_xml(self):
         with pytest.raises(DiveParseError):
             SuuntoXmlParser.parse(MALFORMED_XML)
+
+    def test_raises_dive_parse_error_on_billion_laughs_entity_expansion(self):
+        with pytest.raises(DiveParseError):
+            SuuntoXmlParser.parse(BILLION_LAUGHS_XML)
+
+    def test_raises_dive_parse_error_on_xxe(self):
+        with pytest.raises(DiveParseError):
+            SuuntoXmlParser.parse(XXE_XML)
 
 
 class TestParseDiveFile:

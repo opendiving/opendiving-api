@@ -1,5 +1,8 @@
 import xml.etree.ElementTree as ET
 
+import defusedxml.ElementTree as DET
+from defusedxml.common import DefusedXmlException
+
 from ...schemas.parsed_dive import (
     DiveGasChangeSchema,
     DiveMixtureSchema,
@@ -43,16 +46,16 @@ class SuuntoXmlParser(DiveParser):
         if not filename.lower().endswith(".xml"):
             return False
         try:
-            root = ET.fromstring(content)
-        except ET.ParseError:
+            root = DET.fromstring(content)
+        except (ET.ParseError, DefusedXmlException):
             return False
         return root.tag == _tag("Dive")
 
     @classmethod
     def parse(cls, content: bytes) -> ParsedDiveSchema:
         try:
-            root = ET.fromstring(content)
-        except ET.ParseError as exc:
+            root = DET.fromstring(content)
+        except (ET.ParseError, DefusedXmlException) as exc:
             raise DiveParseError(f"Invalid XML: {exc}") from exc
 
         mixtures = [cls._parse_mixture(mix) for mix in root.findall(f"{_tag('DiveMixtures')}/{_tag('DiveMixture')}")]

@@ -35,6 +35,36 @@ from ...services.dive_stats import recalculate_dive_stats
 
 router = APIRouter(tags=["dives"])
 
+# Dive-computer export files are small (samples are a few bytes each); this cap is
+# generous headroom while still bounding memory usage and XML-parser workload for an
+# endpoint that accepts arbitrary user-uploaded files.
+_MAX_DIVE_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
+_MAX_DIVE_FILE_SIZE_MB = _MAX_DIVE_FILE_SIZE // (1024 * 1024)
+_UPLOAD_READ_CHUNK_SIZE = 1024 * 1024  # 1 MB
+
+
+async def _read_upload_within_limit(file: UploadFile, max_size: int) -> bytes:
+    """Read an upload's full content, rejecting it once it exceeds `max_size`.
+
+    Reads in bounded chunks instead of trusting the `Content-Length` header (which
+    may be absent or spoofed) or calling `file.read()` unbounded, so at most
+    `max_size` (+ one chunk) bytes are ever buffered in memory.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_UPLOAD_READ_CHUNK_SIZE)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_size:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Maximum allowed size is {_MAX_DIVE_FILE_SIZE_MB} MB.",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
 
 _DIVE_CONSTRAINT_MESSAGES = {
     "ck_dive_duration_positive": "Duration must be positive.",
@@ -125,7 +155,7 @@ async def parse_dive_xml(
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing filename")
 
-    content = await file.read()
+    content = await _read_upload_within_limit(file, _MAX_DIVE_FILE_SIZE)
     try:
         return parse_dive_file(file.filename, content)
     except UnsupportedDiveFileError as exc:
