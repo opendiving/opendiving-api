@@ -16,6 +16,7 @@ from src.app.core.security import (
     create_access_token,
     create_refresh_token,
     get_password_hash,
+    verify_google_id_token,
     verify_password,
     verify_token,
 )
@@ -187,6 +188,99 @@ class TestAuthenticateUser:
             result = await authenticate_user("someuser", "wrong-password", mock_db)
 
             assert result is False
+
+    @pytest.mark.asyncio
+    async def test_authenticate_google_only_account_returns_false(self, mock_db):
+        """A Google-only account (see `verify_google_id_token`) has no password to check
+        against - password sign-in must fail rather than crash on a `None` hash."""
+        db_user = {"username": "someuser", "email": "user@example.com", "hashed_password": None}
+
+        with patch("src.app.core.security.crud_users") as mock_crud:
+            mock_crud.get = AsyncMock(return_value=db_user)
+
+            result = await authenticate_user("someuser", "any-password", mock_db)
+
+            assert result is False
+
+
+class TestVerifyGoogleIdToken:
+    """Test the Google ID token verification helper backing `/login/google`."""
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_client_id_not_configured(self):
+        with patch("src.app.core.security.settings") as mock_settings:
+            mock_settings.GOOGLE_CLIENT_ID = None
+
+            result = await verify_google_id_token("some-credential")
+
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_user_info_for_valid_token(self):
+        payload = {
+            "sub": "google-123",
+            "email": "user@example.com",
+            "email_verified": True,
+            "name": "Jane Doe",
+        }
+
+        with (
+            patch("src.app.core.security.settings") as mock_settings,
+            patch("src.app.core.security.google_id_token.verify_oauth2_token") as mock_verify,
+        ):
+            mock_settings.GOOGLE_CLIENT_ID = "client-id"
+            mock_verify.return_value = payload
+
+            result = await verify_google_id_token("good-credential")
+
+            assert result is not None
+            assert result.google_id == "google-123"
+            assert result.email == "user@example.com"
+            assert result.name == "Jane Doe"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_for_unverified_email(self):
+        payload = {"sub": "google-123", "email": "user@example.com", "email_verified": False, "name": "Jane Doe"}
+
+        with (
+            patch("src.app.core.security.settings") as mock_settings,
+            patch("src.app.core.security.google_id_token.verify_oauth2_token") as mock_verify,
+        ):
+            mock_settings.GOOGLE_CLIENT_ID = "client-id"
+            mock_verify.return_value = payload
+
+            result = await verify_google_id_token("good-credential")
+
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_invalid_token(self):
+        with (
+            patch("src.app.core.security.settings") as mock_settings,
+            patch("src.app.core.security.google_id_token.verify_oauth2_token") as mock_verify,
+        ):
+            mock_settings.GOOGLE_CLIENT_ID = "client-id"
+            mock_verify.side_effect = ValueError("bad token")
+
+            result = await verify_google_id_token("bad-credential")
+
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_email_local_part_when_name_missing(self):
+        payload = {"sub": "google-123", "email": "jane@example.com", "email_verified": True}
+
+        with (
+            patch("src.app.core.security.settings") as mock_settings,
+            patch("src.app.core.security.google_id_token.verify_oauth2_token") as mock_verify,
+        ):
+            mock_settings.GOOGLE_CLIENT_ID = "client-id"
+            mock_verify.return_value = payload
+
+            result = await verify_google_id_token("good-credential")
+
+            assert result is not None
+            assert result.name == "jane"
 
 
 class TestBlacklistToken:

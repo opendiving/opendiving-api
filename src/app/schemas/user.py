@@ -52,7 +52,10 @@ class UserCreate(UserBase):
 
 
 class UserCreateInternal(UserBase):
-    hashed_password: str
+    # Both optional: a Google sign-up (see `/login/google`) sets `google_id` and
+    # leaves `hashed_password` unset, while a regular sign-up is the reverse.
+    hashed_password: str | None = None
+    google_id: str | None = None
 
 
 class UserUpdate(BaseModel):

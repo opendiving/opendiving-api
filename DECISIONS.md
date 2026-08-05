@@ -520,3 +520,53 @@ tool" section above, this only takes effect for brand-new tables via
 ```sql
 CREATE INDEX ix_token_blacklist_expires_at ON token_blacklist (expires_at);
 ```
+
+## Google sign in/up shares one endpoint, and treats a verified email as proof of ownership
+
+`POST /login/google` (`api/v1/login.py`) is the single endpoint behind both the
+"Continue with Google" button on `/signin` and `/signup` on the frontend - Google
+Identity Services itself doesn't distinguish sign in from sign up (there's one
+button, one `credential` JWT), so the backend mirrors that: find-or-create, then
+issue tokens exactly like `/login` does.
+
+The frontend never talks to Google's OAuth endpoints directly for this - it only
+loads Google's Identity Services *button* (via `@react-oauth/google`), which
+hands back a signed ID token (`credential`, a JWT) once the user picks an
+account. That JWT is forwarded verbatim to `/login/google`, which verifies it
+server-side with `google-auth`'s `id_token.verify_oauth2_token()` - this checks
+the signature against Google's published public keys, expiry, issuer, and (via
+the `audience` argument) that the token was issued for *this* app's OAuth client
+ID (`GOOGLE_CLIENT_ID`/`NEXT_PUBLIC_GOOGLE_CLIENT_ID` - the same value on both
+sides; it's not a secret). The backend never sees or handles a Google client
+secret - the ID-token flow doesn't need one.
+
+Account matching, in order:
+1. Look up by `User.google_id` (the token's `sub` claim) - the common case for a
+   returning Google user.
+2. Otherwise look up by email. If found, link `google_id` onto that existing
+   (presumably password-based) account rather than erroring or creating a
+   duplicate - this is safe specifically because Google only issues an ID token
+   with `email_verified: true` for an address it has itself confirmed the user
+   controls (`verify_google_id_token` in `core/security.py` rejects anything
+   else), so it's equivalent to the user proving ownership of that email again.
+3. Otherwise create a new account: `name` from the token's `name` claim (falling
+   back to the email's local part), `username` auto-generated from the email's
+   local part via `_generate_unique_username` (sanitized to `UserBase.username`'s
+   `^[a-z0-9]+$` pattern, with a numeric suffix appended on collision), and no
+   password.
+
+This is why `User.hashed_password` (`models/user.py`) is nullable - Google-only
+accounts never set one. `authenticate_user` (`core/security.py`) treats a `None`
+hashed password as "password sign-in unavailable", rather than passing `None`
+to `bcrypt.checkpw()`. A Google-only user who wants a password later would need
+a dedicated "set password" flow - not implemented yet, since nothing currently
+prompts for it.
+
+Applying this to an existing local DB (per the "no migration tool" section
+above) - `hashed_password` is only made nullable in the SQLAlchemy model, which
+`create_all()` never alters on an existing table:
+```sql
+ALTER TABLE "user" ALTER COLUMN hashed_password DROP NOT NULL;
+ALTER TABLE "user" ADD COLUMN google_id VARCHAR;
+CREATE UNIQUE INDEX ix_user_google_id ON "user" (google_id);
+```

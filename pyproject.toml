@@ -26,6 +26,7 @@ dependencies = [
     "psycopg2-binary>=2.9.9",
     "fastcrud>=0.15.5",
     "crudadmin>=0.4.2",
+    "google-auth[requests]>=2.28.0",
     "gunicorn>=23.0.0",
     "defusedxml>=0.7.1",
 ]

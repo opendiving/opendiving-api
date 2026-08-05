@@ -4,6 +4,9 @@ from typing import Any, Literal, cast
 
 import bcrypt
 from fastapi.security import OAuth2PasswordBearer
+from google.auth.exceptions import GoogleAuthError
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token as google_id_token
 from jose import JWTError, jwt
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..crud.crud_users import crud_users
 from .config import settings
 from .db.crud_token_blacklist import crud_token_blacklist
-from .schemas import TokenBlacklistCreate, TokenData
+from .schemas import GoogleUserInfo, TokenBlacklistCreate, TokenData
 
 SECRET_KEY: SecretStr = settings.SECRET_KEY
 ALGORITHM = settings.ALGORITHM
@@ -46,10 +49,53 @@ async def authenticate_user(username_or_email: str, password: str, db: AsyncSess
         return False
 
     db_user = cast(dict[str, Any], db_user)
+    # Google-only accounts (see `/login/google`) have no password to check against.
+    if db_user["hashed_password"] is None:
+        return False
+
     if not await verify_password(password, db_user["hashed_password"]):
         return False
 
     return db_user
+
+
+async def verify_google_id_token(credential: str) -> GoogleUserInfo | None:
+    """Verify a Google Identity Services ID token and extract the account info from it.
+
+    Parameters
+    ----------
+    credential: str
+        The `credential` JWT returned to the frontend by Google's Identity Services
+        library, forwarded here unmodified.
+
+    Returns
+    -------
+    GoogleUserInfo | None
+        The verified account info if `credential` is a genuine, non-expired Google ID
+        token issued for this app (checked via the `aud` claim matching
+        `settings.GOOGLE_CLIENT_ID`) and its email is Google-verified, `None` otherwise.
+    """
+    if not settings.GOOGLE_CLIENT_ID:
+        return None
+
+    try:
+        # `verify_oauth2_token` validates the signature (against Google's published
+        # public keys), expiry, issuer, and - via `audience` - that this token was
+        # actually issued for *this* app's OAuth client, not some other one.
+        payload = google_id_token.verify_oauth2_token(
+            credential, google_requests.Request(), audience=settings.GOOGLE_CLIENT_ID
+        )
+    except (GoogleAuthError, ValueError):
+        return None
+
+    if not payload.get("email_verified") or not payload.get("email") or not payload.get("sub"):
+        return None
+
+    return GoogleUserInfo(
+        google_id=payload["sub"],
+        email=payload["email"],
+        name=payload.get("name") or payload["email"].split("@")[0],
+    )
 
 
 async def create_access_token(data: dict[str, Any], expires_delta: timedelta | None = None) -> str:

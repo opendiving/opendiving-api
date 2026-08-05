@@ -35,6 +35,21 @@ class TokenData(BaseModel):
     username_or_email: str
 
 
+# -------------- google auth --------------
+class GoogleAuthRequest(BaseModel):
+    # The ID token (a JWT) returned to the frontend by Google Identity Services
+    # after the user signs in with their Google account.
+    credential: str
+
+
+class GoogleUserInfo(BaseModel):
+    """Account info extracted from a verified Google ID token."""
+
+    google_id: str
+    email: str
+    name: str
+
+
 class TokenBlacklistBase(BaseModel):
     token: str
     expires_at: datetime

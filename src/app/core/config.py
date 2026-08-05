@@ -67,6 +67,15 @@ class FirstUserSettings(BaseSettings):
     ADMIN_PASSWORD: str = config("ADMIN_PASSWORD", default="!Ch4ng3Th1sP4ssW0rd!")
 
 
+class GoogleAuthSettings(BaseSettings):
+    # OAuth 2.0 client ID from the Google Cloud Console, shared with the frontend
+    # (`NEXT_PUBLIC_GOOGLE_CLIENT_ID`) - it's used there to request an ID token and
+    # here, as the expected `aud` claim, to verify that token actually belongs to
+    # this app rather than some other Google OAuth client. Not a secret - safe to
+    # ship to the browser - so there's no accompanying `GOOGLE_CLIENT_SECRET`.
+    GOOGLE_CLIENT_ID: str | None = config("GOOGLE_CLIENT_ID", default=None)
+
+
 class TestSettings(BaseSettings): ...
 
 
@@ -124,6 +133,7 @@ class Settings(
     PostgresSettings,
     CryptSettings,
     FirstUserSettings,
+    GoogleAuthSettings,
     TestSettings,
     RedisCacheSettings,
     ClientSideCacheSettings,
