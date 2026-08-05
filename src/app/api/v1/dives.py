@@ -296,16 +296,16 @@ async def read_dives(
     )
 
 
-@cache(key_prefix="dive_cache", resource_id_name="dive_uuid", resource_id_type=uuid_pkg.UUID)
+@cache(key_prefix="dive_cache", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
 async def _cached_read_dive(
-    request: Request, dive_uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession
+    request: Request, uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession
 ) -> DiveReadWithMixtures:
     """Fetches (and caches) a single dive by uuid, regardless of owner.
 
     Like `_cached_read_dives`, this must only be called after authorization has already
     been checked, since `@cache` can serve a cached response without re-checking it.
     """
-    db_dive = await crud_dives.get(db=db, uuid=dive_uuid, is_deleted=False, schema_to_select=DiveReadInternal)
+    db_dive = await crud_dives.get(db=db, uuid=uuid, is_deleted=False, schema_to_select=DiveReadInternal)
     if db_dive is None:
         raise NotFoundException("Dive not found")
     db_dive = cast(dict[str, Any], db_dive)
@@ -322,33 +322,33 @@ async def _cached_read_dive(
     )
 
 
-@router.get("/dive/{dive_uuid}", response_model=DiveReadWithMixtures)
+@router.get("/dive/{uuid}", response_model=DiveReadWithMixtures)
 async def read_dive(
     request: Request,
-    dive_uuid: uuid_pkg.UUID,
+    uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveReadWithMixtures:
-    db_dive = await crud_dives.get(db=db, uuid=dive_uuid, is_deleted=False, schema_to_select=DiveReadInternal)
+    db_dive = await crud_dives.get(db=db, uuid=uuid, is_deleted=False, schema_to_select=DiveReadInternal)
     if db_dive is None:
         raise NotFoundException("Dive not found")
 
     if _dive_owner_id(db_dive) != current_user["id"]:
         raise ForbiddenException()
 
-    return await _cached_read_dive(request, dive_uuid=dive_uuid, owner_uuid=current_user["uuid"], db=db)
+    return await _cached_read_dive(request, uuid=uuid, owner_uuid=current_user["uuid"], db=db)
 
 
-@router.patch("/dive/{dive_uuid}")
-@cache("dive_cache", resource_id_name="dive_uuid", resource_id_type=uuid_pkg.UUID)
+@router.patch("/dive/{uuid}")
+@cache("dive_cache", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
 async def patch_dive(
     request: Request,
-    dive_uuid: uuid_pkg.UUID,
+    uuid: uuid_pkg.UUID,
     values: DiveUpdateRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    db_dive = await crud_dives.get(db=db, uuid=dive_uuid, is_deleted=False, schema_to_select=DiveReadInternal)
+    db_dive = await crud_dives.get(db=db, uuid=uuid, is_deleted=False, schema_to_select=DiveReadInternal)
     if db_dive is None:
         raise NotFoundException("Dive not found")
 
@@ -378,7 +378,7 @@ async def patch_dive(
 
     if update_data:
         try:
-            await crud_dives.update(db=db, object=update_data, uuid=dive_uuid)
+            await crud_dives.update(db=db, object=update_data, uuid=uuid)
         except IntegrityError as e:
             await db.rollback()
             raise HTTPException(status_code=422, detail=_fk_error_detail(e)) from e
@@ -406,15 +406,15 @@ async def patch_dive(
     return {"message": "Dive updated"}
 
 
-@router.delete("/dive/{dive_uuid}")
-@cache("dive_cache", resource_id_name="dive_uuid", resource_id_type=uuid_pkg.UUID)
+@router.delete("/dive/{uuid}")
+@cache("dive_cache", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
 async def erase_dive(
     request: Request,
-    dive_uuid: uuid_pkg.UUID,
+    uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    db_dive = await crud_dives.get(db=db, uuid=dive_uuid, is_deleted=False, schema_to_select=DiveReadInternal)
+    db_dive = await crud_dives.get(db=db, uuid=uuid, is_deleted=False, schema_to_select=DiveReadInternal)
     if db_dive is None:
         raise NotFoundException("Dive not found")
 
@@ -422,7 +422,7 @@ async def erase_dive(
     if owner_id != current_user["id"]:
         raise ForbiddenException()
 
-    await crud_dives.delete(db=db, uuid=dive_uuid)
+    await crud_dives.delete(db=db, uuid=uuid)
     await recalculate_dive_stats(db=db, user_id=owner_id)
     await delete_keys_by_pattern(f"user_{owner_id}_dives:*")
 

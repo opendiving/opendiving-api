@@ -33,13 +33,13 @@ async def create_task(message: str) -> dict[str, str]:
     return {"id": job.job_id}
 
 
-@router.get("/task/{task_id}")
-async def get_task(task_id: str) -> dict[str, Any] | None:
+@router.get("/task/{id}")
+async def get_task(id: str) -> dict[str, Any] | None:
     """Get information about a specific background task.
 
     Parameters
     ----------
-    task_id: str
+    id: str
         The ID of the task.
 
     Returns
@@ -50,7 +50,7 @@ async def get_task(task_id: str) -> dict[str, Any] | None:
     if queue.pool is None:
         raise HTTPException(status_code=503, detail="Queue is not available")
 
-    job = ArqJob(task_id, queue.pool)
+    job = ArqJob(id, queue.pool)
     job_info = await job.info()
     if job_info is None:
         return None

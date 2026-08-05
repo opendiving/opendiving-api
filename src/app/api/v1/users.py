@@ -63,12 +63,12 @@ async def read_users_me(request: Request, current_user: Annotated[dict, Depends(
     return current_user
 
 
-@router.get("/user/{user_uuid}", response_model=UserRead, dependencies=[Depends(get_current_user)])
+@router.get("/user/{uuid}", response_model=UserRead, dependencies=[Depends(get_current_user)])
 async def read_user(
-    request: Request, user_uuid: uuid_pkg.UUID, db: Annotated[AsyncSession, Depends(async_get_db)]
+    request: Request, uuid: uuid_pkg.UUID, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> UserRead:
     db_user = await crud_users.get(
-        db=db, uuid=user_uuid, is_deleted=False, schema_to_select=UserRead, return_as_model=True
+        db=db, uuid=uuid, is_deleted=False, schema_to_select=UserRead, return_as_model=True
     )
     if db_user is None:
         raise NotFoundException("User not found")
@@ -76,15 +76,15 @@ async def read_user(
     return cast(UserRead, db_user)
 
 
-@router.patch("/user/{user_uuid}")
+@router.patch("/user/{uuid}")
 async def patch_user(
     request: Request,
     values: UserUpdate,
-    user_uuid: uuid_pkg.UUID,
+    uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    db_user = await crud_users.get(db=db, uuid=user_uuid)
+    db_user = await crud_users.get(db=db, uuid=uuid)
     if db_user is None:
         raise NotFoundException("User not found")
 
@@ -95,7 +95,7 @@ async def patch_user(
         db_username = db_user.username
         db_email = db_user.email
 
-    if current_user["uuid"] != user_uuid:
+    if current_user["uuid"] != uuid:
         raise ForbiddenException()
 
     if values.email is not None and values.email != db_email:
@@ -106,25 +106,25 @@ async def patch_user(
         if await crud_users.exists(db=db, username=values.username):
             raise DuplicateValueException("Username not available")
 
-    await crud_users.update(db=db, object=values, uuid=user_uuid)
+    await crud_users.update(db=db, object=values, uuid=uuid)
     return {"message": "User updated"}
 
 
-@router.delete("/user/{user_uuid}")
+@router.delete("/user/{uuid}")
 async def erase_user(
     request: Request,
-    user_uuid: uuid_pkg.UUID,
+    uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     token: str = Depends(oauth2_scheme),
 ) -> dict[str, str]:
-    db_user = await crud_users.get(db=db, uuid=user_uuid, schema_to_select=UserReadInternal)
+    db_user = await crud_users.get(db=db, uuid=uuid, schema_to_select=UserReadInternal)
     if not db_user:
         raise NotFoundException("User not found")
 
-    if current_user["uuid"] != user_uuid:
+    if current_user["uuid"] != uuid:
         raise ForbiddenException()
 
-    await crud_users.delete(db=db, uuid=user_uuid)
+    await crud_users.delete(db=db, uuid=uuid)
     await blacklist_token(token=token, db=db)
     return {"message": "User deleted"}

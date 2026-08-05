@@ -121,9 +121,9 @@ async def read_dive_sites(
     )
 
 
-@cache(key_prefix="dive_site_cache", resource_id_name="dive_site_uuid", resource_id_type=uuid_pkg.UUID)
+@cache(key_prefix="dive_site_cache", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
 async def _cached_read_dive_site(
-    request: Request, dive_site_uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession
+    request: Request, uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession
 ) -> DiveSiteRead:
     """Fetches (and caches) a single dive site by uuid, regardless of owner.
 
@@ -131,7 +131,7 @@ async def _cached_read_dive_site(
     been checked, since `@cache` can serve a cached response without re-checking it.
     """
     db_dive_site = await crud_dive_sites.get(
-        db=db, uuid=dive_site_uuid, is_deleted=False, schema_to_select=DiveSiteReadInternal, return_as_model=True
+        db=db, uuid=uuid, is_deleted=False, schema_to_select=DiveSiteReadInternal, return_as_model=True
     )
     if db_dive_site is None:
         raise NotFoundException("Dive site not found")
@@ -139,15 +139,15 @@ async def _cached_read_dive_site(
     return _to_public_dive_site(cast(DiveSiteReadInternal, db_dive_site), user_uuid=owner_uuid)
 
 
-@router.get("/dive-site/{dive_site_uuid}", response_model=DiveSiteRead)
+@router.get("/dive-site/{uuid}", response_model=DiveSiteRead)
 async def read_dive_site(
     request: Request,
-    dive_site_uuid: uuid_pkg.UUID,
+    uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveSiteRead:
     db_dive_site = await crud_dive_sites.get(
-        db=db, uuid=dive_site_uuid, is_deleted=False, schema_to_select=DiveSiteReadInternal, return_as_model=True
+        db=db, uuid=uuid, is_deleted=False, schema_to_select=DiveSiteReadInternal, return_as_model=True
     )
     if db_dive_site is None:
         raise NotFoundException("Dive site not found")
@@ -156,20 +156,20 @@ async def read_dive_site(
     if db_dive_site.user_id != current_user["id"]:
         raise ForbiddenException()
 
-    return await _cached_read_dive_site(request, dive_site_uuid=dive_site_uuid, owner_uuid=current_user["uuid"], db=db)
+    return await _cached_read_dive_site(request, uuid=uuid, owner_uuid=current_user["uuid"], db=db)
 
 
-@router.patch("/dive-site/{dive_site_uuid}")
-@cache("dive_site_cache", resource_id_name="dive_site_uuid", resource_id_type=uuid_pkg.UUID)
+@router.patch("/dive-site/{uuid}")
+@cache("dive_site_cache", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
 async def patch_dive_site(
     request: Request,
-    dive_site_uuid: uuid_pkg.UUID,
+    uuid: uuid_pkg.UUID,
     values: DiveSiteUpdate,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
     db_dive_site = await crud_dive_sites.get(
-        db=db, uuid=dive_site_uuid, is_deleted=False, schema_to_select=DiveSiteReadInternal, return_as_model=True
+        db=db, uuid=uuid, is_deleted=False, schema_to_select=DiveSiteReadInternal, return_as_model=True
     )
     if db_dive_site is None:
         raise NotFoundException("Dive site not found")
@@ -192,21 +192,21 @@ async def patch_dive_site(
 
     update_data = values.model_dump(exclude_unset=True)
     if update_data:
-        await crud_dive_sites.update(db=db, object=update_data, uuid=dive_site_uuid)
+        await crud_dive_sites.update(db=db, object=update_data, uuid=uuid)
         await delete_keys_by_pattern(f"user_{db_dive_site.user_id}_dive_sites:*")
 
     return {"message": "Dive site updated"}
 
 
-@router.delete("/dive-site/{dive_site_uuid}")
-@cache("dive_site_cache", resource_id_name="dive_site_uuid", resource_id_type=uuid_pkg.UUID)
+@router.delete("/dive-site/{uuid}")
+@cache("dive_site_cache", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
 async def erase_dive_site(
     request: Request,
-    dive_site_uuid: uuid_pkg.UUID,
+    uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    db_dive_site = await crud_dive_sites.get(db=db, uuid=dive_site_uuid, schema_to_select=DiveSiteReadInternal)
+    db_dive_site = await crud_dive_sites.get(db=db, uuid=uuid, schema_to_select=DiveSiteReadInternal)
     if db_dive_site is None:
         raise NotFoundException("Dive site not found")
 
@@ -214,7 +214,7 @@ async def erase_dive_site(
     if owner_id != current_user["id"]:
         raise ForbiddenException()
 
-    await crud_dive_sites.delete(db=db, uuid=dive_site_uuid)
+    await crud_dive_sites.delete(db=db, uuid=uuid)
     await delete_keys_by_pattern(f"user_{owner_id}_dive_sites:*")
 
     return {"message": "Dive site deleted"}

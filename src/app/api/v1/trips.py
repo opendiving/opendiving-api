@@ -109,9 +109,9 @@ async def read_trips(
     )
 
 
-@cache(key_prefix="trip_cache", resource_id_name="trip_uuid", resource_id_type=uuid_pkg.UUID)
+@cache(key_prefix="trip_cache", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
 async def _cached_read_trip(
-    request: Request, trip_uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession
+    request: Request, uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession
 ) -> TripRead:
     """Fetches (and caches) a single trip by uuid, regardless of owner.
 
@@ -119,7 +119,7 @@ async def _cached_read_trip(
     been checked, since `@cache` can serve a cached response without re-checking it.
     """
     db_trip = await crud_trips.get(
-        db=db, uuid=trip_uuid, is_deleted=False, schema_to_select=TripReadInternal, return_as_model=True
+        db=db, uuid=uuid, is_deleted=False, schema_to_select=TripReadInternal, return_as_model=True
     )
     if db_trip is None:
         raise NotFoundException("Trip not found")
@@ -127,15 +127,15 @@ async def _cached_read_trip(
     return _to_public_trip(cast(TripReadInternal, db_trip), user_uuid=owner_uuid)
 
 
-@router.get("/trip/{trip_uuid}", response_model=TripRead)
+@router.get("/trip/{uuid}", response_model=TripRead)
 async def read_trip(
     request: Request,
-    trip_uuid: uuid_pkg.UUID,
+    uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> TripRead:
     db_trip = await crud_trips.get(
-        db=db, uuid=trip_uuid, is_deleted=False, schema_to_select=TripReadInternal, return_as_model=True
+        db=db, uuid=uuid, is_deleted=False, schema_to_select=TripReadInternal, return_as_model=True
     )
     if db_trip is None:
         raise NotFoundException("Trip not found")
@@ -144,20 +144,20 @@ async def read_trip(
     if db_trip.user_id != current_user["id"]:
         raise ForbiddenException()
 
-    return await _cached_read_trip(request, trip_uuid=trip_uuid, owner_uuid=current_user["uuid"], db=db)
+    return await _cached_read_trip(request, uuid=uuid, owner_uuid=current_user["uuid"], db=db)
 
 
-@router.patch("/trip/{trip_uuid}")
-@cache("trip_cache", resource_id_name="trip_uuid", resource_id_type=uuid_pkg.UUID)
+@router.patch("/trip/{uuid}")
+@cache("trip_cache", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
 async def patch_trip(
     request: Request,
-    trip_uuid: uuid_pkg.UUID,
+    uuid: uuid_pkg.UUID,
     values: TripUpdate,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
     db_trip = await crud_trips.get(
-        db=db, uuid=trip_uuid, is_deleted=False, schema_to_select=TripReadInternal, return_as_model=True
+        db=db, uuid=uuid, is_deleted=False, schema_to_select=TripReadInternal, return_as_model=True
     )
     if db_trip is None:
         raise NotFoundException("Trip not found")
@@ -173,21 +173,21 @@ async def patch_trip(
 
     update_data = values.model_dump(exclude_unset=True)
     if update_data:
-        await crud_trips.update(db=db, object=update_data, uuid=trip_uuid)
+        await crud_trips.update(db=db, object=update_data, uuid=uuid)
         await delete_keys_by_pattern(f"user_{db_trip.user_id}_trips:*")
 
     return {"message": "Trip updated"}
 
 
-@router.delete("/trip/{trip_uuid}")
-@cache("trip_cache", resource_id_name="trip_uuid", resource_id_type=uuid_pkg.UUID)
+@router.delete("/trip/{uuid}")
+@cache("trip_cache", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
 async def erase_trip(
     request: Request,
-    trip_uuid: uuid_pkg.UUID,
+    uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    db_trip = await crud_trips.get(db=db, uuid=trip_uuid, is_deleted=False, schema_to_select=TripReadInternal)
+    db_trip = await crud_trips.get(db=db, uuid=uuid, is_deleted=False, schema_to_select=TripReadInternal)
     if db_trip is None:
         raise NotFoundException("Trip not found")
 
@@ -195,7 +195,7 @@ async def erase_trip(
     if owner_id != current_user["id"]:
         raise ForbiddenException()
 
-    await crud_trips.delete(db=db, uuid=trip_uuid)
+    await crud_trips.delete(db=db, uuid=uuid)
     await delete_keys_by_pattern(f"user_{owner_id}_trips:*")
 
     return {"message": "Trip deleted"}

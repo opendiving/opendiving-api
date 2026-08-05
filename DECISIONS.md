@@ -339,6 +339,28 @@ and only calls the cached helper once the request is already authorized. Do not
 put authorization logic inside a `@cache`-decorated function - always gate access
 in the (uncached) caller.
 
+## Single-resource path params were renamed from `{resource}_uuid` to `{uuid}`
+
+`GET/PATCH/DELETE /user/{user_uuid}`, `/trip/{trip_uuid}`, `/dive-site/{dive_site_uuid}`,
+`/dive/{dive_uuid}`, and `GET /task/{task_id}` all repeated the resource name from the
+path segment inside the path parameter itself (e.g. `/trip/{trip_uuid}` - the `trip_`
+prefix is redundant once you're already inside `/trip/...`). These were renamed to a
+bare `{uuid}` (`{id}` for `/task`, which isn't a uuid) - `/trip/{uuid}`,
+`/dive-site/{uuid}`, `/dive/{uuid}`, `/user/{uuid}`, `/task/{id}` - matching the
+intent already noted above under "`/user/{username}/...` routes were changed to
+`/user/{id}/...`". This only affects the *path* parameter name (and therefore the
+generated OpenAPI docs/client code); request/response body fields such as
+`user_uuid`/`trip_uuid` on `Dive`/`Trip`/`DiveSite` payloads, and the `user_uuid`/
+`trip_uuid`/`dive_site_uuid` *query* params on the `/dives`, `/trips`, `/dive-sites`
+list endpoints, keep their prefixed names since those refer to a *different* resource
+than the one in the path segment, so the prefix there is disambiguating, not redundant.
+Each affected module's internal `_cached_read_*` helper and its `@cache(...,
+resource_id_name=...)` argument were renamed to match (e.g. `resource_id_name="uuid"`),
+since FastAPI requires the handler's parameter name to match the path template
+placeholder, and it's cleaner for the cached helper's parameter to mirror it exactly.
+This is also why `uuid` (the stdlib module) is imported as `uuid_pkg` throughout these
+files - so a path parameter can be named `uuid` without shadowing the module.
+
 ## Date-only vs datetime fields
 
 `Dive.start_time` is a full `DateTime(timezone=True)` (ISO8601 with time).
