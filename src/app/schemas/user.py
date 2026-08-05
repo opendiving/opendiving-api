@@ -1,7 +1,8 @@
+import re
 from datetime import datetime
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from ..core.schemas import PublicUUIDSchema
 
@@ -34,7 +35,20 @@ class UserReadInternal(UserRead):
 class UserCreate(UserBase):
     model_config = ConfigDict(extra="forbid")
 
-    password: Annotated[str, Field(pattern=r"^.{8,}|[0-9]+|[A-Z]+|[a-z]+|[^a-zA-Z0-9]+$", examples=["Str1ngst!"])]
+    password: Annotated[str, Field(min_length=8, examples=["Str1ngst!"])]
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_strength(cls, value: str) -> str:
+        if not re.search(r"[0-9]", value):
+            raise ValueError("Password must contain at least one number")
+        if not re.search(r"[A-Z]", value):
+            raise ValueError("Password must contain at least one uppercase letter")
+        if not re.search(r"[a-z]", value):
+            raise ValueError("Password must contain at least one lowercase letter")
+        if not re.search(r"[^a-zA-Z0-9]", value):
+            raise ValueError("Password must contain at least one special character")
+        return value
 
 
 class UserCreateInternal(UserBase):
