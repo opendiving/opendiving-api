@@ -1,9 +1,12 @@
 import uuid as uuid_pkg
-from uuid6 import uuid7
-from datetime import UTC, datetime
-from typing import Any
+from datetime import datetime
 
-from pydantic import BaseModel, Field, field_serializer
+from pydantic import BaseModel
+
+# Free-text "notes" fields (Dive, DiveSite, Trip) are stored as unbounded `Text`
+# columns in Postgres (VARCHAR(n) and TEXT perform identically there), so this
+# limit exists purely to keep payloads sane - not because of any storage constraint.
+NOTES_MAX_LENGTH = 10_000
 
 
 class HealthCheck(BaseModel):
@@ -13,39 +16,13 @@ class HealthCheck(BaseModel):
 
 
 # -------------- mixins --------------
-class UUIDSchema(BaseModel):
-    uuid: uuid_pkg.UUID = Field(default_factory=uuid7)
+class PublicUUIDSchema(BaseModel):
+    """Adds the opaque, uuid7-based `uuid` field exposed as a resource's public
+    identifier (e.g. in URLs) instead of the internal sequential `id`. Mirrors the
+    SQLAlchemy-side `PublicUUIDMixin` in `core.db.models`.
+    """
 
-
-class TimestampSchema(BaseModel):
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC).replace(tzinfo=None))
-    updated_at: datetime | None = Field(default=None)
-
-    @field_serializer("created_at")
-    def serialize_dt(self, created_at: datetime | None, _info: Any) -> str | None:
-        if created_at is not None:
-            return created_at.isoformat()
-
-        return None
-
-    @field_serializer("updated_at")
-    def serialize_updated_at(self, updated_at: datetime | None, _info: Any) -> str | None:
-        if updated_at is not None:
-            return updated_at.isoformat()
-
-        return None
-
-
-class PersistentDeletion(BaseModel):
-    deleted_at: datetime | None = Field(default=None)
-    is_deleted: bool = False
-
-    @field_serializer("deleted_at")
-    def serialize_dates(self, deleted_at: datetime | None, _info: Any) -> str | None:
-        if deleted_at is not None:
-            return deleted_at.isoformat()
-
-        return None
+    uuid: uuid_pkg.UUID
 
 
 # -------------- token --------------

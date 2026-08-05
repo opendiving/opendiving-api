@@ -1,26 +1,21 @@
-from typing import Annotated
-
 from crudadmin import CRUDAdmin
 from crudadmin.admin_interface.model_view import PasswordTransformer
-from pydantic import BaseModel, Field
 
 from ..core.security import get_password_hash
-from ..models.post import Post
-from ..models.tier import Tier
+from ..models.dive import Dive
+from ..models.dive_dive_site import DiveDiveSite
+from ..models.dive_mixture import DiveMixture
+from ..models.dive_site import DiveSite
+from ..models.trip import Trip
 from ..models.user import User
-from ..schemas.post import PostUpdate
-from ..schemas.tier import TierCreate, TierUpdate
+from ..models.user_dive_stats import UserDiveStats
+from ..schemas.dive import DiveCreateInternal, DiveUpdateInternal
+from ..schemas.dive_dive_site import DiveDiveSiteCreate, DiveDiveSiteUpdate
+from ..schemas.dive_mixture import DiveMixtureCreateInternal, DiveMixtureUpdate
+from ..schemas.dive_site import DiveSiteCreateInternal, DiveSiteUpdate
+from ..schemas.trip import TripCreateInternal, TripUpdate
 from ..schemas.user import UserCreate, UserCreateInternal, UserUpdate
-
-
-class PostCreateAdmin(BaseModel):
-    title: Annotated[str, Field(min_length=2, max_length=30, examples=["This is my post"])]
-    text: Annotated[str, Field(min_length=1, max_length=63206, examples=["This is the content of my post."])]
-    created_by_user_id: int
-    media_url: Annotated[
-        str | None,
-        Field(pattern=r"^(https?|ftp)://[^\s/$.?#].[^\s]*$", examples=["https://www.postimageurl.com"], default=None),
-    ]
+from ..schemas.user_dive_stats import UserDiveStatsUpdate
 
 
 def register_admin_views(admin: CRUDAdmin) -> None:
@@ -47,15 +42,44 @@ def register_admin_views(admin: CRUDAdmin) -> None:
     )
 
     admin.add_view(
-        model=Tier,
-        create_schema=TierCreate,
-        update_schema=TierUpdate,
+        model=Dive,
+        create_schema=DiveCreateInternal,
+        update_schema=DiveUpdateInternal,
         allowed_actions={"view", "create", "update", "delete"},
     )
 
     admin.add_view(
-        model=Post,
-        create_schema=PostCreateAdmin,
-        update_schema=PostUpdate,
+        model=UserDiveStats,
+        create_schema=UserDiveStatsUpdate,
+        update_schema=UserDiveStatsUpdate,
+        allowed_actions={"view"},
+    )
+
+    admin.add_view(
+        model=DiveSite,
+        create_schema=DiveSiteCreateInternal,
+        update_schema=DiveSiteUpdate,
         allowed_actions={"view", "create", "update", "delete"},
     )
+
+    admin.add_view(
+        model=Trip,
+        create_schema=TripCreateInternal,
+        update_schema=TripUpdate,
+        allowed_actions={"view", "create", "update", "delete"},
+    )
+
+    admin.add_view(
+        model=DiveMixture,
+        create_schema=DiveMixtureCreateInternal,
+        update_schema=DiveMixtureUpdate,
+        allowed_actions={"view", "create", "update", "delete"},
+    )
+
+    admin.add_view(
+        model=DiveDiveSite,
+        create_schema=DiveDiveSiteCreate,
+        update_schema=DiveDiveSiteUpdate,
+        allowed_actions={"view", "create", "update", "delete"},
+    )
+

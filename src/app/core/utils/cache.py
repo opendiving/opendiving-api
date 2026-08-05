@@ -1,8 +1,8 @@
 import functools
 import json
 import re
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import Any, Concatenate, ParamSpec, TypeVar, cast
 
 from fastapi import Request
 from fastapi.encoders import jsonable_encoder
@@ -12,6 +12,9 @@ from ..exceptions.cache_exceptions import CacheIdentificationInferenceError, Inv
 
 pool: ConnectionPool | None = None
 client: Redis | None = None
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
 def _infer_resource_id(kwargs: dict[str, Any], resource_id_type: type | tuple[type, ...]) -> int | str:
@@ -37,14 +40,16 @@ def _infer_resource_id(kwargs: dict[str, Any], resource_id_type: type | tuple[ty
     resource_id: int | str | None = None
     for arg_name, arg_value in kwargs.items():
         if isinstance(arg_value, resource_id_type):
+            # mypy cannot narrow `arg_value` from a dynamic `resource_id_type`, but the
+            # isinstance check above guarantees it is actually an int or str here.
             if (resource_id_type is int) and ("id" in arg_name):
-                resource_id = arg_value
+                resource_id = cast("int | str", arg_value)
 
             elif (resource_id_type is int) and ("id" not in arg_name):
                 pass
 
             elif resource_id_type is str:
-                resource_id = arg_value
+                resource_id = cast("int | str", arg_value)
 
     if resource_id is None:
         raise CacheIdentificationInferenceError
@@ -173,14 +178,27 @@ async def _delete_keys_by_pattern(pattern: str) -> None:
     """
     if client is None:
         return
-    
-    cursor = 0 
+
+    cursor = 0
     while True:
         cursor, keys = await client.scan(cursor, match=pattern, count=100)
         if keys:
             await client.delete(*keys)
-        if cursor == 0: 
+        if cursor == 0:
             break
+
+
+async def delete_keys_by_pattern(pattern: str) -> None:
+    """Public wrapper around `_delete_keys_by_pattern` for ad-hoc cache invalidation from
+    inside an endpoint handler.
+
+    This is needed for handlers whose invalidation target can only be computed after a DB
+    lookup inside the handler body (e.g. the owning user's id resolved from a fetched
+    object), and therefore can't be expressed via the `@cache` decorator's `to_invalidate_extra`
+    / `pattern_to_invalidate_extra` kwarg-based templating, which only has access to the
+    decorated function's raw call arguments.
+    """
+    await _delete_keys_by_pattern(pattern)
 
 
 def cache(
@@ -190,7 +208,10 @@ def cache(
     resource_id_type: type | tuple[type, ...] = int,
     to_invalidate_extra: dict[str, Any] | None = None,
     pattern_to_invalidate_extra: list[str] | None = None,
-) -> Callable:
+) -> Callable[
+    [Callable[Concatenate[Request, P], Awaitable[R]]],
+    Callable[Concatenate[Request, P], Awaitable[R]],
+]:
     """Cache decorator for FastAPI endpoints.
 
     This decorator enables caching the results of FastAPI endpoint functions to improve response times
@@ -285,18 +306,24 @@ def cache(
       consider the potential impact on Redis performance.
     """
 
-    def wrapper(func: Callable) -> Callable:
+    def wrapper(
+        func: Callable[Concatenate[Request, P], Awaitable[R]],
+    ) -> Callable[Concatenate[Request, P], Awaitable[R]]:
         @functools.wraps(func)
-        async def inner(request: Request, *args: Any, **kwargs: Any) -> Any:
+        async def inner(request: Request, *args: P.args, **kwargs: P.kwargs) -> R:
             if client is None:
                 raise MissingClientError
 
-            if resource_id_name:
-                resource_id = kwargs[resource_id_name]
-            else:
-                resource_id = _infer_resource_id(kwargs=kwargs, resource_id_type=resource_id_type)
+            # `kwargs` is only usable as `P.kwargs` for forwarding to `func`; cast it to a
+            # plain dict for the key-formatting helpers below, which need to inspect it.
+            kwargs_dict = cast(dict[str, Any], kwargs)
 
-            formatted_key_prefix = _format_prefix(key_prefix, kwargs)
+            if resource_id_name:
+                resource_id = kwargs_dict[resource_id_name]
+            else:
+                resource_id = _infer_resource_id(kwargs=kwargs_dict, resource_id_type=resource_id_type)
+
+            formatted_key_prefix = _format_prefix(key_prefix, kwargs_dict)
             cache_key = f"{formatted_key_prefix}:{resource_id}"
             if request.method == "GET":
                 if to_invalidate_extra is not None or pattern_to_invalidate_extra is not None:
@@ -304,7 +331,7 @@ def cache(
 
                 cached_data = await client.get(cache_key)
                 if cached_data:
-                    return json.loads(cached_data.decode())
+                    return cast(R, json.loads(cached_data.decode()))
 
             result = await func(request, *args, **kwargs)
 
@@ -315,19 +342,19 @@ def cache(
                 await client.set(cache_key, serialized_data)
                 await client.expire(cache_key, expiration)
 
-                return json.loads(serialized_data)
+                return cast(R, json.loads(serialized_data))
 
             else:
                 await client.delete(cache_key)
                 if to_invalidate_extra is not None:
-                    formatted_extra = _format_extra_data(to_invalidate_extra, kwargs)
+                    formatted_extra = _format_extra_data(to_invalidate_extra, kwargs_dict)
                     for prefix, id in formatted_extra.items():
                         extra_cache_key = f"{prefix}:{id}"
                         await client.delete(extra_cache_key)
 
                 if pattern_to_invalidate_extra is not None:
                     for pattern in pattern_to_invalidate_extra:
-                        formatted_pattern = _format_prefix(pattern, kwargs)
+                        formatted_pattern = _format_prefix(pattern, kwargs_dict)
                         await _delete_keys_by_pattern(formatted_pattern + "*")
 
             return result
