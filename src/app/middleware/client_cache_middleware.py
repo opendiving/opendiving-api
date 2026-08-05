@@ -3,7 +3,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 
 
 class ClientCacheMiddleware(BaseHTTPMiddleware):
-    """Middleware to set the `Cache-Control` header for client-side caching on all responses.
+    """Middleware to set a default `Cache-Control` header on responses that don't already specify one.
 
     Parameters
     ----------
@@ -26,6 +26,10 @@ class ClientCacheMiddleware(BaseHTTPMiddleware):
     ----
         - The `Cache-Control` header instructs clients (e.g., browsers)
         to cache the response for the specified duration.
+        - This middleware never marks a response `public` if the request carried an
+          `Authorization` header, and it never overwrites a `Cache-Control` header that
+          the endpoint already set, since that would risk a shared proxy/CDN caching one
+          user's private response and serving it to another.
     """
 
     def __init__(self, app: FastAPI, max_age: int = 60) -> None:
@@ -52,5 +56,17 @@ class ClientCacheMiddleware(BaseHTTPMiddleware):
             - This method is automatically called by Starlette for processing the request-response cycle.
         """
         response: Response = await call_next(request)
-        response.headers["Cache-Control"] = f"public, max-age={self.max_age}"
+
+        # Never override a `Cache-Control` header the endpoint already set explicitly.
+        if "Cache-Control" in response.headers:
+            return response
+
+        # Authenticated requests (identified by an `Authorization` header) may return
+        # per-user data. Mark those responses as private/non-cacheable-by-default rather
+        # than `public`, so a shared proxy/CDN won't serve one user's response to another.
+        if "Authorization" in request.headers:
+            response.headers["Cache-Control"] = "private, no-store"
+        else:
+            response.headers["Cache-Control"] = f"public, max-age={self.max_age}"
+
         return response
