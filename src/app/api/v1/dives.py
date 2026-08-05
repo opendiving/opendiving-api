@@ -10,6 +10,7 @@ from ...api.dependencies import get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import ForbiddenException, NotFoundException
 from ...core.utils.cache import cache, delete_keys_by_pattern
+from ...core.utils.datetime_offset import combine_start_time, split_start_time
 from ...crud.crud_dive_dive_sites import (
     get_dive_sites_for_dive,
     get_dive_sites_for_dives,
@@ -111,6 +112,18 @@ def _dive_internal_id(db_dive: Any) -> int:
     return cast(int, db_dive["id"] if isinstance(db_dive, dict) else db_dive.id)
 
 
+def _to_public_start_time(data: dict[str, Any]) -> dict[str, Any]:
+    """Re-attaches a stored `utc_offset_minutes` to `start_time` and drops the now-redundant
+    offset key, so the public `DiveRead`/`DiveReadWithMixtures` shape always exposes a single
+    offset-aware `start_time` (e.g. `2021-04-04T10:04:47.910+02:00`) - see
+    `core/utils/datetime_offset.py`.
+    """
+    data = dict(data)
+    offset_minutes = data.pop("utc_offset_minutes")
+    data["start_time"] = combine_start_time(data["start_time"], offset_minutes)
+    return data
+
+
 def _to_public_dive(
     db_dive: DiveReadInternal | dict[str, Any],
     *,
@@ -120,7 +133,7 @@ def _to_public_dive(
 ) -> DiveRead:
     """Convert an internal dive representation (integer FKs) into its public shape
     (owning user and trip referenced by `uuid`)."""
-    data = db_dive if isinstance(db_dive, dict) else db_dive.model_dump()
+    data = _to_public_start_time(db_dive if isinstance(db_dive, dict) else db_dive.model_dump())
     return DiveRead(
         **{k: v for k, v in data.items() if k not in ("id", "user_id", "trip_id")},
         user_uuid=user_uuid,
@@ -137,7 +150,7 @@ def _to_public_dive_with_mixtures(
     dive_sites: list[DiveSiteInfo],
     mixtures: list[DiveMixtureRead],
 ) -> DiveReadWithMixtures:
-    data = db_dive if isinstance(db_dive, dict) else db_dive.model_dump()
+    data = _to_public_start_time(db_dive if isinstance(db_dive, dict) else db_dive.model_dump())
     return DiveReadWithMixtures(
         **{k: v for k, v in data.items() if k not in ("id", "user_id", "trip_id")},
         user_uuid=user_uuid,
@@ -188,7 +201,11 @@ async def write_dive(
     dive_site_ids = [site_id_by_uuid[u] for u in dive.dive_site_uuids]
 
     dive_internal_dict = dive.model_dump(exclude={"mixtures", "dive_site_uuids", "user_uuid", "trip_uuid"})
-    dive_internal = DiveCreateInternal(**dive_internal_dict, user_id=current_user["id"], trip_id=trip_id)
+    utc_start_time, utc_offset_minutes = split_start_time(dive.start_time)
+    dive_internal_dict["start_time"] = utc_start_time
+    dive_internal = DiveCreateInternal(
+        **dive_internal_dict, user_id=current_user["id"], trip_id=trip_id, utc_offset_minutes=utc_offset_minutes
+    )
     try:
         created_dive = await crud_dives.create(
             db=db, object=dive_internal, schema_to_select=DiveReadInternal, return_as_model=True
@@ -387,6 +404,11 @@ async def patch_dive(
         raise ForbiddenException()
 
     update_data = values.model_dump(exclude={"mixtures", "dive_site_uuids", "trip_uuid"}, exclude_unset=True)
+
+    if values.start_time is not None:
+        utc_start_time, utc_offset_minutes = split_start_time(values.start_time)
+        update_data["start_time"] = utc_start_time
+        update_data["utc_offset_minutes"] = utc_offset_minutes
 
     if "trip_uuid" in values.model_fields_set:
         if values.trip_uuid is None:

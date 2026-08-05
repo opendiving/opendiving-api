@@ -387,6 +387,47 @@ Don't mix these up when adding new date fields - decide up front whether a field
 is a point in time (`datetime`) or a calendar date (`date`), since the frontend
 handles each very differently (see the web app's `DECISIONS.md`).
 
+## `start_time`'s UTC offset is stored separately, but the API only ever sees one field
+
+A dive logged at 09:00 in Bangkok (+07:00) should always *display* as 09:00, regardless
+of what timezone the viewer happens to be in - but a `timestamptz` column only stores an
+absolute instant, not the offset it was originally expressed in. So `Dive` has two
+columns: `start_time` (the UTC instant) and `utc_offset_minutes` (e.g. `120` for
+`+02:00`), the latter defaulting to `0` purely so existing call sites that construct a
+`Dive(...)` without it (tests, the admin panel) don't break.
+
+Critically, **the API itself never exposes `utc_offset_minutes` as its own field**. Every
+input/output `start_time` is a single offset-aware ISO 8601 string, e.g.
+`"2021-04-04T10:04:47.910+02:00"` - a naive datetime (no offset) is rejected by
+`DiveBase`/`DiveUpdate`'s `start_time` validation (`require_utc_offset` in
+`core/utils/datetime_offset.py`). The two DB columns are purely an internal storage
+detail:
+- On write (`write_dive`/`patch_dive` in `api/v1/dives.py`), `split_start_time()` splits
+  the incoming offset-aware `start_time` into the UTC instant + offset minutes to store.
+- On read (`_to_public_start_time()` in `api/v1/dives.py`), `combine_start_time()` re-attaches
+  the stored offset to the stored UTC instant before building the public `DiveRead`/
+  `DiveReadWithMixtures` response.
+
+This keeps the public API contract simple (one field, not two that could disagree with
+each other) while still letting the DB index/sort/filter on `start_time` as a normal
+absolute-instant column. `DiveCreateInternal`/`DiveUpdateInternal`/`DiveReadInternal` (the
+schemas that actually mirror the two DB columns 1:1) are the only place
+`utc_offset_minutes` appears as an explicit field - never on `DiveCreate`/`DiveUpdate`/
+`DiveRead`.
+
+Applying this to an existing local DB (per the "no migration tool" workflow above):
+```sql
+ALTER TABLE dive ADD COLUMN utc_offset_minutes INTEGER NOT NULL DEFAULT 0;
+```
+Existing rows have no way to recover what offset they were originally logged in (that
+information was simply never captured before), so they backfill to `0` (UTC) - meaning
+they'll display in UTC rather than their "real" original timezone until re-saved. This
+is an acceptable one-time loss of precision for old data given the alternative (guessing).
+
+The web frontend defaults the offset to the browser's own `Date.getTimezoneOffset()` for
+new dives, and to whatever offset (if any) is embedded in a dive-computer export file's
+`StartTime`/equivalent field when importing one - see the web app's `DECISIONS.md`.
+
 ## `recalculate_dive_stats`'s aggregate is backed by a covering index, not incremental counters
 
 `services/dive_stats.py`'s `recalculate_dive_stats` reruns `COUNT`/`MAX`/`SUM`

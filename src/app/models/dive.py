@@ -13,9 +13,23 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, unique=True, primary_key=True, init=False)
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id"), index=True)
     dive_number: Mapped[int] = mapped_column(Integer)
+    # Always stored as the equivalent UTC instant, regardless of the offset the caller
+    # provided it with (see `utc_offset_minutes` below) - Postgres normalizes any
+    # timezone-aware value written to a `timestamptz` column to UTC internally anyway.
     start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     duration: Mapped[int] = mapped_column(Integer)
     notes: Mapped[str] = mapped_column(Text)
+
+    # The UTC offset (in minutes, e.g. 120 for "+02:00") that `start_time` was originally
+    # expressed in - the dive site's/dive computer's local time, not the viewer's. Kept
+    # separately because a `timestamptz` column only stores an absolute instant and
+    # can't reconstruct the original offset on its own. Combined with `start_time` to
+    # reconstruct an offset-aware datetime for the API (see `split_start_time()`/
+    # `combine_start_time()` in `schemas/dive.py`) so dives always display in the
+    # timezone they were actually logged in. Defaults to 0 (UTC) purely so existing
+    # call sites that construct a `Dive(...)` without it (tests, the admin panel) don't
+    # break - real writes always pass an explicit value derived from `start_time`.
+    utc_offset_minutes: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
     max_depth: Mapped[float | None] = mapped_column(Float, default=None)
     avg_depth: Mapped[float | None] = mapped_column(Float, default=None)

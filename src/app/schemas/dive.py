@@ -2,15 +2,26 @@ import uuid as uuid_pkg
 from datetime import datetime
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema
+from ..core.utils.datetime_offset import require_utc_offset
 from .dive_mixture import DiveMixtureCreate, DiveMixtureRead
+
+_START_TIME_EXAMPLE = "2021-04-04T10:04:47.910+02:00"
+
+# `start_time` always carries an explicit UTC offset over the API, both ways: on input,
+# it's the offset the caller (e.g. the web app, defaulting to the browser's own offset)
+# knows the dive happened in; on output, it's reconstructed from the dive's stored
+# `utc_offset_minutes` (see `core/utils/datetime_offset.py`) so a dive always displays in
+# the timezone it was actually logged in, not the viewer's. A naive datetime (no offset)
+# is rejected rather than silently assumed to be UTC or local.
+DiveStartTime = Annotated[datetime, AfterValidator(require_utc_offset)]
 
 
 class DiveBase(BaseModel):
     dive_number: Annotated[int, Field(examples=[5])]
-    start_time: Annotated[datetime, Field(examples=[datetime.now()])]
+    start_time: Annotated[DiveStartTime, Field(examples=[_START_TIME_EXAMPLE])]
     duration: Annotated[int, Field(examples=[2048], description="Dive duration in seconds")]
 
     max_depth: Annotated[float | None, Field(default=None)]
@@ -49,11 +60,18 @@ class DiveReadInternal(DiveBase, PublicUUIDSchema):
     only - never returned directly over the API (use `DiveRead`/`DiveReadWithMixtures`
     for the public shape, which additionally resolves `user_id`/`trip_id` to the owning
     user's/trip's `uuid` and attaches the dive's sites).
+
+    `start_time` here is the raw stored UTC instant (not yet re-combined with
+    `utc_offset_minutes` - see `combine_start_time()`), since that recombination only
+    makes sense once converting to the public `DiveRead` shape.
     """
 
     id: int
     user_id: int
     trip_id: int | None = None
+    utc_offset_minutes: Annotated[
+        int, Field(description="UTC offset (minutes) start_time was originally expressed in, e.g. 120 for +02:00")
+    ]
     created_at: datetime
 
 
@@ -74,6 +92,10 @@ class DiveCreateInternal(DiveBase):
 
     user_id: int
     trip_id: int | None = None
+    # `start_time` on this schema is the UTC instant to store (already split from the
+    # public, offset-aware `start_time` via `split_start_time()`), paired with the offset
+    # it was split from.
+    utc_offset_minutes: int
 
 
 class DiveCreateRequest(DiveCreate):
@@ -91,7 +113,7 @@ class DiveUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     dive_number: Annotated[int | None, Field(examples=[5], default=None)]
-    start_time: Annotated[datetime | None, Field(examples=[datetime.now()], default=None)]
+    start_time: Annotated[DiveStartTime | None, Field(examples=[_START_TIME_EXAMPLE], default=None)]
     duration: Annotated[int | None, Field(examples=[2048], description="Dive duration in seconds", default=None)]
     max_depth: Annotated[float | None, Field(default=None)]
     avg_depth: Annotated[float | None, Field(default=None)]
@@ -136,6 +158,7 @@ class DiveUpdateInternal(BaseModel):
     bottom_temperature: Annotated[float | None, Field(default=None)]
     visibility: Annotated[int | None, Field(default=None, description="Underwater visibility in meters")]
     trip_id: Annotated[int | None, Field(default=None, description="Internal id of the trip this dive belongs to")]
+    utc_offset_minutes: Annotated[int | None, Field(default=None)]
     notes: Annotated[
         str | None,
         Field(
