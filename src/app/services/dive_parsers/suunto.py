@@ -10,7 +10,7 @@ from ...schemas.parsed_dive import (
     ParsedDiveSchema,
 )
 from .base import DiveParser
-from .exceptions import DiveParseError
+from .exceptions import DiveParseError, UnsupportedDiveFileError
 
 _SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
 _NIL = "{http://www.w3.org/2001/XMLSchema-instance}nil"
@@ -43,13 +43,7 @@ class SuuntoXmlParser(DiveParser):
 
     @classmethod
     def can_parse(cls, filename: str, content: bytes) -> bool:
-        if not filename.lower().endswith(".xml"):
-            return False
-        try:
-            root = DET.fromstring(content)
-        except (ET.ParseError, DefusedXmlException):
-            return False
-        return root.tag == _tag("Dive")
+        return filename.lower().endswith(".xml")
 
     @classmethod
     def parse(cls, content: bytes) -> ParsedDiveSchema:
@@ -57,6 +51,9 @@ class SuuntoXmlParser(DiveParser):
             root = DET.fromstring(content)
         except (ET.ParseError, DefusedXmlException) as exc:
             raise DiveParseError(f"Invalid XML: {exc}") from exc
+
+        if root.tag != _tag("Dive"):
+            raise UnsupportedDiveFileError(f"Root element is not a Suunto <Dive>: {root.tag}")
 
         mixtures = [cls._parse_mixture(mix) for mix in root.findall(f"{_tag('DiveMixtures')}/{_tag('DiveMixture')}")]
         samples = [cls._parse_sample(s) for s in root.findall(f"{_tag('DiveSamples')}/{_tag('Dive.Sample')}")]

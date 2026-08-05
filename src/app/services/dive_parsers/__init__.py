@@ -17,8 +17,12 @@ def parse_dive_file(filename: str, content: bytes) -> ParsedDiveSchema:
         DiveParseError: if a parser recognizes the file but fails to parse it.
     """
     for parser in _PARSERS:
-        if parser.can_parse(filename, content):
+        if not parser.can_parse(filename, content):
+            continue
+        try:
             return parser.parse(content)
+        except UnsupportedDiveFileError:
+            continue
     raise UnsupportedDiveFileError(f"No parser available for file: {filename}")
 
 

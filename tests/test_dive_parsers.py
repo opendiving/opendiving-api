@@ -81,26 +81,16 @@ XXE_XML = b"""<?xml version="1.0"?>
 
 
 class TestSuuntoXmlParserCanParse:
-    def test_recognizes_valid_suunto_file(self):
+    """`can_parse` is a cheap filename check only; it never inspects XML content."""
+
+    def test_recognizes_xml_extension(self):
         assert SuuntoXmlParser.can_parse("export.xml", VALID_SUUNTO_XML.encode()) is True
 
     def test_rejects_non_xml_extension(self):
         assert SuuntoXmlParser.can_parse("export.txt", VALID_SUUNTO_XML.encode()) is False
 
-    def test_rejects_xml_with_wrong_root_tag(self):
-        assert SuuntoXmlParser.can_parse("export.xml", NOT_A_DIVE_XML.encode()) is False
-
-    def test_rejects_malformed_xml(self):
-        assert SuuntoXmlParser.can_parse("export.xml", MALFORMED_XML) is False
-
     def test_extension_check_is_case_insensitive(self):
         assert SuuntoXmlParser.can_parse("EXPORT.XML", VALID_SUUNTO_XML.encode()) is True
-
-    def test_rejects_billion_laughs_entity_expansion_without_raising(self):
-        assert SuuntoXmlParser.can_parse("evil.xml", BILLION_LAUGHS_XML) is False
-
-    def test_rejects_xxe_without_raising(self):
-        assert SuuntoXmlParser.can_parse("evil.xml", XXE_XML) is False
 
 
 class TestSuuntoXmlParserParse:
@@ -135,6 +125,10 @@ class TestSuuntoXmlParserParse:
         assert parsed.samples[0].depth == 0.0
         assert parsed.samples[1].time == 60
         assert parsed.samples[1].depth == 10.5
+
+    def test_raises_unsupported_for_xml_with_wrong_root_tag(self):
+        with pytest.raises(UnsupportedDiveFileError):
+            SuuntoXmlParser.parse(NOT_A_DIVE_XML.encode())
 
     def test_raises_dive_parse_error_on_malformed_xml(self):
         with pytest.raises(DiveParseError):
