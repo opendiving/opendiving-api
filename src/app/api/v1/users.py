@@ -1,14 +1,14 @@
 import uuid as uuid_pkg
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Cookie, Depends, Request, Response
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import DuplicateValueException, ForbiddenException, NotFoundException
-from ...core.security import blacklist_token, get_password_hash, oauth2_scheme
+from ...core.security import blacklist_token, blacklist_tokens, get_password_hash, oauth2_scheme
 from ...crud.crud_users import crud_users
 from ...schemas.user import UserCreate, UserCreateInternal, UserRead, UserReadInternal, UserUpdate
 
@@ -113,10 +113,12 @@ async def patch_user(
 @router.delete("/user/{uuid}")
 async def erase_user(
     request: Request,
+    response: Response,
     uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
-    token: str = Depends(oauth2_scheme),
+    access_token: str = Depends(oauth2_scheme),
+    refresh_token: str | None = Cookie(None, alias="refresh_token"),
 ) -> dict[str, str]:
     db_user = await crud_users.get(db=db, uuid=uuid, schema_to_select=UserReadInternal)
     if not db_user:
@@ -126,5 +128,11 @@ async def erase_user(
         raise ForbiddenException()
 
     await crud_users.delete(db=db, uuid=uuid)
-    await blacklist_token(token=token, db=db)
+
+    if refresh_token:
+        await blacklist_tokens(access_token=access_token, refresh_token=refresh_token, db=db)
+        response.delete_cookie(key="refresh_token")
+    else:
+        await blacklist_token(token=access_token, db=db)
+
     return {"message": "User deleted"}
