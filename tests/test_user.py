@@ -153,43 +153,97 @@ class TestEraseUser:
 
     @pytest.mark.asyncio
     async def test_erase_user_success(self, mock_db, current_user_dict, sample_user_read):
-        """Test successful user deletion."""
+        """Test successful user deletion blacklists both tokens and clears the refresh cookie
+        when a refresh token is present."""
         user_uuid = current_user_dict["uuid"]
         sample_user_read.uuid = user_uuid
-        token = "mock_token"
+        access_token = "mock_access_token"
+        refresh_token = "mock_refresh_token"
+        mock_response = Mock()
 
         with patch("src.app.api.v1.users.crud_users") as mock_crud:
             mock_crud.get = AsyncMock(return_value=sample_user_read)
             mock_crud.delete = AsyncMock(return_value=None)
 
-            with patch("src.app.api.v1.users.blacklist_token", new_callable=AsyncMock) as mock_blacklist:
-                result = await erase_user(Mock(), user_uuid, current_user_dict, mock_db, token)
+            with patch("src.app.api.v1.users.blacklist_tokens", new_callable=AsyncMock) as mock_blacklist_tokens:
+                result = await erase_user(
+                    request=Mock(),
+                    response=mock_response,
+                    uuid=user_uuid,
+                    current_user=current_user_dict,
+                    db=mock_db,
+                    access_token=access_token,
+                    refresh_token=refresh_token,
+                )
 
                 assert result == {"message": "User deleted"}
                 mock_crud.delete.assert_called_once_with(db=mock_db, uuid=user_uuid)
-                mock_blacklist.assert_called_once_with(token=token, db=mock_db)
+                mock_blacklist_tokens.assert_called_once_with(
+                    access_token=access_token, refresh_token=refresh_token, db=mock_db
+                )
+                mock_response.delete_cookie.assert_called_once_with(key="refresh_token")
+
+    @pytest.mark.asyncio
+    async def test_erase_user_success_without_refresh_token(self, mock_db, current_user_dict, sample_user_read):
+        """Test user deletion falls back to blacklisting just the access token when no
+        refresh token cookie is present."""
+        user_uuid = current_user_dict["uuid"]
+        sample_user_read.uuid = user_uuid
+        access_token = "mock_access_token"
+
+        with patch("src.app.api.v1.users.crud_users") as mock_crud:
+            mock_crud.get = AsyncMock(return_value=sample_user_read)
+            mock_crud.delete = AsyncMock(return_value=None)
+
+            with patch("src.app.api.v1.users.blacklist_token", new_callable=AsyncMock) as mock_blacklist_token:
+                result = await erase_user(
+                    request=Mock(),
+                    response=Mock(),
+                    uuid=user_uuid,
+                    current_user=current_user_dict,
+                    db=mock_db,
+                    access_token=access_token,
+                    refresh_token=None,
+                )
+
+                assert result == {"message": "User deleted"}
+                mock_blacklist_token.assert_called_once_with(token=access_token, db=mock_db)
 
     @pytest.mark.asyncio
     async def test_erase_user_not_found(self, mock_db, current_user_dict):
         """Test user deletion when user doesn't exist."""
         user_uuid = uuid7()
-        token = "mock_token"
 
         with patch("src.app.api.v1.users.crud_users") as mock_crud:
             mock_crud.get = AsyncMock(return_value=None)
 
             with pytest.raises(NotFoundException, match="User not found"):
-                await erase_user(Mock(), user_uuid, current_user_dict, mock_db, token)
+                await erase_user(
+                    request=Mock(),
+                    response=Mock(),
+                    uuid=user_uuid,
+                    current_user=current_user_dict,
+                    db=mock_db,
+                    access_token="mock_token",
+                    refresh_token=None,
+                )
 
     @pytest.mark.asyncio
     async def test_erase_user_forbidden(self, mock_db, current_user_dict, sample_user_read):
         """Test user deletion when user tries to delete another user."""
         other_user_uuid = uuid7()
         sample_user_read.uuid = other_user_uuid
-        token = "mock_token"
 
         with patch("src.app.api.v1.users.crud_users") as mock_crud:
             mock_crud.get = AsyncMock(return_value=sample_user_read)
 
             with pytest.raises(ForbiddenException):
-                await erase_user(Mock(), other_user_uuid, current_user_dict, mock_db, token)
+                await erase_user(
+                    request=Mock(),
+                    response=Mock(),
+                    uuid=other_user_uuid,
+                    current_user=current_user_dict,
+                    db=mock_db,
+                    access_token="mock_token",
+                    refresh_token=None,
+                )
