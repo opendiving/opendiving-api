@@ -95,7 +95,7 @@ async def _start_onboarding_or_sign_in(
 async def request_email_link(
     request: Request, body: EmailAuthRequest, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> EmailAuthRequestResponse:
-    """Step 1 of the email flow: generates a single-use magic-link token and emails it.
+    """Step 1 of the email flow: generates a magic-link token and emails it.
 
     Always returns the same generic message, whether or not `email` belongs to an
     existing account - this must never be used to check if someone has signed up.
@@ -113,21 +113,21 @@ async def request_email_link(
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
 
-    # Only one active token per email: invalidate any still-pending request(s) rather
-    # than leaving them valid alongside the new one. FastCRUD's `update(...,
+    # Only one *live* link per email: invalidate any previous, still-live request(s)
+    # rather than leaving them valid alongside the new one. FastCRUD's `update(...,
     # allow_multiple=True)` raises `NoResultFound` when zero rows match (the common
-    # case - most emails won't have a pending request), so check first rather than
-    # treating "nothing to invalidate" as an error (mirrors the token-blacklist purge
-    # job's `count()`-before-`delete()` pattern in `core.worker.functions`).
-    pending_count = await crud_authentication_requests.count(db, email=email, purpose="sign_in", used_at=None)
+    # case - most emails won't have one), so check first rather than treating
+    # "nothing to invalidate" as an error (mirrors the token-blacklist purge job's
+    # `count()`-before-`delete()` pattern in `core.worker.functions`).
+    pending_count = await crud_authentication_requests.count(db, email=email, purpose="sign_in", invalidated_at=None)
     if pending_count > 0:
         await crud_authentication_requests.update(
             db=db,
-            object=AuthenticationRequestUpdate(used_at=datetime.now(UTC)),
+            object=AuthenticationRequestUpdate(invalidated_at=datetime.now(UTC)),
             allow_multiple=True,
             email=email,
             purpose="sign_in",
-            used_at=None,
+            invalidated_at=None,
         )
 
     raw_token = generate_secure_token()
@@ -154,6 +154,13 @@ async def verify_email_link(
 ) -> AuthOutcome:
     """Step 2 of the email flow: validates the magic-link token and either signs the
     caller in (existing account) or hands back an onboarding session (new one).
+
+    Re-opening/re-verifying the *same* link again (e.g. because a mail client's
+    link-preview/security-scanning feature "detonated" it before a human clicked, or
+    the user simply clicked twice) is deliberately not an error - it just re-confirms
+    the same outcome, since `resolve_identity` is a pure lookup with no side effects
+    of its own. Only an *expired* link, or one superseded by a newer request (see
+    `request_email_link`), is rejected - see `AuthenticationRequest.invalidated_at`.
     """
     await enforce_rate_limit(
         f"auth:email-verify:ip:{_client_ip(request)}",
@@ -167,8 +174,8 @@ async def verify_email_link(
     if auth_request is None:
         raise UnauthorizedException("This sign-in link is invalid.")
 
-    if auth_request["used_at"] is not None:
-        raise UnauthorizedException("This sign-in link has already been used.")
+    if auth_request["invalidated_at"] is not None:
+        raise UnauthorizedException("This sign-in link is no longer valid - a newer one was requested.")
 
     expires_at = auth_request["expires_at"]
     if expires_at.tzinfo is None:
@@ -176,9 +183,10 @@ async def verify_email_link(
     if expires_at < datetime.now(UTC):
         raise UnauthorizedException("This sign-in link has expired.")
 
-    await crud_authentication_requests.update(
-        db=db, object=AuthenticationRequestUpdate(used_at=datetime.now(UTC)), id=auth_request["id"]
-    )
+    if auth_request["used_at"] is None:
+        await crud_authentication_requests.update(
+            db=db, object=AuthenticationRequestUpdate(used_at=datetime.now(UTC)), id=auth_request["id"]
+        )
 
     outcome = await resolve_identity(db=db, provider="email", email=auth_request["email"])
     return await _start_onboarding_or_sign_in(response, outcome)

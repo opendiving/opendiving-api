@@ -113,10 +113,10 @@ async def request_email_change(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> EmailChangeRequestResponse:
-    """Step 1 of changing an account's email: generates a single-use confirmation
-    link and emails it to the *new* address - the change only takes effect once that
-    link is clicked (`POST /user/email-change/verify`), proving the caller actually
-    controls it.
+    """Step 1 of changing an account's email: generates a confirmation link and
+    emails it to the *new* address - the change only takes effect once that link is
+    opened (`POST /user/email-change/verify`), proving the caller actually controls
+    it.
 
     Always operates on the caller's own account (from the access token), not a path
     parameter - there is no other account to target.
@@ -139,19 +139,19 @@ async def request_email_change(
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
 
-    # Only one active change request per user at a time, regardless of which target
-    # address a previous (still-pending) request was for.
+    # Only one *live* change request per user at a time, regardless of which target
+    # address a previous one was for.
     pending_count = await crud_authentication_requests.count(
-        db, user_id=current_user["id"], purpose="email_change", used_at=None
+        db, user_id=current_user["id"], purpose="email_change", invalidated_at=None
     )
     if pending_count > 0:
         await crud_authentication_requests.update(
             db=db,
-            object=AuthenticationRequestUpdate(used_at=datetime.now(UTC)),
+            object=AuthenticationRequestUpdate(invalidated_at=datetime.now(UTC)),
             allow_multiple=True,
             user_id=current_user["id"],
             purpose="email_change",
-            used_at=None,
+            invalidated_at=None,
         )
 
     raw_token = generate_secure_token()
@@ -184,6 +184,12 @@ async def verify_email_change(
     may well be opened on a different device/browser than the one the change was
     requested from - the token itself, tied to a specific `user_id`, is what
     authorizes this.
+
+    Re-opening/re-verifying the *same* link again (e.g. a mail client's
+    link-preview/security-scanning feature "detonating" it before a human clicks, or
+    the user clicking twice) is deliberately not an error - it's a no-op that just
+    reports the change as already applied. Only an *expired* link, or one superseded
+    by a newer request, is rejected - see `AuthenticationRequest.invalidated_at`.
     """
     await enforce_rate_limit(
         f"email-change-verify:ip:{_client_ip(request)}",
@@ -197,33 +203,28 @@ async def verify_email_change(
     if auth_request is None:
         raise UnauthorizedException("This confirmation link is invalid.")
 
+    if auth_request["invalidated_at"] is not None:
+        raise UnauthorizedException("This confirmation link is no longer valid - a newer request was made.")
+
     new_email = auth_request["email"]
     user_id = auth_request["user_id"]
 
-    db_user = await crud_users.get(db=db, id=user_id, is_deleted=False)
-    if db_user is None:
-        raise NotFoundException("User not found")
-
-    current_email = db_user["email"] if isinstance(db_user, dict) else db_user.email
-
+    # Already applied - a harmless repeat (see docstring above). Skip straight to
+    # the same success response without re-touching the DB or re-notifying anyone.
     if auth_request["used_at"] is not None:
-        # Already used - most likely a mail client's link-preview/security-scanning
-        # feature (many run a real JS-executing browser to "detonate" links before a
-        # human ever clicks) rather than a genuine reuse attempt. If the account's
-        # email already matches what this token would have set, the change this
-        # token represents has already gone through - report success instead of a
-        # confusing "invalid link" error for something that, in fact, already
-        # worked. Only a token that's used *and* doesn't match the current state is
-        # treated as a real (rejected) reuse.
-        if current_email == new_email:
-            return EmailChangeVerifyResponse(email=new_email)
-        raise UnauthorizedException("This confirmation link has already been used.")
+        return EmailChangeVerifyResponse(email=new_email)
 
     expires_at = auth_request["expires_at"]
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=UTC)
     if expires_at < datetime.now(UTC):
         raise UnauthorizedException("This confirmation link has expired.")
+
+    db_user = await crud_users.get(db=db, id=user_id, is_deleted=False)
+    if db_user is None:
+        raise NotFoundException("User not found")
+
+    current_email = db_user["email"] if isinstance(db_user, dict) else db_user.email
 
     if await crud_users.exists(db=db, email=new_email):
         raise DuplicateValueException("Email is already registered to another account")

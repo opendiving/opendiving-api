@@ -17,6 +17,7 @@ class AuthenticationRequestUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     used_at: datetime | None = None
+    invalidated_at: datetime | None = None
 
 
 class AuthenticationRequestRead(BaseModel):
@@ -25,6 +26,7 @@ class AuthenticationRequestRead(BaseModel):
     token_hash: str
     expires_at: datetime
     used_at: datetime | None
+    invalidated_at: datetime | None
     purpose: str
     user_id: int | None
     created_at: datetime

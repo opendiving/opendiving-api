@@ -76,7 +76,8 @@ class TestRequestEmailChange:
             assert kwargs["allow_multiple"] is True
             assert kwargs["user_id"] == current_user_dict["id"]
             assert kwargs["purpose"] == "email_change"
-            assert kwargs["used_at"] is None
+            assert kwargs["invalidated_at"] is None
+            assert kwargs["object"].invalidated_at is not None
 
     @pytest.mark.asyncio
     async def test_does_not_call_update_when_there_is_nothing_pending(self, mock_db, current_user_dict):
@@ -140,41 +141,38 @@ class TestVerifyEmailChange:
                 await verify_email_change(_request(), EmailChangeVerifyRequest(token="bad"), mock_db)
 
     @pytest.mark.asyncio
-    async def test_reused_token_raises_unauthorized(self, mock_db):
-        """A token used for a *different* change than the account's current email
-        reflects is a genuine reuse attempt, not a harmless re-verification."""
+    async def test_invalidated_token_raises_unauthorized(self, mock_db):
+        """Superseded by a newer change request - a hard reject, unlike a merely
+        already-used-but-still-live token (see the idempotent-reuse test below)."""
         auth_request = {
             "id": 1,
             "email": "new@example.com",
             "user_id": 7,
-            "used_at": datetime.now(UTC),
+            "used_at": None,
+            "invalidated_at": datetime.now(UTC),
             "expires_at": datetime.now(UTC) + timedelta(minutes=10),
         }
         with (
             patch("src.app.api.v1.users.enforce_rate_limit", new_callable=AsyncMock),
             patch("src.app.api.v1.users.crud_authentication_requests") as mock_crud,
-            patch("src.app.api.v1.users.crud_users") as mock_users,
         ):
             mock_crud.get = AsyncMock(return_value=auth_request)
-            mock_users.get = AsyncMock(return_value={"id": 7, "email": "still-old@example.com"})
 
-            with pytest.raises(UnauthorizedException, match="already been used"):
-                await verify_email_change(_request(), EmailChangeVerifyRequest(token="used"), mock_db)
+            with pytest.raises(UnauthorizedException, match="no longer valid"):
+                await verify_email_change(_request(), EmailChangeVerifyRequest(token="stale"), mock_db)
 
     @pytest.mark.asyncio
-    async def test_reused_token_matching_current_email_is_idempotent(self, mock_db):
-        """A used token whose target email already matches the account's current one
-        means the change already went through - most likely because a mail client's
-        link-preview/security-scanning feature (running a real, JS-executing
-        browser) "detonated" the link before the real user clicked it. Re-verifying
-        must report success, not a confusing "invalid link" error for a change that
-        actually already worked.
-        """
+    async def test_already_used_but_live_token_is_idempotent(self, mock_db):
+        """Re-opening the same confirmation link again (e.g. a mail client's
+        link-preview/security-scanning feature having already applied it, or the
+        user clicking twice) must not error - it's a no-op that just reports the
+        change as already applied, without touching `crud_users` again."""
         auth_request = {
             "id": 1,
             "email": "new@example.com",
             "user_id": 7,
             "used_at": datetime.now(UTC),
+            "invalidated_at": None,
             "expires_at": datetime.now(UTC) + timedelta(minutes=10),
         }
         with (
@@ -183,11 +181,12 @@ class TestVerifyEmailChange:
             patch("src.app.api.v1.users.crud_users") as mock_users,
         ):
             mock_crud.get = AsyncMock(return_value=auth_request)
-            mock_users.get = AsyncMock(return_value={"id": 7, "email": "new@example.com"})
 
-            result = await verify_email_change(_request(), EmailChangeVerifyRequest(token="used"), mock_db)
+            result = await verify_email_change(_request(), EmailChangeVerifyRequest(token="already-used"), mock_db)
 
             assert result.email == "new@example.com"
+            mock_users.get.assert_not_called()
+            mock_users.update.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_expired_token_raises_unauthorized(self, mock_db):
@@ -196,15 +195,14 @@ class TestVerifyEmailChange:
             "email": "new@example.com",
             "user_id": 7,
             "used_at": None,
+            "invalidated_at": None,
             "expires_at": datetime.now(UTC) - timedelta(minutes=1),
         }
         with (
             patch("src.app.api.v1.users.enforce_rate_limit", new_callable=AsyncMock),
             patch("src.app.api.v1.users.crud_authentication_requests") as mock_crud,
-            patch("src.app.api.v1.users.crud_users") as mock_users,
         ):
             mock_crud.get = AsyncMock(return_value=auth_request)
-            mock_users.get = AsyncMock(return_value={"id": 7, "email": "old@example.com"})
 
             with pytest.raises(UnauthorizedException, match="expired"):
                 await verify_email_change(_request(), EmailChangeVerifyRequest(token="expired"), mock_db)
@@ -216,6 +214,7 @@ class TestVerifyEmailChange:
             "email": "new@example.com",
             "user_id": 7,
             "used_at": None,
+            "invalidated_at": None,
             "expires_at": datetime.now(UTC) + timedelta(minutes=10),
         }
         with (
@@ -236,6 +235,7 @@ class TestVerifyEmailChange:
             "email": "taken@example.com",
             "user_id": 7,
             "used_at": None,
+            "invalidated_at": None,
             "expires_at": datetime.now(UTC) + timedelta(minutes=10),
         }
         with (
@@ -257,6 +257,7 @@ class TestVerifyEmailChange:
             "email": "new@example.com",
             "user_id": 7,
             "used_at": None,
+            "invalidated_at": None,
             "expires_at": datetime.now(UTC) + timedelta(minutes=10),
         }
 
@@ -289,6 +290,7 @@ class TestVerifyEmailChange:
             "email": "race@example.com",
             "user_id": 7,
             "used_at": None,
+            "invalidated_at": None,
             "expires_at": datetime.now(UTC) + timedelta(minutes=10),
         }
 

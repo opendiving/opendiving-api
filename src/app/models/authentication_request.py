@@ -7,7 +7,7 @@ from ..core.db.database import Base
 
 
 class AuthenticationRequest(Base):
-    """A single-use, short-lived email magic-link token.
+    """A short-lived email magic-link token.
 
     Deliberately separate from `User`/`AuthenticationProvider`: proving ownership of an
     email address must never, by itself, create a user record - see `POST
@@ -17,8 +17,8 @@ class AuthenticationRequest(Base):
 
     Also doubles as the magic-link backing an *existing* user's email-change
     confirmation (`purpose="email_change"`, see `POST /user/email-change/request`/
-    `POST /user/email-change/verify` in `api.v1.users`) - the mechanics (single-use,
-    hashed token, short expiry) are identical, only what "verifying" it does differs.
+    `POST /user/email-change/verify` in `api.v1.users`) - the mechanics (hashed token,
+    short expiry) are identical, only what "verifying" it does differs.
     """
 
     __tablename__ = "authentication_request"
@@ -34,7 +34,22 @@ class AuthenticationRequest(Base):
     token_hash: Mapped[str] = mapped_column(String, unique=True, index=True)
 
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    # Timestamp of the first successful verification - purely informational/for
+    # observability. Deliberately does *not* block a link from being opened again:
+    # a mail client's link-preview/security-scanning feature can "detonate" a link
+    # before a human clicks it, and re-verifying an already-used-but-not-invalidated
+    # token just re-confirms the exact same outcome (same account signed in, or the
+    # same email-change re-applied), so treating it as an error would only produce
+    # confusing failures for something that, in fact, already worked. See
+    # `invalidated_at` for what actually revokes a token.
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
+    # Set when a *newer* request supersedes this one (see `POST /auth/email/request`/
+    # `POST /user/email-change/request`, which invalidate any still-live previous
+    # request for the same email/user) - this is what actually revokes a token,
+    # distinct from `used_at`.
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
     # "sign_in" (the original magic-link flow) or "email_change". Determines which
     # endpoint is willing to consume a given row, and what "used" means for it.

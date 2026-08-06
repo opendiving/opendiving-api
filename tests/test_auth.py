@@ -81,7 +81,8 @@ class TestRequestEmailLink:
             assert kwargs["allow_multiple"] is True
             assert kwargs["email"] == "repeat@example.com"
             assert kwargs["purpose"] == "sign_in"
-            assert kwargs["used_at"] is None
+            assert kwargs["invalidated_at"] is None
+            assert kwargs["object"].invalidated_at is not None
 
     @pytest.mark.asyncio
     async def test_does_not_call_update_when_there_is_nothing_pending(self, mock_db):
@@ -101,7 +102,7 @@ class TestRequestEmailLink:
             await request_email_link(_request(), EmailAuthRequest(email="first-time@example.com"), mock_db)
 
             mock_crud.count.assert_called_once_with(
-                mock_db, email="first-time@example.com", purpose="sign_in", used_at=None
+                mock_db, email="first-time@example.com", purpose="sign_in", invalidated_at=None
             )
             mock_crud.update.assert_not_called()
             mock_crud.create.assert_called_once()
@@ -130,11 +131,15 @@ class TestVerifyEmailLink:
                 await verify_email_link(_request(), EmailVerifyRequest(token="bad"), Mock(), mock_db)
 
     @pytest.mark.asyncio
-    async def test_reused_token_raises_unauthorized(self, mock_db):
+    async def test_invalidated_token_raises_unauthorized(self, mock_db):
+        """Superseded by a newer request (see `request_email_link`) - a hard reject,
+        unlike a merely-already-used-but-still-live token (see the idempotent-reuse
+        test below)."""
         auth_request = {
             "id": 1,
             "email": "a@example.com",
-            "used_at": datetime.now(UTC),
+            "used_at": None,
+            "invalidated_at": datetime.now(UTC),
             "expires_at": datetime.now(UTC) + timedelta(minutes=10),
         }
         with (
@@ -143,8 +148,8 @@ class TestVerifyEmailLink:
         ):
             mock_crud.get = AsyncMock(return_value=auth_request)
 
-            with pytest.raises(UnauthorizedException, match="already been used"):
-                await verify_email_link(_request(), EmailVerifyRequest(token="used"), Mock(), mock_db)
+            with pytest.raises(UnauthorizedException, match="no longer valid"):
+                await verify_email_link(_request(), EmailVerifyRequest(token="stale"), Mock(), mock_db)
 
     @pytest.mark.asyncio
     async def test_expired_token_raises_unauthorized(self, mock_db):
@@ -152,6 +157,7 @@ class TestVerifyEmailLink:
             "id": 1,
             "email": "a@example.com",
             "used_at": None,
+            "invalidated_at": None,
             "expires_at": datetime.now(UTC) - timedelta(minutes=1),
         }
         with (
@@ -164,11 +170,43 @@ class TestVerifyEmailLink:
                 await verify_email_link(_request(), EmailVerifyRequest(token="expired"), Mock(), mock_db)
 
     @pytest.mark.asyncio
+    async def test_already_used_but_live_token_succeeds_again(self, mock_db):
+        """Re-opening the same link (e.g. a mail client's link-preview/security-
+        scanning feature having already "detonated" it, or the user clicking twice)
+        must not error - it just re-confirms the same outcome, and shouldn't
+        re-touch `used_at` a second time."""
+        auth_request = {
+            "id": 1,
+            "email": "existing@example.com",
+            "used_at": datetime.now(UTC),
+            "invalidated_at": None,
+            "expires_at": datetime.now(UTC) + timedelta(minutes=10),
+        }
+        db_user = {"id": 1, "username": "existinguser", "email": "existing@example.com"}
+
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
+            patch("src.app.services.auth_service.crud_authentication_providers") as mock_providers,
+            patch("src.app.services.auth_service.crud_users") as mock_users,
+        ):
+            mock_requests.get = AsyncMock(return_value=auth_request)
+            mock_requests.update = AsyncMock(return_value=None)
+            mock_users.get = AsyncMock(return_value=db_user)
+            mock_providers.exists = AsyncMock(return_value=True)
+
+            outcome = await verify_email_link(_request(), EmailVerifyRequest(token="already-used"), Mock(), mock_db)
+
+            assert outcome.status == "authenticated"
+            mock_requests.update.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_existing_user_is_authenticated_and_token_marked_used(self, mock_db):
         auth_request = {
             "id": 1,
             "email": "existing@example.com",
             "used_at": None,
+            "invalidated_at": None,
             "expires_at": datetime.now(UTC) + timedelta(minutes=10),
         }
         db_user = {"id": 1, "username": "existinguser", "email": "existing@example.com"}
@@ -201,6 +239,7 @@ class TestVerifyEmailLink:
             "id": 1,
             "email": "new@example.com",
             "used_at": None,
+            "invalidated_at": None,
             "expires_at": datetime.now(UTC) + timedelta(minutes=10),
         }
 

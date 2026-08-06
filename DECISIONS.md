@@ -775,28 +775,45 @@ expired", but their email *had* actually changed in the DB. Root cause: many mai
 clients (Outlook/Microsoft Defender "Safe Links", iOS Mail's rich link previews,
 etc.) "detonate" or preview-render links using a real, JS-executing browser *before*
 a human ever clicks them - which, when the link target auto-fires the verify call
-from a `useEffect` on page load (as this originally did), silently consumes the
-single-use token. The real user's subsequent click then correctly gets "already
-used" - a technically-accurate but confusing error, since the change they wanted had,
-in fact, already gone through.
+from a `useEffect` on page load (this app's design from the start, since a page -
+unlike a bare API link - already defeats *simple*, non-JS-executing scanners), can
+silently consume the token first. The real user's subsequent click then used to get a
+hard "already used" error - a technically-accurate but confusing one, since the
+change they wanted had, in fact, already gone through.
 
-Two layers now guard against this:
-1. **Idempotent re-verification** (`verify_email_change`): if a token is already used
-   *and* the account's current email already matches what that token would have set,
-   it returns success instead of erroring - only a used token whose target doesn't
-   match the current state is treated as a genuine (rejected) reuse. This is safe
-   specifically because it grants no new privilege - it just confirms an
-   already-applied, idempotent fact. This is deliberately *not* done for
-   `/auth/email/verify` (sign-in) - reissuing fresh access/refresh tokens on every
-   replay of a "used" token would defeat single-use as a security control in a way
-   that re-confirming an email change does not.
-2. **Explicit confirmation click** (`opendiving-web`'s `/auth/verify` and
-   `/settings/confirm-email` pages): both now show a "Sign in"/"Confirm email
-   change" button instead of calling the verify endpoint automatically on page load.
-   A passive preview/scan can load the page, but it can't fake a real button click,
-   so this stops the token from being silently consumed before the user acts at all
-   - a stronger fix than relying solely on "it's a page, not a raw API link" (see web
-   app's `DECISIONS.md`).
+Two approaches were tried and rejected before landing on the current one:
+- **A same-browser "pairing" cookie** (set when the link is requested, checked when
+  it's opened) would tell a scanner - which never has that cookie - apart from the
+  real user. Rejected: it's extremely common to *request* a link on one
+  device/browser (e.g. a laptop) and *open* it from another (e.g. a phone's mail
+  app), which would just relabel "legitimate cross-device use" as "unpaired" and
+  push it down the same degraded path as an actual scanner.
+- **Requiring an explicit confirmation click** (a "Sign in"/"Confirm email change"
+  button instead of auto-verifying on load) reliably defeats the scanner problem,
+  but adds friction to every single sign-in, forever, to guard against a
+  comparatively rare event - not the right tradeoff for how central this flow is.
+
+What's actually implemented instead: `AuthenticationRequest` distinguishes `used_at`
+(informational - when a token was first successfully verified) from `invalidated_at`
+(when a *newer* request supersedes it - see `request_email_link`/`request_email_change`,
+which invalidate any previous live request for the same email/user). Verifying an
+already-used-but-not-invalidated token is deliberately **not** an error - it's a
+harmless repeat, since re-running `resolve_identity`/re-applying the same email
+change produces the exact same outcome every time. Only an *invalidated* or
+*expired* token is rejected. This is safe specifically because neither flow grants
+an escalated or different outcome on replay within the token's own (short) validity
+window - it's the same account either way - so there's no meaningful security
+downgrade, just the removal of a confusing failure mode. Both `/auth/email/verify`
+and `/user/email-change/verify` follow this same pattern now; the frontend pages
+(`/auth/verify`, `/settings/confirm-email`) go back to auto-verifying on load, no
+click required (see the web app's `DECISIONS.md`).
+
+`invalidated_at` was added to the *existing* `authentication_request` table - same
+"no migration tool" caveat as `purpose`/`user_id` above applies on an already-running
+dev DB:
+```sql
+ALTER TABLE authentication_request ADD COLUMN invalidated_at TIMESTAMPTZ;
+```
 
 The admin panel (`admin/views.py`) lost its `password_transformer`/`PasswordTransformer`
 for the `User` view - there's no password field to transform. Admin-created users

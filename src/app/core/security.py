@@ -59,6 +59,7 @@ def hash_token(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode()).hexdigest()
 
 
+
 # -------------- google id token verification --------------
 async def verify_google_id_token(credential: str) -> GoogleUserInfo | None:
     """Verify a Google Identity Services ID token and extract the account info from it.
