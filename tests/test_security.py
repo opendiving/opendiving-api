@@ -6,46 +6,50 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from jose import jwt
 
+from src.app.core.schemas import GoogleUserInfo, OnboardingTokenData
 from src.app.core.security import (
     ALGORITHM,
     SECRET_KEY,
     TokenType,
-    authenticate_user,
     blacklist_token,
     blacklist_tokens,
     create_access_token,
+    create_onboarding_token,
     create_refresh_token,
-    get_password_hash,
+    generate_secure_token,
+    hash_token,
     verify_google_id_token,
-    verify_password,
+    verify_onboarding_token,
     verify_token,
 )
 
 
-class TestPasswordHashing:
-    """Test password hashing and verification."""
+class TestMagicLinkTokens:
+    """Test the magic-link token generation/hashing helpers."""
 
-    @pytest.mark.asyncio
-    async def test_hash_and_verify_roundtrip(self):
-        """A password hashed with get_password_hash should verify successfully."""
-        password = "S3cur3P@ssword!"
-        hashed = get_password_hash(password)
+    def test_generate_secure_token_is_url_safe_and_high_entropy(self):
+        token = generate_secure_token()
 
-        assert hashed != password
-        assert await verify_password(password, hashed) is True
+        assert isinstance(token, str)
+        assert len(token) >= 32
+        # url-safe base64 alphabet only
+        assert all(c.isalnum() or c in "-_" for c in token)
 
-    @pytest.mark.asyncio
-    async def test_verify_wrong_password_fails(self):
-        """A different password should not verify against an existing hash."""
-        hashed = get_password_hash("correct-password")
+    def test_generate_secure_token_is_not_deterministic(self):
+        assert generate_secure_token() != generate_secure_token()
 
-        assert await verify_password("wrong-password", hashed) is False
+    def test_hash_token_is_deterministic(self):
+        token = generate_secure_token()
 
-    def test_hash_is_not_deterministic(self):
-        """Hashing the same password twice should produce different hashes (unique salt)."""
-        password = "same-password"
+        assert hash_token(token) == hash_token(token)
 
-        assert get_password_hash(password) != get_password_hash(password)
+    def test_hash_token_differs_for_different_tokens(self):
+        assert hash_token(generate_secure_token()) != hash_token(generate_secure_token())
+
+    def test_hash_token_does_not_return_the_raw_token(self):
+        token = generate_secure_token()
+
+        assert hash_token(token) != token
 
 
 class TestTokenCreation:
@@ -140,71 +144,75 @@ class TestVerifyToken:
             assert token_data is None
 
 
-class TestAuthenticateUser:
-    """Test the authenticate_user helper."""
+class TestOnboardingTokens:
+    """Test the temporary onboarding-session JWT helpers backing `POST /auth/complete`."""
 
     @pytest.mark.asyncio
-    async def test_authenticate_with_email_success(self, mock_db):
-        password = "correct-password"
-        db_user = {"username": "someuser", "email": "user@example.com", "hashed_password": get_password_hash(password)}
+    async def test_create_and_verify_roundtrip(self, mock_db):
+        data = OnboardingTokenData(
+            email="new@example.com", provider="google", provider_user_id="g-1", name="New Person", avatar=None
+        )
 
-        with patch("src.app.core.security.crud_users") as mock_crud:
-            mock_crud.get = AsyncMock(return_value=db_user)
+        token = await create_onboarding_token(data)
 
-            result = await authenticate_user("user@example.com", password, mock_db)
+        with patch("src.app.core.security.crud_token_blacklist") as mock_blacklist:
+            mock_blacklist.exists = AsyncMock(return_value=False)
 
-            assert result == db_user
-            mock_crud.get.assert_called_once_with(db=mock_db, email="user@example.com", is_deleted=False)
+            result = await verify_onboarding_token(token, mock_db)
 
-    @pytest.mark.asyncio
-    async def test_authenticate_with_username_success(self, mock_db):
-        password = "correct-password"
-        db_user = {"username": "someuser", "email": "user@example.com", "hashed_password": get_password_hash(password)}
-
-        with patch("src.app.core.security.crud_users") as mock_crud:
-            mock_crud.get = AsyncMock(return_value=db_user)
-
-            result = await authenticate_user("someuser", password, mock_db)
-
-            assert result == db_user
-            mock_crud.get.assert_called_once_with(db=mock_db, username="someuser", is_deleted=False)
+            assert result == data
 
     @pytest.mark.asyncio
-    async def test_authenticate_unknown_user_returns_false(self, mock_db):
-        with patch("src.app.core.security.crud_users") as mock_crud:
-            mock_crud.get = AsyncMock(return_value=None)
+    async def test_verify_rejects_blacklisted_token(self, mock_db):
+        data = OnboardingTokenData(email="new@example.com", provider="email")
+        token = await create_onboarding_token(data)
 
-            result = await authenticate_user("nobody@example.com", "any-password", mock_db)
+        with patch("src.app.core.security.crud_token_blacklist") as mock_blacklist:
+            mock_blacklist.exists = AsyncMock(return_value=True)
 
-            assert result is False
+            result = await verify_onboarding_token(token, mock_db)
 
-    @pytest.mark.asyncio
-    async def test_authenticate_wrong_password_returns_false(self, mock_db):
-        db_user = {"username": "someuser", "email": "user@example.com", "hashed_password": get_password_hash("correct")}
-
-        with patch("src.app.core.security.crud_users") as mock_crud:
-            mock_crud.get = AsyncMock(return_value=db_user)
-
-            result = await authenticate_user("someuser", "wrong-password", mock_db)
-
-            assert result is False
+            assert result is None
 
     @pytest.mark.asyncio
-    async def test_authenticate_google_only_account_returns_false(self, mock_db):
-        """A Google-only account (see `verify_google_id_token`) has no password to check
-        against - password sign-in must fail rather than crash on a `None` hash."""
-        db_user = {"username": "someuser", "email": "user@example.com", "hashed_password": None}
+    async def test_verify_rejects_expired_token(self, mock_db):
+        data = OnboardingTokenData(email="new@example.com", provider="email")
 
-        with patch("src.app.core.security.crud_users") as mock_crud:
-            mock_crud.get = AsyncMock(return_value=db_user)
+        with patch("src.app.core.security.settings") as mock_settings:
+            mock_settings.ONBOARDING_TOKEN_EXPIRE_MINUTES = -5
+            token = await create_onboarding_token(data)
 
-            result = await authenticate_user("someuser", "any-password", mock_db)
+        with patch("src.app.core.security.crud_token_blacklist") as mock_blacklist:
+            mock_blacklist.exists = AsyncMock(return_value=False)
 
-            assert result is False
+            result = await verify_onboarding_token(token, mock_db)
+
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_verify_rejects_wrong_token_type(self, mock_db):
+        """An access token presented as an onboarding token should be rejected."""
+        token = await create_access_token({"sub": "someuser"})
+
+        with patch("src.app.core.security.crud_token_blacklist") as mock_blacklist:
+            mock_blacklist.exists = AsyncMock(return_value=False)
+
+            result = await verify_onboarding_token(token, mock_db)
+
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_verify_rejects_malformed_token(self, mock_db):
+        with patch("src.app.core.security.crud_token_blacklist") as mock_blacklist:
+            mock_blacklist.exists = AsyncMock(return_value=False)
+
+            result = await verify_onboarding_token("not-a-valid-jwt", mock_db)
+
+            assert result is None
 
 
 class TestVerifyGoogleIdToken:
-    """Test the Google ID token verification helper backing `/login/google`."""
+    """Test the Google ID token verification helper backing `POST /auth/google`."""
 
     @pytest.mark.asyncio
     async def test_returns_none_when_client_id_not_configured(self):
@@ -222,6 +230,7 @@ class TestVerifyGoogleIdToken:
             "email": "user@example.com",
             "email_verified": True,
             "name": "Jane Doe",
+            "picture": "https://example.com/avatar.png",
         }
 
         with (
@@ -233,10 +242,12 @@ class TestVerifyGoogleIdToken:
 
             result = await verify_google_id_token("good-credential")
 
-            assert result is not None
-            assert result.google_id == "google-123"
-            assert result.email == "user@example.com"
-            assert result.name == "Jane Doe"
+            assert result == GoogleUserInfo(
+                google_id="google-123",
+                email="user@example.com",
+                name="Jane Doe",
+                avatar="https://example.com/avatar.png",
+            )
 
     @pytest.mark.asyncio
     async def test_returns_none_for_unverified_email(self):
@@ -281,6 +292,7 @@ class TestVerifyGoogleIdToken:
 
             assert result is not None
             assert result.name == "jane"
+            assert result.avatar is None
 
 
 class TestBlacklistToken:

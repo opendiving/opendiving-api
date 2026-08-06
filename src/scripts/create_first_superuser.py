@@ -2,13 +2,12 @@ import asyncio
 import logging
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, Column, DateTime, Integer, MetaData, String, Table, insert, select
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, MetaData, String, Table, insert, select
 from sqlalchemy.dialects.postgresql import UUID
 from uuid6 import uuid7  # 126
 
 from ..app.core.config import settings
 from ..app.core.db.database import AsyncSession, async_engine, local_session
-from ..app.core.security import get_password_hash
 from ..app.models.user import User
 
 logging.basicConfig(level=logging.INFO)
@@ -20,7 +19,6 @@ async def create_first_user(session: AsyncSession) -> None:
         name = settings.ADMIN_NAME
         email = settings.ADMIN_EMAIL
         username = settings.ADMIN_USERNAME
-        hashed_password = get_password_hash(settings.ADMIN_PASSWORD)
 
         query = select(User).filter_by(email=email)
         result = await session.execute(query)
@@ -35,7 +33,6 @@ async def create_first_user(session: AsyncSession) -> None:
                 Column("name", String(30), nullable=False),
                 Column("username", String(20), nullable=False, unique=True, index=True),
                 Column("email", String(50), nullable=False, unique=True, index=True),
-                Column("hashed_password", String, nullable=False),
                 Column("profile_image_url", String, default="https://profileimageurl.com"),
                 Column("uuid", UUID(as_uuid=True), default=uuid7, unique=True),
                 Column("created_at", DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False),
@@ -44,18 +41,31 @@ async def create_first_user(session: AsyncSession) -> None:
                 Column("is_deleted", Boolean, default=False, index=True),
                 Column("is_superuser", Boolean, default=False),
             )
+            authentication_provider_table = Table(
+                "authentication_provider",
+                metadata,
+                Column("id", Integer, primary_key=True, autoincrement=True, nullable=False),
+                Column("user_id", Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
+                Column("provider", String(20), nullable=False),
+                Column("provider_user_id", String, nullable=True),
+                Column("created_at", DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False),
+            )
 
             data = {
                 "name": name,
                 "email": email,
                 "username": username,
-                "hashed_password": hashed_password,
                 "is_superuser": True,
             }
 
-            stmt = insert(user_table).values(data)
             async with async_engine.connect() as conn:
-                await conn.execute(stmt)
+                result = await conn.execute(insert(user_table).values(data).returning(user_table.c.id))
+                user_id = result.scalar_one()
+                # No password anywhere - the admin authenticates the same way as any
+                # other user, via the email-magic-link flow (see `AuthenticationProvider`).
+                await conn.execute(
+                    insert(authentication_provider_table).values(user_id=user_id, provider="email")
+                )
                 await conn.commit()
 
             logger.info(f"Admin user {username} created successfully.")

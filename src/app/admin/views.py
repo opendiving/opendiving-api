@@ -1,7 +1,5 @@
 from crudadmin import CRUDAdmin
-from crudadmin.admin_interface.model_view import PasswordTransformer
 
-from ..core.security import get_password_hash
 from ..models.dive import Dive
 from ..models.dive_dive_site import DiveDiveSite
 from ..models.dive_mixture import DiveMixture
@@ -14,7 +12,7 @@ from ..schemas.dive_dive_site import DiveDiveSiteCreate, DiveDiveSiteUpdate
 from ..schemas.dive_mixture import DiveMixtureCreateInternal, DiveMixtureUpdate
 from ..schemas.dive_site import DiveSiteCreateInternal, DiveSiteUpdate
 from ..schemas.trip import TripCreateInternal, TripUpdate
-from ..schemas.user import UserCreate, UserCreateInternal, UserUpdate
+from ..schemas.user import UserCreateInternal, UserUpdate
 from ..schemas.user_dive_stats import UserDiveStatsUpdate
 
 
@@ -25,19 +23,13 @@ def register_admin_views(admin: CRUDAdmin) -> None:
     schemas and permissions.
     """
 
-    password_transformer = PasswordTransformer(
-        password_field="password",
-        hashed_field="hashed_password",
-        hash_function=get_password_hash,
-        required_fields=["name", "username", "email"],
-    )
-
+    # No password field anywhere - a `User` has no authentication method of its own
+    # (see `AuthenticationProvider`), so admin-created users can sign in afterwards via
+    # the normal email-magic-link flow using their `email`.
     admin.add_view(
         model=User,
-        create_schema=UserCreate,
+        create_schema=UserCreateInternal,
         update_schema=UserUpdate,
-        update_internal_schema=UserCreateInternal,
-        password_transformer=password_transformer,
         allowed_actions={"view", "create", "update"},
     )
 

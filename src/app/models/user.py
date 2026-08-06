@@ -14,18 +14,11 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     username: Mapped[str] = mapped_column(String(20), unique=True, index=True)
     email: Mapped[str] = mapped_column(String(50), unique=True, index=True)
 
-    # Nullable because Google-only accounts (see `/login/google`) never set a
-    # password - there's nothing to hash. `authenticate_user` (core/security.py)
-    # treats a `None` here as "password sign-in unavailable for this account".
-    hashed_password: Mapped[str | None] = mapped_column(String, default=None)
-
-    # The `sub` claim from Google's ID token, i.e. the stable, unique identifier
-    # for the Google account - set once an account has signed in with Google at
-    # least once (either created via Google, or a password account that later
-    # links its already-verified email to a Google account). Never reused across
-    # users, hence `unique=True`.
-    google_id: Mapped[str | None] = mapped_column(String, unique=True, index=True, default=None)
-
+    # No password/provider-id columns here at all - a user's actual authentication
+    # methods (magic-link email, Google, and any future provider) live exclusively in
+    # `AuthenticationProvider`, one row per linked provider. This is what lets the same
+    # account be reached via either method without the `User` row itself needing to
+    # know which ones are in use.
     profile_image_url: Mapped[str] = mapped_column(String, default="https://profileimageurl.com")
     is_superuser: Mapped[bool] = mapped_column(default=False)
 

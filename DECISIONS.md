@@ -570,3 +570,113 @@ ALTER TABLE "user" ALTER COLUMN hashed_password DROP NOT NULL;
 ALTER TABLE "user" ADD COLUMN google_id VARCHAR;
 CREATE UNIQUE INDEX ix_user_google_id ON "user" (google_id);
 ```
+
+**Superseded** by the unified auth flow below - `/login`, `/login/google`, and
+`POST /user` (password signup) no longer exist, and `User` no longer has
+`hashed_password`/`google_id` columns at all.
+
+## Unified auth flow: no passwords, no separate sign up, one `User` row per identity
+
+The entire password-based login/signup system (`POST /login`, `POST /login/google`,
+`POST /user`) was replaced with a single flow entered through either an email magic
+link or Google - see `api/v1/auth.py`. The driving requirement: **authentication
+("who are you?") must be fully separated from account creation ("tell us about
+you")**, so no unverified/incomplete user can ever end up in the `user` table, and a
+verified email or Google account is looked up *before* deciding whether to sign in or
+start onboarding - never the other way around.
+
+Three new pieces make this work:
+
+- **`AuthenticationRequest`** (`models/authentication_request.py`) - a purely
+  temporary, table-backed record for the email magic-link flow. Stores a SHA-256
+  hash of the token (never the raw token - see `core.security.hash_token`), an
+  `expires_at` (30 min, `settings.MAGIC_LINK_TOKEN_EXPIRE_MINUTES`), and a nullable
+  `used_at` that makes it single-use. Deliberately holds no reference to `User` -
+  proving you control an email address must never, by itself, create or touch a user
+  row.
+- **`AuthenticationProvider`** (`models/authentication_provider.py`) - one row per
+  provider a `User` has linked (`provider="email"`, `provider="google"` with
+  `provider_user_id` set to Google's `sub`, and any future provider needs no schema
+  change - just a new `provider` value). This is what lets the same account be
+  reached via either method: `services.auth_service.resolve_identity` looks up by
+  provider identity first (Google's `sub`, when present), falls back to looking up
+  by email, and links the current provider onto that account if it isn't linked yet.
+  Two `UniqueConstraint`s enforce the invariants that matter: `(provider,
+  provider_user_id)` stops the same Google account from ever being linked to two
+  users (Postgres treats each row's `NULL` `provider_user_id` - i.e. every "email"
+  row - as distinct from every other `NULL`, so this doesn't block multiple users
+  each having their own "email" row), and `(user_id, provider)` stops a user from
+  linking the same provider twice.
+- **Onboarding tokens** (`core.security.create_onboarding_token`/
+  `verify_onboarding_token`) - a short-lived JWT (`TokenType.ONBOARDING`, 30 min via
+  `settings.ONBOARDING_TOKEN_EXPIRE_MINUTES`) carrying a verified-but-accountless
+  identity (email, provider, provider-specific id, prefill name/avatar) from
+  `/auth/email/verify` or `/auth/google` to `/auth/complete`. Never persisted -
+  same as access/refresh tokens, it's just a signed, self-contained blob - but it's
+  recorded in the existing `token_blacklist` table once used (`blacklist_token`),
+  making it single-use exactly like a magic-link token. This is also what backstops
+  "no unverified users": a `User` row is created in exactly one place
+  (`complete_profile`), and only after this token has been validated.
+
+`services.auth_service.resolve_identity` is the one place both `/auth/email/verify`
+and `/auth/google` funnel through to answer "does an account already exist, and if
+so is this provider linked to it yet" identically for both - see its docstring for
+the three-step lookup order. It returns either `AuthenticatedUser` (sign in
+immediately) or `OnboardingRequired` (mint an onboarding token, no DB write).
+
+`complete_profile` (`POST /auth/complete`) creates the `User` row and its first
+`AuthenticationProvider` row together, using FastCRUD's `create(..., commit=False)`
+followed by one explicit `db.commit()`, with `except IntegrityError: await
+db.rollback()` around both - this is what makes account creation transactional and
+race-safe: two concurrent completions of the same onboarding token (or two signups
+racing for the same username) both pass the pre-emptive `crud_users.exists(...)`
+checks, but only one of them can win the DB-level unique constraint on `email`/
+`username`; the loser's `IntegrityError` is turned into a `DuplicateValueException`
+rather than a 500 or (worse) a duplicate account.
+
+`POST /auth/email/request` invalidating previous pending tokens hit the same
+`NoResultFound` pitfall as the token-blacklist purge job (`core/worker/functions.py`):
+FastCRUD's `update(..., allow_multiple=True)` raises `NoResultFound` when zero rows
+match, and the common case here - a first-time request - has nothing pending to
+invalidate. Fixed the same way: `count()` first, only call `update()` if it's non-zero.
+
+Rate limiting (`core.utils.rate_limit.enforce_rate_limit`) is a fixed-window Redis
+counter (`INCR` + `EXPIRE`) applied per-email and per-IP on `/auth/email/request`,
+and per-IP on `/auth/email/verify`/`/auth/google` - see `MagicLinkSettings` in
+`core/config.py` for the limits/window. It's a soft dependency: if `cache.client`
+is `None` (Redis unreachable/not configured), it's a no-op rather than a hard
+failure, since the actual security boundary is token expiry + single-use +
+`RESEND_API_KEY`-gated sending, not the rate limiter.
+
+`POST /auth/email/request` always returns the exact same
+`EmailAuthRequestResponse` message regardless of whether the email belongs to an
+existing account, and - unlike the old `/login`/`POST /user` - never even queries
+`crud_users`. Enumeration protection here isn't a response-shaping trick bolted on
+afterwards; the code path genuinely can't distinguish the two cases, because
+whether a magic link will eventually sign someone in or send them to onboarding is
+only decided later, in `/auth/email/verify`.
+
+CSRF: the only cookie-authenticated endpoint in this flow is `POST /refresh` (the
+httpOnly `refresh_token` cookie set by `issue_tokens`) - every other endpoint here is
+either unauthenticated (the whole point of `/auth/*`) or authenticated via a Bearer
+access token, which browsers never attach automatically, so it isn't CSRF-able at
+all. `/refresh`'s cookie is `samesite="lax"`, which browsers refuse to attach on
+cross-site `fetch`/XHR (only top-level navigations), so a malicious page can't
+silently trigger it with the victim's session - this was already the design before
+this rewrite, just re-verified as still sufficient given the new endpoints don't
+change that picture.
+
+The admin panel (`admin/views.py`) lost its `password_transformer`/`PasswordTransformer`
+for the `User` view - there's no password field to transform. Admin-created users
+authenticate afterwards the same way as anyone else, via their `email`. Similarly,
+`scripts/create_first_superuser.py` no longer sets a `hashed_password`; it now also
+inserts a matching `authentication_provider` row (`provider="email"`) so the
+admin account it creates can actually sign in.
+
+Applying this to an existing local DB (per the "no migration tool" section above) -
+`create_all()` creates the two new tables automatically, but won't touch the
+existing `user` table:
+```sql
+ALTER TABLE "user" DROP COLUMN hashed_password;
+ALTER TABLE "user" DROP COLUMN google_id;
+```

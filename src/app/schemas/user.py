@@ -1,8 +1,7 @@
-import re
 from datetime import datetime
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from ..core.schemas import PublicUUIDSchema
 
@@ -32,30 +31,15 @@ class UserReadInternal(UserRead):
     id: int
 
 
-class UserCreate(UserBase):
-    model_config = ConfigDict(extra="forbid")
-
-    password: Annotated[str, Field(min_length=8, examples=["Str1ngst!"])]
-
-    @field_validator("password")
-    @classmethod
-    def validate_password_strength(cls, value: str) -> str:
-        if not re.search(r"[0-9]", value):
-            raise ValueError("Password must contain at least one number")
-        if not re.search(r"[A-Z]", value):
-            raise ValueError("Password must contain at least one uppercase letter")
-        if not re.search(r"[a-z]", value):
-            raise ValueError("Password must contain at least one lowercase letter")
-        if not re.search(r"[^a-zA-Z0-9]", value):
-            raise ValueError("Password must contain at least one special character")
-        return value
-
-
 class UserCreateInternal(UserBase):
-    # Both optional: a Google sign-up (see `/login/google`) sets `google_id` and
-    # leaves `hashed_password` unset, while a regular sign-up is the reverse.
-    hashed_password: str | None = None
-    google_id: str | None = None
+    """The only way a `User` row is ever created - from a completed profile (`POST
+    /auth/complete`), never directly from a signup form. There's no password field
+    anywhere: identity is proven up front by the email-magic-link or Google flow, and
+    the resulting authentication method is recorded separately (see
+    `AuthenticationProviderCreate`), not on the user row itself.
+    """
+
+    profile_image_url: str = "https://profileimageurl.com"
 
 
 class UserUpdate(BaseModel):

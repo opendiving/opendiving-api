@@ -1,8 +1,9 @@
+import hashlib
+import secrets
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Any, Literal, cast
+from typing import Any
 
-import bcrypt
 from fastapi.security import OAuth2PasswordBearer
 from google.auth.exceptions import GoogleAuthError
 from google.auth.transport import requests as google_requests
@@ -11,54 +12,54 @@ from jose import JWTError, jwt
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..crud.crud_users import crud_users
 from .config import settings
 from .db.crud_token_blacklist import crud_token_blacklist
-from .schemas import GoogleUserInfo, TokenBlacklistCreate, TokenData
+from .schemas import GoogleUserInfo, OnboardingTokenData, TokenBlacklistCreate, TokenData
 
 SECRET_KEY: SecretStr = settings.SECRET_KEY
 ALGORITHM = settings.ALGORITHM
 ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
 REFRESH_TOKEN_EXPIRE_DAYS = settings.REFRESH_TOKEN_EXPIRE_DAYS
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/login")
+# Only used to *validate* a Bearer access token on protected routes (see
+# `api.dependencies.get_current_user`) - there's deliberately no `tokenUrl` endpoint
+# that issues one via a username/password form anymore. `OAuth2PasswordBearer` is used
+# purely for its "extract the Bearer token from the Authorization header, and describe
+# that in the OpenAPI schema" behavior, not its password-grant semantics.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/email/verify", auto_error=True)
 
 
 class TokenType(StrEnum):
     ACCESS = "access"
     REFRESH = "refresh"
+    # A short-lived, never-persisted session proving a verified identity (email or
+    # Google) that doesn't have a `User` row yet - see `create_onboarding_token`/
+    # `verify_onboarding_token` below, and `POST /auth/complete`.
+    ONBOARDING = "onboarding"
 
 
-async def verify_password(plain_password: str, hashed_password: str) -> bool:
-    correct_password: bool = bcrypt.checkpw(plain_password.encode(), hashed_password.encode())
-    return correct_password
+# -------------- magic-link tokens --------------
+def generate_secure_token() -> str:
+    """Generates a cryptographically secure, single-use random token for the email
+    magic-link flow (`POST /auth/email/request`). URL-safe so it can go straight into
+    a query string with no extra encoding.
+    """
+    return secrets.token_urlsafe(32)
 
 
-def get_password_hash(password: str) -> str:
-    hashed_password: str = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-    return hashed_password
+def hash_token(raw_token: str) -> str:
+    """Hashes a magic-link token for storage (`AuthenticationRequest.token_hash`).
+
+    Only the hash is ever persisted - a DB leak alone can't be used to mint valid
+    magic links, only to invalidate/enumerate them. `raw_token` already has 256 bits
+    of entropy from `secrets.token_urlsafe`, so a fast hash (rather than a
+    deliberately slow, salted one like bcrypt) is appropriate here: this is unlike a
+    user-chosen password, which needs defense against low-entropy guessing.
+    """
+    return hashlib.sha256(raw_token.encode()).hexdigest()
 
 
-async def authenticate_user(username_or_email: str, password: str, db: AsyncSession) -> dict[str, Any] | Literal[False]:
-    if "@" in username_or_email:
-        db_user = await crud_users.get(db=db, email=username_or_email, is_deleted=False)
-    else:
-        db_user = await crud_users.get(db=db, username=username_or_email, is_deleted=False)
-
-    if not db_user:
-        return False
-
-    db_user = cast(dict[str, Any], db_user)
-    # Google-only accounts (see `/login/google`) have no password to check against.
-    if db_user["hashed_password"] is None:
-        return False
-
-    if not await verify_password(password, db_user["hashed_password"]):
-        return False
-
-    return db_user
-
-
+# -------------- google id token verification --------------
 async def verify_google_id_token(credential: str) -> GoogleUserInfo | None:
     """Verify a Google Identity Services ID token and extract the account info from it.
 
@@ -95,9 +96,11 @@ async def verify_google_id_token(credential: str) -> GoogleUserInfo | None:
         google_id=payload["sub"],
         email=payload["email"],
         name=payload.get("name") or payload["email"].split("@")[0],
+        avatar=payload.get("picture"),
     )
 
 
+# -------------- access / refresh tokens --------------
 async def create_access_token(data: dict[str, Any], expires_delta: timedelta | None = None) -> str:
     to_encode = data.copy()
     if expires_delta:
@@ -155,6 +158,60 @@ async def verify_token(token: str, expected_token_type: TokenType, db: AsyncSess
         return None
 
 
+# -------------- onboarding tokens --------------
+async def create_onboarding_token(data: OnboardingTokenData) -> str:
+    """Creates a short-lived (`settings.ONBOARDING_TOKEN_EXPIRE_MINUTES`) JWT carrying a
+    verified-but-accountless identity from `/auth/email/verify` or `/auth/google` to
+    `/auth/complete`. Never persisted anywhere - the signature and expiry are all that
+    back it, same as access/refresh tokens - but it *is* recorded in the token
+    blacklist once used (see `blacklist_token`), making it single-use.
+    """
+    expire = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=settings.ONBOARDING_TOKEN_EXPIRE_MINUTES)
+    to_encode: dict[str, Any] = {
+        "email": data.email,
+        "provider": data.provider,
+        "provider_user_id": data.provider_user_id,
+        "name": data.name,
+        "avatar": data.avatar,
+        "exp": expire,
+        "token_type": TokenType.ONBOARDING,
+    }
+    encoded_jwt: str = jwt.encode(to_encode, SECRET_KEY.get_secret_value(), algorithm=ALGORITHM)
+    return encoded_jwt
+
+
+async def verify_onboarding_token(token: str, db: AsyncSession) -> OnboardingTokenData | None:
+    """Validates an onboarding JWT: not blacklisted (i.e. not already used to complete
+    a profile), not expired, and well-formed. Returns the identity it carries, or
+    `None` if any of that fails.
+    """
+    is_blacklisted = await crud_token_blacklist.exists(db, token=token)
+    if is_blacklisted:
+        return None
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+
+    if payload.get("token_type") != TokenType.ONBOARDING:
+        return None
+
+    email = payload.get("email")
+    provider = payload.get("provider")
+    if not email or not provider:
+        return None
+
+    return OnboardingTokenData(
+        email=email,
+        provider=provider,
+        provider_user_id=payload.get("provider_user_id"),
+        name=payload.get("name"),
+        avatar=payload.get("avatar"),
+    )
+
+
+# -------------- blacklisting --------------
 async def blacklist_tokens(access_token: str, refresh_token: str, db: AsyncSession) -> None:
     """Blacklist both access and refresh tokens.
 

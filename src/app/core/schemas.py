@@ -36,18 +36,29 @@ class TokenData(BaseModel):
 
 
 # -------------- google auth --------------
-class GoogleAuthRequest(BaseModel):
-    # The ID token (a JWT) returned to the frontend by Google Identity Services
-    # after the user signs in with their Google account.
-    credential: str
-
-
 class GoogleUserInfo(BaseModel):
     """Account info extracted from a verified Google ID token."""
 
     google_id: str
     email: str
     name: str
+    avatar: str | None = None
+
+
+# -------------- onboarding (temporary, pre-account session) --------------
+class OnboardingTokenData(BaseModel):
+    """Decoded payload of a short-lived onboarding JWT (see `create_onboarding_token`/
+    `verify_onboarding_token` in `core.security`), issued once an email or Google
+    identity has been verified but no `User` row exists for it yet. Never persisted -
+    it only ever lives inside the signed token itself, carried by the frontend from
+    `/auth/email/verify` or `/auth/google` to `/auth/complete`.
+    """
+
+    email: str
+    provider: str
+    provider_user_id: str | None = None
+    name: str | None = None
+    avatar: str | None = None
 
 
 class TokenBlacklistBase(BaseModel):

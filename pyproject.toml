@@ -29,6 +29,7 @@ dependencies = [
     "google-auth[requests]>=2.28.0",
     "gunicorn>=23.0.0",
     "defusedxml>=0.7.1",
+    "resend>=2.35.0",
 ]
 
 [project.optional-dependencies]

@@ -2,6 +2,31 @@
 
 Backend API for Open Diving app.
 
+## Authentication
+
+There is a single entry point into the app: email magic link or Google - no
+passwords, no separate sign up flow. See `src/app/api/v1/auth.py` for the endpoints
+(`/auth/email/request`, `/auth/email/verify`, `/auth/google`, `/auth/complete`) and
+`DECISIONS.md` for the full design rationale.
+
+Magic-link emails are sent via [Resend](https://resend.com). Set these in `src/.env`:
+
+```bash
+# Required to actually deliver magic-link emails - without it, the link is only
+# logged (useful for local development).
+RESEND_API_KEY="re_..._your_key"
+EMAIL_FROM_ADDRESS="onboarding@resend.dev"
+
+# Used to build the magic-link URL (`{FRONTEND_URL}/auth/verify?token=...`).
+FRONTEND_URL="http://localhost:3000"
+
+# Optional - tune magic-link/onboarding-session expiry and rate limits. See
+# `MagicLinkSettings`/`CryptSettings` in `src/app/core/config.py` for all of them
+# and their defaults.
+MAGIC_LINK_TOKEN_EXPIRE_MINUTES=30
+ONBOARDING_TOKEN_EXPIRE_MINUTES=30
+```
+
 ## Endpoints
 
 ### Parse a Suunto dive XML file
