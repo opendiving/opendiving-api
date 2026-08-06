@@ -9,7 +9,7 @@ class EmailChangeRequest(BaseModel):
 
 class EmailChangeRequestResponse(BaseModel):
     """Always the same generic message, regardless of whether `new_email` already
-    belongs to another account - see `POST /user/{uuid}/email-change/request`.
+    belongs to another account - see `POST /user/email-change/request`.
     """
 
     message: str = "Check your new email address to confirm the change."

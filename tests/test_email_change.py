@@ -14,7 +14,6 @@ from src.app.api.v1.users import request_email_change, verify_email_change
 from src.app.core.exceptions.http_exceptions import (
     BadRequestException,
     DuplicateValueException,
-    ForbiddenException,
     NotFoundException,
     RateLimitException,
     UnauthorizedException,
@@ -29,29 +28,13 @@ def _request(ip: str = "1.2.3.4") -> Mock:
 
 
 class TestRequestEmailChange:
-    """`POST /user/{uuid}/email-change/request`."""
-
-    @pytest.mark.asyncio
-    async def test_forbidden_for_another_users_uuid(self, mock_db, current_user_dict):
-        from uuid6 import uuid7
-
-        other_uuid = uuid7()
-
-        with pytest.raises(ForbiddenException):
-            await request_email_change(
-                _request(),
-                other_uuid,
-                EmailChangeRequest(new_email="new@example.com"),
-                current_user_dict,
-                mock_db,
-            )
+    """`POST /user/email-change/request`."""
 
     @pytest.mark.asyncio
     async def test_rejects_unchanged_email(self, mock_db, current_user_dict):
         with pytest.raises(BadRequestException):
             await request_email_change(
                 _request(),
-                current_user_dict["uuid"],
                 EmailChangeRequest(new_email=current_user_dict["email"].upper()),
                 current_user_dict,
                 mock_db,
@@ -65,7 +48,6 @@ class TestRequestEmailChange:
             with pytest.raises(RateLimitException):
                 await request_email_change(
                     _request(),
-                    current_user_dict["uuid"],
                     EmailChangeRequest(new_email="new@example.com"),
                     current_user_dict,
                     mock_db,
@@ -84,7 +66,6 @@ class TestRequestEmailChange:
 
             await request_email_change(
                 _request(),
-                current_user_dict["uuid"],
                 EmailChangeRequest(new_email="new@example.com"),
                 current_user_dict,
                 mock_db,
@@ -110,7 +91,6 @@ class TestRequestEmailChange:
 
             await request_email_change(
                 _request(),
-                current_user_dict["uuid"],
                 EmailChangeRequest(new_email="new@example.com"),
                 current_user_dict,
                 mock_db,
@@ -130,7 +110,6 @@ class TestRequestEmailChange:
 
             result = await request_email_change(
                 _request(),
-                current_user_dict["uuid"],
                 EmailChangeRequest(new_email="new@example.com"),
                 current_user_dict,
                 mock_db,

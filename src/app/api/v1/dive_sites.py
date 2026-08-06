@@ -19,7 +19,7 @@ from ...schemas.dive_site import (
     DiveSiteUpdate,
 )
 
-router = APIRouter(tags=["dive_sites"])
+router = APIRouter(tags=["dive-sites"])
 
 
 def _dive_site_owner_id(db_dive_site: Any) -> int:

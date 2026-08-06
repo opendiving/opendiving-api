@@ -1,4 +1,4 @@
-"""Unified authentication & registration flow.
+"""Unified authentication & registration flow, plus session refresh/teardown.
 
 The single entry point into the app: a caller either proves ownership of an email
 address (magic link) or authenticates with Google, and *only then* do we ask "does an
@@ -6,12 +6,17 @@ account already exist for this identity?" (`resolve_identity`, in `services.auth
 If so, they're signed in immediately. If not, a temporary onboarding session is issued
 and no `User` row is created until profile completion (`POST /auth/complete`) succeeds -
 there are no unverified users, and there is no separate sign up flow.
+
+`POST /auth/refresh`/`POST /auth/logout` also live here (see `DECISIONS.md`) - they
+used to sit in their own `login.py`/`logout.py` modules under a stale `"login"` tag,
+left over from the old password-based flow.
 """
 
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Cookie, Depends, Request, Response
+from jose import JWTError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,12 +25,17 @@ from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import DuplicateValueException, UnauthorizedException
 from ...core.schemas import OnboardingTokenData
 from ...core.security import (
+    TokenType,
     blacklist_token,
+    blacklist_tokens,
+    create_access_token,
     create_onboarding_token,
     generate_secure_token,
     hash_token,
+    oauth2_scheme,
     verify_google_id_token,
     verify_onboarding_token,
+    verify_token,
 )
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...crud.crud_authentication_providers import crud_authentication_providers
@@ -258,3 +268,41 @@ async def complete_profile(
 
     tokens = await issue_tokens(response, body.username)
     return AuthOutcome(status="authenticated", **tokens)
+
+
+@router.post("/refresh")
+async def refresh_access_token(request: Request, db: AsyncSession = Depends(async_get_db)) -> dict[str, str]:
+    """Exchanges the httpOnly `refresh_token` cookie (set by `issue_tokens`) for a new
+    access token. See `DECISIONS.md` for why this is the one cookie-authenticated
+    endpoint in this flow and why that's still CSRF-safe.
+    """
+    refresh_token = request.cookies.get("refresh_token")
+    if not refresh_token:
+        raise UnauthorizedException("Refresh token missing.")
+
+    user_data = await verify_token(refresh_token, TokenType.REFRESH, db)
+    if not user_data:
+        raise UnauthorizedException("Invalid refresh token.")
+
+    new_access_token = await create_access_token(data={"sub": user_data.username_or_email})
+    return {"access_token": new_access_token, "token_type": "bearer"}
+
+
+@router.post("/logout")
+async def logout(
+    response: Response,
+    access_token: str = Depends(oauth2_scheme),
+    refresh_token: str | None = Cookie(None, alias="refresh_token"),
+    db: AsyncSession = Depends(async_get_db),
+) -> dict[str, str]:
+    try:
+        if not refresh_token:
+            raise UnauthorizedException("Refresh token not found")
+
+        await blacklist_tokens(access_token=access_token, refresh_token=refresh_token, db=db)
+        response.delete_cookie(key="refresh_token")
+
+        return {"message": "Logged out successfully"}
+
+    except JWTError:
+        raise UnauthorizedException("Invalid token.")

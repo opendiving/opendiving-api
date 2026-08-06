@@ -20,6 +20,7 @@ from ...core.exceptions.http_exceptions import (
 from ...core.security import blacklist_token, blacklist_tokens, generate_secure_token, hash_token, oauth2_scheme
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...crud.crud_authentication_requests import crud_authentication_requests
+from ...crud.crud_user_dive_stats import crud_user_dive_stats
 from ...crud.crud_users import crud_users
 from ...schemas.authentication_request import AuthenticationRequestCreate, AuthenticationRequestUpdate
 from ...schemas.email_change import (
@@ -29,6 +30,7 @@ from ...schemas.email_change import (
     EmailChangeVerifyResponse,
 )
 from ...schemas.user import UserRead, UserReadInternal, UserUpdate
+from ...schemas.user_dive_stats import UserDiveStatsRead, UserDiveStatsReadInternal
 from ...services.email_service import send_email_change_confirmation_email, send_email_changed_notification
 
 router = APIRouter(tags=["users"])
@@ -95,7 +97,7 @@ async def patch_user(
         raise ForbiddenException()
 
     # Note: `email` is deliberately not part of `UserUpdate` - see
-    # `POST /user/{uuid}/email-change/request` for how email changes work instead.
+    # `POST /user/email-change/request` for how email changes work instead.
     if values.username is not None and values.username != db_username:
         if await crud_users.exists(db=db, username=values.username):
             raise DuplicateValueException("Username not available")
@@ -104,10 +106,9 @@ async def patch_user(
     return {"message": "User updated"}
 
 
-@router.post("/user/{uuid}/email-change/request", response_model=EmailChangeRequestResponse)
+@router.post("/user/email-change/request", response_model=EmailChangeRequestResponse)
 async def request_email_change(
     request: Request,
-    uuid: uuid_pkg.UUID,
     body: EmailChangeRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
@@ -117,12 +118,12 @@ async def request_email_change(
     link is clicked (`POST /user/email-change/verify`), proving the caller actually
     controls it.
 
+    Always operates on the caller's own account (from the access token), not a path
+    parameter - there is no other account to target.
+
     Always returns the same generic message, whether or not `new_email` already
     belongs to another account.
     """
-    if current_user["uuid"] != uuid:
-        raise ForbiddenException()
-
     new_email = body.new_email.lower()
     if new_email == current_user["email"].lower():
         raise BadRequestException("That's already your email address.")
@@ -239,6 +240,30 @@ async def verify_email_change(
     await send_email_changed_notification(old_email=current_email, new_email=new_email)
 
     return EmailChangeVerifyResponse(email=new_email)
+
+
+@router.get("/user/{uuid}/dive-stats", response_model=UserDiveStatsRead)
+async def read_dive_stats(
+    request: Request,
+    uuid: uuid_pkg.UUID,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> UserDiveStatsRead:
+    if current_user["uuid"] != uuid:
+        raise ForbiddenException()
+
+    stats = await crud_user_dive_stats.get(
+        db=db, user_id=current_user["id"], schema_to_select=UserDiveStatsReadInternal, return_as_model=True
+    )
+    if stats is None:
+        # No dives logged yet - return zeroed-out stats rather than 404, since
+        # every user conceptually has stats, they just haven't been created yet.
+        # total_dives/max_depth/total_time/species_seen have Pydantic defaults, but mypy's
+        # pydantic plugin doesn't recognize defaults declared via `Annotated[..., Field(default=...)]`.
+        return UserDiveStatsRead(user_uuid=uuid, created_at=datetime.now(UTC))  # type: ignore[call-arg]
+
+    stats = cast(UserDiveStatsReadInternal, stats)
+    return UserDiveStatsRead(**{k: v for k, v in stats.model_dump().items() if k != "user_id"}, user_uuid=uuid)
 
 
 @router.delete("/user/{uuid}")

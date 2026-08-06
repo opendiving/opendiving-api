@@ -289,11 +289,13 @@ directly instead of a username:
   directly (added to `DiveCreateRequest`/`TripCreate`/`DiveSiteCreate`). The
   handler checks `current_user["id"] == body.user_id` and raises `403` on mismatch
   - it does not trust the body's `user_id` on its own.
-- `GET /dives`, `/trips`, `/dive-sites`, `/dive-stats`: take `user_id` as a query
+- `GET /dives`, `/trips`, `/dive-sites`: take `user_id` as a query
   param instead of a path segment. The handler checks `current_user["id"] ==
   user_id` and raises `403` on mismatch. These endpoints are no longer public -
   they previously had no auth dependency at all (readable by anyone who knew a
   username).
+  `/dive-stats` was later moved again, to `GET /user/{uuid}/dive-stats` - see
+  "`GET /dive-stats` was moved under `/user/{uuid}/...`" below.
 - `GET/PATCH/DELETE /dive/{id}`, `/trip/{id}`, `/dive-site/{id}`: no longer take
   a username at all. The handler fetches the object by `id` alone, then checks
   the fetched object's `user_id` against `current_user["id"]`, raising `404` if
@@ -378,6 +380,31 @@ since FastAPI requires the handler's parameter name to match the path template
 placeholder, and it's cleaner for the cached helper's parameter to mirror it exactly.
 This is also why `uuid` (the stdlib module) is imported as `uuid_pkg` throughout these
 files - so a path parameter can be named `uuid` without shadowing the module.
+
+## `GET /dive-stats` was moved under `/user/{uuid}/...`
+
+`GET /dive-stats` (a flat route taking `user_uuid` as a query param, per the
+flattening decision above) was changed to `GET /user/{uuid}/dive-stats`, matching
+the path-based shape already used for every other single-user route (`GET/PATCH/
+DELETE /user/{uuid}`, `POST /user/{uuid}/email-change/request`). The handler's
+ownership check is unchanged in substance - it still compares `current_user["uuid"]`
+against the path `uuid` and raises `403` on mismatch - only the parameter's source
+(path segment instead of query string) and name (`uuid` instead of `user_uuid`,
+per the `{resource}_uuid` -> `{uuid}` renaming decision above) changed. Unlike
+`/dives`, `/trips`, `/dive-sites`, this endpoint doesn't take any *other* id that
+would need disambiguating from the path segment, so there's no reason left for it
+to stay flat with the others.
+
+Once the route itself lived at `/user/{uuid}/dive-stats`, keeping its handler in a
+separate single-endpoint `dive_stats.py` module (tagged `"dive-stats"`) no longer made
+sense either - by that point it was, structurally, just another single-user route
+under `/user/{uuid}/...`, like `email-change/request` or the plain `GET /user/{uuid}`.
+`read_dive_stats` was moved into `users.py` and now shares that module's `"users"`
+tag; `dive_stats.py` no longer exists, and `api/v1/__init__.py` no longer registers a
+separate router for it. This only affects where the *route* lives - `models/`,
+`schemas/user_dive_stats.py`, `crud/crud_user_dive_stats.py`, and
+`services/dive_stats.py` (the recalculation logic invoked from `dives.py`) are
+unrelated internals and keep their existing names/locations.
 
 ## Date-only vs datetime fields
 
@@ -656,15 +683,40 @@ afterwards; the code path genuinely can't distinguish the two cases, because
 whether a magic link will eventually sign someone in or send them to onboarding is
 only decided later, in `/auth/email/verify`.
 
-CSRF: the only cookie-authenticated endpoint in this flow is `POST /refresh` (the
+CSRF: the only cookie-authenticated endpoint in this flow is `POST /auth/refresh` (the
 httpOnly `refresh_token` cookie set by `issue_tokens`) - every other endpoint here is
 either unauthenticated (the whole point of `/auth/*`) or authenticated via a Bearer
 access token, which browsers never attach automatically, so it isn't CSRF-able at
-all. `/refresh`'s cookie is `samesite="lax"`, which browsers refuse to attach on
+all. `/auth/refresh`'s cookie is `samesite="lax"`, which browsers refuse to attach on
 cross-site `fetch`/XHR (only top-level navigations), so a malicious page can't
 silently trigger it with the victim's session - this was already the design before
 this rewrite, just re-verified as still sufficient given the new endpoints don't
 change that picture.
+
+## `/refresh` and `/logout` moved from their own `login.py`/`logout.py` modules into `/auth`
+
+`POST /refresh` and `POST /logout` used to live in their own single-endpoint modules
+(`api/v1/login.py`, `api/v1/logout.py`), both tagged `"login"` in the generated
+OpenAPI docs (Swagger/Redoc) - a leftover from the old password-based flow, from
+back when a `POST /login` endpoint actually existed there. Once that flow was
+replaced (see "Unified auth flow" below), the `"login"` tag no longer corresponded
+to any real endpoint, and having every other auth-adjacent operation grouped under
+the `"auth"` tag while these two sat off on their own under a stale tag name made the
+docs' endpoint grouping actively misleading.
+
+Both were merged directly into `api/v1/auth.py` and now hang off that module's
+existing `APIRouter(prefix="/auth", tags=["auth"])`, so they're reachable at
+`POST /auth/refresh` and `POST /auth/logout` and show up under the same `"auth"`
+tag as `/auth/email/request`, `/auth/google`, etc. `login.py`/`logout.py` no longer
+exist; their routes were removed from `api/v1/__init__.py` accordingly. Callers
+(the web app's `client.ts`/`auth.ts`) were updated to the new paths - there is no
+backwards-compatible redirect from the old `/refresh`/`/logout` paths, since these
+are same-origin API calls from apps we control, not a public integration surface.
+
+While touching tags, `dive_sites.py`'s tag was also renamed from `"dive_sites"` to
+`"dive-sites"`, matching the dash-separated convention every other module's tag
+already followed (`"dive-stats"`, `"dive-site"`-style URL segments) - it was the one
+holdout still using an underscore.
 
 ## Changing an account's email requires confirming the new address first
 
@@ -677,11 +729,12 @@ a different `purpose` (`"email_change"` vs `"sign_in"`) and, crucially, a `user_
 the already-existing account requesting the change, which `"sign_in"` rows never have
 since that flow works before any `User` row exists.
 
-- `POST /user/{uuid}/email-change/request` (authenticated, ownership-checked) emails
-  a confirmation link to the **new** address, not the current one - proving control
-  of the new address is the entire point. Always returns the same generic message
-  regardless of whether the new address already belongs to someone else (mirrors
-  `/auth/email/request`'s enumeration protection).
+- `POST /user/email-change/request` (authenticated; operates on the caller's own
+  account from the access token, no `{uuid}` path param - there's no other account to
+  target) emails a confirmation link to the **new** address, not the current one -
+  proving control of the new address is the entire point. Always returns the same
+  generic message regardless of whether the new address already belongs to someone
+  else (mirrors `/auth/email/request`'s enumeration protection).
 - `POST /user/email-change/verify` (no auth required - the token itself, tied to a
   specific `user_id`, is what authorizes the change) applies it: `crud_users.update`
   the row's `email`, mark the `AuthenticationRequest` used, and send a best-effort
@@ -690,6 +743,15 @@ since that flow works before any `User` row exists.
   try/except `IntegrityError` -> rollback -> `DuplicateValueException`, same
   race-safety pattern as `/auth/complete`, for two verifications racing to claim the
   same address.
+
+`POST /user/email-change/request` originally lived at `POST /user/{uuid}/email-change/request`
+and compared `current_user["uuid"]` against the path `uuid`, raising `403` on
+mismatch - the same ownership-check pattern as `PATCH`/`DELETE /user/{uuid}`. Unlike
+those routes, this one never had a legitimate reason to target anyone other than the
+caller (there's no admin/moderation path that changes *someone else's* email), so the
+`{uuid}` was dropped entirely and the handler now always operates on `current_user`
+from the access token. This removed the only way to call it "wrong" (mismatched path
+uuid) along with the `ForbiddenException` branch that guarded against it.
 
 The admin panel needed its own `UserAdminUpdate` schema (`UserUpdate` plus `email`
 back) for its `update_schema`, since a trusted superuser should still be able to fix

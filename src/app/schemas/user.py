@@ -45,7 +45,7 @@ class UserCreateInternal(UserBase):
 class UserUpdate(BaseModel):
     """`PATCH /user/{uuid}`'s body. Deliberately has no `email` field - changing an
     account's email requires proving ownership of the new address first (see
-    `POST /user/{uuid}/email-change/request` / `POST /user/email-change/verify`),
+    `POST /user/email-change/request` / `POST /user/email-change/verify`),
     not a plain field update. `extra="forbid"` means submitting `email` here is a
     422, not a silently-ignored no-op, so callers notice they need the other flow.
     """

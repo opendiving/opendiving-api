@@ -10,7 +10,7 @@ passwords, no separate sign up flow. See `src/app/api/v1/auth.py` for the endpoi
 `DECISIONS.md` for the full design rationale.
 
 Changing an account's email (`src/app/api/v1/users.py`) reuses the same magic-link
-mechanics: `POST /user/{uuid}/email-change/request` emails a confirmation link to the
+mechanics: `POST /user/email-change/request` emails a confirmation link to the
 *new* address, and the change only applies once `POST /user/email-change/verify`
 confirms it - see `DECISIONS.md`.
 

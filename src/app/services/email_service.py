@@ -53,7 +53,7 @@ async def send_magic_link_email(email: str, magic_link_url: str) -> None:
 
 async def send_email_change_confirmation_email(new_email: str, confirm_url: str) -> None:
     """Sends the "confirm your new email address" link for `POST
-    /user/{uuid}/email-change/request` - deliberately to `new_email`, not the
+    /user/email-change/request` - deliberately to `new_email`, not the
     account's current one, since the whole point is proving the caller actually
     controls the new address before the change takes effect.
     """

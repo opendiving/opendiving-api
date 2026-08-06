@@ -16,7 +16,7 @@ class AuthenticationRequest(Base):
     creation to profile completion (`POST /auth/complete`).
 
     Also doubles as the magic-link backing an *existing* user's email-change
-    confirmation (`purpose="email_change"`, see `POST /user/{uuid}/email-change/request`/
+    confirmation (`purpose="email_change"`, see `POST /user/email-change/request`/
     `POST /user/email-change/verify` in `api.v1.users`) - the mechanics (single-use,
     hashed token, short expiry) are identical, only what "verifying" it does differs.
     """
