@@ -666,6 +666,46 @@ silently trigger it with the victim's session - this was already the design befo
 this rewrite, just re-verified as still sufficient given the new endpoints don't
 change that picture.
 
+## Changing an account's email requires confirming the new address first
+
+`PATCH /user/{uuid}` (`api/v1/users.py`) no longer accepts `email` at all -
+`UserUpdate` dropped the field entirely, so submitting it is a 422
+(`extra="forbid"`), not a silently-ignored no-op. Changing an account's email is a
+two-step confirmation flow instead, reusing the exact same `AuthenticationRequest`
+mechanics as the sign-in magic link (single-use, hashed token, short expiry) but with
+a different `purpose` (`"email_change"` vs `"sign_in"`) and, crucially, a `user_id` -
+the already-existing account requesting the change, which `"sign_in"` rows never have
+since that flow works before any `User` row exists.
+
+- `POST /user/{uuid}/email-change/request` (authenticated, ownership-checked) emails
+  a confirmation link to the **new** address, not the current one - proving control
+  of the new address is the entire point. Always returns the same generic message
+  regardless of whether the new address already belongs to someone else (mirrors
+  `/auth/email/request`'s enumeration protection).
+- `POST /user/email-change/verify` (no auth required - the token itself, tied to a
+  specific `user_id`, is what authorizes the change) applies it: `crud_users.update`
+  the row's `email`, mark the `AuthenticationRequest` used, and send a best-effort
+  "your email was changed" notice to the **old** address (`send_email_changed_notification`)
+  so its owner finds out even if they weren't the one who changed it. Wrapped in a
+  try/except `IntegrityError` -> rollback -> `DuplicateValueException`, same
+  race-safety pattern as `/auth/complete`, for two verifications racing to claim the
+  same address.
+
+The admin panel needed its own `UserAdminUpdate` schema (`UserUpdate` plus `email`
+back) for its `update_schema`, since a trusted superuser should still be able to fix
+up an account's email directly without the confirmation dance - `admin/views.py`
+uses this instead of the public `UserUpdate`.
+
+`purpose`/`user_id` were added to the *existing* `authentication_request` table, so -
+per the "no migration tool" section above - `create_all()` won't add them to an
+already-running dev DB (surfaces as `asyncpg.exceptions.UndefinedColumnError: column
+authentication_request.user_id does not exist`). Add them by hand:
+```sql
+ALTER TABLE authentication_request ADD COLUMN purpose VARCHAR(20) NOT NULL DEFAULT 'sign_in';
+ALTER TABLE authentication_request ADD COLUMN user_id INTEGER REFERENCES "user"(id) ON DELETE CASCADE;
+CREATE INDEX ix_authentication_request_user_id ON authentication_request (user_id);
+```
+
 The admin panel (`admin/views.py`) lost its `password_transformer`/`PasswordTransformer`
 for the `User` view - there's no password field to transform. Admin-created users
 authenticate afterwards the same way as anyone else, via their `email`. Similarly,

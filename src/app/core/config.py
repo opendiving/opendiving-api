@@ -93,6 +93,13 @@ class MagicLinkSettings(BaseSettings):
     MAGIC_LINK_REQUEST_RATE_LIMIT_PER_IP: int = config("MAGIC_LINK_REQUEST_RATE_LIMIT_PER_IP", default=15)
     MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP: int = config("MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP", default=30)
 
+    # Email-change confirmation (see `POST /user/{uuid}/email-change/request`/
+    # `POST /user/email-change/verify` in `api.v1.users`) reuses the same
+    # `AuthenticationRequest` mechanics as sign-in, with its own expiry/rate limit
+    # (keyed per-user, not per-email - it's an authenticated action).
+    EMAIL_CHANGE_TOKEN_EXPIRE_MINUTES: int = config("EMAIL_CHANGE_TOKEN_EXPIRE_MINUTES", default=30)
+    EMAIL_CHANGE_REQUEST_RATE_LIMIT_PER_USER: int = config("EMAIL_CHANGE_REQUEST_RATE_LIMIT_PER_USER", default=3)
+
 
 class EmailSettings(BaseSettings):
     # https://resend.com - used to deliver the magic-link email (see `services.email_service`).

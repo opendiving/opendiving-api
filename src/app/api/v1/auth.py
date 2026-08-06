@@ -109,13 +109,14 @@ async def request_email_link(
     # case - most emails won't have a pending request), so check first rather than
     # treating "nothing to invalidate" as an error (mirrors the token-blacklist purge
     # job's `count()`-before-`delete()` pattern in `core.worker.functions`).
-    pending_count = await crud_authentication_requests.count(db, email=email, used_at=None)
+    pending_count = await crud_authentication_requests.count(db, email=email, purpose="sign_in", used_at=None)
     if pending_count > 0:
         await crud_authentication_requests.update(
             db=db,
             object=AuthenticationRequestUpdate(used_at=datetime.now(UTC)),
             allow_multiple=True,
             email=email,
+            purpose="sign_in",
             used_at=None,
         )
 
@@ -123,7 +124,9 @@ async def request_email_link(
     expires_at = datetime.now(UTC) + timedelta(minutes=settings.MAGIC_LINK_TOKEN_EXPIRE_MINUTES)
     await crud_authentication_requests.create(
         db=db,
-        object=AuthenticationRequestCreate(email=email, token_hash=hash_token(raw_token), expires_at=expires_at),
+        object=AuthenticationRequestCreate(
+            email=email, token_hash=hash_token(raw_token), expires_at=expires_at, purpose="sign_in"
+        ),
     )
 
     magic_link_url = f"{settings.FRONTEND_URL}/auth/verify?token={raw_token}"
@@ -148,7 +151,9 @@ async def verify_email_link(
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
 
-    auth_request = await crud_authentication_requests.get(db=db, token_hash=hash_token(body.token))
+    auth_request = await crud_authentication_requests.get(
+        db=db, token_hash=hash_token(body.token), purpose="sign_in"
+    )
     if auth_request is None:
         raise UnauthorizedException("This sign-in link is invalid.")
 

@@ -80,6 +80,7 @@ class TestRequestEmailLink:
             kwargs = mock_crud.update.call_args.kwargs
             assert kwargs["allow_multiple"] is True
             assert kwargs["email"] == "repeat@example.com"
+            assert kwargs["purpose"] == "sign_in"
             assert kwargs["used_at"] is None
 
     @pytest.mark.asyncio
@@ -99,7 +100,9 @@ class TestRequestEmailLink:
 
             await request_email_link(_request(), EmailAuthRequest(email="first-time@example.com"), mock_db)
 
-            mock_crud.count.assert_called_once_with(mock_db, email="first-time@example.com", used_at=None)
+            mock_crud.count.assert_called_once_with(
+                mock_db, email="first-time@example.com", purpose="sign_in", used_at=None
+            )
             mock_crud.update.assert_not_called()
             mock_crud.create.assert_called_once()
 

@@ -12,7 +12,7 @@ from ..schemas.dive_dive_site import DiveDiveSiteCreate, DiveDiveSiteUpdate
 from ..schemas.dive_mixture import DiveMixtureCreateInternal, DiveMixtureUpdate
 from ..schemas.dive_site import DiveSiteCreateInternal, DiveSiteUpdate
 from ..schemas.trip import TripCreateInternal, TripUpdate
-from ..schemas.user import UserCreateInternal, UserUpdate
+from ..schemas.user import UserAdminUpdate, UserCreateInternal
 from ..schemas.user_dive_stats import UserDiveStatsUpdate
 
 
@@ -25,11 +25,13 @@ def register_admin_views(admin: CRUDAdmin) -> None:
 
     # No password field anywhere - a `User` has no authentication method of its own
     # (see `AuthenticationProvider`), so admin-created users can sign in afterwards via
-    # the normal email-magic-link flow using their `email`.
+    # the normal email-magic-link flow using their `email`. Uses `UserAdminUpdate`
+    # (not the public API's `UserUpdate`) so a superuser can still edit `email`
+    # directly here without going through the verified email-change flow.
     admin.add_view(
         model=User,
         create_schema=UserCreateInternal,
-        update_schema=UserUpdate,
+        update_schema=UserAdminUpdate,
         allowed_actions={"view", "create", "update"},
     )
 

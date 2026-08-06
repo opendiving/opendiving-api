@@ -43,13 +43,19 @@ class UserCreateInternal(UserBase):
 
 
 class UserUpdate(BaseModel):
+    """`PATCH /user/{uuid}`'s body. Deliberately has no `email` field - changing an
+    account's email requires proving ownership of the new address first (see
+    `POST /user/{uuid}/email-change/request` / `POST /user/email-change/verify`),
+    not a plain field update. `extra="forbid"` means submitting `email` here is a
+    422, not a silently-ignored no-op, so callers notice they need the other flow.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     name: Annotated[str | None, Field(min_length=2, max_length=30, examples=["User Userberg"], default=None)]
     username: Annotated[
         str | None, Field(min_length=2, max_length=20, pattern=r"^[a-z0-9]+$", examples=["userberg"], default=None)
     ]
-    email: Annotated[EmailStr | None, Field(examples=["user.userberg@example.com"], default=None)]
     profile_image_url: Annotated[
         str | None,
         Field(
@@ -60,6 +66,16 @@ class UserUpdate(BaseModel):
 
 class UserUpdateInternal(UserUpdate):
     updated_at: datetime
+
+
+class UserAdminUpdate(UserUpdate):
+    """Same as `UserUpdate`, but also allows setting `email` directly - reserved for
+    the admin panel (`admin/views.py`'s `update_schema`), where a trusted superuser
+    may need to fix up an account without going through the verified email-change
+    flow. Never used by the public API.
+    """
+
+    email: Annotated[EmailStr | None, Field(examples=["user.userberg@example.com"], default=None)]
 
 
 class UserDelete(BaseModel):

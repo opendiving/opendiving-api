@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, String
+from sqlalchemy import DateTime, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.db.database import Base
@@ -14,11 +14,19 @@ class AuthenticationRequest(Base):
     /auth/email/verify`, which only issues a temporary onboarding session (a signed JWT,
     never persisted) for emails with no existing account, and defers actual account
     creation to profile completion (`POST /auth/complete`).
+
+    Also doubles as the magic-link backing an *existing* user's email-change
+    confirmation (`purpose="email_change"`, see `POST /user/{uuid}/email-change/request`/
+    `POST /user/email-change/verify` in `api.v1.users`) - the mechanics (single-use,
+    hashed token, short expiry) are identical, only what "verifying" it does differs.
     """
 
     __tablename__ = "authentication_request"
 
     id: Mapped[int] = mapped_column(autoincrement=True, nullable=False, unique=True, primary_key=True, init=False)
+
+    # For `purpose="sign_in"`, the (unverified-until-now) email being signed in with.
+    # For `purpose="email_change"`, the *new* address `user_id` wants to change to.
     email: Mapped[str] = mapped_column(String(50), index=True)
 
     # SHA-256 hex digest of the raw token emailed to the user - only the hash is ever
@@ -27,6 +35,16 @@ class AuthenticationRequest(Base):
 
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
+    # "sign_in" (the original magic-link flow) or "email_change". Determines which
+    # endpoint is willing to consume a given row, and what "used" means for it.
+    purpose: Mapped[str] = mapped_column(String(20), default="sign_in")
+
+    # Only set for `purpose="email_change"` - the already-existing user requesting the
+    # change. `None` for `purpose="sign_in"`, since that flow is deliberately usable
+    # before any `User` row exists at all.
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), index=True, default=None)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default_factory=lambda: datetime.now(UTC)
     )

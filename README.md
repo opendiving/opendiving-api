@@ -9,6 +9,11 @@ passwords, no separate sign up flow. See `src/app/api/v1/auth.py` for the endpoi
 (`/auth/email/request`, `/auth/email/verify`, `/auth/google`, `/auth/complete`) and
 `DECISIONS.md` for the full design rationale.
 
+Changing an account's email (`src/app/api/v1/users.py`) reuses the same magic-link
+mechanics: `POST /user/{uuid}/email-change/request` emails a confirmation link to the
+*new* address, and the change only applies once `POST /user/email-change/verify`
+confirms it - see `DECISIONS.md`.
+
 Magic-link emails are sent via [Resend](https://resend.com). Set these in `src/.env`:
 
 ```bash
@@ -25,6 +30,7 @@ FRONTEND_URL="http://localhost:3000"
 # and their defaults.
 MAGIC_LINK_TOKEN_EXPIRE_MINUTES=30
 ONBOARDING_TOKEN_EXPIRE_MINUTES=30
+EMAIL_CHANGE_TOKEN_EXPIRE_MINUTES=30
 ```
 
 ## Endpoints

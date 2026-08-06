@@ -9,6 +9,8 @@ class AuthenticationRequestCreate(BaseModel):
     email: EmailStr
     token_hash: str
     expires_at: datetime
+    purpose: str = "sign_in"
+    user_id: int | None = None
 
 
 class AuthenticationRequestUpdate(BaseModel):
@@ -23,4 +25,6 @@ class AuthenticationRequestRead(BaseModel):
     token_hash: str
     expires_at: datetime
     used_at: datetime | None
+    purpose: str
+    user_id: int | None
     created_at: datetime
