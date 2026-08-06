@@ -47,6 +47,7 @@ from ...schemas.auth import (
     EmailAuthRequestResponse,
     EmailVerifyRequest,
     GoogleAuthRequest,
+    LinkCheckResponse,
     ProfileCompletionRequest,
 )
 from ...schemas.authentication_provider import AuthenticationProviderCreate
@@ -143,6 +144,36 @@ async def request_email_link(
     await send_magic_link_email(email=email, magic_link_url=magic_link_url)
 
     return _EMAIL_REQUEST_RESPONSE
+
+
+@router.get("/email/verify/check", response_model=LinkCheckResponse)
+async def check_email_link(
+    request: Request, token: str, db: Annotated[AsyncSession, Depends(async_get_db)]
+) -> LinkCheckResponse:
+    """Side-effect-free precheck used by the sign-in landing page before it shows the
+    "Sign in" button - lets it show an error immediately for a link that's already
+    been used, invalidated, or expired (e.g. revisited via the browser's back
+    button after already signing in) rather than a misleadingly clickable button,
+    and lets it display which email it's about to sign in as. Never marks anything
+    used or changes any state.
+    """
+    await enforce_rate_limit(
+        f"auth:email-verify-check:ip:{_client_ip(request)}",
+        settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
+        settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
+    )
+
+    auth_request = await crud_authentication_requests.get(db=db, token_hash=hash_token(token), purpose="sign_in")
+    if auth_request is None or auth_request["invalidated_at"] is not None or auth_request["used_at"] is not None:
+        return LinkCheckResponse(valid=False)
+
+    expires_at = auth_request["expires_at"]
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at < datetime.now(UTC):
+        return LinkCheckResponse(valid=False)
+
+    return LinkCheckResponse(valid=True, email=auth_request["email"])
 
 
 @router.post("/email/verify", response_model=AuthOutcome)

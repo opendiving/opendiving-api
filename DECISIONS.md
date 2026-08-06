@@ -781,19 +781,28 @@ silently consume the token first. The real user's subsequent click then used to 
 hard "already used" error - a technically-accurate but confusing one, since the
 change they wanted had, in fact, already gone through.
 
-Two approaches were tried and rejected before landing on the current one:
-- **A same-browser "pairing" cookie** (set when the link is requested, checked when
-  it's opened) would tell a scanner - which never has that cookie - apart from the
-  real user. Rejected: it's extremely common to *request* a link on one
-  device/browser (e.g. a laptop) and *open* it from another (e.g. a phone's mail
-  app), which would just relabel "legitimate cross-device use" as "unpaired" and
-  push it down the same degraded path as an actual scanner.
-- **Requiring an explicit confirmation click** (a "Sign in"/"Confirm email change"
-  button instead of auto-verifying on load) reliably defeats the scanner problem,
-  but adds friction to every single sign-in, forever, to guard against a
-  comparatively rare event - not the right tradeoff for how central this flow is.
+A same-browser "pairing" cookie (set when the link is requested, checked when it's
+opened) was tried and rejected: it's extremely common to *request* a link on one
+device/browser (e.g. a laptop) and *open* it from another (e.g. a phone's mail app),
+which would just relabel "legitimate cross-device use" as "unpaired" and push it down
+the same degraded path as an actual scanner. Auto-verifying unconditionally on load
+was also tried, relying solely on the idempotent-reuse handling below to paper over a
+scanner having already consumed the token - genuinely zero-click, but it still lets
+automation silently trigger the *real* sign-in/email-change before a human ever acts,
+which is the actual thing worth protecting against, not just the confusing error
+message.
 
-What's actually implemented instead: `AuthenticationRequest` distinguishes `used_at`
+The fix that stuck mirrors what the sign-up flow already gets "for free": completing
+a *new* account requires a real person to fill in and submit the profile-completion
+form, something automation won't do - so the frontend's `/auth/verify` and
+`/settings/confirm-email` pages (see the web app's `DECISIONS.md`) now require an
+explicit "Sign in"/"Confirm email change" button click before they ever call
+`POST /auth/email/verify`/`POST /user/email-change/verify`. A preview/scan can load
+the page, but it can't fake a real click, so no session is issued and no email is
+changed without genuine user interaction.
+
+On top of that, as defense-in-depth (e.g. a double click, or a slow network retry
+re-submitting the same request): `AuthenticationRequest` distinguishes `used_at`
 (informational - when a token was first successfully verified) from `invalidated_at`
 (when a *newer* request supersedes it - see `request_email_link`/`request_email_change`,
 which invalidate any previous live request for the same email/user). Verifying an
@@ -803,10 +812,7 @@ change produces the exact same outcome every time. Only an *invalidated* or
 *expired* token is rejected. This is safe specifically because neither flow grants
 an escalated or different outcome on replay within the token's own (short) validity
 window - it's the same account either way - so there's no meaningful security
-downgrade, just the removal of a confusing failure mode. Both `/auth/email/verify`
-and `/user/email-change/verify` follow this same pattern now; the frontend pages
-(`/auth/verify`, `/settings/confirm-email`) go back to auto-verifying on load, no
-click required (see the web app's `DECISIONS.md`).
+downgrade from allowing the repeat, just the removal of a confusing failure mode.
 
 `invalidated_at` was added to the *existing* `authentication_request` table - same
 "no migration tool" caveat as `purpose`/`user_id` above applies on an already-running
@@ -814,6 +820,41 @@ dev DB:
 ```sql
 ALTER TABLE authentication_request ADD COLUMN invalidated_at TIMESTAMPTZ;
 ```
+
+### The confirm-email button shouldn't even be shown for a link that's already been used
+
+Follow-on report: pressing the browser's **back** button after already confirming
+an email change lands back on `/settings/confirm-email` with the "Confirm email
+change" button still showing - and pressing it *again* succeeds, silently, because
+of the idempotent-reuse leniency described above. That leniency exists to tolerate
+*races* (a double click, a scanner detonation followed by a genuine click a moment
+later) - it was never meant to make a stale, already-actioned link look repeatedly
+actionable to a human who revisits it long after the fact.
+
+The fix: `GET /auth/email/verify/check` and `GET /user/email-change/verify/check`
+(`check_email_link`/`check_email_change_link`) are new, side-effect-free precheck
+endpoints - they look up the token and report whether it's still live (not found,
+invalidated, *already used*, or expired all count as "not live"), and, if it is,
+which email it's for. Unlike the POST verify endpoints, **`used_at` alone is enough
+to make the precheck say "invalid"** - there's no races to tolerate here, since
+nothing has been submitted yet. The frontend calls this on page load, *before*
+showing the confirm button at all, so a revisited/already-used link shows an error
+immediately rather than a clickable button (see the web app's `DECISIONS.md`).
+
+This also gives the frontend a place to show the *target* email up front (in both
+the check response and, for email changes, echoed back from the POST verify
+response), so a user confirming a change can see which address they're about to
+switch to - and, on success, which one they switched to.
+
+Separately, `verify_email_change`'s idempotent (`used_at is not None`) branch was
+tightened: it used to unconditionally report success on replay. It now fetches the
+account's *current* email first and only treats the replay as a harmless repeat if
+`current_email == new_email` (i.e. the change this token represents was in fact the
+last thing applied) - otherwise it's a genuine, rejected reuse (e.g. the account's
+email was changed *again* since, by a different, later request), and raises same as
+an invalidated token would. `verify_email_link` (sign-in) didn't need the equivalent
+change - `resolve_identity` is a pure function of the verified email, so replaying it
+can't "drift" the way a mutable `email` column can.
 
 The admin panel (`admin/views.py`) lost its `password_transformer`/`PasswordTransformer`
 for the `User` view - there's no password field to transform. Admin-created users

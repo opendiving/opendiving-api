@@ -25,6 +25,20 @@ class EmailVerifyRequest(BaseModel):
     token: str
 
 
+class LinkCheckResponse(BaseModel):
+    """Side-effect-free response for the `GET .../verify/check` precheck endpoints
+    (`api.v1.auth.check_email_link`, `api.v1.users.check_email_change_link`) - used
+    by the corresponding confirmation page *before* it shows its "Sign in"/"Confirm
+    email change" button, so re-opening an already-used, invalidated, or expired
+    link (e.g. via the browser's back button) shows an error immediately instead of
+    a misleadingly clickable button. `email` is only set when `valid` is `True`, so
+    the page can show what it's about to sign in as / change the address to.
+    """
+
+    valid: bool
+    email: str | None = None
+
+
 # -------------- google --------------
 class GoogleAuthRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")

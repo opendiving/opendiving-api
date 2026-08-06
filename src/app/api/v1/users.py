@@ -22,6 +22,7 @@ from ...core.utils.rate_limit import enforce_rate_limit
 from ...crud.crud_authentication_requests import crud_authentication_requests
 from ...crud.crud_user_dive_stats import crud_user_dive_stats
 from ...crud.crud_users import crud_users
+from ...schemas.auth import LinkCheckResponse
 from ...schemas.authentication_request import AuthenticationRequestCreate, AuthenticationRequestUpdate
 from ...schemas.email_change import (
     EmailChangeRequest,
@@ -173,6 +174,36 @@ async def request_email_change(
     return _EMAIL_CHANGE_REQUEST_RESPONSE
 
 
+@router.get("/user/email-change/verify/check", response_model=LinkCheckResponse)
+async def check_email_change_link(
+    request: Request, token: str, db: Annotated[AsyncSession, Depends(async_get_db)]
+) -> LinkCheckResponse:
+    """Side-effect-free precheck used by the confirmation page before it shows the
+    "Confirm email change" button - lets it show an error immediately for a link
+    that's already been used, invalidated, or expired (e.g. revisited via the
+    browser's back button after already confirming) rather than a misleadingly
+    clickable button, and lets it display the target email up front. Never marks
+    anything used or changes any state.
+    """
+    await enforce_rate_limit(
+        f"email-change-verify-check:ip:{_client_ip(request)}",
+        settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
+        settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
+    )
+
+    auth_request = await crud_authentication_requests.get(db=db, token_hash=hash_token(token), purpose="email_change")
+    if auth_request is None or auth_request["invalidated_at"] is not None or auth_request["used_at"] is not None:
+        return LinkCheckResponse(valid=False)
+
+    expires_at = auth_request["expires_at"]
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at < datetime.now(UTC):
+        return LinkCheckResponse(valid=False)
+
+    return LinkCheckResponse(valid=True, email=auth_request["email"])
+
+
 @router.post("/user/email-change/verify", response_model=EmailChangeVerifyResponse)
 async def verify_email_change(
     request: Request,
@@ -187,9 +218,14 @@ async def verify_email_change(
 
     Re-opening/re-verifying the *same* link again (e.g. a mail client's
     link-preview/security-scanning feature "detonating" it before a human clicks, or
-    the user clicking twice) is deliberately not an error - it's a no-op that just
-    reports the change as already applied. Only an *expired* link, or one superseded
-    by a newer request, is rejected - see `AuthenticationRequest.invalidated_at`.
+    the user clicking twice) is deliberately not an error, as long as the change it
+    represents was actually applied - it's a no-op that just reports that back,
+    rather than re-touching the DB or re-notifying anyone. Only an *expired* link,
+    one superseded by a newer request (see `AuthenticationRequest.invalidated_at`),
+    or a used token whose target *doesn't* match the account's current email (a
+    genuine, rejected reuse) is an error. `check_email_change_link` is what actually
+    keeps a human from re-triggering this in the first place after the first use -
+    this leniency is just a safety net for races (e.g. a double click).
     """
     await enforce_rate_limit(
         f"email-change-verify:ip:{_client_ip(request)}",
@@ -209,22 +245,22 @@ async def verify_email_change(
     new_email = auth_request["email"]
     user_id = auth_request["user_id"]
 
-    # Already applied - a harmless repeat (see docstring above). Skip straight to
-    # the same success response without re-touching the DB or re-notifying anyone.
+    db_user = await crud_users.get(db=db, id=user_id, is_deleted=False)
+    if db_user is None:
+        raise NotFoundException("User not found")
+
+    current_email = db_user["email"] if isinstance(db_user, dict) else db_user.email
+
     if auth_request["used_at"] is not None:
-        return EmailChangeVerifyResponse(email=new_email)
+        if current_email == new_email:
+            return EmailChangeVerifyResponse(email=new_email)
+        raise UnauthorizedException("This confirmation link has already been used.")
 
     expires_at = auth_request["expires_at"]
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=UTC)
     if expires_at < datetime.now(UTC):
         raise UnauthorizedException("This confirmation link has expired.")
-
-    db_user = await crud_users.get(db=db, id=user_id, is_deleted=False)
-    if db_user is None:
-        raise NotFoundException("User not found")
-
-    current_email = db_user["email"] if isinstance(db_user, dict) else db_user.email
 
     if await crud_users.exists(db=db, email=new_email):
         raise DuplicateValueException("Email is already registered to another account")

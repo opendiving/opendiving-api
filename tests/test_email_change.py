@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from src.app.api.v1.users import request_email_change, verify_email_change
+from src.app.api.v1.users import check_email_change_link, request_email_change, verify_email_change
 from src.app.core.exceptions.http_exceptions import (
     BadRequestException,
     DuplicateValueException,
@@ -126,6 +126,117 @@ class TestRequestEmailChange:
             assert mock_send.call_args.kwargs["new_email"] == "new@example.com"
 
 
+class TestCheckEmailChangeLink:
+    """`GET /user/email-change/verify/check` - the side-effect-free precheck used by
+    the confirmation page before it shows the "Confirm email change" button."""
+
+    @pytest.mark.asyncio
+    async def test_rate_limited_requests_are_rejected(self, mock_db):
+        with patch("src.app.api.v1.users.enforce_rate_limit", new_callable=AsyncMock) as mock_limit:
+            mock_limit.side_effect = RateLimitException("Too many requests. Please try again later.")
+
+            with pytest.raises(RateLimitException):
+                await check_email_change_link(_request(), "any", mock_db)
+
+    @pytest.mark.asyncio
+    async def test_not_found_is_invalid(self, mock_db):
+        with (
+            patch("src.app.api.v1.users.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.users.crud_authentication_requests") as mock_crud,
+        ):
+            mock_crud.get = AsyncMock(return_value=None)
+
+            result = await check_email_change_link(_request(), "bad", mock_db)
+
+            assert result.valid is False
+            assert result.email is None
+
+    @pytest.mark.asyncio
+    async def test_invalidated_token_is_invalid(self, mock_db):
+        auth_request = {
+            "id": 1,
+            "email": "new@example.com",
+            "user_id": 7,
+            "used_at": None,
+            "invalidated_at": datetime.now(UTC),
+            "expires_at": datetime.now(UTC) + timedelta(minutes=10),
+        }
+        with (
+            patch("src.app.api.v1.users.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.users.crud_authentication_requests") as mock_crud,
+        ):
+            mock_crud.get = AsyncMock(return_value=auth_request)
+
+            result = await check_email_change_link(_request(), "stale", mock_db)
+
+            assert result.valid is False
+
+    @pytest.mark.asyncio
+    async def test_already_used_token_is_invalid(self, mock_db):
+        """This is what actually keeps a human from re-confirming after already
+        confirming once (e.g. via the browser's back button) - unlike
+        `verify_email_change`'s idempotent-reuse leniency, this precheck must treat
+        an already-used token as invalid so no button is even shown."""
+        auth_request = {
+            "id": 1,
+            "email": "new@example.com",
+            "user_id": 7,
+            "used_at": datetime.now(UTC),
+            "invalidated_at": None,
+            "expires_at": datetime.now(UTC) + timedelta(minutes=10),
+        }
+        with (
+            patch("src.app.api.v1.users.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.users.crud_authentication_requests") as mock_crud,
+        ):
+            mock_crud.get = AsyncMock(return_value=auth_request)
+
+            result = await check_email_change_link(_request(), "already-used", mock_db)
+
+            assert result.valid is False
+
+    @pytest.mark.asyncio
+    async def test_expired_token_is_invalid(self, mock_db):
+        auth_request = {
+            "id": 1,
+            "email": "new@example.com",
+            "user_id": 7,
+            "used_at": None,
+            "invalidated_at": None,
+            "expires_at": datetime.now(UTC) - timedelta(minutes=1),
+        }
+        with (
+            patch("src.app.api.v1.users.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.users.crud_authentication_requests") as mock_crud,
+        ):
+            mock_crud.get = AsyncMock(return_value=auth_request)
+
+            result = await check_email_change_link(_request(), "expired", mock_db)
+
+            assert result.valid is False
+
+    @pytest.mark.asyncio
+    async def test_fresh_token_is_valid_and_returns_target_email(self, mock_db):
+        auth_request = {
+            "id": 1,
+            "email": "new@example.com",
+            "user_id": 7,
+            "used_at": None,
+            "invalidated_at": None,
+            "expires_at": datetime.now(UTC) + timedelta(minutes=10),
+        }
+        with (
+            patch("src.app.api.v1.users.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.users.crud_authentication_requests") as mock_crud,
+        ):
+            mock_crud.get = AsyncMock(return_value=auth_request)
+
+            result = await check_email_change_link(_request(), "good", mock_db)
+
+            assert result.valid is True
+            assert result.email == "new@example.com"
+
+
 class TestVerifyEmailChange:
     """`POST /user/email-change/verify`."""
 
@@ -181,12 +292,36 @@ class TestVerifyEmailChange:
             patch("src.app.api.v1.users.crud_users") as mock_users,
         ):
             mock_crud.get = AsyncMock(return_value=auth_request)
+            mock_users.get = AsyncMock(return_value={"id": 7, "email": "new@example.com"})
 
             result = await verify_email_change(_request(), EmailChangeVerifyRequest(token="already-used"), mock_db)
 
             assert result.email == "new@example.com"
-            mock_users.get.assert_not_called()
             mock_users.update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reused_token_with_mismatched_email_raises_unauthorized(self, mock_db):
+        """A used token whose target email no longer matches the account's current
+        one - e.g. the account's email changed again since - is a genuine, rejected
+        reuse, not a harmless repeat."""
+        auth_request = {
+            "id": 1,
+            "email": "new@example.com",
+            "user_id": 7,
+            "used_at": datetime.now(UTC),
+            "invalidated_at": None,
+            "expires_at": datetime.now(UTC) + timedelta(minutes=10),
+        }
+        with (
+            patch("src.app.api.v1.users.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.users.crud_authentication_requests") as mock_crud,
+            patch("src.app.api.v1.users.crud_users") as mock_users,
+        ):
+            mock_crud.get = AsyncMock(return_value=auth_request)
+            mock_users.get = AsyncMock(return_value={"id": 7, "email": "someone-else@example.com"})
+
+            with pytest.raises(UnauthorizedException, match="already been used"):
+                await verify_email_change(_request(), EmailChangeVerifyRequest(token="stale-used"), mock_db)
 
     @pytest.mark.asyncio
     async def test_expired_token_raises_unauthorized(self, mock_db):
@@ -201,8 +336,10 @@ class TestVerifyEmailChange:
         with (
             patch("src.app.api.v1.users.enforce_rate_limit", new_callable=AsyncMock),
             patch("src.app.api.v1.users.crud_authentication_requests") as mock_crud,
+            patch("src.app.api.v1.users.crud_users") as mock_users,
         ):
             mock_crud.get = AsyncMock(return_value=auth_request)
+            mock_users.get = AsyncMock(return_value={"id": 7, "email": "old@example.com"})
 
             with pytest.raises(UnauthorizedException, match="expired"):
                 await verify_email_change(_request(), EmailChangeVerifyRequest(token="expired"), mock_db)
