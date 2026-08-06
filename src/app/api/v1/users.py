@@ -196,7 +196,26 @@ async def verify_email_change(
     if auth_request is None:
         raise UnauthorizedException("This confirmation link is invalid.")
 
+    new_email = auth_request["email"]
+    user_id = auth_request["user_id"]
+
+    db_user = await crud_users.get(db=db, id=user_id, is_deleted=False)
+    if db_user is None:
+        raise NotFoundException("User not found")
+
+    current_email = db_user["email"] if isinstance(db_user, dict) else db_user.email
+
     if auth_request["used_at"] is not None:
+        # Already used - most likely a mail client's link-preview/security-scanning
+        # feature (many run a real JS-executing browser to "detonate" links before a
+        # human ever clicks) rather than a genuine reuse attempt. If the account's
+        # email already matches what this token would have set, the change this
+        # token represents has already gone through - report success instead of a
+        # confusing "invalid link" error for something that, in fact, already
+        # worked. Only a token that's used *and* doesn't match the current state is
+        # treated as a real (rejected) reuse.
+        if current_email == new_email:
+            return EmailChangeVerifyResponse(email=new_email)
         raise UnauthorizedException("This confirmation link has already been used.")
 
     expires_at = auth_request["expires_at"]
@@ -204,13 +223,6 @@ async def verify_email_change(
         expires_at = expires_at.replace(tzinfo=UTC)
     if expires_at < datetime.now(UTC):
         raise UnauthorizedException("This confirmation link has expired.")
-
-    new_email = auth_request["email"]
-    user_id = auth_request["user_id"]
-
-    db_user = await crud_users.get(db=db, id=user_id, is_deleted=False)
-    if db_user is None:
-        raise NotFoundException("User not found")
 
     if await crud_users.exists(db=db, email=new_email):
         raise DuplicateValueException("Email is already registered to another account")
@@ -224,8 +236,7 @@ async def verify_email_change(
         await db.rollback()
         raise DuplicateValueException("Email is already registered to another account") from None
 
-    old_email = db_user["email"] if isinstance(db_user, dict) else db_user.email
-    await send_email_changed_notification(old_email=old_email, new_email=new_email)
+    await send_email_changed_notification(old_email=current_email, new_email=new_email)
 
     return EmailChangeVerifyResponse(email=new_email)
 

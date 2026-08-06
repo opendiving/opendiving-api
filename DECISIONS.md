@@ -706,6 +706,36 @@ ALTER TABLE authentication_request ADD COLUMN user_id INTEGER REFERENCES "user"(
 CREATE INDEX ix_authentication_request_user_id ON authentication_request (user_id);
 ```
 
+### A confirmed change can still show "invalid or expired" - because something already used the link
+
+A real report: a user clicked the confirmation link, saw "this link is invalid or
+expired", but their email *had* actually changed in the DB. Root cause: many mail
+clients (Outlook/Microsoft Defender "Safe Links", iOS Mail's rich link previews,
+etc.) "detonate" or preview-render links using a real, JS-executing browser *before*
+a human ever clicks them - which, when the link target auto-fires the verify call
+from a `useEffect` on page load (as this originally did), silently consumes the
+single-use token. The real user's subsequent click then correctly gets "already
+used" - a technically-accurate but confusing error, since the change they wanted had,
+in fact, already gone through.
+
+Two layers now guard against this:
+1. **Idempotent re-verification** (`verify_email_change`): if a token is already used
+   *and* the account's current email already matches what that token would have set,
+   it returns success instead of erroring - only a used token whose target doesn't
+   match the current state is treated as a genuine (rejected) reuse. This is safe
+   specifically because it grants no new privilege - it just confirms an
+   already-applied, idempotent fact. This is deliberately *not* done for
+   `/auth/email/verify` (sign-in) - reissuing fresh access/refresh tokens on every
+   replay of a "used" token would defeat single-use as a security control in a way
+   that re-confirming an email change does not.
+2. **Explicit confirmation click** (`opendiving-web`'s `/auth/verify` and
+   `/settings/confirm-email` pages): both now show a "Sign in"/"Confirm email
+   change" button instead of calling the verify endpoint automatically on page load.
+   A passive preview/scan can load the page, but it can't fake a real button click,
+   so this stops the token from being silently consumed before the user acts at all
+   - a stronger fix than relying solely on "it's a page, not a raw API link" (see web
+   app's `DECISIONS.md`).
+
 The admin panel (`admin/views.py`) lost its `password_transformer`/`PasswordTransformer`
 for the `User` view - there's no password field to transform. Admin-created users
 authenticate afterwards the same way as anyone else, via their `email`. Similarly,
