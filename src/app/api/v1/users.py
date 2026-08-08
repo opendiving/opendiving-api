@@ -1,133 +1,288 @@
-import uuid as uuid_pkg
-from typing import Annotated, Any, cast
+from datetime import UTC, datetime, timedelta
+from typing import Annotated, cast
 
 from fastapi import APIRouter, Cookie, Depends, Request, Response
-from fastcrud import PaginatedListResponse, compute_offset, paginated_response
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import get_current_user
+from ...core.config import settings
 from ...core.db.database import async_get_db
-from ...core.exceptions.http_exceptions import DuplicateValueException, ForbiddenException, NotFoundException
-from ...core.security import blacklist_token, blacklist_tokens, get_password_hash, oauth2_scheme
+from ...core.exceptions.http_exceptions import (
+    BadRequestException,
+    DuplicateValueException,
+    NotFoundException,
+    UnauthorizedException,
+)
+from ...core.security import blacklist_token, blacklist_tokens, generate_secure_token, hash_token, oauth2_scheme
+from ...core.utils.rate_limit import enforce_rate_limit
+from ...crud.crud_authentication_requests import crud_authentication_requests
+from ...crud.crud_user_dive_stats import crud_user_dive_stats
 from ...crud.crud_users import crud_users
-from ...schemas.user import UserCreate, UserCreateInternal, UserRead, UserReadInternal, UserUpdate
+from ...schemas.auth import LinkCheckResponse
+from ...schemas.authentication_request import AuthenticationRequestCreate, AuthenticationRequestUpdate
+from ...schemas.email_change import (
+    EmailChangeRequest,
+    EmailChangeRequestResponse,
+    EmailChangeVerifyRequest,
+    EmailChangeVerifyResponse,
+)
+from ...schemas.user import UserRead, UserUpdate
+from ...schemas.user_dive_stats import UserDiveStatsRead, UserDiveStatsReadInternal
+from ...services.email_service import send_email_change_confirmation_email, send_email_changed_notification
 
 router = APIRouter(tags=["users"])
 
+# Note: there is no `POST /user` here - account creation only ever happens via
+# `POST /auth/complete` (see `api.v1.auth`), after an identity (email or Google) has
+# already been verified. There is no separate signup flow.
 
-@router.post("/user", response_model=UserRead, status_code=201)
-async def write_user(
-    request: Request, user: UserCreate, db: Annotated[AsyncSession, Depends(async_get_db)]
-) -> UserRead:
-    email_row = await crud_users.exists(db=db, email=user.email)
-    if email_row:
-        raise DuplicateValueException("Email is already registered")
-
-    username_row = await crud_users.exists(db=db, username=user.username)
-    if username_row:
-        raise DuplicateValueException("Username not available")
-
-    user_internal_dict = user.model_dump()
-    user_internal_dict["hashed_password"] = get_password_hash(password=user_internal_dict["password"])
-    del user_internal_dict["password"]
-
-    user_internal = UserCreateInternal(**user_internal_dict)
-    created_user = await crud_users.create(
-        db=db, object=user_internal, schema_to_select=UserReadInternal, return_as_model=True
-    )
-
-    user_read = await crud_users.get(db=db, id=created_user.id, schema_to_select=UserRead, return_as_model=True)
-    if user_read is None:
-        raise NotFoundException("Created user not found")
-
-    return cast(UserRead, user_read)
+_EMAIL_CHANGE_REQUEST_RESPONSE = EmailChangeRequestResponse()
 
 
-@router.get("/users", response_model=PaginatedListResponse[UserRead], dependencies=[Depends(get_current_user)])
-async def read_users(
-    request: Request, db: Annotated[AsyncSession, Depends(async_get_db)], page: int = 1, items_per_page: int = 10
-) -> dict:
-    users_data = await crud_users.get_multi(
-        db=db,
-        offset=compute_offset(page, items_per_page),
-        limit=items_per_page,
-        is_deleted=False,
-    )
-
-    response: dict[str, Any] = paginated_response(crud_data=users_data, page=page, items_per_page=items_per_page)
-    return response
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
 
 
-@router.get("/user/me", response_model=UserRead)
-async def read_users_me(request: Request, current_user: Annotated[dict, Depends(get_current_user)]) -> dict:
+# Note: there is no `GET /users` here (yet) either - a public-facing listing of
+# all users has the same "other users shouldn't see email" problem as a single
+# lookup by uuid, and is being designed together with the eventual public-profile
+# endpoint rather than left in its previous shape (which returned full `UserRead`,
+# including `email`, for every user) in the meantime.
+
+
+@router.get("/user", response_model=UserRead)
+async def read_current_user(request: Request, current_user: Annotated[dict, Depends(get_current_user)]) -> dict:
     return current_user
 
 
-@router.get("/user/{uuid}", response_model=UserRead, dependencies=[Depends(get_current_user)])
-async def read_user(
-    request: Request, uuid: uuid_pkg.UUID, db: Annotated[AsyncSession, Depends(async_get_db)]
-) -> UserRead:
-    db_user = await crud_users.get(
-        db=db, uuid=uuid, is_deleted=False, schema_to_select=UserRead, return_as_model=True
-    )
-    if db_user is None:
-        raise NotFoundException("User not found")
-
-    return cast(UserRead, db_user)
+# Note: there is no `GET /user/{uuid}` here (yet) - looking up *other* users will be
+# added later as a separate, public-profile-shaped endpoint (limited fields, no
+# email) rather than reusing this module's current-user-only routes. Until then,
+# there's no way to fetch another user's data through this API at all.
 
 
-@router.patch("/user/{uuid}")
+@router.patch("/user")
 async def patch_user(
     request: Request,
     values: UserUpdate,
-    uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    db_user = await crud_users.get(db=db, uuid=uuid)
-    if db_user is None:
-        raise NotFoundException("User not found")
-
-    if isinstance(db_user, dict):
-        db_username = db_user["username"]
-        db_email = db_user["email"]
-    else:
-        db_username = db_user.username
-        db_email = db_user.email
-
-    if current_user["uuid"] != uuid:
-        raise ForbiddenException()
-
-    if values.email is not None and values.email != db_email:
-        if await crud_users.exists(db=db, email=values.email):
-            raise DuplicateValueException("Email is already registered")
-
-    if values.username is not None and values.username != db_username:
+    # Note: `email` is deliberately not part of `UserUpdate` - see
+    # `POST /user/email-change/request` for how email changes work instead.
+    if values.username is not None and values.username != current_user["username"]:
         if await crud_users.exists(db=db, username=values.username):
             raise DuplicateValueException("Username not available")
 
-    await crud_users.update(db=db, object=values, uuid=uuid)
+    await crud_users.update(db=db, object=values, uuid=current_user["uuid"])
     return {"message": "User updated"}
 
 
-@router.delete("/user/{uuid}")
+@router.post("/user/email-change/request", response_model=EmailChangeRequestResponse)
+async def request_email_change(
+    request: Request,
+    body: EmailChangeRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> EmailChangeRequestResponse:
+    """Step 1 of changing an account's email: generates a confirmation link and
+    emails it to the *new* address - the change only takes effect once that link is
+    opened (`POST /user/email-change/verify`), proving the caller actually controls
+    it.
+
+    Always operates on the caller's own account (from the access token), not a path
+    parameter - there is no other account to target.
+
+    Always returns the same generic message, whether or not `new_email` already
+    belongs to another account.
+    """
+    new_email = body.new_email.lower()
+    if new_email == current_user["email"].lower():
+        raise BadRequestException("That's already your email address.")
+
+    await enforce_rate_limit(
+        f"email-change:user:{current_user['id']}",
+        settings.EMAIL_CHANGE_REQUEST_RATE_LIMIT_PER_USER,
+        settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
+    )
+    await enforce_rate_limit(
+        f"email-change:ip:{_client_ip(request)}",
+        settings.EMAIL_CHANGE_REQUEST_RATE_LIMIT_PER_USER * 5,
+        settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
+    )
+
+    # Only one *live* change request per user at a time, regardless of which target
+    # address a previous one was for.
+    pending_count = await crud_authentication_requests.count(
+        db, user_id=current_user["id"], purpose="email_change", invalidated_at=None
+    )
+    if pending_count > 0:
+        await crud_authentication_requests.update(
+            db=db,
+            object=AuthenticationRequestUpdate(invalidated_at=datetime.now(UTC)),
+            allow_multiple=True,
+            user_id=current_user["id"],
+            purpose="email_change",
+            invalidated_at=None,
+        )
+
+    raw_token = generate_secure_token()
+    expires_at = datetime.now(UTC) + timedelta(minutes=settings.EMAIL_CHANGE_TOKEN_EXPIRE_MINUTES)
+    await crud_authentication_requests.create(
+        db=db,
+        object=AuthenticationRequestCreate(
+            email=new_email,
+            token_hash=hash_token(raw_token),
+            expires_at=expires_at,
+            purpose="email_change",
+            user_id=current_user["id"],
+        ),
+    )
+
+    confirm_url = f"{settings.FRONTEND_URL}/settings/confirm-email?token={raw_token}"
+    await send_email_change_confirmation_email(new_email=new_email, confirm_url=confirm_url)
+
+    return _EMAIL_CHANGE_REQUEST_RESPONSE
+
+
+@router.get("/user/email-change/verify/check", response_model=LinkCheckResponse)
+async def check_email_change_link(
+    request: Request, token: str, db: Annotated[AsyncSession, Depends(async_get_db)]
+) -> LinkCheckResponse:
+    """Side-effect-free precheck used by the confirmation page before it shows the
+    "Confirm email change" button - lets it show an error immediately for a link
+    that's already been used, invalidated, or expired (e.g. revisited via the
+    browser's back button after already confirming) rather than a misleadingly
+    clickable button, and lets it display the target email up front. Never marks
+    anything used or changes any state.
+    """
+    await enforce_rate_limit(
+        f"email-change-verify-check:ip:{_client_ip(request)}",
+        settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
+        settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
+    )
+
+    auth_request = await crud_authentication_requests.get(db=db, token_hash=hash_token(token), purpose="email_change")
+    if auth_request is None or auth_request["invalidated_at"] is not None or auth_request["used_at"] is not None:
+        return LinkCheckResponse(valid=False)
+
+    expires_at = auth_request["expires_at"]
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at < datetime.now(UTC):
+        return LinkCheckResponse(valid=False)
+
+    return LinkCheckResponse(valid=True, email=auth_request["email"])
+
+
+@router.post("/user/email-change/verify", response_model=EmailChangeVerifyResponse)
+async def verify_email_change(
+    request: Request,
+    body: EmailChangeVerifyRequest,
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> EmailChangeVerifyResponse:
+    """Step 2: validates the confirmation link and, if it checks out, applies the
+    email change. Deliberately doesn't require the caller to be signed in - the link
+    may well be opened on a different device/browser than the one the change was
+    requested from - the token itself, tied to a specific `user_id`, is what
+    authorizes this.
+
+    Re-opening/re-verifying the *same* link again (e.g. a mail client's
+    link-preview/security-scanning feature "detonating" it before a human clicks, or
+    the user clicking twice) is deliberately not an error, as long as the change it
+    represents was actually applied - it's a no-op that just reports that back,
+    rather than re-touching the DB or re-notifying anyone. Only an *expired* link,
+    one superseded by a newer request (see `AuthenticationRequest.invalidated_at`),
+    or a used token whose target *doesn't* match the account's current email (a
+    genuine, rejected reuse) is an error. `check_email_change_link` is what actually
+    keeps a human from re-triggering this in the first place after the first use -
+    this leniency is just a safety net for races (e.g. a double click).
+    """
+    await enforce_rate_limit(
+        f"email-change-verify:ip:{_client_ip(request)}",
+        settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
+        settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
+    )
+
+    auth_request = await crud_authentication_requests.get(
+        db=db, token_hash=hash_token(body.token), purpose="email_change"
+    )
+    if auth_request is None:
+        raise UnauthorizedException("This confirmation link is invalid.")
+
+    if auth_request["invalidated_at"] is not None:
+        raise UnauthorizedException("This confirmation link is no longer valid - a newer request was made.")
+
+    new_email = auth_request["email"]
+    user_id = auth_request["user_id"]
+
+    db_user = await crud_users.get(db=db, id=user_id, is_deleted=False)
+    if db_user is None:
+        raise NotFoundException("User not found")
+
+    current_email = db_user["email"] if isinstance(db_user, dict) else db_user.email
+
+    if auth_request["used_at"] is not None:
+        if current_email == new_email:
+            return EmailChangeVerifyResponse(email=new_email)
+        raise UnauthorizedException("This confirmation link has already been used.")
+
+    expires_at = auth_request["expires_at"]
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at < datetime.now(UTC):
+        raise UnauthorizedException("This confirmation link has expired.")
+
+    if await crud_users.exists(db=db, email=new_email):
+        raise DuplicateValueException("Email is already registered to another account")
+
+    try:
+        await crud_users.update(db=db, object={"email": new_email}, id=user_id)
+        await crud_authentication_requests.update(
+            db=db, object=AuthenticationRequestUpdate(used_at=datetime.now(UTC)), id=auth_request["id"]
+        )
+    except IntegrityError:
+        await db.rollback()
+        raise DuplicateValueException("Email is already registered to another account") from None
+
+    await send_email_changed_notification(old_email=current_email, new_email=new_email)
+
+    return EmailChangeVerifyResponse(email=new_email)
+
+
+@router.get("/user/dive-stats", response_model=UserDiveStatsRead)
+async def read_dive_stats(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> UserDiveStatsRead:
+    stats = await crud_user_dive_stats.get(
+        db=db, user_id=current_user["id"], schema_to_select=UserDiveStatsReadInternal, return_as_model=True
+    )
+    if stats is None:
+        # No dives logged yet - return zeroed-out stats rather than 404, since
+        # every user conceptually has stats, they just haven't been created yet.
+        # total_dives/max_depth/total_time/species_seen have Pydantic defaults, but mypy's
+        # pydantic plugin doesn't recognize defaults declared via `Annotated[..., Field(default=...)]`.
+        return UserDiveStatsRead(user_uuid=current_user["uuid"], created_at=datetime.now(UTC))  # type: ignore[call-arg]
+
+    stats = cast(UserDiveStatsReadInternal, stats)
+    return UserDiveStatsRead(
+        **{k: v for k, v in stats.model_dump().items() if k != "user_id"}, user_uuid=current_user["uuid"]
+    )
+
+
+@router.delete("/user")
 async def erase_user(
     request: Request,
     response: Response,
-    uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     access_token: str = Depends(oauth2_scheme),
     refresh_token: str | None = Cookie(None, alias="refresh_token"),
 ) -> dict[str, str]:
-    db_user = await crud_users.get(db=db, uuid=uuid, schema_to_select=UserReadInternal)
-    if not db_user:
-        raise NotFoundException("User not found")
-
-    if current_user["uuid"] != uuid:
-        raise ForbiddenException()
-
-    await crud_users.delete(db=db, uuid=uuid)
+    await crud_users.delete(db=db, uuid=current_user["uuid"])
 
     if refresh_token:
         await blacklist_tokens(access_token=access_token, refresh_token=refresh_token, db=db)

@@ -13,8 +13,12 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     name: Mapped[str] = mapped_column(String(30))
     username: Mapped[str] = mapped_column(String(20), unique=True, index=True)
     email: Mapped[str] = mapped_column(String(50), unique=True, index=True)
-    hashed_password: Mapped[str] = mapped_column(String)
 
+    # No password/provider-id columns here at all - a user's actual authentication
+    # methods (magic-link email, Google, and any future provider) live exclusively in
+    # `AuthenticationProvider`, one row per linked provider. This is what lets the same
+    # account be reached via either method without the `User` row itself needing to
+    # know which ones are in use.
     profile_image_url: Mapped[str] = mapped_column(String, default="https://profileimageurl.com")
     is_superuser: Mapped[bool] = mapped_column(default=False)
 

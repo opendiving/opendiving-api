@@ -289,11 +289,13 @@ directly instead of a username:
   directly (added to `DiveCreateRequest`/`TripCreate`/`DiveSiteCreate`). The
   handler checks `current_user["id"] == body.user_id` and raises `403` on mismatch
   - it does not trust the body's `user_id` on its own.
-- `GET /dives`, `/trips`, `/dive-sites`, `/dive-stats`: take `user_id` as a query
+- `GET /dives`, `/trips`, `/dive-sites`: take `user_id` as a query
   param instead of a path segment. The handler checks `current_user["id"] ==
   user_id` and raises `403` on mismatch. These endpoints are no longer public -
   they previously had no auth dependency at all (readable by anyone who knew a
   username).
+  `/dive-stats` was later moved again, to `GET /user/{uuid}/dive-stats` - see
+  "`GET /dive-stats` was moved under `/user/{uuid}/...`" below.
 - `GET/PATCH/DELETE /dive/{id}`, `/trip/{id}`, `/dive-site/{id}`: no longer take
   a username at all. The handler fetches the object by `id` alone, then checks
   the fetched object's `user_id` against `current_user["id"]`, raising `404` if
@@ -378,6 +380,31 @@ since FastAPI requires the handler's parameter name to match the path template
 placeholder, and it's cleaner for the cached helper's parameter to mirror it exactly.
 This is also why `uuid` (the stdlib module) is imported as `uuid_pkg` throughout these
 files - so a path parameter can be named `uuid` without shadowing the module.
+
+## `GET /dive-stats` was moved under `/user/{uuid}/...`
+
+`GET /dive-stats` (a flat route taking `user_uuid` as a query param, per the
+flattening decision above) was changed to `GET /user/{uuid}/dive-stats`, matching
+the path-based shape already used for every other single-user route (`GET/PATCH/
+DELETE /user/{uuid}`, `POST /user/{uuid}/email-change/request`). The handler's
+ownership check is unchanged in substance - it still compares `current_user["uuid"]`
+against the path `uuid` and raises `403` on mismatch - only the parameter's source
+(path segment instead of query string) and name (`uuid` instead of `user_uuid`,
+per the `{resource}_uuid` -> `{uuid}` renaming decision above) changed. Unlike
+`/dives`, `/trips`, `/dive-sites`, this endpoint doesn't take any *other* id that
+would need disambiguating from the path segment, so there's no reason left for it
+to stay flat with the others.
+
+Once the route itself lived at `/user/{uuid}/dive-stats`, keeping its handler in a
+separate single-endpoint `dive_stats.py` module (tagged `"dive-stats"`) no longer made
+sense either - by that point it was, structurally, just another single-user route
+under `/user/{uuid}/...`, like `email-change/request` or the plain `GET /user/{uuid}`.
+`read_dive_stats` was moved into `users.py` and now shares that module's `"users"`
+tag; `dive_stats.py` no longer exists, and `api/v1/__init__.py` no longer registers a
+separate router for it. This only affects where the *route* lives - `models/`,
+`schemas/user_dive_stats.py`, `crud/crud_user_dive_stats.py`, and
+`services/dive_stats.py` (the recalculation logic invoked from `dives.py`) are
+unrelated internals and keep their existing names/locations.
 
 ## Date-only vs datetime fields
 
@@ -520,3 +547,401 @@ tool" section above, this only takes effect for brand-new tables via
 ```sql
 CREATE INDEX ix_token_blacklist_expires_at ON token_blacklist (expires_at);
 ```
+
+## Google sign in/up shares one endpoint, and treats a verified email as proof of ownership
+
+`POST /login/google` (`api/v1/login.py`) is the single endpoint behind both the
+"Continue with Google" button on `/signin` and `/signup` on the frontend - Google
+Identity Services itself doesn't distinguish sign in from sign up (there's one
+button, one `credential` JWT), so the backend mirrors that: find-or-create, then
+issue tokens exactly like `/login` does.
+
+The frontend never talks to Google's OAuth endpoints directly for this - it only
+loads Google's Identity Services *button* (via `@react-oauth/google`), which
+hands back a signed ID token (`credential`, a JWT) once the user picks an
+account. That JWT is forwarded verbatim to `/login/google`, which verifies it
+server-side with `google-auth`'s `id_token.verify_oauth2_token()` - this checks
+the signature against Google's published public keys, expiry, issuer, and (via
+the `audience` argument) that the token was issued for *this* app's OAuth client
+ID (`GOOGLE_CLIENT_ID`/`NEXT_PUBLIC_GOOGLE_CLIENT_ID` - the same value on both
+sides; it's not a secret). The backend never sees or handles a Google client
+secret - the ID-token flow doesn't need one.
+
+Account matching, in order:
+1. Look up by `User.google_id` (the token's `sub` claim) - the common case for a
+   returning Google user.
+2. Otherwise look up by email. If found, link `google_id` onto that existing
+   (presumably password-based) account rather than erroring or creating a
+   duplicate - this is safe specifically because Google only issues an ID token
+   with `email_verified: true` for an address it has itself confirmed the user
+   controls (`verify_google_id_token` in `core/security.py` rejects anything
+   else), so it's equivalent to the user proving ownership of that email again.
+3. Otherwise create a new account: `name` from the token's `name` claim (falling
+   back to the email's local part), `username` auto-generated from the email's
+   local part via `_generate_unique_username` (sanitized to `UserBase.username`'s
+   `^[a-z0-9]+$` pattern, with a numeric suffix appended on collision), and no
+   password.
+
+This is why `User.hashed_password` (`models/user.py`) is nullable - Google-only
+accounts never set one. `authenticate_user` (`core/security.py`) treats a `None`
+hashed password as "password sign-in unavailable", rather than passing `None`
+to `bcrypt.checkpw()`. A Google-only user who wants a password later would need
+a dedicated "set password" flow - not implemented yet, since nothing currently
+prompts for it.
+
+Applying this to an existing local DB (per the "no migration tool" section
+above) - `hashed_password` is only made nullable in the SQLAlchemy model, which
+`create_all()` never alters on an existing table:
+```sql
+ALTER TABLE "user" ALTER COLUMN hashed_password DROP NOT NULL;
+ALTER TABLE "user" ADD COLUMN google_id VARCHAR;
+CREATE UNIQUE INDEX ix_user_google_id ON "user" (google_id);
+```
+
+**Superseded** by the unified auth flow below - `/login`, `/login/google`, and
+`POST /user` (password signup) no longer exist, and `User` no longer has
+`hashed_password`/`google_id` columns at all.
+
+## Unified auth flow: no passwords, no separate sign up, one `User` row per identity
+
+The entire password-based login/signup system (`POST /login`, `POST /login/google`,
+`POST /user`) was replaced with a single flow entered through either an email magic
+link or Google - see `api/v1/auth.py`. The driving requirement: **authentication
+("who are you?") must be fully separated from account creation ("tell us about
+you")**, so no unverified/incomplete user can ever end up in the `user` table, and a
+verified email or Google account is looked up *before* deciding whether to sign in or
+start onboarding - never the other way around.
+
+Three new pieces make this work:
+
+- **`AuthenticationRequest`** (`models/authentication_request.py`) - a purely
+  temporary, table-backed record for the email magic-link flow. Stores a SHA-256
+  hash of the token (never the raw token - see `core.security.hash_token`), an
+  `expires_at` (30 min, `settings.MAGIC_LINK_TOKEN_EXPIRE_MINUTES`), and a nullable
+  `used_at` that makes it single-use. Deliberately holds no reference to `User` -
+  proving you control an email address must never, by itself, create or touch a user
+  row.
+- **`AuthenticationProvider`** (`models/authentication_provider.py`) - one row per
+  provider a `User` has linked (`provider="email"`, `provider="google"` with
+  `provider_user_id` set to Google's `sub`, and any future provider needs no schema
+  change - just a new `provider` value). This is what lets the same account be
+  reached via either method: `services.auth_service.resolve_identity` looks up by
+  provider identity first (Google's `sub`, when present), falls back to looking up
+  by email, and links the current provider onto that account if it isn't linked yet.
+  Two `UniqueConstraint`s enforce the invariants that matter: `(provider,
+  provider_user_id)` stops the same Google account from ever being linked to two
+  users (Postgres treats each row's `NULL` `provider_user_id` - i.e. every "email"
+  row - as distinct from every other `NULL`, so this doesn't block multiple users
+  each having their own "email" row), and `(user_id, provider)` stops a user from
+  linking the same provider twice.
+- **Onboarding tokens** (`core.security.create_onboarding_token`/
+  `verify_onboarding_token`) - a short-lived JWT (`TokenType.ONBOARDING`, 30 min via
+  `settings.ONBOARDING_TOKEN_EXPIRE_MINUTES`) carrying a verified-but-accountless
+  identity (email, provider, provider-specific id, prefill name/avatar) from
+  `/auth/email/verify` or `/auth/google` to `/auth/complete`. Never persisted -
+  same as access/refresh tokens, it's just a signed, self-contained blob - but it's
+  recorded in the existing `token_blacklist` table once used (`blacklist_token`),
+  making it single-use exactly like a magic-link token. This is also what backstops
+  "no unverified users": a `User` row is created in exactly one place
+  (`complete_profile`), and only after this token has been validated.
+
+`services.auth_service.resolve_identity` is the one place both `/auth/email/verify`
+and `/auth/google` funnel through to answer "does an account already exist, and if
+so is this provider linked to it yet" identically for both - see its docstring for
+the three-step lookup order. It returns either `AuthenticatedUser` (sign in
+immediately) or `OnboardingRequired` (mint an onboarding token, no DB write).
+
+`complete_profile` (`POST /auth/complete`) creates the `User` row and its first
+`AuthenticationProvider` row together, using FastCRUD's `create(..., commit=False)`
+followed by one explicit `db.commit()`, with `except IntegrityError: await
+db.rollback()` around both - this is what makes account creation transactional and
+race-safe: two concurrent completions of the same onboarding token (or two signups
+racing for the same username) both pass the pre-emptive `crud_users.exists(...)`
+checks, but only one of them can win the DB-level unique constraint on `email`/
+`username`; the loser's `IntegrityError` is turned into a `DuplicateValueException`
+rather than a 500 or (worse) a duplicate account.
+
+`POST /auth/email/request` invalidating previous pending tokens hit the same
+`NoResultFound` pitfall as the token-blacklist purge job (`core/worker/functions.py`):
+FastCRUD's `update(..., allow_multiple=True)` raises `NoResultFound` when zero rows
+match, and the common case here - a first-time request - has nothing pending to
+invalidate. Fixed the same way: `count()` first, only call `update()` if it's non-zero.
+
+Rate limiting (`core.utils.rate_limit.enforce_rate_limit`) is a fixed-window Redis
+counter (`INCR` + `EXPIRE`) applied per-email and per-IP on `/auth/email/request`,
+and per-IP on `/auth/email/verify`/`/auth/google` - see `MagicLinkSettings` in
+`core/config.py` for the limits/window. It's a soft dependency: if `cache.client`
+is `None` (Redis unreachable/not configured), it's a no-op rather than a hard
+failure, since the actual security boundary is token expiry + single-use +
+`RESEND_API_KEY`-gated sending, not the rate limiter.
+
+`POST /auth/email/request` always returns the exact same
+`EmailAuthRequestResponse` message regardless of whether the email belongs to an
+existing account, and - unlike the old `/login`/`POST /user` - never even queries
+`crud_users`. Enumeration protection here isn't a response-shaping trick bolted on
+afterwards; the code path genuinely can't distinguish the two cases, because
+whether a magic link will eventually sign someone in or send them to onboarding is
+only decided later, in `/auth/email/verify`.
+
+CSRF: the only cookie-authenticated endpoint in this flow is `POST /auth/refresh` (the
+httpOnly `refresh_token` cookie set by `issue_tokens`) - every other endpoint here is
+either unauthenticated (the whole point of `/auth/*`) or authenticated via a Bearer
+access token, which browsers never attach automatically, so it isn't CSRF-able at
+all. `/auth/refresh`'s cookie is `samesite="lax"`, which browsers refuse to attach on
+cross-site `fetch`/XHR (only top-level navigations), so a malicious page can't
+silently trigger it with the victim's session - this was already the design before
+this rewrite, just re-verified as still sufficient given the new endpoints don't
+change that picture.
+
+## `/refresh` and `/logout` moved from their own `login.py`/`logout.py` modules into `/auth`
+
+`POST /refresh` and `POST /logout` used to live in their own single-endpoint modules
+(`api/v1/login.py`, `api/v1/logout.py`), both tagged `"login"` in the generated
+OpenAPI docs (Swagger/Redoc) - a leftover from the old password-based flow, from
+back when a `POST /login` endpoint actually existed there. Once that flow was
+replaced (see "Unified auth flow" below), the `"login"` tag no longer corresponded
+to any real endpoint, and having every other auth-adjacent operation grouped under
+the `"auth"` tag while these two sat off on their own under a stale tag name made the
+docs' endpoint grouping actively misleading.
+
+Both were merged directly into `api/v1/auth.py` and now hang off that module's
+existing `APIRouter(prefix="/auth", tags=["auth"])`, so they're reachable at
+`POST /auth/refresh` and `POST /auth/logout` and show up under the same `"auth"`
+tag as `/auth/email/request`, `/auth/google`, etc. `login.py`/`logout.py` no longer
+exist; their routes were removed from `api/v1/__init__.py` accordingly. Callers
+(the web app's `client.ts`/`auth.ts`) were updated to the new paths - there is no
+backwards-compatible redirect from the old `/refresh`/`/logout` paths, since these
+are same-origin API calls from apps we control, not a public integration surface.
+
+While touching tags, `dive_sites.py`'s tag was also renamed from `"dive_sites"` to
+`"dive-sites"`, matching the dash-separated convention every other module's tag
+already followed (`"dive-stats"`, `"dive-site"`-style URL segments) - it was the one
+holdout still using an underscore.
+
+## Changing an account's email requires confirming the new address first
+
+`PATCH /user/{uuid}` (`api/v1/users.py`) no longer accepts `email` at all -
+`UserUpdate` dropped the field entirely, so submitting it is a 422
+(`extra="forbid"`), not a silently-ignored no-op. Changing an account's email is a
+two-step confirmation flow instead, reusing the exact same `AuthenticationRequest`
+mechanics as the sign-in magic link (single-use, hashed token, short expiry) but with
+a different `purpose` (`"email_change"` vs `"sign_in"`) and, crucially, a `user_id` -
+the already-existing account requesting the change, which `"sign_in"` rows never have
+since that flow works before any `User` row exists.
+
+- `POST /user/email-change/request` (authenticated; operates on the caller's own
+  account from the access token, no `{uuid}` path param - there's no other account to
+  target) emails a confirmation link to the **new** address, not the current one -
+  proving control of the new address is the entire point. Always returns the same
+  generic message regardless of whether the new address already belongs to someone
+  else (mirrors `/auth/email/request`'s enumeration protection).
+- `POST /user/email-change/verify` (no auth required - the token itself, tied to a
+  specific `user_id`, is what authorizes the change) applies it: `crud_users.update`
+  the row's `email`, mark the `AuthenticationRequest` used, and send a best-effort
+  "your email was changed" notice to the **old** address (`send_email_changed_notification`)
+  so its owner finds out even if they weren't the one who changed it. Wrapped in a
+  try/except `IntegrityError` -> rollback -> `DuplicateValueException`, same
+  race-safety pattern as `/auth/complete`, for two verifications racing to claim the
+  same address.
+
+`POST /user/email-change/request` originally lived at `POST /user/{uuid}/email-change/request`
+and compared `current_user["uuid"]` against the path `uuid`, raising `403` on
+mismatch - the same ownership-check pattern as `PATCH`/`DELETE /user/{uuid}`. Unlike
+those routes, this one never had a legitimate reason to target anyone other than the
+caller (there's no admin/moderation path that changes *someone else's* email), so the
+`{uuid}` was dropped entirely and the handler now always operates on `current_user`
+from the access token. This removed the only way to call it "wrong" (mismatched path
+uuid) along with the `ForbiddenException` branch that guarded against it.
+
+The admin panel needed its own `UserAdminUpdate` schema (`UserUpdate` plus `email`
+back) for its `update_schema`, since a trusted superuser should still be able to fix
+up an account's email directly without the confirmation dance - `admin/views.py`
+uses this instead of the public `UserUpdate`.
+
+`purpose`/`user_id` were added to the *existing* `authentication_request` table, so -
+per the "no migration tool" section above - `create_all()` won't add them to an
+already-running dev DB (surfaces as `asyncpg.exceptions.UndefinedColumnError: column
+authentication_request.user_id does not exist`). Add them by hand:
+```sql
+ALTER TABLE authentication_request ADD COLUMN purpose VARCHAR(20) NOT NULL DEFAULT 'sign_in';
+ALTER TABLE authentication_request ADD COLUMN user_id INTEGER REFERENCES "user"(id) ON DELETE CASCADE;
+CREATE INDEX ix_authentication_request_user_id ON authentication_request (user_id);
+```
+
+### A confirmed change can still show "invalid or expired" - because something already used the link
+
+A real report: a user clicked the confirmation link, saw "this link is invalid or
+expired", but their email *had* actually changed in the DB. Root cause: many mail
+clients (Outlook/Microsoft Defender "Safe Links", iOS Mail's rich link previews,
+etc.) "detonate" or preview-render links using a real, JS-executing browser *before*
+a human ever clicks them - which, when the link target auto-fires the verify call
+from a `useEffect` on page load (this app's design from the start, since a page -
+unlike a bare API link - already defeats *simple*, non-JS-executing scanners), can
+silently consume the token first. The real user's subsequent click then used to get a
+hard "already used" error - a technically-accurate but confusing one, since the
+change they wanted had, in fact, already gone through.
+
+A same-browser "pairing" cookie (set when the link is requested, checked when it's
+opened) was tried and rejected: it's extremely common to *request* a link on one
+device/browser (e.g. a laptop) and *open* it from another (e.g. a phone's mail app),
+which would just relabel "legitimate cross-device use" as "unpaired" and push it down
+the same degraded path as an actual scanner. Auto-verifying unconditionally on load
+was also tried, relying solely on the idempotent-reuse handling below to paper over a
+scanner having already consumed the token - genuinely zero-click, but it still lets
+automation silently trigger the *real* sign-in/email-change before a human ever acts,
+which is the actual thing worth protecting against, not just the confusing error
+message.
+
+The fix that stuck mirrors what the sign-up flow already gets "for free": completing
+a *new* account requires a real person to fill in and submit the profile-completion
+form, something automation won't do - so the frontend's `/auth/verify` and
+`/settings/confirm-email` pages (see the web app's `DECISIONS.md`) now require an
+explicit "Sign in"/"Confirm email change" button click before they ever call
+`POST /auth/email/verify`/`POST /user/email-change/verify`. A preview/scan can load
+the page, but it can't fake a real click, so no session is issued and no email is
+changed without genuine user interaction.
+
+On top of that, as defense-in-depth (e.g. a double click, or a slow network retry
+re-submitting the same request): `AuthenticationRequest` distinguishes `used_at`
+(informational - when a token was first successfully verified) from `invalidated_at`
+(when a *newer* request supersedes it - see `request_email_link`/`request_email_change`,
+which invalidate any previous live request for the same email/user). Verifying an
+already-used-but-not-invalidated token is deliberately **not** an error - it's a
+harmless repeat, since re-running `resolve_identity`/re-applying the same email
+change produces the exact same outcome every time. Only an *invalidated* or
+*expired* token is rejected. This is safe specifically because neither flow grants
+an escalated or different outcome on replay within the token's own (short) validity
+window - it's the same account either way - so there's no meaningful security
+downgrade from allowing the repeat, just the removal of a confusing failure mode.
+
+`invalidated_at` was added to the *existing* `authentication_request` table - same
+"no migration tool" caveat as `purpose`/`user_id` above applies on an already-running
+dev DB:
+```sql
+ALTER TABLE authentication_request ADD COLUMN invalidated_at TIMESTAMPTZ;
+```
+
+### The confirm-email button shouldn't even be shown for a link that's already been used
+
+Follow-on report: pressing the browser's **back** button after already confirming
+an email change lands back on `/settings/confirm-email` with the "Confirm email
+change" button still showing - and pressing it *again* succeeds, silently, because
+of the idempotent-reuse leniency described above. That leniency exists to tolerate
+*races* (a double click, a scanner detonation followed by a genuine click a moment
+later) - it was never meant to make a stale, already-actioned link look repeatedly
+actionable to a human who revisits it long after the fact.
+
+The fix: `GET /auth/email/verify/check` and `GET /user/email-change/verify/check`
+(`check_email_link`/`check_email_change_link`) are new, side-effect-free precheck
+endpoints - they look up the token and report whether it's still live (not found,
+invalidated, *already used*, or expired all count as "not live"), and, if it is,
+which email it's for. Unlike the POST verify endpoints, **`used_at` alone is enough
+to make the precheck say "invalid"** - there's no races to tolerate here, since
+nothing has been submitted yet. The frontend calls this on page load, *before*
+showing the confirm button at all, so a revisited/already-used link shows an error
+immediately rather than a clickable button (see the web app's `DECISIONS.md`).
+
+This also gives the frontend a place to show the *target* email up front (in both
+the check response and, for email changes, echoed back from the POST verify
+response), so a user confirming a change can see which address they're about to
+switch to - and, on success, which one they switched to.
+
+Separately, `verify_email_change`'s idempotent (`used_at is not None`) branch was
+tightened: it used to unconditionally report success on replay. It now fetches the
+account's *current* email first and only treats the replay as a harmless repeat if
+`current_email == new_email` (i.e. the change this token represents was in fact the
+last thing applied) - otherwise it's a genuine, rejected reuse (e.g. the account's
+email was changed *again* since, by a different, later request), and raises same as
+an invalidated token would. `verify_email_link` (sign-in) didn't need the equivalent
+change - `resolve_identity` is a pure function of the verified email, so replaying it
+can't "drift" the way a mutable `email` column can.
+
+The admin panel (`admin/views.py`) lost its `password_transformer`/`PasswordTransformer`
+for the `User` view - there's no password field to transform. Admin-created users
+authenticate afterwards the same way as anyone else, via their `email`. Similarly,
+`scripts/create_first_superuser.py` no longer sets a `hashed_password`; it now also
+inserts a matching `authentication_provider` row (`provider="email"`) so the
+admin account it creates can actually sign in.
+
+Applying this to an existing local DB (per the "no migration tool" section above) -
+`create_all()` creates the two new tables automatically, but won't touch the
+existing `user` table:
+```sql
+ALTER TABLE "user" DROP COLUMN hashed_password;
+ALTER TABLE "user" DROP COLUMN google_id;
+```
+
+## Current-user routes moved off `/user/me` and `/user/{uuid}` onto a bare `/user`
+
+The long-term goal is for "my account" and "someone else's public profile" to be
+two distinct, differently-shaped endpoints - the former returns full data (incl.
+`email`) from the access token, the latter (not built yet) will return a limited,
+public subset with no `email`, keyed by `{uuid}`. Reusing `/user/{uuid}` for both
+(gated by an `if current_user["uuid"] != uuid` check, as it worked before) doesn't
+scale to that: it's a runtime check that's easy to forget on a new route, rather
+than a distinction baked into the URL shape itself.
+
+As a first step (public profile routes are a separate, later piece of work),
+`users.py`'s current-user-only routes were moved off `{uuid}`/`me` entirely onto a
+bare `/user`, always resolving the account from the access token instead of a path
+parameter:
+- `GET /user/me` -> `GET /user` (`read_users_me` renamed to `read_current_user`).
+- `PATCH /user/{uuid}` -> `PATCH /user`. The ownership check (`current_user["uuid"]
+  != uuid` -> `403`) is gone entirely, not just relaxed - there's no `uuid` param
+  left to mismatch against.
+- `DELETE /user/{uuid}` -> `DELETE /user`, same reasoning. This also removed the
+  route's own `crud_users.get`/`NotFoundException` check - `current_user` already
+  came from a fresh, non-deleted lookup inside `get_current_user`, so re-fetching
+  the same row by `uuid` just to check it still exists was redundant.
+- `GET /user/{uuid}/dive-stats` -> `GET /user/dive-stats`, for the same reason
+  `email-change/request` dropped its `{uuid}` (see above): it already 403'd on any
+  `uuid` other than the caller's, so the path param was never anything but
+  decoration. If public dive stats are ever wanted as part of a future public
+  profile, that's a new route (e.g. `GET /profile/{uuid}/dive-stats` or similar),
+  not a relaxation of this one.
+
+`GET /user/{uuid}` (the plain single-user lookup) and `GET /users` (the paginated
+list, which returned full `UserRead` including `email` for every user) were both
+removed outright rather than repurposed - there is intentionally **no way to fetch
+any user's data other than your own through this API right now**. Public-profile-
+shaped replacements (limited fields, no `email` - both a single lookup and a
+listing) are planned but deliberately out of scope for this change. `read_users`
+no longer exists in `users.py`; the `PaginatedListResponse`/`compute_offset`/
+`paginated_response` imports it was the only user of were removed along with it.
+
+`opendiving-web` (`authAPI.getCurrentUser`/`updateProfile` in `lib/api/auth.ts`)
+and `opendiving-ios` (`AuthAPI.currentUser()`) were updated to match - see their
+respective `DECISIONS.md` entries.
+
+## `CORSMiddleware` was missing entirely - every cross-origin request 405'd on preflight
+
+`core/setup.py` never configured `CORSMiddleware`, despite `opendiving-web` always
+having run on a different origin than the API (`localhost:3000` vs `localhost:8000`
+in local dev, per `FRONTEND_URL`/`NEXT_PUBLIC_API_URL`). `apiClient` (`lib/api/
+client.ts`) sends `withCredentials: true` plus an `Authorization` header on most
+requests and JSON bodies on writes - all of which make the browser preflight with
+`OPTIONS` before the real request. With no CORS middleware, FastAPI has no
+`OPTIONS` handler for any route, so every preflight - and therefore every real
+cross-origin request from a browser - got a bare `405 Method Not Allowed`, with
+no CORS-related response headers at all.
+
+Fixed by adding `CORSMiddleware` in `create_application`, gated on
+`isinstance(settings, FrontendSettings)` (same pattern as the existing
+`ClientSideCacheSettings`/`EnvironmentSettings` checks): `allow_origins=
+[settings.FRONTEND_URL]` (the same setting already used to build the magic-link
+URL - there's exactly one trusted frontend origin, so no new config was added),
+`allow_credentials=True` (required for the refresh-token cookie), and
+`allow_methods`/`allow_headers` left as `["*"]` - both are fine to wildcard even
+with `allow_credentials=True` per the Fetch/CORS spec; only `allow_origins=["*"]`
+is disallowed together with credentials, and this doesn't do that.
+`lifespan_factory`'s and `create_application`'s `settings` parameter type unions
+both gained `FrontendSettings` to match (mypy caught the missing one from the
+other, since both now need to accept the same combined `Settings` instance).
+
+`tests/test_cors.py` builds its own app via `create_application(...,
+create_tables_on_start=False)` rather than using `conftest.py`'s `client` fixture
+(session-scoped `TestClient(app)` importing `src.app.main`), since that fixture's
+app runs the real startup lifespan (`create_tables()` against `POSTGRES_URI`,
+which resolves to the `db` docker-compose hostname) and isn't otherwise used by
+any existing test - not worth requiring a live Postgres connection just to check
+middleware headers on an `OPTIONS` request.

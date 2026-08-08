@@ -1,8 +1,7 @@
-import re
 from datetime import datetime
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from ..core.schemas import PublicUUIDSchema
 
@@ -32,37 +31,31 @@ class UserReadInternal(UserRead):
     id: int
 
 
-class UserCreate(UserBase):
-    model_config = ConfigDict(extra="forbid")
-
-    password: Annotated[str, Field(min_length=8, examples=["Str1ngst!"])]
-
-    @field_validator("password")
-    @classmethod
-    def validate_password_strength(cls, value: str) -> str:
-        if not re.search(r"[0-9]", value):
-            raise ValueError("Password must contain at least one number")
-        if not re.search(r"[A-Z]", value):
-            raise ValueError("Password must contain at least one uppercase letter")
-        if not re.search(r"[a-z]", value):
-            raise ValueError("Password must contain at least one lowercase letter")
-        if not re.search(r"[^a-zA-Z0-9]", value):
-            raise ValueError("Password must contain at least one special character")
-        return value
-
-
 class UserCreateInternal(UserBase):
-    hashed_password: str
+    """The only way a `User` row is ever created - from a completed profile (`POST
+    /auth/complete`), never directly from a signup form. There's no password field
+    anywhere: identity is proven up front by the email-magic-link or Google flow, and
+    the resulting authentication method is recorded separately (see
+    `AuthenticationProviderCreate`), not on the user row itself.
+    """
+
+    profile_image_url: str = "https://profileimageurl.com"
 
 
 class UserUpdate(BaseModel):
+    """`PATCH /user`'s body. Deliberately has no `email` field - changing an
+    account's email requires proving ownership of the new address first (see
+    `POST /user/email-change/request` / `POST /user/email-change/verify`),
+    not a plain field update. `extra="forbid"` means submitting `email` here is a
+    422, not a silently-ignored no-op, so callers notice they need the other flow.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     name: Annotated[str | None, Field(min_length=2, max_length=30, examples=["User Userberg"], default=None)]
     username: Annotated[
         str | None, Field(min_length=2, max_length=20, pattern=r"^[a-z0-9]+$", examples=["userberg"], default=None)
     ]
-    email: Annotated[EmailStr | None, Field(examples=["user.userberg@example.com"], default=None)]
     profile_image_url: Annotated[
         str | None,
         Field(
@@ -73,6 +66,16 @@ class UserUpdate(BaseModel):
 
 class UserUpdateInternal(UserUpdate):
     updated_at: datetime
+
+
+class UserAdminUpdate(UserUpdate):
+    """Same as `UserUpdate`, but also allows setting `email` directly - reserved for
+    the admin panel (`admin/views.py`'s `update_schema`), where a trusted superuser
+    may need to fix up an account without going through the verified email-change
+    flow. Never used by the public API.
+    """
+
+    email: Annotated[EmailStr | None, Field(examples=["user.userberg@example.com"], default=None)]
 
 
 class UserDelete(BaseModel):

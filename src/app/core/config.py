@@ -24,6 +24,11 @@ class CryptSettings(BaseSettings):
     ALGORITHM: str = config("ALGORITHM", default="HS256")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = config("ACCESS_TOKEN_EXPIRE_MINUTES", default=30)
     REFRESH_TOKEN_EXPIRE_DAYS: int = config("REFRESH_TOKEN_EXPIRE_DAYS", default=7)
+    # How long a temporary, post-verification-but-pre-account "onboarding" JWT (see
+    # `create_onboarding_token`/`verify_onboarding_token` in `core.security`) stays
+    # valid for. Deliberately short - it exists only to carry a verified identity from
+    # `/auth/email/verify` or `/auth/google` to `/auth/complete`.
+    ONBOARDING_TOKEN_EXPIRE_MINUTES: int = config("ONBOARDING_TOKEN_EXPIRE_MINUTES", default=30)
 
 
 class DatabaseSettings(BaseSettings):
@@ -65,6 +70,46 @@ class FirstUserSettings(BaseSettings):
     ADMIN_EMAIL: str = config("ADMIN_EMAIL", default="admin@admin.com")
     ADMIN_USERNAME: str = config("ADMIN_USERNAME", default="admin")
     ADMIN_PASSWORD: str = config("ADMIN_PASSWORD", default="!Ch4ng3Th1sP4ssW0rd!")
+
+
+class GoogleAuthSettings(BaseSettings):
+    # OAuth 2.0 client ID from the Google Cloud Console, shared with the frontend
+    # (`NEXT_PUBLIC_GOOGLE_CLIENT_ID`) - it's used there to request an ID token and
+    # here, as the expected `aud` claim, to verify that token actually belongs to
+    # this app rather than some other Google OAuth client. Not a secret - safe to
+    # ship to the browser - so there's no accompanying `GOOGLE_CLIENT_SECRET`.
+    GOOGLE_CLIENT_ID: str | None = config("GOOGLE_CLIENT_ID", default=None)
+
+
+class MagicLinkSettings(BaseSettings):
+    MAGIC_LINK_TOKEN_EXPIRE_MINUTES: int = config("MAGIC_LINK_TOKEN_EXPIRE_MINUTES", default=30)
+
+    # Fixed-window rate limits (see `core.utils.rate_limit`), keyed separately by email
+    # and by client IP - the former stops one address from being spammed, the latter
+    # stops one caller from spamming many addresses (and, being far higher, is not a
+    # meaningful enumeration side-channel).
+    MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS: int = config("MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS", default=900)
+    MAGIC_LINK_REQUEST_RATE_LIMIT_PER_EMAIL: int = config("MAGIC_LINK_REQUEST_RATE_LIMIT_PER_EMAIL", default=3)
+    MAGIC_LINK_REQUEST_RATE_LIMIT_PER_IP: int = config("MAGIC_LINK_REQUEST_RATE_LIMIT_PER_IP", default=15)
+    MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP: int = config("MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP", default=30)
+
+    # Email-change confirmation (see `POST /user/email-change/request`/
+    # `POST /user/email-change/verify` in `api.v1.users`) reuses the same
+    # `AuthenticationRequest` mechanics as sign-in, with its own expiry/rate limit
+    # (keyed per-user, not per-email - it's an authenticated action).
+    EMAIL_CHANGE_TOKEN_EXPIRE_MINUTES: int = config("EMAIL_CHANGE_TOKEN_EXPIRE_MINUTES", default=30)
+    EMAIL_CHANGE_REQUEST_RATE_LIMIT_PER_USER: int = config("EMAIL_CHANGE_REQUEST_RATE_LIMIT_PER_USER", default=3)
+
+
+class EmailSettings(BaseSettings):
+    # https://resend.com - used to deliver the magic-link email (see `services.email_service`).
+    RESEND_API_KEY: str | None = config("RESEND_API_KEY", default=None)
+    EMAIL_FROM_ADDRESS: str = config("EMAIL_FROM_ADDRESS", default="onboarding@resend.dev")
+
+
+class FrontendSettings(BaseSettings):
+    # Used to build the magic-link URL emailed to the user (`{FRONTEND_URL}/auth/verify?token=...`).
+    FRONTEND_URL: str = config("FRONTEND_URL", default="http://localhost:3000")
 
 
 class TestSettings(BaseSettings): ...
@@ -124,6 +169,10 @@ class Settings(
     PostgresSettings,
     CryptSettings,
     FirstUserSettings,
+    GoogleAuthSettings,
+    MagicLinkSettings,
+    EmailSettings,
+    FrontendSettings,
     TestSettings,
     RedisCacheSettings,
     ClientSideCacheSettings,

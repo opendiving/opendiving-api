@@ -1,3 +1,5 @@
+from .authentication_provider import AuthenticationProvider
+from .authentication_request import AuthenticationRequest
 from .dive import Dive
 from .dive_dive_site import DiveDiveSite
 from .dive_mixture import DiveMixture
