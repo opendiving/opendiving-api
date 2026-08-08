@@ -43,7 +43,13 @@ class SuuntoXmlParser(DiveParser):
 
     @classmethod
     def can_parse(cls, filename: str, content: bytes) -> bool:
-        return filename.lower().endswith(".xml")
+        if not filename.lower().endswith(".xml"):
+            return False
+        try:
+            root = DET.fromstring(content)
+        except (ET.ParseError, DefusedXmlException):
+            return False
+        return root.tag == _tag("Dive")
 
     @classmethod
     def parse(cls, content: bytes) -> ParsedDiveSchema:
@@ -55,6 +61,13 @@ class SuuntoXmlParser(DiveParser):
         if root.tag != _tag("Dive"):
             raise UnsupportedDiveFileError(f"Root element is not a Suunto <Dive>: {root.tag}")
 
+        try:
+            return cls._parse_dive(root)
+        except (TypeError, ValueError) as exc:
+            raise DiveParseError(f"Malformed Suunto XML dive data: {exc}") from exc
+
+    @classmethod
+    def _parse_dive(cls, root: ET.Element) -> ParsedDiveSchema:
         mixtures = [cls._parse_mixture(mix) for mix in root.findall(f"{_tag('DiveMixtures')}/{_tag('DiveMixture')}")]
         samples = [cls._parse_sample(s) for s in root.findall(f"{_tag('DiveSamples')}/{_tag('Dive.Sample')}")]
 

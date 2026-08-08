@@ -330,11 +330,11 @@ its own `username` via the body, that's unrelated to which user is being edited.
 `GET /user/me` (an exact literal path, not a `{username}`/`{id}` placeholder) is
 unaffected and still resolves the caller's own record from their token.
 
-## All `/user*`/`/users`/`/dive/parse-xml` endpoints require auth, except signup
+## All `/user*`/`/users`/`/dive/parse` endpoints require auth, except signup
 
 `GET /users`, `GET /user/{id}`, and `GET /user/{id}/tier` used to have no auth
-dependency at all - readable by anyone, unauthenticated. `POST /dive/parse-xml`
-was the same. These now all require `Depends(get_current_user)` (added via the
+dependency at all - readable by anyone, unauthenticated. `POST /dive/parse`
+(formerly `/dive/parse-xml`) was the same. These now all require `Depends(get_current_user)` (added via the
 route's `dependencies=[...]`, since the handlers don't otherwise need the
 current user's identity - they aren't per-owner checks, just "must be logged in").
 `GET /user/{id}/rate_limits` and `PATCH /user/{id}/tier` already required
@@ -945,3 +945,73 @@ app runs the real startup lifespan (`create_tables()` against `POSTGRES_URI`,
 which resolves to the `db` docker-compose hostname) and isn't otherwise used by
 any existing test - not worth requiring a live Postgres connection just to check
 middleware headers on an `OPTIONS` request.
+
+## `/dive/parse-xml` renamed to `/dive/parse`, added a Suunto JSON parser
+
+The upload-and-parse endpoint (`dives.py`) was renamed from `POST
+/dive/parse-xml` to `POST /dive/parse` since it's no longer XML-only: a
+`SuuntoJsonParser` (`services/dive_parsers/suunto_json.py`) was added to parse
+Suunto app / Suunto Ocean JSON exports (`DeviceLog.Header`), alongside the
+existing `SuuntoXmlParser` for DM5-style XML exports. `parse_dive_file()`
+already dispatched by trying each registered parser's `can_parse()` in turn, so
+adding the new format only meant registering the class in `dive_parsers/
+__init__.py`'s `_PARSERS` list - no dispatch logic changed. The handler
+function itself was renamed `parse_dive_xml` -> `parse_dive` to match.
+
+The JSON header format reports temperature in Kelvin (SI units) rather than
+Celsius like the XML export, so `SuuntoJsonParser` converts it
+(`value - 273.15`). It only maps `DeviceLog.Header`'s summary fields for now -
+unlike `SuuntoXmlParser`, it does not parse per-sample depth/temperature
+profiles or gas mixtures (`mixtures`/`samples` come back as `[]`), since the
+JSON export this was built against only had header data. If/when a full
+Suunto JSON export with a samples array is available, extend `SuuntoJsonParser`
+rather than adding a second JSON parser class, so `.json` files still only need
+one `can_parse()` check.
+
+`SuuntoJsonParser.can_parse()` deviates from `SuuntoXmlParser`'s pattern (a
+pure filename check) - `.json` alone isn't distinctive enough, so `can_parse`
+also parses the content and checks for `DeviceLog.Header`, returning `False`
+(not raising) for invalid JSON or a mismatched shape. `parse()` no longer
+raises `UnsupportedDiveFileError` for a missing `DeviceLog`/`Header` - that
+detection now lives entirely in `can_parse`, so `parse_dive_file()`'s dispatch
+loop never calls `parse()` on a file this parser doesn't recognize in the
+first place. `parse()` still guards against being called directly (as the unit
+tests do) with unrecognized data, but now reports that as `DiveParseError`
+(a generic "malformed" catch-all) rather than `UnsupportedDiveFileError`, since
+format recognition is no longer its job. `DiveParser.can_parse`'s docstring
+(`dive_parsers/base.py`) was loosened accordingly: a pure filename check is
+still preferred, but parsers may inspect `content` there if the extension
+alone is ambiguous, as long as they turn any failure into `False` rather than
+an exception.
+
+All call sites needed updating for the rename: the frontend
+(`lib/api/dives.ts`'s `parseDiveFile`, `components/dives/dive-file-import.tsx`'s
+`accept` attribute, now `.xml,.json`), `README.md`, `DIVE_FUNCTIONALITY.md`, and
+the now-stale-named `tests/test_dive_upload.py` (endpoint paths only; the file
+name and its focus on the upload size guard are still accurate for both
+formats).
+
+`services/dive_parsers/suunto.py` was renamed to `suunto_xml.py` to mirror
+`suunto_json.py` now that there are two Suunto parsers - `suunto.py` on its own
+no longer indicated which format it handled. While making that change,
+`SuuntoXmlParser.parse()` picked up the same defensive wrapping
+`SuuntoJsonParser.parse()` already had: extracting fields (`_int`/`_float`
+converting element text) is now wrapped in a `try/except (TypeError,
+ValueError)` that re-raises as `DiveParseError`, since a well-formed `<Dive>`
+element with non-numeric content in a numeric field (e.g. `<MaxDepth>not-a-
+number</MaxDepth>`) previously raised an unhandled `ValueError` straight out of
+`parse()` - a real bug, not just an inconsistency, since it meant a malformed
+upload could 500 instead of getting the normal `422`.
+
+`SuuntoXmlParser.can_parse()` also gained the same kind of structure check
+`SuuntoJsonParser.can_parse()` has: it now defensively parses the XML and
+checks the root tag is a namespaced `<Dive>`, returning `False` (never
+raising) for anything else, on top of the existing `.xml` extension check.
+Unlike the JSON parser, this didn't replace the equivalent check in `parse()`
+(`root.tag != _tag("Dive")` still raises `UnsupportedDiveFileError` there) -
+kept as defense-in-depth for direct `parse()` calls, since XML element lookups
+fail silently (returning `None`) rather than raising for a mismatched
+namespace/root, unlike the JSON parser's `dict` indexing which naturally
+raises on a structural mismatch. Without that fallback, calling `parse()`
+directly on non-Suunto XML would silently return an all-`None` `ParsedDiveSchema`
+instead of failing.

@@ -13,10 +13,15 @@ class DiveParser(ABC):
     @classmethod
     @abstractmethod
     def can_parse(cls, filename: str, content: bytes) -> bool:
-        """Cheap, syntactic check (e.g. file extension) for whether this parser should attempt the file.
+        """Cheap check (e.g. file extension) for whether this parser should attempt the file.
 
-        This must not parse `content`, since `parse()` will do that. It only narrows down which
-        parser(s) are worth trying.
+        Prefer a purely syntactic check (e.g. just the filename) that avoids parsing
+        `content` at all, leaving that to `parse()`. This isn't always enough to narrow
+        down which parser(s) are worth trying, though (e.g. a `.json` file could be any
+        number of unrelated formats) - in that case, `can_parse` may need to attempt a
+        cheap, defensive parse of `content` itself to check for a distinctive shape,
+        as long as it never raises: unparseable/unrecognized content should be treated
+        as `False`, not propagated as an exception.
         """
         raise NotImplementedError
 
