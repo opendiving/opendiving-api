@@ -1015,3 +1015,119 @@ namespace/root, unlike the JSON parser's `dict` indexing which naturally
 raises on a structural mismatch. Without that fallback, calling `parse()`
 directly on non-Suunto XML would silently return an all-`None` `ParsedDiveSchema`
 instead of failing.
+
+## `SuuntoJsonParser` gas mixtures come from `Header.Diving.Gases`, in SI units
+
+Suunto's JSON export has (at least) two header shapes: a "clean"/header-only
+one with everything directly under `Header` (no gas data at all), and a
+D5-style one that nests most dive stats - including gas mixtures - under
+`Header.Diving`. `SuuntoJsonParser` now reads `Header.Diving.Gases` (defaulting
+to `[]` if `Diving` or `Gases` is absent, so the header-only shape still works
+unchanged) and maps each entry to a `DiveMixtureSchema`.
+
+Unlike the rest of the header, `Diving.Gases` reports values in raw SI units
+rather than the more human-scaled units used elsewhere (or in the XML export):
+pressure in Pascal (not bar), tank size in cubic meters (not liters), and
+oxygen/helium as a 0-1 fraction (not a 0-100 percentage). Converting these -
+like the existing Kelvin-to-Celsius conversion - goes through `Decimal`
+arithmetic (`_pascals_to_bar`/`_cubic_meters_to_liters`/`_fraction_to_percent`,
+built on shared `_decimal_multiply`/`_decimal_divide` helpers) rather than raw
+float math, for the same reason: dividing/multiplying by these round SI factors
+in plain floats can introduce binary representation noise (e.g. `0.21 * 100`
+not landing exactly on `21.0`), which Decimal avoids since it operates on the
+exact decimal digits of the JSON literal instead of its binary float
+approximation.
+
+A few mixture fields have no equivalent in `Diving.Gases`: there's no free-text
+name the way the XML export's `<Name>Air</Name>` has, so `State` (e.g.
+"Primary", "Deco") is used as the closest available label; there's no
+equivalent of the XML `<Type>` tag distinguishing mixture types, so it's
+hardcoded to `0`; and there's no per-gas-change-event data, so `gas_changes`
+is always `[]`. `StartPressure`/`EndPressure`/`TransmitterID` are genuinely
+optional per gas (e.g. an untransmitted backup cylinder may only have
+`Oxygen`/`Helium`/`TankSize`), and come back as `None` rather than `0`/a crash
+when absent.
+
+`duration` differs between the two header shapes too, and now falls back the
+same way `avg_depth` already did (`header.get("DepthAverage", depth.get("Avg"))`)
+- prefer the "clean"-style key, fall back to the D5-style one if absent:
+`header.get("DiveTime", header.get("Duration"))`, since D5-style exports have
+no `DiveTime`, only a top-level `Duration`. (An equivalent fallback for
+`ascent_time`, via `Diving.AlgorithmAscentTime`, was added and then removed
+again - see "`ParsedDiveSchema`/`DiveMixtureSchema` trimmed to fields the
+backend models actually support" below.)
+
+## `ParsedDiveSchema`/`DiveMixtureSchema` trimmed to fields the backend models actually support
+
+`ParsedDiveSchema` and `DiveMixtureSchema` (`schemas/parsed_dive.py`) originally
+mirrored the *source* export formats' full field sets (Suunto DM5 XML's
+algorithm/tissue-loading/CNS/OTU/CNS stats, PO2 set points, per-mixture gas-change
+events, per-sample depth/temperature profiles, etc.) rather than what the `Dive`/
+`DiveMixture` backend models (`models/dive.py`, `models/dive_mixture.py`) can
+actually persist. Since nothing downstream - not the DB models, not the frontend
+form (`applyParsedDiveToForm` in `dive-file-import.tsx` only ever read `dive_
+number`/`start_time`/`duration`/`max_depth`/`avg_depth`/`bottom_temperature`) -
+could do anything with the extra fields, they were dropped rather than carried
+as dead weight:
+
+- `ParsedDiveSchema` kept only `avg_depth`, `bottom_temperature`, `dive_number`,
+  `duration`, `max_depth`, `start_time`, `mixtures` (all of which have a direct
+  `Dive` column equivalent). Everything else (`algorithm`, `altitude_mode`,
+  `ascent_mode`, `ascent_time`, `battery_level`, `bottom_time`, `cns_end`,
+  `cns_start`, `cylinder_volume`, `cylinder_work_pressure`, `desaturation_time`,
+  `diving_days_in_row`, `end_pressure` (top-level), `end_temperature`,
+  `last_deco_stop_depth`, `mode`, `olf_end`, `otu_end`, `otu_start`,
+  `personal_mode`, `previous_max_depth`, `sample_interval`, `serial_number`,
+  `software`, `source`, `start_temperature`, `surface_pressure`, `surface_time`)
+  was removed.
+- `DiveMixtureSchema` kept only `end_pressure`, `helium`, `name`, `oxygen`,
+  `start_pressure`, and `size` renamed to `volume` (matching `DiveMixtureBase.
+  volume` exactly, rather than using a different name for the same concept).
+  `po2` (already noted above as having no `DiveMixture` column - it was replaced
+  by `helium`), `transmitter_id`, `type`, and `gas_changes` were removed.
+- `DiveGasChangeSchema` and `DiveSampleSchema` were deleted outright, along with
+  `ParsedDiveSchema.samples` - there's no backend model for either gas-change
+  events or per-sample depth/temperature profiles at all, so a parser populating
+  them was always a dead end.
+
+Both parsers (`suunto_xml.py`, `suunto_json.py`) were trimmed to match: they
+simply stop extracting the removed fields, rather than extracting them and
+having the schema discard them. `SuuntoXmlParser` also dropped its now-unused
+`_parse_sample` method and `DiveGasChanges`/`DiveSamples` XML traversal
+entirely. The frontend's `ParsedDive` interface (`lib/api/dives.ts`) had
+`source`/`serial_number`/`software` removed to match (nothing read them; the
+catch-all `[key: string]: unknown` index signature was kept for forward
+compatibility, but the concrete fields shouldn't claim to exist if the backend
+no longer sends them).
+
+`DiveMixtureSchema.name` was kept in the schema (it does have a `DiveMixture.
+name` column), but both parsers now always set it to `None` rather than
+guessing at it - `SuuntoXmlParser` no longer reads the XML export's `<Name>`
+tag (e.g. `<Name>Air</Name>`), and `SuuntoJsonParser` no longer uses `Gases[].
+State` (e.g. "Primary") as a stand-in name. `State` in particular was a poor
+proxy - it describes a gas's *role* (primary/deco/bailout), not an actual gas
+label a diver would recognize - and even the XML export's real `<Name>` tag is
+left for the diver to fill in/edit themselves on the create/edit form instead
+of being pre-filled from a guess.
+
+`DiveMixtureSchema.start_pressure`/`end_pressure`/`oxygen`/`helium` are now
+rounded to 2 decimal places in both parsers (a `_round2_or_none` helper
+duplicated in each file - not a shared module, since each already has its own
+small set of parser-local rounding helpers). This matters most for
+`SuuntoJsonParser`: converting the D5-style JSON export's Pascal pressures to
+bar via `_pascals_to_bar` (division by 100000) or its 0-1 oxygen/helium
+fractions to a percentage can produce more decimal digits than a dive-computer
+gauge is meaningfully precise to (e.g. `20714062 Pa -> 207.14062 bar`).
+`SuuntoXmlParser` gained the same rounding for consistency, even though its
+DM5 XML source data is already low-precision in practice - avg_depth/max_depth/
+bottom_temperature were deliberately left unrounded, matching the source data's
+own precision (2 decimals in every fixture seen so far), for the same reason
+the JSON parser's depth/temperature fields aren't explicitly rounded either.
+
+`_round2_or_none` quantizes via `Decimal` (`Decimal(str(value)).quantize(
+Decimal("0.01"))`) rather than plain `round(value, 2)`, matching the
+Decimal-based approach `_kelvin_to_celsius`/`_pascals_to_bar`/etc. already use
+to avoid reintroducing binary floating-point noise at the last step - e.g.
+`round(2.675, 2)` on a raw float can land on `2.67` instead of `2.68` due to
+`2.675`'s own imprecise binary representation, whereas `Decimal("2.675")` is
+exact and rounds predictably.
