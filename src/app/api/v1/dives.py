@@ -37,7 +37,7 @@ from ...services.dive_stats import recalculate_dive_stats
 router = APIRouter(tags=["dives"])
 
 # Dive-computer export files are small (samples are a few bytes each); this cap is
-# generous headroom while still bounding memory usage and XML-parser workload for an
+# generous headroom while still bounding memory usage and parser workload for an
 # endpoint that accepts arbitrary user-uploaded files.
 _MAX_DIVE_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 _MAX_DIVE_FILE_SIZE_MB = _MAX_DIVE_FILE_SIZE // (1024 * 1024)
@@ -160,9 +160,9 @@ def _to_public_dive_with_mixtures(
     )
 
 
-@router.post("/dive/parse-xml", response_model=ParsedDiveSchema, dependencies=[Depends(get_current_user)])
-async def parse_dive_xml(
-    file: Annotated[UploadFile, File(description="Dive-computer export file (e.g. Suunto XML)")],
+@router.post("/dive/parse", response_model=ParsedDiveSchema, dependencies=[Depends(get_current_user)])
+async def parse_dive(
+    file: Annotated[UploadFile, File(description="Dive-computer export file (e.g. Suunto XML or JSON)")],
 ) -> ParsedDiveSchema:
     """Upload a dive-computer export file and receive the parsed dive data as JSON."""
     if not file.filename:

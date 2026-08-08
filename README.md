@@ -248,11 +248,11 @@ EMAIL_CHANGE_TOKEN_EXPIRE_MINUTES=30
 
 ## Endpoints
 
-### Parse a Suunto dive XML file
+### Parse a Suunto dive export file
 
-Upload a Suunto dive XML file and receive the parsed dive data as JSON:
+Upload a Suunto dive export file (XML or JSON) and receive the parsed dive data as JSON:
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/dive/parse-xml \
+curl -X POST http://localhost:8000/api/v1/dive/parse \
   -F "file=@Dive_2021-04-06-1231.xml"
 ```

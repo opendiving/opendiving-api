@@ -1,11 +1,13 @@
 from ...schemas.parsed_dive import ParsedDiveSchema
 from .base import DiveParser
 from .exceptions import DiveParseError, UnsupportedDiveFileError
-from .suunto import SuuntoXmlParser
+from .suunto_json import SuuntoJsonParser
+from .suunto_xml import SuuntoXmlParser
 
 # Register new dive-computer parsers here, in the order they should be tried.
 _PARSERS: list[type[DiveParser]] = [
     SuuntoXmlParser,
+    SuuntoJsonParser,
 ]
 
 

@@ -1,4 +1,4 @@
-"""Unit tests for the dive-file upload endpoint's size guard (`/dive/parse-xml`)."""
+"""Unit tests for the dive-file upload endpoint's size guard (`/dive/parse`)."""
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -29,12 +29,12 @@ def _make_dive_upload_client() -> TestClient:
     return TestClient(app)
 
 
-class TestParseDiveXmlUploadSizeLimit:
+class TestParseDiveUploadSizeLimit:
     def test_accepts_file_within_limit(self):
         client = _make_dive_upload_client()
 
         response = client.post(
-            "/dive/parse-xml",
+            "/dive/parse",
             files={"file": ("export.xml", VALID_SUUNTO_XML, "application/xml")},
         )
 
@@ -46,7 +46,7 @@ class TestParseDiveXmlUploadSizeLimit:
         oversized_content = b"a" * (_MAX_DIVE_FILE_SIZE + 1)
 
         response = client.post(
-            "/dive/parse-xml",
+            "/dive/parse",
             files={"file": ("export.xml", oversized_content, "application/xml")},
         )
 
@@ -60,7 +60,7 @@ class TestParseDiveXmlUploadSizeLimit:
         oversized_content = b"b" * (_MAX_DIVE_FILE_SIZE * 2)
 
         response = client.post(
-            "/dive/parse-xml",
+            "/dive/parse",
             files={"file": ("export.xml", oversized_content, "application/xml")},
         )
 
@@ -70,7 +70,7 @@ class TestParseDiveXmlUploadSizeLimit:
         client = _make_dive_upload_client()
 
         response = client.post(
-            "/dive/parse-xml",
+            "/dive/parse",
             files={"file": ("", VALID_SUUNTO_XML, "application/xml")},
         )
 
@@ -82,7 +82,7 @@ class TestParseDiveXmlUploadSizeLimit:
         client = _make_dive_upload_client()
 
         response = client.post(
-            "/dive/parse-xml",
+            "/dive/parse",
             files={"file": ("export.csv", b"time,depth\n0,0\n", "text/csv")},
         )
 
