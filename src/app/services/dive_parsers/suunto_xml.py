@@ -64,7 +64,7 @@ class SuuntoXmlParser(DiveParser):
             root = DET.fromstring(content)
         except (ET.ParseError, DefusedXmlException):
             return False
-        return root.tag == _tag("Dive")
+        return bool(root.tag == _tag("Dive"))
 
     @classmethod
     def parse(cls, content: bytes) -> ParsedDiveSchema:
