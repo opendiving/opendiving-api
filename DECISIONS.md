@@ -870,3 +870,78 @@ existing `user` table:
 ALTER TABLE "user" DROP COLUMN hashed_password;
 ALTER TABLE "user" DROP COLUMN google_id;
 ```
+
+## Current-user routes moved off `/user/me` and `/user/{uuid}` onto a bare `/user`
+
+The long-term goal is for "my account" and "someone else's public profile" to be
+two distinct, differently-shaped endpoints - the former returns full data (incl.
+`email`) from the access token, the latter (not built yet) will return a limited,
+public subset with no `email`, keyed by `{uuid}`. Reusing `/user/{uuid}` for both
+(gated by an `if current_user["uuid"] != uuid` check, as it worked before) doesn't
+scale to that: it's a runtime check that's easy to forget on a new route, rather
+than a distinction baked into the URL shape itself.
+
+As a first step (public profile routes are a separate, later piece of work),
+`users.py`'s current-user-only routes were moved off `{uuid}`/`me` entirely onto a
+bare `/user`, always resolving the account from the access token instead of a path
+parameter:
+- `GET /user/me` -> `GET /user` (`read_users_me` renamed to `read_current_user`).
+- `PATCH /user/{uuid}` -> `PATCH /user`. The ownership check (`current_user["uuid"]
+  != uuid` -> `403`) is gone entirely, not just relaxed - there's no `uuid` param
+  left to mismatch against.
+- `DELETE /user/{uuid}` -> `DELETE /user`, same reasoning. This also removed the
+  route's own `crud_users.get`/`NotFoundException` check - `current_user` already
+  came from a fresh, non-deleted lookup inside `get_current_user`, so re-fetching
+  the same row by `uuid` just to check it still exists was redundant.
+- `GET /user/{uuid}/dive-stats` -> `GET /user/dive-stats`, for the same reason
+  `email-change/request` dropped its `{uuid}` (see above): it already 403'd on any
+  `uuid` other than the caller's, so the path param was never anything but
+  decoration. If public dive stats are ever wanted as part of a future public
+  profile, that's a new route (e.g. `GET /profile/{uuid}/dive-stats` or similar),
+  not a relaxation of this one.
+
+`GET /user/{uuid}` (the plain single-user lookup) and `GET /users` (the paginated
+list, which returned full `UserRead` including `email` for every user) were both
+removed outright rather than repurposed - there is intentionally **no way to fetch
+any user's data other than your own through this API right now**. Public-profile-
+shaped replacements (limited fields, no `email` - both a single lookup and a
+listing) are planned but deliberately out of scope for this change. `read_users`
+no longer exists in `users.py`; the `PaginatedListResponse`/`compute_offset`/
+`paginated_response` imports it was the only user of were removed along with it.
+
+`opendiving-web` (`authAPI.getCurrentUser`/`updateProfile` in `lib/api/auth.ts`)
+and `opendiving-ios` (`AuthAPI.currentUser()`) were updated to match - see their
+respective `DECISIONS.md` entries.
+
+## `CORSMiddleware` was missing entirely - every cross-origin request 405'd on preflight
+
+`core/setup.py` never configured `CORSMiddleware`, despite `opendiving-web` always
+having run on a different origin than the API (`localhost:3000` vs `localhost:8000`
+in local dev, per `FRONTEND_URL`/`NEXT_PUBLIC_API_URL`). `apiClient` (`lib/api/
+client.ts`) sends `withCredentials: true` plus an `Authorization` header on most
+requests and JSON bodies on writes - all of which make the browser preflight with
+`OPTIONS` before the real request. With no CORS middleware, FastAPI has no
+`OPTIONS` handler for any route, so every preflight - and therefore every real
+cross-origin request from a browser - got a bare `405 Method Not Allowed`, with
+no CORS-related response headers at all.
+
+Fixed by adding `CORSMiddleware` in `create_application`, gated on
+`isinstance(settings, FrontendSettings)` (same pattern as the existing
+`ClientSideCacheSettings`/`EnvironmentSettings` checks): `allow_origins=
+[settings.FRONTEND_URL]` (the same setting already used to build the magic-link
+URL - there's exactly one trusted frontend origin, so no new config was added),
+`allow_credentials=True` (required for the refresh-token cookie), and
+`allow_methods`/`allow_headers` left as `["*"]` - both are fine to wildcard even
+with `allow_credentials=True` per the Fetch/CORS spec; only `allow_origins=["*"]`
+is disallowed together with credentials, and this doesn't do that.
+`lifespan_factory`'s and `create_application`'s `settings` parameter type unions
+both gained `FrontendSettings` to match (mypy caught the missing one from the
+other, since both now need to accept the same combined `Settings` instance).
+
+`tests/test_cors.py` builds its own app via `create_application(...,
+create_tables_on_start=False)` rather than using `conftest.py`'s `client` fixture
+(session-scoped `TestClient(app)` importing `src.app.main`), since that fixture's
+app runs the real startup lifespan (`create_tables()` against `POSTGRES_URI`,
+which resolves to the `db` docker-compose hostname) and isn't otherwise used by
+any existing test - not worth requiring a live Postgres connection just to check
+middleware headers on an `OPTIONS` request.

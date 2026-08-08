@@ -1,6 +1,6 @@
 """Unit tests for the email-change confirmation flow (`api.v1.users`): requesting a
 change requires confirming ownership of the new address via a magic link before it
-takes effect - directly setting `email` via `PATCH /user/{uuid}` is no longer possible
+takes effect - directly setting `email` via `PATCH /user` is no longer possible
 (see `schemas.user.UserUpdate`).
 """
 

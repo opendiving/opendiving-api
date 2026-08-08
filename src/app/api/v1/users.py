@@ -1,9 +1,7 @@
-import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any, cast
+from typing import Annotated, cast
 
 from fastapi import APIRouter, Cookie, Depends, Request, Response
-from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,7 +11,6 @@ from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import (
     BadRequestException,
     DuplicateValueException,
-    ForbiddenException,
     NotFoundException,
     UnauthorizedException,
 )
@@ -30,7 +27,7 @@ from ...schemas.email_change import (
     EmailChangeVerifyRequest,
     EmailChangeVerifyResponse,
 )
-from ...schemas.user import UserRead, UserReadInternal, UserUpdate
+from ...schemas.user import UserRead, UserUpdate
 from ...schemas.user_dive_stats import UserDiveStatsRead, UserDiveStatsReadInternal
 from ...services.email_service import send_email_change_confirmation_email, send_email_changed_notification
 
@@ -47,63 +44,38 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-@router.get("/users", response_model=PaginatedListResponse[UserRead], dependencies=[Depends(get_current_user)])
-async def read_users(
-    request: Request, db: Annotated[AsyncSession, Depends(async_get_db)], page: int = 1, items_per_page: int = 10
-) -> dict:
-    users_data = await crud_users.get_multi(
-        db=db,
-        offset=compute_offset(page, items_per_page),
-        limit=items_per_page,
-        is_deleted=False,
-    )
-
-    response: dict[str, Any] = paginated_response(crud_data=users_data, page=page, items_per_page=items_per_page)
-    return response
+# Note: there is no `GET /users` here (yet) either - a public-facing listing of
+# all users has the same "other users shouldn't see email" problem as a single
+# lookup by uuid, and is being designed together with the eventual public-profile
+# endpoint rather than left in its previous shape (which returned full `UserRead`,
+# including `email`, for every user) in the meantime.
 
 
-@router.get("/user/me", response_model=UserRead)
-async def read_users_me(request: Request, current_user: Annotated[dict, Depends(get_current_user)]) -> dict:
+@router.get("/user", response_model=UserRead)
+async def read_current_user(request: Request, current_user: Annotated[dict, Depends(get_current_user)]) -> dict:
     return current_user
 
 
-@router.get("/user/{uuid}", response_model=UserRead, dependencies=[Depends(get_current_user)])
-async def read_user(
-    request: Request, uuid: uuid_pkg.UUID, db: Annotated[AsyncSession, Depends(async_get_db)]
-) -> UserRead:
-    db_user = await crud_users.get(
-        db=db, uuid=uuid, is_deleted=False, schema_to_select=UserRead, return_as_model=True
-    )
-    if db_user is None:
-        raise NotFoundException("User not found")
-
-    return cast(UserRead, db_user)
+# Note: there is no `GET /user/{uuid}` here (yet) - looking up *other* users will be
+# added later as a separate, public-profile-shaped endpoint (limited fields, no
+# email) rather than reusing this module's current-user-only routes. Until then,
+# there's no way to fetch another user's data through this API at all.
 
 
-@router.patch("/user/{uuid}")
+@router.patch("/user")
 async def patch_user(
     request: Request,
     values: UserUpdate,
-    uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    db_user = await crud_users.get(db=db, uuid=uuid)
-    if db_user is None:
-        raise NotFoundException("User not found")
-
-    db_username = db_user["username"] if isinstance(db_user, dict) else db_user.username
-
-    if current_user["uuid"] != uuid:
-        raise ForbiddenException()
-
     # Note: `email` is deliberately not part of `UserUpdate` - see
     # `POST /user/email-change/request` for how email changes work instead.
-    if values.username is not None and values.username != db_username:
+    if values.username is not None and values.username != current_user["username"]:
         if await crud_users.exists(db=db, username=values.username):
             raise DuplicateValueException("Username not available")
 
-    await crud_users.update(db=db, object=values, uuid=uuid)
+    await crud_users.update(db=db, object=values, uuid=current_user["uuid"])
     return {"message": "User updated"}
 
 
@@ -279,16 +251,12 @@ async def verify_email_change(
     return EmailChangeVerifyResponse(email=new_email)
 
 
-@router.get("/user/{uuid}/dive-stats", response_model=UserDiveStatsRead)
+@router.get("/user/dive-stats", response_model=UserDiveStatsRead)
 async def read_dive_stats(
     request: Request,
-    uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> UserDiveStatsRead:
-    if current_user["uuid"] != uuid:
-        raise ForbiddenException()
-
     stats = await crud_user_dive_stats.get(
         db=db, user_id=current_user["id"], schema_to_select=UserDiveStatsReadInternal, return_as_model=True
     )
@@ -297,30 +265,24 @@ async def read_dive_stats(
         # every user conceptually has stats, they just haven't been created yet.
         # total_dives/max_depth/total_time/species_seen have Pydantic defaults, but mypy's
         # pydantic plugin doesn't recognize defaults declared via `Annotated[..., Field(default=...)]`.
-        return UserDiveStatsRead(user_uuid=uuid, created_at=datetime.now(UTC))  # type: ignore[call-arg]
+        return UserDiveStatsRead(user_uuid=current_user["uuid"], created_at=datetime.now(UTC))  # type: ignore[call-arg]
 
     stats = cast(UserDiveStatsReadInternal, stats)
-    return UserDiveStatsRead(**{k: v for k, v in stats.model_dump().items() if k != "user_id"}, user_uuid=uuid)
+    return UserDiveStatsRead(
+        **{k: v for k, v in stats.model_dump().items() if k != "user_id"}, user_uuid=current_user["uuid"]
+    )
 
 
-@router.delete("/user/{uuid}")
+@router.delete("/user")
 async def erase_user(
     request: Request,
     response: Response,
-    uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     access_token: str = Depends(oauth2_scheme),
     refresh_token: str | None = Cookie(None, alias="refresh_token"),
 ) -> dict[str, str]:
-    db_user = await crud_users.get(db=db, uuid=uuid, schema_to_select=UserReadInternal)
-    if not db_user:
-        raise NotFoundException("User not found")
-
-    if current_user["uuid"] != uuid:
-        raise ForbiddenException()
-
-    await crud_users.delete(db=db, uuid=uuid)
+    await crud_users.delete(db=db, uuid=current_user["uuid"])
 
     if refresh_token:
         await blacklist_tokens(access_token=access_token, refresh_token=refresh_token, db=db)

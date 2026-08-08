@@ -6,6 +6,7 @@ import anyio
 import fastapi
 import redis.asyncio as redis
 from fastapi import APIRouter, Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 
@@ -18,6 +19,7 @@ from .config import (
     DatabaseSettings,
     EnvironmentOption,
     EnvironmentSettings,
+    FrontendSettings,
     RedisCacheSettings,
     settings,
 )
@@ -50,7 +52,12 @@ async def set_threadpool_tokens(number_of_tokens: int = 100) -> None:
 
 
 def lifespan_factory(
-    settings: DatabaseSettings | RedisCacheSettings | AppSettings | ClientSideCacheSettings | EnvironmentSettings,
+    settings: DatabaseSettings
+    | RedisCacheSettings
+    | AppSettings
+    | ClientSideCacheSettings
+    | EnvironmentSettings
+    | FrontendSettings,
     create_tables_on_start: bool = True,
 ) -> Callable[[FastAPI], _AsyncGeneratorContextManager[Any]]:
     """Factory to create a lifespan async context manager for a FastAPI app."""
@@ -85,7 +92,12 @@ def lifespan_factory(
 # -------------- application --------------
 def create_application(
     router: APIRouter,
-    settings: DatabaseSettings | RedisCacheSettings | AppSettings | ClientSideCacheSettings | EnvironmentSettings,
+    settings: DatabaseSettings
+    | RedisCacheSettings
+    | AppSettings
+    | ClientSideCacheSettings
+    | EnvironmentSettings
+    | FrontendSettings,
     create_tables_on_start: bool = True,
     lifespan: Callable[[FastAPI], _AsyncGeneratorContextManager[Any]] | None = None,
     **kwargs: Any,
@@ -147,6 +159,21 @@ def create_application(
 
     application = FastAPI(lifespan=lifespan, **kwargs)
     application.include_router(router)
+
+    if isinstance(settings, FrontendSettings):
+        # The web app is served from a different origin than the API (e.g.
+        # localhost:3000 vs localhost:8000 in local dev) and sends both an
+        # `Authorization` header and JSON bodies with `withCredentials`/cookies -
+        # all of which make the browser preflight with `OPTIONS` first. Without
+        # this, FastAPI has no `OPTIONS` handler for any route, so every
+        # preflight (and therefore every real cross-origin request) 405s.
+        application.add_middleware(
+            CORSMiddleware,
+            allow_origins=[settings.FRONTEND_URL],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     if isinstance(settings, ClientSideCacheSettings):
         # Starlette's `_MiddlewareFactory` protocol doesn't precisely match how
