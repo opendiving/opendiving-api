@@ -29,6 +29,9 @@ class DiveBase(BaseModel):
     avg_depth: Annotated[float | None, Field(default=None)]
     bottom_temperature: Annotated[float | None, Field(default=None)]
     visibility: Annotated[int | None, Field(default=None, description="Underwater visibility in meters")]
+    weight: Annotated[
+        float | None, Field(default=None, examples=[6.0], description="Total ballast carried, in kilograms")
+    ]
 
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
 
@@ -130,6 +133,7 @@ class DiveUpdate(BaseModel):
     avg_depth: Annotated[float | None, Field(default=None)]
     bottom_temperature: Annotated[float | None, Field(default=None)]
     visibility: Annotated[int | None, Field(default=None, description="Underwater visibility in meters")]
+    weight: Annotated[float | None, Field(default=None, description="Total ballast carried, in kilograms")]
     trip_uuid: Annotated[
         uuid_pkg.UUID | None, Field(default=None, description="Public id of the trip this dive belongs to")
     ]
@@ -173,6 +177,7 @@ class DiveUpdateInternal(BaseModel):
     avg_depth: Annotated[float | None, Field(default=None)]
     bottom_temperature: Annotated[float | None, Field(default=None)]
     visibility: Annotated[int | None, Field(default=None, description="Underwater visibility in meters")]
+    weight: Annotated[float | None, Field(default=None, description="Total ballast carried, in kilograms")]
     trip_id: Annotated[int | None, Field(default=None, description="Internal id of the trip this dive belongs to")]
     utc_offset_minutes: Annotated[int | None, Field(default=None)]
     notes: Annotated[

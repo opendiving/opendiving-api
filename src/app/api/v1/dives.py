@@ -81,6 +81,7 @@ _DIVE_CONSTRAINT_MESSAGES = {
     "ck_dive_visibility_non_negative": "Visibility must be zero or positive.",
     "ck_dive_max_depth_positive": "Max depth must be positive.",
     "ck_dive_avg_depth_positive": "Average depth must be positive.",
+    "ck_dive_weight_non_negative": "Weight must be zero or positive.",
 }
 
 

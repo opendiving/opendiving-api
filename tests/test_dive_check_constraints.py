@@ -140,6 +140,21 @@ class TestDiveCheckConstraints:
         db.add(_make_dive(dive_owner.id, avg_depth=None))
         db.commit()
 
+    def test_negative_weight_is_rejected(self, db: Session, dive_owner: User) -> None:
+        _assert_violates(db, _make_dive(dive_owner.id, weight=-1), "ck_dive_weight_non_negative")
+
+    def test_zero_weight_is_allowed(self, db: Session, dive_owner: User) -> None:
+        db.add(_make_dive(dive_owner.id, weight=0))
+        db.commit()
+
+    def test_positive_weight_is_allowed(self, db: Session, dive_owner: User) -> None:
+        db.add(_make_dive(dive_owner.id, weight=6.5))
+        db.commit()
+
+    def test_null_weight_is_allowed(self, db: Session, dive_owner: User) -> None:
+        db.add(_make_dive(dive_owner.id, weight=None))
+        db.commit()
+
 
 class TestDiveMixtureCheckConstraints:
     @pytest.fixture

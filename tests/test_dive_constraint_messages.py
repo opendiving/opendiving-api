@@ -49,6 +49,9 @@ class TestFkErrorDetail:
     def test_avg_depth_must_be_positive(self):
         assert _fk_error_detail(_integrity_error("ck_dive_avg_depth_positive")) == "Average depth must be positive."
 
+    def test_weight_must_be_non_negative(self):
+        assert _fk_error_detail(_integrity_error("ck_dive_weight_non_negative")) == "Weight must be zero or positive."
+
     def test_unknown_violation_falls_back_to_generic_message(self):
         exc = IntegrityError("INSERT ...", {}, Exception("some other constraint"))
         assert _fk_error_detail(exc) == "Invalid reference: a related record does not exist."

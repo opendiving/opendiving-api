@@ -10,6 +10,15 @@ from .gear_item import GearItemInfo
 
 class GearSetBase(BaseModel):
     name: Annotated[str, Field(min_length=1, max_length=255, examples=["Sidemount"])]
+    weight: Annotated[
+        float | None,
+        Field(
+            default=None,
+            ge=0,
+            examples=[6.0],
+            description="Ballast normally carried with this set, in kilograms - prefills a dive's weight",
+        ),
+    ]
 
 
 class GearSetRead(GearSetBase, PublicUUIDSchema):
@@ -54,6 +63,9 @@ class GearSetUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: Annotated[str | None, Field(min_length=1, max_length=255, default=None)]
+    weight: Annotated[
+        float | None, Field(default=None, ge=0, description="Ballast normally carried with this set, in kilograms")
+    ]
 
 
 class GearSetUpdateRequest(GearSetUpdate):
