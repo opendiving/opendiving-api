@@ -1243,3 +1243,34 @@ gear_item_id = ...)` condition rather than a separate round trip to resolve
 matching dive ids. It backs the gear detail page's "Dives with this Gear" list,
 which is what makes the `dive_count` statistic clickable rather than just a
 number.
+
+## `GearItem.type` is a closed vocabulary, but has no DB `CHECK` constraint
+
+Gear carries a broad category - fins, wetsuit, regulator, ... - as `GearType`
+(`schemas/gear_item.py`), a `StrEnum` rather than free text. Free text would let
+the same kind of kit be spelled three different ways in one diver's list
+("Fins"/"fins"/"Fin"), which defeats the point: the category exists so the UI can
+group, filter and scan by it. `OTHER` is the escape hatch.
+
+Members are declared in the order kit is normally listed rather than
+alphabetically, so callers that want that order (the frontend's type picker) can
+take it straight from the enum instead of maintaining a second sorted list.
+
+Unlike `dive`/`dive_mixture`'s numeric ranges, this is deliberately **not**
+mirrored by a `CheckConstraint`. Those constraints exist because their only other
+validation lives in the frontend's Zod schemas, so a direct API call could
+otherwise write nonsense. A gear type has no such gap: `GearType` is a Pydantic
+field, so every write through the API (and through the admin panel, which uses
+the same schemas) is already rejected server-side. A DB-level copy of the list
+would buy nothing and would need a `DROP`/`ADD CONSTRAINT` every time a category
+is added. The column is a plain `VARCHAR(32)`.
+
+`type` is nullable and optional throughout. Gear logged before the column existed
+has none, and requiring a diver to categorize a one-off piece of kit before they
+can save it would be friction for no gain - so the UI shows "No type" rather
+than forcing a choice.
+
+Applying to an existing local DB (per "Schema changes have no migration tool"):
+```sql
+ALTER TABLE gear_item ADD COLUMN type VARCHAR(32);
+```

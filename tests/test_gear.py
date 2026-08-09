@@ -20,7 +20,7 @@ from src.app.crud.crud_dive_gear_items import replace_gear_items_for_dive
 from src.app.crud.crud_gear_set_items import replace_gear_items_for_set
 from src.app.models.dive_gear_item import DiveGearItem
 from src.app.models.gear_set_item import GearSetItem
-from src.app.schemas.gear_item import GearItemInfo, GearItemReadInternal, GearItemUpdate
+from src.app.schemas.gear_item import GearItemInfo, GearItemReadInternal, GearItemUpdate, GearType
 from src.app.schemas.gear_set import GearSetCreateRequest, GearSetReadInternal, GearSetUpdateRequest
 from src.app.services.gear_stats import recalculate_gear_dive_counts
 
@@ -32,6 +32,7 @@ def _internal_gear_item(**overrides) -> GearItemReadInternal:
         "uuid": uuid7(),
         "name": "MK25 EVO",
         "brand": "Scubapro",
+        "type": GearType.REGULATOR,
         "notes": "serviced 2025",
         "rented": False,
         "is_archived": False,
@@ -82,6 +83,37 @@ class TestPublicShapeConversion:
         assert public.gear_items[1].is_archived is True
         assert public.user_uuid == user_uuid
         assert not hasattr(public, "user_id")
+
+
+class TestGearType:
+    def test_is_a_closed_vocabulary(self) -> None:
+        """Unknown categories are rejected rather than stored as free text, which is
+        what keeps the same kit named the same way across a diver's whole list."""
+        with pytest.raises(ValueError):
+            GearItemUpdate(type="spaceship")  # type: ignore[arg-type]
+
+    def test_accepts_a_member_by_its_string_value(self) -> None:
+        """Clients send the wire value ("fins"), not the Python member."""
+        assert GearItemUpdate(type="fins").type is GearType.FINS  # type: ignore[arg-type]
+
+    def test_serializes_as_its_plain_string_value(self) -> None:
+        """`StrEnum` keeps the JSON shape a plain string, so clients never see
+        "GearType.FINS"."""
+        assert GearItemInfo(uuid=uuid7(), name="Jetfins", type=GearType.FINS).model_dump(mode="json")["type"] == "fins"
+
+    def test_is_optional_everywhere(self) -> None:
+        """Gear logged before types existed has none, and categorizing a one-off piece
+        of kit shouldn't be required to save it."""
+        assert GearItemUpdate().type is None
+        assert GearItemInfo(uuid=uuid7(), name="Odd kit").type is None
+
+    def test_members_are_declared_in_kit_order_not_alphabetically(self) -> None:
+        """Declaration order is part of the contract - callers sort by it to list kit
+        the way a diver lays it out."""
+        values = [t.value for t in GearType]
+        assert values[:3] == ["mask", "snorkel", "fins"]
+        assert values[-1] == "other"
+        assert values != sorted(values)
 
 
 class TestGearSchemas:

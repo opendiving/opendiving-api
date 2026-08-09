@@ -22,6 +22,16 @@ class GearItem(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id"), index=True)
     name: Mapped[str] = mapped_column(String(255))
     brand: Mapped[str | None] = mapped_column(String(255), default=None)
+    # Broad category ("fins", "wetsuit", "regulator", ...) - see `GearType` in
+    # `schemas/gear_item.py` for the vocabulary, which is the single source of truth.
+    # Stored as a plain string rather than a Postgres ENUM or a `CHECK` constraint: the
+    # API's own Pydantic schema already rejects unknown values on every write (unlike
+    # the numeric ranges on `dive`/`dive_mixture`, whose only other validation lives in
+    # the frontend's Zod schemas - see DECISIONS.md), so a DB-level copy of the list
+    # would buy nothing and would need a DDL change every time a category is added.
+    # 32 chars is generous headroom over the longest current member ("regulator"),
+    # so a new category never needs the column widened.
+    type: Mapped[str | None] = mapped_column(String(32), default=None)
     notes: Mapped[str] = mapped_column(Text, default="")
     # Rented gear is a property of the item itself rather than of a dive: a diver
     # typically adds "rented BCD (Blue Ocean, Koh Tao)" as its own item and archives

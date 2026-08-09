@@ -1,5 +1,6 @@
 import uuid as uuid_pkg
 from datetime import datetime
+from enum import StrEnum
 from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -7,9 +8,49 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema
 
 
+class GearType(StrEnum):
+    """Broad category a gear item falls into.
+
+    A closed vocabulary rather than free text so the same kind of kit is named
+    the same way across a diver's whole list (no "Fins"/"fins"/"Fin" drift),
+    which is what lets the UI group and filter by it. `OTHER` is the escape
+    hatch for anything genuinely unusual.
+
+    Declaring the members in the order kit is normally listed rather than
+    alphabetically keeps that order available to any caller that wants to sort
+    by it. This is the single source of truth for the vocabulary - it is
+    deliberately *not* mirrored by a DB `CHECK` constraint (see DECISIONS.md).
+    """
+
+    MASK = "mask"
+    SNORKEL = "snorkel"
+    FINS = "fins"
+    WETSUIT = "wetsuit"
+    DRYSUIT = "drysuit"
+    HOOD = "hood"
+    GLOVES = "gloves"
+    BOOTS = "boots"
+    BCD = "bcd"
+    REGULATOR = "regulator"
+    COMPUTER = "computer"
+    CYLINDER = "cylinder"
+    WEIGHTS = "weights"
+    LIGHT = "light"
+    SMB = "smb"
+    REEL = "reel"
+    KNIFE = "knife"
+    COMPASS = "compass"
+    CAMERA = "camera"
+    OTHER = "other"
+
+
 class GearItemBase(BaseModel):
     name: Annotated[str, Field(min_length=1, max_length=255, examples=["MK25 EVO / S620Ti"])]
     brand: Annotated[str | None, Field(default=None, max_length=255, examples=["Scubapro"])]
+    type: Annotated[
+        GearType | None,
+        Field(default=None, examples=[GearType.REGULATOR], description="Broad category this item falls into"),
+    ]
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
     rented: Annotated[bool, Field(default=False, description="Whether this item is rented rather than owned")]
 
@@ -24,6 +65,7 @@ class GearItemInfo(PublicUUIDSchema):
 
     name: str
     brand: str | None = None
+    type: GearType | None = None
     rented: bool = False
     is_archived: bool = False
 
@@ -75,6 +117,7 @@ class GearItemUpdate(BaseModel):
 
     name: Annotated[str | None, Field(min_length=1, max_length=255, default=None)]
     brand: Annotated[str | None, Field(default=None, max_length=255)]
+    type: Annotated[GearType | None, Field(default=None)]
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
     rented: Annotated[bool | None, Field(default=None)]
     is_archived: Annotated[bool | None, Field(default=None, description="Set to archive/unarchive this item")]

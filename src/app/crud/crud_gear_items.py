@@ -19,12 +19,26 @@ from ..schemas.gear_item import (
 # dive or a gear set), in the order `gear_item_info_from_row` unpacks them. Shared by
 # `crud_dive_gear_items` and `crud_gear_set_items`, which select the same summary
 # through their respective join tables.
-GEAR_ITEM_INFO_COLUMNS = (GearItem.uuid, GearItem.name, GearItem.brand, GearItem.rented, GearItem.is_archived)
+GEAR_ITEM_INFO_COLUMNS = (
+    GearItem.uuid,
+    GearItem.name,
+    GearItem.brand,
+    GearItem.type,
+    GearItem.rented,
+    GearItem.is_archived,
+)
 
 
 def gear_item_info_from_row(row: Any) -> GearItemInfo:
     """Build a `GearItemInfo` from a result row selecting `GEAR_ITEM_INFO_COLUMNS`."""
-    return GearItemInfo(uuid=row.uuid, name=row.name, brand=row.brand, rented=row.rented, is_archived=row.is_archived)
+    return GearItemInfo(
+        uuid=row.uuid,
+        name=row.name,
+        brand=row.brand,
+        type=row.type,
+        rented=row.rented,
+        is_archived=row.is_archived,
+    )
 
 
 CRUDGearItem = FastCRUD[
