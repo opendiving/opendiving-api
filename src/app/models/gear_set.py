@@ -1,4 +1,4 @@
-from sqlalchemy import ForeignKey, Index, String, func
+from sqlalchemy import Float, ForeignKey, Index, String, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -20,6 +20,17 @@ class GearSet(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, unique=True, primary_key=True, init=False)
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id"), index=True)
     name: Mapped[str] = mapped_column(String(255))
+    # The ballast (in kilograms) the diver normally carries with this configuration,
+    # used to prefill `dive.weight` when the set is loaded into the dive form. Like the
+    # item list, it's a starting point the diver can then change for that dive - the
+    # dive stores its own copy and never reads back from the set.
+    #
+    # Bounded by Pydantic (`ge=0` in `schemas/gear_set.py`) rather than a DB
+    # `CheckConstraint`, for the same reason `GearItem.type` has no DB-level copy of its
+    # vocabulary: the API schema already rejects a negative value on every write, so a
+    # constraint here would only duplicate it. `dive.weight` is the other way round
+    # because that schema leaves all its numeric bounds to the DB (see DECISIONS.md).
+    weight: Mapped[float | None] = mapped_column(Float, default=None)
 
     @declared_attr.directive
     @classmethod

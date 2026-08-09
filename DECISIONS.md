@@ -1354,6 +1354,31 @@ ALTER TABLE dive ADD CONSTRAINT ck_dive_weight_non_negative
     CHECK (weight IS NULL OR weight >= 0);
 ```
 
-A per-set default weight on `gear_set` (pre-filling the dive form the way its
-item list already does) would fit the "sets are only a form-filling shortcut"
-rule, but isn't implemented - the dive would still store its own value.
+## `gear_set.weight` is a default, `dive.weight` is the record
+
+`gear_set` carries its own nullable `weight` (kg): the ballast the diver normally
+uses with that configuration. Loading a set into the dive form fills in the
+dive's weight the same way it fills in the item list - and just like the item
+list, it's a starting point. The dive stores its own copy and never reads back
+from the set, so renaming, re-weighting or deleting a set can't rewrite what a
+past dive says the diver actually carried (see "A dive references gear items,
+never the gear set they came from" - same reasoning, same guarantee).
+
+`NULL` on a set means "this set makes no claim about weight", and loading it
+leaves whatever's on the dive alone. That's why it's nullable rather than
+defaulting to 0: a set of fins and a mask shouldn't silently zero out the dive's
+weight.
+
+Unlike `dive.weight`, the bound lives in Pydantic (`ge=0` on `GearSetBase`), not
+in a DB `CheckConstraint`. This is the `GearItem.type` rule, not an oversight:
+the API schema already rejects a negative value on every write, so a DB-level
+copy would buy nothing. `dive.weight` goes the other way because `DiveBase`
+declares no numeric bounds at all - all of them are enforced by the DB and
+mirrored in the frontend's Zod schemas, and one field breaking that pattern would
+mean one field returning a different 422 shape from its neighbours.
+
+Also a new column on an existing table, so:
+
+```sql
+ALTER TABLE gear_set ADD COLUMN weight double precision;
+```

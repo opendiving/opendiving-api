@@ -74,7 +74,7 @@ async def write_gear_set(
 
     gear_item_ids = await _resolve_item_ids(db, gear_set.gear_item_uuids, current_user["id"])
 
-    gear_set_internal = GearSetCreateInternal(name=gear_set.name, user_id=current_user["id"])
+    gear_set_internal = GearSetCreateInternal(name=gear_set.name, weight=gear_set.weight, user_id=current_user["id"])
     created_gear_set = await crud_gear_sets.create(
         db=db, object=gear_set_internal, schema_to_select=GearSetReadInternal, return_as_model=True
     )
