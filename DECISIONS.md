@@ -1318,3 +1318,42 @@ the trip's name.
 
 Entries cached under the old `dive_cache:*` prefix are simply never read again
 and expire on their own; a local dev Redis can be flushed to be rid of them.
+
+## Weight is a `dive` column, not a gear item
+
+`dive.weight` is a nullable `Float` holding the total ballast carried on the
+dive, in kilograms - the same shape as `max_depth`/`visibility` next to it.
+
+The tempting alternative was a `GearType.WEIGHT` gear item, or a `quantity`
+column on `dive_gear_item`. Both were rejected:
+
+- A `gear_item` is an *identity* - `ux_gear_item_user_id_brand_name_lower`
+  enforces one row per (brand, name), and `dive_count` is denormalized per item.
+  "4 kg" isn't a thing the diver owns, so a diver's list would fill up with
+  "2kg"/"4kg"/"4.5kg" rows whose dive counts mean nothing.
+- The entire point of logging weight is comparing it numerically across dives
+  ("6 kg with the 5mm in salt, 4 kg in fresh"), which a name string can't answer.
+- A weight *belt* or an integrated weight *pocket* genuinely is a gear item - it
+  is owned, it can be rented, it wears out. The amount of lead in it is a
+  different fact, and keeping the two apart is the point.
+- `dive_gear_item.quantity` would generalize to nothing else, and would force
+  the diver to own a "weights" item just to record a number.
+
+`ck_dive_weight_non_negative` is `>= 0`, not `> 0` like the depth constraints:
+diving with no lead at all is a real, deliberate entry (a drysuit with a heavy
+undergarment, a freedive), and it's worth distinguishing from `NULL` ("didn't
+record it"). `Float` rather than `Integer` because half-kilo increments are
+normal and pound-based weights don't convert to whole kilos.
+
+Being a new column on an existing table, this needed a manual `ALTER TABLE` on
+any existing database (see "Schema changes have no migration tool"):
+
+```sql
+ALTER TABLE dive ADD COLUMN weight double precision;
+ALTER TABLE dive ADD CONSTRAINT ck_dive_weight_non_negative
+    CHECK (weight IS NULL OR weight >= 0);
+```
+
+A per-set default weight on `gear_set` (pre-filling the dive form the way its
+item list already does) would fit the "sets are only a form-filling shortcut"
+rule, but isn't implemented - the dive would still store its own value.

@@ -35,6 +35,12 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     avg_depth: Mapped[float | None] = mapped_column(Float, default=None)
     bottom_temperature: Mapped[float | None] = mapped_column(Float, default=None)
     visibility: Mapped[int | None] = mapped_column(Integer, default=None)
+    # Total ballast carried on the dive, in kilograms - a plain per-dive scalar like the
+    # depths above rather than a `gear_item`, because the amount of lead isn't a piece of
+    # kit the diver owns and the whole point of logging it is comparing it numerically
+    # across dives (see DECISIONS.md). `Float`, not `Integer`: half-kilo increments are
+    # normal, and pound-based weights don't convert to whole kilos.
+    weight: Mapped[float | None] = mapped_column(Float, default=None)
     trip_id: Mapped[int | None] = mapped_column(ForeignKey("trip.id", ondelete="SET NULL"), default=None, index=True)
 
     @declared_attr.directive
@@ -47,6 +53,10 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
             CheckConstraint("visibility IS NULL OR visibility >= 0", name="ck_dive_visibility_non_negative"),
             CheckConstraint("max_depth IS NULL OR max_depth > 0", name="ck_dive_max_depth_positive"),
             CheckConstraint("avg_depth IS NULL OR avg_depth > 0", name="ck_dive_avg_depth_positive"),
+            # `>= 0`, unlike the depths above: diving with no lead at all is a real,
+            # deliberate entry (a drysuit with a heavy undergarment, a freedive), and it's
+            # worth being able to tell apart from "didn't record it" (NULL).
+            CheckConstraint("weight IS NULL OR weight >= 0", name="ck_dive_weight_non_negative"),
             # Serves `_cached_read_dives` (`GET /dives`, by far the hottest query on this
             # table): `WHERE user_id = ... AND is_deleted = false ORDER BY start_time DESC`.
             # `is_deleted` isn't a column here - the partial predicate already pins it to
