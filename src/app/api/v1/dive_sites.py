@@ -18,6 +18,7 @@ from ...schemas.dive_site import (
     DiveSiteReadInternal,
     DiveSiteUpdate,
 )
+from ...services.cache_invalidation import invalidate_dive_caches
 
 router = APIRouter(tags=["dive-sites"])
 
@@ -57,9 +58,7 @@ async def write_dive_site(
     if current_user["uuid"] != dive_site.user_uuid:
         raise ForbiddenException()
 
-    if await dive_site_name_exists(
-        db=db, user_id=current_user["id"], name=dive_site.name, location=dive_site.location
-    ):
+    if await dive_site_name_exists(db=db, user_id=current_user["id"], name=dive_site.name, location=dive_site.location):
         raise DuplicateValueException("A dive site with this name already exists at this location")
 
     dive_site_internal_dict = dive_site.model_dump(exclude={"user_uuid"})
@@ -150,6 +149,10 @@ async def patch_dive_site(
     if update_data:
         await crud_dive_sites.update(db=db, object=update_data, uuid=uuid)
         await _dive_site_cache.invalidate_list(db_dive_site.user_id)
+        # Dive reads embed this site's name/location, so a rename makes every cached
+        # dive logged here stale - the bug that used to be documented as a known
+        # limitation, fixable now that the single-dive cache key is user-scoped.
+        await invalidate_dive_caches(db_dive_site.user_id)
 
     return {"message": "Dive site updated"}
 
@@ -172,5 +175,7 @@ async def erase_dive_site(
 
     await crud_dive_sites.delete(db=db, uuid=uuid)
     await _dive_site_cache.invalidate_list(owner_id)
+    # Soft-deleted sites stay on the dives logged at them, so drop those reads too.
+    await invalidate_dive_caches(owner_id)
 
     return {"message": "Dive site deleted"}

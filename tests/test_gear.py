@@ -9,6 +9,7 @@ exercised end to end by hand (see DECISIONS.md), not here.
 """
 
 from datetime import UTC, datetime
+from fnmatch import fnmatch
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -22,6 +23,7 @@ from src.app.models.dive_gear_item import DiveGearItem
 from src.app.models.gear_set_item import GearSetItem
 from src.app.schemas.gear_item import GearItemInfo, GearItemReadInternal, GearItemUpdate, GearType
 from src.app.schemas.gear_set import GearSetCreateRequest, GearSetReadInternal, GearSetUpdateRequest
+from src.app.services.cache_invalidation import invalidate_dive_caches, invalidate_gear_caches
 from src.app.services.gear_stats import recalculate_gear_dive_counts
 
 
@@ -224,3 +226,58 @@ class TestRecalculateGearDiveCounts:
         await recalculate_gear_dive_counts(db, user_id=1, commit=False)
 
         db.commit.assert_not_awaited()
+
+
+class TestCacheInvalidationPatterns:
+    """`invalidate_dive_caches`/`invalidate_gear_caches` are pattern deletes, so the
+    patterns are the contract: too narrow and renames go stale, too broad and they
+    wipe unrelated resources' caches. See `services/cache_invalidation.py`.
+    """
+
+    @pytest.mark.asyncio
+    async def test_dive_invalidation_covers_both_list_and_item_keys(self, monkeypatch) -> None:
+        patterns: list[str] = []
+        monkeypatch.setattr(
+            "src.app.services.cache_invalidation.delete_keys_by_pattern",
+            AsyncMock(side_effect=lambda pattern: patterns.append(pattern)),
+        )
+
+        await invalidate_dive_caches(7)
+
+        assert patterns == ["user_7_dives:*", "user_7_dive:*"]
+
+    @pytest.mark.asyncio
+    async def test_dive_invalidation_does_not_sweep_the_dive_site_list(self, monkeypatch) -> None:
+        """A single `user_7_dive*` would also match `user_7_dive_sites:page_...`, making
+        every dive edit needlessly rebuild the dive *site* list cache."""
+        patterns: list[str] = []
+        monkeypatch.setattr(
+            "src.app.services.cache_invalidation.delete_keys_by_pattern",
+            AsyncMock(side_effect=lambda pattern: patterns.append(pattern)),
+        )
+
+        await invalidate_dive_caches(7)
+
+        assert not any(fnmatch("user_7_dive_sites:page_1:items_per_page:10", p) for p in patterns)
+        # ...while still matching the keys it is meant to drop.
+        assert any(fnmatch("user_7_dive:019f-abc", p) for p in patterns)
+        assert any(fnmatch("user_7_dives:page_1:items_per_page:10:trip_None:site_None:gear_None", p) for p in patterns)
+
+    @pytest.mark.asyncio
+    async def test_gear_invalidation_covers_every_gear_key_and_nothing_else(self, monkeypatch) -> None:
+        patterns: list[str] = []
+        monkeypatch.setattr(
+            "src.app.services.cache_invalidation.delete_keys_by_pattern",
+            AsyncMock(side_effect=lambda pattern: patterns.append(pattern)),
+        )
+
+        await invalidate_gear_caches(7)
+
+        matches = lambda key: any(fnmatch(key, p) for p in patterns)  # noqa: E731
+        assert matches("user_7_gear_items:page_1:items_per_page:10:archived_False")
+        assert matches("user_7_gear_item:019f-abc")
+        assert matches("user_7_gear_sets:page_1:items_per_page:10")
+        assert matches("user_7_gear_set:019f-abc")
+        # Another user's gear, and this user's non-gear caches, must survive.
+        assert not matches("user_8_gear_items:page_1:items_per_page:10:archived_False")
+        assert not matches("user_7_dives:page_1:items_per_page:10")

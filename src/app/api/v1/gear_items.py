@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...api.dependencies import get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import DuplicateValueException, ForbiddenException, NotFoundException
-from ...core.utils.cache import cache, delete_keys_by_pattern
+from ...core.utils.cache import cache
 from ...crud.crud_gear_items import crud_gear_items, gear_item_name_exists
 from ...schemas.gear_item import (
     GearItemCreate,
@@ -18,6 +18,7 @@ from ...schemas.gear_item import (
     GearItemReadInternal,
     GearItemUpdate,
 )
+from ...services.cache_invalidation import invalidate_dive_caches, invalidate_gear_caches
 
 router = APIRouter(tags=["gear"])
 
@@ -33,18 +34,6 @@ def _to_public_gear_item(
     (owning user referenced by `uuid`)."""
     data = db_gear_item if isinstance(db_gear_item, dict) else db_gear_item.model_dump()
     return GearItemRead(**{k: v for k, v in data.items() if k not in ("id", "user_id")}, user_uuid=user_uuid)
-
-
-async def invalidate_gear_caches(user_id: int) -> None:
-    """Drop every cached gear read for a user.
-
-    All gear cache keys are deliberately user-scoped and share the `user_{id}_gear_`
-    prefix (`..._gear_items:page_...`, `..._gear_item:{uuid}`, `..._gear_sets:page_...`,
-    `..._gear_set:{uuid}`), so a single pattern covers the lot. Sets embed their items'
-    names, so an item edit has to invalidate set reads too - and a *dive* mutation has to
-    call this as well, since it changes items' `dive_count` (see `dives.py`).
-    """
-    await delete_keys_by_pattern(f"user_{user_id}_gear_*")
 
 
 @router.post("/gear-item", response_model=GearItemRead, status_code=201)
@@ -222,6 +211,9 @@ async def patch_gear_item(
     if update_data:
         await crud_gear_items.update(db=db, object=update_data, uuid=uuid)
         await invalidate_gear_caches(db_gear_item.user_id)
+        # Dive reads embed this item's name/brand/type/rented/is_archived, so a rename
+        # (or an archive) makes every cached dive that uses it stale.
+        await invalidate_dive_caches(db_gear_item.user_id)
 
     return {"message": "Gear item updated"}
 
@@ -247,5 +239,8 @@ async def erase_gear_item(
 
     await crud_gear_items.delete(db=db, uuid=uuid)
     await invalidate_gear_caches(owner_id)
+    # Soft-deleted gear stays on the dives that used it, so their cached reads still
+    # reference it - drop them rather than reasoning about which fields "look" deleted.
+    await invalidate_dive_caches(owner_id)
 
     return {"message": "Gear item deleted"}

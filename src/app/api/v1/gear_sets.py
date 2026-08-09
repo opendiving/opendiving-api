@@ -24,7 +24,7 @@ from ...schemas.gear_set import (
     GearSetReadInternal,
     GearSetUpdateRequest,
 )
-from .gear_items import invalidate_gear_caches
+from ...services.cache_invalidation import invalidate_gear_caches
 
 router = APIRouter(tags=["gear"])
 

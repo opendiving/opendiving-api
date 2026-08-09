@@ -1229,11 +1229,9 @@ picker's (active-only) view and the management page's (full) view can't serve
 each other's cached results. This is the same reason `_cached_read_dives` keys on
 its `trip_id`/`dive_site_id`/`gear_item_id` filters.
 
-Known limitation, inherited from dive sites rather than introduced here: renaming
-a gear item doesn't invalidate `dive_cache:{uuid}` for the dives that embed it,
-so a single dive's cached read can show a stale gear name until it next changes.
-Fixing it properly needs a dive-uuid-per-gear-item reverse index; `dive_site`
-has had the same behaviour since it was introduced.
+This same reasoning was later applied to the dive caches to fix stale embedded
+names - see "Renaming a dive site or gear item invalidates that user's dive
+caches" below.
 
 ## `GET /dives` gained a `gear_item_uuid` filter alongside `dive_site_uuid`
 
@@ -1274,3 +1272,49 @@ Applying to an existing local DB (per "Schema changes have no migration tool"):
 ```sql
 ALTER TABLE gear_item ADD COLUMN type VARCHAR(32);
 ```
+
+
+## Renaming a dive site or gear item invalidates that user's dive caches
+
+A dive's cached representation embeds *summaries of other resources*: its dive
+sites' names/locations (`DiveSiteInfo`) and its gear items' names/brands/types
+(`GearItemInfo`). So renaming a dive site or a gear item makes every cached dive
+that references it stale, even though no dive row changed. Both the paginated
+list (`_cached_read_dives`) and the single-dive read carry those summaries, so
+both go stale.
+
+This was originally shipped as a known limitation, because the single-dive cache
+key was a flat `dive_cache:{uuid}`. The renaming endpoint knows only the owner's
+`user_id`, not which of their dives reference the renamed thing, so there was no
+pattern that could target them - the only match would have been
+`dive_cache:*`, i.e. every user's dives.
+
+The fix was to scope that key by user, exactly like the gear caches:
+`dive_cache:{uuid}` -> `user_{user_id}_dive:{uuid}`. `services/cache_invalidation.py`
+can then express the invalidation as a pattern, and `dive_sites.py`/`gear_items.py`
+call `invalidate_dive_caches(owner_id)` after a patch or delete.
+
+Two things to know if you touch this:
+
+- **The helpers live in `services/cache_invalidation.py`, not in the route
+  modules.** `dives.py` already invalidates gear caches (a dive changes each
+  item's `dive_count`) and gear now invalidates dive caches, so keeping them in
+  the routers would be a circular import.
+- **`invalidate_dive_caches` uses two patterns, not one.** The obvious
+  `user_{id}_dive*` would also sweep `user_{id}_dive_sites:page_...` - the dive
+  *site* list cache, a different resource. Harmless, but it would quietly cost
+  every dive edit an extra dive-site list rebuild. So it deletes
+  `user_{id}_dives:*` and `user_{id}_dive:*` separately. `user_{id}_gear_*` has
+  no such neighbour and stays a single pattern.
+
+`patch_dive`/`erase_dive` lost their `@cache("dive_cache", ...)` decorators in the
+process. That decorator existed purely to delete the flat item key on a non-GET;
+the key is now user-scoped and built from a `user_id` the decorator can't reach
+from route kwargs, so both routes invalidate explicitly instead - matching what
+`gear_items.py` already did.
+
+Renaming a *trip* needs none of this: `DiveRead` carries `trip_uuid` only, never
+the trip's name.
+
+Entries cached under the old `dive_cache:*` prefix are simply never read again
+and expire on their own; a local dev Redis can be flushed to be rid of them.

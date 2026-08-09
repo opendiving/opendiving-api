@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...api.dependencies import get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import ForbiddenException, NotFoundException
-from ...core.utils.cache import cache, delete_keys_by_pattern
+from ...core.utils.cache import cache
 from ...core.utils.datetime_offset import combine_start_time, split_start_time
 from ...crud.crud_dive_dive_sites import (
     get_dive_sites_for_dive,
@@ -38,10 +38,10 @@ from ...schemas.dive import (
 from ...schemas.dive_mixture import DiveMixtureRead
 from ...schemas.gear_item import GearItemInfo
 from ...schemas.parsed_dive import ParsedDiveSchema
+from ...services.cache_invalidation import invalidate_dive_caches, invalidate_gear_caches
 from ...services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file
 from ...services.dive_stats import recalculate_dive_stats
 from ...services.gear_stats import recalculate_gear_dive_counts
-from .gear_items import invalidate_gear_caches
 
 router = APIRouter(tags=["dives"])
 
@@ -255,7 +255,7 @@ async def write_dive(
         raise HTTPException(status_code=422, detail=_fk_error_detail(e)) from e
     await recalculate_dive_stats(db=db, user_id=current_user["id"])
     await recalculate_gear_dive_counts(db=db, user_id=current_user["id"])
-    await delete_keys_by_pattern(f"user_{current_user['id']}_dives:*")
+    await invalidate_dive_caches(current_user["id"])
     # Gear reads carry each item's `dive_count`, which this dive just changed.
     await invalidate_gear_caches(current_user["id"])
 
@@ -395,14 +395,21 @@ async def read_dives(
     )
 
 
-@cache(key_prefix="dive_cache", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
+# Keyed `user_{user_id}_dive:{uuid}` rather than the flat `dive_cache:{uuid}` it used
+# to be. A dive read embeds its dive sites' and gear items' names, so renaming either
+# has to drop the cached dives that reference it - and the renaming endpoint knows only
+# the owner's id, not which of their dives are affected. Scoping the key by user is what
+# makes `invalidate_dive_caches()` able to express that as a pattern at all.
+@cache(key_prefix="user_{user_id}_dive", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
 async def _cached_read_dive(
-    request: Request, uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession
+    request: Request, user_id: int, uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession
 ) -> DiveReadWithMixtures:
-    """Fetches (and caches) a single dive by uuid, regardless of owner.
+    """Fetches (and caches) a single dive by uuid.
 
     Like `_cached_read_dives`, this must only be called after authorization has already
     been checked, since `@cache` can serve a cached response without re-checking it.
+    `user_id` is always the dive's owner (the route rejects anyone else), so it both
+    scopes the cache key and can't be used to read another user's dive.
     """
     db_dive = await crud_dives.get(db=db, uuid=uuid, is_deleted=False, schema_to_select=DiveReadInternal)
     if db_dive is None:
@@ -441,11 +448,12 @@ async def read_dive(
     if _dive_owner_id(db_dive) != current_user["id"]:
         raise ForbiddenException()
 
-    return await _cached_read_dive(request, uuid=uuid, owner_uuid=current_user["uuid"], db=db)
+    return await _cached_read_dive(
+        request, user_id=current_user["id"], uuid=uuid, owner_uuid=current_user["uuid"], db=db
+    )
 
 
 @router.patch("/dive/{uuid}")
-@cache("dive_cache", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
 async def patch_dive(
     request: Request,
     uuid: uuid_pkg.UUID,
@@ -530,7 +538,7 @@ async def patch_dive(
     if update_data or values.mixtures is not None or dive_site_ids is not None or gear_item_ids is not None:
         await recalculate_dive_stats(db=db, user_id=owner_id)
         await recalculate_gear_dive_counts(db=db, user_id=owner_id)
-        await delete_keys_by_pattern(f"user_{owner_id}_dives:*")
+        await invalidate_dive_caches(owner_id)
         # Gear reads carry each item's `dive_count`, which this edit may have changed.
         await invalidate_gear_caches(owner_id)
 
@@ -538,7 +546,6 @@ async def patch_dive(
 
 
 @router.delete("/dive/{uuid}")
-@cache("dive_cache", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
 async def erase_dive(
     request: Request,
     uuid: uuid_pkg.UUID,
@@ -556,7 +563,7 @@ async def erase_dive(
     await crud_dives.delete(db=db, uuid=uuid)
     await recalculate_dive_stats(db=db, user_id=owner_id)
     await recalculate_gear_dive_counts(db=db, user_id=owner_id)
-    await delete_keys_by_pattern(f"user_{owner_id}_dives:*")
+    await invalidate_dive_caches(owner_id)
     # Gear reads carry each item's `dive_count`, which this dive no longer contributes to.
     await invalidate_gear_caches(owner_id)
 
