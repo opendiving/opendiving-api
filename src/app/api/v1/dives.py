@@ -9,16 +9,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...api.dependencies import get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import ForbiddenException, NotFoundException
-from ...core.utils.cache import cache, delete_keys_by_pattern
+from ...core.utils.cache import cache
 from ...core.utils.datetime_offset import combine_start_time, split_start_time
 from ...crud.crud_dive_dive_sites import (
     get_dive_sites_for_dive,
     get_dive_sites_for_dives,
     replace_dive_sites_for_dive,
 )
+from ...crud.crud_dive_gear_items import (
+    get_gear_items_for_dive,
+    get_gear_items_for_dives,
+    replace_gear_items_for_dive,
+)
 from ...crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
 from ...crud.crud_dive_sites import resolve_dive_site_ids_for_user
 from ...crud.crud_dives import crud_dives
+from ...crud.crud_gear_items import resolve_gear_item_ids_for_user
 from ...crud.crud_trips import get_trip_uuids_by_ids, resolve_trip_id_for_user
 from ...schemas.dive import (
     DiveCreateInternal,
@@ -30,9 +36,12 @@ from ...schemas.dive import (
     DiveUpdateRequest,
 )
 from ...schemas.dive_mixture import DiveMixtureRead
+from ...schemas.gear_item import GearItemInfo
 from ...schemas.parsed_dive import ParsedDiveSchema
+from ...services.cache_invalidation import invalidate_dive_caches, invalidate_gear_caches
 from ...services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file
 from ...services.dive_stats import recalculate_dive_stats
+from ...services.gear_stats import recalculate_gear_dive_counts
 
 router = APIRouter(tags=["dives"])
 
@@ -81,6 +90,8 @@ def _fk_error_detail(exc: IntegrityError) -> str:
         return "Trip not found."
     if "dive_site_id_fkey" in msg:
         return "Dive site not found."
+    if "gear_item_id_fkey" in msg:
+        return "Gear item not found."
     for constraint, detail in _DIVE_CONSTRAINT_MESSAGES.items():
         if constraint in msg:
             return detail
@@ -130,6 +141,7 @@ def _to_public_dive(
     user_uuid: uuid_pkg.UUID,
     trip_uuid: uuid_pkg.UUID | None,
     dive_sites: list[DiveSiteInfo],
+    gear_items: list[GearItemInfo],
 ) -> DiveRead:
     """Convert an internal dive representation (integer FKs) into its public shape
     (owning user and trip referenced by `uuid`)."""
@@ -139,6 +151,7 @@ def _to_public_dive(
         user_uuid=user_uuid,
         trip_uuid=trip_uuid,
         dive_sites=dive_sites,
+        gear_items=gear_items,
     )
 
 
@@ -148,6 +161,7 @@ def _to_public_dive_with_mixtures(
     user_uuid: uuid_pkg.UUID,
     trip_uuid: uuid_pkg.UUID | None,
     dive_sites: list[DiveSiteInfo],
+    gear_items: list[GearItemInfo],
     mixtures: list[DiveMixtureRead],
 ) -> DiveReadWithMixtures:
     data = _to_public_start_time(db_dive if isinstance(db_dive, dict) else db_dive.model_dump())
@@ -156,6 +170,7 @@ def _to_public_dive_with_mixtures(
         user_uuid=user_uuid,
         trip_uuid=trip_uuid,
         dive_sites=dive_sites,
+        gear_items=gear_items,
         mixtures=mixtures,
     )
 
@@ -200,7 +215,16 @@ async def write_dive(
         raise HTTPException(status_code=422, detail="Dive site not found.")
     dive_site_ids = [site_id_by_uuid[u] for u in dive.dive_site_uuids]
 
-    dive_internal_dict = dive.model_dump(exclude={"mixtures", "dive_site_uuids", "user_uuid", "trip_uuid"})
+    gear_id_by_uuid = await resolve_gear_item_ids_for_user(
+        db=db, gear_item_uuids=dive.gear_item_uuids, user_id=current_user["id"]
+    )
+    if gear_id_by_uuid is None:
+        raise HTTPException(status_code=422, detail="Gear item not found.")
+    gear_item_ids = [gear_id_by_uuid[u] for u in dive.gear_item_uuids]
+
+    dive_internal_dict = dive.model_dump(
+        exclude={"mixtures", "dive_site_uuids", "gear_item_uuids", "user_uuid", "trip_uuid"}
+    )
     utc_start_time, utc_offset_minutes = split_start_time(dive.start_time)
     dive_internal_dict["start_time"] = utc_start_time
     dive_internal = DiveCreateInternal(
@@ -224,8 +248,16 @@ async def write_dive(
     except IntegrityError as e:
         await db.rollback()
         raise HTTPException(status_code=422, detail=_fk_error_detail(e)) from e
+    try:
+        await replace_gear_items_for_dive(db=db, dive_id=created_dive.id, gear_item_ids=gear_item_ids)
+    except IntegrityError as e:
+        await db.rollback()
+        raise HTTPException(status_code=422, detail=_fk_error_detail(e)) from e
     await recalculate_dive_stats(db=db, user_id=current_user["id"])
-    await delete_keys_by_pattern(f"user_{current_user['id']}_dives:*")
+    await recalculate_gear_dive_counts(db=db, user_id=current_user["id"])
+    await invalidate_dive_caches(current_user["id"])
+    # Gear reads carry each item's `dive_count`, which this dive just changed.
+    await invalidate_gear_caches(current_user["id"])
 
     dive_read_internal = await crud_dives.get(db=db, id=created_dive.id, schema_to_select=DiveReadInternal)
     if dive_read_internal is None:
@@ -233,17 +265,22 @@ async def write_dive(
 
     mixtures = await get_mixtures_for_dive(db=db, dive_id=created_dive.id)
     dive_sites = await get_dive_sites_for_dive(db=db, dive_id=created_dive.id)
+    gear_items = await get_gear_items_for_dive(db=db, dive_id=created_dive.id)
     return _to_public_dive_with_mixtures(
         cast(dict[str, Any], dive_read_internal),
         user_uuid=current_user["uuid"],
         trip_uuid=dive.trip_uuid,
         dive_sites=dive_sites,
+        gear_items=gear_items,
         mixtures=mixtures,
     )
 
 
 @cache(
-    key_prefix=("user_{user_id}_dives:page_{page}:items_per_page:{items_per_page}:trip_{trip_id}:site_{dive_site_id}"),
+    key_prefix=(
+        "user_{user_id}_dives:page_{page}:items_per_page:{items_per_page}"
+        ":trip_{trip_id}:site_{dive_site_id}:gear_{gear_item_id}"
+    ),
     resource_id_name="user_id",
     expiration=60,
 )
@@ -256,6 +293,7 @@ async def _cached_read_dives(
     items_per_page: int,
     trip_id: int | None,
     dive_site_id: int | None,
+    gear_item_id: int | None,
 ) -> dict:
     """Fetches (and caches) a user's paginated dive list.
 
@@ -274,6 +312,9 @@ async def _cached_read_dives(
         # via a single `IN (subquery)` condition rather than resolving matching dive ids
         # in a separate round trip.
         filters["id__at_dive_site"] = dive_site_id
+    if gear_item_id is not None:
+        # Same shape as the dive site filter above: match dives that used this item.
+        filters["id__with_gear_item"] = gear_item_id
 
     dives_data = await crud_dives.get_multi(
         db=db,
@@ -284,9 +325,10 @@ async def _cached_read_dives(
         **filters,
     )
 
-    # Enrich each dive with its dive site(s) and trip uuid via batched lookups.
+    # Enrich each dive with its dive site(s), gear and trip uuid via batched lookups.
     dive_ids = [d["id"] for d in dives_data["data"]]
     sites_by_dive = await get_dive_sites_for_dives(db=db, dive_ids=dive_ids)
+    gear_by_dive = await get_gear_items_for_dives(db=db, dive_ids=dive_ids)
     referenced_trip_ids = [d["trip_id"] for d in dives_data["data"] if d["trip_id"] is not None]
     trip_uuid_by_id = await get_trip_uuids_by_ids(db=db, trip_ids=referenced_trip_ids)
 
@@ -296,6 +338,7 @@ async def _cached_read_dives(
             user_uuid=user_uuid,
             trip_uuid=trip_uuid_by_id.get(dive["trip_id"]) if dive["trip_id"] is not None else None,
             dive_sites=sites_by_dive.get(dive["id"], []),
+            gear_items=gear_by_dive.get(dive["id"], []),
         ).model_dump()
         for dive in dives_data["data"]
     ]
@@ -314,6 +357,7 @@ async def read_dives(
     items_per_page: int = 10,
     trip_uuid: uuid_pkg.UUID | None = None,
     dive_site_uuid: uuid_pkg.UUID | None = None,
+    gear_item_uuid: uuid_pkg.UUID | None = None,
 ) -> dict:
     if current_user["uuid"] != user_uuid:
         raise ForbiddenException()
@@ -331,6 +375,13 @@ async def read_dives(
         )
         dive_site_id = (site_map or {}).get(dive_site_uuid, -1)
 
+    gear_item_id: int | None = None
+    if gear_item_uuid is not None:
+        gear_map = await resolve_gear_item_ids_for_user(
+            db=db, gear_item_uuids=[gear_item_uuid], user_id=current_user["id"]
+        )
+        gear_item_id = (gear_map or {}).get(gear_item_uuid, -1)
+
     return await _cached_read_dives(
         request,
         user_id=current_user["id"],
@@ -340,17 +391,25 @@ async def read_dives(
         items_per_page=items_per_page,
         trip_id=trip_id,
         dive_site_id=dive_site_id,
+        gear_item_id=gear_item_id,
     )
 
 
-@cache(key_prefix="dive_cache", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
+# Keyed `user_{user_id}_dive:{uuid}` rather than the flat `dive_cache:{uuid}` it used
+# to be. A dive read embeds its dive sites' and gear items' names, so renaming either
+# has to drop the cached dives that reference it - and the renaming endpoint knows only
+# the owner's id, not which of their dives are affected. Scoping the key by user is what
+# makes `invalidate_dive_caches()` able to express that as a pattern at all.
+@cache(key_prefix="user_{user_id}_dive", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
 async def _cached_read_dive(
-    request: Request, uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession
+    request: Request, user_id: int, uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession
 ) -> DiveReadWithMixtures:
-    """Fetches (and caches) a single dive by uuid, regardless of owner.
+    """Fetches (and caches) a single dive by uuid.
 
     Like `_cached_read_dives`, this must only be called after authorization has already
     been checked, since `@cache` can serve a cached response without re-checking it.
+    `user_id` is always the dive's owner (the route rejects anyone else), so it both
+    scopes the cache key and can't be used to read another user's dive.
     """
     db_dive = await crud_dives.get(db=db, uuid=uuid, is_deleted=False, schema_to_select=DiveReadInternal)
     if db_dive is None:
@@ -364,8 +423,14 @@ async def _cached_read_dive(
 
     mixtures = await get_mixtures_for_dive(db=db, dive_id=db_dive["id"])
     dive_sites = await get_dive_sites_for_dive(db=db, dive_id=db_dive["id"])
+    gear_items = await get_gear_items_for_dive(db=db, dive_id=db_dive["id"])
     return _to_public_dive_with_mixtures(
-        db_dive, user_uuid=owner_uuid, trip_uuid=trip_uuid, dive_sites=dive_sites, mixtures=mixtures
+        db_dive,
+        user_uuid=owner_uuid,
+        trip_uuid=trip_uuid,
+        dive_sites=dive_sites,
+        gear_items=gear_items,
+        mixtures=mixtures,
     )
 
 
@@ -383,11 +448,12 @@ async def read_dive(
     if _dive_owner_id(db_dive) != current_user["id"]:
         raise ForbiddenException()
 
-    return await _cached_read_dive(request, uuid=uuid, owner_uuid=current_user["uuid"], db=db)
+    return await _cached_read_dive(
+        request, user_id=current_user["id"], uuid=uuid, owner_uuid=current_user["uuid"], db=db
+    )
 
 
 @router.patch("/dive/{uuid}")
-@cache("dive_cache", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
 async def patch_dive(
     request: Request,
     uuid: uuid_pkg.UUID,
@@ -403,7 +469,9 @@ async def patch_dive(
     if owner_id != current_user["id"]:
         raise ForbiddenException()
 
-    update_data = values.model_dump(exclude={"mixtures", "dive_site_uuids", "trip_uuid"}, exclude_unset=True)
+    update_data = values.model_dump(
+        exclude={"mixtures", "dive_site_uuids", "gear_item_uuids", "trip_uuid"}, exclude_unset=True
+    )
 
     if values.start_time is not None:
         utc_start_time, utc_offset_minutes = split_start_time(values.start_time)
@@ -428,6 +496,15 @@ async def patch_dive(
             raise HTTPException(status_code=422, detail="Dive site not found.")
         dive_site_ids = [site_id_by_uuid[u] for u in values.dive_site_uuids]
 
+    gear_item_ids: list[int] | None = None
+    if values.gear_item_uuids is not None:
+        gear_id_by_uuid = await resolve_gear_item_ids_for_user(
+            db=db, gear_item_uuids=values.gear_item_uuids, user_id=owner_id
+        )
+        if gear_id_by_uuid is None:
+            raise HTTPException(status_code=422, detail="Gear item not found.")
+        gear_item_ids = [gear_id_by_uuid[u] for u in values.gear_item_uuids]
+
     if update_data:
         try:
             await crud_dives.update(db=db, object=update_data, uuid=uuid)
@@ -451,15 +528,24 @@ async def patch_dive(
             await db.rollback()
             raise HTTPException(status_code=422, detail=_fk_error_detail(e)) from e
 
-    if update_data or values.mixtures is not None or dive_site_ids is not None:
+    if gear_item_ids is not None:
+        try:
+            await replace_gear_items_for_dive(db=db, dive_id=dive_id, gear_item_ids=gear_item_ids)
+        except IntegrityError as e:
+            await db.rollback()
+            raise HTTPException(status_code=422, detail=_fk_error_detail(e)) from e
+
+    if update_data or values.mixtures is not None or dive_site_ids is not None or gear_item_ids is not None:
         await recalculate_dive_stats(db=db, user_id=owner_id)
-        await delete_keys_by_pattern(f"user_{owner_id}_dives:*")
+        await recalculate_gear_dive_counts(db=db, user_id=owner_id)
+        await invalidate_dive_caches(owner_id)
+        # Gear reads carry each item's `dive_count`, which this edit may have changed.
+        await invalidate_gear_caches(owner_id)
 
     return {"message": "Dive updated"}
 
 
 @router.delete("/dive/{uuid}")
-@cache("dive_cache", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
 async def erase_dive(
     request: Request,
     uuid: uuid_pkg.UUID,
@@ -476,6 +562,9 @@ async def erase_dive(
 
     await crud_dives.delete(db=db, uuid=uuid)
     await recalculate_dive_stats(db=db, user_id=owner_id)
-    await delete_keys_by_pattern(f"user_{owner_id}_dives:*")
+    await recalculate_gear_dive_counts(db=db, user_id=owner_id)
+    await invalidate_dive_caches(owner_id)
+    # Gear reads carry each item's `dive_count`, which this dive no longer contributes to.
+    await invalidate_gear_caches(owner_id)
 
     return {"message": "Dive deleted"}
