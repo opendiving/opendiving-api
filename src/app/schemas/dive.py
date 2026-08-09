@@ -7,6 +7,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema
 from ..core.utils.datetime_offset import require_utc_offset
 from .dive_mixture import DiveMixtureCreate, DiveMixtureRead
+from .gear_item import GearItemInfo
 
 _START_TIME_EXAMPLE = "2021-04-04T10:04:47.910+02:00"
 
@@ -52,6 +53,12 @@ class DiveRead(DiveBase, PublicUUIDSchema):
     created_at: datetime
     dive_sites: Annotated[
         list[DiveSiteInfo], Field(default_factory=list, description="Dive sites visited, in the order visited")
+    ]
+    # A dive records the gear items used on it, never the gear *set* they were loaded
+    # from: sets are purely a form-filling shortcut and can be edited or deleted
+    # afterwards without rewriting history (see `models/gear_set.py`).
+    gear_items: Annotated[
+        list[GearItemInfo], Field(default_factory=list, description="Gear items used, in the order listed")
     ]
 
 
@@ -99,13 +106,17 @@ class DiveCreateInternal(DiveBase):
 
 
 class DiveCreateRequest(DiveCreate):
-    """Request body for creating a dive, including its gas mixtures and dive site(s)."""
+    """Request body for creating a dive, including its gas mixtures, dive site(s) and gear."""
 
     user_uuid: Annotated[uuid_pkg.UUID, Field(description="Public id of the user this dive belongs to")]
     mixtures: Annotated[list[DiveMixtureCreate], Field(default_factory=list)]
     dive_site_uuids: Annotated[
         list[uuid_pkg.UUID],
         Field(default_factory=list, description="Public ids of the dive sites visited, in the order visited"),
+    ]
+    gear_item_uuids: Annotated[
+        list[uuid_pkg.UUID],
+        Field(default_factory=list, description="Public ids of the gear items used, in the order listed"),
     ]
 
 
@@ -133,17 +144,22 @@ class DiveUpdate(BaseModel):
 
 
 class DiveUpdateRequest(DiveUpdate):
-    """Request body for updating a dive, including replacing its gas mixtures and dive site(s).
+    """Request body for updating a dive, including replacing its gas mixtures, dive site(s)
+    and gear.
 
-    If `mixtures`/`dive_site_uuids` is omitted, the existing mixtures/dive sites are left
-    untouched. If provided (even as an empty list), all existing mixtures/dive sites are
-    replaced with the given list.
+    If `mixtures`/`dive_site_uuids`/`gear_item_uuids` is omitted, the existing
+    mixtures/dive sites/gear are left untouched. If provided (even as an empty list), the
+    existing ones are replaced with the given list.
     """
 
     mixtures: Annotated[list[DiveMixtureCreate] | None, Field(default=None)]
     dive_site_uuids: Annotated[
         list[uuid_pkg.UUID] | None,
         Field(default=None, description="Public ids of the dive sites visited, in the order visited"),
+    ]
+    gear_item_uuids: Annotated[
+        list[uuid_pkg.UUID] | None,
+        Field(default=None, description="Public ids of the gear items used, in the order listed"),
     ]
 
 

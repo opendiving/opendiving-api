@@ -2,8 +2,12 @@ from .authentication_provider import AuthenticationProvider
 from .authentication_request import AuthenticationRequest
 from .dive import Dive
 from .dive_dive_site import DiveDiveSite
+from .dive_gear_item import DiveGearItem
 from .dive_mixture import DiveMixture
 from .dive_site import DiveSite
+from .gear_item import GearItem
+from .gear_set import GearSet
+from .gear_set_item import GearSetItem
 from .trip import Trip
 from .user import User
 from .user_dive_stats import UserDiveStats

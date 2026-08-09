@@ -1131,3 +1131,115 @@ to avoid reintroducing binary floating-point noise at the last step - e.g.
 `round(2.675, 2)` on a raw float can land on `2.67` instead of `2.68` due to
 `2.675`'s own imprecise binary representation, whereas `Decimal("2.675")` is
 exact and rounds predictably.
+
+## Gear is `GearItem` + `GearSet`, not a single `Gear` table
+
+"Gear" is what divers actually call their equipment ("dive gear", "gear list"),
+so it wins over "Equipment" as the domain name - but *gear* is a mass noun, so
+"a gear" reads wrong for a single regulator or wing. The tables are therefore
+`gear_item` (one physical piece of kit: brand, name, notes, `rented`) and
+`gear_set` (a named grouping), with the API exposing `/gear-item(s)` and
+`/gear-set(s)` and the frontend labelling them simply "Gear" and "Gear Sets".
+
+Both are joined to their dependents the same way dive sites are (see "Dive sites
+are many-to-many with dives via a join table"): `dive_gear_item` links a dive to
+the items used on it, `gear_set_item` links a set to its members, each with a
+`position` column preserving list order and `ON DELETE CASCADE` on both FKs.
+`crud_dive_gear_items.py`/`crud_gear_set_items.py` mirror
+`crud_dive_dive_sites.py` exactly: `replace_*_for_*()` deletes and re-inserts the
+whole list on every write, de-duplicating ids (first occurrence wins) rather
+than diffing or upserting.
+
+All four tables are brand new, so `Base.metadata.create_all()` creates them (and
+their indexes) on startup - unlike a column added to an existing table, this
+needed no manual `ALTER TABLE` (see "Schema changes have no migration tool").
+
+## A dive references gear items, never the gear set they came from
+
+Gear sets exist purely to save typing in the dive form: selecting one replaces
+the form's gear list with the set's items, after which the diver can add or
+remove items for that dive without touching the stored set. `Dive` therefore has
+no `gear_set_id` and `DiveRead` no `gear_set` field - only `gear_items`.
+
+That's deliberate rather than an omission. If a dive pointed at a set, renaming,
+re-scoping or deleting the set would silently rewrite (or orphan) history for
+every dive that ever used it, and "the gear I actually dived with" would stop
+being answerable from the dive alone. Keeping the set out of the dive means sets
+stay freely editable and disposable, and `DELETE /gear-set/{uuid}` can be a
+genuinely cheap operation that touches neither gear nor dives.
+
+## Archiving gear is separate from soft-deleting it
+
+`gear_item` carries both `is_deleted`/`deleted_at` (the usual `SoftDeleteMixin`)
+and its own `is_archived`/`archived_at`. They mean different things:
+
+- **Archived** - retired, sold, returned to the rental shop. The item is hidden
+  from `GET /gear-items` (unless `include_archived=true`) so the dive form's
+  picker won't offer it for a *new* dive, but it stays on every dive and in every
+  set that already references it, and keeps its `dive_count`.
+- **Deleted** - gone from the user's gear list entirely.
+
+`resolve_gear_item_ids_for_user()` deliberately resolves archived items
+normally: archiving must not make an existing dive or set unsavable just because
+it references gear the diver has since retired. Only the *listing* filters them.
+
+`archived_at` is derived server-side in `patch_gear_item` from the `is_archived`
+flag in the request body (and cleared on unarchive) rather than being accepted
+from the caller, so the two can't drift apart.
+
+## `gear_item.dive_count` is denormalized, and recalculated exactly like `user_dive_stats`
+
+Every gear list row shows how many dives that item was used on, so computing it
+per request would mean a join + `GROUP BY` on every cache miss. It's stored on
+`gear_item` instead and refreshed by `services.gear_stats.recalculate_gear_dive_counts()`
+after every dive create, update and delete - the same "recompute from scratch,
+never increment" approach as `recalculate_dive_stats` (see "recalculate_dive_stats's
+aggregate is backed by a covering index"), which keeps it immune to drift.
+
+It's a single `UPDATE ... SET dive_count = (correlated COUNT subquery)` over the
+user's items, guarded by `WHERE dive_count IS DISTINCT FROM (...)` so the common
+case - editing a dive without touching its gear - doesn't rewrite every row the
+user owns for nothing. Only non-deleted dives count, so soft-deleting a dive
+decrements its gear's counts on the next recalculation.
+
+Because it's derived, the admin panel's `GearItem` view can technically edit
+`dive_count`, but the value only survives until the owner's next dive mutation.
+
+## Every gear cache key is user-scoped under one `user_{id}_gear_` prefix
+
+Unlike `dive_site_cache:{uuid}`/`trip_cache:{uuid}`, the single-item gear caches
+are keyed `user_{user_id}_gear_item:{uuid}` / `user_{user_id}_gear_set:{uuid}`,
+alongside the list caches `user_{user_id}_gear_items:page_...` and
+`user_{user_id}_gear_sets:page_...`. That makes
+`invalidate_gear_caches()` (`api/v1/gear_items.py`) a single
+`delete_keys_by_pattern("user_{id}_gear_*")` covering all four.
+
+The user scoping isn't cosmetic - it's what makes that invalidation possible at
+all. Two things force it:
+- a gear set read embeds its items' names/brands, so editing an *item* has to
+  invalidate *set* reads too;
+- a gear item read carries `dive_count`, so creating, editing or deleting a
+  **dive** has to invalidate gear reads (hence the `invalidate_gear_caches()`
+  calls in `dives.py`). A dive mutation knows the owner's `user_id` but not
+  which gear uuids changed, so without the user prefix the only matching pattern
+  would be `gear_item_cache:*` - every user's gear, not just this one's.
+
+The gear-item list cache key also includes `archived_{include_archived}`, so the
+picker's (active-only) view and the management page's (full) view can't serve
+each other's cached results. This is the same reason `_cached_read_dives` keys on
+its `trip_id`/`dive_site_id`/`gear_item_id` filters.
+
+Known limitation, inherited from dive sites rather than introduced here: renaming
+a gear item doesn't invalidate `dive_cache:{uuid}` for the dives that embed it,
+so a single dive's cached read can show a stale gear name until it next changes.
+Fixing it properly needs a dive-uuid-per-gear-item reverse index; `dive_site`
+has had the same behaviour since it was introduced.
+
+## `GET /dives` gained a `gear_item_uuid` filter alongside `dive_site_uuid`
+
+`crud_dives`' `custom_filters` grew a `with_gear_item` entry mirroring
+`at_dive_site` - one `id IN (SELECT dive_id FROM dive_gear_item WHERE
+gear_item_id = ...)` condition rather than a separate round trip to resolve
+matching dive ids. It backs the gear detail page's "Dives with this Gear" list,
+which is what makes the `dive_count` statistic clickable rather than just a
+number.
