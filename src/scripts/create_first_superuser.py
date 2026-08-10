@@ -63,9 +63,7 @@ async def create_first_user(session: AsyncSession) -> None:
                 user_id = result.scalar_one()
                 # No password anywhere - the admin authenticates the same way as any
                 # other user, via the email-magic-link flow (see `AuthenticationProvider`).
-                await conn.execute(
-                    insert(authentication_provider_table).values(user_id=user_id, provider="email")
-                )
+                await conn.execute(insert(authentication_provider_table).values(user_id=user_id, provider="email"))
                 await conn.commit()
 
             logger.info(f"Admin user {username} created successfully.")

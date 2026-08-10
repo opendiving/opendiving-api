@@ -389,8 +389,8 @@ class TestSuuntoJsonParserParse:
 
     def test_raises_dive_parse_error_when_device_log_header_missing(self):
         """Format recognition lives in `can_parse`; if `parse` is called directly
-        on data that doesn't match, it still fails safely r
-ather than crashing."""
+                on data that doesn't match, it still fails safely r
+        ather than crashing."""
         with pytest.raises(DiveParseError):
             SuuntoJsonParser.parse(NOT_A_DIVE_JSON.encode())
 

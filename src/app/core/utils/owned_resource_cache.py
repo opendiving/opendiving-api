@@ -78,9 +78,9 @@ class OwnedResourceCache[InternalT, PublicT]:
             expiration=list_expiration,
         )(self._read_list_uncached)
 
-        self.read_item = cache(
-            key_prefix=item_cache_prefix, resource_id_name="uuid", resource_id_type=uuid_pkg.UUID
-        )(self._read_item_uncached)
+        self.read_item = cache(key_prefix=item_cache_prefix, resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)(
+            self._read_item_uncached
+        )
 
     async def _read_list_uncached(
         self,

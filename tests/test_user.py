@@ -41,9 +41,7 @@ class TestPatchUser:
             result = await patch_user(Mock(), user_update, current_user_dict, mock_db)
 
             assert result == {"message": "User updated"}
-            mock_crud.update.assert_called_once_with(
-                db=mock_db, object=user_update, uuid=current_user_dict["uuid"]
-            )
+            mock_crud.update.assert_called_once_with(db=mock_db, object=user_update, uuid=current_user_dict["uuid"])
 
     @pytest.mark.asyncio
     async def test_patch_user_duplicate_username(self, mock_db, current_user_dict):

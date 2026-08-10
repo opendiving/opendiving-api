@@ -32,4 +32,3 @@ async def get_current_superuser(current_user: Annotated[dict, Depends(get_curren
         raise ForbiddenException("You do not have enough privileges.")
 
     return current_user
-

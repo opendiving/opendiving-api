@@ -199,9 +199,7 @@ async def verify_email_link(
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
 
-    auth_request = await crud_authentication_requests.get(
-        db=db, token_hash=hash_token(body.token), purpose="sign_in"
-    )
+    auth_request = await crud_authentication_requests.get(db=db, token_hash=hash_token(body.token), purpose="sign_in")
     if auth_request is None:
         raise UnauthorizedException("This sign-in link is invalid.")
 

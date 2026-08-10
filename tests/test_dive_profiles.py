@@ -327,9 +327,7 @@ class TestNormalize:
         shifting them independently would slide temperature off the depth curve."""
         parsed = SuuntoXmlParser.parse_profile(
             _xml_with_samples(
-                _sample(1, depth="1.0", temperature="26.0")
-                + _sample(11, depth="2.0")
-                + _sample(21, temperature="25.0")
+                _sample(1, depth="1.0", temperature="26.0") + _sample(11, depth="2.0") + _sample(21, temperature="25.0")
             )
         )
 

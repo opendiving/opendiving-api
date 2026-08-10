@@ -120,7 +120,7 @@ class SuuntoXmlParser(DiveParser):
             return False
         try:
             root = DET.fromstring(content)
-        except (ET.ParseError, DefusedXmlException):
+        except ET.ParseError, DefusedXmlException:
             return False
         return bool(root.tag == _tag("Dive"))
 
