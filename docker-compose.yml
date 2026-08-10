@@ -19,6 +19,11 @@ services:
     volumes:
       - ./src/app:/code/app
       - ./src/.env:/code/.env
+      # One-shot maintenance scripts (`src/scripts/`) import their modules as `src.app.*`,
+      # so they need the package rooted at `/code/src` - the app itself is served from
+      # `/code/app` and is unaffected. This is what makes
+      # `docker compose exec web python -m src.scripts.backfill_dive_profiles` work.
+      - ./src:/code/src
 
   worker:
     build:

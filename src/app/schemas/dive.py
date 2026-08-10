@@ -7,6 +7,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema
 from ..core.utils.datetime_offset import require_utc_offset
 from .dive_mixture import DiveMixtureCreate, DiveMixtureRead
+from .dive_profile import DiveProfileInfo
 from .gear_item import GearItemInfo
 
 _START_TIME_EXAMPLE = "2021-04-04T10:04:47.910+02:00"
@@ -166,6 +167,20 @@ class DiveReadWithMixtures(DiveRead):
         Field(
             default=None,
             description="Surface-normalized gas consumption, or null when the dive doesn't record enough to derive it",
+        ),
+    ]
+    # Here rather than on `DiveRead` for the same reason as `source_file` above: on the
+    # parent it would land on the paginated list and cost `_cached_read_dives` - the
+    # hottest path in the app - another query per page for something only the detail page
+    # renders. `get_profile_infos_for_dives` is already batched for the day that changes.
+    #
+    # A summary only. The series themselves are tens of KB and are fetched separately,
+    # with their own ETag, from `GET /dive/{uuid}/profile`.
+    profile: Annotated[
+        DiveProfileInfo | None,
+        Field(
+            default=None,
+            description="Summary of this dive's per-sample profile, or null when it has none",
         ),
     ]
 

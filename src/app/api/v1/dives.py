@@ -3,6 +3,8 @@ import uuid as uuid_pkg
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,6 +42,7 @@ from ...schemas.dive import (
     DiveUpdateRequest,
 )
 from ...schemas.dive_mixture import DiveMixtureRead
+from ...schemas.dive_profile import DiveProfileInfo, DiveProfileRead
 from ...schemas.gear_item import GearItemInfo
 from ...schemas.parsed_dive import ParsedDiveResponse
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_gear_caches
@@ -57,6 +60,12 @@ from ...services.dive_files import (
 )
 from ...services.dive_gas import compute_gas_use
 from ...services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file_with_parser
+from ...services.dive_profiles import (
+    get_profile_infos_for_dives,
+    get_profile_version,
+    load_profile,
+    to_read_schema,
+)
 from ...services.dive_stats import recalculate_dive_stats
 from ...services.gear_stats import recalculate_gear_dive_counts
 
@@ -170,6 +179,7 @@ def _to_public_dive_with_mixtures(
     gear_items: list[GearItemInfo],
     mixtures: list[DiveMixtureRead],
     source_file: DiveFileInfo | None = None,
+    profile: DiveProfileInfo | None = None,
 ) -> DiveReadWithMixtures:
     data = _to_public_start_time(db_dive if isinstance(db_dive, dict) else db_dive.model_dump())
     return DiveReadWithMixtures(
@@ -180,6 +190,7 @@ def _to_public_dive_with_mixtures(
         gear_items=gear_items,
         mixtures=mixtures,
         source_file=source_file,
+        profile=profile,
         # Both callers of this function (creating a dive, and the cached single-dive
         # read) go through here, so gas use is derived in exactly one place. Safe to
         # compute before caching, unlike gear service status: nothing about it depends
@@ -454,6 +465,8 @@ async def _cached_read_dive(
     dive_sites = await get_dive_sites_for_dive(db=db, dive_id=db_dive["id"])
     gear_items = await get_gear_items_for_dive(db=db, dive_id=db_dive["id"])
     source_files = await get_file_infos_for_dives(db=db, dive_ids=[db_dive["id"]])
+    # Written batched though only ever called with one id, matching `get_file_infos_for_dives`.
+    profiles = await get_profile_infos_for_dives(db=db, dive_ids=[db_dive["id"]])
     return _to_public_dive_with_mixtures(
         db_dive,
         user_uuid=owner_uuid,
@@ -462,6 +475,7 @@ async def _cached_read_dive(
         gear_items=gear_items,
         mixtures=mixtures,
         source_file=source_files.get(db_dive["id"]),
+        profile=profiles.get(db_dive["id"]),
     )
 
 
@@ -633,7 +647,8 @@ async def write_dive_file(
     except DiveFileConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    # Dive reads embed this file's metadata, so they're now stale.
+    # Dive reads embed this file's metadata *and* the summary of the profile extracted
+    # from it (`store_dive_file` does that in the same transaction), so they're now stale.
     await invalidate_dive_caches(current_user["id"])
     return info
 
@@ -696,6 +711,57 @@ async def read_dive_file(
             "ETag": etag,
         },
     )
+
+
+@router.get("/dive/{uuid}/profile", response_model=DiveProfileRead)
+async def read_dive_profile(
+    request: Request,
+    uuid: uuid_pkg.UUID,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    v: Annotated[
+        str | None,
+        Query(description="Opaque cache-busting version token; ignored by the server"),
+    ] = None,
+) -> Response | DiveProfileRead:
+    """Serve a dive's per-sample depth/temperature/tank-pressure curves.
+
+    Deliberately *not* `@cache`d, and for a sharper reason than the file route above. A
+    profile is **immutable** for a given (source file, extractor version) pair, which
+    makes it the ideal `ETag` case and the worst Redis case: every dive cache key lives
+    under `user_{id}_dive*` and `invalidate_dive_caches` sweeps the lot on every dive
+    edit and every dive-site or gear rename - none of which can change a profile. Caching
+    it would mean evicting and refetching tens of KB per dive for nothing.
+
+    `v` is read by nothing here; it is declared so the contract is visible. The client
+    varies it with the profile's `updated_at` so a re-extraction gets its own cache entry
+    rather than being masked by the previous one for five minutes.
+    """
+    db_dive = await _get_owned_dive(db, uuid, current_user)
+    dive_id = _dive_internal_id(db_dive)
+
+    # The version before the payload, so a conditional request costs one two-column query
+    # rather than decoding tens of KB of JSONB only to throw it away.
+    version = await get_profile_version(db=db, dive_id=dive_id)
+    if version is None:
+        raise NotFoundException("This dive has no profile")
+
+    etag = f'"{version}"'
+    if request.headers.get("if-none-match") == etag:
+        # Returning a bare `Response` bypasses `response_model` validation, which a 304
+        # with no body would otherwise fail - the same thing `read_dive_file` relies on.
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "private, max-age=300"})
+
+    profile = await load_profile(db=db, dive_id=dive_id)
+    if profile is None:
+        raise NotFoundException("This dive has no profile")
+
+    # Set here rather than left to `ClientCacheMiddleware`, which never overrides a
+    # `Cache-Control` an endpoint set for itself.
+    response = JSONResponse(content=jsonable_encoder(to_read_schema(profile)))
+    response.headers["Cache-Control"] = "private, max-age=300"
+    response.headers["ETag"] = etag
+    return response
 
 
 @router.delete("/dive/{uuid}/file")

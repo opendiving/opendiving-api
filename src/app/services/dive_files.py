@@ -25,6 +25,13 @@ from ..models.dive import Dive
 from ..models.dive_file import DiveFile
 from ..schemas.dive import DiveFileInfo
 from .dive_parsers import PARSER_BY_KEY
+from .dive_profiles import (
+    delete_profile_for_dive,
+    extract_profile,
+    get_existing_profile,
+    should_extract,
+    store_profile,
+)
 
 # Matches the cap `/dive/parse` reads under, since the same file makes both trips: a
 # limit here that was lower would let a file pre-fill a form and then be refused
@@ -168,6 +175,16 @@ async def store_dive_file(
     if outcome == "noop" and existing is not None:
         # Nothing is rewritten, not even `original_filename`: the bytes are the file's
         # identity, and re-uploading them is the client repeating itself.
+        #
+        # The *profile*, though, is a function of (these bytes, the extractor version),
+        # so a repeated PUT after `PROFILE_EXTRACTOR_VERSION` was bumped opportunistically
+        # upgrades it from bytes already in hand. Still a no-op in the normal case.
+        if should_extract(await get_existing_profile(db, dive_id=dive_id), sha256=digest) == "extract":
+            profile = extract_profile(parser, data)
+            if profile is not None:
+                await store_profile(
+                    db, dive_id=dive_id, profile=profile, source_sha256=digest, parser_key=parser.key, commit=True
+                )
         return _info(existing)
 
     if outcome == "conflict" and existing is not None:
@@ -183,11 +200,24 @@ async def store_dive_file(
     filename = safe_filename(upload.filename, default="dive-file")
     now = datetime.now(UTC)
 
+    # Deliberately *before* the `try` below, not inside it: an exception raised in there
+    # is caught by the `IntegrityError` handler and reported to the diver as a concurrent-
+    # upload conflict, which a parse failure is not. `extract_profile` never raises
+    # anyway - it logs and returns `None`, because a file that can't be sampled is still
+    # worth storing (see `services/dive_profiles.py`) - but the ordering is what makes
+    # that true regardless of what it grows into.
+    profile = extract_profile(parser, data)
+
     try:
         # Replacement, not versioning: whatever this dive had is gone. Runs before the
         # insert because `ux_dive_file_dive_id` is checked per statement, so two rows
         # for one dive must not coexist even momentarily.
         await db.execute(delete(DiveFile).where(DiveFile.dive_id == dive_id))
+        # Same statement-ordering reason, and the same transaction as the file itself: a
+        # dive must never end up with a stored file and a profile extracted from a
+        # *different* one. Unconditional, so a replacement export with no samples clears
+        # the previous export's curves rather than leaving them attributed to it.
+        await delete_profile_for_dive(db, dive_id=dive_id, commit=False)
         result = await db.execute(
             insert(DiveFile)
             .values(
@@ -209,6 +239,10 @@ async def store_dive_file(
             .returning(DiveFile.uuid, DiveFile.updated_at)
         )
         row = result.one()
+        if profile is not None:
+            await store_profile(
+                db, dive_id=dive_id, profile=profile, source_sha256=digest, parser_key=parser.key, commit=False
+            )
         await db.commit()
     except IntegrityError as exc:
         # Two uploads for the same dive raced between the delete and the insert. One
@@ -265,7 +299,12 @@ async def delete_dive_file(db: AsyncSession, *, dive_id: int, commit: bool = Tru
     Hard, not soft, and not merely unlinked: a row nothing can reach keeps occupying its
     bytes forever, and a "delete" that only hides the file would be a worse trade than
     losing it from the corpus.
+
+    Takes the dive's extracted profile with it. Nothing cascades from removing the file
+    (the profile's FK is to `dive`, not to `dive_file`), and a profile whose source export
+    is gone can never be re-derived or checked against anything.
     """
+    await delete_profile_for_dive(db, dive_id=dive_id, commit=False)
     result = cast(CursorResult, await db.execute(delete(DiveFile).where(DiveFile.dive_id == dive_id)))
     deleted = result.rowcount > 0
     if commit:
@@ -279,6 +318,10 @@ async def delete_files_for_dive(db: AsyncSession, *, dive_id: int, commit: bool 
     The FK's `ON DELETE CASCADE` can't do this for us: deletion is application-level
     (`is_deleted`), so no `DELETE FROM dive` ever runs and the cascade never fires - the
     same reasoning as `delete_files_for_certification`.
+
+    The dive's extracted profile goes too, via `delete_dive_file` - whose own
+    `delete_profile_for_dive` call covers this path as well as the explicit
+    `DELETE /dive/{uuid}/file` one, so the dive-deletion hook needed no change.
     """
     await delete_dive_file(db, dive_id=dive_id, commit=commit)
 

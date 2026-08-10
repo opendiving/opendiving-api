@@ -256,3 +256,38 @@ Upload a Suunto dive export file (XML or JSON) and receive the parsed dive data 
 curl -X POST http://localhost:8000/api/v1/dive/parse \
   -F "file=@Dive_2021-04-06-1231.xml"
 ```
+
+### Dive source files and profiles
+
+The export a dive was imported from is attached in a second request, carrying the
+`file_token` that `POST /dive/parse` returned for the same bytes:
+
+```bash
+curl -X PUT http://localhost:8000/api/v1/dive/{uuid}/file \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@Dive_2025-05-31-1259.xml" \
+  -F "file_token=$FILE_TOKEN"
+```
+
+Attaching a file also extracts the dive's per-sample profile (depth, temperature and tank
+pressure) into `dive_profile`, server-side. The dive detail response then carries a
+`profile` summary, and the curves themselves are served separately:
+
+```bash
+# The full per-channel series. Immutable for a given (file, extractor version) pair, so
+# it is served with an `ETag` rather than Redis-cached - see DECISIONS.md.
+curl http://localhost:8000/api/v1/dive/{uuid}/profile \
+  -H "Authorization: Bearer $TOKEN"
+
+# 404 when the dive has no imported file, or has one that carried no samples.
+```
+
+`DELETE /dive/{uuid}/file` removes the profile along with the file, and so does deleting
+the dive.
+
+To extract profiles from exports already stored against dives (after a parser fix or an
+extractor-version bump):
+
+```bash
+docker compose exec web python -m src.scripts.backfill_dive_profiles --parser-key suunto_xml
+```

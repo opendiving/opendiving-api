@@ -1957,3 +1957,272 @@ crash. Same scale judgment as `recalculate_dive_stats` re-aggregating on every w
 Note that `_cached_gas_use_history` carries the same authorization caveat as
 `_cached_read_dives`: `@cache` serves a hit without re-running the wrapped function, so it
 must only ever be called with the calling user's own id.
+
+## A dive profile is stored per channel, not per sample and not on a shared axis
+
+`dive_profile` holds one row per dive with each channel's series in a JSONB `data`
+payload:
+
+```json
+{"depth":       {"t": [0, 10, 20], "v": [139, 372, 632]},
+ "temperature": {"t": [0, 1, 2],   "v": [219, 219, 218]},
+ "pressure":    [{"gas_number": 1, "t": [0, 10], "v": [2052, 2041]}]}
+```
+
+**Per channel rather than one shared time axis with nulls**, because the channels are
+independently sampled and the corpus is emphatic about it: a 2026 Suunto Ocean export has
+8 292 sample objects, of which 395 carry `Depth`/`Ceiling`/`Cylinders`, 3 933 carry
+`Temperature` at 1 Hz, and the rest carry only events, GPS or battery telemetry. A union
+axis on that dive is ~4 300 entries with depth null in about 90 % of them. Per-channel is
+roughly half the size, each series is naturally sorted, and nothing has to handle nulls on
+write. The chart pays one binary search per channel instead of one shared index lookup -
+see `nearestSampleIndex` in the web app.
+
+A consequence of the same fact, worth stating because it looks like corruption: **the
+union of an export's sample timestamps is not monotonic.** Adjacent entries go backwards
+by up to 0.7 s, because the separate sensor streams are appended out of order. Each
+channel's *own* timestamps are monotonic, so parsers group by channel and sort there, and
+out-of-order union timestamps are never treated as a parse error.
+
+**Not a row-per-sample table.** ~400 rows per dive on a Suunto D5 and several thousand at
+1 Hz, for data that is only ever fetched whole, for one dive, and drawn. The table would
+exist purely to be `ORDER BY t`-ed back into the arrays above.
+
+**JSONB rather than a packed `bytea`.** This is the codebase's first JSONB column
+(`grep JSONB src/` was previously empty), so the reasoning is worth recording. A packed
+int16 encoding would save perhaps 3x on a column Postgres already TOASTs and compresses;
+`SELECT data->'depth' FROM dive_profile WHERE ...` from `psql` is worth more than that
+during parser work, and the entire file-retention rationale in `models/dive_file.py` is
+"develop new extractions against real data".
+
+**Integer-scaled values, no floats.** Depth in centimeters, temperature in tenths of a
+degree, pressure in tenths of a bar. Same reasoning as `_kelvin_to_celsius`: a float
+round-trip produces `20.600000000000023`-class noise, several thousand times per dive. All
+three resolutions comfortably exceed any dive computer's real precision. The scale lives in
+the format (`schemas/dive_profile.py`, mirrored by the web app's `PROFILE_CHANNELS`); the
+API returns the stored integers verbatim and the chart divides once per point while it is
+already mapping through its scale functions. Conversions go through `Decimal(str(value))`
+with `ROUND_HALF_UP`, like every other unit conversion in the parsers.
+
+**`t` is integer elapsed seconds** from the first sample across all channels - one origin
+for all of them, since they share the chart's x axis and shifting them independently would
+slide temperature off the depth curve. At 720 px across an hour, one second is a fifth of
+a pixel, already finer than the chart can draw. Where two readings round onto the same
+second (1 Hz temperature with sub-second jitter does this constantly), the later one wins;
+averaging would invent a reading the sensor never took.
+
+**No nulls inside a series.** A sensor dropout is a gap in `t`, and the chart breaks the
+polyline where the delta exceeds a threshold derived from the series' own cadence. Real:
+`Dive_2025-06-02-1155.xml` records pressure on 224 of 441 samples, and
+`Dive_2025-03-08-1440.xml` has a 1 341-second hole in the middle of its pressure series.
+
+**Pressure is a list keyed by `gas_number`, not a scalar channel.** A Suunto Ocean reports
+five cylinder slots per sample with one populated, and gas numbering differs between device
+generations (1 on the 2025 D5, 0 on the Ocean). It is a label to display, not an index to
+trust. Only cylinders with at least one non-null reading are stored.
+
+The summary columns (`duration_seconds`, `depth_sample_count`, and the five extremes) are
+deliberately *outside* `data`, because they are what answers "does this dive have a profile,
+and which curves would a chart draw" for the dive detail response without decoding tens of
+KB. `channels` on the read schema is derived from which extremes are non-NULL rather than
+stored - a column saying which curves a row carries is a column that can disagree with the
+row.
+
+## Profiles are capped at 1 200 points per channel by min/max bucketing, never LTTB
+
+`MAX_POINTS_PER_CHANNEL = 1200`, applied per channel, server-side at extraction.
+
+The one thing a depth profile must never lose is its maximum depth and the shape of the
+deepest excursion. Min/max bucketing *guarantees* both extremes of every bucket survive -
+a property a test asserts directly (`max(downsampled.v) == max(original.v)`). LTTB
+optimizes visual similarity and offers no such invariant: it can drop a one-sample spike,
+which on a dive profile is the single most important sample in the file. Same argument for
+minimum temperature, which is what `bottom_temperature` means.
+
+Buckets are chosen on **time**, not index, so a channel with an irregular cadence isn't
+unevenly weighted, and each bucket emits its min and its max in time order.
+
+Not hypothetical: 2026-ocean temperature is 3 933 points on one dive and hits the cap
+today. Depth (395) never does.
+
+The same guarantee cuts the other way and that is accepted on purpose: a transmitter glitch
+that reports 0.6 bar mid-dive survives downsampling and stretches the pressure axis. That
+is the file's own data faithfully drawn, and inventing a plausibility filter would mean
+silently discarding readings - the opposite of the property the bucketing was chosen for.
+
+## `parse_profile` is separate from `parse`, and never runs on the `/dive/parse` path
+
+`DiveParser` gained a **non-abstract** `parse_profile(content) -> ParsedProfileSchema | None`
+rather than growing `ParsedDiveSchema` a samples field.
+
+It is never called from `POST /dive/parse`. A profile is thousands of readings the browser
+has no use for while filling in a form, and it would have to be posted back to be stored -
+which would make the stored samples client-supplied and reopen the exact trust problem the
+parse token exists to close. The "`ParsedDiveSchema`/`DiveMixtureSchema` trimmed..."
+decision already deleted `DiveSampleSchema` for this reason; this is its complement. It is
+called server-side from `PUT /dive/{uuid}/file`, the only place with both the bytes and
+proof of where they came from.
+
+Non-abstract so a new format can ship header-only and grow a profile extraction later
+without a flag day. `None` means "this file carries no samples"; malformed samples raise
+`DiveParseError`. Dispatch is free - `PARSER_BY_KEY` already resolves a stored `parser_key`
+back to its parser.
+
+`SuuntoXmlParser.parse_profile` **re-parses the XML from scratch via `defusedxml`.** A
+second entry point into XML parsing is a second place to forget the XXE/entity-expansion
+guard, so the billion-laughs and XXE fixtures are re-run against it in
+`tests/test_dive_profiles.py`.
+
+Two things are deliberately *not* read. `AveragedTemperature` in the XML export - the raw
+`Temperature` is what the sensor saw, and smoothing is a chart decision that shouldn't be
+baked into storage. And `DeviceInternalAbsPressure` in the JSON export, which sits right
+next to `Cylinders[].Pressure` in the same sample object and is the device's own *ambient*
+sensor (~96 400 Pa at the surface): labelling it "tank pressure" on a chart divers plan gas
+from would be actively wrong, so it gets a prominent comment rather than a silent omission.
+
+A DM5 export reports one `<Pressure>` per sample with no cylinder identity, so it becomes a
+single-entry pressure list labelled gas number 1 - which is what the *same dive* exported as
+JSON reports for it. Not the mixture's `<TransmitterId>`: that is a device serial (e.g.
+2411100050), so using it would read as nonsense in a legend and make one dive disagree with
+itself depending on which export it was imported from.
+
+## DM5 XML expresses every pressure in millibar, and `_parse_mixture` used to read them as bar
+
+Cross-checked against the same dive exported both ways (`Dive_2025-05-31-1259.xml` /
+`685013accbecd72812f3d840.json`):
+
+| | XML | JSON | Truth |
+|---|---|---|---|
+| `DiveMixture/StartPressure` | `205203` | `20520312` Pa | 205.2 bar |
+| `DiveMixture/EndPressure` | `86781` | `8678125` Pa | 86.78 bar |
+| sample `<Pressure>` | `205200` | `Cylinders[0].Pressure: 20520000` | 205.2 bar |
+
+`CylinderWorkPressure = 200000` (200 bar) and `SurfacePressure = 105500` (1.055 bar) confirm
+millibar throughout, and no XML file in the corpus carries a bar-scale mixture pressure: of
+353 `StartPressure` values, 255 are `0` and 96 are 5-6 digits. The JSON parser was already
+correct (`_pascals_to_bar`); the XML one was not, and it went unnoticed because
+pre-2025 exports have no transmitter and write `0`.
+
+The consequence was that any dive imported from a 2025+ DM5 XML stored
+`start_pressure ~ 205203` bar and a correspondingly meaningless `gas_use`/RMV. Fixed here
+rather than separately because without it the *same file* would yield 205.2 bar on the
+profile chart and 205 203 bar in the gas mixtures table on the same page.
+
+No corrective `UPDATE` was run against stored `dive_mixture` rows: on this database no row
+has a pressure above 500 bar (the highest is a plausible hand-entered 415), because the
+existing dives were bulk-imported by `export/import.py`, which never uploaded a file. Should
+such rows appear on another database, the correction is unambiguous - divide any pressure
+above ~500 bar by 1000 - since no real cylinder reaches it.
+
+## Profile extraction is idempotent on (file digest, extractor version), and never fails an upload
+
+`should_extract(existing, sha256=, version=)` is the whole test, split out of its callers so
+the table of cases is testable without a database. A profile is a pure function of the bytes
+it came from and the extractor that read them, so `dive_profile.source_sha256` +
+`extractor_version` is both the idempotency key and the `ETag` the read route serves.
+
+In `store_dive_file`:
+
+- **The `insert` branch** deletes any existing profile alongside the `DiveFile` delete and
+  stores the new one in the *same transaction*: a dive must never end up with a stored file
+  and a profile extracted from a different one. The delete is unconditional, so a
+  replacement export with no samples clears the previous export's curves rather than leaving
+  them attributed to it.
+- **The `noop` branch** (same bytes re-uploaded) calls `should_extract`. A repeated `PUT`
+  stays a no-op, but a `PUT` after `PROFILE_EXTRACTOR_VERSION` is bumped opportunistically
+  upgrades the profile from bytes already in hand.
+- **Extraction runs before the `try` block**, not inside it: an exception in there would be
+  caught by the `IntegrityError` handler and reported to the diver as a concurrent-upload
+  conflict, which a parse failure is not.
+
+**A failed extraction must not fail the upload.** `extract_profile` catches `DiveParseError`
+(and anything unexpected), logs it with the parser key, and returns `None`. The file is the
+durable artifact and can be re-extracted after the extractor is fixed; refusing the attach
+would discard the very corpus entry needed to fix it.
+
+**Extraction never writes back to `dive` columns.** A profile's maximum depth may disagree
+with `dive.max_depth` - and does: `Dive_2021-03-28-1049.xml` reports `<MaxDepth>14.9</MaxDepth>`
+in its header while its deepest *sample* is 14.89 m. `dive.max_depth` is the diver's record
+and may have been hand-edited. The parse token proves "this dive was imported from this
+file", not "these values are derived from it". For the same reason `duration_seconds` on the
+profile is the span of the recorded samples, not `dive.duration`; a computer keeps logging
+for ~20 s after the dive ends.
+
+## The profile's `ON DELETE CASCADE` never fires, so two explicit deletes do the work
+
+`dive_profile.dive_id` carries `ON DELETE CASCADE`, and it is decoration: dive deletion is
+application-level (`is_deleted`), so no `DELETE FROM dive` ever runs - the same trap
+`delete_files_for_dive` and `soft_delete_schedules_for_gear_item` already exist to work
+around. Said so in the model docstring, because a reader who trusts the FK will conclude the
+rows are cleaned up when they aren't.
+
+What actually removes them is `delete_profile_for_dive`, called from `delete_dive_file`.
+That covers **both** paths for free: the explicit `DELETE /dive/{uuid}/file`, and
+`delete_files_for_dive`, which `erase_dive` calls when a dive is deleted. Verified by
+reading `delete_files_for_dive` rather than assumed.
+
+A profile goes with its file rather than outliving it: nothing cascades from removing the
+export, and a profile whose source is gone can never be re-derived or checked against
+anything.
+
+## `GET /dive/{uuid}/profile` uses an ETag, not `@cache`
+
+Modelled on `read_dive_file`, and for a sharper reason than that route's.
+
+A profile is **immutable** for a given (source file, extractor version) pair, which makes it
+the ideal `ETag` case and the worst Redis case. Every dive cache key lives under
+`user_{id}_dive*`, and `invalidate_dive_caches` sweeps the lot on every dive edit and every
+dive-site or gear rename - none of which can change a profile. Caching it would mean
+evicting and refetching tens of KB per dive for nothing.
+
+The version is checked before the payload is loaded (`get_profile_version` is a two-column
+query), so a conditional request costs one narrow query rather than decoding tens of KB of
+JSONB only to discard it. The 304 returns a bare `Response`, which bypasses `response_model`
+validation - the same thing `read_dive_file` relies on. `Cache-Control: private, max-age=300`
+is set by the endpoint, and `ClientCacheMiddleware` never overrides a `Cache-Control` an
+endpoint set for itself. `v` is declared and ignored, so the contract is visible: the client
+varies it with the profile's `updated_at` to give each re-extraction its own cache entry.
+
+`DiveProfileInfo` goes on `DiveReadWithMixtures` and **never on `DiveRead`** - the same
+inheritance trap `source_file` documents. On the parent it would land on the paginated list
+and cost `_cached_read_dives` another query per page. `get_profile_infos_for_dives` is
+written batched though only ever called with one id, matching `get_file_infos_for_dives`,
+which is what a profile sparkline in the dive list would need without a rewrite.
+
+## The profile backfill is a script, not an arq job
+
+"The Arq worker now does one real thing" records that the API-side queue plumbing was
+deliberately deleted and the worker runs crons only. A backfill finishes once per extractor
+version, so scheduling it as a cron would mean rescanning the whole corpus forever for a job
+that is already done.
+
+`src/scripts/backfill_dive_profiles.py`, mirroring `create_first_superuser.py`:
+
+```bash
+docker compose exec web python -m src.scripts.backfill_dive_profiles --parser-key suunto_xml
+```
+
+It selects `dive_file` LEFT JOIN `dive_profile` where no profile exists, the extractor
+version is behind, or `source_sha256` differs - with **explicit columns, never
+`select(DiveFile)`**, or the `bytea` would ride along for every row in the corpus before a
+single profile was extracted. One file at a time via `load_dive_file`, committing in batches
+of 50, reporting `examined / extracted / skipped / no_samples / failed`. All five counts
+always, because a run that reports only successes hides the parser that stopped working.
+
+**The gotcha it exists to avoid:** `delete_keys_by_pattern` silently returns when
+`cache.client is None`, and that is only ever set by the API's lifespan - which a script
+does not go through. Without `create_redis_cache_pool()` first, every backfilled dive's
+cached detail response would keep claiming the dive has no profile for up to an hour, with
+no error anywhere.
+
+`src/scripts/` is now bind-mounted into the `web` service (`./src:/code/src`) so that
+command works at all; the app itself is still served from `/code/app` and is unaffected.
+
+## No manual DDL for the dive-profile feature
+
+`dive_profile` is a brand-new table with one unique index, so both arrive via `create_all()`
+on restart. No column was added to `dive` or any other existing table - the FK lives on
+`dive_profile` - so there is nothing to `ALTER`, and no `.env` change is needed.
+
+`DiveProfile` is deliberately **not** registered in `admin/views.py`, for the same reason as
+`DiveFile` and `CertificationFile`.
