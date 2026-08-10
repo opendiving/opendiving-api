@@ -22,6 +22,17 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     profile_image_url: Mapped[str] = mapped_column(String, default="https://profileimageurl.com")
     is_superuser: Mapped[bool] = mapped_column(default=False)
 
+    # Whether to email this user when their gear is due for servicing (see
+    # `core.worker.functions.send_gear_service_digests`). Opt-*out* rather than opt-in:
+    # a reminder nobody switched on is a reminder that never arrives, and the whole point
+    # of the feature is reaching a diver who isn't currently in the app.
+    #
+    # `Mapped[bool]` without `| None` deliberately - the column is NOT NULL, and
+    # `server_default` is what makes the model agree with the hand-written ALTER TABLE
+    # that adds it to an existing database (see DECISIONS.md; `create_all` never alters
+    # an existing table).
+    gear_service_emails: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+
     # Overrides `SoftDeleteMixin.is_deleted` to add an index: unlike Dive/Trip/DiveSite
     # (each of which has a compound partial index that already covers `is_deleted` as a
     # leading/predicate column), no other index on this table covers it.

@@ -1382,3 +1382,265 @@ Also a new column on an existing table, so:
 ```sql
 ALTER TABLE gear_set ADD COLUMN weight double precision;
 ```
+
+## Gear service is a schedule (the rule) plus records (the history), never one table
+
+A cylinder needs an annual visual inspection **and** a five-year hydrostatic test at
+the same time. That single fact rules out every "one interval per item" design -
+columns on `gear_item`, or a single `service_interval_months` - so servicing is two
+tables:
+
+- `gear_service_schedule` - the rule. One row per (item, kind, label), enforced by
+  `ux_gear_service_schedule_item_kind_label` (COALESCE-ing a NULL label to `''`
+  exactly like `ux_gear_item_user_id_brand_name_lower` does for a NULL brand, so two
+  label-less "service" rules collide but two differently-labelled "other" rules don't).
+- `gear_service_record` - the history. What was actually done, when, by whom.
+
+Keeping them apart is what makes both halves work. A diver can set a reminder on
+brand-new kit that has never been serviced (the baseline is the schedule's
+`starts_on`), and can change an interval without rewriting history. Conversely a
+record can exist with no rule at all - logging "hydro done" on a cylinder you never
+set a reminder for is a real thing to want - which is why `kind`/`label` are **copied**
+onto the record at write time rather than read back through
+`gear_service_schedule_id`, and why that FK is `ON DELETE SET NULL` rather than
+`CASCADE`. Deleting a reminder must never throw away the receipts.
+
+Both tables are brand new, so `Base.metadata.create_all()` creates them, their
+indexes and their `CheckConstraint`s on startup - no manual `ALTER TABLE` (see
+"Schema changes have no migration tool"). The one column this feature adds to an
+existing table is `user.gear_service_emails`, below.
+
+## A service interval is months OR dives, whichever trips first
+
+`interval_months` and `interval_dives` are two independent thresholds on the same
+rule, not alternatives: regulator servicing is routinely specified as "annually or
+every 100 dives, whichever comes first". `ck_gear_service_schedule_has_an_interval`
+requires at least one - a rule with neither could never become due, so it would sit in
+the table producing nothing forever.
+
+Unlike `GearItem.type` (a closed vocabulary already enforced by Pydantic - see
+"`GearItem.type` is a closed vocabulary, but has no DB `CHECK` constraint"), these
+*do* get DB-level `CheckConstraint`s, alongside `interval_months > 0` /
+`interval_dives > 0`. They're genuine domain invariants rather than a duplicated list,
+and they're mirrored in `GearServiceScheduleBase`'s `require_an_interval` validator and
+the frontend's Zod refine.
+
+`services.gear_service.recalculate_service_schedule` derives both due fields from a
+single baseline - the latest non-deleted record for the schedule, ordered
+`(serviced_on DESC, id DESC)`, falling back to `starts_on`/`dive_count_at_start` when
+the item has never been serviced. The `id` tie-break matters: two services entered for
+the same day would otherwise resolve arbitrarily.
+
+`add_months` is hand-rolled with `calendar.monthrange` clamping rather than pulling in
+`dateutil`: "serviced 31 August, again in 6 months" has to land on 28 (or 29) February,
+not overflow into March. `timedelta` can't express months at all.
+
+## `dive_count_at_service` is a snapshot, so back-filling old dives inflates it
+
+A dive-based threshold needs a baseline dive count, and both `dive_count_at_start`
+(on the schedule) and `dive_count_at_service` (on the record) are snapshots of
+`gear_item.dive_count` taken server-side at write time. Neither is in the `Create`
+schema - both are `extra="forbid"` - because a caller able to set them could move
+their own due threshold arbitrarily.
+
+Being snapshots of a *lifetime* counter, they have two known inaccuracies, both
+accepted deliberately:
+
+- Back-filling a 2019 dive next week inflates "dives since this service". The exact
+  alternative - `COUNT(*)` over `dive_gear_item JOIN dive WHERE start_time::date >
+  serviced_on` - is correct but can't be compared against a stored threshold and needs
+  a per-item aggregate on every read.
+- Deleting dives drives `dive_count` back down, so a naive subtraction can go negative.
+  `services.gear_service.dives_since` clamps at 0 (as does `divesSince` in the web
+  app's `lib/gear-service.ts`); "-3 dives since service" is nonsense to display and
+  worse to compare.
+
+## `next_due_on`/`next_due_at_dive_count` are stored; `ServiceStatus` deliberately is not
+
+The two due fields are denormalized onto the schedule and recalculated on write, the
+same "recompute from scratch, never increment" approach as `recalculate_dive_stats`
+and `recalculate_gear_dive_counts`. Storing `next_due_on` is what makes the digest
+job's `WHERE next_due_on <= today + 30` an indexed scan
+(`ix_gear_service_schedule_next_due_on`) rather than a Python filter over every
+schedule in the database.
+
+`ServiceStatus` (ok / due_soon / overdue) is the opposite: it is **never** stored, and
+never computed inside a `@cache`-decorated read. It's a function of *today's date*, and
+the single-gear-item cache uses the decorator's 3600s default while the list uses 60s -
+either would happily serve yesterday's countdown after a quiet night. The API therefore
+returns only clock-stable facts (`next_due_on`, `next_due_at_dive_count`,
+`last_service_on`, plus the item's existing `dive_count`), every one a pure function of
+stored data and safe to cache indefinitely.
+
+Same reasoning drives `GET /gear-service-due` taking **no `within_days` parameter**. A
+server-side "due within N days" horizon would bake today's date into the cached
+response, which then goes quietly wrong at midnight. It returns every active schedule
+(capped at `DUE_OVERVIEW_LIMIT`) and the client buckets.
+
+## Service status is computed twice on purpose: in the browser, and in the digest job
+
+Because status can't be an API field, whoever displays it has to derive it.
+`services.gear_service.service_status` and `serviceStatus` in the web app's
+`src/lib/gear-service.ts` are near-line-for-line twins. This is the feature's only
+duplication and it is deliberate: the browser needs it for every badge, and the digest
+job needs it with no browser to ask.
+
+The constants are named identically on both sides (`SERVICE_DUE_SOON_DAYS = 30`,
+`SERVICE_DUE_SOON_DIVES = 10`) so a single `grep SERVICE_DUE_SOON` finds the pair.
+Change one and you must change the other; both have the same truth-table tests.
+
+## A dive moves `gear_item.dive_count`, but never `next_due_at_dive_count`
+
+`next_due_at_dive_count` is an **absolute threshold** (`baseline + interval_dives`),
+not a remaining count. It depends only on snapshots, so logging, editing or deleting a
+dive changes what the status *displays as* without requiring a write to
+`gear_service_schedule` at all - the comparison `dive_count >= next_due_at_dive_count`
+happens at read time (browser) and query time (cron).
+
+`services/gear_stats.py` is therefore untouched by this feature. Storing "dives
+remaining" instead would have forced a write to every one of a user's schedules on
+every dive mutation and coupled two recalculation services together, for no gain.
+
+The one thing this has to preserve: a dive that trips a dive-based interval must still
+be able to fire an email even though nothing wrote to the schedule. It does, because
+`should_notify` is evaluated fresh each run against the item's live `dive_count`.
+
+## Service routes are flat, and every one checks ownership before touching the cache
+
+`/gear-service-schedule(s)`, `/gear-service-record(s)` and `/gear-service-due` are
+top-level, not nested under `/gear-item/{uuid}/...`. That matches the two earlier
+flattenings ("`/{username}/...` resource routes were flattened", "`/user/{username}/...`
+routes were changed to `/user/{id}/...`"): each resource has its own `uuid`, and
+nesting would give it a second identity. Filtering by item is a query parameter,
+exactly like `GET /dives?gear_item_uuid=`.
+
+Create bodies carry `gear_item_uuid` rather than `user_uuid` - ownership derived from
+the item is strictly stronger than trusting a user id in the body, since the caller
+can't name an item that isn't theirs. `_owned_gear_item` answers identically (422, "Gear
+item not found.") for "doesn't exist" and "isn't yours", mirroring `_resolve_item_ids`
+in `gear_sets.py`, so someone else's gear uuids stay unprobeable.
+
+Every read route resolves the row and checks ownership *uncached* first, then calls a
+private `_cached_read_*` helper - see the `@cache`/authorization gotcha under "All
+`/user*`/`/users`/`/dive/parse` endpoints require auth".
+
+## Every service cache key starts with `user_{id}_gear_`, so invalidation needed no change
+
+The five new cache keys (`..._gear_service_schedules:page_...`,
+`..._gear_service_schedule:{uuid}`, `..._gear_service_records:page_...`,
+`..._gear_service_record:{uuid}`, `..._gear_service_due`) all sit under the existing
+`user_{id}_gear_` prefix, so `invalidate_gear_caches`' single
+`delete_keys_by_pattern(f"user_{user_id}_gear_*")` already sweeps them.
+`services/cache_invalidation.py` gained documentation, not code. If a sixth key is ever
+added, it must stay under that prefix.
+
+`invalidate_dive_caches` is deliberately **not** called from the service routes: dive
+reads embed `GearItemInfo`, which carries no service fields. If service data is ever
+added to `GearItemInfo`, these routes must start calling it.
+
+`GearItemRead` gained a `service: list[GearServiceScheduleInfo]`, resolved by
+`get_schedules_for_gear_items` - one batched query per page, mirroring
+`get_gear_items_for_dives` - so the gear list can badge every row without an N+1.
+`GearItemInfo` itself was left alone: it's embedded in every dive and gear set and has
+to stay lean.
+
+## The service digest fires once per threshold, tracked in four columns on the schedule
+
+`send_gear_service_digests` runs daily but sends far less often. `should_notify`
+compares the schedule's current `(status, next_due_on, next_due_at_dive_count)` against
+the stored `(notified_stage, notified_for_due_on, notified_for_due_at_dive_count)` and
+sends only when they differ. That one comparison covers everything worth covering: one
+email entering "due soon", one entering "overdue", a fresh cycle after a service is
+logged, and a fresh notification when an edited interval moves the due date.
+
+Critically, `recalculate_service_schedule` clears all four notify columns **in the same
+statement** that moves `next_due_*`. That's what guarantees they can't drift: a reminder
+is always armed for the due date currently stored, never a superseded one.
+
+The one gap the tuple can't close is a schedule that stays overdue forever - the tuple
+never changes, so it would go silent. `SERVICE_OVERDUE_RENAG_DAYS` (90) re-sends
+quarterly. Deliberately overdue-only: nagging about something that isn't due yet is
+what trains people to ignore the emails.
+
+Two ordering/scoping decisions in the job itself:
+
+- **One email per user, never per item.** A diver whose whole kit comes due the same
+  week gets a single list.
+- **Send first, mark second.** If Resend fails, the exception propagates before the
+  mark, so the worst case is a duplicate email tomorrow rather than a reminder that
+  silently never arrives. For gear safety that's the right way round.
+
+The cron entry has **no `run_at_startup=True`**, unlike `purge_expired_tokens`: that
+one is idempotent housekeeping, this one sends email, and a worker restart must never
+blast a round of reminders out.
+
+The query's `OR` is only half indexable. The date arm is served by
+`ix_gear_service_schedule_next_due_on`; the dive arm compares `gear_item.dive_count`
+against a `gear_service_schedule` column and can't be. That's fine at this scale (a
+handful of schedules per user), and it's a pre-filter anyway - `should_notify` makes the
+real decision. The escape hatch, if it ever matters, is materializing "dives remaining"
+onto the schedule inside `recalculate_gear_dive_counts`; that was rejected for the
+reasons under "A dive moves `gear_item.dive_count`" above.
+
+## The digest's "today" is UTC, and that's fine at date granularity
+
+`User` has no timezone column - `Dive.utc_offset_minutes` is per-dive, not per-user - so
+`send_gear_service_digests` treats "today" as UTC and runs at
+`GEAR_SERVICE_DIGEST_HOUR` (default 07:00 UTC, mid-morning across Europe). With a
+30-day lead time and date-granular thresholds, being a few hours out either way changes
+nothing. If it ever matters, the upgrade is to run hourly and gate on the offset
+inferred from the user's most recent dive.
+
+## Archived or soft-deleted gear never generates a reminder
+
+Three exclusions in the digest query and in `get_due_overview_for_user`, each for its
+own reason:
+
+- `gear_item.is_archived` - retiring a piece of kit has to silence it without the
+  diver also having to pause every rule on it. Consistent with archiving already
+  hiding an item from the dive form's picker.
+- `gear_item.is_deleted` / `gear_service_schedule.is_deleted` - the obvious ones.
+- `user.gear_service_emails` - the opt-out, below.
+
+`gear_service_schedule.is_active` is a fourth, different thing: pausing one rule
+without deleting it or touching the item. Three separate flags on the same axis sounds
+redundant but each answers a distinct question - is this *item* retired, is this *rule*
+paused, is this *user* opted out.
+
+## Soft-deleting a gear item soft-deletes its schedules, with a raw `UPDATE`
+
+`gear_item.is_deleted` is application-level, so the `ON DELETE CASCADE` on
+`gear_service_schedule.gear_item_id` never fires for it (that only happens on a hard
+delete, which the API doesn't expose). Without an explicit cascade the digest would
+keep emailing about gear the diver can no longer see, so `erase_gear_item` calls
+`soft_delete_schedules_for_gear_item` first.
+
+It's a plain `update(...).values(is_deleted=True, ...)` rather than
+`crud.delete(allow_multiple=True)`: fastcrud raises `NoResultFound` when zero rows
+match, and the overwhelmingly common case - deleting an item that never had a schedule -
+matches zero rows. `purge_expired_tokens` works around the same pitfall with a
+`count()` first; a raw `UPDATE` avoids the extra round trip entirely.
+
+Service *records* are deliberately left alone. They're unreachable once the item is
+gone, and a soft delete is meant to be recoverable - discarding the history would make
+it a good deal less so.
+
+## `user.gear_service_emails` is the only new column on an existing table
+
+Opt-*out*, not opt-in: a reminder nobody switched on is a reminder that never arrives,
+and the entire point of the feature is reaching a diver who isn't currently in the app.
+
+It has to be added to **both** `UserRead` (so `GET /user` feeds the settings toggle;
+the `= True` default also covers the window before the `ALTER` runs) and `UserUpdate`.
+Missing the second is the easy mistake: `UserUpdate` is `extra="forbid"`, so the
+toggle would 422 rather than save.
+
+Per "Schema changes have no migration tool", apply to an existing local DB with:
+
+```sql
+ALTER TABLE "user" ADD COLUMN gear_service_emails BOOLEAN NOT NULL DEFAULT true;
+```
+
+That is the whole manual-DDL list for this feature. Both new tables, all their
+indexes, all three `CheckConstraint`s and both FKs arrive via `create_all()` on
+restart, because they are brand-new tables.

@@ -6,6 +6,8 @@ from ..models.dive_gear_item import DiveGearItem
 from ..models.dive_mixture import DiveMixture
 from ..models.dive_site import DiveSite
 from ..models.gear_item import GearItem
+from ..models.gear_service_record import GearServiceRecord
+from ..models.gear_service_schedule import GearServiceSchedule
 from ..models.gear_set import GearSet
 from ..models.gear_set_item import GearSetItem
 from ..models.trip import Trip
@@ -17,6 +19,12 @@ from ..schemas.dive_gear_item import DiveGearItemCreate, DiveGearItemUpdate
 from ..schemas.dive_mixture import DiveMixtureCreateInternal, DiveMixtureUpdate
 from ..schemas.dive_site import DiveSiteCreateInternal, DiveSiteUpdate
 from ..schemas.gear_item import GearItemCreateInternal, GearItemUpdate
+from ..schemas.gear_service import (
+    GearServiceRecordCreateInternal,
+    GearServiceRecordUpdate,
+    GearServiceScheduleCreateInternal,
+    GearServiceScheduleUpdate,
+)
 from ..schemas.gear_set import GearSetCreateInternal, GearSetUpdate
 from ..schemas.gear_set_item import GearSetItemCreate, GearSetItemUpdate
 from ..schemas.trip import TripCreateInternal, TripUpdate
@@ -94,6 +102,23 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         allowed_actions={"view", "create", "update", "delete"},
     )
 
+    # `last_service_on`/`next_due_on`/`next_due_at_dive_count` and the `notified_*`
+    # fields are derived (see `services.gear_service.recalculate_service_schedule`), so
+    # editing them here only sticks until the next schedule or record write.
+    admin.add_view(
+        model=GearServiceSchedule,
+        create_schema=GearServiceScheduleCreateInternal,
+        update_schema=GearServiceScheduleUpdate,
+        allowed_actions={"view", "create", "update", "delete"},
+    )
+
+    admin.add_view(
+        model=GearServiceRecord,
+        create_schema=GearServiceRecordCreateInternal,
+        update_schema=GearServiceRecordUpdate,
+        allowed_actions={"view", "create", "update", "delete"},
+    )
+
     admin.add_view(
         model=GearSet,
         create_schema=GearSetCreateInternal,
@@ -114,4 +139,3 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         update_schema=DiveGearItemUpdate,
         allowed_actions={"view", "create", "update", "delete"},
     )
-

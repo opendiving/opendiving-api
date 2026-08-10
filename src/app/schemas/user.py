@@ -21,6 +21,10 @@ class UserRead(PublicUUIDSchema):
     username: Annotated[str, Field(min_length=2, max_length=20, pattern=r"^[a-z0-9]+$", examples=["userson"])]
     email: Annotated[EmailStr, Field(examples=["user.userson@example.com"])]
     profile_image_url: str
+    # Feeds the settings page's gear-reminder toggle. Defaults to `True` so this still
+    # validates against a database where the column hasn't been added by hand yet (see
+    # DECISIONS.md's "no migration tool" workflow).
+    gear_service_emails: bool = True
 
 
 class UserReadInternal(UserRead):
@@ -61,6 +65,11 @@ class UserUpdate(BaseModel):
         Field(
             pattern=r"^(https?|ftp)://[^\s/$.?#].[^\s]*$", examples=["https://www.profileimageurl.com"], default=None
         ),
+    ]
+    # Must be listed here as well as on `UserRead`: this schema is `extra="forbid"`, so
+    # without it the settings page's toggle would 422 rather than save.
+    gear_service_emails: Annotated[
+        bool | None, Field(default=None, description="Email me when gear is due for service")
     ]
 
 

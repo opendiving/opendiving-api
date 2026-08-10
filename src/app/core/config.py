@@ -112,6 +112,14 @@ class FrontendSettings(BaseSettings):
     FRONTEND_URL: str = config("FRONTEND_URL", default="http://localhost:3000")
 
 
+class GearServiceSettings(BaseSettings):
+    # Hour of the day (UTC) the gear-service digest cron runs - see
+    # `core.worker.functions.send_gear_service_digests`. Configurable mainly so local
+    # development can park it somewhere harmless; 07:00 UTC lands mid-morning across
+    # Europe, which is close enough given everything here is date-granular.
+    GEAR_SERVICE_DIGEST_HOUR: int = config("GEAR_SERVICE_DIGEST_HOUR", default=7)
+
+
 class TestSettings(BaseSettings): ...
 
 
@@ -128,8 +136,6 @@ class ClientSideCacheSettings(BaseSettings):
 class RedisQueueSettings(BaseSettings):
     REDIS_QUEUE_HOST: str = config("REDIS_QUEUE_HOST", default="localhost")
     REDIS_QUEUE_PORT: int = config("REDIS_QUEUE_PORT", default=6379)
-
-
 
 
 class CRUDAdminSettings(BaseSettings):
@@ -173,6 +179,7 @@ class Settings(
     MagicLinkSettings,
     EmailSettings,
     FrontendSettings,
+    GearServiceSettings,
     TestSettings,
     RedisCacheSettings,
     ClientSideCacheSettings,
