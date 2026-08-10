@@ -17,7 +17,7 @@ The whole stack runs from Docker:
 ```bash
 git clone https://github.com/opendiving/opendiving-api.git
 cd opendiving-api
-# create src/.env - see "Configuration" in README.md
+cp src/.env.example src/.env   # defaults are fine for local work
 docker compose up
 ```
 
