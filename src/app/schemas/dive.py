@@ -96,6 +96,36 @@ class DiveFileInfo(PublicUUIDSchema):
     updated_at: datetime | None = None
 
 
+class DiveGasUse(BaseModel):
+    """Surface-normalized gas consumption for a dive, derived from its duration, average
+    depth and cylinder pressures - see `services/dive_gas.py` for the arithmetic and for
+    the (deliberately strict) conditions under which it's derivable at all.
+
+    Present as a whole or not at all, rather than field-by-field: a dive either records
+    enough to know what it consumed or it doesn't, and a half-populated version - litres
+    used but no rate, say - would read as a number worth acting on when it isn't. Divers
+    plan gas off these figures.
+    """
+
+    gas_used: Annotated[float, Field(examples=[1800.0], description="Gas breathed, in liters at surface pressure")]
+    rmv: Annotated[
+        float,
+        Field(
+            examples=[14.29],
+            description="Respiratory minute volume: liters per minute at surface pressure. Cylinder-independent, "
+            "so it's the figure to compare across dives.",
+        ),
+    ]
+    sac_bar_per_min: Annotated[
+        float,
+        Field(
+            examples=[1.19],
+            description="Surface air consumption in bar per minute. Only meaningful alongside this dive's cylinder "
+            "volume, but it's what a pressure gauge actually shows.",
+        ),
+    ]
+
+
 class DiveReadWithMixtures(DiveRead):
     mixtures: Annotated[list[DiveMixtureRead], Field(default_factory=list)]
     # Deliberately here rather than on `DiveRead`, which `DiveReadWithMixtures` extends:
@@ -105,6 +135,17 @@ class DiveReadWithMixtures(DiveRead):
     source_file: Annotated[
         DiveFileInfo | None,
         Field(default=None, description="The dive-computer export this dive was imported from, if any"),
+    ]
+    # Here rather than on `DiveRead` for the same reason as `source_file` above, with one
+    # extra: it's derived from the mixtures, which the list response doesn't carry at all.
+    # Putting it on the parent would mean a batched mixture lookup in `_cached_read_dives`
+    # purely to compute it.
+    gas_use: Annotated[
+        DiveGasUse | None,
+        Field(
+            default=None,
+            description="Surface-normalized gas consumption, or null when the dive doesn't record enough to derive it",
+        ),
     ]
 
 
