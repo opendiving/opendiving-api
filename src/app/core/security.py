@@ -1,5 +1,6 @@
 import hashlib
 import secrets
+import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
@@ -14,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
 from .db.crud_token_blacklist import crud_token_blacklist
-from .schemas import GoogleUserInfo, OnboardingTokenData, TokenBlacklistCreate, TokenData
+from .schemas import DiveFileTokenData, GoogleUserInfo, OnboardingTokenData, TokenBlacklistCreate, TokenData
 
 SECRET_KEY: SecretStr = settings.SECRET_KEY
 ALGORITHM = settings.ALGORITHM
@@ -36,6 +37,11 @@ class TokenType(StrEnum):
     # Google) that doesn't have a `User` row yet - see `create_onboarding_token`/
     # `verify_onboarding_token` below, and `POST /auth/complete`.
     ONBOARDING = "onboarding"
+    # Not a session at all: a receipt from `POST /dive/parse` attesting that this server
+    # parsed a specific set of bytes for a specific user - see `create_dive_file_token`/
+    # `verify_dive_file_token` below, and `PUT /dive/{uuid}/file`. Carries no authority;
+    # the upload route still checks that the caller owns the dive.
+    DIVE_FILE = "dive_file"
 
 
 # -------------- magic-link tokens --------------
@@ -210,6 +216,61 @@ async def verify_onboarding_token(token: str, db: AsyncSession) -> OnboardingTok
         name=payload.get("name"),
         avatar=payload.get("avatar"),
     )
+
+
+# -------------- dive file tokens --------------
+def create_dive_file_token(*, user_uuid: uuid_pkg.UUID, sha256: str, parser_key: str) -> str:
+    """Mints the receipt `POST /dive/parse` hands back with the parsed dive.
+
+    Binds three things the upload route needs to trust: who parsed the file, exactly
+    which bytes were parsed (by content hash), and which parser succeeded. `PUT
+    /dive/{uuid}/file` re-hashes the body it receives and stores the file only if the
+    hash matches, so the only bytes that can ever enter `dive_file` are bytes this
+    server has already parsed.
+
+    Deliberately *not* blacklisted after use, unlike `create_onboarding_token`:
+    re-uploading the same file to the same dive is an idempotent no-op by design, and
+    the token confers no authority to replay - it can only ever store bytes its holder
+    already owns a parse of.
+
+    The parser's `content_type` is deliberately absent. That value ends up in a response
+    header on download, so it is resolved from `parser_key` against the live registry at
+    store time rather than carried here, where a forged token could dictate it.
+    """
+    expire = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=settings.DIVE_FILE_TOKEN_EXPIRE_MINUTES)
+    to_encode: dict[str, Any] = {
+        "user_uuid": str(user_uuid),
+        "sha256": sha256,
+        "parser_key": parser_key,
+        "exp": expire,
+        "token_type": TokenType.DIVE_FILE,
+    }
+    encoded_jwt: str = jwt.encode(to_encode, SECRET_KEY.get_secret_value(), algorithm=ALGORITHM)
+    return encoded_jwt
+
+
+def verify_dive_file_token(token: str) -> DiveFileTokenData | None:
+    """Validates a dive-file token: well-formed, unexpired, correctly typed and complete.
+    Returns what it attests, or `None` if any of that fails.
+
+    Checking `token_type` is what stops an access token - which the frontend also holds,
+    and which is signed with the same key - from being presented here as a parse receipt.
+    """
+    try:
+        payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+
+    if payload.get("token_type") != TokenType.DIVE_FILE:
+        return None
+
+    user_uuid = payload.get("user_uuid")
+    sha256 = payload.get("sha256")
+    parser_key = payload.get("parser_key")
+    if not user_uuid or not sha256 or not parser_key:
+        return None
+
+    return DiveFileTokenData(user_uuid=user_uuid, sha256=sha256, parser_key=parser_key)
 
 
 # -------------- blacklisting --------------

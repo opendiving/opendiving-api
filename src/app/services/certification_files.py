@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import undefer
 from uuid6 import uuid7
 
-from ..core.utils.uploads import read_upload_within_limit
+from ..core.utils.uploads import read_upload_within_limit, safe_filename
 from ..models.certification_file import CertificationFile
 from ..schemas.certification import CertificationFileInfo, CertificationSide
 
@@ -86,20 +86,6 @@ def sniff_content_type(data: bytes) -> str:
     raise UnsupportedCardFileError("Unsupported file type. Upload a JPEG, PNG, WEBP or PDF.")
 
 
-def _safe_filename(filename: str | None) -> str:
-    """Reduce an uploaded filename to something safe to store and to echo back in a
-    `Content-Disposition` header.
-
-    Nothing here ever touches the filesystem, so this is not path-traversal defence; it
-    strips directory components and control characters (notably CR/LF and `"`) so the
-    value can't break out of the header it later lands in.
-    """
-    name = (filename or "").replace("\\", "/").rsplit("/", 1)[-1]
-    name = "".join(ch for ch in name if ch.isprintable() and ch not in '"\\')
-    name = name.strip() or "card"
-    return name[:255]
-
-
 async def store_certification_file(
     db: AsyncSession, *, certification_id: int, side: CertificationSide, upload: UploadFile
 ) -> CertificationFileInfo:
@@ -118,7 +104,7 @@ async def store_certification_file(
         raise UnsupportedCardFileError("The uploaded file is empty.")
 
     content_type = sniff_content_type(data)
-    filename = _safe_filename(upload.filename)
+    filename = safe_filename(upload.filename, default="card")
     digest = hashlib.sha256(data).hexdigest()
     now = datetime.now(UTC)
 

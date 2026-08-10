@@ -1,7 +1,8 @@
+import hashlib
 import uuid as uuid_pkg
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...api.dependencies import get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import ForbiddenException, NotFoundException
+from ...core.security import create_dive_file_token
 from ...core.utils.cache import cache
 from ...core.utils.datetime_offset import combine_start_time, split_start_time
 from ...core.utils.uploads import read_upload_within_limit
@@ -30,6 +32,7 @@ from ...crud.crud_trips import get_trip_uuids_by_ids, resolve_trip_id_for_user
 from ...schemas.dive import (
     DiveCreateInternal,
     DiveCreateRequest,
+    DiveFileInfo,
     DiveRead,
     DiveReadInternal,
     DiveReadWithMixtures,
@@ -38,18 +41,25 @@ from ...schemas.dive import (
 )
 from ...schemas.dive_mixture import DiveMixtureRead
 from ...schemas.gear_item import GearItemInfo
-from ...schemas.parsed_dive import ParsedDiveSchema
+from ...schemas.parsed_dive import ParsedDiveResponse
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_gear_caches
-from ...services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file
+from ...services.dive_files import (
+    MAX_DIVE_FILE_SIZE,
+    DiveFileAlreadyLinkedError,
+    DiveFileConflictError,
+    InvalidDiveFileTokenError,
+    delete_dive_file,
+    delete_files_for_dive,
+    get_dive_file_sha256,
+    get_file_infos_for_dives,
+    load_dive_file,
+    store_dive_file,
+)
+from ...services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file_with_parser
 from ...services.dive_stats import recalculate_dive_stats
 from ...services.gear_stats import recalculate_gear_dive_counts
 
 router = APIRouter(tags=["dives"])
-
-# Dive-computer export files are small (samples are a few bytes each); this cap is
-# generous headroom while still bounding memory usage and parser workload for an
-# endpoint that accepts arbitrary user-uploaded files.
-_MAX_DIVE_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 
 
 _DIVE_CONSTRAINT_MESSAGES = {
@@ -96,6 +106,24 @@ def _dive_owner_id(db_dive: Any) -> int:
     return cast(int, db_dive["user_id"] if isinstance(db_dive, dict) else db_dive.user_id)
 
 
+async def _get_owned_dive(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> dict[str, Any]:
+    """Fetch a dive by public uuid and assert the caller owns it.
+
+    Every route that names a single dive starts here: a 404 for a missing or deleted
+    row, a 403 for someone else's. Note the ordering - this runs *before* any cached
+    read helper is reached, because `@cache` serves a cached response without re-running
+    authorization (see `_cached_read_dive`).
+    """
+    db_dive = await crud_dives.get(db=db, uuid=uuid, is_deleted=False, schema_to_select=DiveReadInternal)
+    if db_dive is None:
+        raise NotFoundException("Dive not found")
+
+    if _dive_owner_id(db_dive) != current_user["id"]:
+        raise ForbiddenException()
+
+    return cast(dict[str, Any], db_dive)
+
+
 def _dive_internal_id(db_dive: Any) -> int:
     return cast(int, db_dive["id"] if isinstance(db_dive, dict) else db_dive.id)
 
@@ -140,6 +168,7 @@ def _to_public_dive_with_mixtures(
     dive_sites: list[DiveSiteInfo],
     gear_items: list[GearItemInfo],
     mixtures: list[DiveMixtureRead],
+    source_file: DiveFileInfo | None = None,
 ) -> DiveReadWithMixtures:
     data = _to_public_start_time(db_dive if isinstance(db_dive, dict) else db_dive.model_dump())
     return DiveReadWithMixtures(
@@ -149,24 +178,41 @@ def _to_public_dive_with_mixtures(
         dive_sites=dive_sites,
         gear_items=gear_items,
         mixtures=mixtures,
+        source_file=source_file,
     )
 
 
-@router.post("/dive/parse", response_model=ParsedDiveSchema, dependencies=[Depends(get_current_user)])
+@router.post("/dive/parse", response_model=ParsedDiveResponse)
 async def parse_dive(
+    current_user: Annotated[dict, Depends(get_current_user)],
     file: Annotated[UploadFile, File(description="Dive-computer export file (e.g. Suunto XML or JSON)")],
-) -> ParsedDiveSchema:
-    """Upload a dive-computer export file and receive the parsed dive data as JSON."""
+) -> ParsedDiveResponse:
+    """Upload a dive-computer export file and receive the parsed dive data as JSON.
+
+    Nothing is stored here - the bytes are parsed and dropped. What comes back alongside
+    the dive is a `file_token` attesting that this parse happened: hand it to
+    `PUT /dive/{uuid}/file` with the same file, once the dive it pre-filled exists, and
+    the export is kept against that dive.
+    """
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing filename")
 
-    content = await read_upload_within_limit(file, _MAX_DIVE_FILE_SIZE)
+    content = await read_upload_within_limit(file, MAX_DIVE_FILE_SIZE)
     try:
-        return parse_dive_file(file.filename, content)
+        parser, parsed = parse_dive_file_with_parser(file.filename, content)
     except UnsupportedDiveFileError as exc:
         raise HTTPException(status_code=415, detail=str(exc)) from exc
     except DiveParseError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return ParsedDiveResponse(
+        **parsed.model_dump(),
+        file_token=create_dive_file_token(
+            user_uuid=current_user["uuid"],
+            sha256=hashlib.sha256(content).hexdigest(),
+            parser_key=parser.key,
+        ),
+    )
 
 
 @router.post("/dive", response_model=DiveReadWithMixtures, status_code=201)
@@ -401,6 +447,7 @@ async def _cached_read_dive(
     mixtures = await get_mixtures_for_dive(db=db, dive_id=db_dive["id"])
     dive_sites = await get_dive_sites_for_dive(db=db, dive_id=db_dive["id"])
     gear_items = await get_gear_items_for_dive(db=db, dive_id=db_dive["id"])
+    source_files = await get_file_infos_for_dives(db=db, dive_ids=[db_dive["id"]])
     return _to_public_dive_with_mixtures(
         db_dive,
         user_uuid=owner_uuid,
@@ -408,6 +455,7 @@ async def _cached_read_dive(
         dive_sites=dive_sites,
         gear_items=gear_items,
         mixtures=mixtures,
+        source_file=source_files.get(db_dive["id"]),
     )
 
 
@@ -418,12 +466,7 @@ async def read_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveReadWithMixtures:
-    db_dive = await crud_dives.get(db=db, uuid=uuid, is_deleted=False, schema_to_select=DiveReadInternal)
-    if db_dive is None:
-        raise NotFoundException("Dive not found")
-
-    if _dive_owner_id(db_dive) != current_user["id"]:
-        raise ForbiddenException()
+    await _get_owned_dive(db, uuid, current_user)
 
     return await _cached_read_dive(
         request, user_id=current_user["id"], uuid=uuid, owner_uuid=current_user["uuid"], db=db
@@ -438,13 +481,8 @@ async def patch_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    db_dive = await crud_dives.get(db=db, uuid=uuid, is_deleted=False, schema_to_select=DiveReadInternal)
-    if db_dive is None:
-        raise NotFoundException("Dive not found")
-
+    db_dive = await _get_owned_dive(db, uuid, current_user)
     owner_id = _dive_owner_id(db_dive)
-    if owner_id != current_user["id"]:
-        raise ForbiddenException()
 
     update_data = values.model_dump(
         exclude={"mixtures", "dive_site_uuids", "gear_item_uuids", "trip_uuid"}, exclude_unset=True
@@ -529,14 +567,15 @@ async def erase_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    db_dive = await crud_dives.get(db=db, uuid=uuid, is_deleted=False, schema_to_select=DiveReadInternal)
-    if db_dive is None:
-        raise NotFoundException("Dive not found")
-
+    db_dive = await _get_owned_dive(db, uuid, current_user)
     owner_id = _dive_owner_id(db_dive)
-    if owner_id != current_user["id"]:
-        raise ForbiddenException()
 
+    # The stored export goes with the dive. The FK's `ON DELETE CASCADE` can't do this:
+    # `crud_dives.delete` sets `is_deleted`, so no `DELETE FROM dive` ever runs. Leaving
+    # the row would strand its bytes behind a dive nobody can open, and would keep the
+    # file's slot in both unique indexes - blocking a re-import of the same export into
+    # a fresh dive. Same reasoning as `erase_certification`.
+    await delete_files_for_dive(db=db, dive_id=_dive_internal_id(db_dive), commit=False)
     await crud_dives.delete(db=db, uuid=uuid)
     await recalculate_dive_stats(db=db, user_id=owner_id)
     await recalculate_gear_dive_counts(db=db, user_id=owner_id)
@@ -545,3 +584,126 @@ async def erase_dive(
     await invalidate_gear_caches(owner_id)
 
     return {"message": "Dive deleted"}
+
+
+# -------------- source files --------------
+# The export a dive was imported from is attached in a second request rather than riding
+# along with `POST /dive`: that endpoint takes a JSON `DiveCreateRequest` (which is
+# `extra="forbid"`), and turning the one resource-creating route in the app into a
+# multipart one to carry an optional attachment is a poor trade. A separate `PUT` is
+# also idempotent, which is what makes re-importing the same file harmless.
+
+
+@router.put("/dive/{uuid}/file", response_model=DiveFileInfo)
+async def write_dive_file(
+    request: Request,
+    uuid: uuid_pkg.UUID,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    file: Annotated[UploadFile, File(description="The dive-computer export this dive was imported from")],
+    file_token: Annotated[str, Form(description="The `file_token` returned by `POST /dive/parse` for this file")],
+) -> DiveFileInfo:
+    """Attach or replace the export this dive was imported from.
+
+    The token is what admits the file: it proves this server parsed these exact bytes
+    for this user, so the endpoint neither has to re-parse nor has to trust that an
+    arbitrary upload is a dive log at all.
+    """
+    db_dive = await _get_owned_dive(db, uuid, current_user)
+
+    try:
+        info = await store_dive_file(
+            db=db,
+            user_id=current_user["id"],
+            user_uuid=current_user["uuid"],
+            dive_id=_dive_internal_id(db_dive),
+            upload=file,
+            file_token=file_token,
+        )
+    except InvalidDiveFileTokenError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except DiveFileAlreadyLinkedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except DiveFileConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    # Dive reads embed this file's metadata, so they're now stale.
+    await invalidate_dive_caches(current_user["id"])
+    return info
+
+
+@router.get("/dive/{uuid}/file")
+async def read_dive_file(
+    request: Request,
+    uuid: uuid_pkg.UUID,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    v: Annotated[
+        str | None,
+        Query(description="Opaque cache-busting version token; ignored by the server"),
+    ] = None,
+) -> Response:
+    """Serve a dive's stored export back to its owner.
+
+    Deliberately *not* `@cache`d, for the same reason as the certification card
+    download: Redis here holds serialized API responses, and parking multi-megabyte
+    binaries in it would evict everything else the cache exists for. The
+    `ETag`/`If-None-Match` pair does the equivalent job in the browser.
+
+    `v` is read by nothing here; it is declared so the contract is visible. The response
+    is cacheable for five minutes and the file at this URL can be *replaced*, so the
+    client varies `v` to give each version its own cache entry.
+    """
+    db_dive = await _get_owned_dive(db, uuid, current_user)
+    dive_id = _dive_internal_id(db_dive)
+
+    # Check the hash before loading the bytes, so a conditional request costs one narrow
+    # query rather than a full read that gets thrown away.
+    sha256 = await get_dive_file_sha256(db=db, dive_id=dive_id)
+    if sha256 is None:
+        raise NotFoundException("This dive has no source file")
+
+    etag = f'"{sha256}"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "private, max-age=300"})
+
+    file = await load_dive_file(db=db, dive_id=dive_id)
+    if file is None:
+        raise NotFoundException("This dive has no source file")
+
+    return Response(
+        content=file.data,
+        media_type=file.content_type,
+        headers={
+            # `attachment`, not `inline`: the web app fetches this through its API client
+            # and hands it to the browser as a download, so it never navigates here. XML
+            # opened in a tab at the app's own origin is exactly what we don't want.
+            "Content-Disposition": f'attachment; filename="{file.original_filename}"',
+            # The stored type comes from the parser that read the file, but say so
+            # explicitly: the browser must not be free to re-interpret user-uploaded
+            # content as something scriptable.
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            # `private` because this is one diver's file and no shared cache should keep
+            # a copy; the `ETag` makes re-validation after 5 minutes cheap.
+            "Cache-Control": "private, max-age=300",
+            "ETag": etag,
+        },
+    )
+
+
+@router.delete("/dive/{uuid}/file")
+async def erase_dive_file(
+    request: Request,
+    uuid: uuid_pkg.UUID,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> dict[str, str]:
+    db_dive = await _get_owned_dive(db, uuid, current_user)
+
+    deleted = await delete_dive_file(db=db, dive_id=_dive_internal_id(db_dive))
+    if not deleted:
+        raise NotFoundException("This dive has no source file")
+
+    await invalidate_dive_caches(current_user["id"])
+    return {"message": "Dive file deleted"}

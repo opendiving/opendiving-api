@@ -29,6 +29,13 @@ class CryptSettings(BaseSettings):
     # valid for. Deliberately short - it exists only to carry a verified identity from
     # `/auth/email/verify` or `/auth/google` to `/auth/complete`.
     ONBOARDING_TOKEN_EXPIRE_MINUTES: int = config("ONBOARDING_TOKEN_EXPIRE_MINUTES", default=30)
+    # How long the token minted by `POST /dive/parse` stays usable for attaching the
+    # parsed file to a dive (see `create_dive_file_token` in `core.security`). Much
+    # longer than the tokens above because it is a staleness bound, not a credential
+    # lifetime: a diver may import a file and then spend an evening filling in sites,
+    # gear and notes before saving. It grants nothing beyond storing bytes this server
+    # already parsed for that same user.
+    DIVE_FILE_TOKEN_EXPIRE_MINUTES: int = config("DIVE_FILE_TOKEN_EXPIRE_MINUTES", default=1440)
 
 
 class DatabaseSettings(BaseSettings):

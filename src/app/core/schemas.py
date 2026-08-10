@@ -61,6 +61,21 @@ class OnboardingTokenData(BaseModel):
     avatar: str | None = None
 
 
+class DiveFileTokenData(BaseModel):
+    """Decoded payload of a dive-file token (see `create_dive_file_token`/
+    `verify_dive_file_token` in `core.security`), minted by `POST /dive/parse` and
+    presented again by `PUT /dive/{uuid}/file`.
+
+    It attests one thing: this server successfully parsed *these exact bytes* for
+    *this user*, recently. That is what lets the upload endpoint store a file without
+    re-parsing it, and what ties a stored export to the dive whose form it pre-filled.
+    """
+
+    user_uuid: str
+    sha256: str
+    parser_key: str
+
+
 class TokenBlacklistBase(BaseModel):
     token: str
     expires_at: datetime

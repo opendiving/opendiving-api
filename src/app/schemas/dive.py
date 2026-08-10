@@ -85,8 +85,27 @@ class DiveReadInternal(DiveBase, PublicUUIDSchema):
     created_at: datetime
 
 
+class DiveFileInfo(PublicUUIDSchema):
+    """Metadata about the dive-computer export a dive was imported from - never its
+    bytes, which are only ever served by `GET /dive/{uuid}/file`."""
+
+    original_filename: str
+    content_type: str
+    byte_size: int
+    parser_key: Annotated[str, Field(description="Identifier of the parser that read this file, e.g. `suunto_xml`")]
+    updated_at: datetime | None = None
+
+
 class DiveReadWithMixtures(DiveRead):
     mixtures: Annotated[list[DiveMixtureRead], Field(default_factory=list)]
+    # Deliberately here rather than on `DiveRead`, which `DiveReadWithMixtures` extends:
+    # putting it on the parent would inherit it onto the paginated list response too,
+    # adding a query to `_cached_read_dives` - the hottest path in the app - for
+    # something only the detail page renders.
+    source_file: Annotated[
+        DiveFileInfo | None,
+        Field(default=None, description="The dive-computer export this dive was imported from, if any"),
+    ]
 
 
 class DiveCreate(DiveBase):

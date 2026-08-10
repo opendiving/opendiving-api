@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import ClassVar
 
 from ...schemas.parsed_dive import ParsedDiveSchema
 
@@ -9,6 +10,18 @@ class DiveParser(ABC):
     To support a new dive-computer format, implement this interface and
     register the class in `dive_parsers.__init__`.
     """
+
+    # Stable identifier for this format, recorded on any stored export (`dive_file.
+    # parser_key`) and carried in the token minted by `/dive/parse`. Stored rows are
+    # queried by it when developing a new extraction ("re-run this against every Suunto
+    # JSON we have"), so treat it as part of the data model: renaming one orphans every
+    # row already written under the old name.
+    key: ClassVar[str]
+    # What a stored export of this format is served back as. Comes from here rather than
+    # from the uploader's claimed `Content-Type` or a byte sniff, since a successful
+    # parse is a stronger guarantee than either - and this way the value in the response
+    # header is always one of a closed set the application itself declares.
+    content_type: ClassVar[str]
 
     @classmethod
     @abstractmethod
