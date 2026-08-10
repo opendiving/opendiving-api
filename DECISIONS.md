@@ -1930,3 +1930,30 @@ water (10.06 m/bar) vs fresh (10.33), a 1 bar surface (wrong at an altitude lake
 ideal-gas behaviour (~5% optimistic at a 230 bar fill). All three are what every other
 dive log does, none is correctable without data the app doesn't collect, and all apply
 uniformly across a user's dives, so the trend is unaffected.
+
+## `GET /user/gas-use-history` is one unpaginated series, cached under the dive prefix
+
+The dashboard graph needs a whole diving career, so this returns every dive that yields
+a figure, oldest first, with no pagination - a page of ten dives is not a trend. It can't
+be served off `GET /dives` in any case: that response carries no mixtures, and the fix
+would be a batched mixture lookup on the hottest path in the app.
+
+The cache key is `user_{id}_dives:gas_use_history`, deliberately under the *dives* prefix
+even though the route hangs off `/user/...`. `invalidate_dive_caches()` already sweeps
+`user_{id}_dives:*` after every dive create, update and delete, so the series drops with
+them and that function needed no change at all. A prefix of its own would have been a
+third pattern to remember to add there, and the bug from forgetting is a graph that
+silently keeps plotting deleted dives.
+
+`gas_use_history()` runs two queries - the user's dives, then their mixtures batched -
+and lets `compute_gas_use` decide per dive in Python. Pushing its conditions into SQL
+(`HAVING count(*) = 1`, `avg_depth IS NOT NULL`, both pressures present) would keep the
+un-derivable majority from coming back at all: on a real 506-dive log, 343 dives qualify,
+so roughly a third of the rows are fetched and discarded. That's left on the table on
+purpose. It would be a second copy of the rules in a second language, and when the two
+drift the symptom is a dive quietly missing from a graph - which nobody notices, unlike a
+crash. Same scale judgment as `recalculate_dive_stats` re-aggregating on every write.
+
+Note that `_cached_gas_use_history` carries the same authorization caveat as
+`_cached_read_dives`: `@cache` serves a hit without re-running the wrapped function, so it
+must only ever be called with the calling user's own id.

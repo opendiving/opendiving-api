@@ -126,6 +126,27 @@ class DiveGasUse(BaseModel):
     ]
 
 
+class DiveGasUsePoint(BaseModel):
+    """One dive's entry in a user's gas-use history (`GET /user/gas-use-history`).
+
+    Carries just enough of the dive to plot and label a point and to link back to it -
+    not a trimmed `DiveRead`. The series exists to be graphed, and every field here is
+    either an axis, a tooltip, or the link target.
+    """
+
+    dive_uuid: Annotated[uuid_pkg.UUID, Field(description="Public id of the dive this point came from")]
+    dive_number: int
+    start_time: Annotated[
+        DiveStartTime,
+        Field(
+            examples=[_START_TIME_EXAMPLE],
+            description="The dive's own offset-aware start time, exactly as `DiveRead` reports it - the x axis",
+        ),
+    ]
+    avg_depth: Annotated[float, Field(description="Average depth the consumption was normalized from, in meters")]
+    gas_use: DiveGasUse
+
+
 class DiveReadWithMixtures(DiveRead):
     mixtures: Annotated[list[DiveMixtureRead], Field(default_factory=list)]
     # Deliberately here rather than on `DiveRead`, which `DiveReadWithMixtures` extends:

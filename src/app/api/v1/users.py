@@ -15,12 +15,14 @@ from ...core.exceptions.http_exceptions import (
     UnauthorizedException,
 )
 from ...core.security import blacklist_token, blacklist_tokens, generate_secure_token, hash_token, oauth2_scheme
+from ...core.utils.cache import cache
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...crud.crud_authentication_requests import crud_authentication_requests
 from ...crud.crud_user_dive_stats import crud_user_dive_stats
 from ...crud.crud_users import crud_users
 from ...schemas.auth import LinkCheckResponse
 from ...schemas.authentication_request import AuthenticationRequestCreate, AuthenticationRequestUpdate
+from ...schemas.dive import DiveGasUsePoint
 from ...schemas.email_change import (
     EmailChangeRequest,
     EmailChangeRequestResponse,
@@ -29,6 +31,7 @@ from ...schemas.email_change import (
 )
 from ...schemas.user import UserRead, UserUpdate
 from ...schemas.user_dive_stats import UserDiveStatsRead, UserDiveStatsReadInternal
+from ...services.dive_gas import gas_use_history
 from ...services.email_service import send_email_change_confirmation_email, send_email_changed_notification
 
 router = APIRouter(tags=["users"])
@@ -271,6 +274,39 @@ async def read_dive_stats(
     return UserDiveStatsRead(
         **{k: v for k, v in stats.model_dump().items() if k != "user_id"}, user_uuid=current_user["uuid"]
     )
+
+
+# Keyed under the `user_{id}_dives:` prefix on purpose, even though this hangs off
+# `/user/...` rather than `/dives`: `invalidate_dive_caches()` already sweeps
+# `user_{id}_dives:*` after every dive create, update and delete, so this series drops
+# with them and needed no invalidation change at all. A key of its own (say
+# `user_{id}_gas_use:`) would have been a third pattern to remember to add there, and the
+# bug from forgetting is a graph that silently keeps showing yesterday's dives.
+#
+# Same authorization caveat as `_cached_read_dives` in `dives.py`: `@cache` serves a hit
+# without re-running the route's body, so this must only ever be called with the *calling*
+# user's own id, which is all the route below passes.
+@cache(key_prefix="user_{user_id}_dives:gas_use_history", resource_id_name="user_id", expiration=60)
+async def _cached_gas_use_history(request: Request, user_id: int, db: AsyncSession) -> list[DiveGasUsePoint]:
+    return await gas_use_history(db=db, user_id=user_id)
+
+
+@router.get("/user/gas-use-history", response_model=list[DiveGasUsePoint])
+async def read_gas_use_history(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> list[DiveGasUsePoint]:
+    """Every dive of the caller's that records enough to derive its gas use, oldest first.
+
+    The whole series rather than a page of it: this exists to be plotted as a trend, and
+    a trend needs the whole career. Dives that can't produce a figure are simply absent -
+    it's a chart series, not a checklist, and `GET /dive/{uuid}` is where a diver finds
+    out why one of theirs is missing.
+
+    Always the caller's own account, like `/user/dive-stats` - no uuid parameter.
+    """
+    return await _cached_gas_use_history(request, user_id=current_user["id"], db=db)
 
 
 @router.delete("/user")
