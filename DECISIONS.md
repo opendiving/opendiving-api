@@ -2226,3 +2226,41 @@ on restart. No column was added to `dive` or any other existing table - the FK l
 
 `DiveProfile` is deliberately **not** registered in `admin/views.py`, for the same reason as
 `DiveFile` and `CertificationFile`.
+
+## The contact form is an API endpoint, not a `mailto:`
+
+`POST /api/v1/contact` (`api/v1/contact.py`) is the only endpoint here that mails a
+*human* rather than a user, and the only one that both accepts anonymous input and sends
+mail as a result. It exists because the frontend is a pure static-ish Next.js client with
+no mail provider of its own - Resend lives here, so the form has to post here.
+
+Four things about it are deliberate:
+
+- **Unauthenticated.** The person most likely to need it is the one who can't sign in.
+  That makes it the obvious relay-abuse target, hence fixed-window rate limits keyed
+  *both* by submitted email and by client IP (`CONTACT_FORM_RATE_LIMIT_*`, defaulting to
+  a one-hour window). The submitted address is never verified, so the `From:` line in the
+  resulting mail is a claim, not an identity.
+- **Nothing is stored.** There is no inbox in this app to read a contact message from, so
+  a table would be a write-only pile nobody ever opens. The operator's mailbox is the
+  system of record.
+- **`reply_to`, never a spoofed `from`.** `EMAIL_FROM_ADDRESS` is the only address this
+  domain's SPF/DKIM covers; sending *as* the submitter is what gets a sending domain
+  blocklisted. Hitting Reply in the inbox still answers the diver.
+- **`send_contact_form_email` escapes its inputs, and it's the only sender that does.**
+  Every other function in `services/email_service.py` interpolates content this server
+  composed. This one interpolates prose a stranger typed, so it runs `html.escape` over
+  the name, subject and body (then turns newlines into `<br>`). If you add another sender
+  that carries user-supplied text, do the same.
+
+`CONTACT_FORM_EMAIL` (default `contact@opendiving.app`) is the recipient - a self-hosted
+instance should point it at its own operator. It is *not* the same setting as
+`AppSettings.CONTACT_EMAIL`, which is OpenAPI document metadata shown in `/docs` and
+nothing else; the two are separate so that publishing a maintainer address in the API docs
+doesn't silently reroute a stranger's support mail.
+
+With `RESEND_API_KEY` unset the send is a logged no-op, like every other sender here - but
+the whole submission is written to the log, so a local instance can still see what would
+have gone out. The endpoint still reports success in that case: it reports that the
+message was *accepted*, and it deliberately never tells an anonymous caller anything about
+the recipient inbox or downstream delivery.

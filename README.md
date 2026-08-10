@@ -65,6 +65,10 @@ EMAIL_FROM_ADDRESS="noreply@yourdomain.example"
 # Used to build magic-link URLs ({FRONTEND_URL}/auth/verify?token=...)
 FRONTEND_URL="http://localhost:3000"
 
+# Where the frontend's contact form (POST /api/v1/contact) delivers to. Point this
+# at your own inbox when self-hosting - the default is the project's own address.
+CONTACT_FORM_EMAIL="contact@opendiving.app"
+
 # Optional: Google Sign-In (must match the frontend's NEXT_PUBLIC_GOOGLE_CLIENT_ID)
 GOOGLE_CLIENT_ID="your-client-id.apps.googleusercontent.com"
 ```
@@ -85,6 +89,7 @@ source of truth.
 | Trips & sites | `/trip(s)`, `/dive-site(s)` |
 | Gear | `/gear-item(s)`, `/gear-set(s)`, `/gear-service-schedule(s)`, `/gear-service-record(s)`, `/gear-service-due` |
 | Certifications | `/certification(s)`, `/certification/{uuid}/file/{side}` |
+| Contact | `/contact` (unauthenticated, rate-limited; forwards to `CONTACT_FORM_EMAIL`) |
 
 A typical import flow:
 

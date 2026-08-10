@@ -1,0 +1,195 @@
+"""Unit tests for the contact-form endpoint (see `api.v1.contact`).
+
+Built against a minimal app exposing only the contact router - like
+`test_health.py`, this keeps the test off the full application lifespan (DB/Redis
+setup), which this endpoint doesn't touch anyway.
+"""
+
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from src.app.api.v1.contact import router as contact_router
+from src.app.core.exceptions.http_exceptions import RateLimitException
+from src.app.services.email_service import send_contact_form_email
+
+VALID_BODY = {
+    "name": "Jacques Cousteau",
+    "email": "Jacques@Example.com",
+    "category": "import",
+    "subject": "Suunto export won't import",
+    "message": "The JSON my Ocean exports is rejected with a parse error.",
+}
+
+
+def _make_contact_client() -> TestClient:
+    app = FastAPI()
+    app.include_router(contact_router)
+    return TestClient(app)
+
+
+class TestSendContactMessage:
+    def test_accepts_a_valid_submission_and_forwards_it(self):
+        with (
+            patch("src.app.api.v1.contact.send_contact_form_email", new_callable=AsyncMock) as mock_send,
+            patch("src.app.api.v1.contact.enforce_rate_limit", new_callable=AsyncMock),
+        ):
+            response = _make_contact_client().post("/contact", json=VALID_BODY)
+
+            assert response.status_code == 200
+            assert "on its way" in response.json()["message"]
+            mock_send.assert_awaited_once()
+
+    def test_forwards_the_human_readable_category_label(self):
+        """The inbox sees "Dive-computer import", not the `import` slug."""
+        with (
+            patch("src.app.api.v1.contact.send_contact_form_email", new_callable=AsyncMock) as mock_send,
+            patch("src.app.api.v1.contact.enforce_rate_limit", new_callable=AsyncMock),
+        ):
+            _make_contact_client().post("/contact", json=VALID_BODY)
+
+            assert mock_send.await_args.kwargs["category_label"] == "Dive-computer import"
+
+    def test_lowercases_the_submitted_email(self):
+        """So the per-email rate limit can't be sidestepped by varying the casing."""
+        with (
+            patch("src.app.api.v1.contact.send_contact_form_email", new_callable=AsyncMock) as mock_send,
+            patch("src.app.api.v1.contact.enforce_rate_limit", new_callable=AsyncMock) as mock_limit,
+        ):
+            _make_contact_client().post("/contact", json=VALID_BODY)
+
+            assert mock_send.await_args.kwargs["email"] == "jacques@example.com"
+            assert mock_limit.await_args_list[0].args[0] == "contact:email:jacques@example.com"
+
+    def test_rate_limits_by_email_and_by_ip(self):
+        with (
+            patch("src.app.api.v1.contact.send_contact_form_email", new_callable=AsyncMock),
+            patch("src.app.api.v1.contact.enforce_rate_limit", new_callable=AsyncMock) as mock_limit,
+        ):
+            _make_contact_client().post("/contact", json=VALID_BODY)
+
+            keys = [call.args[0] for call in mock_limit.await_args_list]
+            assert keys[0].startswith("contact:email:")
+            assert keys[1].startswith("contact:ip:")
+
+    def test_does_not_send_when_rate_limited(self):
+        with (
+            patch("src.app.api.v1.contact.send_contact_form_email", new_callable=AsyncMock) as mock_send,
+            patch("src.app.api.v1.contact.enforce_rate_limit", new_callable=AsyncMock) as mock_limit,
+        ):
+            mock_limit.side_effect = RateLimitException("Too many requests. Please try again later.")
+
+            response = _make_contact_client().post("/contact", json=VALID_BODY)
+
+            assert response.status_code == 429
+            mock_send.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("email", "not-an-email"),
+            ("category", "partnership"),
+            ("subject", "hi"),
+            ("message", "too short"),
+            ("name", ""),
+        ],
+    )
+    def test_rejects_invalid_submissions(self, field: str, value: str):
+        with (
+            patch("src.app.api.v1.contact.send_contact_form_email", new_callable=AsyncMock) as mock_send,
+            patch("src.app.api.v1.contact.enforce_rate_limit", new_callable=AsyncMock),
+        ):
+            response = _make_contact_client().post("/contact", json={**VALID_BODY, field: value})
+
+            assert response.status_code == 422
+            mock_send.assert_not_awaited()
+
+    def test_rejects_unknown_fields(self):
+        """`extra="forbid"` - a form field the API doesn't know about is a bug on one
+        side or the other, not something to silently drop on the floor.
+        """
+        with (
+            patch("src.app.api.v1.contact.send_contact_form_email", new_callable=AsyncMock),
+            patch("src.app.api.v1.contact.enforce_rate_limit", new_callable=AsyncMock),
+        ):
+            response = _make_contact_client().post("/contact", json={**VALID_BODY, "cc": "someone@example.com"})
+
+            assert response.status_code == 422
+
+
+class TestSendContactFormEmail:
+    ARGS = {
+        "name": "Jacques Cousteau",
+        "email": "jacques@example.com",
+        "category_label": "Bug report",
+        "subject": "Profile chart is empty",
+        "message": "The chart renders nothing for my last dive.",
+    }
+
+    @pytest.mark.asyncio
+    async def test_noop_when_resend_not_configured(self):
+        with (
+            patch("src.app.services.email_service.settings") as mock_settings,
+            patch("src.app.services.email_service.resend") as mock_resend,
+        ):
+            mock_settings.RESEND_API_KEY = None
+
+            await send_contact_form_email(**self.ARGS)
+
+            mock_resend.Emails.send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sends_to_the_configured_inbox_replying_to_the_submitter(self):
+        with (
+            patch("src.app.services.email_service.settings") as mock_settings,
+            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+        ):
+            mock_settings.RESEND_API_KEY = "re_test_key"
+            mock_settings.EMAIL_FROM_ADDRESS = "noreply@mail.opendiving.app"
+            mock_settings.CONTACT_FORM_EMAIL = "contact@opendiving.app"
+
+            await send_contact_form_email(**self.ARGS)
+
+            _send_fn, payload = mock_run_sync.call_args.args
+            assert payload["to"] == "contact@opendiving.app"
+            # Never sent *as* the submitter - only our own address is SPF/DKIM-covered.
+            assert payload["from"] == "noreply@mail.opendiving.app"
+            assert payload["reply_to"] == "jacques@example.com"
+            assert payload["subject"] == "[Bug report] Profile chart is empty"
+
+    @pytest.mark.asyncio
+    async def test_escapes_html_in_the_submitted_message(self):
+        """The one sender in this module whose content a stranger typed."""
+        with (
+            patch("src.app.services.email_service.settings") as mock_settings,
+            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+        ):
+            mock_settings.RESEND_API_KEY = "re_test_key"
+            mock_settings.EMAIL_FROM_ADDRESS = "noreply@mail.opendiving.app"
+            mock_settings.CONTACT_FORM_EMAIL = "contact@opendiving.app"
+
+            await send_contact_form_email(
+                **{**self.ARGS, "message": '<a href="https://evil.example">click</a>', "name": "<b>bold</b>"}
+            )
+
+            _send_fn, payload = mock_run_sync.call_args.args
+            assert "<a href=" not in payload["html"]
+            assert "&lt;a href=" in payload["html"]
+            assert "<b>bold</b>" not in payload["html"]
+
+    @pytest.mark.asyncio
+    async def test_keeps_line_breaks_readable(self):
+        with (
+            patch("src.app.services.email_service.settings") as mock_settings,
+            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+        ):
+            mock_settings.RESEND_API_KEY = "re_test_key"
+            mock_settings.EMAIL_FROM_ADDRESS = "noreply@mail.opendiving.app"
+            mock_settings.CONTACT_FORM_EMAIL = "contact@opendiving.app"
+
+            await send_contact_form_email(**{**self.ARGS, "message": "line one\nline two"})
+
+            _send_fn, payload = mock_run_sync.call_args.args
+            assert "line one<br>line two" in payload["html"]

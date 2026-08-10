@@ -1,12 +1,13 @@
 """Transactional email delivery via Resend (https://resend.com).
 
 Used for the magic-link sign-in email (see `api.v1.auth.request_email_link`), the
-email-change confirmation/notification pair (see `api.v1.users`), and the gear-service
-digest (see `core.worker.functions.send_gear_service_digests`), all funneling through
-`_send` so the "run Resend's blocking client off the event loop" plumbing only lives in
-one place.
+email-change confirmation/notification pair (see `api.v1.users`), the gear-service
+digest (see `core.worker.functions.send_gear_service_digests`), and the contact form
+(see `api.v1.contact`), all funneling through `_send` so the "run Resend's blocking
+client off the event loop" plumbing only lives in one place.
 """
 
+import html
 import logging
 from typing import Any
 
@@ -109,6 +110,52 @@ async def send_gear_service_digest_email(email: str, lines: list[tuple[str, str,
             f"<ul>{items}</ul>"
             f'<p><a href="{settings.FRONTEND_URL}/gear">Review your gear</a>, or '
             f'<a href="{settings.FRONTEND_URL}/settings">turn these reminders off</a>.</p>'
+        ),
+    }
+
+    await anyio.to_thread.run_sync(_send, payload)
+
+
+async def send_contact_form_email(name: str, email: str, category_label: str, subject: str, message: str) -> None:
+    """Forwards a contact-form submission to `CONTACT_FORM_EMAIL`.
+
+    Every other sender in this module mails content this server composed itself; this
+    one mails content a *stranger* typed, so it's the one place that has to escape its
+    inputs - an unescaped `<a href=...>` in the message body would otherwise render as
+    a live link in the recipient's mail client.
+
+    `reply_to` is the submitter's address, so hitting Reply in the inbox answers the
+    diver rather than the no-reply `from` address. The message is never sent *as* them
+    (`from` stays `EMAIL_FROM_ADDRESS`): the domain's SPF/DKIM only covers our own
+    address, and spoofing an arbitrary sender is what gets a domain blocklisted.
+
+    A no-op (logged, not raised) when `RESEND_API_KEY` isn't configured, matching the
+    rest of this module - the whole submission is written to the log in that case, so a
+    local instance without a Resend account can still see what would have been sent.
+    """
+    if not settings.RESEND_API_KEY:
+        logger.warning(
+            "RESEND_API_KEY not configured; contact message from %s <%s> [%s] %s: %s",
+            name,
+            email,
+            category_label,
+            subject,
+            message,
+        )
+        return
+
+    body = html.escape(message).replace("\n", "<br>")
+    payload = {
+        "from": settings.EMAIL_FROM_ADDRESS,
+        "to": settings.CONTACT_FORM_EMAIL,
+        "reply_to": email,
+        "subject": f"[{category_label}] {subject}",
+        "html": (
+            f"<p><strong>From:</strong> {html.escape(name)} &lt;{html.escape(email)}&gt;<br>"
+            f"<strong>Category:</strong> {html.escape(category_label)}<br>"
+            f"<strong>Subject:</strong> {html.escape(subject)}</p>"
+            "<hr>"
+            f"<p>{body}</p>"
         ),
     }
 

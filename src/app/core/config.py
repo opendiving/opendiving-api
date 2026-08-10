@@ -15,6 +15,9 @@ class AppSettings(BaseSettings):
     APP_DESCRIPTION: str | None = config("APP_DESCRIPTION", default=None)
     APP_VERSION: str | None = config("APP_VERSION", default=None)
     LICENSE_NAME: str | None = config("LICENSE", default=None)
+    # OpenAPI document metadata only ("who maintains this API", shown in `/docs`) -
+    # *not* where the frontend's contact form delivers to. That's
+    # `ContactSettings.CONTACT_FORM_EMAIL` below.
     CONTACT_NAME: str | None = config("CONTACT_NAME", default=None)
     CONTACT_EMAIL: str | None = config("CONTACT_EMAIL", default=None)
 
@@ -114,6 +117,23 @@ class EmailSettings(BaseSettings):
     EMAIL_FROM_ADDRESS: str = config("EMAIL_FROM_ADDRESS", default="onboarding@resend.dev")
 
 
+class ContactSettings(BaseSettings):
+    # Inbox the frontend's contact form (`POST /api/v1/contact`) delivers to. A
+    # self-hosted instance should point this at its own operator - the default is the
+    # address for the project's own deployment, and mail sent there about someone
+    # else's server is not something we can act on.
+    CONTACT_FORM_EMAIL: str = config("CONTACT_FORM_EMAIL", default="contact@opendiving.app")
+
+    # Fixed-window rate limits (see `core.utils.rate_limit`), keyed separately by the
+    # submitted email and by client IP, mirroring the magic-link limits above. The
+    # endpoint is unauthenticated and sends mail, so this is the only thing standing
+    # between it and being used as a relay; the window is deliberately much longer
+    # than the auth one, since nobody legitimately files ten support requests an hour.
+    CONTACT_FORM_RATE_LIMIT_WINDOW_SECONDS: int = config("CONTACT_FORM_RATE_LIMIT_WINDOW_SECONDS", default=3600)
+    CONTACT_FORM_RATE_LIMIT_PER_EMAIL: int = config("CONTACT_FORM_RATE_LIMIT_PER_EMAIL", default=3)
+    CONTACT_FORM_RATE_LIMIT_PER_IP: int = config("CONTACT_FORM_RATE_LIMIT_PER_IP", default=10)
+
+
 class FrontendSettings(BaseSettings):
     # Used to build the magic-link URL emailed to the user (`{FRONTEND_URL}/auth/verify?token=...`).
     FRONTEND_URL: str = config("FRONTEND_URL", default="http://localhost:3000")
@@ -185,6 +205,7 @@ class Settings(
     GoogleAuthSettings,
     MagicLinkSettings,
     EmailSettings,
+    ContactSettings,
     FrontendSettings,
     GearServiceSettings,
     TestSettings,
