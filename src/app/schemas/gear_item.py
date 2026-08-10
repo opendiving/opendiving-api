@@ -6,6 +6,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema
+from .gear_service import GearServiceScheduleInfo
 
 
 class GearType(StrEnum):
@@ -79,6 +80,13 @@ class GearItemRead(GearItemBase, PublicUUIDSchema):
     is_archived: bool = False
     archived_at: datetime | None = None
     dive_count: Annotated[int, Field(default=0, description="Number of the owner's dives this item was used on")]
+    # This item's servicing rules, embedded so the gear list can badge "service due"
+    # without a request per row. Carries due dates and thresholds only, never a computed
+    # status - see `ServiceStatus` in `schemas/gear_service.py`.
+    service: Annotated[
+        list[GearServiceScheduleInfo],
+        Field(default_factory=list, description="Service schedules attached to this item"),
+    ]
     created_at: datetime
 
 

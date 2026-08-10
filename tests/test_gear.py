@@ -8,7 +8,7 @@ recalculation statement. The endpoint behaviour on top of a live Postgres/Redis 
 exercised end to end by hand (see DECISIONS.md), not here.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from fnmatch import fnmatch
 from unittest.mock import AsyncMock, MagicMock
 
@@ -22,6 +22,7 @@ from src.app.crud.crud_gear_set_items import replace_gear_items_for_set
 from src.app.models.dive_gear_item import DiveGearItem
 from src.app.models.gear_set_item import GearSetItem
 from src.app.schemas.gear_item import GearItemInfo, GearItemReadInternal, GearItemUpdate, GearType
+from src.app.schemas.gear_service import GearServiceScheduleInfo, ServiceKind
 from src.app.schemas.gear_set import GearSetCreateRequest, GearSetReadInternal, GearSetUpdateRequest
 from src.app.services.cache_invalidation import invalidate_dive_caches, invalidate_gear_caches
 from src.app.services.gear_stats import recalculate_gear_dive_counts
@@ -68,6 +69,38 @@ class TestPublicShapeConversion:
 
         assert public.name == "MK25 EVO"
         assert public.dive_count == 0
+
+    def test_gear_item_has_no_service_schedules_by_default(self) -> None:
+        """`write_gear_item` passes no `service`, a brand-new item provably having none -
+        so the field has to default rather than blow up."""
+        public = _to_public_gear_item(_internal_gear_item(), user_uuid=uuid7())
+
+        assert public.service == []
+
+    def test_gear_item_embeds_the_service_schedules_it_is_given(self) -> None:
+        """The read paths resolve a whole page's schedules in one batched query and hand
+        them in here, so the gear list can badge "service due" without a request per row.
+        """
+        user_uuid = uuid7()
+        internal = _internal_gear_item()
+        schedule = GearServiceScheduleInfo(
+            uuid=uuid7(),
+            kind=ServiceKind.SERVICE,
+            interval_months=12,
+            next_due_on=date(2027, 3, 14),
+            last_service_on=date(2026, 3, 14),
+        )
+
+        public = _to_public_gear_item(internal, user_uuid=user_uuid, service=[schedule])
+
+        assert [s.kind for s in public.service] == [ServiceKind.SERVICE]
+        assert public.service[0].next_due_on == date(2027, 3, 14)
+        # Only clock-stable facts are embedded - a computed status would be wrong the
+        # next morning once the response has been cached (see `ServiceStatus`).
+        assert not hasattr(public.service[0], "status")
+        # Embedding schedules must not disturb the existing shape rules.
+        assert not hasattr(public, "id")
+        assert not hasattr(public, "user_id")
 
     def test_gear_set_embeds_its_items_in_order(self) -> None:
         user_uuid = uuid7()

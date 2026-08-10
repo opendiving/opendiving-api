@@ -1,9 +1,10 @@
 """Transactional email delivery via Resend (https://resend.com).
 
-Used for the magic-link sign-in email (see `api.v1.auth.request_email_link`) and the
-email-change confirmation/notification pair (see `api.v1.users`), all funneling
-through `_send` so the "run Resend's blocking client off the event loop" plumbing
-only lives in one place.
+Used for the magic-link sign-in email (see `api.v1.auth.request_email_link`), the
+email-change confirmation/notification pair (see `api.v1.users`), and the gear-service
+digest (see `core.worker.functions.send_gear_service_digests`), all funneling through
+`_send` so the "run Resend's blocking client off the event loop" plumbing only lives in
+one place.
 """
 
 import logging
@@ -72,6 +73,42 @@ async def send_email_change_confirmation_email(new_email: str, confirm_url: str)
             f"<p>This link expires in {settings.EMAIL_CHANGE_TOKEN_EXPIRE_MINUTES} minutes "
             "and can only be used once. If you didn't request this, you can safely "
             "ignore this email - your account email won't change.</p>"
+        ),
+    }
+
+    await anyio.to_thread.run_sync(_send, payload)
+
+
+async def send_gear_service_digest_email(email: str, lines: list[tuple[str, str, str]]) -> None:
+    """Sends the "your gear needs servicing" digest.
+
+    One email per user per run, never one per item - a diver whose whole kit comes due
+    the same week should get a single list, not six separate emails.
+
+    Each entry in `lines` is `(gear_item_label, due_text, gear_item_uuid)`, already
+    ordered and phrased by the caller. This function deliberately does no status
+    arithmetic of its own, so exactly one place (`services.gear_service`) decides what
+    "overdue" means.
+    """
+    if not settings.RESEND_API_KEY:
+        logger.warning("RESEND_API_KEY not configured; gear service digest for %s: %s", email, lines)
+        return
+
+    items = "".join(
+        f'<li><a href="{settings.FRONTEND_URL}/gear/{item_uuid}"><strong>{label}</strong></a> - {detail}</li>'
+        for label, detail, item_uuid in lines
+    )
+    subject = "Your dive gear needs servicing" if len(lines) == 1 else f"{len(lines)} pieces of gear need servicing"
+
+    payload = {
+        "from": settings.EMAIL_FROM_ADDRESS,
+        "to": email,
+        "subject": subject,
+        "html": (
+            "<p>A quick heads-up before your next trip - this gear is due for service:</p>"
+            f"<ul>{items}</ul>"
+            f'<p><a href="{settings.FRONTEND_URL}/gear">Review your gear</a>, or '
+            f'<a href="{settings.FRONTEND_URL}/settings">turn these reminders off</a>.</p>'
         ),
     }
 

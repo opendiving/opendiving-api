@@ -76,6 +76,24 @@ async def resolve_gear_item_ids_for_user(
     return mapping
 
 
+async def get_gear_item_uuids_by_id(db: AsyncSession, gear_item_ids: list[int]) -> dict[int, uuid_pkg.UUID]:
+    """Resolve internal gear item `id`s back to their public `uuid`s, in one query.
+
+    The reverse of `resolve_gear_item_ids_for_user`, for read paths that hold internal
+    FKs and need to emit the public shape - a service schedule/record row carries
+    `gear_item_id`, but `GearServiceScheduleRead` exposes `gear_item_uuid`. Batched so a
+    paginated listing resolves every row's item in one round trip instead of per row.
+
+    Unlike its counterpart this does no ownership filtering: callers reach it only with
+    ids taken from rows they have already authorized.
+    """
+    if not gear_item_ids:
+        return {}
+
+    result = await db.execute(select(GearItem.id, GearItem.uuid).where(GearItem.id.in_(set(gear_item_ids))))
+    return {row.id: row.uuid for row in result}
+
+
 async def gear_item_name_exists(
     db: AsyncSession, user_id: int, name: str, brand: str | None = None, exclude_id: int | None = None
 ) -> bool:

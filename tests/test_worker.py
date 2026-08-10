@@ -1,11 +1,14 @@
 """Unit tests for the Arq worker background tasks."""
 
-from datetime import datetime
+from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from uuid6 import uuid7
 
-from src.app.core.worker.functions import purge_expired_tokens
+from src.app.core.worker.functions import _due_text, purge_expired_tokens, send_gear_service_digests
+from src.app.schemas.gear_service import ServiceKind, ServiceStatus
 
 
 class _FakeSessionContext:
@@ -65,3 +68,190 @@ class TestPurgeExpiredTokens:
 
             mock_blacklist.delete.assert_not_called()
             assert "No expired" in result
+
+
+def _row(**overrides):
+    """A row as the digest's join query yields it."""
+    defaults = {
+        "user_id": 1,
+        "email": "diver@example.com",
+        "schedule_id": 10,
+        "kind": ServiceKind.SERVICE.value,
+        "label": None,
+        "next_due_on": date(2026, 8, 20),
+        "next_due_at_dive_count": None,
+        "notified_stage": None,
+        "notified_for_due_on": None,
+        "notified_for_due_at_dive_count": None,
+        "notified_at": None,
+        "gear_item_uuid": uuid7(),
+        "name": "MK25 EVO",
+        "brand": "Scubapro",
+        "dive_count": 40,
+    }
+    return SimpleNamespace(**{**defaults, **overrides})
+
+
+class _RecordingSession(AsyncMock):
+    """`local_session()` stand-in that replays a fixed result set and records writes."""
+
+    def __init__(self, rows):
+        super().__init__()
+        self._rows = rows
+        self.updates = []
+        self.calls = []
+
+    async def execute(self, statement):
+        compiled = str(statement)
+        self.calls.append(compiled)
+        if compiled.strip().upper().startswith("UPDATE"):
+            self.updates.append(statement.compile().params)
+            return MagicMock()
+        result = MagicMock()
+        result.all.return_value = self._rows
+        return result
+
+
+def _patched(session):
+    return (
+        patch("src.app.core.worker.functions.local_session", return_value=_FakeSessionContext(session)),
+        patch("src.app.core.worker.functions.send_gear_service_digest_email", new_callable=AsyncMock),
+    )
+
+
+class TestDueText:
+    """Each digest line has to name the arm that actually ran out."""
+
+    TODAY = date(2026, 8, 10)
+
+    def test_reports_an_overdue_date(self) -> None:
+        row = _row(next_due_on=date(2026, 7, 1))
+        assert "overdue since 1 Jul 2026" in _due_text(row, ServiceStatus.OVERDUE, self.TODAY)
+
+    def test_reports_an_upcoming_date(self) -> None:
+        row = _row(next_due_on=date(2026, 8, 20))
+        assert "due 20 Aug 2026" in _due_text(row, ServiceStatus.DUE_SOON, self.TODAY)
+
+    def test_reports_the_dive_arm_when_that_is_the_one_that_ran_out(self) -> None:
+        # Saying "due 1 Mar" about a regulator that has actually run out of dives would
+        # be worse than useless.
+        row = _row(next_due_on=date(2027, 3, 1), next_due_at_dive_count=140, dive_count=143)
+        text = _due_text(row, ServiceStatus.OVERDUE, self.TODAY)
+        assert "overdue by 3 dives" in text
+        assert "2027" not in text
+
+    def test_reports_a_dive_only_schedule(self) -> None:
+        row = _row(next_due_on=None, next_due_at_dive_count=140, dive_count=135)
+        assert "due in 5 dives" in _due_text(row, ServiceStatus.DUE_SOON, self.TODAY)
+
+    def test_singularizes_one_dive(self) -> None:
+        row = _row(next_due_on=None, next_due_at_dive_count=140, dive_count=139)
+        assert "due in 1 dive" in _due_text(row, ServiceStatus.DUE_SOON, self.TODAY)
+
+    def test_includes_the_kind_and_its_label(self) -> None:
+        row = _row(kind=ServiceKind.VISUAL_INSPECTION.value, label="Stage 1")
+        assert _due_text(row, ServiceStatus.DUE_SOON, self.TODAY).startswith("Visual inspection (Stage 1)")
+
+
+class TestSendGearServiceDigests:
+    """One email per user, sent before the notify state is marked."""
+
+    @pytest.mark.asyncio
+    async def test_sends_nothing_when_no_schedule_is_due(self) -> None:
+        session = _RecordingSession([])
+        session_patch, email_patch = _patched(session)
+        with session_patch, email_patch as send:
+            result = await send_gear_service_digests(MagicMock())
+
+        send.assert_not_awaited()
+        assert session.updates == []
+        assert "No gear service reminders" in result
+
+    @pytest.mark.asyncio
+    async def test_sends_one_email_per_user_regardless_of_item_count(self) -> None:
+        overdue = date(2020, 1, 1)
+        rows = [
+            _row(user_id=1, schedule_id=10, next_due_on=overdue, name="MK25 EVO"),
+            _row(user_id=1, schedule_id=11, next_due_on=overdue, name="Wing 17L"),
+            _row(user_id=2, schedule_id=12, next_due_on=overdue, email="other@example.com", name="AL80"),
+        ]
+        session = _RecordingSession(rows)
+        session_patch, email_patch = _patched(session)
+        with session_patch, email_patch as send:
+            result = await send_gear_service_digests(MagicMock())
+
+        assert send.await_count == 2
+        first_email, first_lines = send.await_args_list[0].args
+        assert first_email == "diver@example.com"
+        # Both of user 1's items in one list, not two separate emails.
+        assert len(first_lines) == 2
+        assert {line[0] for line in first_lines} == {"Scubapro MK25 EVO", "Scubapro Wing 17L"}
+        assert "2 gear service digest(s) covering 3 schedule(s)" in result
+
+    @pytest.mark.asyncio
+    async def test_marks_the_notify_state_after_sending(self) -> None:
+        # Send first, mark second: a Resend failure must produce a duplicate tomorrow
+        # rather than a reminder that silently never arrives.
+        due_on = date(2020, 1, 1)
+        session = _RecordingSession([_row(next_due_on=due_on)])
+        session_patch, email_patch = _patched(session)
+        with session_patch, email_patch:
+            await send_gear_service_digests(MagicMock())
+
+        assert len(session.updates) == 1
+        marked = session.updates[0]
+        assert marked["notified_stage"] == ServiceStatus.OVERDUE.value
+        assert marked["notified_for_due_on"] == due_on
+        assert isinstance(marked["notified_at"], datetime)
+
+    @pytest.mark.asyncio
+    async def test_a_second_run_with_unchanged_state_sends_nothing(self) -> None:
+        due_on = date(2020, 1, 1)
+        already = _row(
+            next_due_on=due_on,
+            notified_stage=ServiceStatus.OVERDUE.value,
+            notified_for_due_on=due_on,
+            notified_at=datetime.now(UTC),
+        )
+        session = _RecordingSession([already])
+        session_patch, email_patch = _patched(session)
+        with session_patch, email_patch as send:
+            result = await send_gear_service_digests(MagicMock())
+
+        send.assert_not_awaited()
+        assert "No gear service reminders" in result
+
+    @pytest.mark.asyncio
+    async def test_a_still_overdue_schedule_re_nags_after_the_quiet_period(self) -> None:
+        due_on = date(2020, 1, 1)
+        stale = _row(
+            next_due_on=due_on,
+            notified_stage=ServiceStatus.OVERDUE.value,
+            notified_for_due_on=due_on,
+            notified_at=datetime.now(UTC) - timedelta(days=120),
+        )
+        session = _RecordingSession([stale])
+        session_patch, email_patch = _patched(session)
+        with session_patch, email_patch as send:
+            await send_gear_service_digests(MagicMock())
+
+        send.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_the_query_excludes_archived_deleted_and_opted_out(self) -> None:
+        session = _RecordingSession([])
+        session_patch, email_patch = _patched(session)
+        with session_patch, email_patch:
+            await send_gear_service_digests(MagicMock())
+
+        statement = session.calls[0]
+        # Retiring gear must silence it without pausing every rule on it.
+        assert "gear_item.is_archived IS false" in statement
+        assert "gear_item.is_deleted IS false" in statement
+        assert "gear_service_schedule.is_deleted IS false" in statement
+        assert "gear_service_schedule.is_active IS true" in statement
+        assert '"user".is_deleted IS false' in statement
+        assert '"user".gear_service_emails IS true' in statement
+        # Both interval arms are pre-filtered on.
+        assert "gear_service_schedule.next_due_on <=" in statement
+        assert "gear_item.dive_count >= gear_service_schedule.next_due_at_dive_count" in statement

@@ -11,6 +11,7 @@ from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import DuplicateValueException, ForbiddenException, NotFoundException
 from ...core.utils.cache import cache
 from ...crud.crud_gear_items import crud_gear_items, gear_item_name_exists
+from ...crud.crud_gear_service_schedules import get_schedules_for_gear_item, get_schedules_for_gear_items
 from ...schemas.gear_item import (
     GearItemCreate,
     GearItemCreateInternal,
@@ -18,7 +19,9 @@ from ...schemas.gear_item import (
     GearItemReadInternal,
     GearItemUpdate,
 )
+from ...schemas.gear_service import GearServiceScheduleInfo
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_gear_caches
+from ...services.gear_service import soft_delete_schedules_for_gear_item
 
 router = APIRouter(tags=["gear"])
 
@@ -28,12 +31,24 @@ def _gear_item_owner_id(db_gear_item: Any) -> int:
 
 
 def _to_public_gear_item(
-    db_gear_item: GearItemReadInternal | dict[str, Any], *, user_uuid: uuid_pkg.UUID
+    db_gear_item: GearItemReadInternal | dict[str, Any],
+    *,
+    user_uuid: uuid_pkg.UUID,
+    service: list[GearServiceScheduleInfo] | None = None,
 ) -> GearItemRead:
     """Convert an internal gear item representation (integer FKs) into its public shape
-    (owning user referenced by `uuid`)."""
+    (owning user referenced by `uuid`, service schedules embedded).
+
+    `service` defaults to an empty list rather than being fetched here, so the read
+    paths can resolve a whole page's schedules in one batched query - and so
+    `write_gear_item` can skip the lookup entirely, a brand-new item provably having none.
+    """
     data = db_gear_item if isinstance(db_gear_item, dict) else db_gear_item.model_dump()
-    return GearItemRead(**{k: v for k, v in data.items() if k not in ("id", "user_id")}, user_uuid=user_uuid)
+    return GearItemRead(
+        **{k: v for k, v in data.items() if k not in ("id", "user_id")},
+        user_uuid=user_uuid,
+        service=service or [],
+    )
 
 
 @router.post("/gear-item", response_model=GearItemRead, status_code=201)
@@ -100,7 +115,14 @@ async def _cached_read_gear_items(
         sort_orders="asc",
         **filters,
     )
-    data["data"] = [_to_public_gear_item(item, user_uuid=user_uuid).model_dump() for item in data["data"]]
+    # One batched query for the whole page's service schedules rather than one per row -
+    # every gear row shows a service badge, so an N+1 here would be on the hot path.
+    # `get_multi` passes no `schema_to_select`, so each row still carries its internal `id`.
+    schedules_by_item = await get_schedules_for_gear_items(db=db, gear_item_ids=[item["id"] for item in data["data"]])
+    data["data"] = [
+        _to_public_gear_item(item, user_uuid=user_uuid, service=schedules_by_item[item["id"]]).model_dump()
+        for item in data["data"]
+    ]
 
     response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
     return response
@@ -146,7 +168,9 @@ async def _cached_read_gear_item(
     if db_gear_item is None:
         raise NotFoundException("Gear item not found")
 
-    return _to_public_gear_item(cast(GearItemReadInternal, db_gear_item), user_uuid=owner_uuid)
+    db_gear_item = cast(GearItemReadInternal, db_gear_item)
+    service = await get_schedules_for_gear_item(db=db, gear_item_id=db_gear_item.id)
+    return _to_public_gear_item(db_gear_item, user_uuid=owner_uuid, service=service)
 
 
 @router.get("/gear-item/{uuid}", response_model=GearItemRead)
@@ -228,6 +252,11 @@ async def erase_gear_item(
     """Soft-deletes a gear item. Dives and gear sets that already reference it keep their
     join rows (and so keep showing it), matching how a soft-deleted dive site behaves -
     archiving is the non-destructive way to retire gear you still want in your log.
+
+    Its service schedules go with it, though: `is_deleted` is application-level, so the
+    `ON DELETE CASCADE` on `gear_service_schedule.gear_item_id` never fires, and without
+    this the digest would keep emailing about gear the diver can no longer see. The
+    service *records* are left alone - see `soft_delete_schedules_for_gear_item`.
     """
     db_gear_item = await crud_gear_items.get(db=db, uuid=uuid, schema_to_select=GearItemReadInternal)
     if db_gear_item is None:
@@ -237,6 +266,8 @@ async def erase_gear_item(
     if owner_id != current_user["id"]:
         raise ForbiddenException()
 
+    gear_item_id = cast(int, db_gear_item["id"] if isinstance(db_gear_item, dict) else db_gear_item.id)
+    await soft_delete_schedules_for_gear_item(db=db, gear_item_id=gear_item_id, commit=False)
     await crud_gear_items.delete(db=db, uuid=uuid)
     await invalidate_gear_caches(owner_id)
     # Soft-deleted gear stays on the dives that used it, so their cached reads still
