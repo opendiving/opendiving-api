@@ -1644,3 +1644,113 @@ ALTER TABLE "user" ADD COLUMN gear_service_emails BOOLEAN NOT NULL DEFAULT true;
 That is the whole manual-DDL list for this feature. Both new tables, all their
 indexes, all three `CheckConstraint`s and both FKs arrive via `create_all()` on
 restart, because they are brand-new tables.
+
+## Certification card files live in Postgres, not object storage
+
+The whole point of storing c-cards is to remove a reason to keep PADI's or SSI's app
+installed. We can't *issue* certifications, but we can hold a photo of the card.
+
+The bytes go in a `bytea` column (`certification_file.data`). There is no bucket, no
+storage client and no credentials to manage, because at this size there is nothing to
+gain: a diver has well under ten cards of a few hundred KB to a few MB each, so the
+existing database and its backups cover the lot. Object storage would add
+infrastructure, configuration, a new failure mode and orphaned-object cleanup to store
+what amounts to a few MB per user.
+
+This will not stay true. When photo galleries arrive - hundreds of multi-megabyte dive
+photos per diver - blobs in Postgres become a real problem for backup size and restore
+time. What makes that migration tractable is that `services/certification_files.py` is
+the **only** module that touches `data`: routes call `store_certification_file` /
+`load_certification_file` / `delete_certification_file` and never see a column. Moving
+to S3 means rewriting those functions and adding a nullable `storage_key`. Deliberately
+no abstract `FileStorage` base class in the meantime - there is one implementation and
+no configuration selecting between two, so an interface would be scaffolding for a
+migration that hasn't happened. The module boundary is the seam.
+
+## Card files are a separate table, hard-deleted, with a deferred `data` column
+
+`certification` itself carries **no binary columns**, so listing a diver's
+certifications can never drag megabytes through the query. Two `bytea` columns on the
+main table would have worked with `deferred()`, but deferred columns are easy to load by
+accident from a `get_multi` or an admin view; a separate table makes that structurally
+impossible and gives front and back identical handling instead of duplicated column
+pairs. `data` is *also* `deferred()`, so even a direct query for a file row returns
+metadata only unless `undefer` asks for the bytes - which only `load_certification_file`
+does.
+
+`CertificationFile` has no `SoftDeleteMixin`, unlike every other model here. A
+soft-deleted blob keeps occupying its bytes forever with nothing able to read it. So
+files are hard-deleted - including when their parent certification is deleted, which
+`erase_certification` does explicitly: `is_deleted` is application-level, so no `DELETE
+FROM certification` ever runs and the FK's `ON DELETE CASCADE` never fires. Same trap as
+`soft_delete_schedules_for_gear_item`.
+
+Two gotchas worth keeping:
+
+- `PublicUUIDMixin`'s `uuid` has a `default_factory`, which is a **dataclass**-level
+  default applied when the ORM constructs an instance. `store_certification_file` uses a
+  Core-level `pg_insert(...)` for its `ON CONFLICT` upsert, which constructs nothing, so
+  the `uuid` has to be passed explicitly or Postgres gets a NULL. It is set on insert
+  only and left out of the `DO UPDATE` set, so replacing a card's photo swaps the bytes
+  without the file changing identity.
+- Wrapping a column in `deferred()` hides the `Mapped[bytes]` annotation from
+  SQLAlchemy's nullability inference, so `data` needs an explicit `nullable=False`.
+
+## Uploaded content types are sniffed, never taken from the client
+
+`sniff_content_type` identifies an upload from its leading bytes and rejects anything
+that isn't JPEG, PNG, WEBP or PDF. The sniffed value is what gets stored *and* what the
+download route later serves the file back as - so trusting the uploader's
+`Content-Type` would let someone have us serve arbitrary bytes under a type of their
+choosing. A `.jpg` whose contents are HTML is a 415, not a stored `text/html`.
+
+HEIC is detected separately and rejected with its own message naming the fix. It is what
+an iPhone stores natively, so a bare "unsupported file type" would read as a bug to
+anyone who just photographed their card; in practice iOS transcodes to JPEG when
+uploading through a file input, so this mostly catches files picked out of the Files app.
+Supporting it properly needs `pillow-heif`, which is a bigger change than this feature.
+
+The download response carries `Content-Disposition: attachment`, `X-Content-Type-Options:
+nosniff` and `Content-Security-Policy: default-src 'none'; sandbox`. `attachment` rather
+than `inline` because the web app fetches these through its API client and renders from a
+blob URL, never navigating to the URL - so nothing is lost, and a malicious PDF opened
+directly in a tab can't execute in the same-origin viewer.
+
+## The card download endpoint is never Redis-cached
+
+`@cache` stores serialized API responses; parking multi-megabyte binaries in it would
+evict everything else the cache exists for. The endpoint uses `ETag`/`If-None-Match`
+instead, which does the equivalent job in the browser where the bytes are wanted anyway.
+The `ETag` is the stored `sha256`, and `get_certification_file_sha256` fetches just that
+column, so a conditional request costs one narrow query rather than a full read that gets
+thrown away.
+
+The metadata reads *are* cached, hand-written rather than built with
+`OwnedResourceCache` - that factory's own docstring rules out resources whose list does
+more than a `get_multi` plus a shape conversion, and `CertificationRead` embeds each
+row's file metadata (batched by `get_file_infos_for_certifications`, the
+`get_schedules_for_gear_items` pattern). `invalidate_certification_caches` runs after
+file uploads and deletes too, not just metadata writes: photographing a card changes
+what a cached list page should say even though no `certification` column moved.
+
+## `agency_other` is validated against `agency` in two places
+
+`CertificationBase` rejects `agency_other` unless `agency` is `other`, and requires it
+when it is - in both directions, so a stored row can never carry a second agency name
+that some future read path might display. `CertificationUpdate` can't do this: a PATCH
+may carry either field alone, so the pairing is only checkable once merged over the
+stored row. `patch_certification` does that with `_validate_agency_pairing`.
+
+Note the asymmetry this creates for clients: switching a certification away from `other`
+must send `agency_other: null` explicitly, or the merged result still has both set and
+422s.
+
+## No manual DDL for this feature
+
+`certification` and `certification_file` are both brand-new tables, so per "Schema
+changes have no migration tool" they and all their indexes arrive via `create_all()` on
+restart. There is nothing to `ALTER`.
+
+`CertificationFile` is deliberately **not** registered in `admin/views.py`: its rows are
+mostly one multi-megabyte `bytea` the generic list/detail views would try to render as
+text, and there's no admin form that could meaningfully accept a file upload.
