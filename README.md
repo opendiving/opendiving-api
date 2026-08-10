@@ -43,7 +43,7 @@ serves it all over a clean, documented REST API — so your data is never more t
 ```bash
 git clone https://github.com/opendiving/opendiving-api.git
 cd opendiving-api
-# create src/.env (see Configuration below)
+cp src/.env.example src/.env   # then set SECRET_KEY and the passwords
 docker compose up
 ```
 
@@ -54,7 +54,10 @@ worker for emails and scheduled jobs. Pair it with
 
 ### Configuration
 
-Everything is configured through `src/.env`. The interesting parts:
+Everything is configured through `src/.env`, which starts as a copy of
+[`src/.env.example`](src/.env.example) — every setting is listed and commented there.
+Change `SECRET_KEY`, `POSTGRES_PASSWORD` and `ADMIN_PASSWORD` before you go anywhere near
+a public network. The parts worth knowing about:
 
 ```bash
 # Magic-link emails via Resend (https://resend.com). Leave unset for local
@@ -73,8 +76,8 @@ CONTACT_FORM_EMAIL="contact@opendiving.app"
 GOOGLE_CLIENT_ID="your-client-id.apps.googleusercontent.com"
 ```
 
-Token lifetimes, rate limits, and the rest have sensible defaults — see
-`src/app/core/config.py` for the full list.
+Token lifetimes, rate limits, and the rest have sensible defaults — they're in
+`src/.env.example` commented out, and `src/app/core/config.py` is the authoritative list.
 
 ## API overview
 
