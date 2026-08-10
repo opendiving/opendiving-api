@@ -4,6 +4,7 @@ from .certification import Certification
 from .certification_file import CertificationFile
 from .dive import Dive
 from .dive_dive_site import DiveDiveSite
+from .dive_file import DiveFile
 from .dive_gear_item import DiveGearItem
 from .dive_mixture import DiveMixture
 from .dive_site import DiveSite

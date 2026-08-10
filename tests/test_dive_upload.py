@@ -1,13 +1,17 @@
 """Unit tests for the dive-file upload endpoint's size guard (`/dive/parse`)."""
 
+import uuid as uuid_pkg
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.app.api.dependencies import get_current_user
-from src.app.api.v1.dives import _MAX_DIVE_FILE_SIZE
 from src.app.api.v1.dives import router as dives_router
+from src.app.services.dive_files import MAX_DIVE_FILE_SIZE
 
 SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
+
+USER_UUID = uuid_pkg.UUID("00000000-0000-0000-0000-0000000000aa")
 
 VALID_SUUNTO_XML = f"""<?xml version="1.0" encoding="utf-8"?>
 <Dive xmlns="{SUUNTO_NS}">
@@ -25,7 +29,7 @@ def _make_dive_upload_client() -> TestClient:
     """
     app = FastAPI()
     app.include_router(dives_router)
-    app.dependency_overrides[get_current_user] = lambda: {"id": 1, "is_superuser": False}
+    app.dependency_overrides[get_current_user] = lambda: {"id": 1, "uuid": USER_UUID, "is_superuser": False}
     return TestClient(app)
 
 
@@ -43,7 +47,7 @@ class TestParseDiveUploadSizeLimit:
 
     def test_rejects_file_over_size_limit_with_413(self):
         client = _make_dive_upload_client()
-        oversized_content = b"a" * (_MAX_DIVE_FILE_SIZE + 1)
+        oversized_content = b"a" * (MAX_DIVE_FILE_SIZE + 1)
 
         response = client.post(
             "/dive/parse",
@@ -57,7 +61,7 @@ class TestParseDiveUploadSizeLimit:
         not by trusting Content-Length or reading the whole body unconditionally."""
         client = _make_dive_upload_client()
         # Comfortably larger than the limit, but not so large the test itself is slow.
-        oversized_content = b"b" * (_MAX_DIVE_FILE_SIZE * 2)
+        oversized_content = b"b" * (MAX_DIVE_FILE_SIZE * 2)
 
         response = client.post(
             "/dive/parse",

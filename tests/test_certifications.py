@@ -20,7 +20,7 @@ from uuid6 import uuid7
 
 from src.app.api.v1.certifications import _to_public_certification, _validate_agency_pairing
 from src.app.core.exceptions.http_exceptions import UnprocessableEntityException
-from src.app.core.utils.uploads import read_upload_within_limit
+from src.app.core.utils.uploads import read_upload_within_limit, safe_filename
 from src.app.schemas.certification import (
     CertificationAgency,
     CertificationBase,
@@ -33,7 +33,6 @@ from src.app.services.cache_invalidation import invalidate_certification_caches
 from src.app.services.certification_files import (
     MAX_CARD_FILE_SIZE,
     UnsupportedCardFileError,
-    _safe_filename,
     sniff_content_type,
 )
 
@@ -229,23 +228,29 @@ class TestSafeFilename:
     be safe to put there. Nothing here ever touches the filesystem."""
 
     def test_strips_directory_components(self) -> None:
-        assert _safe_filename("../../etc/passwd") == "passwd"
-        assert _safe_filename(r"C:\Users\me\card.jpg") == "card.jpg"
+        assert safe_filename("../../etc/passwd") == "passwd"
+        assert safe_filename(r"C:\Users\me\card.jpg") == "card.jpg"
 
     def test_strips_quotes_and_newlines_that_would_break_the_header(self) -> None:
-        cleaned = _safe_filename('ca"rd\r\nX-Injected: yes.jpg')
+        cleaned = safe_filename('ca"rd\r\nX-Injected: yes.jpg')
 
         assert '"' not in cleaned
         assert "\r" not in cleaned
         assert "\n" not in cleaned
 
     def test_falls_back_when_there_is_nothing_usable(self) -> None:
-        assert _safe_filename(None) == "card"
-        assert _safe_filename("") == "card"
-        assert _safe_filename("   ") == "card"
+        assert safe_filename(None, default="card") == "card"
+        assert safe_filename("", default="card") == "card"
+        assert safe_filename("   ", default="card") == "card"
+
+    def test_the_fallback_is_per_caller(self) -> None:
+        """Each kind of upload names its own placeholder, so a download with no usable
+        original name still says what it is."""
+        assert safe_filename(None) == "file"
+        assert safe_filename(None, default="dive-file") == "dive-file"
 
     def test_truncates_to_the_column_width(self) -> None:
-        assert len(_safe_filename("a" * 400 + ".jpg")) == 255
+        assert len(safe_filename("a" * 400 + ".jpg")) == 255
 
 
 class TestUploadSizeGuard:

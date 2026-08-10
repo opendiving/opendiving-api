@@ -1754,3 +1754,130 @@ restart. There is nothing to `ALTER`.
 `CertificationFile` is deliberately **not** registered in `admin/views.py`: its rows are
 mostly one multi-megabyte `bytea` the generic list/detail views would try to render as
 text, and there's no admin form that could meaningfully accept a file upload.
+
+## Dive source files are stored only once a dive exists
+
+`POST /dive/parse` stays exactly what it was: it reads the upload, parses it, and drops
+the bytes. Storage happens in a second request, `PUT /dive/{uuid}/file`, which the web
+app sends after `POST /dive` (or `PATCH /dive/{uuid}`) has succeeded.
+
+Two reasons it isn't folded into the create call. `DiveCreateRequest` is
+`extra="forbid"` JSON, so a file can't ride along in the body, and turning the one
+resource-creating route in the app into a multipart endpoint to carry an optional
+attachment is a poor trade. And a separate `PUT` is idempotent, which is what makes
+re-sending the same file harmless.
+
+The consequence is that a file which never becomes a dive is never kept - including
+every file that failed to parse, which is arguably the most interesting kind for parser
+work. That's a deliberate narrowing: the point of the corpus is to develop new
+extractions and *backfill the dives they'd improve*, and a file with no dive attached
+can't be backfilled into anything.
+
+The web app treats a failed attach as non-fatal - a toast, not a rollback. The dive
+exists and is correct; the file is a nicety for future parsing work, and undoing a save
+the diver already made to preserve it would be much worse than losing it.
+
+## A signed parse token, not `can_parse`, decides what may be stored
+
+`PUT /dive/{uuid}/file` requires a `file_token` - a short-lived JWT
+(`create_dive_file_token`, `TokenType.DIVE_FILE`) minted by `/dive/parse` binding
+`(user uuid, sha256 of the bytes, the parser that succeeded)`. The store path re-hashes
+the body it receives and refuses anything whose digest doesn't match.
+
+The obvious alternative was to re-run the parser registry on upload and accept whatever
+`can_parse` recognized. That was rejected on two counts. `can_parse` answers "could some
+parser plausibly read this?", so the endpoint would accept any blob shaped like an
+export - free `bytea` storage in the app's own database, and no guarantee the stored
+file is the one that pre-filled the dive's form. And `parse_dive_file` deliberately
+falls through to the next parser when one raises `UnsupportedDiveFileError` from
+`parse()`, so the first parser to *match* is not always the one that *read* the file;
+recording the former would mislabel rows. `parse_dive_file_with_parser` exists to return
+the parser that actually succeeded, with `parse_dive_file` kept as a thin wrapper so no
+existing caller changed.
+
+What the token proves is narrow and worth stating: this server parsed these exact bytes
+for this user, recently. It does **not** prove the diver left the pre-filled values
+alone afterwards. Provenance is "this dive was imported from this file", not "these
+field values are derived from this file".
+
+It is not a security boundary on its own - the route still checks dive ownership - and
+it is deliberately **not** blacklisted after use, unlike `create_onboarding_token`:
+re-uploading the same file to the same dive is an idempotent no-op by design, and the
+token can only ever store bytes its holder already owns a parse of. `DIVE_FILE_TOKEN_
+EXPIRE_MINUTES` defaults to 24 h rather than the 30 minutes the auth tokens use, because
+it bounds staleness rather than credential lifetime: a diver may import a file and then
+spend an evening filling in sites, gear and notes before saving.
+
+`content_type` is deliberately *not* a claim. It ends up in a response header, so it is
+resolved from `parser_key` through `PARSER_BY_KEY` at store time - a value the
+application owns, from a closed set it declares. A forged token can never dictate it.
+This replaces byte-sniffing here but not for cards: a successful parse is a strictly
+stronger guarantee than magic bytes, which is why `sniff_content_type` still governs
+certification uploads, where nothing parses the content.
+
+## A dive has at most one source file, and identical bytes are stored once per diver
+
+Two unique indexes on `dive_file`: `ux_dive_file_dive_id` and
+`ux_dive_file_user_id_sha256`. Together they reduce every upload to three cases, which
+`reconcile()` in `services/dive_files.py` returns as a `Literal` so the decision is
+testable without a database:
+
+- same bytes, same dive → **no-op**. `PUT` is idempotent; nothing is rewritten, not even
+  `original_filename`.
+- same bytes, *another* dive → **409**, naming nothing but saying so plainly.
+- unseen bytes → **insert**, hard-deleting whatever that dive had.
+
+The 409 is the interesting one. Re-pointing the row at the new dive would silently strip
+the file off the dive that already has it; storing a second copy would defeat the
+dedupe. An export normally holds a single dive, so the realistic cause is logging one
+file as two dives - a data-quality problem the diver wants told about, and one that
+costs nothing to report because the dive is already saved by the time the attach runs.
+
+There is deliberately no fourth "unlinked row you could re-claim" case, because
+`dive_id` is NOT NULL. Retaining a replaced file as an unlinked or superseded corpus row
+was considered and rejected: it needs a state column, a partial unique index and a
+fourth branch, and every such row would be unreachable through an API where every route
+resolves through a dive - the exact trap "Card files are a separate table, hard-deleted"
+describes. If replaced-file retention ever earns its keep, a nullable `superseded_at`
+plus `UNIQUE (dive_id) WHERE superseded_at IS NULL` is the additive way to add it.
+
+The write wraps `IntegrityError` into a 409 rather than taking a lock: there is one user
+per dive and the UI disables the button in flight, so a retry beats `SELECT ... FOR
+UPDATE` on this path.
+
+## Deleting a dive hard-deletes its source file
+
+`erase_dive` calls `delete_files_for_dive` before `crud_dives.delete`, for the same
+reason `erase_certification` does: deletion is application-level (`is_deleted`), so no
+`DELETE FROM dive` ever runs and the FK's `ON DELETE CASCADE` never fires.
+
+Leaving the row would do more than strand bytes. It would keep the file's slot in *both*
+unique indexes, so re-importing the same export into a fresh dive would 409 against a
+dive the diver can no longer see. `DELETE /dive/{uuid}/file` likewise hard-deletes
+rather than unlinking - a "delete" button that only hides the file would be a worse
+trade than losing it from the corpus, and it's a raw device export, which is more
+identifying than a card scan.
+
+## `source_file` is on the dive detail response only
+
+`DiveFileInfo` hangs off `DiveReadWithMixtures`, not `DiveRead`. Note the inheritance
+trap: `DiveReadWithMixtures` *extends* `DiveRead`, so putting the field on the parent
+would put it on the paginated list response too and force a second query into
+`_cached_read_dives` - the hottest path in the app - for something only the detail page
+renders.
+
+`get_file_infos_for_dives` is still written batched (explicit columns, `dive_id.in_()`)
+even though it's only ever called with one id, because that's the
+`get_file_infos_for_certifications` shape, it makes the never-select-the-`bytea`
+discipline the default, and it's what an attachment marker in the dive list would need
+without a rewrite.
+
+## No manual DDL for the dive-file feature
+
+`dive_file` is a brand-new table, so it and both unique indexes arrive via `create_all()`
+on restart. No column was added to `dive` or any other existing table - the FK lives on
+`dive_file` - so there is nothing to `ALTER`. `DIVE_FILE_TOKEN_EXPIRE_MINUTES` has a
+default in `config.py`, so no `.env` change is needed either.
+
+`DiveFile` is deliberately **not** registered in `admin/views.py`, for the same reason as
+`CertificationFile`.

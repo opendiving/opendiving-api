@@ -56,6 +56,9 @@ class SuuntoXmlParser(DiveParser):
     them, so they aren't parsed at all.
     """
 
+    key = "suunto_xml"
+    content_type = "application/xml"
+
     @classmethod
     def can_parse(cls, filename: str, content: bytes) -> bool:
         if not filename.lower().endswith(".xml"):

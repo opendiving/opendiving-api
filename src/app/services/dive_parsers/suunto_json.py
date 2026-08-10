@@ -97,6 +97,9 @@ class SuuntoJsonParser(DiveParser):
     from "clean"/header-only exports, which don't have gas data at all).
     """
 
+    key = "suunto_json"
+    content_type = "application/json"
+
     @classmethod
     def can_parse(cls, filename: str, content: bytes) -> bool:
         if not filename.lower().endswith(".json"):
