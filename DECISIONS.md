@@ -1881,3 +1881,79 @@ default in `config.py`, so no `.env` change is needed either.
 
 `DiveFile` is deliberately **not** registered in `admin/views.py`, for the same reason as
 `CertificationFile`.
+
+## Gas use is computed on read, never stored, and deliberately refuses multi-tank dives
+
+`services/dive_gas.py`'s `compute_gas_use()` derives a dive's surface-normalized
+consumption (`gas_used`, `rmv`, `sac_bar_per_min`) from `duration`, `avg_depth` and the
+one mixture's pressures, and `_to_public_dive_with_mixtures()` attaches it as `gas_use`.
+Both callers of that helper (creating a dive, and `_cached_read_dive`) go through it, so
+the formula has exactly one call site.
+
+**Computed rather than denormalized**, unlike `user_dive_stats` and
+`gear_item.dive_count`: those exist because recomputing them per request means a join +
+`GROUP BY` over a user's whole history. This is arithmetic on columns already loaded for
+the response, so a stored column would buy nothing and cost a hand-written `ALTER TABLE`
+(see "Schema changes have no migration tool") plus a recalculation hook on every mixture
+replace. The feature ships with **no DDL at all**.
+
+**Safe to cache, unlike gear service status.** `serviceStatus` can't be an API field
+because it depends on today's date and the cache outlives the day (see the web app's
+"Service status is derived in the browser"). Gas use depends on nothing but the row, so
+computing it before `@cache` stores the response is correct, and there is no browser-side
+twin of the formula to keep in step - only of the *reasons it's absent*, which is a UI
+concern (`lib/dive-gas.ts`).
+
+**`None` rather than a best guess**, whenever the dive doesn't pin every litre to a known
+depth over a known time: not exactly one mixture, no usable `avg_depth`, either pressure
+missing, or no pressure drop at all (a carried-but-unbreathed tank is not a 0 L/min
+diver, and averaging one into a dashboard trend would drag it down). Returned as a whole
+nested object or not at all, so there's no half-populated version to misread - divers
+plan gas off these numbers.
+
+The multi-tank refusal is the interesting one, and it is *not* about summing litres.
+A dive records no clue as to **how** its cylinders were breathed, so a 50% deco bottle
+emptied over five minutes at 6 m and a back gas breathed for forty at 30 m would both be
+divided by the whole dive's average depth. Manifolded twins already work, because
+`VOLUME_OPTIONS` in the web app logs them as one mixture at the pair's combined water
+capacity with a single shared pressure - which is exactly right. Unlocking genuinely
+staged cylinders needs, at minimum, a `parallel`/`staged` discriminator on
+`dive_mixture`, and for the staged case per-mixture time-on-gas and depth-on-gas; the
+exact version needs depth and per-transmitter pressure *samples*, which the stored
+dive-computer exports already contain but nothing parses out yet. Note also that a
+partial sum would be worse than nothing in the common real case - a staged bottle whose
+pressures simply weren't logged would leave the numerator short against a full-dive
+denominator and quietly report an RMV that's too *low*.
+
+Three approximations are baked into `METERS_PER_BAR = 10.0` and documented there: salt
+water (10.06 m/bar) vs fresh (10.33), a 1 bar surface (wrong at an altitude lake), and
+ideal-gas behaviour (~5% optimistic at a 230 bar fill). All three are what every other
+dive log does, none is correctable without data the app doesn't collect, and all apply
+uniformly across a user's dives, so the trend is unaffected.
+
+## `GET /user/gas-use-history` is one unpaginated series, cached under the dive prefix
+
+The dashboard graph needs a whole diving career, so this returns every dive that yields
+a figure, oldest first, with no pagination - a page of ten dives is not a trend. It can't
+be served off `GET /dives` in any case: that response carries no mixtures, and the fix
+would be a batched mixture lookup on the hottest path in the app.
+
+The cache key is `user_{id}_dives:gas_use_history`, deliberately under the *dives* prefix
+even though the route hangs off `/user/...`. `invalidate_dive_caches()` already sweeps
+`user_{id}_dives:*` after every dive create, update and delete, so the series drops with
+them and that function needed no change at all. A prefix of its own would have been a
+third pattern to remember to add there, and the bug from forgetting is a graph that
+silently keeps plotting deleted dives.
+
+`gas_use_history()` runs two queries - the user's dives, then their mixtures batched -
+and lets `compute_gas_use` decide per dive in Python. Pushing its conditions into SQL
+(`HAVING count(*) = 1`, `avg_depth IS NOT NULL`, both pressures present) would keep the
+un-derivable majority from coming back at all: on a real 506-dive log, 343 dives qualify,
+so roughly a third of the rows are fetched and discarded. That's left on the table on
+purpose. It would be a second copy of the rules in a second language, and when the two
+drift the symptom is a dive quietly missing from a graph - which nobody notices, unlike a
+crash. Same scale judgment as `recalculate_dive_stats` re-aggregating on every write.
+
+Note that `_cached_gas_use_history` carries the same authorization caveat as
+`_cached_read_dives`: `@cache` serves a hit without re-running the wrapped function, so it
+must only ever be called with the calling user's own id.

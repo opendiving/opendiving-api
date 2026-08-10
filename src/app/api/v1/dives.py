@@ -55,6 +55,7 @@ from ...services.dive_files import (
     load_dive_file,
     store_dive_file,
 )
+from ...services.dive_gas import compute_gas_use
 from ...services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file_with_parser
 from ...services.dive_stats import recalculate_dive_stats
 from ...services.gear_stats import recalculate_gear_dive_counts
@@ -179,6 +180,11 @@ def _to_public_dive_with_mixtures(
         gear_items=gear_items,
         mixtures=mixtures,
         source_file=source_file,
+        # Both callers of this function (creating a dive, and the cached single-dive
+        # read) go through here, so gas use is derived in exactly one place. Safe to
+        # compute before caching, unlike gear service status: nothing about it depends
+        # on when it's read.
+        gas_use=compute_gas_use(duration=data["duration"], avg_depth=data["avg_depth"], mixtures=mixtures),
     )
 
 
