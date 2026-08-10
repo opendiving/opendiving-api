@@ -20,12 +20,13 @@ VALID_SUUNTO_XML = f"""<?xml version="1.0" encoding="utf-8"?>
   <StartTime>2024-05-01T09:00:00</StartTime>
   <DiveMixtures>
     <DiveMixture>
-      <EndPressure>50</EndPressure>
+      <!-- Millibar, as every pressure in a DM5 export is: 200000 is 200 bar. -->
+      <EndPressure>50000</EndPressure>
       <Helium>0</Helium>
       <Name>Air</Name>
       <Oxygen>21</Oxygen>
       <Size>12</Size>
-      <StartPressure>200</StartPressure>
+      <StartPressure>200000</StartPressure>
     </DiveMixture>
   </DiveMixtures>
 </Dive>
@@ -171,8 +172,8 @@ class TestSuuntoXmlParserParse:
 <Dive xmlns="{SUUNTO_NS}">
   <DiveMixtures>
     <DiveMixture>
-      <StartPressure>207.14062</StartPressure>
-      <EndPressure>122.4375</EndPressure>
+      <StartPressure>207140.62</StartPressure>
+      <EndPressure>122437.5</EndPressure>
       <Oxygen>20.999</Oxygen>
       <Helium>0.001</Helium>
       <Size>12</Size>
@@ -188,6 +189,54 @@ class TestSuuntoXmlParserParse:
         assert mixture.end_pressure == 122.44
         assert mixture.oxygen == 21.0
         assert mixture.helium == 0.0
+
+    def test_reads_mixture_pressures_as_millibar(self):
+        """DM5 expresses every pressure in millibar, including these.
+
+        The values here are from `Dive_2025-05-31-1259.xml`, whose JSON twin
+        (`685013accbecd72812f3d840.json`) reports the same cylinder as 20520312 /
+        8678125 Pascal - 205.2 and 86.78 bar. Reading these as bar is what used to store
+        `start_pressure = 205203` and make the dive's RMV meaningless.
+        """
+        xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <DiveMixtures>
+    <DiveMixture>
+      <StartPressure>205203</StartPressure>
+      <EndPressure>86781</EndPressure>
+      <Oxygen>31</Oxygen>
+      <Size>11</Size>
+    </DiveMixture>
+  </DiveMixtures>
+</Dive>
+""".encode()
+
+        mixture = SuuntoXmlParser.parse(xml).mixtures[0]
+
+        assert mixture.start_pressure == 205.2
+        assert mixture.end_pressure == 86.78
+
+    def test_leaves_a_zero_mixture_pressure_at_zero(self):
+        """Pre-transmitter exports write `0`, which must stay `0` rather than becoming a
+        tiny non-zero number - 255 of the 353 `StartPressure` values in the local corpus
+        are exactly this."""
+        xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <DiveMixtures>
+    <DiveMixture>
+      <StartPressure>0</StartPressure>
+      <EndPressure>0</EndPressure>
+      <Oxygen>21</Oxygen>
+      <Size>12</Size>
+    </DiveMixture>
+  </DiveMixtures>
+</Dive>
+""".encode()
+
+        mixture = SuuntoXmlParser.parse(xml).mixtures[0]
+
+        assert mixture.start_pressure == 0.0
+        assert mixture.end_pressure == 0.0
 
     def test_raises_unsupported_for_xml_with_wrong_root_tag(self):
         with pytest.raises(UnsupportedDiveFileError):

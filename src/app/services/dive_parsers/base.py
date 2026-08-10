@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import ClassVar
 
+from ...schemas.dive_profile import ParsedProfileSchema
 from ...schemas.parsed_dive import ParsedDiveSchema
 
 
@@ -49,3 +50,21 @@ class DiveParser(ABC):
             DiveParseError: if the content is malformed or cannot be parsed.
         """
         raise NotImplementedError
+
+    @classmethod
+    def parse_profile(cls, content: bytes) -> ParsedProfileSchema | None:
+        """Extract this dive's per-sample profile, or `None` when the file carries none.
+
+        Separate from `parse()` and deliberately **not** abstract: a new format can ship
+        header-only and grow a profile extraction later without a flag day, and the
+        default here is the honest answer for a parser that hasn't got one yet.
+
+        Never called on the `/dive/parse` path - only server-side from
+        `PUT /dive/{uuid}/file`, which is the only place that has both the bytes and
+        proof of where they came from. See `models/dive_profile.py`.
+
+        Raises:
+            DiveParseError: if the file's samples are malformed. A file with no samples
+                at all is `None`, not an error.
+        """
+        return None

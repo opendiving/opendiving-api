@@ -7,6 +7,7 @@ from .dive_dive_site import DiveDiveSite
 from .dive_file import DiveFile
 from .dive_gear_item import DiveGearItem
 from .dive_mixture import DiveMixture
+from .dive_profile import DiveProfile
 from .dive_site import DiveSite
 from .gear_item import GearItem
 from .gear_service_record import GearServiceRecord
