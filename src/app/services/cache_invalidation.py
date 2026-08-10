@@ -35,6 +35,21 @@ async def invalidate_dive_caches(user_id: int) -> None:
     await delete_keys_by_pattern(f"user_{user_id}_dive:*")
 
 
+async def invalidate_certification_caches(user_id: int) -> None:
+    """Drop every cached certification read for a user.
+
+    Both cache keys share the `user_{id}_certification` prefix
+    (`..._certifications:page_...` and `..._certification:{uuid}`), so one pattern
+    covers the lot and nothing else starts with it.
+
+    Called after any metadata mutation *and* after every card file upload or delete:
+    `CertificationRead` embeds each stored file's metadata (`CertificationFileInfo`), so
+    photographing a card changes what a cached list page should say even though no
+    `certification` column moved.
+    """
+    await delete_keys_by_pattern(f"user_{user_id}_certification*")
+
+
 async def invalidate_gear_caches(user_id: int) -> None:
     """Drop every cached gear read for a user.
 

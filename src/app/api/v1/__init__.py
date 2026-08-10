@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from .auth import router as auth_router
+from .certifications import router as certifications_router
 from .dive_sites import router as dive_sites_router
 from .dives import router as dives_router
 from .gear_items import router as gear_items_router
@@ -19,4 +20,5 @@ router.include_router(dive_sites_router)
 router.include_router(gear_items_router)
 router.include_router(gear_sets_router)
 router.include_router(gear_service_router)
+router.include_router(certifications_router)
 router.include_router(dives_router)

@@ -1,5 +1,6 @@
 from crudadmin import CRUDAdmin
 
+from ..models.certification import Certification
 from ..models.dive import Dive
 from ..models.dive_dive_site import DiveDiveSite
 from ..models.dive_gear_item import DiveGearItem
@@ -13,6 +14,7 @@ from ..models.gear_set_item import GearSetItem
 from ..models.trip import Trip
 from ..models.user import User
 from ..models.user_dive_stats import UserDiveStats
+from ..schemas.certification import CertificationCreateInternal, CertificationUpdate
 from ..schemas.dive import DiveCreateInternal, DiveUpdateInternal
 from ..schemas.dive_dive_site import DiveDiveSiteCreate, DiveDiveSiteUpdate
 from ..schemas.dive_gear_item import DiveGearItemCreate, DiveGearItemUpdate
@@ -139,3 +141,19 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         update_schema=DiveGearItemUpdate,
         allowed_actions={"view", "create", "update", "delete"},
     )
+
+    admin.add_view(
+        model=Certification,
+        create_schema=CertificationCreateInternal,
+        update_schema=CertificationUpdate,
+        allowed_actions={"view", "create", "update", "delete"},
+    )
+
+    # `CertificationFile` is deliberately *not* registered. Its rows are mostly one
+    # multi-megabyte `bytea` column, which the admin's generic list and detail views
+    # would try to render as text, and there is no create/update form that could
+    # meaningfully accept a file upload. Card files are managed through
+    # `PUT`/`DELETE /certification/{uuid}/file/{side}` instead. Note that deleting a
+    # `Certification` from this panel leaves its files behind if the delete is a soft
+    # one: only the API's `erase_certification` removes them explicitly (an
+    # application-level `is_deleted` never fires the FK cascade).

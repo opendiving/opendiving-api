@@ -1,5 +1,7 @@
 from .authentication_provider import AuthenticationProvider
 from .authentication_request import AuthenticationRequest
+from .certification import Certification
+from .certification_file import CertificationFile
 from .dive import Dive
 from .dive_dive_site import DiveDiveSite
 from .dive_gear_item import DiveGearItem

@@ -11,6 +11,7 @@ from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import ForbiddenException, NotFoundException
 from ...core.utils.cache import cache
 from ...core.utils.datetime_offset import combine_start_time, split_start_time
+from ...core.utils.uploads import read_upload_within_limit
 from ...crud.crud_dive_dive_sites import (
     get_dive_sites_for_dive,
     get_dive_sites_for_dives,
@@ -49,31 +50,6 @@ router = APIRouter(tags=["dives"])
 # generous headroom while still bounding memory usage and parser workload for an
 # endpoint that accepts arbitrary user-uploaded files.
 _MAX_DIVE_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
-_MAX_DIVE_FILE_SIZE_MB = _MAX_DIVE_FILE_SIZE // (1024 * 1024)
-_UPLOAD_READ_CHUNK_SIZE = 1024 * 1024  # 1 MB
-
-
-async def _read_upload_within_limit(file: UploadFile, max_size: int) -> bytes:
-    """Read an upload's full content, rejecting it once it exceeds `max_size`.
-
-    Reads in bounded chunks instead of trusting the `Content-Length` header (which
-    may be absent or spoofed) or calling `file.read()` unbounded, so at most
-    `max_size` (+ one chunk) bytes are ever buffered in memory.
-    """
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = await file.read(_UPLOAD_READ_CHUNK_SIZE)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > max_size:
-            raise HTTPException(
-                status_code=413,
-                detail=f"File too large. Maximum allowed size is {_MAX_DIVE_FILE_SIZE_MB} MB.",
-            )
-        chunks.append(chunk)
-    return b"".join(chunks)
 
 
 _DIVE_CONSTRAINT_MESSAGES = {
@@ -184,7 +160,7 @@ async def parse_dive(
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing filename")
 
-    content = await _read_upload_within_limit(file, _MAX_DIVE_FILE_SIZE)
+    content = await read_upload_within_limit(file, _MAX_DIVE_FILE_SIZE)
     try:
         return parse_dive_file(file.filename, content)
     except UnsupportedDiveFileError as exc:
