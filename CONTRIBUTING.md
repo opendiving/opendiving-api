@@ -1,0 +1,146 @@
+# Contributing to OpenDiving API
+
+Thanks for wanting to help. Bug reports, a fix for a typo in a docstring, a parser for a
+dive computer nobody has covered yet — all welcome.
+
+For anything bigger than a small fix, **open an issue first** so we can agree on the
+shape before you spend an evening on it. That is especially true for changes to the
+database schema or the public API surface, since [opendiving-web](https://github.com/opendiving/opendiving-web)
+and [opendiving-ios](https://github.com/opendiving/opendiving-ios) consume it.
+
+Participation is covered by our [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Getting set up
+
+The whole stack runs from Docker:
+
+```bash
+git clone https://github.com/opendiving/opendiving-api.git
+cd opendiving-api
+# create src/.env - see "Configuration" in README.md
+docker compose up
+```
+
+That gives you the API on <http://localhost:8000> (docs at `/docs`), PostgreSQL, Redis,
+and the arq worker. Leave `RESEND_API_KEY` unset locally — magic-link sign-in URLs are
+then written to the API logs instead of emailed, which is what you want for development.
+
+For running the tooling (ruff, mypy, pytest) outside the container you need Python 3.14
+and [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv sync --extra dev
+```
+
+## Before you open a PR
+
+Three checks run on every pull request, and all three must be green. Run them locally
+first:
+
+```bash
+uv run ruff check src
+uv run mypy src --config-file pyproject.toml
+uv run pytest --cov=src/app --cov-report=term-missing
+```
+
+mypy and pytest need `ENVIRONMENT=local` and a `SECRET_KEY` in the environment (any
+value — CI uses a throwaway one).
+
+**The suite runs without a database.** Almost every test mocks the session (`mock_db`),
+so a cold checkout with nothing else running gives you a green run in under a second.
+The exception is `tests/test_dive_check_constraints.py`, which inserts real rows through
+a sync session to verify the constraints Postgres actually enforces. It is marked
+`skipif` on a connection attempt, so with no database reachable those 33 tests **skip
+silently** rather than fail — which is exactly what CI does, since the workflow has no
+Postgres service.
+
+That matters if you touch `models/` or add a `CheckConstraint`: your run can be green
+because the tests that would have caught you never executed. Bring the stack up
+(`docker compose up`) and re-run, or use the containerised suite:
+
+```bash
+docker compose -f docker-compose.test.yml up
+```
+
+Two things to know when you do run them against a live database: they write to whatever
+`POSTGRES_*` resolves to — your dev database, by default — and the `create_user` helper
+commits a row per test that nothing cleans up afterwards, so expect a scattering of
+faker-named users to accumulate.
+
+Ruff is configured with `fix = true`, so `uv run ruff check src` will repair what it can
+on its own. Line length is 120; docstrings follow the numpy convention. Everything under
+`app.*` is type-checked with `disallow_untyped_defs` — new functions need annotations.
+
+## How the code is laid out
+
+```
+src/app/
+  api/v1/      route handlers - request/response only, thin
+  crud/        database access (FastCRUD), one module per table
+  services/    business logic that doesn't belong in a route
+  models/      SQLAlchemy models
+  schemas/     Pydantic request/response schemas
+  core/        config, security, exceptions, worker, db setup
+src/scripts/   one-shot maintenance scripts
+tests/
+```
+
+Follow the existing layering: a route validates and authorizes, a service decides, a crud
+module talks to the database. If a handler is growing branches, that logic probably wants
+to be a service.
+
+Tests live in `tests/`, one module per feature area (`test_dives.py`, `test_gear.py`, …).
+New endpoints and new parsing behaviour should come with tests; bug fixes should come
+with a test that fails without the fix.
+
+## Two things that will bite you
+
+**There are no migrations yet.** `Base.metadata.create_all()` runs on startup and creates
+*new* tables, but never alters existing ones. Adding a column means: update the model and
+schema, restart the `web` container, then apply the `ALTER TABLE` by hand against your dev
+database. If your PR changes the schema, **put the SQL in the PR description** so everyone
+else can apply it too. The same goes for new `CheckConstraint`s. Versioned Alembic
+migrations are on the roadmap before 1.0.
+
+**Read [DECISIONS.md](DECISIONS.md) before your first PR.** It records the non-obvious
+choices and the traps already hit — the schema-change workflow above, check-constraint
+behaviour, the caching and cache-invalidation strategy, auth details. When you make a
+decision that would puzzle the next person, append a section to it as part of your PR.
+The auth design, with sequence diagrams for every flow, is in
+[docs/authentication.md](docs/authentication.md).
+
+## Adding a dive-computer parser
+
+This is the most useful contribution available right now, and it is self-contained:
+
+1. Implement `DiveParser` (`src/app/services/dive_parsers/base.py`) — `can_parse()`,
+   `parse()`, and optionally `parse_profile()` if the format carries per-sample data.
+   A parser that recognizes a file and then finds it isn't really its format should raise
+   `UnsupportedDiveFileError` from `parse()` so the next candidate gets a turn.
+2. Register the class in `dive_parsers/__init__.py`, in the order it should be tried.
+3. Pick the `key` carefully. It is written to `dive_file.parser_key` on every stored
+   export and is part of the data model — renaming one orphans every row already written
+   under the old name.
+4. Add tests to `tests/test_dive_parsers.py` with a small anonymised sample file.
+
+Existing profiles can be re-extracted after a parser fix:
+
+```bash
+docker compose exec web python -m src.scripts.backfill_dive_profiles --parser-key suunto_xml
+```
+
+## Pull requests
+
+- Branch off `main`, keep the PR focused on one thing.
+- Write a subject line that says what changed (`feat: Store the dive-computer export a
+  dive was imported from`). The history mixes `feat:`-prefixed and plain subjects; either
+  is fine.
+- Say in the description what you changed, why, and anything a reviewer has to do by hand
+  (schema SQL, new env vars, a backfill script).
+- If the change affects the API contract, mention whether the web or iOS client needs a
+  matching change.
+
+## License
+
+By contributing you agree that your work is licensed under [AGPL-3.0](LICENSE), same as
+the rest of the project.
