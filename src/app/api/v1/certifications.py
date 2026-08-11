@@ -10,6 +10,7 @@ from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import ForbiddenException, NotFoundException, UnprocessableEntityException
 from ...core.utils.cache import cache
 from ...core.utils.pagination import clamp_pagination
+from ...core.utils.uploads import content_disposition_attachment
 from ...crud.crud_certifications import crud_certifications, get_expiring_overview_for_user
 from ...schemas.certification import (
     CertificationAgency,
@@ -365,7 +366,7 @@ async def read_certification_file(
             # and renders from a blob URL, so it never navigates here directly. Should
             # someone open the URL in a tab anyway, `attachment` stops a malicious PDF
             # from executing in the same-origin viewer.
-            "Content-Disposition": f'attachment; filename="{file.original_filename}"',
+            "Content-Disposition": content_disposition_attachment(file.original_filename, default="card"),
             # The stored type is sniffed from the bytes, but say so explicitly: the
             # browser must not be free to re-interpret user-uploaded content as something
             # scriptable.

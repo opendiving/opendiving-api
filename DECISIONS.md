@@ -1772,7 +1772,10 @@ The download response carries `Content-Disposition: attachment`, `X-Content-Type
 nosniff` and `Content-Security-Policy: default-src 'none'; sandbox`. `attachment` rather
 than `inline` because the web app fetches these through its API client and renders from a
 blob URL, never navigating to the URL - so nothing is lost, and a malicious PDF opened
-directly in a tab can't execute in the same-origin viewer.
+directly in a tab can't execute in the same-origin viewer. The `filename` on that header
+is built by `content_disposition_attachment`, not interpolated - see "Non-ASCII filenames
+need RFC 6266, because Starlette encodes headers as latin-1" for what interpolating it
+cost.
 
 ## The card download endpoint is never Redis-cached
 
@@ -2864,3 +2867,60 @@ throttled for (see `AUTH_COMPLETE_RATE_LIMIT_PER_IP` and that route's docstring)
 signed-in caller could walk a wordlist through it without even needing a fresh onboarding
 token. It's scoped to the branch that actually answers the question - throttling the whole
 endpoint would 429 a settings page toggling `gear_service_emails`, which reveals nothing.
+
+## Non-ASCII filenames need RFC 6266, because Starlette encodes headers as latin-1
+
+`safe_filename` keeps printable non-ASCII on purpose - `original_filename` is also what
+the clients display, so a diver who names a file in Japanese should see it back. But the
+download routes used to interpolate that stored name straight into the header:
+
+```python
+"Content-Disposition": f'attachment; filename="{file.original_filename}"',
+```
+
+Starlette encodes every header value as latin-1 while building the response, so anything
+above U+00FF raises `UnicodeEncodeError` *before* a single byte is sent. That is not a
+garbled filename, it is a 500 - and a permanent one, on every subsequent
+`GET /certification/{uuid}/file/{side}` or `GET /dive/{uuid}/file` for that row, because
+the name causing it is stored. The upload, the metadata reads and the card thumbnail all
+keep working; only the download breaks.
+
+Three things conspire to hide it:
+
+- latin-1 covers the *accented Latin* range, so "café.jpg" encodes fine and merely arrives
+  as mojibake. Only CJK, Cyrillic, Greek, Hebrew and emoji actually raise. Testing with
+  European names finds nothing.
+- The `If-None-Match` branch returns before the header is built, so a client that already
+  has the file keeps re-validating happily while a fresh one 500s.
+- The web client never reads the header; `downloadBlob` names the saved file from
+  `original_filename` in the JSON metadata. So once the 500 is fixed, the header's
+  contents only show up in a bare `curl` - which is precisely why the ASCII fallback
+  below is worth getting right rather than leaving as a placeholder.
+
+`content_disposition_attachment` (`core/utils/uploads.py`) now builds both parameters RFC
+6266 defines:
+
+```
+attachment; filename="card.jpg"; filename*=UTF-8''%E6%BD%9C%E6%B0%B4.jpg
+```
+
+`filename*` carries the real name percent-encoded as UTF-8 for anything that understands
+it, which is every current browser; the plain `filename` carries an ASCII folding for
+anything that doesn't, `curl -OJ` being the one that matters. `quote(name, safe="")`
+escapes everything outside the unreserved set, so its output is always ASCII and always
+inside RFC 5987's `attr-char`.
+
+The alternative - ASCII-folding inside `safe_filename` at upload time - was rejected
+twice over. It would show every non-Latin diver a mangled version of their own filename in
+the list rows, the source-file card and the download dialog, and it would do nothing for
+the rows already stored, which are exactly the ones that 500. Only the header has to be
+narrow, so only the header is narrowed.
+
+Two details in `_ascii_fallback` that look like padding and aren't:
+
+- The folded name goes back through `safe_filename`. NFKD maps fullwidth punctuation onto
+  its ASCII twin (`＂` → `"`, `／` → `/`), so folding *re-introduces* the characters
+  `safe_filename` had already stripped - and a `"` there would close the quoted string
+  early.
+- A name with no ASCII in it at all folds to a bare extension, so `default` supplies the
+  stem: "潜水.jpg" downloads as "card.jpg" rather than as the dotfile ".jpg".

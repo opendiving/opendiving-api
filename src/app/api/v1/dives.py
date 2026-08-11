@@ -21,7 +21,7 @@ from ...core.security import create_dive_file_token
 from ...core.utils.cache import cache
 from ...core.utils.datetime_offset import combine_start_time, split_start_time
 from ...core.utils.pagination import clamp_pagination
-from ...core.utils.uploads import read_upload_within_limit
+from ...core.utils.uploads import content_disposition_attachment, read_upload_within_limit
 from ...crud.crud_dive_dive_sites import (
     get_dive_sites_for_dive,
     get_dive_sites_for_dives,
@@ -849,7 +849,7 @@ async def read_dive_file(
             # `attachment`, not `inline`: the web app fetches this through its API client
             # and hands it to the browser as a download, so it never navigates here. XML
             # opened in a tab at the app's own origin is exactly what we don't want.
-            "Content-Disposition": f'attachment; filename="{file.original_filename}"',
+            "Content-Disposition": content_disposition_attachment(file.original_filename, default="dive-file"),
             # The stored type comes from the parser that read the file, but say so
             # explicitly: the browser must not be free to re-interpret user-uploaded
             # content as something scriptable.

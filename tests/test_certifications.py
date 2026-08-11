@@ -16,12 +16,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import HTTPException, UploadFile
+from fastapi import HTTPException, Response, UploadFile
 from uuid6 import uuid7
 
 from src.app.api.v1.certifications import _to_public_certification, _validate_agency_pairing
 from src.app.core.exceptions.http_exceptions import UnprocessableEntityException
-from src.app.core.utils.uploads import read_upload_within_limit, safe_filename
+from src.app.core.utils.uploads import content_disposition_attachment, read_upload_within_limit, safe_filename
 from src.app.crud.crud_certifications import get_expiring_overview_for_user
 from src.app.schemas.certification import (
     CertificationAgency,
@@ -253,6 +253,62 @@ class TestSafeFilename:
 
     def test_truncates_to_the_column_width(self) -> None:
         assert len(safe_filename("a" * 400 + ".jpg")) == 255
+
+    def test_keeps_non_ascii_names(self) -> None:
+        """`original_filename` is what the clients display, so a name that is entirely
+        CJK or accented is stored as the diver wrote it. Making it safe for the download
+        header is `content_disposition_attachment`'s job, not this one's."""
+        assert safe_filename("潜水カード.jpg") == "潜水カード.jpg"
+
+
+class TestContentDispositionHeader:
+    """Starlette encodes header values as latin-1, so the non-ASCII names `safe_filename`
+    keeps used to raise `UnicodeEncodeError` while building the response - a permanent 500
+    on every download of that file, not a garbled filename."""
+
+    def test_a_non_ascii_name_survives_starlette_header_encoding(self) -> None:
+        """The regression itself: the value has to be latin-1 encodable, which is what
+        `Response` does to every header on the way out."""
+        header = content_disposition_attachment("潜水カード.jpg", default="card")
+
+        response = Response(content=b"x", headers={"Content-Disposition": header})
+
+        assert (b"content-disposition", header.encode("latin-1")) in response.raw_headers
+
+    def test_the_real_name_rides_in_the_rfc_5987_parameter(self) -> None:
+        header = content_disposition_attachment("潜水.jpg", default="card")
+
+        assert "filename*=UTF-8''%E6%BD%9C%E6%B0%B4.jpg" in header
+
+    def test_an_ascii_name_is_left_readable(self) -> None:
+        header = content_disposition_attachment("card.jpg", default="card")
+
+        assert header == "attachment; filename=\"card.jpg\"; filename*=UTF-8''card.jpg"
+
+    def test_accents_fold_rather_than_vanish(self) -> None:
+        """The plain parameter is all a client that ignores `filename*` gets (`curl -OJ`,
+        notably), so it should still resemble the name the diver chose."""
+        header = content_disposition_attachment("café.jpg", default="card")
+
+        assert 'filename="cafe.jpg"' in header
+
+    def test_a_name_that_folds_away_keeps_its_extension(self) -> None:
+        """Nothing ASCII survives here, and a bare ".jpg" would download as a dotfile."""
+        header = content_disposition_attachment("潜水.jpg", default="card")
+
+        assert 'filename="card.jpg"' in header
+
+    def test_fullwidth_punctuation_cannot_break_out_of_the_quoted_string(self) -> None:
+        """NFKD maps `＂` onto a plain `"`, so folding re-introduces the character
+        `safe_filename` had already stripped."""
+        header = content_disposition_attachment("ca＂rd.jpg", default="card")
+
+        assert header.count('"') == 2
+
+    def test_falls_back_when_there_is_no_usable_name(self) -> None:
+        header = content_disposition_attachment(None, default="dive-file")
+
+        assert header == "attachment; filename=\"dive-file\"; filename*=UTF-8''dive-file"
 
 
 class TestUploadSizeGuard:
