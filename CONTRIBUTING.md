@@ -66,7 +66,7 @@ green because the tests that would have caught you never executed. Bring the sta
 rather than on its own:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.test.yml up --build --abort-on-container-exit web
+docker compose -f docker-compose.yml -f docker-compose.test.yml up --build --abort-on-container-exit api
 ```
 
 CI does run Postgres and Redis as service containers, and fails the job if the
@@ -117,7 +117,7 @@ with a test that fails without the fix.
 
 **There are no migrations yet.** `Base.metadata.create_all()` runs on startup and creates
 *new* tables, but never alters existing ones. Adding a column means: update the model and
-schema, restart the `web` container, then apply the `ALTER TABLE` by hand against your dev
+schema, restart the `api` container, then apply the `ALTER TABLE` by hand against your dev
 database. If your PR changes the schema, **put the SQL in the PR description** so everyone
 else can apply it too. The same goes for new `CheckConstraint`s. Versioned Alembic
 migrations are on the roadmap before 1.0.
@@ -146,7 +146,7 @@ This is the most useful contribution available right now, and it is self-contain
 Existing profiles can be re-extracted after a parser fix:
 
 ```bash
-docker compose exec web python -m src.scripts.backfill_dive_profiles --parser-key suunto_xml
+docker compose exec api python -m src.scripts.backfill_dive_profiles --parser-key suunto_xml
 ```
 
 ## Pull requests

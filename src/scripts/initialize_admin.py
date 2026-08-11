@@ -4,7 +4,7 @@ Run once before the API starts:
 
     python -m src.scripts.initialize_admin
 
-`docker-compose.yml` wires this up as the `admin_init` service, which `web` waits on via
+`docker-compose.yml` wires this up as the `admin_init` service, which `api` waits on via
 `service_completed_successfully`, so local development still needs no manual step.
 
 Why this isn't in the app's lifespan: it used to be, and the lifespan runs once *per

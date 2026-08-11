@@ -13,7 +13,7 @@ existing tables (add columns, add indexes, etc.).
 
 Practical workflow used throughout this project for adding a column to an existing table:
 1. Add the field to the SQLAlchemy model (`models/*.py`) and Pydantic schema (`schemas/*.py`).
-2. Restart the `web` container (`docker compose restart web`) - this creates any
+2. Restart the `api` container (`docker compose restart api`) - this creates any
    brand-new tables via `create_all()`.
 3. Manually run the equivalent `ALTER TABLE ... ADD COLUMN ...` against the live
    DB: `docker compose exec -T db psql -U postgres -d opendive -c "ALTER TABLE ..."`.
@@ -2257,7 +2257,7 @@ that is already done.
 `src/scripts/backfill_dive_profiles.py`, mirroring `create_first_superuser.py`:
 
 ```bash
-docker compose exec web python -m src.scripts.backfill_dive_profiles --parser-key suunto_xml
+docker compose exec api python -m src.scripts.backfill_dive_profiles --parser-key suunto_xml
 ```
 
 It selects `dive_file` LEFT JOIN `dive_profile` where no profile exists, the extractor
@@ -2273,7 +2273,7 @@ does not go through. Without `create_redis_cache_pool()` first, every backfilled
 cached detail response would keep claiming the dive has no profile for up to an hour, with
 no error anywhere.
 
-`src/scripts/` is now bind-mounted into the `web` service (`./src:/code/src`) so that
+`src/scripts/` is now bind-mounted into the `api` service (`./src:/code/src`) so that
 command works at all; the app itself is still served from `/code/app` and is unaffected.
 
 ## No manual DDL for the dive-profile feature
@@ -2541,7 +2541,7 @@ admin) ran in a custom lifespan in `main.py`. Four workers raced it, and the los
 with `table admin_user already exists` or
 `UNIQUE constraint failed: admin_user.username`, taking the container with them. It is now
 a one-shot, `src/scripts/initialize_admin.py`, wired into `docker-compose.yml` as the
-`admin_init` service that `web` waits on via `service_completed_successfully` - so local
+`admin_init` service that `api` waits on via `service_completed_successfully` - so local
 development still needs no manual step. Constructing `CRUDAdmin` still registers all its
 routes (`__init__` calls the synchronous `setup()`), so every worker can mount the panel
 without any of them touching the database.
@@ -2553,7 +2553,7 @@ both look, both see nothing, and both try. The loser dies with
 `duplicate key value violates unique constraint "pg_type_typname_nsp_index"`. It is now
 serialized behind a transaction-scoped Postgres advisory lock in `core/setup.create_tables`,
 which makes the check-and-create pair atomic across processes. Deliberately kept in the
-lifespan rather than moved to a one-shot, so the `docker compose restart web` workflow at the
+lifespan rather than moved to a one-shot, so the `docker compose restart api` workflow at the
 top of this file still picks up brand-new tables. Only ever contended on a cold database.
 
 Note this was invisible on a warm database - the earlier multi-worker test passed simply

@@ -1,11 +1,11 @@
 # Overlay for running the test suite against real Postgres and Redis:
 #
-#   docker compose -f docker-compose.yml -f docker-compose.test.yml up --abort-on-container-exit web
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml up --abort-on-container-exit api
 #
 # This is the only way to exercise the DB-backed tests (`test_dive_check_constraints.py`,
 # `test_dive_numbering.py`), which skip themselves when nothing is listening on Postgres.
 services:
-  web:
+  api:
     build:
       context: .
       dockerfile: Dockerfile

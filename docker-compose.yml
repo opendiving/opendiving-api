@@ -1,5 +1,5 @@
 services:
-  web:
+  api:
     build:
       context: .
       dockerfile: Dockerfile
@@ -29,11 +29,11 @@ services:
       # One-shot maintenance scripts (`src/scripts/`) import their modules as `src.app.*`,
       # so they need the package rooted at `/code/src` - the app itself is served from
       # `/code/app` and is unaffected. This is what makes
-      # `docker compose exec web python -m src.scripts.backfill_dive_profiles` work.
+      # `docker compose exec api python -m src.scripts.backfill_dive_profiles` work.
       - ./src:/code/src
 
   # One-shot: creates the admin panel's own tables and seeds its initial admin, then
-  # exits. Runs to completion before `web` starts, so the four gunicorn workers in the
+  # exits. Runs to completion before `api` starts, so the four gunicorn workers in the
   # production image never race each other doing it (see src/scripts/initialize_admin.py).
   # Exits 0 immediately when CRUD_ADMIN_ENABLED is false, so it costs nothing when the
   # panel is off.
@@ -123,7 +123,7 @@ services:
   #   volumes:
   #     - ./default.conf:/etc/nginx/conf.d/default.conf
   #   depends_on:
-  #     - web
+  #     - api
 
   #-------- uncomment to create first superuser --------
   # create_superuser:
@@ -134,7 +134,7 @@ services:
   #     - ./src/.env
   #   depends_on:
   #     - db
-  #     - web
+  #     - api
   #   command: python -m src.scripts.create_first_superuser
   #   volumes:
   #     - ./src:/code/src

@@ -120,7 +120,7 @@ curl http://localhost:8000/api/v1/dive/{uuid}/profile -H "Authorization: Bearer 
   constraints, caching strategy…). Read it before your first PR.
 - Tests: `docker compose -f docker-compose.test.yml up` or `pytest` against `tests/`.
 - Re-extract profiles after a parser fix:
-  `docker compose exec web python -m src.scripts.backfill_dive_profiles --parser-key suunto_xml`
+  `docker compose exec api python -m src.scripts.backfill_dive_profiles --parser-key suunto_xml`
 
 ## Related repositories
 
