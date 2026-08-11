@@ -2448,6 +2448,19 @@ Both are now `UTC`-aware. Worth noting because fixing *either one alone* makes t
 worse rather than better - the offsets stop cancelling, and revoked tokens get purged while
 still valid.
 
+The column itself was the third piece, and it was missed at the time: `token_blacklist.expires_at`
+was still plain `DateTime` (the only naive timestamp left in the schema), i.e. Postgres
+`TIMESTAMP WITHOUT TIME ZONE`. asyncpg does not silently coerce there - binding an aware
+datetime to a naive column raises `DataError: can't subtract offset-naive and offset-aware
+datetimes`, so *both* halves of the fix above failed outright: every logout/deletion insert
+and every run of `purge_expired_tokens`. It is now `DateTime(timezone=True)` like everything
+else.
+
+Any rows already in the table predate the fix and were written in the host's local zone, so
+`AT TIME ZONE 'UTC'` reinterprets them off by that offset. That is harmless here and not
+worth a smarter `USING`: the table only holds entries until the token they name would have
+expired anyway, and the first purge after the change clears them out.
+
 ## Pagination bounds live in `core/utils/pagination`, not in each route
 
 `page`/`items_per_page` come off the query string, and three of the eight list endpoints
