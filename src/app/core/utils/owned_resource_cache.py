@@ -4,26 +4,12 @@ from typing import Any
 
 from fastapi import Request
 from fastcrud import compute_offset, paginated_response
-from sqlalchemy import func, or_, select
+from sqlalchemy import ColumnElement
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql.elements import ColumnElement
 
 from ..exceptions.http_exceptions import NotFoundException
 from .cache import cache, delete_keys_by_pattern
-
-LIKE_ESCAPE_CHAR = "\\"
-
-
-def escape_like(term: str) -> str:
-    """Escapes the `LIKE`/`ILIKE` wildcards in a user-supplied search term, so a site
-    named "50%" is searchable and typing "%" alone doesn't match everything.
-
-    Pairs with `.ilike(pattern, escape=LIKE_ESCAPE_CHAR)`. The escape character itself has
-    to be doubled first, or escaping the wildcards would produce new unescaped ones.
-    """
-    for char in (LIKE_ESCAPE_CHAR, "%", "_"):
-        term = term.replace(char, LIKE_ESCAPE_CHAR + char)
-    return term
+from .search import search_clause, search_multi
 
 
 class OwnedResourceCache[InternalT, PublicT]:
@@ -152,41 +138,24 @@ class OwnedResourceCache[InternalT, PublicT]:
     def search_conditions(self, *, user_id: int, term: str) -> tuple[ColumnElement[bool], ...]:
         """The `WHERE` clauses matching the user's non-deleted rows against a search term."""
         model = self._crud.model
-        pattern = f"%{escape_like(term)}%"
         return (
             model.user_id == user_id,
             model.is_deleted.is_(False),
-            or_(*(getattr(model, column).ilike(pattern, escape=LIKE_ESCAPE_CHAR) for column in self._search_columns)),
+            search_clause(model, self._search_columns, term),
         )
 
     async def _search_multi(
         self, *, db: AsyncSession, user_id: int, term: str, offset: int, limit: int
     ) -> dict[str, Any]:
-        """The `search=`-filtered counterpart to `crud.get_multi`, returning the same
-        `{"data": [...], "total_count": n}` shape.
-
-        Hand-written rather than expressed as `get_multi` filter kwargs because those are
-        AND'd together: matching a term against *either* the name or the location needs an
-        OR across two columns, which the `__`-suffix filter syntax can't express.
-        """
-        model = self._crud.model
-        conditions = self.search_conditions(user_id=user_id, term=term)
-
-        total_count = await db.scalar(select(func.count()).select_from(model).where(*conditions))
-
-        sort_column = getattr(model, self._sort_columns)
-        # Selecting the columns rather than the entity keeps the rows as plain dicts, the
-        # same shape `get_multi` hands back when called without a `schema_to_select`.
-        stmt = (
-            select(*model.__table__.columns)
-            .where(*conditions)
-            .order_by(sort_column.desc() if self._sort_orders == "desc" else sort_column.asc())
-            .offset(offset)
-            .limit(limit)
+        return await search_multi(
+            db=db,
+            model=self._crud.model,
+            conditions=self.search_conditions(user_id=user_id, term=term),
+            sort_column=self._sort_columns,
+            sort_order=self._sort_orders,
+            offset=offset,
+            limit=limit,
         )
-        rows = (await db.execute(stmt)).mappings().all()
-
-        return {"data": [dict(row) for row in rows], "total_count": total_count or 0}
 
     async def _read_item_uncached(
         self, request: Request, uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession

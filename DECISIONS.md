@@ -278,48 +278,63 @@ filters, enrichment with related trip/dive-site uuids, mixtures) - it doesn't fi
 per-user owned resources should use `OwnedResourceCache` rather than
 hand-copying this pattern again.
 
-## `GET /dive-sites` searches server-side, because the picker used to fetch the whole table
+## The dive form's pickers search server-side, because they used to fetch whole tables
 
-The dive form's site picker (`DiveSiteMultiSelect`) filtered client-side, so it
-paged through *every* dive site the user owns - `items_per_page=100` in a loop
-until `has_more` was false - before the dropdown was usable. A diver with a few
-hundred logged sites paid several sequential round-trips on every form open.
+The dive form's dive site, trip and gear pickers all filtered client-side, so each
+paged through *every* row the user owns - `items_per_page=100` in a loop until
+`has_more` was false - before its dropdown was usable. A diver with a few hundred
+logged sites paid several sequential round-trips on every form open. (The trip
+picker didn't even loop: it fetched one page of 100 and dropped the rest silently,
+so a 101st trip couldn't be selected at all.)
 
-`GET /dive-sites` now takes `search=`: a case-insensitive substring match on
-`name` **or** `location`, with `items_per_page` capped at
-`MAX_DIVE_SITES_PER_PAGE` (100) so no single request can pull the table anyway.
-Location is searched alongside the name because that's how people recall sites
-they haven't dived in a while ("that wall in Dahab"), and it's already shown as
-the dropdown's secondary text.
+All three endpoints now take `search=`, a case-insensitive substring match, with
+`items_per_page` capped at 100 (`MAX_DIVE_SITES_PER_PAGE`, `MAX_TRIPS_PER_PAGE`,
+`MAX_GEAR_ITEMS_PER_PAGE`) so no single request can pull a table anyway:
 
-Three things about the implementation are non-obvious:
+| Endpoint | Columns matched | Why the second column |
+|---|---|---|
+| `GET /dive-sites` | `name`, `location` | How people recall sites they haven't dived in a while ("that wall in Dahab") |
+| `GET /trips` | `name`, `location` | A trip is as often remembered by where it went as by what it was called |
+| `GET /gear-items` | `name`, `brand` | Divers name kit inconsistently ("MK25", "my reg") but recall the brand |
+
+Gear deliberately matches `brand` rather than `type`: `type` is a closed
+vocabulary with its own filter surface, and folding it into free-text search
+would make "reg" match every regulator regardless of name.
+
+Four things about the implementation are non-obvious:
 
 - **The search query is hand-written, not `get_multi` filter kwargs.** FastCRUD's
   `__`-suffix filters (`name__ilike=...`) are AND'd together, and its `__or`
   operator groups *operators on one column*, not columns. Matching either column
-  needs a real cross-column `OR`, so `OwnedResourceCache._search_multi` builds the
-  `select()` itself and returns `get_multi`'s `{"data": [...], "total_count": n}`
-  shape. It selects `model.__table__.columns` rather than the entity, so rows come
-  back as plain dicts exactly like the unsearched path - `_to_public` sees one
-  shape either way.
+  needs a real cross-column `OR`, so `core/utils/search.py` builds the `select()`
+  itself and returns `get_multi`'s `{"data": [...], "total_count": n}` shape. It
+  selects `model.__table__.columns` rather than the entity, so rows come back as
+  plain dicts exactly like the unsearched path - each caller's public-shape
+  conversion sees one shape either way, and gear can still read the internal `id`
+  it needs to batch its service-schedule lookup.
 - **The term is escaped for `LIKE`.** `escape_like()` backslash-escapes `\`, `%`
   and `_` (in that order - escaping the wildcards first would produce new live
   ones), paired with `.ilike(pattern, escape="\\")`. Without it a site named
   "50%" is unsearchable and a bare `%` matches everything.
-- **`search` is part of the list cache key**, appended as `:search:{search}` after
-  the existing `user_{id}_dive_sites:page_{n}:items_per_page:{n}` prefix - so it
-  still falls under the `user_{id}_dive_sites:*` wildcard `invalidate_list` purges,
-  and no invalidation logic changed. The route lowercases/strips the term before
-  passing it down so `" Blue "` and `"blue"` share one entry. Resources that pass
-  no `search_columns` (trips, today) keep the original key shape: `read_list` is
+- **`search` is part of every list cache key**, appended after the existing
+  `user_{id}_{resource}:page_{n}:items_per_page:{n}` prefix - so it still falls
+  under the `user_{id}_{resource}:*` wildcard that invalidation purges, and no
+  invalidation logic changed. Each route lowercases/strips the term before passing
+  it down, so `" Blue "` and `"blue"` share one entry. A resource that passes no
+  `search_columns` keeps the original key shape: `OwnedResourceCache.read_list` is
   called without a `search` kwarg for those, and `@cache` would `KeyError` on a
   placeholder it can't fill.
+- **Dive sites and trips go through `OwnedResourceCache`; gear doesn't.** Gear's
+  list read was already hand-rolled (it batches service schedules per page), so it
+  calls the same `search_clause`/`search_multi` helpers directly. That's the split
+  the factory's docstring already describes - resources whose reads do more than a
+  straight `get_multi` keep their own helpers.
 
-The search is a plain filtered scan - `ix_dive_site_user_id_name` can't serve a
-leading-wildcard `ILIKE`. That's fine at the scale this table has per user
-(hundreds, not millions, and always narrowed by `user_id` first). If it ever
-isn't, the fix is a `pg_trgm` GIN index on `(name, location)`, not a different
-query shape.
+Each search is a plain filtered scan - the existing composite indexes can't serve a
+leading-wildcard `ILIKE`. That's fine at the scale these tables have per user
+(hundreds, not millions, and always narrowed by `user_id` first). If it ever isn't,
+the fix is a `pg_trgm` GIN index on the searched columns, not a different query
+shape.
 
 ## `/{username}/...` resource routes were flattened to `/...` + explicit ids
 

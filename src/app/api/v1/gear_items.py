@@ -2,7 +2,7 @@ import uuid as uuid_pkg
 from datetime import UTC, datetime
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,8 +10,10 @@ from ...api.dependencies import get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import DuplicateValueException, ForbiddenException, NotFoundException
 from ...core.utils.cache import cache
+from ...core.utils.search import search_clause, search_multi
 from ...crud.crud_gear_items import crud_gear_items, gear_item_name_exists
 from ...crud.crud_gear_service_schedules import get_schedules_for_gear_item, get_schedules_for_gear_items
+from ...models.gear_item import GearItem
 from ...schemas.gear_item import (
     GearItemCreate,
     GearItemCreateInternal,
@@ -24,6 +26,15 @@ from ...services.cache_invalidation import invalidate_dive_caches, invalidate_ge
 from ...services.gear_service import soft_delete_schedules_for_gear_item
 
 router = APIRouter(tags=["gear"])
+
+# Brand rather than type: divers name their kit inconsistently ("MK25", "my reg"), but
+# reach for the brand when they can't recall what they called it. Type is already a
+# closed vocabulary with its own filter surface.
+GEAR_ITEM_SEARCH_COLUMNS = ("name", "brand")
+
+# `GET /gear-items` feeds both the gear page and the dive form's picker, so the page size
+# is a client choice - but an unbounded one lets a single request pull the whole table.
+MAX_GEAR_ITEMS_PER_PAGE = 100
 
 
 def _gear_item_owner_id(db_gear_item: Any) -> int:
@@ -82,7 +93,10 @@ async def write_gear_item(
 
 
 @cache(
-    key_prefix=("user_{user_id}_gear_items:page_{page}:items_per_page:{items_per_page}:archived_{include_archived}"),
+    key_prefix=(
+        "user_{user_id}_gear_items:page_{page}:items_per_page:{items_per_page}"
+        ":archived_{include_archived}:search_{search}"
+    ),
     resource_id_name="user_id",
     expiration=60,
 )
@@ -94,6 +108,7 @@ async def _cached_read_gear_items(
     page: int,
     items_per_page: int,
     include_archived: bool,
+    search: str | None = None,
 ) -> dict:
     """Fetches (and caches) a user's paginated gear item list.
 
@@ -101,20 +116,42 @@ async def _cached_read_gear_items(
     authorization has been checked by the route - `@cache` serves cached responses
     without re-running any authorization logic. `include_archived` is part of the cache
     key so the picker's (non-archived) view and the management page's (full) view can't
-    serve each other's results.
+    serve each other's results, and `search` for the same reason between two queries.
     """
-    filters: dict[str, Any] = {"user_id": user_id, "is_deleted": False}
-    if not include_archived:
-        filters["is_archived"] = False
+    offset = compute_offset(page, items_per_page)
+    term = (search or "").strip()
 
-    data = await crud_gear_items.get_multi(
-        db=db,
-        offset=compute_offset(page, items_per_page),
-        limit=items_per_page,
-        sort_columns="name",
-        sort_orders="asc",
-        **filters,
-    )
+    if term:
+        conditions = [
+            GearItem.user_id == user_id,
+            GearItem.is_deleted.is_(False),
+            search_clause(GearItem, GEAR_ITEM_SEARCH_COLUMNS, term),
+        ]
+        if not include_archived:
+            conditions.append(GearItem.is_archived.is_(False))
+
+        data = await search_multi(
+            db=db,
+            model=GearItem,
+            conditions=tuple(conditions),
+            sort_column="name",
+            sort_order="asc",
+            offset=offset,
+            limit=items_per_page,
+        )
+    else:
+        filters: dict[str, Any] = {"user_id": user_id, "is_deleted": False}
+        if not include_archived:
+            filters["is_archived"] = False
+
+        data = await crud_gear_items.get_multi(
+            db=db,
+            offset=offset,
+            limit=items_per_page,
+            sort_columns="name",
+            sort_orders="asc",
+            **filters,
+        )
     # One batched query for the whole page's service schedules rather than one per row -
     # every gear row shows a service badge, so an N+1 here would be on the hot path.
     # `get_multi` passes no `schema_to_select`, so each row still carries its internal `id`.
@@ -137,6 +174,10 @@ async def read_gear_items(
     page: int = 1,
     items_per_page: int = 10,
     include_archived: bool = False,
+    search: Annotated[
+        str | None,
+        Query(max_length=255, description="Case-insensitive substring match on name or brand"),
+    ] = None,
 ) -> dict:
     """List a user's gear. Archived items are excluded unless `include_archived=true`,
     so the dive form's picker only ever offers gear that's still in service.
@@ -149,9 +190,12 @@ async def read_gear_items(
         user_id=current_user["id"],
         user_uuid=user_uuid,
         db=db,
-        page=page,
-        items_per_page=items_per_page,
+        page=max(page, 1),
+        items_per_page=min(max(items_per_page, 1), MAX_GEAR_ITEMS_PER_PAGE),
         include_archived=include_archived,
+        # Normalized here rather than in the cache layer so that " MK25 " and "mk25"
+        # share one cache entry instead of two identical ones under different keys.
+        search=(search or "").strip().lower() or None,
     )
 
 
