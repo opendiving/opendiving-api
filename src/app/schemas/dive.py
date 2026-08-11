@@ -1,8 +1,8 @@
 import uuid as uuid_pkg
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Self
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema
 from ..core.utils.datetime_offset import require_utc_offset
@@ -318,6 +318,23 @@ class DiveCreateRequest(DiveCreate):
     ]
 
 
+# Fields whose columns are `NOT NULL` (see `models/dive.py`). Every field on `DiveUpdate`
+# is typed `| None` because that is how "omit it to leave it alone" is spelled in a PATCH
+# body - but for these, an *explicit* `null` is a different thing entirely and the
+# database will refuse it.
+#
+# It used to be refused down at the driver: the null survived `exclude_unset`, hit
+# Postgres, and the `IntegrityError` came back as a 422 reading "Invalid reference: a
+# related record does not exist." - which describes a foreign-key problem, not a
+# not-null one. `start_time` was worse: `patch_dive`'s guard was `if values.start_time is
+# not None`, so an explicit null skipped the `split_start_time` branch, still reached the
+# database as `None`, and left `utc_offset_minutes` describing the *previous* start time.
+#
+# Rejecting them here means the caller gets the field name and a usable message, and the
+# route below can trust that anything present is really a value.
+_NON_NULLABLE_UPDATE_FIELDS = ("dive_number", "start_time", "duration", "notes")
+
+
 class DiveUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -340,6 +357,22 @@ class DiveUpdate(BaseModel):
             default=None,
         ),
     ]
+
+    @model_validator(mode="after")
+    def _reject_explicit_nulls(self) -> Self:
+        """Refuse an explicit `null` for a column that cannot hold one.
+
+        `model_fields_set` is what separates "sent as null" from "not sent", the same
+        distinction `trip_uuid` relies on for the opposite purpose - there, an explicit
+        null is the *only* way to detach a dive from its trip, because the column is
+        genuinely nullable.
+        """
+        nulled = [name for name in _NON_NULLABLE_UPDATE_FIELDS if name in self.model_fields_set]
+        nulled = [name for name in nulled if getattr(self, name) is None]
+        if nulled:
+            fields = ", ".join(nulled)
+            raise ValueError(f"{fields} cannot be null; omit the field to leave it unchanged")
+        return self
 
 
 class DiveUpdateRequest(DiveUpdate):

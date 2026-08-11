@@ -2693,3 +2693,92 @@ copy that happened to be on disk had none, which was luck rather than design.
 `.dockerignore` now excludes `.env` (but not `.env.example`), logs, `__pycache__`, the local
 venv and the tool caches. Verified after the change: no `.env` in the builder layer, no logs
 or `__pycache__` anywhere in the runtime image, `.env.example` still present.
+
+## `GET /certifications-expiring` mirrors `/gear-service-due`, deliberately
+
+The dashboard's renewal card needs the few certifications with expiry dates on them. It
+used to get there by paging the diver's *entire* certification list client-side, because
+an expiry is just as likely to sit on the oldest card as the newest and `GET
+/certifications` sorts by neither. Gear had already solved the same problem with
+`/gear-service-due`; certifications simply had no equivalent.
+
+This one is built to match, including the part that looks like an omission: **it takes no
+`within_days` parameter.** A server-side horizon would bake today's date into a response
+cached for 60 seconds, which then goes quietly wrong at midnight. With no date input the
+response is a pure function of stored rows, so it can be cached safely and the client
+buckets it into expiring-soon/expired itself - the same trade `GearServiceDueResponse`
+documents.
+
+Two ways it deliberately differs from its gear twin:
+
+* **Undated cards are excluded by the query**, not sorted last. Most recreational
+  certifications never expire, so for a typical diver that is most of the list, and none
+  of them can ever appear on a renewals card.
+* **It carries no card-file metadata.** The renewal card renders a name, an agency and a
+  date; embedding `files` would mean the batched file lookup `_cached_read_certifications`
+  does, for something nothing on that card shows.
+
+The cache key is `user_{id}_certifications_expiring`, which starts with
+`user_{id}_certification` - so `invalidate_certification_caches` already sweeps it and no
+new invalidation call was needed. That prefix overlap is load-bearing; renaming the key to
+something outside it would leave a stale renewals list after every card edit.
+
+## The dashboard overviews say when they are truncated
+
+`GearServiceDueResponse` and `CertificationExpiringResponse` both return every matching
+row rather than a date-filtered slice, so both need a row cap (`DUE_OVERVIEW_LIMIT` /
+`EXPIRING_OVERVIEW_LIMIT`, both 200). The gear one had the cap but no way to say it had
+been hit, so a diver past it saw a dashboard card that looked complete while some overdue
+kit simply wasn't in it. For a safety-adjacent card that is the wrong direction to fail
+in, so both now carry a `truncated` flag and the web client says the list is partial.
+
+Both queries select `limit + 1` rows and drop the extra, so `truncated` is *exact*.
+Comparing `len(rows) == limit` instead would report a list that happens to end on the
+boundary as truncated, which is the kind of false alarm that gets ignored.
+
+`truncated` defaults to `False` so an older client - or a cached response written before
+the field existed - doesn't read as "the list is partial".
+
+## `DiveUpdate` refuses an explicit null for a `NOT NULL` column
+
+Every field on `DiveUpdate` is typed `T | None`, because that is how "omit it to leave it
+alone" is spelled in a PATCH body. But four of them - `dive_number`, `start_time`,
+`duration`, `notes` - map to `NOT NULL` columns, so an explicit `null` is a different
+thing entirely and the database refuses it.
+
+It used to be refused all the way down at the driver. The null survived `exclude_unset`,
+reached Postgres, and the `IntegrityError` came back through `_fk_error_detail` as a 422
+reading **"Invalid reference: a related record does not exist."** - a foreign-key message
+for a not-null problem, which is close to the least helpful thing it could have said.
+
+`start_time` was worse than misleading. `patch_dive`'s guard was `if values.start_time is
+not None`, so an explicit null *skipped* the `split_start_time` branch, still reached the
+database from `model_dump`, and left `utc_offset_minutes` describing the previous start
+time - a wrong-but-plausible offset on a dive, not an error.
+
+A `model_validator` on `DiveUpdate` now rejects those four with a message naming the
+field, and `patch_dive`'s `start_time` branch is keyed off `model_fields_set` to match the
+`trip_uuid` branch beside it. The nullable fields are untouched: clearing `max_depth` back
+to "not recorded" is a real operation, and `trip_uuid: null` is the *only* way to detach a
+dive from its trip.
+
+No client was sending these nulls, so this was latent - but the contract advertised them,
+and the web client has since learned that "explicit null clears a field" from the
+`trip_uuid` fix. That is exactly the assumption that would have walked into it.
+
+## The `trip_uuid` detach path has a test now
+
+`PATCH /dive/{uuid}` detaching a dive from its trip depends entirely on
+
+    if "trip_uuid" in values.model_fields_set:
+        if values.trip_uuid is None:
+            update_data["trip_id"] = None
+
+and `grep trip_uuid tests/` was empty. The web client's "remove from trip" is built on it,
+and without the branch the request succeeds, reports "Dive updated", and changes nothing -
+a silent no-op, the worst shape for a bug to have.
+
+`tests/test_dive_update.py` pins both halves: an explicit null detaches, an omitted key
+leaves the trip alone. Both were checked by deleting the branch and confirming the first
+fails. It needs no database - `patch_dive`'s collaborators are stubbed and the assertions
+are on the `update_data` handed to `crud_dives.update`.

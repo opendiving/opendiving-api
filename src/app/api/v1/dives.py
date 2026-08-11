@@ -593,7 +593,12 @@ async def patch_dive(
         exclude={"mixtures", "dive_site_uuids", "gear_item_uuids", "trip_uuid"}, exclude_unset=True
     )
 
-    if values.start_time is not None:
+    # Keyed off `model_fields_set`, matching the `trip_uuid` branch below, so the two
+    # optional-field branches in this route read the same way. `DiveUpdate` rejects an
+    # explicit null for `start_time` (the column is `NOT NULL`), so a field that is set
+    # is always a real datetime here - which is what stops a null slipping past this
+    # branch into the update and leaving `utc_offset_minutes` describing the *old* time.
+    if "start_time" in values.model_fields_set and values.start_time is not None:
         utc_start_time, utc_offset_minutes = split_start_time(values.start_time)
         update_data["start_time"] = utc_start_time
         update_data["utc_offset_minutes"] = utc_offset_minutes

@@ -644,8 +644,8 @@ async def erase_gear_service_record(
 async def _cached_read_due(request: Request, user_id: int, db: AsyncSession) -> dict:
     """Fetches (and caches) the user's whole active schedule list. Authorization happens
     in the route - see `_cached_read_schedules`."""
-    data = await get_due_overview_for_user(db=db, user_id=user_id, limit=DUE_OVERVIEW_LIMIT)
-    return GearServiceDueResponse(data=data).model_dump()
+    data, truncated = await get_due_overview_for_user(db=db, user_id=user_id, limit=DUE_OVERVIEW_LIMIT)
+    return GearServiceDueResponse(data=data, truncated=truncated).model_dump()
 
 
 @router.get("/gear-service-due", response_model=GearServiceDueResponse)

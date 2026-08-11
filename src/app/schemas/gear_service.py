@@ -314,6 +314,12 @@ class GearServiceDueResponse(BaseModel):
     "today" into a cached response and quietly go wrong at midnight. With no date input
     this is a pure function of stored rows, so it can be cached safely and the client
     buckets it into due-soon/overdue itself.
+
+    `truncated` says the `DUE_OVERVIEW_LIMIT` row cap was hit. Without it the dashboard
+    card silently under-reported: a diver past the cap would see a list that looked
+    complete while some overdue kit simply wasn't in it. For a safety-adjacent card that
+    is the wrong direction to fail in, so the client says the list is partial instead.
     """
 
     data: list[GearServiceDueItem]
+    truncated: bool = False

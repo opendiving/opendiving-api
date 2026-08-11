@@ -12,7 +12,8 @@ Postgres/Redis is exercised end to end by hand (see DECISIONS.md), not here.
 import io
 from datetime import UTC, date, datetime
 from fnmatch import fnmatch
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException, UploadFile
@@ -21,6 +22,7 @@ from uuid6 import uuid7
 from src.app.api.v1.certifications import _to_public_certification, _validate_agency_pairing
 from src.app.core.exceptions.http_exceptions import UnprocessableEntityException
 from src.app.core.utils.uploads import read_upload_within_limit, safe_filename
+from src.app.crud.crud_certifications import get_expiring_overview_for_user
 from src.app.schemas.certification import (
     CertificationAgency,
     CertificationBase,
@@ -318,3 +320,90 @@ class TestCacheInvalidation:
         assert not matches("user_8_certifications:page_1:items_per_page:10")
         assert not matches("user_7_gear_items:page_1:items_per_page:10:archived_False")
         assert not matches("user_7_dives:page_1:items_per_page:10")
+
+
+class TestExpiringOverview:
+    """`GET /certifications-expiring` is the certification twin of `/gear-service-due`,
+    and exists so the dashboard's renewal card stops paging a diver's whole certification
+    list client-side just to find the few with dates on them.
+    """
+
+    def _db(self, rows: list) -> MagicMock:
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=rows)
+        return db
+
+    def _row(self, name: str = "Rescue Diver", expires_on: date = date(2026, 9, 1)) -> SimpleNamespace:
+        return SimpleNamespace(
+            uuid=uuid7(),
+            agency=CertificationAgency.PADI,
+            agency_other=None,
+            name=name,
+            expires_on=expires_on,
+        )
+
+    @pytest.mark.asyncio
+    async def test_returns_the_rows_and_no_truncation_flag(self) -> None:
+        db = self._db([self._row("Rescue Diver"), self._row("EFR")])
+
+        data, truncated = await get_expiring_overview_for_user(db, user_id=1, limit=200)
+
+        assert [item.name for item in data] == ["Rescue Diver", "EFR"]
+        assert truncated is False
+
+    @pytest.mark.asyncio
+    async def test_excludes_cards_with_no_expiry_and_other_users(self) -> None:
+        db = self._db([])
+
+        await get_expiring_overview_for_user(db, user_id=7, limit=200)
+
+        statement = str(db.execute.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
+        # Most recreational certifications never expire, so a dated-only filter is most
+        # of the point - none of the undated ones can ever appear on a renewals card.
+        assert "certification.expires_on IS NOT NULL" in statement
+        assert "certification.user_id = 7" in statement
+        assert "certification.is_deleted IS false" in statement
+
+    @pytest.mark.asyncio
+    async def test_sorts_soonest_first(self) -> None:
+        db = self._db([])
+
+        await get_expiring_overview_for_user(db, user_id=1, limit=200)
+
+        statement = str(db.execute.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
+        assert "ORDER BY certification.expires_on ASC, certification.name" in statement
+
+    @pytest.mark.asyncio
+    async def test_flags_truncation_and_trims_to_the_limit(self) -> None:
+        # One row past the cap is what the query deliberately asks for, so `truncated`
+        # is exact rather than the "we got exactly `limit` rows, so probably" guess.
+        db = self._db([self._row() for _ in range(4)])
+
+        data, truncated = await get_expiring_overview_for_user(db, user_id=1, limit=3)
+
+        assert len(data) == 3
+        assert truncated is True
+
+    @pytest.mark.asyncio
+    async def test_does_not_flag_truncation_at_exactly_the_limit(self) -> None:
+        db = self._db([self._row() for _ in range(3)])
+
+        data, truncated = await get_expiring_overview_for_user(db, user_id=1, limit=3)
+
+        assert len(data) == 3
+        assert truncated is False
+
+    @pytest.mark.asyncio
+    async def test_selects_one_row_past_the_limit(self) -> None:
+        db = self._db([])
+
+        await get_expiring_overview_for_user(db, user_id=1, limit=200)
+
+        statement = str(db.execute.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
+        assert "LIMIT 201" in statement
+
+    def test_the_cache_key_is_covered_by_the_existing_invalidation_pattern(self) -> None:
+        # The route's key prefix must start with `user_{id}_certification` or a card edit
+        # would leave a stale renewals list behind - `invalidate_certification_caches`
+        # sweeps exactly that one pattern and nothing calls anything extra for this route.
+        assert fnmatch("user_1_certifications_expiring", "user_1_certification*")

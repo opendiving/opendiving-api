@@ -10,11 +10,12 @@ from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import ForbiddenException, NotFoundException, UnprocessableEntityException
 from ...core.utils.cache import cache
 from ...core.utils.pagination import clamp_pagination
-from ...crud.crud_certifications import crud_certifications
+from ...crud.crud_certifications import crud_certifications, get_expiring_overview_for_user
 from ...schemas.certification import (
     CertificationAgency,
     CertificationCreate,
     CertificationCreateInternal,
+    CertificationExpiringResponse,
     CertificationFileInfo,
     CertificationRead,
     CertificationReadInternal,
@@ -33,6 +34,12 @@ from ...services.certification_files import (
 )
 
 router = APIRouter(tags=["certifications"])
+
+# `GET /certifications-expiring` returns every dated card rather than a date-filtered
+# slice (see `CertificationExpiringResponse`), so it needs *some* bound. Mirrors
+# `DUE_OVERVIEW_LIMIT` in `gear_service.py`; a diver holding 200 expiring certifications
+# is not the case this card is sized for, and `truncated` tells them so.
+EXPIRING_OVERVIEW_LIMIT = 200
 
 
 def _to_public_certification(
@@ -377,3 +384,41 @@ async def erase_certification_file(
 
     await invalidate_certification_caches(db_certification.user_id)
     return {"message": "Certification file deleted"}
+
+
+# -------------------- dashboard --------------------
+@cache(key_prefix="user_{user_id}_certifications_expiring", resource_id_name="user_id", expiration=60)
+async def _cached_read_expiring(request: Request, user_id: int, db: AsyncSession) -> dict:
+    """Fetches (and caches) the user's whole dated-certification list. Authorization
+    happens in the route - see `_cached_read_certifications`.
+
+    The key starts with `user_{id}_certification`, so the existing
+    `invalidate_certification_caches` pattern already covers it; nothing extra to call.
+    """
+    data, truncated = await get_expiring_overview_for_user(db=db, user_id=user_id, limit=EXPIRING_OVERVIEW_LIMIT)
+    return CertificationExpiringResponse(data=data, truncated=truncated).model_dump()
+
+
+@router.get("/certifications-expiring", response_model=CertificationExpiringResponse)
+async def read_certifications_expiring(
+    request: Request,
+    user_uuid: uuid_pkg.UUID,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> dict:
+    """Every certification the user owns that has an expiry date, soonest first.
+
+    The certification twin of `GET /gear-service-due`, and it exists for the same
+    reason: without it a dashboard card has to page through a diver's entire
+    certification list client-side to find the few that are expiring, since an expiry is
+    just as likely to sit on the oldest card as the newest and the list endpoint sorts by
+    neither.
+
+    Takes no date horizon on purpose: filtering by "expiring within N days" server-side
+    would bake today's date into the cached response, which then quietly goes wrong at
+    midnight. The client buckets into expiring-soon/expired itself.
+    """
+    if current_user["uuid"] != user_uuid:
+        raise ForbiddenException()
+
+    return await _cached_read_expiring(request, user_id=current_user["id"], db=db)
