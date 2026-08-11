@@ -67,6 +67,12 @@ async def write_trip(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> TripRead:
+    """Create a trip for the authenticated user.
+
+    `user_uuid` in the body must be the caller's own: a mismatch is a 403 rather than a
+    silent reassignment to the caller. Trip names are unique per user, so reusing one
+    that already exists is a 422.
+    """
     if current_user["uuid"] != trip.user_uuid:
         raise ForbiddenException()
 
@@ -100,6 +106,13 @@ async def read_trips(
         Query(max_length=255, description="Case-insensitive substring match on name or location"),
     ] = None,
 ) -> dict:
+    """List the caller's trips, most recent start date first.
+
+    `user_uuid` must be the caller's own (403 otherwise) - this endpoint cannot be used
+    to read another user's trips. `search` matches a case-insensitive substring against
+    name and location. Out-of-range pagination is clamped rather than rejected, so
+    `items_per_page` above the ceiling returns the ceiling instead of a 422.
+    """
     if current_user["uuid"] != user_uuid:
         raise ForbiddenException()
 
@@ -125,6 +138,10 @@ async def read_trip(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> TripRead:
+    """Return a single trip by its public uuid.
+
+    404 when no such trip exists, 403 when it belongs to another user.
+    """
     # Authorize before the cached read: `@cache` replays a hit without re-checking.
     await _get_owned_trip(db, uuid, current_user)
 
@@ -140,6 +157,11 @@ async def patch_trip(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
+    """Partially update a trip; omitted fields are left untouched.
+
+    403 unless the caller owns it. Renaming to a name the caller already has on another
+    trip is a 422.
+    """
     db_trip = await _get_owned_trip(db, uuid, current_user)
 
     if values.name is not None and await trip_name_exists(
@@ -163,6 +185,11 @@ async def erase_trip(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
+    """Soft-delete a trip.
+
+    403 unless the caller owns it. The row is flagged rather than removed, so dives that
+    referenced this trip keep their `trip_id` - the trip simply stops appearing in reads.
+    """
     owner_id = (await _get_owned_trip(db, uuid, current_user)).user_id
 
     await crud_trips.delete(db=db, uuid=uuid)

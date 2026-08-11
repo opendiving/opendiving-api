@@ -76,6 +76,12 @@ async def write_dive_site(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveSiteRead:
+    """Create a dive site for the authenticated user.
+
+    `user_uuid` in the body must be the caller's own (403 otherwise). Uniqueness is on
+    name *and* location together, so the same site name at a different location is
+    allowed; a genuine repeat is a 422.
+    """
     if current_user["uuid"] != dive_site.user_uuid:
         raise ForbiddenException()
 
@@ -111,6 +117,13 @@ async def read_dive_sites(
         Query(max_length=255, description="Case-insensitive substring match on name or location"),
     ] = None,
 ) -> dict:
+    """List the caller's dive sites.
+
+    `user_uuid` must be the caller's own (403 otherwise). `search` matches a
+    case-insensitive substring against name and location, which is what backs the dive
+    form's picker: it narrows server-side as you type rather than shipping the whole list
+    to the browser. Out-of-range pagination is clamped, not rejected.
+    """
     if current_user["uuid"] != user_uuid:
         raise ForbiddenException()
 
@@ -136,6 +149,10 @@ async def read_dive_site(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveSiteRead:
+    """Return a single dive site by its public uuid.
+
+    404 when no such site exists, 403 when it belongs to another user.
+    """
     # Authorize before the cached read: `@cache` replays a hit without re-checking.
     await _get_owned_dive_site(db, uuid, current_user)
 
@@ -151,6 +168,13 @@ async def patch_dive_site(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
+    """Partially update a dive site; omitted fields are left untouched.
+
+    403 unless the caller owns it. Uniqueness is re-checked against the *resulting* name
+    and location, so moving a site to a location where that name is already taken is a
+    422. Because dive reads embed this site's name and location, a successful change also
+    invalidates every cached dive logged here.
+    """
     db_dive_site = await _get_owned_dive_site(db, uuid, current_user)
 
     effective_name = values.name if values.name is not None else db_dive_site.name
@@ -185,6 +209,12 @@ async def erase_dive_site(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
+    """Soft-delete a dive site.
+
+    403 unless the caller owns it. Idempotent: deleting an already-deleted site succeeds
+    rather than 404ing. The site stays attached to the dives logged at it, so their
+    cached reads are invalidated too.
+    """
     # `include_deleted`: deleting an already-soft-deleted site is a no-op, not a 404.
     owner_id = (await _get_owned_dive_site(db, uuid, current_user, include_deleted=True)).user_id
 

@@ -81,6 +81,11 @@ async def write_gear_item(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> GearItemRead:
+    """Create a gear item for the authenticated user.
+
+    `user_uuid` must be the caller's own (403 otherwise). Uniqueness is on brand *and*
+    name together, so the same model from two brands is fine; a genuine repeat is a 422.
+    """
     if current_user["uuid"] != gear_item.user_uuid:
         raise ForbiddenException()
 
@@ -243,6 +248,10 @@ async def read_gear_item(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> GearItemRead:
+    """Return a single gear item, with its service schedules attached.
+
+    404 when no such item exists, 403 when it belongs to another user.
+    """
     # Authorize before the cached read: `@cache` replays a hit without re-checking.
     await _get_owned_gear_item(db, uuid, current_user)
 

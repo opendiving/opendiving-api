@@ -219,6 +219,11 @@ async def read_certification(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> CertificationRead:
+    """Return a single certification, with metadata for any stored card images.
+
+    404 when no such certification exists, 403 when it belongs to another user. The image
+    bytes themselves are served by `GET /certification/{uuid}/file/{side}`.
+    """
     await _get_owned_certification(db, uuid, current_user)
     return await _cached_read_certification(
         request, user_id=current_user["id"], uuid=uuid, owner_uuid=current_user["uuid"], db=db
@@ -233,6 +238,12 @@ async def patch_certification(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
+    """Partially update a certification; omitted fields are left untouched.
+
+    403 unless the caller owns it. `agency` and `agency_other` are validated as a pair
+    against the resulting values, so clearing one while the other still requires it is a
+    422 rather than a half-updated row.
+    """
     db_certification = await _get_owned_certification(db, uuid, current_user)
 
     update_data = values.model_dump(exclude_unset=True)
@@ -376,6 +387,11 @@ async def erase_certification_file(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
+    """Delete one side's card image from a certification, leaving the certification itself.
+
+    403 unless the caller owns it; 404 when that side has no image stored, so this is not
+    idempotent - a repeat delete reports the absence rather than succeeding quietly.
+    """
     db_certification = await _get_owned_certification(db, uuid, current_user)
 
     deleted = await delete_certification_file(db=db, certification_id=db_certification.id, side=side)

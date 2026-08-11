@@ -114,6 +114,11 @@ def _series(points: list[tuple[float, int]]) -> ParsedSeries | None:
 
 
 def _parse_mixture(gas: dict[str, Any]) -> DiveMixtureSchema:
+    """Map one `Gases[]` entry onto a `DiveMixture`, converting SI units as it goes.
+
+    Missing oxygen/helium/volume become 0.0 rather than null: the model requires them, and
+    an export that omits a gas fraction is one that never recorded it.
+    """
     return DiveMixtureSchema(
         end_pressure=_round2_or_none(_pascals_to_bar(gas.get("EndPressure"))),
         helium=_round2_or_none(_fraction_to_percent(gas.get("Helium"))) or 0.0,
@@ -145,6 +150,12 @@ class SuuntoJsonParser(DiveParser):
 
     @classmethod
     def can_parse(cls, filename: str, content: bytes) -> bool:
+        """Whether this looks like a Suunto JSON export: a `.json` file whose top level is
+        an object carrying `DeviceLog.Header`.
+
+        Sniffs rather than trusts the extension, and answers False for anything malformed
+        instead of raising - the caller is choosing between parsers, not parsing yet.
+        """
         if not filename.lower().endswith(".json"):
             return False
         try:
@@ -160,6 +171,11 @@ class SuuntoJsonParser(DiveParser):
 
     @classmethod
     def parse(cls, content: bytes) -> ParsedDiveSchema:
+        """Extract the dive itself (not its samples - see `parse_profile`).
+
+        Every structural surprise in the file becomes a `DiveParseError`, so a caller never
+        sees a raw `KeyError` from a Suunto export that omits a field this expects.
+        """
         try:
             data: Any = json.loads(content)
         except json.JSONDecodeError as exc:
@@ -255,6 +271,14 @@ class SuuntoJsonParser(DiveParser):
 
     @staticmethod
     def _parse_dive(data: dict[str, Any]) -> ParsedDiveSchema:
+        """Map `DeviceLog.Header` onto `ParsedDiveSchema`.
+
+        Field names vary across export generations, so several are read with a fallback
+        (`DiveTime`/`Duration`, `DepthAverage`/`Depth.Avg`). Bottom temperature is derived
+        rather than read: the JSON header has no per-phase breakdown the way the XML export
+        does, so the colder of the recorded extremes stands in, falling back to the coldest
+        sample when the header carries neither.
+        """
         header = data["DeviceLog"]["Header"]
         samples = data["DeviceLog"].get("Samples") or []
         depth = header.get("Depth") or {}

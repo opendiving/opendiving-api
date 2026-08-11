@@ -53,6 +53,11 @@ _EMAIL_CHANGE_REQUEST_RESPONSE = EmailChangeRequestResponse()
 
 @router.get("/user", response_model=UserRead)
 async def read_current_user(request: Request, current_user: Annotated[dict, Depends(get_current_user)]) -> dict:
+    """Return the authenticated user's own profile.
+
+    Served straight from the token-resolved user, so it costs no extra query. There is no
+    endpoint for reading *another* user - see the note below.
+    """
     return current_user
 
 
@@ -69,6 +74,12 @@ async def patch_user(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
+    """Partially update the authenticated user's own profile.
+
+    Email is deliberately not updatable here - changing it requires the verification
+    round-trip in `POST /user/email-change/request`. Taking a username someone else
+    already holds is a 422.
+    """
     # Note: `email` is deliberately not part of `UserUpdate` - see
     # `POST /user/email-change/request` for how email changes work instead.
     if values.username is not None and values.username != current_user["username"]:
@@ -263,6 +274,11 @@ async def read_dive_stats(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> UserDiveStatsRead:
+    """Return the caller's aggregate dive statistics.
+
+    A user with no dives logged yet gets zeroed-out stats rather than a 404: every user
+    conceptually has stats, the row just hasn't been created.
+    """
     stats = await crud_user_dive_stats.get(
         db=db, user_id=current_user["id"], schema_to_select=UserDiveStatsReadInternal, return_as_model=True
     )
@@ -291,6 +307,9 @@ async def read_dive_stats(
 # user's own id, which is all the route below passes.
 @cache(key_prefix="user_{user_id}_dives:gas_use_history", resource_id_name="user_id", expiration=60)
 async def _cached_gas_use_history(request: Request, user_id: int, db: AsyncSession) -> list[DiveGasUsePoint]:
+    """Fetches (and caches) a user's whole gas-use series. Authorization happens in the
+    route before this is reached - `@cache` serves a hit without re-checking it.
+    """
     return await gas_use_history(db=db, user_id=user_id)
 
 
@@ -321,6 +340,12 @@ async def erase_user(
     access_token: str = Depends(oauth2_scheme),
     refresh_token: str | None = Cookie(None, alias="refresh_token"),
 ) -> dict[str, str]:
+    """Soft-delete the authenticated user's own account and end the session.
+
+    The row is flagged rather than removed. Both the access token and, when present, the
+    refresh token are blacklisted and the refresh cookie cleared, so the tokens the caller
+    is holding stop working immediately instead of staying valid until they expire.
+    """
     await crud_users.delete(db=db, uuid=current_user["uuid"])
 
     if refresh_token:

@@ -66,6 +66,14 @@ _EMAIL_REQUEST_RESPONSE = EmailAuthRequestResponse()
 async def _start_onboarding_or_sign_in(
     response: Response, outcome: AuthenticatedUser | OnboardingRequired
 ) -> AuthOutcome:
+    """Turn a verified identity into either a signed-in session or an onboarding handoff.
+
+    Shared by every entry point that proves who someone is (magic link, Google), because
+    each of them faces the same fork: a `User` row already exists for this identity, or it
+    doesn't and one has to be created by `POST /auth/complete`. In the second case no user
+    is created here - the caller gets a short-lived onboarding token carrying the verified
+    email and profile, which is the only thing that lets `/auth/complete` trust them.
+    """
     if isinstance(outcome, AuthenticatedUser):
         tokens = await issue_tokens(response, outcome.user["username"])
         return AuthOutcome(status="authenticated", **tokens)
@@ -365,6 +373,12 @@ async def logout(
     refresh_token: str | None = Cookie(None, alias="refresh_token"),
     db: AsyncSession = Depends(async_get_db),
 ) -> dict[str, str]:
+    """End the caller's session.
+
+    Blacklists both the access and refresh tokens and clears the refresh cookie, so the
+    pair stops working immediately rather than remaining valid until expiry. 401 when no
+    refresh cookie is present or either token fails to decode.
+    """
     try:
         if not refresh_token:
             raise UnauthorizedException("Refresh token not found")

@@ -94,6 +94,13 @@ _DIVE_CONSTRAINT_MESSAGES = {
 
 
 def _fk_error_detail(exc: IntegrityError) -> str:
+    """Translate a dive `IntegrityError` into a message worth showing a diver.
+
+    Covers both foreign keys (a trip/site/gear item that vanished between validation and
+    insert) and the domain `CheckConstraint`s. Constraint violations surface from the DB
+    layer, not Pydantic, so without this the caller would get a raw 500 instead of a
+    sentence naming the field.
+    """
     msg = str(exc.orig)
     if "dive_trip_id_fkey" in msg:
         return "Trip not found."
@@ -117,6 +124,10 @@ _MIXTURE_CONSTRAINT_MESSAGES = {
 
 
 def _mixture_error_detail(exc: IntegrityError) -> str:
+    """As `_fk_error_detail`, but for the gas-mixture constraints (oxygen/helium ranges,
+    their sum, volume, pressure ordering). Separate because a mixture failure has to name
+    the mixture rather than the dive.
+    """
     msg = str(exc.orig)
     for constraint, detail in _MIXTURE_CONSTRAINT_MESSAGES.items():
         if constraint in msg:
@@ -183,6 +194,12 @@ def _to_public_dive_with_mixtures(
     source_file: DiveFileInfo | None = None,
     profile: DiveProfileInfo | None = None,
 ) -> DiveReadWithMixtures:
+    """Assemble a dive's public shape from the row plus everything a read embeds.
+
+    Internal FKs are dropped in favour of the related resources' uuids and summaries, so
+    the related rows are passed in already fetched - the caller batches them across a page
+    rather than querying per dive.
+    """
     data = _to_public_start_time(db_dive if isinstance(db_dive, dict) else db_dive.model_dump())
     return DiveReadWithMixtures(
         **{k: v for k, v in data.items() if k not in ("id", "user_id", "trip_id")},
@@ -243,6 +260,15 @@ async def write_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveReadWithMixtures:
+    """Log a dive, together with its gas mixtures, dive sites and gear in one request.
+
+    `user_uuid` must be the caller's own (403 otherwise). Every referenced trip, dive site
+    and gear item must belong to the caller too: one that doesn't - or doesn't exist - is
+    a 422 naming which, not a 403, since from the caller's side the two are the same
+    thing. Dive sites keep the order given; index 0 is the primary site. Values the DB's
+    domain constraints reject (a non-positive duration, a mixture over 100%) also come
+    back as 422 with the offending field named.
+    """
     if current_user["uuid"] != dive.user_uuid:
         raise ForbiddenException()
 
@@ -403,6 +429,15 @@ async def read_dives(
     dive_site_uuid: uuid_pkg.UUID | None = None,
     gear_item_uuid: uuid_pkg.UUID | None = None,
 ) -> dict:
+    """List the caller's dives, newest first, each with its trip, sites and gear attached.
+
+    `user_uuid` must be the caller's own (403 otherwise). The `trip_uuid`,
+    `dive_site_uuid` and `gear_item_uuid` filters are combinable, and one naming something
+    that doesn't exist or isn't the caller's returns an empty page rather than an error -
+    it reveals nothing about whether that resource exists. `dive_site_uuid` matches any
+    dive that *includes* the site, since a dive can span several. Out-of-range pagination
+    is clamped, not rejected.
+    """
     if current_user["uuid"] != user_uuid:
         raise ForbiddenException()
 
@@ -473,6 +508,9 @@ async def read_next_dive_number(
 # below calls that same helper, which is what keeps this from surviving its own fix.
 @cache(key_prefix="user_{user_id}_dives:numbering", resource_id_name="user_id", expiration=60)
 async def _cached_numbering_summary(request: Request, user_id: int, db: AsyncSession) -> DiveNumberingSummary:
+    """Fetches (and caches) a user's dive-numbering summary. Authorization happens in the
+    route before this is reached - `@cache` serves a hit without re-checking it.
+    """
     return await summarize_numbering(db=db, user_id=user_id)
 
 
@@ -571,6 +609,12 @@ async def read_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveReadWithMixtures:
+    """Return a single dive with its mixtures, sites, gear, source file and profile summary.
+
+    404 when no such dive exists, 403 when it belongs to another user. The profile's
+    samples are not included - `GET /dive/{uuid}/profile` serves those separately, since
+    they are far larger than the rest of the dive put together.
+    """
     await _get_owned_dive(db, uuid, current_user)
 
     return await _cached_read_dive(
@@ -586,6 +630,15 @@ async def patch_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
+    """Partially update a dive; omitted fields are left untouched.
+
+    403 unless the caller owns it. The list-valued fields - `mixtures`,
+    `dive_site_uuids`, `gear_item_uuids` - are replaced wholesale when present rather than
+    merged, so sending a shorter list removes the difference and omitting the key entirely
+    leaves it alone. Passing `null` for `trip_uuid` detaches the dive from its trip, which
+    is distinct from omitting the key. Referencing anything the caller doesn't own is a
+    422, as are the DB's domain constraints.
+    """
     db_dive = await _get_owned_dive(db, uuid, current_user)
     owner_id = db_dive.user_id
 
@@ -677,6 +730,13 @@ async def erase_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
+    """Soft-delete a dive, and hard-delete the dive-computer export stored against it.
+
+    403 unless the caller owns it. The dive row is only flagged, but its source file is
+    genuinely removed: leaving it would strand the bytes behind a dive nobody can open and
+    hold the file's slot in the unique indexes, blocking a re-import of that same export
+    into a fresh dive.
+    """
     db_dive = await _get_owned_dive(db, uuid, current_user)
     owner_id = db_dive.user_id
 
@@ -861,6 +921,12 @@ async def erase_dive_file(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
+    """Delete the stored dive-computer export from a dive, leaving the dive itself.
+
+    403 unless the caller owns it; 404 when the dive has no source file, so this is not
+    idempotent - a repeat delete reports the absence rather than succeeding quietly. The
+    dive keeps whatever values were parsed out of the file; only the file goes.
+    """
     db_dive = await _get_owned_dive(db, uuid, current_user)
 
     deleted = await delete_dive_file(db=db, dive_id=db_dive.id)

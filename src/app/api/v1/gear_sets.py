@@ -87,6 +87,13 @@ async def write_gear_set(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> GearSetRead:
+    """Create a gear set - a named bundle of the caller's gear items, with an optional
+    default weight the dive form can pre-fill.
+
+    `user_uuid` must be the caller's own and every uuid in `gear_item_uuids` must resolve
+    to a gear item the caller owns; either mismatch is a 403. Set names are unique per
+    user, so reusing one is a 422.
+    """
     if current_user["uuid"] != gear_set.user_uuid:
         raise ForbiddenException()
 
@@ -161,6 +168,12 @@ async def read_gear_sets(
     page: int = 1,
     items_per_page: int = 10,
 ) -> dict:
+    """List the caller's gear sets alphabetically, each with its gear items attached.
+
+    `user_uuid` must be the caller's own (403 otherwise). The items are fetched in one
+    batched lookup across the page rather than per set. Out-of-range pagination is
+    clamped, not rejected.
+    """
     if current_user["uuid"] != user_uuid:
         raise ForbiddenException()
 
@@ -180,6 +193,10 @@ async def read_gear_sets(
 async def _cached_read_gear_set(
     request: Request, user_id: int, uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession
 ) -> GearSetRead:
+    """Fetches (and caches) one gear set with its items attached. Authorization is checked
+    by the route before this is ever reached - `@cache` serves cached responses without
+    re-checking it.
+    """
     db_gear_set = await crud_gear_sets.get(
         db=db, uuid=uuid, is_deleted=False, schema_to_select=GearSetReadInternal, return_as_model=True
     )
@@ -198,6 +215,10 @@ async def read_gear_set(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> GearSetRead:
+    """Return a single gear set, with its gear items attached.
+
+    404 when no such set exists, 403 when it belongs to another user.
+    """
     # Authorize before the cached read: `@cache` replays a hit without re-checking.
     await _get_owned_gear_set(db, uuid, current_user)
 

@@ -38,6 +38,12 @@ _XML_GAS_NUMBER = 1
 
 
 def _tag(name: str) -> str:
+    """Qualify a bare element name with the Suunto XML namespace.
+
+    ElementTree matches on the fully-qualified `{namespace}name`, so an unqualified
+    `find("MaxDepth")` silently matches nothing against these documents rather than
+    erroring - which is why every lookup in this module goes through here.
+    """
     return f"{{{_SUUNTO_NS}}}{name}"
 
 
@@ -116,6 +122,13 @@ class SuuntoXmlParser(DiveParser):
 
     @classmethod
     def can_parse(cls, filename: str, content: bytes) -> bool:
+        """Whether this looks like a Suunto XML export: a `.xml` file whose root element is
+        a namespaced `<Dive>`.
+
+        Parses through `defusedxml`, since this runs on uploaded bytes before anything has
+        vouched for them. Answers False for anything malformed instead of raising - the
+        caller is choosing between parsers, not parsing yet.
+        """
         if not filename.lower().endswith(".xml"):
             return False
         try:
@@ -126,6 +139,13 @@ class SuuntoXmlParser(DiveParser):
 
     @classmethod
     def parse(cls, content: bytes) -> ParsedDiveSchema:
+        """Extract the dive itself (not its samples - see `parse_profile`).
+
+        Distinguishes two failures the caller reports differently: a file that isn't this
+        format at all raises `UnsupportedDiveFileError`, while one that is but is
+        internally broken raises `DiveParseError`. `DET.fromstring` is the XXE-guarded
+        parser and is not interchangeable with `ET.fromstring` here.
+        """
         try:
             root = DET.fromstring(content)
         except (ET.ParseError, DefusedXmlException) as exc:
@@ -163,6 +183,13 @@ class SuuntoXmlParser(DiveParser):
 
     @classmethod
     def _parse_samples(cls, root: ET.Element) -> ParsedProfileSchema | None:
+        """Group `DiveSamples/Dive.Sample` into one series per channel.
+
+        Each channel gets its own time axis rather than sharing one: a sample element may
+        carry any subset of depth, temperature and tank pressure, so a shared axis would be
+        mostly nulls. Samples without a `Time` are skipped - a reading with no position on
+        the axis can't be plotted.
+        """
         depth_t: list[float] = []
         depth_v: list[int] = []
         temperature_t: list[float] = []
@@ -212,6 +239,12 @@ class SuuntoXmlParser(DiveParser):
 
     @classmethod
     def _parse_dive(cls, root: ET.Element) -> ParsedDiveSchema:
+        """Map a `<Dive>` element onto `ParsedDiveSchema`.
+
+        Unlike the JSON export this one records `BottomTemperature` directly, so it is read
+        rather than derived. `DiveNumberInSerie` is deliberately ignored - see the comment
+        below for why importing it would misnumber a diver's log.
+        """
         mixtures = [cls._parse_mixture(mix) for mix in root.findall(f"{_tag('DiveMixtures')}/{_tag('DiveMixture')}")]
 
         return ParsedDiveSchema(
@@ -234,6 +267,13 @@ class SuuntoXmlParser(DiveParser):
 
     @staticmethod
     def _parse_mixture(mix: ET.Element) -> DiveMixtureSchema:
+        """Map one `<DiveMixture>` onto a `DiveMixture`.
+
+        Gas fractions are already percentages here (unlike the JSON export's 0-1
+        fractions), but pressures are millibar - see the comment below for what reading
+        them as bar did to every transmitter-equipped dive. Missing values become 0.0
+        rather than null, since the model requires them.
+        """
         return DiveMixtureSchema(
             # Millibar, not bar - see `_MILLIBAR_PER_BAR`. Reading these as bar stored
             # `start_pressure = 205203` for every dive imported from a 2025+ transmitter

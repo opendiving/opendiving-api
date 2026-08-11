@@ -278,6 +278,11 @@ async def read_gear_service_schedule(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> GearServiceScheduleRead:
+    """Return a single service schedule by its public uuid.
+
+    Ownership is inherited from the gear item the schedule hangs off, so a schedule on
+    another user's item reads as 404 rather than 403 - its existence isn't disclosed.
+    """
     schedule = await resolve_schedule_for_user(db=db, schedule_uuid=uuid, user_id=current_user["id"])
     if schedule is None:
         raise NotFoundException("Service schedule not found")
@@ -569,6 +574,11 @@ async def read_gear_service_record(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> GearServiceRecordRead:
+    """Return a single service record by its public uuid.
+
+    Ownership is inherited from the gear item the record belongs to, so another user's
+    record reads as 404 rather than 403 - its existence isn't disclosed.
+    """
     record = await resolve_record_for_user(db=db, record_uuid=uuid, user_id=current_user["id"])
     if record is None:
         raise NotFoundException("Service record not found")
