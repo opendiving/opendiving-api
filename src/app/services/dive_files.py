@@ -192,9 +192,7 @@ async def store_dive_file(
         # silently strip the file off the dive that has it) or by storing a second copy
         # (which would defeat the dedupe). The realistic cause is logging one export as
         # two dives, and saying so is more use to the diver than either silent fix.
-        other_uuid = (
-            await db.execute(select(Dive.uuid).where(Dive.id == existing.dive_id))
-        ).scalar_one_or_none()
+        other_uuid = (await db.execute(select(Dive.uuid).where(Dive.id == existing.dive_id))).scalar_one_or_none()
         raise DiveFileAlreadyLinkedError(other_uuid)
 
     filename = safe_filename(upload.filename, default="dive-file")

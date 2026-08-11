@@ -1,0 +1,48 @@
+name: PR Title
+
+on:
+  pull_request:
+    # `edited` is the one that matters: it re-runs the check when a title is
+    # corrected, so a failing PR goes green without an empty commit to push.
+    types: [opened, edited, reopened]
+
+# Nothing is checked out and no API call is made - the title arrives in the
+# event payload - so the job needs no token at all.
+permissions: {}
+
+jobs:
+  semantic-title:
+    runs-on: ubuntu-latest
+
+    steps:
+      # PRs here are squash-merged, so this title becomes the commit subject on
+      # `main`. It is the only part of a branch that outlives the branch, which
+      # is why it is checked and the individual commits are not.
+      #
+      # The title is passed through `env` rather than interpolated into the
+      # script. `${{ github.event.pull_request.title }}` written inside `run:`
+      # is substituted before bash parses the line, so a title containing
+      # backticks or `$(...)` would execute as shell.
+      - name: Check title is a conventional commit subject
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          PATTERN='^(feat|fix|refactor|docs|test|chore|perf|ci|build|revert)(\([a-z0-9._-]+\))?!?: .+'
+
+          if printf '%s' "$TITLE" | grep -Eq "$PATTERN"; then
+            echo "OK: $TITLE"
+            exit 0
+          fi
+
+          echo "PR title is not a semantic commit subject:"
+          echo "    $TITLE"
+          echo
+          echo "Expected: <type>[(scope)][!]: <description>"
+          echo "Types:    feat, fix, refactor, docs, test, chore, perf, ci, build, revert"
+          echo
+          echo "Examples: feat: extract and serve per-sample dive profiles"
+          echo "          fix(dives): reject a profile with no samples"
+          echo "          feat!: drop the response envelope"
+          echo
+          echo "Edit the title - this check re-runs on edit, no push needed."
+          exit 1

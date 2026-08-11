@@ -2,16 +2,19 @@ import uuid as uuid_pkg
 from datetime import UTC, datetime
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...api.dependencies import get_current_user
+from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import DuplicateValueException, ForbiddenException, NotFoundException
 from ...core.utils.cache import cache
+from ...core.utils.pagination import clamp_pagination
+from ...core.utils.search import search_clause, search_multi
 from ...crud.crud_gear_items import crud_gear_items, gear_item_name_exists
 from ...crud.crud_gear_service_schedules import get_schedules_for_gear_item, get_schedules_for_gear_items
+from ...models.gear_item import GearItem
 from ...schemas.gear_item import (
     GearItemCreate,
     GearItemCreateInternal,
@@ -25,9 +28,29 @@ from ...services.gear_service import soft_delete_schedules_for_gear_item
 
 router = APIRouter(tags=["gear"])
 
+# Brand rather than type: divers name their kit inconsistently ("MK25", "my reg"), but
+# reach for the brand when they can't recall what they called it. Type is already a
+# closed vocabulary with its own filter surface.
+GEAR_ITEM_SEARCH_COLUMNS = ("name", "brand")
 
-def _gear_item_owner_id(db_gear_item: Any) -> int:
-    return cast(int, db_gear_item["user_id"] if isinstance(db_gear_item, dict) else db_gear_item.user_id)
+
+async def _get_owned_gear_item(
+    db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict, *, include_deleted: bool = False
+) -> GearItemReadInternal:
+    """Fetch a gear item by public uuid and assert the caller owns it.
+
+    Thin wrapper over `fetch_owned_or_raise` - see there for the 404/403 split and, in
+    particular, why this must run before any `@cache`-wrapped read helper.
+    """
+    return await fetch_owned_or_raise(
+        db=db,
+        crud=crud_gear_items,
+        uuid=uuid,
+        current_user=current_user,
+        schema=GearItemReadInternal,
+        not_found_message="Gear item not found",
+        include_deleted=include_deleted,
+    )
 
 
 def _to_public_gear_item(
@@ -58,6 +81,11 @@ async def write_gear_item(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> GearItemRead:
+    """Create a gear item for the authenticated user.
+
+    `user_uuid` must be the caller's own (403 otherwise). Uniqueness is on brand *and*
+    name together, so the same model from two brands is fine; a genuine repeat is a 422.
+    """
     if current_user["uuid"] != gear_item.user_uuid:
         raise ForbiddenException()
 
@@ -82,7 +110,10 @@ async def write_gear_item(
 
 
 @cache(
-    key_prefix=("user_{user_id}_gear_items:page_{page}:items_per_page:{items_per_page}:archived_{include_archived}"),
+    key_prefix=(
+        "user_{user_id}_gear_items:page_{page}:items_per_page:{items_per_page}"
+        ":archived_{include_archived}:search_{search}"
+    ),
     resource_id_name="user_id",
     expiration=60,
 )
@@ -94,6 +125,7 @@ async def _cached_read_gear_items(
     page: int,
     items_per_page: int,
     include_archived: bool,
+    search: str | None = None,
 ) -> dict:
     """Fetches (and caches) a user's paginated gear item list.
 
@@ -101,20 +133,47 @@ async def _cached_read_gear_items(
     authorization has been checked by the route - `@cache` serves cached responses
     without re-running any authorization logic. `include_archived` is part of the cache
     key so the picker's (non-archived) view and the management page's (full) view can't
-    serve each other's results.
-    """
-    filters: dict[str, Any] = {"user_id": user_id, "is_deleted": False}
-    if not include_archived:
-        filters["is_archived"] = False
+    serve each other's results, and `search` for the same reason between two queries.
 
-    data = await crud_gear_items.get_multi(
-        db=db,
-        offset=compute_offset(page, items_per_page),
-        limit=items_per_page,
-        sort_columns="name",
-        sort_orders="asc",
-        **filters,
-    )
+    Hand-written rather than built with `OwnedResourceCache` (as trips, dive sites and
+    gear sets are) because of the two things that factory has no room for: the extra
+    `include_archived` filter dimension, and the batched service-schedule lookup below.
+    See that class's docstring for why the duplication is preferred over a hook.
+    """
+    offset = compute_offset(page, items_per_page)
+    term = (search or "").strip()
+
+    if term:
+        conditions = [
+            GearItem.user_id == user_id,
+            GearItem.is_deleted.is_(False),
+            search_clause(GearItem, GEAR_ITEM_SEARCH_COLUMNS, term),
+        ]
+        if not include_archived:
+            conditions.append(GearItem.is_archived.is_(False))
+
+        data = await search_multi(
+            db=db,
+            model=GearItem,
+            conditions=tuple(conditions),
+            sort_column="name",
+            sort_order="asc",
+            offset=offset,
+            limit=items_per_page,
+        )
+    else:
+        filters: dict[str, Any] = {"user_id": user_id, "is_deleted": False}
+        if not include_archived:
+            filters["is_archived"] = False
+
+        data = await crud_gear_items.get_multi(
+            db=db,
+            offset=offset,
+            limit=items_per_page,
+            sort_columns="name",
+            sort_orders="asc",
+            **filters,
+        )
     # One batched query for the whole page's service schedules rather than one per row -
     # every gear row shows a service badge, so an N+1 here would be on the hot path.
     # `get_multi` passes no `schema_to_select`, so each row still carries its internal `id`.
@@ -137,12 +196,18 @@ async def read_gear_items(
     page: int = 1,
     items_per_page: int = 10,
     include_archived: bool = False,
+    search: Annotated[
+        str | None,
+        Query(max_length=255, description="Case-insensitive substring match on name or brand"),
+    ] = None,
 ) -> dict:
     """List a user's gear. Archived items are excluded unless `include_archived=true`,
     so the dive form's picker only ever offers gear that's still in service.
     """
     if current_user["uuid"] != user_uuid:
         raise ForbiddenException()
+
+    page, items_per_page = clamp_pagination(page, items_per_page)
 
     return await _cached_read_gear_items(
         request,
@@ -152,6 +217,9 @@ async def read_gear_items(
         page=page,
         items_per_page=items_per_page,
         include_archived=include_archived,
+        # Normalized here rather than in the cache layer so that " MK25 " and "mk25"
+        # share one cache entry instead of two identical ones under different keys.
+        search=(search or "").strip().lower() or None,
     )
 
 
@@ -180,15 +248,12 @@ async def read_gear_item(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> GearItemRead:
-    db_gear_item = await crud_gear_items.get(
-        db=db, uuid=uuid, is_deleted=False, schema_to_select=GearItemReadInternal, return_as_model=True
-    )
-    if db_gear_item is None:
-        raise NotFoundException("Gear item not found")
+    """Return a single gear item, with its service schedules attached.
 
-    db_gear_item = cast(GearItemReadInternal, db_gear_item)
-    if db_gear_item.user_id != current_user["id"]:
-        raise ForbiddenException()
+    404 when no such item exists, 403 when it belongs to another user.
+    """
+    # Authorize before the cached read: `@cache` replays a hit without re-checking.
+    await _get_owned_gear_item(db, uuid, current_user)
 
     return await _cached_read_gear_item(
         request, user_id=current_user["id"], uuid=uuid, owner_uuid=current_user["uuid"], db=db
@@ -206,15 +271,7 @@ async def patch_gear_item(
     """Partial update, including archiving/unarchiving via `is_archived` - `archived_at`
     is derived here rather than accepted from the caller.
     """
-    db_gear_item = await crud_gear_items.get(
-        db=db, uuid=uuid, is_deleted=False, schema_to_select=GearItemReadInternal, return_as_model=True
-    )
-    if db_gear_item is None:
-        raise NotFoundException("Gear item not found")
-
-    db_gear_item = cast(GearItemReadInternal, db_gear_item)
-    if db_gear_item.user_id != current_user["id"]:
-        raise ForbiddenException()
+    db_gear_item = await _get_owned_gear_item(db, uuid, current_user)
 
     effective_name = values.name if values.name is not None else db_gear_item.name
     effective_brand = values.brand if "brand" in values.model_fields_set else db_gear_item.brand
@@ -258,16 +315,11 @@ async def erase_gear_item(
     this the digest would keep emailing about gear the diver can no longer see. The
     service *records* are left alone - see `soft_delete_schedules_for_gear_item`.
     """
-    db_gear_item = await crud_gear_items.get(db=db, uuid=uuid, schema_to_select=GearItemReadInternal)
-    if db_gear_item is None:
-        raise NotFoundException("Gear item not found")
+    # `include_deleted`: deleting an already-soft-deleted gear item is a no-op, not a 404.
+    db_gear_item = await _get_owned_gear_item(db, uuid, current_user, include_deleted=True)
+    owner_id = db_gear_item.user_id
 
-    owner_id = _gear_item_owner_id(db_gear_item)
-    if owner_id != current_user["id"]:
-        raise ForbiddenException()
-
-    gear_item_id = cast(int, db_gear_item["id"] if isinstance(db_gear_item, dict) else db_gear_item.id)
-    await soft_delete_schedules_for_gear_item(db=db, gear_item_id=gear_item_id, commit=False)
+    await soft_delete_schedules_for_gear_item(db=db, gear_item_id=db_gear_item.id, commit=False)
     await crud_gear_items.delete(db=db, uuid=uuid)
     await invalidate_gear_caches(owner_id)
     # Soft-deleted gear stays on the dives that used it, so their cached reads still

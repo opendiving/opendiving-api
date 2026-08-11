@@ -1,14 +1,20 @@
 import uuid as uuid_pkg
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...api.dependencies import get_current_user
+from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
-from ...core.exceptions.http_exceptions import DuplicateValueException, ForbiddenException, NotFoundException
+from ...core.exceptions.http_exceptions import (
+    DuplicateValueException,
+    ForbiddenException,
+    NotFoundException,
+    UnprocessableEntityException,
+)
 from ...core.utils.cache import cache
+from ...core.utils.pagination import clamp_pagination
 from ...crud.crud_gear_items import resolve_gear_item_ids_for_user
 from ...crud.crud_gear_set_items import (
     get_gear_items_for_set,
@@ -29,8 +35,23 @@ from ...services.cache_invalidation import invalidate_gear_caches
 router = APIRouter(tags=["gear"])
 
 
-def _gear_set_owner_id(db_gear_set: Any) -> int:
-    return cast(int, db_gear_set["user_id"] if isinstance(db_gear_set, dict) else db_gear_set.user_id)
+async def _get_owned_gear_set(
+    db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict, *, include_deleted: bool = False
+) -> GearSetReadInternal:
+    """Fetch a gear set by public uuid and assert the caller owns it.
+
+    Thin wrapper over `fetch_owned_or_raise` - see there for the 404/403 split and, in
+    particular, why this must run before any `@cache`-wrapped read helper.
+    """
+    return await fetch_owned_or_raise(
+        db=db,
+        crud=crud_gear_sets,
+        uuid=uuid,
+        current_user=current_user,
+        schema=GearSetReadInternal,
+        not_found_message="Gear set not found",
+        include_deleted=include_deleted,
+    )
 
 
 def _to_public_gear_set(
@@ -55,7 +76,7 @@ async def _resolve_item_ids(db: AsyncSession, gear_item_uuids: list[uuid_pkg.UUI
     """
     id_by_uuid = await resolve_gear_item_ids_for_user(db=db, gear_item_uuids=gear_item_uuids, user_id=user_id)
     if id_by_uuid is None:
-        raise HTTPException(status_code=422, detail="Gear item not found.")
+        raise UnprocessableEntityException("Gear item not found.")
     return [id_by_uuid[u] for u in gear_item_uuids]
 
 
@@ -66,6 +87,13 @@ async def write_gear_set(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> GearSetRead:
+    """Create a gear set - a named bundle of the caller's gear items, with an optional
+    default weight the dive form can pre-fill.
+
+    `user_uuid` must be the caller's own and every uuid in `gear_item_uuids` must resolve
+    to a gear item the caller owns; either mismatch is a 403. Set names are unique per
+    user, so reusing one is a 422.
+    """
     if current_user["uuid"] != gear_set.user_uuid:
         raise ForbiddenException()
 
@@ -140,8 +168,16 @@ async def read_gear_sets(
     page: int = 1,
     items_per_page: int = 10,
 ) -> dict:
+    """List the caller's gear sets alphabetically, each with its gear items attached.
+
+    `user_uuid` must be the caller's own (403 otherwise). The items are fetched in one
+    batched lookup across the page rather than per set. Out-of-range pagination is
+    clamped, not rejected.
+    """
     if current_user["uuid"] != user_uuid:
         raise ForbiddenException()
+
+    page, items_per_page = clamp_pagination(page, items_per_page)
 
     return await _cached_read_gear_sets(
         request,
@@ -157,6 +193,10 @@ async def read_gear_sets(
 async def _cached_read_gear_set(
     request: Request, user_id: int, uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession
 ) -> GearSetRead:
+    """Fetches (and caches) one gear set with its items attached. Authorization is checked
+    by the route before this is ever reached - `@cache` serves cached responses without
+    re-checking it.
+    """
     db_gear_set = await crud_gear_sets.get(
         db=db, uuid=uuid, is_deleted=False, schema_to_select=GearSetReadInternal, return_as_model=True
     )
@@ -175,15 +215,12 @@ async def read_gear_set(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> GearSetRead:
-    db_gear_set = await crud_gear_sets.get(
-        db=db, uuid=uuid, is_deleted=False, schema_to_select=GearSetReadInternal, return_as_model=True
-    )
-    if db_gear_set is None:
-        raise NotFoundException("Gear set not found")
+    """Return a single gear set, with its gear items attached.
 
-    db_gear_set = cast(GearSetReadInternal, db_gear_set)
-    if db_gear_set.user_id != current_user["id"]:
-        raise ForbiddenException()
+    404 when no such set exists, 403 when it belongs to another user.
+    """
+    # Authorize before the cached read: `@cache` replays a hit without re-checking.
+    await _get_owned_gear_set(db, uuid, current_user)
 
     return await _cached_read_gear_set(
         request, user_id=current_user["id"], uuid=uuid, owner_uuid=current_user["uuid"], db=db
@@ -201,15 +238,7 @@ async def patch_gear_set(
     """Partial update. Passing `gear_item_uuids` replaces the set's members wholesale -
     this is what the dive form's "Save as set" does when saving onto an existing set.
     """
-    db_gear_set = await crud_gear_sets.get(
-        db=db, uuid=uuid, is_deleted=False, schema_to_select=GearSetReadInternal, return_as_model=True
-    )
-    if db_gear_set is None:
-        raise NotFoundException("Gear set not found")
-
-    db_gear_set = cast(GearSetReadInternal, db_gear_set)
-    if db_gear_set.user_id != current_user["id"]:
-        raise ForbiddenException()
+    db_gear_set = await _get_owned_gear_set(db, uuid, current_user)
 
     if values.name is not None and await gear_set_name_exists(
         db=db, user_id=db_gear_set.user_id, name=values.name, exclude_id=db_gear_set.id
@@ -243,13 +272,8 @@ async def erase_gear_set(
     """Soft-deletes a gear set. Sets are purely a convenience shortcut, so deleting one
     never touches the gear items in it, nor any dive those items were logged on.
     """
-    db_gear_set = await crud_gear_sets.get(db=db, uuid=uuid, schema_to_select=GearSetReadInternal)
-    if db_gear_set is None:
-        raise NotFoundException("Gear set not found")
-
-    owner_id = _gear_set_owner_id(db_gear_set)
-    if owner_id != current_user["id"]:
-        raise ForbiddenException()
+    # `include_deleted`: deleting an already-soft-deleted gear set is a no-op, not a 404.
+    owner_id = (await _get_owned_gear_set(db, uuid, current_user, include_deleted=True)).user_id
 
     await crud_gear_sets.delete(db=db, uuid=uuid)
     await invalidate_gear_caches(owner_id)

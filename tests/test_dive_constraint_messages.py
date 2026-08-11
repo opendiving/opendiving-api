@@ -59,9 +59,7 @@ class TestFkErrorDetail:
 
 class TestMixtureErrorDetail:
     def test_volume_must_be_positive(self):
-        assert (
-            _mixture_error_detail(_integrity_error("ck_dive_mixture_volume_positive")) == "Volume must be positive."
-        )
+        assert _mixture_error_detail(_integrity_error("ck_dive_mixture_volume_positive")) == "Volume must be positive."
 
     def test_oxygen_range(self):
         assert (

@@ -600,6 +600,4 @@ async def backfill_profiles(
         for user_id in touched_user_ids:
             await invalidate_dive_caches(user_id)
 
-    return BackfillReport(
-        examined=examined, extracted=extracted, skipped=skipped, no_samples=no_samples, failed=failed
-    )
+    return BackfillReport(examined=examined, extracted=extracted, skipped=skipped, no_samples=no_samples, failed=failed)

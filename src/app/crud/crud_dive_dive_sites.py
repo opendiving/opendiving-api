@@ -34,8 +34,6 @@ async def get_dive_sites_for_dives(db: AsyncSession, dive_ids: list[int]) -> dic
     return sites_by_dive
 
 
-
-
 async def replace_dive_sites_for_dive(
     db: AsyncSession, dive_id: int, dive_site_ids: list[int], commit: bool = True
 ) -> None:

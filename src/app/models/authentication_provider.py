@@ -38,6 +38,4 @@ class AuthenticationProvider(Base):
     # "google" (Google's `sub` claim), and future providers like "apple"/"github".
     provider_user_id: Mapped[str | None] = mapped_column(String, index=True, default=None)
 
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default_factory=lambda: datetime.now(UTC)
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default_factory=lambda: datetime.now(UTC))

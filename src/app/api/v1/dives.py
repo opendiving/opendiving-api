@@ -9,13 +9,19 @@ from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...api.dependencies import get_current_user
+from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
-from ...core.exceptions.http_exceptions import ForbiddenException, NotFoundException
+from ...core.exceptions.http_exceptions import (
+    BadRequestException,
+    ForbiddenException,
+    NotFoundException,
+    UnprocessableEntityException,
+)
 from ...core.security import create_dive_file_token
 from ...core.utils.cache import cache
 from ...core.utils.datetime_offset import combine_start_time, split_start_time
-from ...core.utils.uploads import read_upload_within_limit
+from ...core.utils.pagination import clamp_pagination
+from ...core.utils.uploads import content_disposition_attachment, read_upload_within_limit
 from ...crud.crud_dive_dive_sites import (
     get_dive_sites_for_dive,
     get_dive_sites_for_dives,
@@ -35,10 +41,15 @@ from ...schemas.dive import (
     DiveCreateInternal,
     DiveCreateRequest,
     DiveFileInfo,
+    DiveNumberingSummary,
+    DiveNumberSuggestion,
     DiveRead,
     DiveReadInternal,
     DiveReadWithMixtures,
+    DiveRenumberRequest,
+    DiveRenumberResult,
     DiveSiteInfo,
+    DiveStartTime,
     DiveUpdateRequest,
 )
 from ...schemas.dive_mixture import DiveMixtureRead
@@ -59,6 +70,7 @@ from ...services.dive_files import (
     store_dive_file,
 )
 from ...services.dive_gas import compute_gas_use
+from ...services.dive_numbering import renumber_dives, suggest_dive_number, summarize_numbering
 from ...services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file_with_parser
 from ...services.dive_profiles import (
     get_profile_infos_for_dives,
@@ -82,6 +94,13 @@ _DIVE_CONSTRAINT_MESSAGES = {
 
 
 def _fk_error_detail(exc: IntegrityError) -> str:
+    """Translate a dive `IntegrityError` into a message worth showing a diver.
+
+    Covers both foreign keys (a trip/site/gear item that vanished between validation and
+    insert) and the domain `CheckConstraint`s. Constraint violations surface from the DB
+    layer, not Pydantic, so without this the caller would get a raw 500 instead of a
+    sentence naming the field.
+    """
     msg = str(exc.orig)
     if "dive_trip_id_fkey" in msg:
         return "Trip not found."
@@ -105,6 +124,10 @@ _MIXTURE_CONSTRAINT_MESSAGES = {
 
 
 def _mixture_error_detail(exc: IntegrityError) -> str:
+    """As `_fk_error_detail`, but for the gas-mixture constraints (oxygen/helium ranges,
+    their sum, volume, pressure ordering). Separate because a mixture failure has to name
+    the mixture rather than the dive.
+    """
     msg = str(exc.orig)
     for constraint, detail in _MIXTURE_CONSTRAINT_MESSAGES.items():
         if constraint in msg:
@@ -112,30 +135,20 @@ def _mixture_error_detail(exc: IntegrityError) -> str:
     return "Invalid gas mixture."
 
 
-def _dive_owner_id(db_dive: Any) -> int:
-    return cast(int, db_dive["user_id"] if isinstance(db_dive, dict) else db_dive.user_id)
-
-
-async def _get_owned_dive(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> dict[str, Any]:
+async def _get_owned_dive(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> DiveReadInternal:
     """Fetch a dive by public uuid and assert the caller owns it.
 
-    Every route that names a single dive starts here: a 404 for a missing or deleted
-    row, a 403 for someone else's. Note the ordering - this runs *before* any cached
-    read helper is reached, because `@cache` serves a cached response without re-running
-    authorization (see `_cached_read_dive`).
+    Thin wrapper over `fetch_owned_or_raise` - see there for the 404/403 split and, in
+    particular, why this must run before any `@cache`-wrapped read helper.
     """
-    db_dive = await crud_dives.get(db=db, uuid=uuid, is_deleted=False, schema_to_select=DiveReadInternal)
-    if db_dive is None:
-        raise NotFoundException("Dive not found")
-
-    if _dive_owner_id(db_dive) != current_user["id"]:
-        raise ForbiddenException()
-
-    return cast(dict[str, Any], db_dive)
-
-
-def _dive_internal_id(db_dive: Any) -> int:
-    return cast(int, db_dive["id"] if isinstance(db_dive, dict) else db_dive.id)
+    return await fetch_owned_or_raise(
+        db=db,
+        crud=crud_dives,
+        uuid=uuid,
+        current_user=current_user,
+        schema=DiveReadInternal,
+        not_found_message="Dive not found",
+    )
 
 
 def _to_public_start_time(data: dict[str, Any]) -> dict[str, Any]:
@@ -181,6 +194,12 @@ def _to_public_dive_with_mixtures(
     source_file: DiveFileInfo | None = None,
     profile: DiveProfileInfo | None = None,
 ) -> DiveReadWithMixtures:
+    """Assemble a dive's public shape from the row plus everything a read embeds.
+
+    Internal FKs are dropped in favour of the related resources' uuids and summaries, so
+    the related rows are passed in already fetched - the caller batches them across a page
+    rather than querying per dive.
+    """
     data = _to_public_start_time(db_dive if isinstance(db_dive, dict) else db_dive.model_dump())
     return DiveReadWithMixtures(
         **{k: v for k, v in data.items() if k not in ("id", "user_id", "trip_id")},
@@ -212,15 +231,17 @@ async def parse_dive(
     the export is kept against that dive.
     """
     if not file.filename:
-        raise HTTPException(status_code=400, detail="Missing filename")
+        raise BadRequestException("Missing filename")
 
     content = await read_upload_within_limit(file, MAX_DIVE_FILE_SIZE)
     try:
         parser, parsed = parse_dive_file_with_parser(file.filename, content)
     except UnsupportedDiveFileError as exc:
+        # 415 and 409 stay raw `HTTPException`s - unlike 400/403/404/422, `http_exceptions`
+        # has no class for either code.
         raise HTTPException(status_code=415, detail=str(exc)) from exc
     except DiveParseError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise UnprocessableEntityException(str(exc)) from exc
 
     return ParsedDiveResponse(
         **parsed.model_dump(),
@@ -239,6 +260,15 @@ async def write_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveReadWithMixtures:
+    """Log a dive, together with its gas mixtures, dive sites and gear in one request.
+
+    `user_uuid` must be the caller's own (403 otherwise). Every referenced trip, dive site
+    and gear item must belong to the caller too: one that doesn't - or doesn't exist - is
+    a 422 naming which, not a 403, since from the caller's side the two are the same
+    thing. Dive sites keep the order given; index 0 is the primary site. Values the DB's
+    domain constraints reject (a non-positive duration, a mixture over 100%) also come
+    back as 422 with the offending field named.
+    """
     if current_user["uuid"] != dive.user_uuid:
         raise ForbiddenException()
 
@@ -246,20 +276,20 @@ async def write_dive(
     if dive.trip_uuid is not None:
         trip_id = await resolve_trip_id_for_user(db=db, trip_uuid=dive.trip_uuid, user_id=current_user["id"])
         if trip_id is None:
-            raise HTTPException(status_code=422, detail="Trip not found.")
+            raise UnprocessableEntityException("Trip not found.")
 
     site_id_by_uuid = await resolve_dive_site_ids_for_user(
         db=db, dive_site_uuids=dive.dive_site_uuids, user_id=current_user["id"]
     )
     if site_id_by_uuid is None:
-        raise HTTPException(status_code=422, detail="Dive site not found.")
+        raise UnprocessableEntityException("Dive site not found.")
     dive_site_ids = [site_id_by_uuid[u] for u in dive.dive_site_uuids]
 
     gear_id_by_uuid = await resolve_gear_item_ids_for_user(
         db=db, gear_item_uuids=dive.gear_item_uuids, user_id=current_user["id"]
     )
     if gear_id_by_uuid is None:
-        raise HTTPException(status_code=422, detail="Gear item not found.")
+        raise UnprocessableEntityException("Gear item not found.")
     gear_item_ids = [gear_id_by_uuid[u] for u in dive.gear_item_uuids]
 
     dive_internal_dict = dive.model_dump(
@@ -276,23 +306,23 @@ async def write_dive(
         )
     except IntegrityError as e:
         await db.rollback()
-        raise HTTPException(status_code=422, detail=_fk_error_detail(e)) from e
+        raise UnprocessableEntityException(_fk_error_detail(e)) from e
 
     try:
         await replace_mixtures_for_dive(db=db, dive_id=created_dive.id, mixtures=dive.mixtures)
     except IntegrityError as e:
         await db.rollback()
-        raise HTTPException(status_code=422, detail=_mixture_error_detail(e)) from e
+        raise UnprocessableEntityException(_mixture_error_detail(e)) from e
     try:
         await replace_dive_sites_for_dive(db=db, dive_id=created_dive.id, dive_site_ids=dive_site_ids)
     except IntegrityError as e:
         await db.rollback()
-        raise HTTPException(status_code=422, detail=_fk_error_detail(e)) from e
+        raise UnprocessableEntityException(_fk_error_detail(e)) from e
     try:
         await replace_gear_items_for_dive(db=db, dive_id=created_dive.id, gear_item_ids=gear_item_ids)
     except IntegrityError as e:
         await db.rollback()
-        raise HTTPException(status_code=422, detail=_fk_error_detail(e)) from e
+        raise UnprocessableEntityException(_fk_error_detail(e)) from e
     await recalculate_dive_stats(db=db, user_id=current_user["id"])
     await recalculate_gear_dive_counts(db=db, user_id=current_user["id"])
     await invalidate_dive_caches(current_user["id"])
@@ -399,8 +429,19 @@ async def read_dives(
     dive_site_uuid: uuid_pkg.UUID | None = None,
     gear_item_uuid: uuid_pkg.UUID | None = None,
 ) -> dict:
+    """List the caller's dives, newest first, each with its trip, sites and gear attached.
+
+    `user_uuid` must be the caller's own (403 otherwise). The `trip_uuid`,
+    `dive_site_uuid` and `gear_item_uuid` filters are combinable, and one naming something
+    that doesn't exist or isn't the caller's returns an empty page rather than an error -
+    it reveals nothing about whether that resource exists. `dive_site_uuid` matches any
+    dive that *includes* the site, since a dive can span several. Out-of-range pagination
+    is clamped, not rejected.
+    """
     if current_user["uuid"] != user_uuid:
         raise ForbiddenException()
+
+    page, items_per_page = clamp_pagination(page, items_per_page)
 
     trip_id: int | None = None
     if trip_uuid is not None:
@@ -433,6 +474,88 @@ async def read_dives(
         dive_site_id=dive_site_id,
         gear_item_id=gear_item_id,
     )
+
+
+# -------------- numbering --------------
+# All three of these are about the caller's own log as a whole, so - unlike `GET /dives`
+# and every other route here - they take no `user_uuid`, matching `/user/dive-stats` and
+# `/user/gas-use-history`. `services/dive_numbering.py` carries the reasoning for what
+# they do and, more to the point, for what they deliberately don't.
+
+
+@router.get("/dives/next-number", response_model=DiveNumberSuggestion)
+async def read_next_dive_number(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    start_time: Annotated[
+        DiveStartTime,
+        Query(description="The start time of the dive being logged, with its UTC offset"),
+    ],
+) -> DiveNumberSuggestion:
+    """The dive number to prefill for a dive starting at `start_time`.
+
+    A suggestion, not a reservation - nothing is held, and the client is free to ignore
+    it. Not `@cache`d: it varies by `start_time`, so the keys would fan out per form
+    keystroke to save two narrow indexed queries.
+    """
+    return await suggest_dive_number(db=db, user_id=current_user["id"], start_time=start_time)
+
+
+# Keyed under the `user_{id}_dives:` prefix for the same reason as
+# `_cached_gas_use_history` in `users.py`: `invalidate_dive_caches()` already sweeps
+# `user_{id}_dives:*` after every dive create, update and delete, so this summary drops
+# with them rather than being a third pattern to remember there. The renumber endpoint
+# below calls that same helper, which is what keeps this from surviving its own fix.
+@cache(key_prefix="user_{user_id}_dives:numbering", resource_id_name="user_id", expiration=60)
+async def _cached_numbering_summary(request: Request, user_id: int, db: AsyncSession) -> DiveNumberingSummary:
+    """Fetches (and caches) a user's dive-numbering summary. Authorization happens in the
+    route before this is reached - `@cache` serves a hit without re-checking it.
+    """
+    return await summarize_numbering(db=db, user_id=user_id)
+
+
+@router.get("/dives/numbering", response_model=DiveNumberingSummary)
+async def read_dive_numbering(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> DiveNumberingSummary:
+    """The state of the caller's dive numbering: its range, its gaps, its duplicates, and
+    whether it runs in date order.
+
+    Purely descriptive. Gaps in particular are as often deliberate (a log that continues
+    a paper logbook) as accidental, so this reports and the diver decides.
+    """
+    return await _cached_numbering_summary(request, user_id=current_user["id"], db=db)
+
+
+@router.post("/dives/renumber", response_model=DiveRenumberResult)
+async def renumber_user_dives(
+    request: Request,
+    values: DiveRenumberRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> DiveRenumberResult:
+    """Renumber the caller's dives consecutively, in chronological order.
+
+    The one place in the app that rewrites numbers a diver entered, and it only ever runs
+    when asked. Send `dry_run: true` first for the exact change list without writing.
+    """
+    result = await renumber_dives(
+        db=db,
+        user_id=current_user["id"],
+        start_at=values.start_at,
+        from_start_time=values.from_start_time,
+        dry_run=values.dry_run,
+    )
+
+    if not result.dry_run and result.changes:
+        # Only the dive caches. Unlike every other dive write, this one can't have moved
+        # `recalculate_dive_stats`'s figures (count, max depth, total time) or any gear
+        # item's `dive_count` - it changed a label on dives that already existed.
+        await invalidate_dive_caches(current_user["id"])
+
+    return result
 
 
 # Keyed `user_{user_id}_dive:{uuid}` rather than the flat `dive_cache:{uuid}` it used
@@ -486,6 +609,12 @@ async def read_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveReadWithMixtures:
+    """Return a single dive with its mixtures, sites, gear, source file and profile summary.
+
+    404 when no such dive exists, 403 when it belongs to another user. The profile's
+    samples are not included - `GET /dive/{uuid}/profile` serves those separately, since
+    they are far larger than the rest of the dive put together.
+    """
     await _get_owned_dive(db, uuid, current_user)
 
     return await _cached_read_dive(
@@ -501,14 +630,28 @@ async def patch_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
+    """Partially update a dive; omitted fields are left untouched.
+
+    403 unless the caller owns it. The list-valued fields - `mixtures`,
+    `dive_site_uuids`, `gear_item_uuids` - are replaced wholesale when present rather than
+    merged, so sending a shorter list removes the difference and omitting the key entirely
+    leaves it alone. Passing `null` for `trip_uuid` detaches the dive from its trip, which
+    is distinct from omitting the key. Referencing anything the caller doesn't own is a
+    422, as are the DB's domain constraints.
+    """
     db_dive = await _get_owned_dive(db, uuid, current_user)
-    owner_id = _dive_owner_id(db_dive)
+    owner_id = db_dive.user_id
 
     update_data = values.model_dump(
         exclude={"mixtures", "dive_site_uuids", "gear_item_uuids", "trip_uuid"}, exclude_unset=True
     )
 
-    if values.start_time is not None:
+    # Keyed off `model_fields_set`, matching the `trip_uuid` branch below, so the two
+    # optional-field branches in this route read the same way. `DiveUpdate` rejects an
+    # explicit null for `start_time` (the column is `NOT NULL`), so a field that is set
+    # is always a real datetime here - which is what stops a null slipping past this
+    # branch into the update and leaving `utc_offset_minutes` describing the *old* time.
+    if "start_time" in values.model_fields_set and values.start_time is not None:
         utc_start_time, utc_offset_minutes = split_start_time(values.start_time)
         update_data["start_time"] = utc_start_time
         update_data["utc_offset_minutes"] = utc_offset_minutes
@@ -519,7 +662,7 @@ async def patch_dive(
         else:
             trip_id = await resolve_trip_id_for_user(db=db, trip_uuid=values.trip_uuid, user_id=owner_id)
             if trip_id is None:
-                raise HTTPException(status_code=422, detail="Trip not found.")
+                raise UnprocessableEntityException("Trip not found.")
             update_data["trip_id"] = trip_id
 
     dive_site_ids: list[int] | None = None
@@ -528,7 +671,7 @@ async def patch_dive(
             db=db, dive_site_uuids=values.dive_site_uuids, user_id=owner_id
         )
         if site_id_by_uuid is None:
-            raise HTTPException(status_code=422, detail="Dive site not found.")
+            raise UnprocessableEntityException("Dive site not found.")
         dive_site_ids = [site_id_by_uuid[u] for u in values.dive_site_uuids]
 
     gear_item_ids: list[int] | None = None
@@ -537,7 +680,7 @@ async def patch_dive(
             db=db, gear_item_uuids=values.gear_item_uuids, user_id=owner_id
         )
         if gear_id_by_uuid is None:
-            raise HTTPException(status_code=422, detail="Gear item not found.")
+            raise UnprocessableEntityException("Gear item not found.")
         gear_item_ids = [gear_id_by_uuid[u] for u in values.gear_item_uuids]
 
     if update_data:
@@ -545,30 +688,30 @@ async def patch_dive(
             await crud_dives.update(db=db, object=update_data, uuid=uuid)
         except IntegrityError as e:
             await db.rollback()
-            raise HTTPException(status_code=422, detail=_fk_error_detail(e)) from e
+            raise UnprocessableEntityException(_fk_error_detail(e)) from e
 
-    dive_id = _dive_internal_id(db_dive)
+    dive_id = db_dive.id
 
     if values.mixtures is not None:
         try:
             await replace_mixtures_for_dive(db=db, dive_id=dive_id, mixtures=values.mixtures)
         except IntegrityError as e:
             await db.rollback()
-            raise HTTPException(status_code=422, detail=_mixture_error_detail(e)) from e
+            raise UnprocessableEntityException(_mixture_error_detail(e)) from e
 
     if dive_site_ids is not None:
         try:
             await replace_dive_sites_for_dive(db=db, dive_id=dive_id, dive_site_ids=dive_site_ids)
         except IntegrityError as e:
             await db.rollback()
-            raise HTTPException(status_code=422, detail=_fk_error_detail(e)) from e
+            raise UnprocessableEntityException(_fk_error_detail(e)) from e
 
     if gear_item_ids is not None:
         try:
             await replace_gear_items_for_dive(db=db, dive_id=dive_id, gear_item_ids=gear_item_ids)
         except IntegrityError as e:
             await db.rollback()
-            raise HTTPException(status_code=422, detail=_fk_error_detail(e)) from e
+            raise UnprocessableEntityException(_fk_error_detail(e)) from e
 
     if update_data or values.mixtures is not None or dive_site_ids is not None or gear_item_ids is not None:
         await recalculate_dive_stats(db=db, user_id=owner_id)
@@ -587,15 +730,22 @@ async def erase_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
+    """Soft-delete a dive, and hard-delete the dive-computer export stored against it.
+
+    403 unless the caller owns it. The dive row is only flagged, but its source file is
+    genuinely removed: leaving it would strand the bytes behind a dive nobody can open and
+    hold the file's slot in the unique indexes, blocking a re-import of that same export
+    into a fresh dive.
+    """
     db_dive = await _get_owned_dive(db, uuid, current_user)
-    owner_id = _dive_owner_id(db_dive)
+    owner_id = db_dive.user_id
 
     # The stored export goes with the dive. The FK's `ON DELETE CASCADE` can't do this:
     # `crud_dives.delete` sets `is_deleted`, so no `DELETE FROM dive` ever runs. Leaving
     # the row would strand its bytes behind a dive nobody can open, and would keep the
     # file's slot in both unique indexes - blocking a re-import of the same export into
     # a fresh dive. Same reasoning as `erase_certification`.
-    await delete_files_for_dive(db=db, dive_id=_dive_internal_id(db_dive), commit=False)
+    await delete_files_for_dive(db=db, dive_id=db_dive.id, commit=False)
     await crud_dives.delete(db=db, uuid=uuid)
     await recalculate_dive_stats(db=db, user_id=owner_id)
     await recalculate_gear_dive_counts(db=db, user_id=owner_id)
@@ -636,12 +786,12 @@ async def write_dive_file(
             db=db,
             user_id=current_user["id"],
             user_uuid=current_user["uuid"],
-            dive_id=_dive_internal_id(db_dive),
+            dive_id=db_dive.id,
             upload=file,
             file_token=file_token,
         )
     except InvalidDiveFileTokenError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise UnprocessableEntityException(str(exc)) from exc
     except DiveFileAlreadyLinkedError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except DiveFileConflictError as exc:
@@ -676,7 +826,7 @@ async def read_dive_file(
     client varies `v` to give each version its own cache entry.
     """
     db_dive = await _get_owned_dive(db, uuid, current_user)
-    dive_id = _dive_internal_id(db_dive)
+    dive_id = db_dive.id
 
     # Check the hash before loading the bytes, so a conditional request costs one narrow
     # query rather than a full read that gets thrown away.
@@ -699,7 +849,7 @@ async def read_dive_file(
             # `attachment`, not `inline`: the web app fetches this through its API client
             # and hands it to the browser as a download, so it never navigates here. XML
             # opened in a tab at the app's own origin is exactly what we don't want.
-            "Content-Disposition": f'attachment; filename="{file.original_filename}"',
+            "Content-Disposition": content_disposition_attachment(file.original_filename, default="dive-file"),
             # The stored type comes from the parser that read the file, but say so
             # explicitly: the browser must not be free to re-interpret user-uploaded
             # content as something scriptable.
@@ -738,7 +888,7 @@ async def read_dive_profile(
     rather than being masked by the previous one for five minutes.
     """
     db_dive = await _get_owned_dive(db, uuid, current_user)
-    dive_id = _dive_internal_id(db_dive)
+    dive_id = db_dive.id
 
     # The version before the payload, so a conditional request costs one two-column query
     # rather than decoding tens of KB of JSONB only to throw it away.
@@ -771,9 +921,15 @@ async def erase_dive_file(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
+    """Delete the stored dive-computer export from a dive, leaving the dive itself.
+
+    403 unless the caller owns it; 404 when the dive has no source file, so this is not
+    idempotent - a repeat delete reports the absence rather than succeeding quietly. The
+    dive keeps whatever values were parsed out of the file; only the file goes.
+    """
     db_dive = await _get_owned_dive(db, uuid, current_user)
 
-    deleted = await delete_dive_file(db=db, dive_id=_dive_internal_id(db_dive))
+    deleted = await delete_dive_file(db=db, dive_id=db_dive.id)
     if not deleted:
         raise NotFoundException("This dive has no source file")
 

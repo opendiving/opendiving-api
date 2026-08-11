@@ -5,15 +5,18 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Res
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...api.dependencies import get_current_user
+from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import ForbiddenException, NotFoundException, UnprocessableEntityException
 from ...core.utils.cache import cache
-from ...crud.crud_certifications import crud_certifications
+from ...core.utils.pagination import clamp_pagination
+from ...core.utils.uploads import content_disposition_attachment
+from ...crud.crud_certifications import crud_certifications, get_expiring_overview_for_user
 from ...schemas.certification import (
     CertificationAgency,
     CertificationCreate,
     CertificationCreateInternal,
+    CertificationExpiringResponse,
     CertificationFileInfo,
     CertificationRead,
     CertificationReadInternal,
@@ -32,6 +35,12 @@ from ...services.certification_files import (
 )
 
 router = APIRouter(tags=["certifications"])
+
+# `GET /certifications-expiring` returns every dated card rather than a date-filtered
+# slice (see `CertificationExpiringResponse`), so it needs *some* bound. Mirrors
+# `DUE_OVERVIEW_LIMIT` in `gear_service.py`; a diver holding 200 expiring certifications
+# is not the case this card is sized for, and `truncated` tells them so.
+EXPIRING_OVERVIEW_LIMIT = 200
 
 
 def _to_public_certification(
@@ -74,25 +83,18 @@ async def _get_owned_certification(
 ) -> CertificationReadInternal:
     """Fetch a certification by public uuid and assert the caller owns it.
 
-    Every route starts here: a 404 for a missing row, a 403 for someone else's. Note the
-    ordering - this runs *before* any cached read helper is reached, because `@cache`
-    serves a cached response without re-running authorization (see `_cached_read_*`).
+    Thin wrapper over `fetch_owned_or_raise` - see there for the 404/403 split and, in
+    particular, why this must run before any `@cache`-wrapped read helper.
     """
-    filters: dict[str, Any] = {"uuid": uuid}
-    if not include_deleted:
-        filters["is_deleted"] = False
-
-    db_certification = await crud_certifications.get(
-        db=db, schema_to_select=CertificationReadInternal, return_as_model=True, **filters
+    return await fetch_owned_or_raise(
+        db=db,
+        crud=crud_certifications,
+        uuid=uuid,
+        current_user=current_user,
+        schema=CertificationReadInternal,
+        not_found_message="Certification not found",
+        include_deleted=include_deleted,
     )
-    if db_certification is None:
-        raise NotFoundException("Certification not found")
-
-    db_certification = cast(CertificationReadInternal, db_certification)
-    if db_certification.user_id != current_user["id"]:
-        raise ForbiddenException()
-
-    return db_certification
 
 
 @router.post("/certification", response_model=CertificationRead, status_code=201)
@@ -181,6 +183,8 @@ async def read_certifications(
     if current_user["uuid"] != user_uuid:
         raise ForbiddenException()
 
+    page, items_per_page = clamp_pagination(page, items_per_page)
+
     return await _cached_read_certifications(
         request,
         user_id=current_user["id"],
@@ -216,6 +220,11 @@ async def read_certification(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> CertificationRead:
+    """Return a single certification, with metadata for any stored card images.
+
+    404 when no such certification exists, 403 when it belongs to another user. The image
+    bytes themselves are served by `GET /certification/{uuid}/file/{side}`.
+    """
     await _get_owned_certification(db, uuid, current_user)
     return await _cached_read_certification(
         request, user_id=current_user["id"], uuid=uuid, owner_uuid=current_user["uuid"], db=db
@@ -230,6 +239,12 @@ async def patch_certification(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
+    """Partially update a certification; omitted fields are left untouched.
+
+    403 unless the caller owns it. `agency` and `agency_other` are validated as a pair
+    against the resulting values, so clearing one while the other still requires it is a
+    422 rather than a half-updated row.
+    """
     db_certification = await _get_owned_certification(db, uuid, current_user)
 
     update_data = values.model_dump(exclude_unset=True)
@@ -351,7 +366,7 @@ async def read_certification_file(
             # and renders from a blob URL, so it never navigates here directly. Should
             # someone open the URL in a tab anyway, `attachment` stops a malicious PDF
             # from executing in the same-origin viewer.
-            "Content-Disposition": f'attachment; filename="{file.original_filename}"',
+            "Content-Disposition": content_disposition_attachment(file.original_filename, default="card"),
             # The stored type is sniffed from the bytes, but say so explicitly: the
             # browser must not be free to re-interpret user-uploaded content as something
             # scriptable.
@@ -373,6 +388,11 @@ async def erase_certification_file(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
+    """Delete one side's card image from a certification, leaving the certification itself.
+
+    403 unless the caller owns it; 404 when that side has no image stored, so this is not
+    idempotent - a repeat delete reports the absence rather than succeeding quietly.
+    """
     db_certification = await _get_owned_certification(db, uuid, current_user)
 
     deleted = await delete_certification_file(db=db, certification_id=db_certification.id, side=side)
@@ -381,3 +401,41 @@ async def erase_certification_file(
 
     await invalidate_certification_caches(db_certification.user_id)
     return {"message": "Certification file deleted"}
+
+
+# -------------------- dashboard --------------------
+@cache(key_prefix="user_{user_id}_certifications_expiring", resource_id_name="user_id", expiration=60)
+async def _cached_read_expiring(request: Request, user_id: int, db: AsyncSession) -> dict:
+    """Fetches (and caches) the user's whole dated-certification list. Authorization
+    happens in the route - see `_cached_read_certifications`.
+
+    The key starts with `user_{id}_certification`, so the existing
+    `invalidate_certification_caches` pattern already covers it; nothing extra to call.
+    """
+    data, truncated = await get_expiring_overview_for_user(db=db, user_id=user_id, limit=EXPIRING_OVERVIEW_LIMIT)
+    return CertificationExpiringResponse(data=data, truncated=truncated).model_dump()
+
+
+@router.get("/certifications-expiring", response_model=CertificationExpiringResponse)
+async def read_certifications_expiring(
+    request: Request,
+    user_uuid: uuid_pkg.UUID,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> dict:
+    """Every certification the user owns that has an expiry date, soonest first.
+
+    The certification twin of `GET /gear-service-due`, and it exists for the same
+    reason: without it a dashboard card has to page through a diver's entire
+    certification list client-side to find the few that are expiring, since an expiry is
+    just as likely to sit on the oldest card as the newest and the list endpoint sorts by
+    neither.
+
+    Takes no date horizon on purpose: filtering by "expiring within N days" server-side
+    would bake today's date into the cached response, which then quietly goes wrong at
+    midnight. The client buckets into expiring-soon/expired itself.
+    """
+    if current_user["uuid"] != user_uuid:
+        raise ForbiddenException()
+
+    return await _cached_read_expiring(request, user_id=current_user["id"], db=db)

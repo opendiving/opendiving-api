@@ -14,11 +14,15 @@ CRUDDive = FastCRUD[Dive, DiveCreateInternal, DiveUpdate, DiveUpdateInternal, Di
 crud_dives = CRUDDive(
     Dive,
     custom_filters={
-        "at_dive_site": lambda column: lambda dive_site_id: column.in_(
-            select(DiveDiveSite.dive_id).where(DiveDiveSite.dive_site_id == dive_site_id)
+        "at_dive_site": lambda column: (
+            lambda dive_site_id: column.in_(
+                select(DiveDiveSite.dive_id).where(DiveDiveSite.dive_site_id == dive_site_id)
+            )
         ),
-        "with_gear_item": lambda column: lambda gear_item_id: column.in_(
-            select(DiveGearItem.dive_id).where(DiveGearItem.gear_item_id == gear_item_id)
+        "with_gear_item": lambda column: (
+            lambda gear_item_id: column.in_(
+                select(DiveGearItem.dive_id).where(DiveGearItem.gear_item_id == gear_item_id)
+            )
         ),
     },
 )

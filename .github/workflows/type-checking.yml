@@ -19,8 +19,18 @@ jobs:
       - name: Install package with dev dependencies
         run: uv sync --extra dev
 
-      - name: Run mypy
+      # Two invocations rather than `mypy src tests`: the app is reachable as both
+      # `app.*` (via `mypy_path = "src"`) and `src.app.*` (how the tests import it), and
+      # checking both roots at once makes mypy refuse with "source file found twice
+      # under different module names".
+      - name: Run mypy on src
         run: uv run mypy src --config-file pyproject.toml
+        env:
+          ENVIRONMENT: local
+          SECRET_KEY: test-secret-key-for-testing-only
+
+      - name: Run mypy on tests
+        run: uv run mypy tests --config-file pyproject.toml
         env:
           ENVIRONMENT: local
           SECRET_KEY: test-secret-key-for-testing-only

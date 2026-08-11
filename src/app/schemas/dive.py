@@ -1,8 +1,8 @@
 import uuid as uuid_pkg
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Self
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema
 from ..core.utils.datetime_offset import require_utc_offset
@@ -185,6 +185,105 @@ class DiveReadWithMixtures(DiveRead):
     ]
 
 
+class DiveNumberSuggestion(BaseModel):
+    """What to prefill the dive number with when logging a dive at a given start time.
+
+    Derived from the dive's *date*, not from the newest dive in the log, so back-filling
+    an old dive suggests a number that belongs where that dive belongs - see
+    `services/dive_numbering.py`.
+    """
+
+    dive_number: Annotated[int, Field(examples=[213], description="Suggested number for a dive at this start time")]
+    is_taken: Annotated[
+        bool,
+        Field(
+            description="Whether an existing dive already carries this number. Advisory only - the suggestion "
+            "stands either way, and duplicates are a legitimate transient state while back-filling a log."
+        ),
+    ]
+
+
+class DiveNumberingSummary(BaseModel):
+    """The state of a user's dive numbering, for the log's numbering indicator.
+
+    Reported rather than enforced: gaps mean 'part of my log lives elsewhere' as often
+    as they mean 'my numbering is a mess', and only the diver knows which. See
+    `services/dive_numbering.py`.
+    """
+
+    total_dives: int
+    lowest: Annotated[int | None, Field(default=None, description="Lowest number in use, or null with no dives")]
+    highest: Annotated[int | None, Field(default=None, description="Highest number in use, or null with no dives")]
+    missing_count: Annotated[
+        int, Field(description="How many numbers between `lowest` and `highest` no dive uses", examples=[34])
+    ]
+    duplicate_count: Annotated[
+        int, Field(description="How many dives carry a number another dive also carries", examples=[2])
+    ]
+    out_of_date_order_count: Annotated[
+        int,
+        Field(description="How many dives are numbered lower than the dive that chronologically precedes them"),
+    ]
+    is_sequential: Annotated[
+        bool,
+        Field(
+            description="Whether the numbers form one unbroken run with no duplicates. Note this doesn't require "
+            "starting at 1: a log that begins at #47 because the first 46 dives are on paper is still sequential."
+        ),
+    ]
+
+
+class DiveRenumberRequest(BaseModel):
+    """Request body for renumbering a log.
+
+    Always explicit - nothing in the app renumbers on its own, because a gap can be
+    deliberate (see `DiveNumberingSummary`).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    start_at: Annotated[
+        int,
+        Field(default=1, ge=1, description="Number to give the earliest dive in scope", examples=[1]),
+    ]
+    from_start_time: Annotated[
+        DiveStartTime | None,
+        Field(
+            default=None,
+            examples=[_START_TIME_EXAMPLE],
+            description="Renumber only dives at or after this instant, leaving earlier ones untouched - so a log "
+            "whose older entries mirror a paper logbook can have just its recent tail tidied. Null renumbers "
+            "every dive.",
+        ),
+    ]
+    dry_run: Annotated[
+        bool,
+        Field(default=False, description="Compute the changes and return them without writing anything"),
+    ]
+
+
+class DiveRenumberChange(BaseModel):
+    """One dive whose number a renumber would change (or did change)."""
+
+    dive_uuid: uuid_pkg.UUID
+    start_time: Annotated[DiveStartTime, Field(examples=[_START_TIME_EXAMPLE])]
+    dive_number: Annotated[int, Field(description="The number before the renumber", examples=[212])]
+    new_dive_number: Annotated[int, Field(description="The number after it", examples=[198])]
+
+
+class DiveRenumberResult(BaseModel):
+    dry_run: bool
+    dives_in_scope: Annotated[int, Field(description="How many dives the requested scope covers")]
+    # The full list, not a sample: this is what the confirmation dialog renders, and a
+    # preview that says "and 180 more" is exactly the part a diver would want to read
+    # before overwriting numbers they may have written in a paper logbook. A dive log is
+    # a career's worth of dives, not a dataset, and this endpoint is hit on demand.
+    changes: Annotated[
+        list[DiveRenumberChange],
+        Field(default_factory=list, description="Every dive whose number changes, in chronological order"),
+    ]
+
+
 class DiveCreate(DiveBase):
     model_config = ConfigDict(extra="forbid")
 
@@ -219,6 +318,23 @@ class DiveCreateRequest(DiveCreate):
     ]
 
 
+# Fields whose columns are `NOT NULL` (see `models/dive.py`). Every field on `DiveUpdate`
+# is typed `| None` because that is how "omit it to leave it alone" is spelled in a PATCH
+# body - but for these, an *explicit* `null` is a different thing entirely and the
+# database will refuse it.
+#
+# It used to be refused down at the driver: the null survived `exclude_unset`, hit
+# Postgres, and the `IntegrityError` came back as a 422 reading "Invalid reference: a
+# related record does not exist." - which describes a foreign-key problem, not a
+# not-null one. `start_time` was worse: `patch_dive`'s guard was `if values.start_time is
+# not None`, so an explicit null skipped the `split_start_time` branch, still reached the
+# database as `None`, and left `utc_offset_minutes` describing the *previous* start time.
+#
+# Rejecting them here means the caller gets the field name and a usable message, and the
+# route below can trust that anything present is really a value.
+_NON_NULLABLE_UPDATE_FIELDS = ("dive_number", "start_time", "duration", "notes")
+
+
 class DiveUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -241,6 +357,22 @@ class DiveUpdate(BaseModel):
             default=None,
         ),
     ]
+
+    @model_validator(mode="after")
+    def _reject_explicit_nulls(self) -> Self:
+        """Refuse an explicit `null` for a column that cannot hold one.
+
+        `model_fields_set` is what separates "sent as null" from "not sent", the same
+        distinction `trip_uuid` relies on for the opposite purpose - there, an explicit
+        null is the *only* way to detach a dive from its trip, because the column is
+        genuinely nullable.
+        """
+        nulled = [name for name in _NON_NULLABLE_UPDATE_FIELDS if name in self.model_fields_set]
+        nulled = [name for name in nulled if getattr(self, name) is None]
+        if nulled:
+            fields = ", ".join(nulled)
+            raise ValueError(f"{fields} cannot be null; omit the field to leave it unchanged")
+        return self
 
 
 class DiveUpdateRequest(DiveUpdate):

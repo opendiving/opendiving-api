@@ -1,10 +1,17 @@
 """Unit tests for the Resend-backed transactional email senders."""
 
+import logging
 from unittest.mock import patch
 
 import pytest
 
-from src.app.services.email_service import send_gear_service_digest_email, send_magic_link_email
+from src.app.core.config import EnvironmentOption
+from src.app.services.email_service import (
+    EmailDeliveryError,
+    send_email_change_confirmation_email,
+    send_gear_service_digest_email,
+    send_magic_link_email,
+)
 
 
 class TestSendMagicLinkEmail:
@@ -98,6 +105,31 @@ class TestSendGearServiceDigestEmail:
             assert "https://app.example.com/settings" in payload["html"]
 
     @pytest.mark.asyncio
+    async def test_gear_names_are_escaped(self):
+        """Gear names and brands are diver-typed and unconstrained by any schema, so they
+        reach this HTML as untrusted input - same footing as the contact form's fields.
+        """
+        with (
+            patch("src.app.services.email_service.settings") as mock_settings,
+            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+        ):
+            mock_settings.RESEND_API_KEY = "re_test_key"
+            mock_settings.EMAIL_FROM_ADDRESS = "onboarding@resend.dev"
+            mock_settings.FRONTEND_URL = "https://app.example.com"
+
+            await send_gear_service_digest_email(
+                "diver@example.com",
+                [("<img src=x onerror=alert(1)>", "Service overdue since <b>ages</b>", "0199-aaaa")],
+            )
+
+            _send_fn, payload = mock_run_sync.call_args.args
+            assert "<img src=x" not in payload["html"]
+            assert "&lt;img src=x onerror=alert(1)&gt;" in payload["html"]
+            assert "<b>ages</b>" not in payload["html"]
+            # The markup this function composes itself is still real markup.
+            assert "<li><a href=" in payload["html"]
+
+    @pytest.mark.asyncio
     async def test_subject_is_singular_for_one_item(self):
         with (
             patch("src.app.services.email_service.settings") as mock_settings,
@@ -111,3 +143,41 @@ class TestSendGearServiceDigestEmail:
 
             _send_fn, payload = mock_run_sync.call_args.args
             assert payload["subject"] == "Your dive gear needs servicing"
+
+
+class TestCredentialBearingEmailsInProduction:
+    """`RESEND_API_KEY` being unset makes the magic-link and email-change senders log the
+    full URL - which embeds a live, single-use auth token - to a rotating file on disk.
+    That is the right trade locally and the wrong one in production.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("sender", "args"),
+        [
+            (send_magic_link_email, ("user@example.com", "https://app.example.com/auth/verify?token=secret")),
+            (
+                send_email_change_confirmation_email,
+                ("new@example.com", "https://app.example.com/settings/email?token=secret"),
+            ),
+        ],
+    )
+    async def test_raises_instead_of_logging_the_token(self, sender, args):
+        with patch("src.app.services.email_service.settings") as mock_settings:
+            mock_settings.RESEND_API_KEY = None
+            mock_settings.ENVIRONMENT = EnvironmentOption.PRODUCTION
+
+            with pytest.raises(EmailDeliveryError):
+                await sender(*args)
+
+    @pytest.mark.asyncio
+    async def test_still_logs_the_link_outside_production(self, caplog):
+        with patch("src.app.services.email_service.settings") as mock_settings:
+            mock_settings.RESEND_API_KEY = None
+            mock_settings.ENVIRONMENT = EnvironmentOption.LOCAL
+
+            with caplog.at_level(logging.WARNING, logger="src.app.services.email_service"):
+                await send_magic_link_email("user@example.com", "https://app.example.com/auth/verify?token=secret")
+
+            # Signing in without a Resend account is the whole point of the fallback.
+            assert "token=secret" in caplog.text

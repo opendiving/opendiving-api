@@ -16,6 +16,7 @@ from ...core.exceptions.http_exceptions import (
 )
 from ...core.security import blacklist_token, blacklist_tokens, generate_secure_token, hash_token, oauth2_scheme
 from ...core.utils.cache import cache
+from ...core.utils.client_ip import client_ip
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...crud.crud_authentication_requests import crud_authentication_requests
 from ...crud.crud_user_dive_stats import crud_user_dive_stats
@@ -43,10 +44,6 @@ router = APIRouter(tags=["users"])
 _EMAIL_CHANGE_REQUEST_RESPONSE = EmailChangeRequestResponse()
 
 
-def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
-
-
 # Note: there is no `GET /users` here (yet) either - a public-facing listing of
 # all users has the same "other users shouldn't see email" problem as a single
 # lookup by uuid, and is being designed together with the eventual public-profile
@@ -56,6 +53,11 @@ def _client_ip(request: Request) -> str:
 
 @router.get("/user", response_model=UserRead)
 async def read_current_user(request: Request, current_user: Annotated[dict, Depends(get_current_user)]) -> dict:
+    """Return the authenticated user's own profile.
+
+    Served straight from the token-resolved user, so it costs no extra query. There is no
+    endpoint for reading *another* user - see the note below.
+    """
     return current_user
 
 
@@ -72,9 +74,25 @@ async def patch_user(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
+    """Partially update the authenticated user's own profile.
+
+    Email is deliberately not updatable here - changing it requires the verification
+    round-trip in `POST /user/email-change/request`. Taking a username someone else
+    already holds is a 422.
+
+    A username change is rate limited per-user for the same reason `POST /auth/complete`
+    is per-IP: the availability check below answers a distinguishable "Username not
+    available", so unthrottled it is a wordlist oracle over who exists. The rest of the
+    profile isn't limited.
+    """
     # Note: `email` is deliberately not part of `UserUpdate` - see
     # `POST /user/email-change/request` for how email changes work instead.
     if values.username is not None and values.username != current_user["username"]:
+        await enforce_rate_limit(
+            f"username-change:user:{current_user['id']}",
+            settings.USERNAME_CHANGE_RATE_LIMIT_PER_USER,
+            settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
+        )
         if await crud_users.exists(db=db, username=values.username):
             raise DuplicateValueException("Username not available")
 
@@ -110,7 +128,7 @@ async def request_email_change(
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
     await enforce_rate_limit(
-        f"email-change:ip:{_client_ip(request)}",
+        f"email-change:ip:{client_ip(request)}",
         settings.EMAIL_CHANGE_REQUEST_RATE_LIMIT_PER_USER * 5,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -151,7 +169,7 @@ async def request_email_change(
 
 @router.get("/user/email-change/verify/check", response_model=LinkCheckResponse)
 async def check_email_change_link(
-    request: Request, token: str, db: Annotated[AsyncSession, Depends(async_get_db)]
+    request: Request, response: Response, token: str, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> LinkCheckResponse:
     """Side-effect-free precheck used by the confirmation page before it shows the
     "Confirm email change" button - lets it show an error immediately for a link
@@ -159,9 +177,15 @@ async def check_email_change_link(
     browser's back button after already confirming) rather than a misleadingly
     clickable button, and lets it display the target email up front. Never marks
     anything used or changes any state.
+
+    Opts out of the default `public` caching for the same reason as
+    `auth.check_email_link`: anonymous side-effect-free GET, but the token is in the
+    query string and the body is an email address.
     """
+    response.headers["Cache-Control"] = "private, no-store"
+
     await enforce_rate_limit(
-        f"email-change-verify-check:ip:{_client_ip(request)}",
+        f"email-change-verify-check:ip:{client_ip(request)}",
         settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -203,7 +227,7 @@ async def verify_email_change(
     this leniency is just a safety net for races (e.g. a double click).
     """
     await enforce_rate_limit(
-        f"email-change-verify:ip:{_client_ip(request)}",
+        f"email-change-verify:ip:{client_ip(request)}",
         settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -260,6 +284,11 @@ async def read_dive_stats(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> UserDiveStatsRead:
+    """Return the caller's aggregate dive statistics.
+
+    A user with no dives logged yet gets zeroed-out stats rather than a 404: every user
+    conceptually has stats, the row just hasn't been created.
+    """
     stats = await crud_user_dive_stats.get(
         db=db, user_id=current_user["id"], schema_to_select=UserDiveStatsReadInternal, return_as_model=True
     )
@@ -288,6 +317,9 @@ async def read_dive_stats(
 # user's own id, which is all the route below passes.
 @cache(key_prefix="user_{user_id}_dives:gas_use_history", resource_id_name="user_id", expiration=60)
 async def _cached_gas_use_history(request: Request, user_id: int, db: AsyncSession) -> list[DiveGasUsePoint]:
+    """Fetches (and caches) a user's whole gas-use series. Authorization happens in the
+    route before this is reached - `@cache` serves a hit without re-checking it.
+    """
     return await gas_use_history(db=db, user_id=user_id)
 
 
@@ -318,6 +350,12 @@ async def erase_user(
     access_token: str = Depends(oauth2_scheme),
     refresh_token: str | None = Cookie(None, alias="refresh_token"),
 ) -> dict[str, str]:
+    """Soft-delete the authenticated user's own account and end the session.
+
+    The row is flagged rather than removed. Both the access token and, when present, the
+    refresh token are blacklisted and the refresh cookie cleared, so the tokens the caller
+    is holding stop working immediately instead of staying valid until they expire.
+    """
     await crud_users.delete(db=db, uuid=current_user["uuid"])
 
     if refresh_token:

@@ -1,8 +1,20 @@
+# Overlay for running the test suite against real Postgres and Redis:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml up --abort-on-container-exit api
+#
+# This is the only way to exercise the DB-backed tests (`test_dive_check_constraints.py`,
+# `test_dive_numbering.py`), which skip themselves when nothing is listening on Postgres.
 services:
-  web:
-    user: root  # Run as root for tests to allow global package installation
-    environment:
-      - PYTHONPATH=/usr/local/lib/python3.11/site-packages
-    command: bash -c "pip install faker pytest-asyncio pytest-mock && pytest tests/ -v"
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Dev dependencies come from `uv.lock` via the `dev` extra, installed at image
+      # build time. The previous `pip install faker pytest-asyncio pytest-mock` at
+      # container start pulled unpinned versions and needed `user: root` to write into
+      # the image's site-packages - both gone now.
+      target: test
+    command: pytest tests/ -v
     volumes:
       - ./tests:/code/tests
+      - ./src:/code/src

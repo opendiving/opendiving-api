@@ -101,11 +101,17 @@ class _RecordingSession(AsyncMock):
         self.updates = []
         self.calls = []
 
-    async def execute(self, statement):
+    async def execute(self, statement, parameters=None):
         compiled = str(statement)
         self.calls.append(compiled)
         if compiled.strip().upper().startswith("UPDATE"):
-            self.updates.append(statement.compile().params)
+            # The digest marks a whole user's schedules in one executemany, so the values
+            # arrive as a list of per-row param dicts alongside the statement rather than
+            # baked into it. `updates` stays one entry per schedule either way.
+            if parameters is None:
+                self.updates.append(statement.compile().params)
+            else:
+                self.updates.extend(parameters)
             return MagicMock()
         result = MagicMock()
         result.all.return_value = self._rows
@@ -203,6 +209,27 @@ class TestSendGearServiceDigests:
         assert marked["notified_stage"] == ServiceStatus.OVERDUE.value
         assert marked["notified_for_due_on"] == due_on
         assert isinstance(marked["notified_at"], datetime)
+
+    @pytest.mark.asyncio
+    async def test_a_users_schedules_are_marked_in_one_statement(self) -> None:
+        """A diver whose whole kit comes due at once should cost one UPDATE, not one per
+        item - the same set-based-write rule `dive_stats`/`gear_stats` follow.
+        """
+        overdue = date(2020, 1, 1)
+        rows = [
+            _row(user_id=1, schedule_id=10, next_due_on=overdue, name="MK25 EVO"),
+            _row(user_id=1, schedule_id=11, next_due_on=overdue, name="Wing 17L"),
+            _row(user_id=1, schedule_id=12, next_due_on=overdue, name="AL80"),
+        ]
+        session = _RecordingSession(rows)
+        session_patch, email_patch = _patched(session)
+        with session_patch, email_patch:
+            await send_gear_service_digests(MagicMock())
+
+        update_statements = [c for c in session.calls if c.strip().upper().startswith("UPDATE")]
+        assert len(update_statements) == 1
+        # ...while still marking every one of the three schedules.
+        assert {mark["schedule_id"] for mark in session.updates} == {10, 11, 12}
 
     @pytest.mark.asyncio
     async def test_a_second_run_with_unchanged_state_sends_nothing(self) -> None:

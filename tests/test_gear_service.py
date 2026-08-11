@@ -9,12 +9,16 @@ Postgres/Redis is exercised by hand (see DECISIONS.md), not here.
 """
 
 from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import ValidationError
+from uuid6 import uuid7
 
+from src.app.crud.crud_gear_service_schedules import get_due_overview_for_user
 from src.app.schemas.gear_service import (
+    GearServiceDueResponse,
     GearServiceRecordCreate,
     GearServiceScheduleBase,
     GearServiceScheduleCreate,
@@ -507,3 +511,85 @@ class TestSoftDeleteSchedulesForGearItem:
         await soft_delete_schedules_for_gear_item(db, gear_item_id=7, commit=False)
 
         db.commit.assert_not_awaited()
+
+
+class TestDueOverview:
+    """The dashboard's `GET /gear-service-due` list, and specifically its row cap.
+
+    Without a `truncated` flag a diver past `DUE_OVERVIEW_LIMIT` saw a list that looked
+    complete while some overdue kit simply wasn't in it - the wrong direction to fail in
+    for a safety-adjacent card.
+    """
+
+    def _db(self, rows: list) -> MagicMock:
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=rows)
+        return db
+
+    def _row(self, name: str = "MK25 EVO") -> SimpleNamespace:
+        return SimpleNamespace(
+            schedule_uuid=uuid7(),
+            kind=ServiceKind.SERVICE,
+            label=None,
+            last_service_on=date(2025, 8, 1),
+            next_due_on=date(2026, 8, 1),
+            next_due_at_dive_count=None,
+            gear_item_uuid=uuid7(),
+            gear_item_name=name,
+            gear_item_brand="Scubapro",
+            gear_item_dive_count=42,
+        )
+
+    @pytest.mark.asyncio
+    async def test_returns_rows_unflagged_when_under_the_cap(self) -> None:
+        db = self._db([self._row("MK25 EVO"), self._row("Wing 17L")])
+
+        data, truncated = await get_due_overview_for_user(db, user_id=1, limit=200)
+
+        assert [item.gear_item_name for item in data] == ["MK25 EVO", "Wing 17L"]
+        assert truncated is False
+
+    @pytest.mark.asyncio
+    async def test_flags_truncation_and_trims_to_the_limit(self) -> None:
+        db = self._db([self._row() for _ in range(4)])
+
+        data, truncated = await get_due_overview_for_user(db, user_id=1, limit=3)
+
+        assert len(data) == 3
+        assert truncated is True
+
+    @pytest.mark.asyncio
+    async def test_does_not_flag_truncation_at_exactly_the_limit(self) -> None:
+        db = self._db([self._row() for _ in range(3)])
+
+        data, truncated = await get_due_overview_for_user(db, user_id=1, limit=3)
+
+        assert len(data) == 3
+        assert truncated is False
+
+    @pytest.mark.asyncio
+    async def test_selects_one_row_past_the_limit(self) -> None:
+        db = self._db([])
+
+        await get_due_overview_for_user(db, user_id=1, limit=200)
+
+        statement = str(db.execute.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
+        assert "LIMIT 201" in statement
+
+    @pytest.mark.asyncio
+    async def test_excludes_paused_schedules_and_archived_gear(self) -> None:
+        db = self._db([])
+
+        await get_due_overview_for_user(db, user_id=7, limit=200)
+
+        statement = str(db.execute.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
+        # Pausing is how a diver silences a rule; archiving retires a whole item without
+        # having to also pause every rule on it. Both must keep it off the dashboard.
+        assert "gear_service_schedule.is_active IS true" in statement
+        assert "gear_item.is_archived IS false" in statement
+        assert "gear_service_schedule.user_id = 7" in statement
+
+    def test_the_response_defaults_truncated_to_false(self) -> None:
+        # An older client (or a cached response predating the field) must not read as
+        # "the list is partial" just because the flag is absent.
+        assert GearServiceDueResponse(data=[]).truncated is False

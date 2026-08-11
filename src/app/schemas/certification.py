@@ -179,3 +179,43 @@ class CertificationDelete(BaseModel):
 
     is_deleted: bool
     deleted_at: datetime
+
+
+# -------------------- dashboard --------------------
+class CertificationExpiringItem(BaseModel):
+    """One row of `GET /certifications-expiring`: just enough of a certification to
+    render a dashboard line and link to the list page.
+
+    The gear twin of this is `GearServiceDueItem`. It carries no card-file metadata:
+    the renewal card shows a name, an agency and a date, and embedding `files` here
+    would mean a second query per row for something nothing on that card renders.
+    """
+
+    uuid: uuid_pkg.UUID
+    agency: CertificationAgency
+    agency_other: str | None = None
+    name: str
+    expires_on: date
+
+
+class CertificationExpiringResponse(BaseModel):
+    """Every certification the user owns that has an expiry date at all.
+
+    Deliberately takes no `within_days` parameter, for the same reason as
+    `GearServiceDueResponse`: a server-side horizon would bake "today" into a cached
+    response and quietly go wrong at midnight. With no date input this is a pure
+    function of stored rows, so it can be cached safely and the client buckets it into
+    expiring-soon/expired itself.
+
+    Note the *boundary* differs from gear on the client side, and that is deliberate:
+    a c-card is valid through its printed date, whereas a service interval that has
+    arrived has arrived. Neither belongs here - both are clock-dependent.
+
+    `truncated` says the row cap was hit, so the client can say the list is partial
+    instead of implying these are all of them. `GearServiceDueResponse` carries the
+    same flag; for a safety-adjacent card, silently under-reporting is the wrong
+    direction to fail in.
+    """
+
+    data: list[CertificationExpiringItem]
+    truncated: bool = False

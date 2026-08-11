@@ -1,15 +1,16 @@
 import uuid as uuid_pkg
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastcrud import PaginatedListResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...api.dependencies import get_current_user
+from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import DuplicateValueException, ForbiddenException, NotFoundException
 from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
+from ...core.utils.pagination import clamp_pagination
 from ...crud.crud_dive_sites import crud_dive_sites, dive_site_name_exists
 from ...schemas.dive_site import (
     DiveSiteCreate,
@@ -23,8 +24,23 @@ from ...services.cache_invalidation import invalidate_dive_caches
 router = APIRouter(tags=["dive-sites"])
 
 
-def _dive_site_owner_id(db_dive_site: Any) -> int:
-    return cast(int, db_dive_site["user_id"] if isinstance(db_dive_site, dict) else db_dive_site.user_id)
+async def _get_owned_dive_site(
+    db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict, *, include_deleted: bool = False
+) -> DiveSiteReadInternal:
+    """Fetch a dive site by public uuid and assert the caller owns it.
+
+    Thin wrapper over `fetch_owned_or_raise` - see there for the 404/403 split and, in
+    particular, why this must run before any `@cache`-wrapped read helper.
+    """
+    return await fetch_owned_or_raise(
+        db=db,
+        crud=crud_dive_sites,
+        uuid=uuid,
+        current_user=current_user,
+        schema=DiveSiteReadInternal,
+        not_found_message="Dive site not found",
+        include_deleted=include_deleted,
+    )
 
 
 def _to_public_dive_site(
@@ -45,6 +61,11 @@ _dive_site_cache: OwnedResourceCache[DiveSiteReadInternal, DiveSiteRead] = Owned
     to_public=lambda db_dive_site, user_uuid: _to_public_dive_site(db_dive_site, user_uuid=user_uuid),
     sort_columns="name",
     sort_orders="asc",
+    # A diver with hundreds of logged sites can't usefully scroll them, so the dive form's
+    # picker narrows the list server-side as you type. Location is searched alongside the
+    # name because that's how people remember sites they haven't dived in a while ("that
+    # wall in Dahab") - see DECISIONS.md.
+    search_columns=("name", "location"),
 )
 
 
@@ -55,6 +76,12 @@ async def write_dive_site(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveSiteRead:
+    """Create a dive site for the authenticated user.
+
+    `user_uuid` in the body must be the caller's own (403 otherwise). Uniqueness is on
+    name *and* location together, so the same site name at a different location is
+    allowed; a genuine repeat is a 422.
+    """
     if current_user["uuid"] != dive_site.user_uuid:
         raise ForbiddenException()
 
@@ -85,12 +112,33 @@ async def read_dive_sites(
     db: Annotated[AsyncSession, Depends(async_get_db)],
     page: int = 1,
     items_per_page: int = 10,
+    search: Annotated[
+        str | None,
+        Query(max_length=255, description="Case-insensitive substring match on name or location"),
+    ] = None,
 ) -> dict:
+    """List the caller's dive sites.
+
+    `user_uuid` must be the caller's own (403 otherwise). `search` matches a
+    case-insensitive substring against name and location, which is what backs the dive
+    form's picker: it narrows server-side as you type rather than shipping the whole list
+    to the browser. Out-of-range pagination is clamped, not rejected.
+    """
     if current_user["uuid"] != user_uuid:
         raise ForbiddenException()
 
+    page, items_per_page = clamp_pagination(page, items_per_page)
+
     return await _dive_site_cache.read_list(
-        request, user_id=current_user["id"], user_uuid=user_uuid, db=db, page=page, items_per_page=items_per_page
+        request,
+        user_id=current_user["id"],
+        user_uuid=user_uuid,
+        db=db,
+        page=page,
+        items_per_page=items_per_page,
+        # Normalized here rather than in the cache layer so that " Blue " and "blue" share
+        # one cache entry instead of two identical ones under different keys.
+        search=(search or "").strip().lower() or None,
     )
 
 
@@ -101,15 +149,12 @@ async def read_dive_site(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveSiteRead:
-    db_dive_site = await crud_dive_sites.get(
-        db=db, uuid=uuid, is_deleted=False, schema_to_select=DiveSiteReadInternal, return_as_model=True
-    )
-    if db_dive_site is None:
-        raise NotFoundException("Dive site not found")
+    """Return a single dive site by its public uuid.
 
-    db_dive_site = cast(DiveSiteReadInternal, db_dive_site)
-    if db_dive_site.user_id != current_user["id"]:
-        raise ForbiddenException()
+    404 when no such site exists, 403 when it belongs to another user.
+    """
+    # Authorize before the cached read: `@cache` replays a hit without re-checking.
+    await _get_owned_dive_site(db, uuid, current_user)
 
     return await _dive_site_cache.read_item(request, uuid=uuid, owner_uuid=current_user["uuid"], db=db)
 
@@ -123,15 +168,14 @@ async def patch_dive_site(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    db_dive_site = await crud_dive_sites.get(
-        db=db, uuid=uuid, is_deleted=False, schema_to_select=DiveSiteReadInternal, return_as_model=True
-    )
-    if db_dive_site is None:
-        raise NotFoundException("Dive site not found")
+    """Partially update a dive site; omitted fields are left untouched.
 
-    db_dive_site = cast(DiveSiteReadInternal, db_dive_site)
-    if db_dive_site.user_id != current_user["id"]:
-        raise ForbiddenException()
+    403 unless the caller owns it. Uniqueness is re-checked against the *resulting* name
+    and location, so moving a site to a location where that name is already taken is a
+    422. Because dive reads embed this site's name and location, a successful change also
+    invalidates every cached dive logged here.
+    """
+    db_dive_site = await _get_owned_dive_site(db, uuid, current_user)
 
     effective_name = values.name if values.name is not None else db_dive_site.name
     effective_location = values.location if "location" in values.model_fields_set else db_dive_site.location
@@ -165,13 +209,14 @@ async def erase_dive_site(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    db_dive_site = await crud_dive_sites.get(db=db, uuid=uuid, schema_to_select=DiveSiteReadInternal)
-    if db_dive_site is None:
-        raise NotFoundException("Dive site not found")
+    """Soft-delete a dive site.
 
-    owner_id = _dive_site_owner_id(db_dive_site)
-    if owner_id != current_user["id"]:
-        raise ForbiddenException()
+    403 unless the caller owns it. Idempotent: deleting an already-deleted site succeeds
+    rather than 404ing. The site stays attached to the dives logged at it, so their
+    cached reads are invalidated too.
+    """
+    # `include_deleted`: deleting an already-soft-deleted site is a no-op, not a 404.
+    owner_id = (await _get_owned_dive_site(db, uuid, current_user, include_deleted=True)).user_id
 
     await crud_dive_sites.delete(db=db, uuid=uuid)
     await _dive_site_cache.invalidate_list(owner_id)

@@ -13,7 +13,7 @@ existing tables (add columns, add indexes, etc.).
 
 Practical workflow used throughout this project for adding a column to an existing table:
 1. Add the field to the SQLAlchemy model (`models/*.py`) and Pydantic schema (`schemas/*.py`).
-2. Restart the `web` container (`docker compose restart web`) - this creates any
+2. Restart the `api` container (`docker compose restart api`) - this creates any
    brand-new tables via `create_all()`.
 3. Manually run the equivalent `ALTER TABLE ... ADD COLUMN ...` against the live
    DB: `docker compose exec -T db psql -U postgres -d opendive -c "ALTER TABLE ..."`.
@@ -277,6 +277,64 @@ filters, enrichment with related trip/dive-site uuids, mixtures) - it doesn't fi
 `OwnedResourceCache`'s shape, so it wasn't forced through it. New simple
 per-user owned resources should use `OwnedResourceCache` rather than
 hand-copying this pattern again.
+
+## The dive form's pickers search server-side, because they used to fetch whole tables
+
+The dive form's dive site, trip and gear pickers all filtered client-side, so each
+paged through *every* row the user owns - `items_per_page=100` in a loop until
+`has_more` was false - before its dropdown was usable. A diver with a few hundred
+logged sites paid several sequential round-trips on every form open. (The trip
+picker didn't even loop: it fetched one page of 100 and dropped the rest silently,
+so a 101st trip couldn't be selected at all.)
+
+All three endpoints now take `search=`, a case-insensitive substring match, with
+`items_per_page` capped at 100 (`MAX_DIVE_SITES_PER_PAGE`, `MAX_TRIPS_PER_PAGE`,
+`MAX_GEAR_ITEMS_PER_PAGE`) so no single request can pull a table anyway:
+
+| Endpoint | Columns matched | Why the second column |
+|---|---|---|
+| `GET /dive-sites` | `name`, `location` | How people recall sites they haven't dived in a while ("that wall in Dahab") |
+| `GET /trips` | `name`, `location` | A trip is as often remembered by where it went as by what it was called |
+| `GET /gear-items` | `name`, `brand` | Divers name kit inconsistently ("MK25", "my reg") but recall the brand |
+
+Gear deliberately matches `brand` rather than `type`: `type` is a closed
+vocabulary with its own filter surface, and folding it into free-text search
+would make "reg" match every regulator regardless of name.
+
+Four things about the implementation are non-obvious:
+
+- **The search query is hand-written, not `get_multi` filter kwargs.** FastCRUD's
+  `__`-suffix filters (`name__ilike=...`) are AND'd together, and its `__or`
+  operator groups *operators on one column*, not columns. Matching either column
+  needs a real cross-column `OR`, so `core/utils/search.py` builds the `select()`
+  itself and returns `get_multi`'s `{"data": [...], "total_count": n}` shape. It
+  selects `model.__table__.columns` rather than the entity, so rows come back as
+  plain dicts exactly like the unsearched path - each caller's public-shape
+  conversion sees one shape either way, and gear can still read the internal `id`
+  it needs to batch its service-schedule lookup.
+- **The term is escaped for `LIKE`.** `escape_like()` backslash-escapes `\`, `%`
+  and `_` (in that order - escaping the wildcards first would produce new live
+  ones), paired with `.ilike(pattern, escape="\\")`. Without it a site named
+  "50%" is unsearchable and a bare `%` matches everything.
+- **`search` is part of every list cache key**, appended after the existing
+  `user_{id}_{resource}:page_{n}:items_per_page:{n}` prefix - so it still falls
+  under the `user_{id}_{resource}:*` wildcard that invalidation purges, and no
+  invalidation logic changed. Each route lowercases/strips the term before passing
+  it down, so `" Blue "` and `"blue"` share one entry. A resource that passes no
+  `search_columns` keeps the original key shape: `OwnedResourceCache.read_list` is
+  called without a `search` kwarg for those, and `@cache` would `KeyError` on a
+  placeholder it can't fill.
+- **Dive sites and trips go through `OwnedResourceCache`; gear doesn't.** Gear's
+  list read was already hand-rolled (it batches service schedules per page), so it
+  calls the same `search_clause`/`search_multi` helpers directly. That's the split
+  the factory's docstring already describes - resources whose reads do more than a
+  straight `get_multi` keep their own helpers.
+
+Each search is a plain filtered scan - the existing composite indexes can't serve a
+leading-wildcard `ILIKE`. That's fine at the scale these tables have per user
+(hundreds, not millions, and always narrowed by `user_id` first). If it ever isn't,
+the fix is a `pg_trgm` GIN index on the searched columns, not a different query
+shape.
 
 ## `/{username}/...` resource routes were flattened to `/...` + explicit ids
 
@@ -1714,7 +1772,10 @@ The download response carries `Content-Disposition: attachment`, `X-Content-Type
 nosniff` and `Content-Security-Policy: default-src 'none'; sandbox`. `attachment` rather
 than `inline` because the web app fetches these through its API client and renders from a
 blob URL, never navigating to the URL - so nothing is lost, and a malicious PDF opened
-directly in a tab can't execute in the same-origin viewer.
+directly in a tab can't execute in the same-origin viewer. The `filename` on that header
+is built by `content_disposition_attachment`, not interpolated - see "Non-ASCII filenames
+need RFC 6266, because Starlette encodes headers as latin-1" for what interpolating it
+cost.
 
 ## The card download endpoint is never Redis-cached
 
@@ -2199,7 +2260,7 @@ that is already done.
 `src/scripts/backfill_dive_profiles.py`, mirroring `create_first_superuser.py`:
 
 ```bash
-docker compose exec web python -m src.scripts.backfill_dive_profiles --parser-key suunto_xml
+docker compose exec api python -m src.scripts.backfill_dive_profiles --parser-key suunto_xml
 ```
 
 It selects `dive_file` LEFT JOIN `dive_profile` where no profile exists, the extractor
@@ -2215,7 +2276,7 @@ does not go through. Without `create_redis_cache_pool()` first, every backfilled
 cached detail response would keep claiming the dive has no profile for up to an hour, with
 no error anywhere.
 
-`src/scripts/` is now bind-mounted into the `web` service (`./src:/code/src`) so that
+`src/scripts/` is now bind-mounted into the `api` service (`./src:/code/src`) so that
 command works at all; the app itself is still served from `/code/app` and is unaffected.
 
 ## No manual DDL for the dive-profile feature
@@ -2226,3 +2287,640 @@ on restart. No column was added to `dive` or any other existing table - the FK l
 
 `DiveProfile` is deliberately **not** registered in `admin/views.py`, for the same reason as
 `DiveFile` and `CertificationFile`.
+
+## The contact form is an API endpoint, not a `mailto:`
+
+`POST /api/v1/contact` (`api/v1/contact.py`) is the only endpoint here that mails a
+*human* rather than a user, and the only one that both accepts anonymous input and sends
+mail as a result. It exists because the frontend is a pure static-ish Next.js client with
+no mail provider of its own - Resend lives here, so the form has to post here.
+
+Four things about it are deliberate:
+
+- **Unauthenticated.** The person most likely to need it is the one who can't sign in.
+  That makes it the obvious relay-abuse target, hence fixed-window rate limits keyed
+  *both* by submitted email and by client IP (`CONTACT_FORM_RATE_LIMIT_*`, defaulting to
+  a one-hour window). The submitted address is never verified, so the `From:` line in the
+  resulting mail is a claim, not an identity.
+- **Nothing is stored.** There is no inbox in this app to read a contact message from, so
+  a table would be a write-only pile nobody ever opens. The operator's mailbox is the
+  system of record.
+- **`reply_to`, never a spoofed `from`.** `EMAIL_FROM_ADDRESS` is the only address this
+  domain's SPF/DKIM covers; sending *as* the submitter is what gets a sending domain
+  blocklisted. Hitting Reply in the inbox still answers the diver.
+- **`send_contact_form_email` escapes its inputs, and it's the only sender that does.**
+  Every other function in `services/email_service.py` interpolates content this server
+  composed. This one interpolates prose a stranger typed, so it runs `html.escape` over
+  the name, subject and body (then turns newlines into `<br>`). If you add another sender
+  that carries user-supplied text, do the same.
+
+`CONTACT_FORM_EMAIL` (default `contact@opendiving.app`) is the recipient - a self-hosted
+instance should point it at its own operator. It is *not* the same setting as
+`AppSettings.CONTACT_EMAIL`, which is OpenAPI document metadata shown in `/docs` and
+nothing else; the two are separate so that publishing a maintainer address in the API docs
+doesn't silently reroute a stranger's support mail.
+
+With `RESEND_API_KEY` unset the send is a logged no-op, like every other sender here - but
+the whole submission is written to the log, so a local instance can still see what would
+have gone out. The endpoint still reports success in that case: it reports that the
+message was *accepted*, and it deliberately never tells an anonymous caller anything about
+the recipient inbox or downstream delivery.
+
+## `dive_number` is a label, not an identity or an ordering key
+
+Nothing in this codebase reads `dive_number` except to print it. Chronology is owned by
+`start_time` everywhere - `_cached_read_dives` sorts by it, `gas_use_history` sorts by
+it, and `ix_dive_user_id_start_time` exists to serve exactly that. Keep it that way: the
+moment something joins, sorts or paginates on `dive_number`, everything below becomes
+unsafe.
+
+It has to stay a free-form label because the two things a diver wants from it are in
+direct conflict:
+
+- **Gaps are real data.** A diver whose first 46 dives are in a paper logbook starts this
+  log at #47, and #100-149 may stay on paper forever. Normalizing that to 1..N destroys
+  information nothing else records.
+- **A fully backfilled log should read 1..N**, with nothing missing.
+
+Both are served by never renumbering automatically, and offering an explicit renumber
+instead. `services/dive_numbering.py` is the whole of it:
+
+- `suggest_dive_number` proposes (`GET /dives/next-number`), and the form can overwrite it.
+- `summarize_numbering` reports (`GET /dives/numbering`), and the diver can ignore it.
+- `renumber_dives` rewrites, and only ever when asked (`POST /dives/renumber`).
+
+Three consequences worth knowing before changing any of it:
+
+- **There is deliberately no unique constraint on `(user_id, dive_number)`.** Duplicates
+  are a normal transient state while back-filling, and a renumber shifting a run of
+  numbers down by one collides with itself halfway through. Enforcing uniqueness would
+  need a deferrable constraint and would buy nothing the numbering summary doesn't already
+  say out loud. Duplicates are *reported*, not blocked.
+- **The suggestion is positional, not `MAX(dive_number) + 1`.** It takes the number of the
+  dive that chronologically precedes the one being logged and adds 1. For the ordinary
+  case - logging the dive you just did - the two agree. They diverge exactly where the
+  naive rule is wrong: back-filling a 2019 dive into a log that reaches #212 should
+  suggest #12. (This replaced a frontend `lastDive.dive_number + 1`, which suggested #213.)
+  It is returned even when it collides, because back-filling a run of old dives collides
+  by construction.
+- **`renumber_dives` writes one `UPDATE ... FROM` over a CTE**, not a write per dive. A
+  partial run would leave numbering in a state neither the diver nor `summarize_numbering`
+  could make sense of, and a row-by-row pass would hit collisions mid-shift. `dry_run`
+  computes the same change list through the same code, so the confirmation dialog and the
+  write it confirms can't disagree. Both order by `(start_time, id)` - the `id` tie-break
+  matters, since two dives can share a start time and Postgres is otherwise free to return
+  them in either order.
+
+The renumber endpoint invalidates only the dive caches. Unlike every other dive write it
+can't have moved `recalculate_dive_stats`'s figures or any gear item's `dive_count` - it
+changed a label on dives that already existed.
+
+## A dive computer's own counter is not the diver's dive number
+
+`SuuntoXmlParser` used to import `DiveNumberInSerie` as `dive_number`, while
+`SuuntoJsonParser` left it null. The XML behaviour was the wrong one: that field is the
+*device's* counter, which starts at 1 on a new or factory-reset computer and restarts
+again on the next one, so importing it stamps a #5 onto someone's 300th dive. Both parsers
+now leave it null and the number comes from `GET /dives/next-number`, derived from the
+dive's own date.
+
+`dive_number` stays on `ParsedDiveSchema` rather than being trimmed away under the
+"fields the backend models actually support" rule above: it has a direct `Dive` column,
+and a format that carries a real lifetime dive number (Subsurface's XML does) can populate
+it. It is simply always null for the two Suunto parsers.
+
+## The admin panel is off by default, and refuses to boot insecurely in production
+
+`CRUD_ADMIN_ENABLED` used to default to `True` and `ADMIN_PASSWORD` to the literal
+`"!Ch4ng3Th1sP4ssW0rd!"` inherited from the upstream boilerplate, with `main.py` mounting
+the panel at `/admin` unconditionally. Unlike `/docs`, which `core/setup.py` disables in
+production and gates behind a superuser in staging, there was no `ENVIRONMENT` check at
+all. A deployment that set `SECRET_KEY` (startup fails without it) but never thought about
+`ADMIN_PASSWORD` therefore served a full create/update/delete interface over `User`,
+`Dive`, `GearItem` and everything else in `admin/views.py`, behind a password published in
+this repository.
+
+Three changes, in order of how much they matter:
+
+1. **`ADMIN_PASSWORD` has no default** (`str | None = None`). Unset now means "no admin
+   account", which `admin/initialize.py` already handled - it just never happened, because
+   the field always had a value.
+2. **`CRUD_ADMIN_ENABLED` defaults to `False`.** The panel bypasses every ownership check
+   in `api/v1` by talking to the models directly, so it should be something an operator
+   turns on, not something a fresh deploy inherits. `src/.env.example` enables it for local
+   development.
+3. **`Settings._reject_insecure_admin_config`** raises at startup when the panel is enabled
+   in production with a missing or boilerplate password. Chosen over silently disabling the
+   panel: an operator who *meant* to have it wants to know, and a hard failure at boot is
+   the loudest, cheapest place to find out. The missing IP allowlist warns rather than
+   raising - plenty of deployments front the panel with a VPN, and refusing to start would
+   break those for no gain.
+
+## `/auth/refresh` rotates the refresh token instead of reusing it
+
+The endpoint used to mint a new access token and hand the same refresh cookie back. A
+refresh token leaked from a browser (an XSS on the frontend, a shared machine, a stolen
+backup) therefore stayed usable for its full `REFRESH_TOKEN_EXPIRE_DAYS` - seven days by
+default - with nothing to revoke it and no way to notice it was being used.
+
+It now blacklists the presented token and issues a fresh pair via `issue_tokens`, the same
+helper every sign-in path uses. The blacklist entry costs one row that
+`purge_expired_tokens` already cleans up.
+
+The cost is real and worth stating: **two tabs refreshing at the same instant will race,
+and the loser gets a 401.** That is inherent to rotation without a grace window. It's
+accepted here because the access token lives 30 minutes, so refreshes are rare enough for
+a collision to be unlikely, and the failure mode is a re-login rather than data loss. If it
+turns out to bite in practice, the standard fix is a short reuse-detection window (accept a
+just-rotated token once more, and treat a *third* use as evidence of theft) rather than
+reverting to no rotation.
+
+The token is spent before its replacement is minted, so a crash between the two leaves the
+caller signed out rather than holding two live refresh tokens.
+
+## Blacklist expiries are UTC-aware, and so is the purge that reads them
+
+`core/security` wrote blacklist rows with `datetime.fromtimestamp(exp)` - no tzinfo, so the
+JWT's UTC `exp` was rendered in the *host's* local zone and stored into a
+`DateTime(timezone=True)` column. `purge_expired_tokens` then compared against a naive
+`datetime.now()`. The two errors cancelled out on a UTC host and on any host as long as
+both stayed wrong in the same direction, which is why nothing looked broken: a server in
+UTC+2 filed every entry two hours late and deleted it two hours early, consistently.
+
+Both are now `UTC`-aware. Worth noting because fixing *either one alone* makes the bug
+worse rather than better - the offsets stop cancelling, and revoked tokens get purged while
+still valid.
+
+The column itself was the third piece, and it was missed at the time: `token_blacklist.expires_at`
+was still plain `DateTime` (the only naive timestamp left in the schema), i.e. Postgres
+`TIMESTAMP WITHOUT TIME ZONE`. asyncpg does not silently coerce there - binding an aware
+datetime to a naive column raises `DataError: can't subtract offset-naive and offset-aware
+datetimes`, so *both* halves of the fix above failed outright: every logout/deletion insert
+and every run of `purge_expired_tokens`. It is now `DateTime(timezone=True)` like everything
+else.
+
+Any rows already in the table predate the fix and were written in the host's local zone, so
+`AT TIME ZONE 'UTC'` reinterprets them off by that offset. That is harmless here and not
+worth a smarter `USING`: the table only holds entries until the token they name would have
+expired anyway, and the first purge after the change clears them out.
+
+## Pagination bounds live in `core/utils/pagination`, not in each route
+
+`page`/`items_per_page` come off the query string, and three of the eight list endpoints
+clamped them while five passed them straight into `crud.get_multi`. `GET /dives?items_per_page=999999999`
+was a request for the caller's entire dive log in one response; a negative value reached
+the database as a negative LIMIT.
+
+`clamp_pagination` is now called by all eight. It clamps rather than rejecting, so an
+existing client asking for too much gets the ceiling instead of a new 422. The three
+per-module `MAX_*_PER_PAGE = 100` constants collapsed into one
+`DEFAULT_MAX_ITEMS_PER_PAGE`, with the per-call override kept for a resource that ever
+needs a different bound.
+
+## Ownership checks go through one `fetch_owned_or_raise`
+
+The "fetch by public uuid, 404 if missing, 403 if it belongs to someone else" block existed
+in seven route files: three as differently-named private helpers (`_get_owned_dive`,
+`_get_owned_certification`, `_owned_gear_item`) and four inlined three times each. Roughly
+fifteen copies of six lines.
+
+That matters more than ordinary duplication because of the invariant the copies each
+restated in a comment: **the check must run before any `@cache`-wrapped read**, since
+`@cache` serves a hit without re-running authorization. An invariant documented in fifteen
+places is one that can be left out of the sixteenth.
+
+`api/dependencies.fetch_owned_or_raise` is now the only implementation. Each route file
+keeps a thin per-entity wrapper (`_get_owned_trip`, `_get_owned_gear_set`, ...) so call
+sites stay readable and each resource keeps its own not-found wording and return type;
+those wrappers are three lines of delegation with no logic.
+
+Deliberately *not* converted, because they answer differently on purpose:
+
+- `gear_service._owned_gear_item` and `gear_sets._resolve_item_ids` answer **422** for both
+  "missing" and "not yours". There the uuid is a reference inside a request body rather
+  than the resource being addressed, and one answer for both keeps someone else's uuids
+  unprobeable.
+- `gear_service`'s schedule/record routes scope by `user_id` down in
+  `resolve_schedule_for_user`, so there is no separate 403 to make.
+
+`tests/test_ownership.py` asserts no route file reintroduces the inline form.
+
+## `mypy` runs over `tests/`, with `call-arg` disabled there
+
+CI checked only `src`. Pointing it at `tests/` surfaced 109 errors, 108 of them
+`[call-arg]` - and all 108 were false.
+
+Every schema in `app/schemas` declares optional fields as
+`Annotated[T | None, Field(default=None)]`. Pydantic's mypy plugin only reads defaults out
+of the `x: T = Field(default=...)` assignment form, not out of `Annotated`, so it
+synthesizes an `__init__` in which those fields are required, and every test that builds a
+schema while omitting an optional field looks like a missing argument. (The plugin is
+configured and does load; this is a gap in what it handles, not a misconfiguration.
+Verified by diffing plugin-on against plugin-off output - identical.)
+
+So `[[tool.mypy.overrides]] module = "tests.*"` disables `call-arg` there, and only there.
+`arg-type`, `attr-defined`, `no-any-return` and the rest still apply to the suite;
+production code is untouched. Rewriting 108 call sites to pass explicit `None`s would have
+been a large diff that made the tests worse to read in order to satisfy a tooling gap. Drop
+the override once the plugin understands `Annotated` defaults.
+
+Two mypy invocations, not one: the app is reachable as both `app.*` (via `mypy_path`) and
+`src.app.*` (how the tests import it), and `mypy src tests` refuses with "source file found
+twice under different module names".
+
+
+## The runtime image now contains the app, and ships gunicorn
+
+Two things were wrong with the image and neither showed up until it was actually run
+rather than merely built.
+
+**The final stage contained no application code.** It copied `/app/.venv` and nothing else,
+leaving `WORKDIR /code` empty, so `app.main:app` was unimportable. The container only ever
+worked because `docker-compose.yml` bind-mounts `./src/app` over `/code/app` - i.e. the
+image ran in local development and nowhere else. This predates the switch to gunicorn: the
+old `uvicorn app.main:app --reload` CMD failed identically without the bind mount. The final
+stage now `COPY`s the package in; the compose bind mount still overlays it for live editing,
+so it is a convenience rather than a requirement.
+
+**`--reload` is gone from the image.** It runs a single worker plus a filesystem watcher and
+restarts on any write. `docker-compose.yml` still overrides `command:` with the uvicorn
+`--reload` form, so local development is unchanged.
+
+## Two things raced once the image ran four workers
+
+Switching the image to `gunicorn -w 4` turned a class of latent bug into a crash loop: the
+FastAPI lifespan runs once *per worker*, and it was doing two things that are deployment
+steps, not per-process steps. Both are fixed; recording them because the shape recurs.
+
+**Admin panel setup.** `admin.initialize()` (create the panel's tables, seed the initial
+admin) ran in a custom lifespan in `main.py`. Four workers raced it, and the losers died
+with `table admin_user already exists` or
+`UNIQUE constraint failed: admin_user.username`, taking the container with them. It is now
+a one-shot, `src/scripts/initialize_admin.py`, wired into `docker-compose.yml` as the
+`admin_init` service that `api` waits on via `service_completed_successfully` - so local
+development still needs no manual step. Constructing `CRUDAdmin` still registers all its
+routes (`__init__` calls the synchronous `setup()`), so every worker can mount the panel
+without any of them touching the database.
+
+**`Base.metadata.create_all()`.** The same per-worker problem, and not admin-specific at
+all: on a *cold* database four workers call `create_all` at once, and `checkfirst=True` does
+not save you - it inspects the catalog and then issues `CREATE TABLE`, so two workers can
+both look, both see nothing, and both try. The loser dies with
+`duplicate key value violates unique constraint "pg_type_typname_nsp_index"`. It is now
+serialized behind a transaction-scoped Postgres advisory lock in `core/setup.create_tables`,
+which makes the check-and-create pair atomic across processes. Deliberately kept in the
+lifespan rather than moved to a one-shot, so the `docker compose restart api` workflow at the
+top of this file still picks up brand-new tables. Only ever contended on a cold database.
+
+Note this was invisible on a warm database - the earlier multi-worker test passed simply
+because the tables already existed. It only reproduced against a freshly created one.
+
+## Running the admin panel on more than one worker
+
+Two pieces of the panel's state are per-process. Verified with 4 workers against Postgres:
+
+- **Its tables** (`admin_user`, `admin_session`, ...). `CRUD_ADMIN_DB_URL` unset means a
+  SQLite file inside one container's filesystem, which is both raced by sibling workers and
+  invisible to any other container - including the `admin_init` one-shot, which would then
+  helpfully initialize a database nobody reads. Point it at the app's Postgres. **Required**
+  for multi-worker.
+- **Its sessions.** These need a store shared by all workers. `CRUD_ADMIN_TRACK_SESSIONS`
+  defaults to `true` and persists them to the `admin_session` table, which already satisfies
+  this - so there is nothing to configure, only something not to switch off.
+  `CRUD_ADMIN_REDIS_ENABLED=true` is an equivalent alternative, worth it to keep session
+  lookups off Postgres, but it is **not** required.
+
+Measured, 12 authenticated requests each: Redis sessions 12/12, DB-tracked sessions 12/12,
+both disabled **1/12** - the single request that happened to land on the worker holding the
+in-memory session, the rest bounced to `/admin/login?error=Session+expired`.
+
+Two traps when testing this by hand, both of which produced false passes first time round:
+`GET /admin` returns a redirect to `/admin/` whether or not you are signed in, so an HTTP
+client that follows redirects reports the login page's `200` and looks like success - probe
+`/admin/` and don't follow redirects. And `SESSION_SECURE_COOKIES` defaults to `true`, so
+over plain HTTP a well-behaved client stores the session cookie and then never sends it,
+making every configuration look broken.
+
+## Rate limiting fails open on a Redis *outage*, not just a missing client
+
+`enforce_rate_limit` has always documented that it degrades rather than hard-fails when
+Redis isn't available - throttling here is defense-in-depth, not the primary security
+boundary, so an outage should not take sign-in down. The check it did was
+`if cache.client is None`, and that check is nearly never true.
+
+`create_redis_cache_pool` builds the client with `redis.Redis.from_pool`, which connects
+**lazily**. In any shipped configuration `cache.client` is therefore a perfectly ordinary
+object whether or not Redis is up; `None` only ever means "the pool was never created",
+i.e. unit tests. A real outage instead surfaced as `ConnectionError` raised from `incr`,
+which propagated out of every rate-limited endpoint - so a Redis blip turned the entire
+auth surface into 500s, which is precisely the failure mode the fail-open branch existed
+to prevent.
+
+Measured in a container against a stopped Redis: six `POST /auth/email/request` calls
+returned `500, 500, 500, 500, 500, 500` before, and `200 x6` after.
+
+The handler wraps only the `incr`/`expire` pair. `RateLimitException` is raised outside it
+on purpose - that is the function's normal signal, not a Redis failure, and a `try` drawn
+one line wider would swallow it and disable rate limiting completely.
+
+The warning fires on *entering* the degraded state and is re-armed on recovery, rather
+than once per process: during an outage the throttled endpoints are exactly the ones being
+hammered, so per-call logging buries the signal, but a latch that never resets means a
+second outage hours later passes silently.
+
+The old test suite only ever exercised `client = None`, which is why none of this showed
+up. `tests/test_rate_limit.py::TestRedisIsDown` now simulates the connection failure.
+
+## Per-IP rate limits need to know which proxy to believe
+
+`request.client.host` is the socket peer. Behind the bundled nginx - or any load balancer -
+that is the proxy's address, identically for every caller, so all the per-IP buckets
+collapse into one global bucket. One bot exhausting the magic-link limit locked sign-in for
+the whole instance. Nothing in the repo set `FORWARDED_ALLOW_IPS` or uvicorn's
+`--proxy-headers`, and nginx's `X-Forwarded-For` was written but never read.
+
+Trusting `X-Forwarded-For` unconditionally would be worse than the bug: the header is
+caller-supplied, so on a directly-reachable deployment anyone could forge a fresh identity
+per request and skip the limits entirely. `core.utils.client_ip` therefore consults it only
+when the socket peer is a proxy the operator explicitly declared in `TRUSTED_PROXY_IPS`, and
+takes the **right-most** entry that isn't itself one of those proxies - a client can prepend
+anything it likes, so only the hops appended by trusted infrastructure, at the end, mean
+anything. Unset (the default) is exactly the old socket-peer behaviour.
+
+Verified end-to-end through the real nginx config: with the proxy trusted, six callers get
+six separate buckets and a bot burning its own 15 leaves other callers at `200`. With no
+trusted proxy, eighteen requests carrying eighteen forged `X-Forwarded-For` values produced
+a **single** bucket keyed on the real peer, still capped at 15.
+
+`TRUSTED_PROXY_IPS` is a comma-separated *string*, not a `list[str]`. For a complex field
+type pydantic-settings parses the environment variable itself and expects JSON, so
+`TRUSTED_PROXY_IPS=172.16.0.0/12` failed validation at startup regardless of the `cast=`
+passed to `config()` - which only produces the default. `CRUD_ADMIN_ALLOWED_IPS_LIST` above
+it is a bare annotation with no `config()` call for the same reason. Unit tests that patch
+the attribute directly cannot catch this; `TestTheSettingParsesFromTheEnvironment` goes
+through `Settings`.
+
+## `ClientCacheMiddleware` inferred "not user-specific" from the wrong signal
+
+It decided whether a response was publicly cacheable purely from whether the *request*
+carried an `Authorization` header. That is backwards for the endpoints that mint
+credentials: `POST /auth/email/verify`, `/auth/google`, `/auth/complete` and `/auth/refresh`
+are unauthenticated by nature - the caller has no token yet, that is the whole point - and
+each returns one in the body. All four were being labelled `public, max-age=60`.
+
+`public` now additionally requires a safe method (GET/HEAD). That covers the four POSTs, but
+a safe method is not sufficient on its own: `GET /auth/email/verify/check` and
+`GET /user/email-change/verify/check` are anonymous, side-effect-free GETs that take a
+single-use token in the query string and return the account's email address. Those set
+`Cache-Control: private, no-store` themselves, which the middleware's existing
+"never overwrite an explicit header" rule preserves.
+
+Verified against a running container: all six now return `private, no-store`, while
+`GET /api/v1/health` still returns `public, max-age=60` - the fix is targeted, not a blanket
+disable of client caching.
+
+## `.dockerignore`, or: `.gitignore` does not apply to Docker
+
+The builder stage does `COPY . /app` and there was no `.dockerignore`, so the entire working
+tree went into an image layer - including the developer's real `src/.env`. Confirmed by
+inspection: `SECRET_KEY`, `POSTGRES_PASSWORD` and `ADMIN_PASSWORD` were present in the
+builder layer, and the `test` stage inherits from `builder`, which makes them part of a
+distributable artifact. A file can be correctly untracked by git and still be baked into
+every image.
+
+This became sharper when the runtime stage started copying the app package in (see above):
+`src/app/logs/app.log` came with it. With `RESEND_API_KEY` unset - the documented
+local-development setup - that file contains magic-link URLs with live sign-in tokens. The
+copy that happened to be on disk had none, which was luck rather than design.
+
+`.dockerignore` now excludes `.env` (but not `.env.example`), logs, `__pycache__`, the local
+venv and the tool caches. Verified after the change: no `.env` in the builder layer, no logs
+or `__pycache__` anywhere in the runtime image, `.env.example` still present.
+
+## `GET /certifications-expiring` mirrors `/gear-service-due`, deliberately
+
+The dashboard's renewal card needs the few certifications with expiry dates on them. It
+used to get there by paging the diver's *entire* certification list client-side, because
+an expiry is just as likely to sit on the oldest card as the newest and `GET
+/certifications` sorts by neither. Gear had already solved the same problem with
+`/gear-service-due`; certifications simply had no equivalent.
+
+This one is built to match, including the part that looks like an omission: **it takes no
+`within_days` parameter.** A server-side horizon would bake today's date into a response
+cached for 60 seconds, which then goes quietly wrong at midnight. With no date input the
+response is a pure function of stored rows, so it can be cached safely and the client
+buckets it into expiring-soon/expired itself - the same trade `GearServiceDueResponse`
+documents.
+
+Two ways it deliberately differs from its gear twin:
+
+* **Undated cards are excluded by the query**, not sorted last. Most recreational
+  certifications never expire, so for a typical diver that is most of the list, and none
+  of them can ever appear on a renewals card.
+* **It carries no card-file metadata.** The renewal card renders a name, an agency and a
+  date; embedding `files` would mean the batched file lookup `_cached_read_certifications`
+  does, for something nothing on that card shows.
+
+The cache key is `user_{id}_certifications_expiring`, which starts with
+`user_{id}_certification` - so `invalidate_certification_caches` already sweeps it and no
+new invalidation call was needed. That prefix overlap is load-bearing; renaming the key to
+something outside it would leave a stale renewals list after every card edit.
+
+## The dashboard overviews say when they are truncated
+
+`GearServiceDueResponse` and `CertificationExpiringResponse` both return every matching
+row rather than a date-filtered slice, so both need a row cap (`DUE_OVERVIEW_LIMIT` /
+`EXPIRING_OVERVIEW_LIMIT`, both 200). The gear one had the cap but no way to say it had
+been hit, so a diver past it saw a dashboard card that looked complete while some overdue
+kit simply wasn't in it. For a safety-adjacent card that is the wrong direction to fail
+in, so both now carry a `truncated` flag and the web client says the list is partial.
+
+Both queries select `limit + 1` rows and drop the extra, so `truncated` is *exact*.
+Comparing `len(rows) == limit` instead would report a list that happens to end on the
+boundary as truncated, which is the kind of false alarm that gets ignored.
+
+`truncated` defaults to `False` so an older client - or a cached response written before
+the field existed - doesn't read as "the list is partial".
+
+## `DiveUpdate` refuses an explicit null for a `NOT NULL` column
+
+Every field on `DiveUpdate` is typed `T | None`, because that is how "omit it to leave it
+alone" is spelled in a PATCH body. But four of them - `dive_number`, `start_time`,
+`duration`, `notes` - map to `NOT NULL` columns, so an explicit `null` is a different
+thing entirely and the database refuses it.
+
+It used to be refused all the way down at the driver. The null survived `exclude_unset`,
+reached Postgres, and the `IntegrityError` came back through `_fk_error_detail` as a 422
+reading **"Invalid reference: a related record does not exist."** - a foreign-key message
+for a not-null problem, which is close to the least helpful thing it could have said.
+
+`start_time` was worse than misleading. `patch_dive`'s guard was `if values.start_time is
+not None`, so an explicit null *skipped* the `split_start_time` branch, still reached the
+database from `model_dump`, and left `utc_offset_minutes` describing the previous start
+time - a wrong-but-plausible offset on a dive, not an error.
+
+A `model_validator` on `DiveUpdate` now rejects those four with a message naming the
+field, and `patch_dive`'s `start_time` branch is keyed off `model_fields_set` to match the
+`trip_uuid` branch beside it. The nullable fields are untouched: clearing `max_depth` back
+to "not recorded" is a real operation, and `trip_uuid: null` is the *only* way to detach a
+dive from its trip.
+
+No client was sending these nulls, so this was latent - but the contract advertised them,
+and the web client has since learned that "explicit null clears a field" from the
+`trip_uuid` fix. That is exactly the assumption that would have walked into it.
+
+## The `trip_uuid` detach path has a test now
+
+`PATCH /dive/{uuid}` detaching a dive from its trip depends entirely on
+
+    if "trip_uuid" in values.model_fields_set:
+        if values.trip_uuid is None:
+            update_data["trip_id"] = None
+
+and `grep trip_uuid tests/` was empty. The web client's "remove from trip" is built on it,
+and without the branch the request succeeds, reports "Dive updated", and changes nothing -
+a silent no-op, the worst shape for a bug to have.
+
+`tests/test_dive_update.py` pins both halves: an explicit null detaches, an omitted key
+leaves the trip alone. Both were checked by deleting the branch and confirming the first
+fails. It needs no database - `patch_dive`'s collaborators are stubbed and the assertions
+are on the `update_data` handed to `crud_dives.update`.
+
+## Test users get uuid-derived names, because nothing cleans them up
+
+`create_user` writes a real row to whatever database `POSTGRES_SERVER` points at - in
+practice the developer's own - and nothing deletes it afterwards. The
+`docker-compose.test.yml` overlay does the same. So the `user` table accumulates: one
+machine had 919 rows from previous runs.
+
+`fake.user_name()`/`fake.email()` draw from a small vocabulary, and both columns are
+`unique=True`. Past a few hundred rows the birthday problem catches up and runs start
+failing with an `IntegrityError` **in fixture setup** - intermittently, at roughly two
+runs in five, and reading like a broken test rather than a broken fixture.
+`fake.unique` does not help: it de-duplicates within one process, not against rows
+already in the table.
+
+`unique_username()`/`unique_email()` in `conftest.py` derive from uuid7 instead, so they
+are unique across runs and machines rather than merely unlikely to repeat. They are also
+shaped to satisfy the app's own rule for a username (`^[a-z0-9]+$`, 2-20 characters) -
+the ORM does not enforce it, but a fixture writing values the API would reject is a trap
+for whoever next asserts on one.
+
+The address is `@example.com`, not something under `.test`. Both are reserved by RFC 2606
+and neither reaches a real inbox, but `email-validator` - which backs Pydantic's
+`EmailStr` - rejects `.test` as a special-use name, so any test round-tripping such an
+address through a schema fails validation. That cost one test
+(`test_rejects_unchanged_email`) before it was spotted.
+
+This stops the bleeding; it does not tidy up. Rows already in the table stay until
+someone runs `docker compose down -v`. The real fix is fixtures that roll back what they
+write, which is a larger change than this was.
+
+## A session's subject is the user's `uuid`, because a username can change hands
+
+`issue_tokens` minted both tokens with `data={"sub": username}`, and `get_current_user`
+resolved that string back to an account by looking the username up. Nothing else in an
+access or refresh token identified anyone: `create_access_token`/`create_refresh_token`
+add only `exp` and `token_type`, and `verify_token` does no database lookup at all. So
+that one username lookup was the root of the entire ownership model - `fetch_owned_or_raise`
+compares against the `id` it returns.
+
+A username is not a stable identifier. `PATCH /user` changes it and releases the old one
+the same instant, with no reservation and no cooldown, so the subject of a live token can
+come to name a *different* account than the one it was issued for. Three consequences,
+in ascending order of severity:
+
+1. **The renaming user is signed out permanently.** Their own tokens name a username that
+   no longer resolves, so every request 401s - and `/auth/refresh` keeps re-minting the
+   dead subject rather than breaking, because it passes the subject through without ever
+   checking that it still resolves to a live user.
+2. **The reverse direction.** Claim a username the moment its holder renames away, and
+   their still-valid tokens now authenticate as *your* account - their subsequent writes
+   land in your logbook.
+3. **Dormant takeover.** Sign in as a desirable username, rename away to free it, then
+   call `/auth/refresh` weekly to keep a token with that subject alive indefinitely (it
+   costs nothing - refresh never asks whether the subject exists). When a real user later
+   claims that username at `/auth/complete`, the dormant token arms itself and reads and
+   writes their account. No victim interaction, no timing window, and it seeds cheaply
+   across as many handles as you like.
+
+The subject is now `str(user.uuid)` - the `uuid7` from `PublicUUIDMixin`, which is
+immutable, already unique-indexed, and already the resource's public identity everywhere
+else in the API. `get_current_user` is a single `crud_users.get(uuid=..., is_deleted=False)`,
+and `TokenData.user_uuid` is typed `uuid.UUID` so the assumption can't quietly revert to a
+string that happens to hold a name.
+
+`verify_token` catches `ValueError` alongside `JWTError`, because `uuid.UUID("someuser")`
+raises it: without that, every token minted before this change - and every forged `sub` -
+would be a 500 rather than a 401. Those older tokens are all invalidated by the cutover,
+which is why this was worth doing pre-launch rather than after.
+
+The tempting smaller fix - blacklist the caller's tokens inside `patch_user`, mirroring
+`erase_user` - is **not** sufficient. It closes (1) and (2), but not (3): the attacker's
+orphaned refresh token lives in a separate cookie jar and is simply never presented on the
+rename request, so there is nothing to blacklist. Only a subject that cannot change hands
+closes it.
+
+`PATCH /user` also gained a per-user rate limit on the username branch specifically. Its
+"Username not available" is the same availability oracle `/auth/complete` is already
+throttled for (see `AUTH_COMPLETE_RATE_LIMIT_PER_IP` and that route's docstring), and a
+signed-in caller could walk a wordlist through it without even needing a fresh onboarding
+token. It's scoped to the branch that actually answers the question - throttling the whole
+endpoint would 429 a settings page toggling `gear_service_emails`, which reveals nothing.
+
+## Non-ASCII filenames need RFC 6266, because Starlette encodes headers as latin-1
+
+`safe_filename` keeps printable non-ASCII on purpose - `original_filename` is also what
+the clients display, so a diver who names a file in Japanese should see it back. But the
+download routes used to interpolate that stored name straight into the header:
+
+```python
+"Content-Disposition": f'attachment; filename="{file.original_filename}"',
+```
+
+Starlette encodes every header value as latin-1 while building the response, so anything
+above U+00FF raises `UnicodeEncodeError` *before* a single byte is sent. That is not a
+garbled filename, it is a 500 - and a permanent one, on every subsequent
+`GET /certification/{uuid}/file/{side}` or `GET /dive/{uuid}/file` for that row, because
+the name causing it is stored. The upload, the metadata reads and the card thumbnail all
+keep working; only the download breaks.
+
+Three things conspire to hide it:
+
+- latin-1 covers the *accented Latin* range, so "café.jpg" encodes fine and merely arrives
+  as mojibake. Only CJK, Cyrillic, Greek, Hebrew and emoji actually raise. Testing with
+  European names finds nothing.
+- The `If-None-Match` branch returns before the header is built, so a client that already
+  has the file keeps re-validating happily while a fresh one 500s.
+- The web client never reads the header; `downloadBlob` names the saved file from
+  `original_filename` in the JSON metadata. So once the 500 is fixed, the header's
+  contents only show up in a bare `curl` - which is precisely why the ASCII fallback
+  below is worth getting right rather than leaving as a placeholder.
+
+`content_disposition_attachment` (`core/utils/uploads.py`) now builds both parameters RFC
+6266 defines:
+
+```
+attachment; filename="card.jpg"; filename*=UTF-8''%E6%BD%9C%E6%B0%B4.jpg
+```
+
+`filename*` carries the real name percent-encoded as UTF-8 for anything that understands
+it, which is every current browser; the plain `filename` carries an ASCII folding for
+anything that doesn't, `curl -OJ` being the one that matters. `quote(name, safe="")`
+escapes everything outside the unreserved set, so its output is always ASCII and always
+inside RFC 5987's `attr-char`.
+
+The alternative - ASCII-folding inside `safe_filename` at upload time - was rejected
+twice over. It would show every non-Latin diver a mangled version of their own filename in
+the list rows, the source-file card and the download dialog, and it would do nothing for
+the rows already stored, which are exactly the ones that 500. Only the header has to be
+narrow, so only the header is narrowed.
+
+Two details in `_ascii_fallback` that look like padding and aren't:
+
+- The folded name goes back through `safe_filename`. NFKD maps fullwidth punctuation onto
+  its ASCII twin (`＂` → `"`, `／` → `/`), so folding *re-introduces* the characters
+  `safe_filename` had already stripped - and a `"` there would close the quoted string
+  early.
+- A name with no ASCII in it at all folds to a bare extension, so `default` supplies the
+  stem: "潜水.jpg" downloads as "card.jpg" rather than as the dotfile ".jpg".

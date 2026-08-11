@@ -41,7 +41,7 @@ pytestmark = pytest.mark.skipif(not _db_available(), reason="No database connect
 @pytest.fixture(scope="module", autouse=True)
 def _ensure_tables() -> None:
     """Create any missing tables (idempotent) so these tests don't depend on the
-    `web` service having already run its startup `create_tables()` lifespan hook.
+    `api` service having already run its startup `create_tables()` lifespan hook.
     """
     Base.metadata.create_all(sync_engine)
 

@@ -4,10 +4,12 @@ from typing import Any
 
 from fastapi import Request
 from fastcrud import compute_offset, paginated_response
+from sqlalchemy import ColumnElement
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..exceptions.http_exceptions import NotFoundException
 from .cache import cache, delete_keys_by_pattern
+from .search import search_clause, search_multi
 
 
 class OwnedResourceCache[InternalT, PublicT]:
@@ -23,9 +25,21 @@ class OwnedResourceCache[InternalT, PublicT]:
     below, and calls `invalidate_list` after a mutation.
 
     Resources whose read/list logic does more than a straight `get_multi`/`get` plus a shape
-    conversion (e.g. `dives.py`, which also enriches results with related trips/dive sites and
-    supports extra filters) don't fit this shape and should keep their own hand-written cache
-    helpers instead of forcing themselves through this factory.
+    conversion don't fit this shape and should keep their own hand-written cache helpers
+    instead of forcing themselves through this factory. The three that opt out, and why:
+
+    - `dives.py` - enriches each row with related trips/dive sites/gear and supports several
+      extra filters.
+    - `gear_items.py` - carries an extra `include_archived` dimension in the cache key *and*
+      batches a service-schedule lookup across the page for the service badge.
+    - `certifications.py` - batches a card-file lookup across the page.
+
+    In each case the enrichment is a second query whose results have to be zipped back into
+    the page before conversion, which is precisely the step this factory has no room for.
+    Adding a generic hook for it would complicate the factory for its three straightforward
+    users (trips, dive sites, gear sets) to serve three callers that each need something
+    different; the duplication is the cheaper side of that trade. Revisit if a fourth
+    resource wants the same enrichment shape.
     """
 
     def __init__(
@@ -39,6 +53,7 @@ class OwnedResourceCache[InternalT, PublicT]:
         to_public: Callable[[InternalT, uuid_pkg.UUID], PublicT],
         sort_columns: str,
         sort_orders: str = "asc",
+        search_columns: tuple[str, ...] = (),
         list_expiration: int = 60,
     ) -> None:
         """
@@ -60,6 +75,11 @@ class OwnedResourceCache[InternalT, PublicT]:
             into the resource's public response shape.
         sort_columns / sort_orders: str
             Passed through to `crud.get_multi` for the list endpoint.
+        search_columns: tuple[str, ...]
+            Model column names a `search=` term matches against, OR'd together and matched
+            case-insensitively as a substring, e.g. `("name", "location")`. Leave empty to
+            opt out of search entirely, in which case `read_list` takes no `search` argument
+            and the cache key is unchanged.
         list_expiration: int
             TTL (seconds) for the list cache. The single-item cache has no expiration, matching
             the existing `trip_cache`/`dive_site_cache`/`dive_cache` behavior.
@@ -71,16 +91,26 @@ class OwnedResourceCache[InternalT, PublicT]:
         self._to_public = to_public
         self._sort_columns = sort_columns
         self._sort_orders = sort_orders
+        self._search_columns = search_columns
+
+        # A searchable resource gets the term in its cache key, so two different searches
+        # can't serve each other's results. Invalidation is a `user_{id}_{resource}:*`
+        # wildcard either way, so the extra key segment needs no change there. Resources
+        # without search keep the original key shape - `read_list` is called without a
+        # `search` kwarg for those, and `@cache` would `KeyError` on the missing value.
+        self.list_cache_key_prefix = f"user_{{user_id}}_{resource_name}:page_{{page}}:items_per_page:{{items_per_page}}"
+        if search_columns:
+            self.list_cache_key_prefix += ":search:{search}"
 
         self.read_list = cache(
-            key_prefix=f"user_{{user_id}}_{resource_name}:page_{{page}}:items_per_page:{{items_per_page}}",
+            key_prefix=self.list_cache_key_prefix,
             resource_id_name="user_id",
             expiration=list_expiration,
         )(self._read_list_uncached)
 
-        self.read_item = cache(
-            key_prefix=item_cache_prefix, resource_id_name="uuid", resource_id_type=uuid_pkg.UUID
-        )(self._read_item_uncached)
+        self.read_item = cache(key_prefix=item_cache_prefix, resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)(
+            self._read_item_uncached
+        )
 
     async def _read_list_uncached(
         self,
@@ -90,25 +120,54 @@ class OwnedResourceCache[InternalT, PublicT]:
         db: AsyncSession,
         page: int,
         items_per_page: int,
+        search: str | None = None,
     ) -> dict[str, Any]:
         """Fetches (and, via `read_list`, caches) a user's paginated resource list.
 
         Only ever reached through `read_list`, and only after the caller's authorization has
         already been checked by the route - see the class docstring.
         """
-        data = await self._crud.get_multi(
-            db=db,
-            offset=compute_offset(page, items_per_page),
-            limit=items_per_page,
-            user_id=user_id,
-            is_deleted=False,
-            sort_columns=self._sort_columns,
-            sort_orders=self._sort_orders,
-        )
+        offset = compute_offset(page, items_per_page)
+        term = (search or "").strip()
+
+        if term and self._search_columns:
+            data = await self._search_multi(db=db, user_id=user_id, term=term, offset=offset, limit=items_per_page)
+        else:
+            data = await self._crud.get_multi(
+                db=db,
+                offset=offset,
+                limit=items_per_page,
+                user_id=user_id,
+                is_deleted=False,
+                sort_columns=self._sort_columns,
+                sort_orders=self._sort_orders,
+            )
         data["data"] = [self._to_public(item, user_uuid).model_dump() for item in data["data"]]  # type: ignore[attr-defined]
 
         response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
         return response
+
+    def search_conditions(self, *, user_id: int, term: str) -> tuple[ColumnElement[bool], ...]:
+        """The `WHERE` clauses matching the user's non-deleted rows against a search term."""
+        model = self._crud.model
+        return (
+            model.user_id == user_id,
+            model.is_deleted.is_(False),
+            search_clause(model, self._search_columns, term),
+        )
+
+    async def _search_multi(
+        self, *, db: AsyncSession, user_id: int, term: str, offset: int, limit: int
+    ) -> dict[str, Any]:
+        return await search_multi(
+            db=db,
+            model=self._crud.model,
+            conditions=self.search_conditions(user_id=user_id, term=term),
+            sort_column=self._sort_columns,
+            sort_order=self._sort_orders,
+            offset=offset,
+            limit=limit,
+        )
 
     async def _read_item_uncached(
         self, request: Request, uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession

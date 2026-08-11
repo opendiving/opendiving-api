@@ -132,9 +132,11 @@ async def schedule_kind_exists(
     return result.first() is not None
 
 
-async def get_due_overview_for_user(db: AsyncSession, user_id: int, limit: int) -> list[GearServiceDueItem]:
+async def get_due_overview_for_user(
+    db: AsyncSession, user_id: int, limit: int
+) -> tuple[list[GearServiceDueItem], bool]:
     """Every active schedule a user owns, joined to enough of its gear item to render a
-    dashboard line, soonest-due first.
+    dashboard line, soonest-due first. Returns `(rows, truncated)`.
 
     Deliberately unfiltered by any date horizon: baking "today" into the query would
     bake it into the cached response too, which then goes quietly wrong at midnight. The
@@ -142,6 +144,10 @@ async def get_due_overview_for_user(db: AsyncSession, user_id: int, limit: int) 
 
     Archived gear is excluded, matching the digest job: retiring a piece of kit should
     stop it asking for attention without the diver having to also pause every rule on it.
+
+    Selects one row past `limit` so `truncated` is exact rather than the "we returned
+    exactly `limit` rows, so there are *probably* more" guess that comparing lengths
+    would give. The extra row is dropped before returning.
     """
     result = await db.execute(
         select(
@@ -165,9 +171,10 @@ async def get_due_overview_for_user(db: AsyncSession, user_id: int, limit: int) 
             GearItem.is_archived.is_(False),
         )
         .order_by(GearServiceSchedule.next_due_on.asc().nulls_last(), GearItem.name)
-        .limit(limit)
+        .limit(limit + 1)
     )
-    return [GearServiceDueItem.model_validate(row, from_attributes=True) for row in result]
+    rows = [GearServiceDueItem.model_validate(row, from_attributes=True) for row in result]
+    return rows[:limit], len(rows) > limit
 
 
 async def resolve_schedule_for_user(

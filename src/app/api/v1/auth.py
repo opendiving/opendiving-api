@@ -28,7 +28,6 @@ from ...core.security import (
     TokenType,
     blacklist_token,
     blacklist_tokens,
-    create_access_token,
     create_onboarding_token,
     generate_secure_token,
     hash_token,
@@ -37,6 +36,7 @@ from ...core.security import (
     verify_onboarding_token,
     verify_token,
 )
+from ...core.utils.client_ip import client_ip
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...crud.crud_authentication_providers import crud_authentication_providers
 from ...crud.crud_authentication_requests import crud_authentication_requests
@@ -63,15 +63,19 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 _EMAIL_REQUEST_RESPONSE = EmailAuthRequestResponse()
 
 
-def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
-
-
 async def _start_onboarding_or_sign_in(
     response: Response, outcome: AuthenticatedUser | OnboardingRequired
 ) -> AuthOutcome:
+    """Turn a verified identity into either a signed-in session or an onboarding handoff.
+
+    Shared by every entry point that proves who someone is (magic link, Google), because
+    each of them faces the same fork: a `User` row already exists for this identity, or it
+    doesn't and one has to be created by `POST /auth/complete`. In the second case no user
+    is created here - the caller gets a short-lived onboarding token carrying the verified
+    email and profile, which is the only thing that lets `/auth/complete` trust them.
+    """
     if isinstance(outcome, AuthenticatedUser):
-        tokens = await issue_tokens(response, outcome.user["username"])
+        tokens = await issue_tokens(response, outcome.user["uuid"])
         return AuthOutcome(status="authenticated", **tokens)
 
     onboarding_token = await create_onboarding_token(
@@ -109,7 +113,7 @@ async def request_email_link(
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
     await enforce_rate_limit(
-        f"auth:email-request:ip:{_client_ip(request)}",
+        f"auth:email-request:ip:{client_ip(request)}",
         settings.MAGIC_LINK_REQUEST_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -148,7 +152,7 @@ async def request_email_link(
 
 @router.get("/email/verify/check", response_model=LinkCheckResponse)
 async def check_email_link(
-    request: Request, token: str, db: Annotated[AsyncSession, Depends(async_get_db)]
+    request: Request, response: Response, token: str, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> LinkCheckResponse:
     """Side-effect-free precheck used by the sign-in landing page before it shows the
     "Sign in" button - lets it show an error immediately for a link that's already
@@ -156,9 +160,18 @@ async def check_email_link(
     button after already signing in) rather than a misleadingly clickable button,
     and lets it display which email it's about to sign in as. Never marks anything
     used or changes any state.
+
+    The only GET in this module that must not be publicly cached. It is anonymous and
+    side-effect-free, which is exactly the shape `ClientCacheMiddleware` marks
+    `public, max-age=60` - but the magic-link token sits in the query string and the
+    response body is the account's email address, so a shared cache keyed on that URL
+    would hand both to whoever asked next. Setting the header here stops the middleware
+    from filling one in.
     """
+    response.headers["Cache-Control"] = "private, no-store"
+
     await enforce_rate_limit(
-        f"auth:email-verify-check:ip:{_client_ip(request)}",
+        f"auth:email-verify-check:ip:{client_ip(request)}",
         settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -194,14 +207,12 @@ async def verify_email_link(
     `request_email_link`), is rejected - see `AuthenticationRequest.invalidated_at`.
     """
     await enforce_rate_limit(
-        f"auth:email-verify:ip:{_client_ip(request)}",
+        f"auth:email-verify:ip:{client_ip(request)}",
         settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
 
-    auth_request = await crud_authentication_requests.get(
-        db=db, token_hash=hash_token(body.token), purpose="sign_in"
-    )
+    auth_request = await crud_authentication_requests.get(db=db, token_hash=hash_token(body.token), purpose="sign_in")
     if auth_request is None:
         raise UnauthorizedException("This sign-in link is invalid.")
 
@@ -235,7 +246,7 @@ async def auth_with_google(
     onboarding session (new account).
     """
     await enforce_rate_limit(
-        f"auth:google:ip:{_client_ip(request)}",
+        f"auth:google:ip:{client_ip(request)}",
         settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -265,7 +276,17 @@ async def complete_profile(
     """Creates the `User` row (and its `AuthenticationProvider` link) for a verified
     identity that had no account yet, then signs the new user in. This is the *only*
     place a `User` row is ever created.
+
+    Rate limited per-IP because the username check below is an availability oracle:
+    someone holding a single onboarding token could otherwise walk a wordlist through
+    it and learn which usernames are taken.
     """
+    await enforce_rate_limit(
+        f"auth:complete:ip:{client_ip(request)}",
+        settings.AUTH_COMPLETE_RATE_LIMIT_PER_IP,
+        settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
+    )
+
     token_data = await verify_onboarding_token(body.onboarding_token, db)
     if token_data is None:
         raise UnauthorizedException("This onboarding session is invalid or has expired.")
@@ -305,16 +326,31 @@ async def complete_profile(
     # never create (or attempt to create) a second account.
     await blacklist_token(body.onboarding_token, db)
 
-    tokens = await issue_tokens(response, body.username)
+    tokens = await issue_tokens(response, created_user.uuid)
     return AuthOutcome(status="authenticated", **tokens)
 
 
 @router.post("/refresh")
-async def refresh_access_token(request: Request, db: AsyncSession = Depends(async_get_db)) -> dict[str, str]:
+async def refresh_access_token(
+    request: Request, response: Response, db: AsyncSession = Depends(async_get_db)
+) -> dict[str, str]:
     """Exchanges the httpOnly `refresh_token` cookie (set by `issue_tokens`) for a new
-    access token. See `DECISIONS.md` for why this is the one cookie-authenticated
-    endpoint in this flow and why that's still CSRF-safe.
+    access token *and a new refresh token*. See `DECISIONS.md` for why this is the one
+    cookie-authenticated endpoint in this flow and why that's still CSRF-safe.
+
+    The presented refresh token is blacklisted and replaced rather than reused. Without
+    rotation a single leaked cookie stays valid for the whole
+    `REFRESH_TOKEN_EXPIRE_DAYS` window with nothing to revoke it and no way to notice;
+    with rotation, the theft has a much shorter useful life and a second use of the same
+    token fails outright. The trade-off is that two tabs refreshing at the exact same
+    moment will race, and the loser gets a 401 - see `DECISIONS.md`.
     """
+    await enforce_rate_limit(
+        f"auth:refresh:ip:{client_ip(request)}",
+        settings.AUTH_REFRESH_RATE_LIMIT_PER_IP,
+        settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
+    )
+
     refresh_token = request.cookies.get("refresh_token")
     if not refresh_token:
         raise UnauthorizedException("Refresh token missing.")
@@ -323,8 +359,11 @@ async def refresh_access_token(request: Request, db: AsyncSession = Depends(asyn
     if not user_data:
         raise UnauthorizedException("Invalid refresh token.")
 
-    new_access_token = await create_access_token(data={"sub": user_data.username_or_email})
-    return {"access_token": new_access_token, "token_type": "bearer"}
+    # Spend the presented token before minting its replacement, so a crash between the
+    # two leaves the caller signed out rather than holding two live refresh tokens.
+    await blacklist_token(refresh_token, db)
+
+    return await issue_tokens(response, user_data.user_uuid)
 
 
 @router.post("/logout")
@@ -334,6 +373,12 @@ async def logout(
     refresh_token: str | None = Cookie(None, alias="refresh_token"),
     db: AsyncSession = Depends(async_get_db),
 ) -> dict[str, str]:
+    """End the caller's session.
+
+    Blacklists both the access and refresh tokens and clears the refresh cookie, so the
+    pair stops working immediately rather than remaining valid until expiry. 401 when no
+    refresh cookie is present or either token fails to decode.
+    """
     try:
         if not refresh_token:
             raise UnauthorizedException("Refresh token not found")

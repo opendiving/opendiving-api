@@ -2,9 +2,9 @@
 
 Run once per extractor version, from the API container:
 
-    docker compose exec web python -m src.scripts.backfill_dive_profiles
-    docker compose exec web python -m src.scripts.backfill_dive_profiles --parser-key suunto_xml
-    docker compose exec web python -m src.scripts.backfill_dive_profiles --dry-run
+    docker compose exec api python -m src.scripts.backfill_dive_profiles
+    docker compose exec api python -m src.scripts.backfill_dive_profiles --parser-key suunto_xml
+    docker compose exec api python -m src.scripts.backfill_dive_profiles --dry-run
 
 A script rather than an arq job, deliberately. DECISIONS.md's "The Arq worker now does
 one real thing" records that the API-side queue plumbing was removed and the worker runs
