@@ -2512,10 +2512,11 @@ Two mypy invocations, not one: the app is reachable as both `app.*` (via `mypy_p
 `src.app.*` (how the tests import it), and `mypy src tests` refuses with "source file found
 twice under different module names".
 
-## The runtime image now contains the app, and ships gunicorn — with one caveat
 
-Two things were wrong with the image and only showed up once it was actually run rather
-than merely built.
+## The runtime image now contains the app, and ships gunicorn
+
+Two things were wrong with the image and neither showed up until it was actually run
+rather than merely built.
 
 **The final stage contained no application code.** It copied `/app/.venv` and nothing else,
 leaving `WORKDIR /code` empty, so `app.main:app` was unimportable. The container only ever
@@ -2529,19 +2530,57 @@ so it is a convenience rather than a requirement.
 restarts on any write. `docker-compose.yml` still overrides `command:` with the uvicorn
 `--reload` form, so local development is unchanged.
 
-**The caveat: the admin panel is not multi-worker safe.** With `-w 4`, every worker runs the
-FastAPI lifespan, so every worker calls `admin.initialize()` against the same SQLite file
-under `crudadmin_data/`. They race, and the losers die - observed as both
-`table admin_user already exists` and
-`UNIQUE constraint failed: admin_user.username`, depending on who gets there first. The
-whole container then fails to boot, because gunicorn gives up after enough workers fail.
+## Two things raced once the image ran four workers
 
-Verified: admin on + `-w 1` boots healthy; admin on + `-w 4` does not.
+Switching the image to `gunicorn -w 4` turned a class of latent bug into a crash loop: the
+FastAPI lifespan runs once *per worker*, and it was doing two things that are deployment
+steps, not per-process steps. Both are fixed; recording them because the shape recurs.
 
-`CRUD_ADMIN_REDIS_ENABLED` does **not** fix this - it moves *sessions* to Redis, while the
-admin-user table stays in SQLite, which is what the race is over. So an operator who wants
-the panel in production must run it on a single worker, ideally as a separate one-worker
-instance alongside the multi-worker API. This is survivable mostly because the panel now
-defaults to off (see above); if it ever needs to run alongside a multi-worker API, the fix
-is to move admin initialization out of the per-worker lifespan and into a one-shot startup
-step.
+**Admin panel setup.** `admin.initialize()` (create the panel's tables, seed the initial
+admin) ran in a custom lifespan in `main.py`. Four workers raced it, and the losers died
+with `table admin_user already exists` or
+`UNIQUE constraint failed: admin_user.username`, taking the container with them. It is now
+a one-shot, `src/scripts/initialize_admin.py`, wired into `docker-compose.yml` as the
+`admin_init` service that `web` waits on via `service_completed_successfully` - so local
+development still needs no manual step. Constructing `CRUDAdmin` still registers all its
+routes (`__init__` calls the synchronous `setup()`), so every worker can mount the panel
+without any of them touching the database.
+
+**`Base.metadata.create_all()`.** The same per-worker problem, and not admin-specific at
+all: on a *cold* database four workers call `create_all` at once, and `checkfirst=True` does
+not save you - it inspects the catalog and then issues `CREATE TABLE`, so two workers can
+both look, both see nothing, and both try. The loser dies with
+`duplicate key value violates unique constraint "pg_type_typname_nsp_index"`. It is now
+serialized behind a transaction-scoped Postgres advisory lock in `core/setup.create_tables`,
+which makes the check-and-create pair atomic across processes. Deliberately kept in the
+lifespan rather than moved to a one-shot, so the `docker compose restart web` workflow at the
+top of this file still picks up brand-new tables. Only ever contended on a cold database.
+
+Note this was invisible on a warm database - the earlier multi-worker test passed simply
+because the tables already existed. It only reproduced against a freshly created one.
+
+## Running the admin panel on more than one worker
+
+Two pieces of the panel's state are per-process. Verified with 4 workers against Postgres:
+
+- **Its tables** (`admin_user`, `admin_session`, ...). `CRUD_ADMIN_DB_URL` unset means a
+  SQLite file inside one container's filesystem, which is both raced by sibling workers and
+  invisible to any other container - including the `admin_init` one-shot, which would then
+  helpfully initialize a database nobody reads. Point it at the app's Postgres. **Required**
+  for multi-worker.
+- **Its sessions.** These need a store shared by all workers. `CRUD_ADMIN_TRACK_SESSIONS`
+  defaults to `true` and persists them to the `admin_session` table, which already satisfies
+  this - so there is nothing to configure, only something not to switch off.
+  `CRUD_ADMIN_REDIS_ENABLED=true` is an equivalent alternative, worth it to keep session
+  lookups off Postgres, but it is **not** required.
+
+Measured, 12 authenticated requests each: Redis sessions 12/12, DB-tracked sessions 12/12,
+both disabled **1/12** - the single request that happened to land on the worker holding the
+in-memory session, the rest bounced to `/admin/login?error=Session+expired`.
+
+Two traps when testing this by hand, both of which produced false passes first time round:
+`GET /admin` returns a redirect to `/admin/` whether or not you are signed in, so an HTTP
+client that follows redirects reports the login page's `200` and looks like success - probe
+`/admin/` and don't follow redirects. And `SESSION_SECURE_COOKIES` defaults to `true`, so
+over plain HTTP a well-behaved client stores the session cookie and then never sends it,
+making every configuration look broken.

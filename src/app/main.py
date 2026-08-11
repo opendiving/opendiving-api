@@ -1,8 +1,3 @@
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
-
-from fastapi import FastAPI
-
 from .admin.initialize import create_admin_interface
 from .api import router
 from .core.config import settings
@@ -10,24 +5,17 @@ from .core.setup import create_application, lifespan_factory
 
 admin = create_admin_interface()
 
-
-@asynccontextmanager
-async def lifespan_with_admin(app: FastAPI) -> AsyncGenerator[None]:
-    """Custom lifespan that includes admin initialization."""
-    # Get the default lifespan
-    default_lifespan = lifespan_factory(settings)
-
-    # Run the default lifespan initialization and our admin initialization
-    async with default_lifespan(app):
-        # Initialize admin interface if it exists
-        if admin:
-            # Initialize admin database and setup
-            await admin.initialize()
-
-        yield
-
-
-app = create_application(router=router, settings=settings, lifespan=lifespan_with_admin)
+# The admin panel's *schema* setup (`admin.initialize()`) deliberately does not happen
+# here. It used to run inside a custom lifespan, which meant every gunicorn worker did it:
+# with `-w 4` the four workers raced to create the admin tables and to insert the initial
+# admin row, and whichever ones lost died with `table admin_user already exists` or
+# `UNIQUE constraint failed: admin_user.username` - taking the whole container down.
+#
+# It is a one-shot schema-and-seed step, not per-process state, so it lives in
+# `scripts.initialize_admin` and runs once before the API starts (see the `admin_init`
+# service in `docker-compose.yml`). Constructing the interface above still registers all
+# its routes, so mounting works in every worker without any of them touching the DB.
+app = create_application(router=router, settings=settings, lifespan=lifespan_factory(settings))
 
 # Mount admin interface if enabled
 if admin:

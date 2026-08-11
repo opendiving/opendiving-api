@@ -12,6 +12,12 @@ def create_admin_interface() -> CRUDAdmin | None:
     unless `CRUD_ADMIN_ENABLED` is explicitly on. Production additionally requires a
     real `ADMIN_PASSWORD`, enforced at startup by `Settings._reject_insecure_admin_config`
     rather than here, so the failure is loud instead of a silently absent panel.
+
+    Constructing the interface builds its routes but touches no database:
+    `CRUDAdmin.__init__` calls `setup()`, which is synchronous route registration, while
+    all the schema-creating and admin-user-seeding work lives in the separate,
+    `await`-able `initialize()`. That split is the whole reason the panel can now run
+    multi-worker - see `scripts.initialize_admin`.
     """
     if not settings.CRUD_ADMIN_ENABLED:
         return None
@@ -33,6 +39,9 @@ def create_admin_interface() -> CRUDAdmin | None:
         session=async_get_db,
         SECRET_KEY=settings.SECRET_KEY.get_secret_value(),
         mount_path=settings.CRUD_ADMIN_MOUNT_PATH,
+        # `None` falls back to CRUDAdmin's per-container SQLite file - see
+        # `CRUD_ADMIN_DB_URL` in `core.config` for why that only works single-process.
+        admin_db_url=settings.CRUD_ADMIN_DB_URL,
         session_backend=session_backend,
         redis_config=redis_config,
         allowed_ips=settings.CRUD_ADMIN_ALLOWED_IPS_LIST if settings.CRUD_ADMIN_ALLOWED_IPS_LIST else None,

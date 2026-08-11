@@ -14,12 +14,15 @@ services:
     # expose:
     #   - "8000"
     # Wait for the datastores to answer, not merely to have been started - otherwise the
-    # app's `create_all()` on startup races an initializing Postgres.
+    # app's `create_all()` on startup races an initializing Postgres. `admin_init` is a
+    # one-shot that must finish before any worker serves `/admin`.
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+      admin_init:
+        condition: service_completed_successfully
     volumes:
       - ./src/app:/code/app
       - ./src/.env:/code/.env
@@ -28,6 +31,26 @@ services:
       # `/code/app` and is unaffected. This is what makes
       # `docker compose exec web python -m src.scripts.backfill_dive_profiles` work.
       - ./src:/code/src
+
+  # One-shot: creates the admin panel's own tables and seeds its initial admin, then
+  # exits. Runs to completion before `web` starts, so the four gunicorn workers in the
+  # production image never race each other doing it (see src/scripts/initialize_admin.py).
+  # Exits 0 immediately when CRUD_ADMIN_ENABLED is false, so it costs nothing when the
+  # panel is off.
+  admin_init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m src.scripts.initialize_admin
+    restart: "no"
+    env_file:
+      - ./src/.env
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./src:/code/src
+      - ./src/.env:/code/.env
 
   worker:
     build:

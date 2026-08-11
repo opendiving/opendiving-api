@@ -198,6 +198,16 @@ class CRUDAdminSettings(BaseSettings):
     CRUD_ADMIN_ENABLED: bool = config("CRUD_ADMIN_ENABLED", default=False)
     CRUD_ADMIN_MOUNT_PATH: str = config("CRUD_ADMIN_MOUNT_PATH", default="/admin")
 
+    # Where the panel keeps its *own* tables (admin users, sessions, event log) - not the
+    # application's data, which it reads through the normal `async_get_db`.
+    #
+    # Unset means CRUDAdmin's default: a SQLite file under `crudadmin_data/`, local to
+    # whichever container's filesystem happens to create it. That is fine for one process
+    # and wrong for anything else - two workers race to create the tables and to insert
+    # the initial admin, and a one-shot init container would write a file the API
+    # container can never see. Point this at Postgres and all of that goes away.
+    CRUD_ADMIN_DB_URL: str | None = config("CRUD_ADMIN_DB_URL", default=None)
+
     CRUD_ADMIN_ALLOWED_IPS_LIST: list[str] | None = None
     CRUD_ADMIN_ALLOWED_NETWORKS_LIST: list[str] | None = None
     CRUD_ADMIN_MAX_SESSIONS: int = config("CRUD_ADMIN_MAX_SESSIONS", default=10)

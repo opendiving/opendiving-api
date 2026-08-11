@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
+from sqlalchemy import text
 
 from ..api.dependencies import get_current_superuser
 from ..middleware.client_cache_middleware import ClientCacheMiddleware
@@ -27,10 +28,32 @@ from .db.database import Base
 from .db.database import async_engine as engine
 from .utils import cache
 
-
 # -------------- database --------------
+# Arbitrary constant; the only thing that matters is that every process runs `create_tables`
+# picks the same one. Namespaced mentally as "opendiving schema bootstrap".
+_SCHEMA_BOOTSTRAP_LOCK_KEY = 8231907441002137
+
+
 async def create_tables() -> None:
+    """Create any brand-new tables. Never alters existing ones - see `DECISIONS.md`.
+
+    Serialized behind a Postgres advisory lock because this runs in the lifespan, and the
+    lifespan runs once *per worker*: under `gunicorn -w 4` against a database that doesn't
+    have the tables yet, four workers call `create_all` simultaneously. `checkfirst=True`
+    doesn't save you - it inspects the catalog and then issues `CREATE TABLE`, so two
+    workers can both look, both see nothing, and both try. The loser dies with
+    `duplicate key value violates unique constraint "pg_type_typname_nsp_index"` and
+    gunicorn eventually gives up on the whole container.
+
+    The lock is transaction-scoped, so it releases when this block commits, and it makes
+    the check-then-create pair atomic across processes: whoever gets in second re-inspects
+    inside the lock, finds the tables, and does nothing. Only ever contended on a cold
+    database - on every subsequent boot `create_all` is a no-op and the lock is
+    uncontended.
+    """
     async with engine.begin() as conn:
+        if conn.dialect.name == "postgresql":
+            await conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _SCHEMA_BOOTSTRAP_LOCK_KEY})
         await conn.run_sync(Base.metadata.create_all)
 
 

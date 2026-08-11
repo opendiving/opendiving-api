@@ -76,8 +76,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 # while developing and never what you want in production - `docker-compose.yml`
 # overrides `command:` with the uvicorn/--reload form for local work.
 #
-# NOTE: incompatible with CRUD_ADMIN_ENABLED=true. Every worker runs the lifespan, so every
-# worker calls `admin.initialize()` against the same SQLite file and they race; the
-# container then fails to boot. The panel defaults to off, so this only bites if you turn
-# it on - in which case run it as a separate single-worker instance. See DECISIONS.md.
+# Running the admin panel alongside this needs CRUD_ADMIN_DB_URL pointed at a shared
+# database - see src/.env.example. Its schema setup is a one-shot (`admin_init` in
+# docker-compose.yml), not something each worker does on boot.
 CMD ["gunicorn", "app.main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000"]
