@@ -2782,3 +2782,33 @@ a silent no-op, the worst shape for a bug to have.
 leaves the trip alone. Both were checked by deleting the branch and confirming the first
 fails. It needs no database - `patch_dive`'s collaborators are stubbed and the assertions
 are on the `update_data` handed to `crud_dives.update`.
+
+## Test users get uuid-derived names, because nothing cleans them up
+
+`create_user` writes a real row to whatever database `POSTGRES_SERVER` points at - in
+practice the developer's own - and nothing deletes it afterwards. The
+`docker-compose.test.yml` overlay does the same. So the `user` table accumulates: one
+machine had 919 rows from previous runs.
+
+`fake.user_name()`/`fake.email()` draw from a small vocabulary, and both columns are
+`unique=True`. Past a few hundred rows the birthday problem catches up and runs start
+failing with an `IntegrityError` **in fixture setup** - intermittently, at roughly two
+runs in five, and reading like a broken test rather than a broken fixture.
+`fake.unique` does not help: it de-duplicates within one process, not against rows
+already in the table.
+
+`unique_username()`/`unique_email()` in `conftest.py` derive from uuid7 instead, so they
+are unique across runs and machines rather than merely unlikely to repeat. They are also
+shaped to satisfy the app's own rule for a username (`^[a-z0-9]+$`, 2-20 characters) -
+the ORM does not enforce it, but a fixture writing values the API would reject is a trap
+for whoever next asserts on one.
+
+The address is `@example.com`, not something under `.test`. Both are reserved by RFC 2606
+and neither reaches a real inbox, but `email-validator` - which backs Pydantic's
+`EmailStr` - rejects `.test` as a special-use name, so any test round-tripping such an
+address through a schema fails validation. That cost one test
+(`test_rejects_unchanged_email`) before it was spotted.
+
+This stops the bleeding; it does not tidy up. Rows already in the table stay until
+someone runs `docker compose down -v`. The real fix is fixtures that roll back what they
+write, which is a larger change than this was.
