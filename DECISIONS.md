@@ -278,6 +278,49 @@ filters, enrichment with related trip/dive-site uuids, mixtures) - it doesn't fi
 per-user owned resources should use `OwnedResourceCache` rather than
 hand-copying this pattern again.
 
+## `GET /dive-sites` searches server-side, because the picker used to fetch the whole table
+
+The dive form's site picker (`DiveSiteMultiSelect`) filtered client-side, so it
+paged through *every* dive site the user owns - `items_per_page=100` in a loop
+until `has_more` was false - before the dropdown was usable. A diver with a few
+hundred logged sites paid several sequential round-trips on every form open.
+
+`GET /dive-sites` now takes `search=`: a case-insensitive substring match on
+`name` **or** `location`, with `items_per_page` capped at
+`MAX_DIVE_SITES_PER_PAGE` (100) so no single request can pull the table anyway.
+Location is searched alongside the name because that's how people recall sites
+they haven't dived in a while ("that wall in Dahab"), and it's already shown as
+the dropdown's secondary text.
+
+Three things about the implementation are non-obvious:
+
+- **The search query is hand-written, not `get_multi` filter kwargs.** FastCRUD's
+  `__`-suffix filters (`name__ilike=...`) are AND'd together, and its `__or`
+  operator groups *operators on one column*, not columns. Matching either column
+  needs a real cross-column `OR`, so `OwnedResourceCache._search_multi` builds the
+  `select()` itself and returns `get_multi`'s `{"data": [...], "total_count": n}`
+  shape. It selects `model.__table__.columns` rather than the entity, so rows come
+  back as plain dicts exactly like the unsearched path - `_to_public` sees one
+  shape either way.
+- **The term is escaped for `LIKE`.** `escape_like()` backslash-escapes `\`, `%`
+  and `_` (in that order - escaping the wildcards first would produce new live
+  ones), paired with `.ilike(pattern, escape="\\")`. Without it a site named
+  "50%" is unsearchable and a bare `%` matches everything.
+- **`search` is part of the list cache key**, appended as `:search:{search}` after
+  the existing `user_{id}_dive_sites:page_{n}:items_per_page:{n}` prefix - so it
+  still falls under the `user_{id}_dive_sites:*` wildcard `invalidate_list` purges,
+  and no invalidation logic changed. The route lowercases/strips the term before
+  passing it down so `" Blue "` and `"blue"` share one entry. Resources that pass
+  no `search_columns` (trips, today) keep the original key shape: `read_list` is
+  called without a `search` kwarg for those, and `@cache` would `KeyError` on a
+  placeholder it can't fill.
+
+The search is a plain filtered scan - `ix_dive_site_user_id_name` can't serve a
+leading-wildcard `ILIKE`. That's fine at the scale this table has per user
+(hundreds, not millions, and always narrowed by `user_id` first). If it ever
+isn't, the fix is a `pg_trgm` GIN index on `(name, location)`, not a different
+query shape.
+
 ## `/{username}/...` resource routes were flattened to `/...` + explicit ids
 
 `dives.py`/`dive_sites.py`/`trips.py`/`dive_stats.py` used to nest every route

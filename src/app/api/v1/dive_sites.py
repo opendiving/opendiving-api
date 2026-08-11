@@ -1,7 +1,7 @@
 import uuid as uuid_pkg
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastcrud import PaginatedListResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,7 +45,16 @@ _dive_site_cache: OwnedResourceCache[DiveSiteReadInternal, DiveSiteRead] = Owned
     to_public=lambda db_dive_site, user_uuid: _to_public_dive_site(db_dive_site, user_uuid=user_uuid),
     sort_columns="name",
     sort_orders="asc",
+    # A diver with hundreds of logged sites can't usefully scroll them, so the dive form's
+    # picker narrows the list server-side as you type. Location is searched alongside the
+    # name because that's how people remember sites they haven't dived in a while ("that
+    # wall in Dahab") - see DECISIONS.md.
+    search_columns=("name", "location"),
 )
+
+# `GET /dive-sites` is a picker feed as much as a list view, so the page size is a client
+# choice - but an unbounded one lets a single request pull the whole table.
+MAX_DIVE_SITES_PER_PAGE = 100
 
 
 @router.post("/dive-site", response_model=DiveSiteRead, status_code=201)
@@ -85,12 +94,24 @@ async def read_dive_sites(
     db: Annotated[AsyncSession, Depends(async_get_db)],
     page: int = 1,
     items_per_page: int = 10,
+    search: Annotated[
+        str | None,
+        Query(max_length=255, description="Case-insensitive substring match on name or location"),
+    ] = None,
 ) -> dict:
     if current_user["uuid"] != user_uuid:
         raise ForbiddenException()
 
     return await _dive_site_cache.read_list(
-        request, user_id=current_user["id"], user_uuid=user_uuid, db=db, page=page, items_per_page=items_per_page
+        request,
+        user_id=current_user["id"],
+        user_uuid=user_uuid,
+        db=db,
+        page=max(page, 1),
+        items_per_page=min(max(items_per_page, 1), MAX_DIVE_SITES_PER_PAGE),
+        # Normalized here rather than in the cache layer so that " Blue " and "blue" share
+        # one cache entry instead of two identical ones under different keys.
+        search=(search or "").strip().lower() or None,
     )
 
 
