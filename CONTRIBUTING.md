@@ -152,9 +152,13 @@ docker compose exec api python -m src.scripts.backfill_dive_profiles --parser-ke
 ## Pull requests
 
 - Branch off `main`, keep the PR focused on one thing.
-- Write a subject line that says what changed (`feat: Store the dive-computer export a
-  dive was imported from`). The history mixes `feat:`-prefixed and plain subjects; either
-  is fine.
+- Title the PR as a conventional commit — `<type>[(scope)][!]: <description>`, e.g.
+  `feat: store the dive-computer export a dive was imported from`. Types: `feat`, `fix`,
+  `refactor`, `docs`, `test`, `chore`, `perf`, `ci`, `build`, `revert`. A CI check enforces
+  this, and re-runs when you edit the title, so a rejected PR needs no new commit. PRs are
+  squash-merged, so the title becomes the commit subject on `main` — commits within your
+  branch can say whatever is useful while working. (Older history mixes prefixed and plain
+  subjects; new PRs need the prefix.)
 - Say in the description what you changed, why, and anything a reviewer has to do by hand
   (schema SQL, new env vars, a backfill script).
 - If the change affects the API contract, mention whether the web or iOS client needs a
