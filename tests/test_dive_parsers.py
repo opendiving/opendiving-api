@@ -150,10 +150,17 @@ class TestSuuntoXmlParserParse:
         parsed = SuuntoXmlParser.parse(VALID_SUUNTO_XML.encode())
 
         assert parsed.avg_depth == 12.3
-        assert parsed.dive_number == 5
         assert parsed.duration == 1800
         assert parsed.max_depth == 25.5
         assert parsed.start_time == "2024-05-01T09:00:00"
+
+    def test_ignores_the_computers_own_dive_counter(self):
+        """`DiveNumberInSerie` is the device's counter, which restarts on a new or
+        factory-reset computer - importing it would stamp a #5 onto a diver's 300th dive.
+        The number comes from the dive's date instead (`services/dive_numbering.py`)."""
+        assert "<DiveNumberInSerie>5</DiveNumberInSerie>" in VALID_SUUNTO_XML
+
+        assert SuuntoXmlParser.parse(VALID_SUUNTO_XML.encode()).dive_number is None
 
     def test_parses_mixtures(self):
         parsed = SuuntoXmlParser.parse(VALID_SUUNTO_XML.encode())

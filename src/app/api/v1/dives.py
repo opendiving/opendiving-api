@@ -35,10 +35,15 @@ from ...schemas.dive import (
     DiveCreateInternal,
     DiveCreateRequest,
     DiveFileInfo,
+    DiveNumberingSummary,
+    DiveNumberSuggestion,
     DiveRead,
     DiveReadInternal,
     DiveReadWithMixtures,
+    DiveRenumberRequest,
+    DiveRenumberResult,
     DiveSiteInfo,
+    DiveStartTime,
     DiveUpdateRequest,
 )
 from ...schemas.dive_mixture import DiveMixtureRead
@@ -59,6 +64,7 @@ from ...services.dive_files import (
     store_dive_file,
 )
 from ...services.dive_gas import compute_gas_use
+from ...services.dive_numbering import renumber_dives, suggest_dive_number, summarize_numbering
 from ...services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file_with_parser
 from ...services.dive_profiles import (
     get_profile_infos_for_dives,
@@ -433,6 +439,85 @@ async def read_dives(
         dive_site_id=dive_site_id,
         gear_item_id=gear_item_id,
     )
+
+
+# -------------- numbering --------------
+# All three of these are about the caller's own log as a whole, so - unlike `GET /dives`
+# and every other route here - they take no `user_uuid`, matching `/user/dive-stats` and
+# `/user/gas-use-history`. `services/dive_numbering.py` carries the reasoning for what
+# they do and, more to the point, for what they deliberately don't.
+
+
+@router.get("/dives/next-number", response_model=DiveNumberSuggestion)
+async def read_next_dive_number(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    start_time: Annotated[
+        DiveStartTime,
+        Query(description="The start time of the dive being logged, with its UTC offset"),
+    ],
+) -> DiveNumberSuggestion:
+    """The dive number to prefill for a dive starting at `start_time`.
+
+    A suggestion, not a reservation - nothing is held, and the client is free to ignore
+    it. Not `@cache`d: it varies by `start_time`, so the keys would fan out per form
+    keystroke to save two narrow indexed queries.
+    """
+    return await suggest_dive_number(db=db, user_id=current_user["id"], start_time=start_time)
+
+
+# Keyed under the `user_{id}_dives:` prefix for the same reason as
+# `_cached_gas_use_history` in `users.py`: `invalidate_dive_caches()` already sweeps
+# `user_{id}_dives:*` after every dive create, update and delete, so this summary drops
+# with them rather than being a third pattern to remember there. The renumber endpoint
+# below calls that same helper, which is what keeps this from surviving its own fix.
+@cache(key_prefix="user_{user_id}_dives:numbering", resource_id_name="user_id", expiration=60)
+async def _cached_numbering_summary(request: Request, user_id: int, db: AsyncSession) -> DiveNumberingSummary:
+    return await summarize_numbering(db=db, user_id=user_id)
+
+
+@router.get("/dives/numbering", response_model=DiveNumberingSummary)
+async def read_dive_numbering(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> DiveNumberingSummary:
+    """The state of the caller's dive numbering: its range, its gaps, its duplicates, and
+    whether it runs in date order.
+
+    Purely descriptive. Gaps in particular are as often deliberate (a log that continues
+    a paper logbook) as accidental, so this reports and the diver decides.
+    """
+    return await _cached_numbering_summary(request, user_id=current_user["id"], db=db)
+
+
+@router.post("/dives/renumber", response_model=DiveRenumberResult)
+async def renumber_user_dives(
+    request: Request,
+    values: DiveRenumberRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> DiveRenumberResult:
+    """Renumber the caller's dives consecutively, in chronological order.
+
+    The one place in the app that rewrites numbers a diver entered, and it only ever runs
+    when asked. Send `dry_run: true` first for the exact change list without writing.
+    """
+    result = await renumber_dives(
+        db=db,
+        user_id=current_user["id"],
+        start_at=values.start_at,
+        from_start_time=values.from_start_time,
+        dry_run=values.dry_run,
+    )
+
+    if not result.dry_run and result.changes:
+        # Only the dive caches. Unlike every other dive write, this one can't have moved
+        # `recalculate_dive_stats`'s figures (count, max depth, total time) or any gear
+        # item's `dive_count` - it changed a label on dives that already existed.
+        await invalidate_dive_caches(current_user["id"])
+
+    return result
 
 
 # Keyed `user_{user_id}_dive:{uuid}` rather than the flat `dive_cache:{uuid}` it used

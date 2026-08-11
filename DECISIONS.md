@@ -2322,3 +2322,66 @@ the whole submission is written to the log, so a local instance can still see wh
 have gone out. The endpoint still reports success in that case: it reports that the
 message was *accepted*, and it deliberately never tells an anonymous caller anything about
 the recipient inbox or downstream delivery.
+
+## `dive_number` is a label, not an identity or an ordering key
+
+Nothing in this codebase reads `dive_number` except to print it. Chronology is owned by
+`start_time` everywhere - `_cached_read_dives` sorts by it, `gas_use_history` sorts by
+it, and `ix_dive_user_id_start_time` exists to serve exactly that. Keep it that way: the
+moment something joins, sorts or paginates on `dive_number`, everything below becomes
+unsafe.
+
+It has to stay a free-form label because the two things a diver wants from it are in
+direct conflict:
+
+- **Gaps are real data.** A diver whose first 46 dives are in a paper logbook starts this
+  log at #47, and #100-149 may stay on paper forever. Normalizing that to 1..N destroys
+  information nothing else records.
+- **A fully backfilled log should read 1..N**, with nothing missing.
+
+Both are served by never renumbering automatically, and offering an explicit renumber
+instead. `services/dive_numbering.py` is the whole of it:
+
+- `suggest_dive_number` proposes (`GET /dives/next-number`), and the form can overwrite it.
+- `summarize_numbering` reports (`GET /dives/numbering`), and the diver can ignore it.
+- `renumber_dives` rewrites, and only ever when asked (`POST /dives/renumber`).
+
+Three consequences worth knowing before changing any of it:
+
+- **There is deliberately no unique constraint on `(user_id, dive_number)`.** Duplicates
+  are a normal transient state while back-filling, and a renumber shifting a run of
+  numbers down by one collides with itself halfway through. Enforcing uniqueness would
+  need a deferrable constraint and would buy nothing the numbering summary doesn't already
+  say out loud. Duplicates are *reported*, not blocked.
+- **The suggestion is positional, not `MAX(dive_number) + 1`.** It takes the number of the
+  dive that chronologically precedes the one being logged and adds 1. For the ordinary
+  case - logging the dive you just did - the two agree. They diverge exactly where the
+  naive rule is wrong: back-filling a 2019 dive into a log that reaches #212 should
+  suggest #12. (This replaced a frontend `lastDive.dive_number + 1`, which suggested #213.)
+  It is returned even when it collides, because back-filling a run of old dives collides
+  by construction.
+- **`renumber_dives` writes one `UPDATE ... FROM` over a CTE**, not a write per dive. A
+  partial run would leave numbering in a state neither the diver nor `summarize_numbering`
+  could make sense of, and a row-by-row pass would hit collisions mid-shift. `dry_run`
+  computes the same change list through the same code, so the confirmation dialog and the
+  write it confirms can't disagree. Both order by `(start_time, id)` - the `id` tie-break
+  matters, since two dives can share a start time and Postgres is otherwise free to return
+  them in either order.
+
+The renumber endpoint invalidates only the dive caches. Unlike every other dive write it
+can't have moved `recalculate_dive_stats`'s figures or any gear item's `dive_count` - it
+changed a label on dives that already existed.
+
+## A dive computer's own counter is not the diver's dive number
+
+`SuuntoXmlParser` used to import `DiveNumberInSerie` as `dive_number`, while
+`SuuntoJsonParser` left it null. The XML behaviour was the wrong one: that field is the
+*device's* counter, which starts at 1 on a new or factory-reset computer and restarts
+again on the next one, so importing it stamps a #5 onto someone's 300th dive. Both parsers
+now leave it null and the number comes from `GET /dives/next-number`, derived from the
+dive's own date.
+
+`dive_number` stays on `ParsedDiveSchema` rather than being trimmed away under the
+"fields the backend models actually support" rule above: it has a direct `Dive` column,
+and a format that carries a real lifetime dive number (Subsurface's XML does) can populate
+it. It is simply always null for the two Suunto parsers.

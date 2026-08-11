@@ -185,6 +185,105 @@ class DiveReadWithMixtures(DiveRead):
     ]
 
 
+class DiveNumberSuggestion(BaseModel):
+    """What to prefill the dive number with when logging a dive at a given start time.
+
+    Derived from the dive's *date*, not from the newest dive in the log, so back-filling
+    an old dive suggests a number that belongs where that dive belongs - see
+    `services/dive_numbering.py`.
+    """
+
+    dive_number: Annotated[int, Field(examples=[213], description="Suggested number for a dive at this start time")]
+    is_taken: Annotated[
+        bool,
+        Field(
+            description="Whether an existing dive already carries this number. Advisory only - the suggestion "
+            "stands either way, and duplicates are a legitimate transient state while back-filling a log."
+        ),
+    ]
+
+
+class DiveNumberingSummary(BaseModel):
+    """The state of a user's dive numbering, for the log's numbering indicator.
+
+    Reported rather than enforced: gaps mean 'part of my log lives elsewhere' as often
+    as they mean 'my numbering is a mess', and only the diver knows which. See
+    `services/dive_numbering.py`.
+    """
+
+    total_dives: int
+    lowest: Annotated[int | None, Field(default=None, description="Lowest number in use, or null with no dives")]
+    highest: Annotated[int | None, Field(default=None, description="Highest number in use, or null with no dives")]
+    missing_count: Annotated[
+        int, Field(description="How many numbers between `lowest` and `highest` no dive uses", examples=[34])
+    ]
+    duplicate_count: Annotated[
+        int, Field(description="How many dives carry a number another dive also carries", examples=[2])
+    ]
+    out_of_date_order_count: Annotated[
+        int,
+        Field(description="How many dives are numbered lower than the dive that chronologically precedes them"),
+    ]
+    is_sequential: Annotated[
+        bool,
+        Field(
+            description="Whether the numbers form one unbroken run with no duplicates. Note this doesn't require "
+            "starting at 1: a log that begins at #47 because the first 46 dives are on paper is still sequential."
+        ),
+    ]
+
+
+class DiveRenumberRequest(BaseModel):
+    """Request body for renumbering a log.
+
+    Always explicit - nothing in the app renumbers on its own, because a gap can be
+    deliberate (see `DiveNumberingSummary`).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    start_at: Annotated[
+        int,
+        Field(default=1, ge=1, description="Number to give the earliest dive in scope", examples=[1]),
+    ]
+    from_start_time: Annotated[
+        DiveStartTime | None,
+        Field(
+            default=None,
+            examples=[_START_TIME_EXAMPLE],
+            description="Renumber only dives at or after this instant, leaving earlier ones untouched - so a log "
+            "whose older entries mirror a paper logbook can have just its recent tail tidied. Null renumbers "
+            "every dive.",
+        ),
+    ]
+    dry_run: Annotated[
+        bool,
+        Field(default=False, description="Compute the changes and return them without writing anything"),
+    ]
+
+
+class DiveRenumberChange(BaseModel):
+    """One dive whose number a renumber would change (or did change)."""
+
+    dive_uuid: uuid_pkg.UUID
+    start_time: Annotated[DiveStartTime, Field(examples=[_START_TIME_EXAMPLE])]
+    dive_number: Annotated[int, Field(description="The number before the renumber", examples=[212])]
+    new_dive_number: Annotated[int, Field(description="The number after it", examples=[198])]
+
+
+class DiveRenumberResult(BaseModel):
+    dry_run: bool
+    dives_in_scope: Annotated[int, Field(description="How many dives the requested scope covers")]
+    # The full list, not a sample: this is what the confirmation dialog renders, and a
+    # preview that says "and 180 more" is exactly the part a diver would want to read
+    # before overwriting numbers they may have written in a paper logbook. A dive log is
+    # a career's worth of dives, not a dataset, and this endpoint is hit on demand.
+    changes: Annotated[
+        list[DiveRenumberChange],
+        Field(default_factory=list, description="Every dive whose number changes, in chronological order"),
+    ]
+
+
 class DiveCreate(DiveBase):
     model_config = ConfigDict(extra="forbid")
 

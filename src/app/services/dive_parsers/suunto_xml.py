@@ -217,7 +217,15 @@ class SuuntoXmlParser(DiveParser):
         return ParsedDiveSchema(
             avg_depth=_float(root, "AvgDepth"),
             bottom_temperature=_float(root, "BottomTemperature"),
-            dive_number=_int(root, "DiveNumberInSerie"),
+            # Deliberately not parsed, though the export has a `DiveNumberInSerie`. That
+            # is the *computer's* counter, not the diver's lifetime dive number: it starts
+            # at 1 on a new or factory-reset device and restarts again on the next one, so
+            # importing it would stamp a dive #1 onto someone's 300th dive. The field stays
+            # on `ParsedDiveSchema` for a format that does carry a real lifetime number
+            # (Subsurface's XML does); until then both Suunto parsers leave it null and the
+            # number comes from `GET /dives/next-number`, which derives it from the dive's
+            # own date - see `services/dive_numbering.py`.
+            dive_number=None,
             duration=_int(root, "Duration"),
             max_depth=_float(root, "MaxDepth"),
             start_time=_text(root, "StartTime"),
