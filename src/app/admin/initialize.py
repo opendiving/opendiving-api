@@ -32,7 +32,7 @@ def create_admin_interface() -> CRUDAdmin | None:
             "host": settings.CRUD_ADMIN_REDIS_HOST,
             "port": settings.CRUD_ADMIN_REDIS_PORT,
             "db": settings.CRUD_ADMIN_REDIS_DB,
-            "password": settings.CRUD_ADMIN_REDIS_PASSWORD if settings.CRUD_ADMIN_REDIS_PASSWORD != "None" else None,
+            "password": settings.CRUD_ADMIN_REDIS_PASSWORD,
         }
 
     admin = CRUDAdmin(

@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from fastapi import Response
 from sqlalchemy.exc import IntegrityError
 
 from src.app.api.v1.auth import (
@@ -132,7 +133,7 @@ class TestCheckEmailLink:
             mock_limit.side_effect = RateLimitException("Too many requests. Please try again later.")
 
             with pytest.raises(RateLimitException):
-                await check_email_link(_request(), "any", mock_db)
+                await check_email_link(_request(), Response(), "any", mock_db)
 
     @pytest.mark.asyncio
     async def test_not_found_is_invalid(self, mock_db):
@@ -142,7 +143,7 @@ class TestCheckEmailLink:
         ):
             mock_crud.get = AsyncMock(return_value=None)
 
-            result = await check_email_link(_request(), "bad", mock_db)
+            result = await check_email_link(_request(), Response(), "bad", mock_db)
 
             assert result.valid is False
             assert result.email is None
@@ -162,7 +163,7 @@ class TestCheckEmailLink:
         ):
             mock_crud.get = AsyncMock(return_value=auth_request)
 
-            result = await check_email_link(_request(), "stale", mock_db)
+            result = await check_email_link(_request(), Response(), "stale", mock_db)
 
             assert result.valid is False
 
@@ -185,7 +186,7 @@ class TestCheckEmailLink:
         ):
             mock_crud.get = AsyncMock(return_value=auth_request)
 
-            result = await check_email_link(_request(), "already-used", mock_db)
+            result = await check_email_link(_request(), Response(), "already-used", mock_db)
 
             assert result.valid is False
 
@@ -204,7 +205,7 @@ class TestCheckEmailLink:
         ):
             mock_crud.get = AsyncMock(return_value=auth_request)
 
-            result = await check_email_link(_request(), "expired", mock_db)
+            result = await check_email_link(_request(), Response(), "expired", mock_db)
 
             assert result.valid is False
 
@@ -223,7 +224,7 @@ class TestCheckEmailLink:
         ):
             mock_crud.get = AsyncMock(return_value=auth_request)
 
-            result = await check_email_link(_request(), "good", mock_db)
+            result = await check_email_link(_request(), Response(), "good", mock_db)
 
             assert result.valid is True
             assert result.email == "a@example.com"

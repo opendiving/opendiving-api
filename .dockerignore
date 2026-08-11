@@ -1,0 +1,51 @@
+# The builder stage does `COPY . /app`, so without this file the whole working tree ends
+# up in an image layer - including the developer's real `src/.env`. That is not just
+# untidy: `SECRET_KEY`, `POSTGRES_PASSWORD` and `ADMIN_PASSWORD` become part of a
+# distributable artifact, recoverable from the layer regardless of what later stages copy.
+#
+# Note that .gitignore does NOT apply to Docker build context - a file can be correctly
+# untracked by git and still be baked into every image.
+
+# ---- secrets ----
+# `.env.example` is deliberately not matched by this and is still copied.
+**/.env
+**/.env.*
+!**/.env.example
+
+# ---- version control / tooling ----
+.git
+.gitignore
+.github
+.dockerignore
+
+# ---- local virtualenv and caches ----
+.venv
+**/__pycache__
+**/*.py[cod]
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.coverage
+htmlcov
+
+# ---- runtime artefacts that must never ship ----
+# `src/app/logs/app.log` was being copied into the runtime image. With `RESEND_API_KEY`
+# unset - the documented local-development setup - that file contains magic-link URLs
+# with live sign-in tokens in them.
+**/*.log
+**/logs
+crudadmin_data
+
+# ---- editor / OS noise ----
+**/.DS_Store
+.idea
+.vscode
+
+# ---- docs: not needed at runtime ----
+docs
+*.md
+!README.md
+
+# Claude Code working directory - agent worktrees, easily hundreds of MB, and
+# every byte would be uploaded as part of the build context.
+.claude/

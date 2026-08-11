@@ -9,6 +9,7 @@ the system of record.
 from fastapi import APIRouter, Request
 
 from ...core.config import settings
+from ...core.utils.client_ip import client_ip
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...schemas.contact import CONTACT_CATEGORY_LABELS, ContactMessageRequest, ContactMessageResponse
 from ...services.email_service import send_contact_form_email
@@ -16,10 +17,6 @@ from ...services.email_service import send_contact_form_email
 router = APIRouter(tags=["contact"])
 
 _CONTACT_RESPONSE = ContactMessageResponse()
-
-
-def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
 
 
 @router.post("/contact", response_model=ContactMessageResponse)
@@ -41,7 +38,7 @@ async def send_contact_message(request: Request, body: ContactMessageRequest) ->
         settings.CONTACT_FORM_RATE_LIMIT_WINDOW_SECONDS,
     )
     await enforce_rate_limit(
-        f"contact:ip:{_client_ip(request)}",
+        f"contact:ip:{client_ip(request)}",
         settings.CONTACT_FORM_RATE_LIMIT_PER_IP,
         settings.CONTACT_FORM_RATE_LIMIT_WINDOW_SECONDS,
     )

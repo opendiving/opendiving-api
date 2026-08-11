@@ -16,6 +16,7 @@ from ...core.exceptions.http_exceptions import (
 )
 from ...core.security import blacklist_token, blacklist_tokens, generate_secure_token, hash_token, oauth2_scheme
 from ...core.utils.cache import cache
+from ...core.utils.client_ip import client_ip
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...crud.crud_authentication_requests import crud_authentication_requests
 from ...crud.crud_user_dive_stats import crud_user_dive_stats
@@ -41,10 +42,6 @@ router = APIRouter(tags=["users"])
 # already been verified. There is no separate signup flow.
 
 _EMAIL_CHANGE_REQUEST_RESPONSE = EmailChangeRequestResponse()
-
-
-def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
 
 
 # Note: there is no `GET /users` here (yet) either - a public-facing listing of
@@ -110,7 +107,7 @@ async def request_email_change(
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
     await enforce_rate_limit(
-        f"email-change:ip:{_client_ip(request)}",
+        f"email-change:ip:{client_ip(request)}",
         settings.EMAIL_CHANGE_REQUEST_RATE_LIMIT_PER_USER * 5,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -151,7 +148,7 @@ async def request_email_change(
 
 @router.get("/user/email-change/verify/check", response_model=LinkCheckResponse)
 async def check_email_change_link(
-    request: Request, token: str, db: Annotated[AsyncSession, Depends(async_get_db)]
+    request: Request, response: Response, token: str, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> LinkCheckResponse:
     """Side-effect-free precheck used by the confirmation page before it shows the
     "Confirm email change" button - lets it show an error immediately for a link
@@ -159,9 +156,15 @@ async def check_email_change_link(
     browser's back button after already confirming) rather than a misleadingly
     clickable button, and lets it display the target email up front. Never marks
     anything used or changes any state.
+
+    Opts out of the default `public` caching for the same reason as
+    `auth.check_email_link`: anonymous side-effect-free GET, but the token is in the
+    query string and the body is an email address.
     """
+    response.headers["Cache-Control"] = "private, no-store"
+
     await enforce_rate_limit(
-        f"email-change-verify-check:ip:{_client_ip(request)}",
+        f"email-change-verify-check:ip:{client_ip(request)}",
         settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -203,7 +206,7 @@ async def verify_email_change(
     this leniency is just a safety net for races (e.g. a double click).
     """
     await enforce_rate_limit(
-        f"email-change-verify:ip:{_client_ip(request)}",
+        f"email-change-verify:ip:{client_ip(request)}",
         settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )

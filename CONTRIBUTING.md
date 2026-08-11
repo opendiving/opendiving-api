@@ -34,14 +34,20 @@ uv sync --extra dev
 
 ## Before you open a PR
 
-Three checks run on every pull request, and all three must be green. Run them locally
-first:
+Three workflows run on every pull request, and all must be green. Run them locally first:
 
 ```bash
-uv run ruff check src
+uv run ruff check src tests
+uv run ruff format --check src tests
 uv run mypy src --config-file pyproject.toml
+uv run mypy tests --config-file pyproject.toml
 uv run pytest --cov=src/app --cov-report=term-missing
 ```
+
+Note that lint and type-checking cover `tests/` as well as `src/`. mypy runs as two
+separate invocations on purpose: the app is importable as both `app.*` (via `mypy_path`)
+and `src.app.*` (how the tests import it), and asking it to check both roots at once
+fails with "source file found twice under different module names".
 
 mypy and pytest need `ENVIRONMENT=local` and a `SECRET_KEY` in the environment (any
 value — CI uses a throwaway one).
@@ -50,26 +56,40 @@ value — CI uses a throwaway one).
 so a cold checkout with nothing else running gives you a green run in under a second.
 The exception is `tests/test_dive_check_constraints.py`, which inserts real rows through
 a sync session to verify the constraints Postgres actually enforces. It is marked
-`skipif` on a connection attempt, so with no database reachable those 33 tests **skip
-silently** rather than fail — which is exactly what CI does, since the workflow has no
-Postgres service.
+`skipif` on a connection attempt, so with no database reachable those tests **skip
+silently** rather than fail.
 
-That matters if you touch `models/` or add a `CheckConstraint`: your run can be green
-because the tests that would have caught you never executed. Bring the stack up
-(`docker compose up`) and re-run, or use the containerised suite:
+That matters if you touch `models/` or add a `CheckConstraint`: your local run can be
+green because the tests that would have caught you never executed. Bring the stack up
+(`docker compose up`) and re-run, or use the containerised suite — note that
+`docker-compose.test.yml` is an *overlay*, so it has to be passed alongside the base file
+rather than on its own:
 
 ```bash
-docker compose -f docker-compose.test.yml up
+docker compose -f docker-compose.yml -f docker-compose.test.yml up --build --abort-on-container-exit web
 ```
+
+CI does run Postgres and Redis as service containers, and fails the job if the
+database-backed tests skip — so unlike before, a green CI run means they actually
+executed.
 
 Two things to know when you do run them against a live database: they write to whatever
 `POSTGRES_*` resolves to — your dev database, by default — and the `create_user` helper
 commits a row per test that nothing cleans up afterwards, so expect a scattering of
 faker-named users to accumulate.
 
-Ruff is configured with `fix = true`, so `uv run ruff check src` will repair what it can
-on its own. Line length is 120; docstrings follow the numpy convention. Everything under
-`app.*` is type-checked with `disallow_untyped_defs` — new functions need annotations.
+Ruff is configured with `fix = true`, so `uv run ruff check src tests` will repair what it
+can on its own, and `uv run ruff format src tests` handles the rest. Line length is 120.
+Everything under `app.*` is type-checked with `disallow_untyped_defs` — new functions need
+annotations.
+
+Docstring style follows the numpy convention by habit, not by enforcement: no `D` rules
+are enabled, so nothing checks it.
+
+One mypy quirk in `tests/`: `call-arg` is disabled there. Pydantic's mypy plugin doesn't
+read defaults out of `Annotated[T, Field(default=None)]`, which is the form every schema
+in `app/schemas` uses, so it reports a missing argument for every optional field a test
+omits — 108 false positives. Every other error code still applies. See `DECISIONS.md`.
 
 ## How the code is laid out
 

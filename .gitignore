@@ -195,3 +195,7 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Claude Code working directory (agent worktrees, launch config). Hundreds of MB
+# of scratch checkouts - never wanted in a commit or a Docker build context.
+.claude/

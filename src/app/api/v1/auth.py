@@ -36,6 +36,7 @@ from ...core.security import (
     verify_onboarding_token,
     verify_token,
 )
+from ...core.utils.client_ip import client_ip
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...crud.crud_authentication_providers import crud_authentication_providers
 from ...crud.crud_authentication_requests import crud_authentication_requests
@@ -60,10 +61,6 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # Always the exact same response regardless of whether the email belongs to an
 # existing account - see `EmailAuthRequestResponse`.
 _EMAIL_REQUEST_RESPONSE = EmailAuthRequestResponse()
-
-
-def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
 
 
 async def _start_onboarding_or_sign_in(
@@ -108,7 +105,7 @@ async def request_email_link(
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
     await enforce_rate_limit(
-        f"auth:email-request:ip:{_client_ip(request)}",
+        f"auth:email-request:ip:{client_ip(request)}",
         settings.MAGIC_LINK_REQUEST_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -147,7 +144,7 @@ async def request_email_link(
 
 @router.get("/email/verify/check", response_model=LinkCheckResponse)
 async def check_email_link(
-    request: Request, token: str, db: Annotated[AsyncSession, Depends(async_get_db)]
+    request: Request, response: Response, token: str, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> LinkCheckResponse:
     """Side-effect-free precheck used by the sign-in landing page before it shows the
     "Sign in" button - lets it show an error immediately for a link that's already
@@ -155,9 +152,18 @@ async def check_email_link(
     button after already signing in) rather than a misleadingly clickable button,
     and lets it display which email it's about to sign in as. Never marks anything
     used or changes any state.
+
+    The only GET in this module that must not be publicly cached. It is anonymous and
+    side-effect-free, which is exactly the shape `ClientCacheMiddleware` marks
+    `public, max-age=60` - but the magic-link token sits in the query string and the
+    response body is the account's email address, so a shared cache keyed on that URL
+    would hand both to whoever asked next. Setting the header here stops the middleware
+    from filling one in.
     """
+    response.headers["Cache-Control"] = "private, no-store"
+
     await enforce_rate_limit(
-        f"auth:email-verify-check:ip:{_client_ip(request)}",
+        f"auth:email-verify-check:ip:{client_ip(request)}",
         settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -193,7 +199,7 @@ async def verify_email_link(
     `request_email_link`), is rejected - see `AuthenticationRequest.invalidated_at`.
     """
     await enforce_rate_limit(
-        f"auth:email-verify:ip:{_client_ip(request)}",
+        f"auth:email-verify:ip:{client_ip(request)}",
         settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -232,7 +238,7 @@ async def auth_with_google(
     onboarding session (new account).
     """
     await enforce_rate_limit(
-        f"auth:google:ip:{_client_ip(request)}",
+        f"auth:google:ip:{client_ip(request)}",
         settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -268,7 +274,7 @@ async def complete_profile(
     it and learn which usernames are taken.
     """
     await enforce_rate_limit(
-        f"auth:complete:ip:{_client_ip(request)}",
+        f"auth:complete:ip:{client_ip(request)}",
         settings.AUTH_COMPLETE_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -332,7 +338,7 @@ async def refresh_access_token(
     moment will race, and the loser gets a 401 - see `DECISIONS.md`.
     """
     await enforce_rate_limit(
-        f"auth:refresh:ip:{_client_ip(request)}",
+        f"auth:refresh:ip:{client_ip(request)}",
         settings.AUTH_REFRESH_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )

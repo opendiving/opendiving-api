@@ -2584,3 +2584,99 @@ client that follows redirects reports the login page's `200` and looks like succ
 `/admin/` and don't follow redirects. And `SESSION_SECURE_COOKIES` defaults to `true`, so
 over plain HTTP a well-behaved client stores the session cookie and then never sends it,
 making every configuration look broken.
+
+## Rate limiting fails open on a Redis *outage*, not just a missing client
+
+`enforce_rate_limit` has always documented that it degrades rather than hard-fails when
+Redis isn't available - throttling here is defense-in-depth, not the primary security
+boundary, so an outage should not take sign-in down. The check it did was
+`if cache.client is None`, and that check is nearly never true.
+
+`create_redis_cache_pool` builds the client with `redis.Redis.from_pool`, which connects
+**lazily**. In any shipped configuration `cache.client` is therefore a perfectly ordinary
+object whether or not Redis is up; `None` only ever means "the pool was never created",
+i.e. unit tests. A real outage instead surfaced as `ConnectionError` raised from `incr`,
+which propagated out of every rate-limited endpoint - so a Redis blip turned the entire
+auth surface into 500s, which is precisely the failure mode the fail-open branch existed
+to prevent.
+
+Measured in a container against a stopped Redis: six `POST /auth/email/request` calls
+returned `500, 500, 500, 500, 500, 500` before, and `200 x6` after.
+
+The handler wraps only the `incr`/`expire` pair. `RateLimitException` is raised outside it
+on purpose - that is the function's normal signal, not a Redis failure, and a `try` drawn
+one line wider would swallow it and disable rate limiting completely.
+
+The warning fires on *entering* the degraded state and is re-armed on recovery, rather
+than once per process: during an outage the throttled endpoints are exactly the ones being
+hammered, so per-call logging buries the signal, but a latch that never resets means a
+second outage hours later passes silently.
+
+The old test suite only ever exercised `client = None`, which is why none of this showed
+up. `tests/test_rate_limit.py::TestRedisIsDown` now simulates the connection failure.
+
+## Per-IP rate limits need to know which proxy to believe
+
+`request.client.host` is the socket peer. Behind the bundled nginx - or any load balancer -
+that is the proxy's address, identically for every caller, so all the per-IP buckets
+collapse into one global bucket. One bot exhausting the magic-link limit locked sign-in for
+the whole instance. Nothing in the repo set `FORWARDED_ALLOW_IPS` or uvicorn's
+`--proxy-headers`, and nginx's `X-Forwarded-For` was written but never read.
+
+Trusting `X-Forwarded-For` unconditionally would be worse than the bug: the header is
+caller-supplied, so on a directly-reachable deployment anyone could forge a fresh identity
+per request and skip the limits entirely. `core.utils.client_ip` therefore consults it only
+when the socket peer is a proxy the operator explicitly declared in `TRUSTED_PROXY_IPS`, and
+takes the **right-most** entry that isn't itself one of those proxies - a client can prepend
+anything it likes, so only the hops appended by trusted infrastructure, at the end, mean
+anything. Unset (the default) is exactly the old socket-peer behaviour.
+
+Verified end-to-end through the real nginx config: with the proxy trusted, six callers get
+six separate buckets and a bot burning its own 15 leaves other callers at `200`. With no
+trusted proxy, eighteen requests carrying eighteen forged `X-Forwarded-For` values produced
+a **single** bucket keyed on the real peer, still capped at 15.
+
+`TRUSTED_PROXY_IPS` is a comma-separated *string*, not a `list[str]`. For a complex field
+type pydantic-settings parses the environment variable itself and expects JSON, so
+`TRUSTED_PROXY_IPS=172.16.0.0/12` failed validation at startup regardless of the `cast=`
+passed to `config()` - which only produces the default. `CRUD_ADMIN_ALLOWED_IPS_LIST` above
+it is a bare annotation with no `config()` call for the same reason. Unit tests that patch
+the attribute directly cannot catch this; `TestTheSettingParsesFromTheEnvironment` goes
+through `Settings`.
+
+## `ClientCacheMiddleware` inferred "not user-specific" from the wrong signal
+
+It decided whether a response was publicly cacheable purely from whether the *request*
+carried an `Authorization` header. That is backwards for the endpoints that mint
+credentials: `POST /auth/email/verify`, `/auth/google`, `/auth/complete` and `/auth/refresh`
+are unauthenticated by nature - the caller has no token yet, that is the whole point - and
+each returns one in the body. All four were being labelled `public, max-age=60`.
+
+`public` now additionally requires a safe method (GET/HEAD). That covers the four POSTs, but
+a safe method is not sufficient on its own: `GET /auth/email/verify/check` and
+`GET /user/email-change/verify/check` are anonymous, side-effect-free GETs that take a
+single-use token in the query string and return the account's email address. Those set
+`Cache-Control: private, no-store` themselves, which the middleware's existing
+"never overwrite an explicit header" rule preserves.
+
+Verified against a running container: all six now return `private, no-store`, while
+`GET /api/v1/health` still returns `public, max-age=60` - the fix is targeted, not a blanket
+disable of client caching.
+
+## `.dockerignore`, or: `.gitignore` does not apply to Docker
+
+The builder stage does `COPY . /app` and there was no `.dockerignore`, so the entire working
+tree went into an image layer - including the developer's real `src/.env`. Confirmed by
+inspection: `SECRET_KEY`, `POSTGRES_PASSWORD` and `ADMIN_PASSWORD` were present in the
+builder layer, and the `test` stage inherits from `builder`, which makes them part of a
+distributable artifact. A file can be correctly untracked by git and still be baked into
+every image.
+
+This became sharper when the runtime stage started copying the app package in (see above):
+`src/app/logs/app.log` came with it. With `RESEND_API_KEY` unset - the documented
+local-development setup - that file contains magic-link URLs with live sign-in tokens. The
+copy that happened to be on disk had none, which was luck rather than design.
+
+`.dockerignore` now excludes `.env` (but not `.env.example`), logs, `__pycache__`, the local
+venv and the tool caches. Verified after the change: no `.env` in the builder layer, no logs
+or `__pycache__` anywhere in the runtime image, `.env.example` still present.

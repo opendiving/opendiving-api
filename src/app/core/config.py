@@ -159,6 +159,24 @@ class ContactSettings(BaseSettings):
     CONTACT_FORM_RATE_LIMIT_PER_IP: int = config("CONTACT_FORM_RATE_LIMIT_PER_IP", default=10)
 
 
+class ProxySettings(BaseSettings):
+    # Addresses (or CIDR blocks) of reverse proxies whose `X-Forwarded-For` header may be
+    # believed - see `core.utils.client_ip`. Every per-IP rate limit depends on this:
+    # unset, a deployment behind nginx sees one client (the proxy) and throttles everyone
+    # into a single shared bucket. Set wrongly - i.e. trusting a network that isn't
+    # actually in front of you - callers can forge the header and evade the limits.
+    #
+    # Comma-separated, e.g. "172.16.0.0/12" for a Docker bridge network, or the address
+    # of the load balancer. Leave unset when the app is reached directly.
+    #
+    # A plain string, split in `core.utils.client_ip`, rather than a `list[str]`: for a
+    # complex field type pydantic-settings parses the environment variable itself and
+    # expects JSON, so `TRUSTED_PROXY_IPS=172.16.0.0/12` fails validation at startup no
+    # matter what `cast=` does here (that only produces the default). Same reason
+    # `CRUD_ADMIN_ALLOWED_IPS_LIST` below is a bare annotation with no `config()` call.
+    TRUSTED_PROXY_IPS: str | None = config("TRUSTED_PROXY_IPS", default=None)
+
+
 class FrontendSettings(BaseSettings):
     # Used to build the magic-link URL emailed to the user (`{FRONTEND_URL}/auth/verify?token=...`).
     FRONTEND_URL: str = config("FRONTEND_URL", default="http://localhost:3000")
@@ -221,7 +239,11 @@ class CRUDAdminSettings(BaseSettings):
     CRUD_ADMIN_REDIS_HOST: str = config("CRUD_ADMIN_REDIS_HOST", default="localhost")
     CRUD_ADMIN_REDIS_PORT: int = config("CRUD_ADMIN_REDIS_PORT", default=6379)
     CRUD_ADMIN_REDIS_DB: int = config("CRUD_ADMIN_REDIS_DB", default=0)
-    CRUD_ADMIN_REDIS_PASSWORD: str | None = config("CRUD_ADMIN_REDIS_PASSWORD", default="None")
+    # `default=None`, like every other optional setting here. It used to default to the
+    # *string* "None", which `admin.initialize` then had to compare against and translate
+    # back - a sentinel that silently becomes a real password the moment anyone writes
+    # CRUD_ADMIN_REDIS_PASSWORD="None" meaning it literally.
+    CRUD_ADMIN_REDIS_PASSWORD: str | None = config("CRUD_ADMIN_REDIS_PASSWORD", default=None)
     CRUD_ADMIN_REDIS_SSL: bool = config("CRUD_ADMIN_REDIS_SSL", default=False)
 
 
@@ -245,6 +267,7 @@ class Settings(
     MagicLinkSettings,
     EmailSettings,
     ContactSettings,
+    ProxySettings,
     FrontendSettings,
     GearServiceSettings,
     TestSettings,
