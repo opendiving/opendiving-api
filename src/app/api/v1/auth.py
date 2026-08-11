@@ -75,7 +75,7 @@ async def _start_onboarding_or_sign_in(
     email and profile, which is the only thing that lets `/auth/complete` trust them.
     """
     if isinstance(outcome, AuthenticatedUser):
-        tokens = await issue_tokens(response, outcome.user["username"])
+        tokens = await issue_tokens(response, outcome.user["uuid"])
         return AuthOutcome(status="authenticated", **tokens)
 
     onboarding_token = await create_onboarding_token(
@@ -326,7 +326,7 @@ async def complete_profile(
     # never create (or attempt to create) a second account.
     await blacklist_token(body.onboarding_token, db)
 
-    tokens = await issue_tokens(response, body.username)
+    tokens = await issue_tokens(response, created_user.uuid)
     return AuthOutcome(status="authenticated", **tokens)
 
 
@@ -363,7 +363,7 @@ async def refresh_access_token(
     # two leaves the caller signed out rather than holding two live refresh tokens.
     await blacklist_token(refresh_token, db)
 
-    return await issue_tokens(response, user_data.username_or_email)
+    return await issue_tokens(response, user_data.user_uuid)
 
 
 @router.post("/logout")

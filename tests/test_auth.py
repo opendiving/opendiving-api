@@ -3,6 +3,7 @@ profile completion. See `tests/test_auth_service.py` for the shared identity-res
 logic, and `tests/test_security.py` for the underlying token helpers.
 """
 
+import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -20,6 +21,10 @@ from src.app.api.v1.auth import (
 from src.app.core.exceptions.http_exceptions import DuplicateValueException, RateLimitException, UnauthorizedException
 from src.app.core.schemas import GoogleUserInfo, OnboardingTokenData
 from src.app.schemas.auth import EmailAuthRequest, EmailVerifyRequest, GoogleAuthRequest, ProfileCompletionRequest
+
+# Every sign-in path subjects its tokens to this, not to the account's username - see
+# `services.auth_service.issue_tokens`.
+USER_UUID = uuid_pkg.uuid4()
 
 
 def _request(ip: str = "1.2.3.4") -> Mock:
@@ -296,7 +301,7 @@ class TestVerifyEmailLink:
             "invalidated_at": None,
             "expires_at": datetime.now(UTC) + timedelta(minutes=10),
         }
-        db_user = {"id": 1, "username": "existinguser", "email": "existing@example.com"}
+        db_user = {"id": 1, "uuid": USER_UUID, "username": "existinguser", "email": "existing@example.com"}
 
         with (
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
@@ -323,7 +328,7 @@ class TestVerifyEmailLink:
             "invalidated_at": None,
             "expires_at": datetime.now(UTC) + timedelta(minutes=10),
         }
-        db_user = {"id": 1, "username": "existinguser", "email": "existing@example.com"}
+        db_user = {"id": 1, "uuid": USER_UUID, "username": "existinguser", "email": "existing@example.com"}
 
         with (
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
@@ -390,7 +395,7 @@ class TestAuthWithGoogle:
     @pytest.mark.asyncio
     async def test_existing_google_user_signs_in(self, mock_db):
         google_user = GoogleUserInfo(google_id="g-123", email="user@example.com", name="Jane Doe")
-        db_user = {"id": 1, "username": "janedoe", "email": "user@example.com"}
+        db_user = {"id": 1, "uuid": USER_UUID, "username": "janedoe", "email": "user@example.com"}
 
         with (
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
@@ -414,7 +419,7 @@ class TestAuthWithGoogle:
         """A magic-link account with a matching, Google-verified email gets the
         `google` provider linked onto it rather than a duplicate account created."""
         google_user = GoogleUserInfo(google_id="g-123", email="user@example.com", name="Jane Doe")
-        existing_user = {"id": 1, "username": "janedoe", "email": "user@example.com"}
+        existing_user = {"id": 1, "uuid": USER_UUID, "username": "janedoe", "email": "user@example.com"}
 
         with (
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
@@ -521,7 +526,7 @@ class TestCompleteProfile:
         token_data = OnboardingTokenData(
             email="new@example.com", provider="google", provider_user_id="g-1", name="New Person", avatar=None
         )
-        created_user = Mock(id=42)
+        created_user = Mock(id=42, uuid=USER_UUID)
 
         with (
             patch("src.app.api.v1.auth.verify_onboarding_token", new_callable=AsyncMock) as mock_verify,

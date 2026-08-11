@@ -4,6 +4,7 @@ for why `/refresh`/`/logout` moved under `/auth`, and for why the presented refr
 token is rotated rather than reused).
 """
 
+import uuid as uuid_pkg
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -11,6 +12,8 @@ import pytest
 from src.app.api.v1.auth import refresh_access_token
 from src.app.core.exceptions.http_exceptions import UnauthorizedException
 from src.app.core.schemas import TokenData
+
+USER_UUID = uuid_pkg.uuid4()
 
 
 def _request(cookies: dict[str, str]) -> Mock:
@@ -59,14 +62,16 @@ class TestRefreshAccessToken:
             patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as mock_issue,
         ):
-            mock_verify.return_value = TokenData(username_or_email="someuser")
+            mock_verify.return_value = TokenData(user_uuid=USER_UUID)
             mock_issue.return_value = {"access_token": "new-access-token", "token_type": "bearer"}
 
             result = await refresh_access_token(_request({"refresh_token": "good-token"}), response, mock_db)
 
             assert result == {"access_token": "new-access-token", "token_type": "bearer"}
             # A fresh refresh cookie is set on the same response, not just an access token.
-            mock_issue.assert_called_once_with(response, "someuser")
+            # The replacement carries the presented token's subject through unchanged -
+            # which is safe only because that subject is an immutable uuid.
+            mock_issue.assert_called_once_with(response, USER_UUID)
 
     @pytest.mark.asyncio
     async def test_presented_refresh_token_is_rotated_out(self, mock_db):
@@ -78,7 +83,7 @@ class TestRefreshAccessToken:
             patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock) as mock_blacklist,
             patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as mock_issue,
         ):
-            mock_verify.return_value = TokenData(username_or_email="someuser")
+            mock_verify.return_value = TokenData(user_uuid=USER_UUID)
             mock_issue.return_value = {"access_token": "new-access-token", "token_type": "bearer"}
 
             await refresh_access_token(_request({"refresh_token": "good-token"}), Mock(), mock_db)

@@ -135,6 +135,14 @@ class MagicLinkSettings(BaseSettings):
     EMAIL_CHANGE_TOKEN_EXPIRE_MINUTES: int = config("EMAIL_CHANGE_TOKEN_EXPIRE_MINUTES", default=30)
     EMAIL_CHANGE_REQUEST_RATE_LIMIT_PER_USER: int = config("EMAIL_CHANGE_REQUEST_RATE_LIMIT_PER_USER", default=3)
 
+    # `PATCH /user` answering "Username not available" is the same availability oracle
+    # `/auth/complete` is, and a signed-in caller can walk a wordlist through it without
+    # even needing a fresh onboarding token. Keyed per-user rather than per-IP because
+    # it's authenticated, and applied only when a username change is actually requested -
+    # the rest of the profile (name, avatar, email-preference toggle) reveals nothing and
+    # shouldn't 429 a settings page.
+    USERNAME_CHANGE_RATE_LIMIT_PER_USER: int = config("USERNAME_CHANGE_RATE_LIMIT_PER_USER", default=5)
+
 
 class EmailSettings(BaseSettings):
     # https://resend.com - used to deliver the magic-link email (see `services.email_service`).

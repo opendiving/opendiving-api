@@ -13,15 +13,19 @@ from ..crud.crud_users import crud_users
 async def get_current_user(
     token: Annotated[str, Depends(oauth2_scheme)], db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> dict[str, Any] | None:
+    """Resolve a Bearer access token to the account it was issued for.
+
+    This single lookup is the root of the entire ownership model - `fetch_owned_or_raise`
+    below compares against the `id` it returns - so it has to name an account that cannot
+    change hands. It keys on the immutable `uuid` the token carries as its subject; it
+    used to key on the username, which `PATCH /user` can change and release for anyone
+    else to claim (see `services.auth_service.issue_tokens` and DECISIONS.md).
+    """
     token_data = await verify_token(token, TokenType.ACCESS, db)
     if token_data is None:
         raise UnauthorizedException("User not authenticated.")
 
-    if "@" in token_data.username_or_email:
-        user = await crud_users.get(db=db, email=token_data.username_or_email, is_deleted=False)
-    else:
-        user = await crud_users.get(db=db, username=token_data.username_or_email, is_deleted=False)
-
+    user = await crud_users.get(db=db, uuid=token_data.user_uuid, is_deleted=False)
     if user:
         return user
 

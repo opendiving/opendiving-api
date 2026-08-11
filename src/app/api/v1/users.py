@@ -79,10 +79,20 @@ async def patch_user(
     Email is deliberately not updatable here - changing it requires the verification
     round-trip in `POST /user/email-change/request`. Taking a username someone else
     already holds is a 422.
+
+    A username change is rate limited per-user for the same reason `POST /auth/complete`
+    is per-IP: the availability check below answers a distinguishable "Username not
+    available", so unthrottled it is a wordlist oracle over who exists. The rest of the
+    profile isn't limited.
     """
     # Note: `email` is deliberately not part of `UserUpdate` - see
     # `POST /user/email-change/request` for how email changes work instead.
     if values.username is not None and values.username != current_user["username"]:
+        await enforce_rate_limit(
+            f"username-change:user:{current_user['id']}",
+            settings.USERNAME_CHANGE_RATE_LIMIT_PER_USER,
+            settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
+        )
         if await crud_users.exists(db=db, username=values.username):
             raise DuplicateValueException("Username not available")
 

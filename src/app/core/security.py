@@ -142,21 +142,17 @@ async def create_refresh_token(data: dict[str, Any], expires_delta: timedelta | 
 
 
 async def verify_token(token: str, expected_token_type: TokenType, db: AsyncSession) -> TokenData | None:
-    """Verify a JWT token and return TokenData if valid.
+    """Validates an access or refresh token - not blacklisted, unexpired, correctly
+    signed, and of `expected_token_type` - and returns the subject it names, or `None`
+    if any of that fails.
 
-    Parameters
-    ----------
-    token: str
-        The JWT token to be verified.
-    expected_token_type: TokenType
-        The expected type of token (access or refresh)
-    db: AsyncSession
-        Database session for performing database operations.
+    Checking `token_type` is what stops a refresh token from being presented as an
+    access token on a protected route, and vice versa: both are signed with the same
+    key, but a refresh token lives days rather than minutes.
 
-    Returns
-    -------
-    TokenData | None
-        TokenData instance if the token is valid, None otherwise.
+    `ValueError` covers a `sub` that isn't a uuid at all. That is a 401 rather than the
+    500 an escaping exception would produce, which is what any token minted before the
+    subject became the user's `uuid` (it used to be their username) now gets.
     """
     is_blacklisted = await crud_token_blacklist.exists(db, token=token)
     if is_blacklisted:
@@ -164,15 +160,15 @@ async def verify_token(token: str, expected_token_type: TokenType, db: AsyncSess
 
     try:
         payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
-        username_or_email: str | None = payload.get("sub")
+        subject: str | None = payload.get("sub")
         token_type: str | None = payload.get("token_type")
 
-        if username_or_email is None or token_type != expected_token_type:
+        if subject is None or token_type != expected_token_type:
             return None
 
-        return TokenData(username_or_email=username_or_email)
+        return TokenData(user_uuid=uuid_pkg.UUID(subject))
 
-    except JWTError:
+    except JWTError, ValueError:
         return None
 
 

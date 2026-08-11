@@ -5,6 +5,7 @@ signs a user in (`issue_tokens`).
 """
 
 import re
+import uuid as uuid_pkg
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, cast
@@ -38,15 +39,24 @@ async def generate_unique_username(base: str, db: AsyncSession) -> str:
     return candidate
 
 
-async def issue_tokens(response: Response, username: str) -> dict[str, str]:
-    """Creates a fresh access/refresh token pair for `username`, sets the refresh
-    token as an httpOnly cookie on `response`, and returns the access token - the
-    common tail end of every flow that signs a user in.
-    """
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = await create_access_token(data={"sub": username}, expires_delta=access_token_expires)
+async def issue_tokens(response: Response, user_uuid: uuid_pkg.UUID) -> dict[str, str]:
+    """Creates a fresh access/refresh token pair for the user with public id
+    `user_uuid`, sets the refresh token as an httpOnly cookie on `response`, and
+    returns the access token - the common tail end of every flow that signs a user in.
 
-    refresh_token = await create_refresh_token(data={"sub": username})
+    The subject is the immutable `uuid` rather than the username these tokens used to
+    name. A username is editable (`PATCH /user`) and is released for anyone to claim
+    the instant it changes, with no cooldown - so a username subject is a session whose
+    identity someone else can assume simply by taking the name, and `/auth/refresh`
+    (which re-mints whatever subject it's handed, without resolving it to a live user)
+    keeps such a token alive indefinitely. The same defect signed the *renaming* user
+    out permanently. See DECISIONS.md.
+    """
+    subject = str(user_uuid)
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = await create_access_token(data={"sub": subject}, expires_delta=access_token_expires)
+
+    refresh_token = await create_refresh_token(data={"sub": subject})
     max_age = settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
 
     response.set_cookie(

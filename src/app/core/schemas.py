@@ -32,7 +32,15 @@ class Token(BaseModel):
 
 
 class TokenData(BaseModel):
-    username_or_email: str
+    """Decoded subject of an access/refresh token.
+
+    The subject is the user's immutable public `uuid`, never their username or email.
+    Both of those are editable and, once released, immediately claimable by someone
+    else - so a token naming one is a session that can silently re-point at a
+    different account. See `services.auth_service.issue_tokens` and DECISIONS.md.
+    """
+
+    user_uuid: uuid_pkg.UUID
 
 
 # -------------- google auth --------------

@@ -1,5 +1,6 @@
 """Unit tests for the auth/security helpers."""
 
+import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
@@ -90,7 +91,8 @@ class TestVerifyToken:
 
     @pytest.mark.asyncio
     async def test_verify_valid_access_token(self, mock_db):
-        token = await create_access_token({"sub": "someuser"})
+        user_uuid = uuid_pkg.uuid4()
+        token = await create_access_token({"sub": str(user_uuid)})
 
         with patch("src.app.core.security.crud_token_blacklist") as mock_blacklist:
             mock_blacklist.exists = AsyncMock(return_value=False)
@@ -98,7 +100,22 @@ class TestVerifyToken:
             token_data = await verify_token(token, TokenType.ACCESS, mock_db)
 
             assert token_data is not None
-            assert token_data.username_or_email == "someuser"
+            assert token_data.user_uuid == user_uuid
+
+    @pytest.mark.asyncio
+    async def test_verify_non_uuid_subject_returns_none(self, mock_db):
+        """The subject used to be a username. Such a token is a 401, not the 500 an
+        unhandled `ValueError` out of `uuid.UUID("someuser")` would produce - which is
+        what every token minted before the cutover now hits.
+        """
+        token = await create_access_token({"sub": "someuser"})
+
+        with patch("src.app.core.security.crud_token_blacklist") as mock_blacklist:
+            mock_blacklist.exists = AsyncMock(return_value=False)
+
+            token_data = await verify_token(token, TokenType.ACCESS, mock_db)
+
+            assert token_data is None
 
     @pytest.mark.asyncio
     async def test_verify_token_wrong_type_returns_none(self, mock_db):

@@ -2,10 +2,13 @@
 logic shared by the email and Google auth flows.
 """
 
+import uuid as uuid_pkg
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from jose import jwt
 
+from src.app.core.security import ALGORITHM, SECRET_KEY
 from src.app.services.auth_service import (
     AuthenticatedUser,
     OnboardingRequired,
@@ -50,7 +53,7 @@ class TestIssueTokens:
     async def test_sets_refresh_cookie_and_returns_access_token(self):
         response = Mock()
 
-        tokens = await issue_tokens(response, "someuser")
+        tokens = await issue_tokens(response, uuid_pkg.uuid4())
 
         assert tokens["token_type"] == "bearer"
         assert "access_token" in tokens
@@ -59,6 +62,25 @@ class TestIssueTokens:
         assert kwargs["key"] == "refresh_token"
         assert kwargs["httponly"] is True
         assert kwargs["samesite"] == "lax"
+
+    @pytest.mark.asyncio
+    async def test_both_tokens_are_subjected_to_the_user_uuid(self):
+        """The security property the whole flow rests on: a session names the one
+        identifier its owner cannot change and nobody else can ever claim. A username
+        subject would let a renamed-away handle be re-registered by an attacker, whose
+        old token then resolves to the new holder's account.
+        """
+        response = Mock()
+        user_uuid = uuid_pkg.uuid4()
+
+        tokens = await issue_tokens(response, user_uuid)
+
+        access_payload = jwt.decode(tokens["access_token"], SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
+        refresh_cookie = response.set_cookie.call_args.kwargs["value"]
+        refresh_payload = jwt.decode(refresh_cookie, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
+
+        assert access_payload["sub"] == str(user_uuid)
+        assert refresh_payload["sub"] == str(user_uuid)
 
 
 class TestResolveIdentity:

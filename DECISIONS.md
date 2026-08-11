@@ -2812,3 +2812,55 @@ address through a schema fails validation. That cost one test
 This stops the bleeding; it does not tidy up. Rows already in the table stay until
 someone runs `docker compose down -v`. The real fix is fixtures that roll back what they
 write, which is a larger change than this was.
+
+## A session's subject is the user's `uuid`, because a username can change hands
+
+`issue_tokens` minted both tokens with `data={"sub": username}`, and `get_current_user`
+resolved that string back to an account by looking the username up. Nothing else in an
+access or refresh token identified anyone: `create_access_token`/`create_refresh_token`
+add only `exp` and `token_type`, and `verify_token` does no database lookup at all. So
+that one username lookup was the root of the entire ownership model - `fetch_owned_or_raise`
+compares against the `id` it returns.
+
+A username is not a stable identifier. `PATCH /user` changes it and releases the old one
+the same instant, with no reservation and no cooldown, so the subject of a live token can
+come to name a *different* account than the one it was issued for. Three consequences,
+in ascending order of severity:
+
+1. **The renaming user is signed out permanently.** Their own tokens name a username that
+   no longer resolves, so every request 401s - and `/auth/refresh` keeps re-minting the
+   dead subject rather than breaking, because it passes the subject through without ever
+   checking that it still resolves to a live user.
+2. **The reverse direction.** Claim a username the moment its holder renames away, and
+   their still-valid tokens now authenticate as *your* account - their subsequent writes
+   land in your logbook.
+3. **Dormant takeover.** Sign in as a desirable username, rename away to free it, then
+   call `/auth/refresh` weekly to keep a token with that subject alive indefinitely (it
+   costs nothing - refresh never asks whether the subject exists). When a real user later
+   claims that username at `/auth/complete`, the dormant token arms itself and reads and
+   writes their account. No victim interaction, no timing window, and it seeds cheaply
+   across as many handles as you like.
+
+The subject is now `str(user.uuid)` - the `uuid7` from `PublicUUIDMixin`, which is
+immutable, already unique-indexed, and already the resource's public identity everywhere
+else in the API. `get_current_user` is a single `crud_users.get(uuid=..., is_deleted=False)`,
+and `TokenData.user_uuid` is typed `uuid.UUID` so the assumption can't quietly revert to a
+string that happens to hold a name.
+
+`verify_token` catches `ValueError` alongside `JWTError`, because `uuid.UUID("someuser")`
+raises it: without that, every token minted before this change - and every forged `sub` -
+would be a 500 rather than a 401. Those older tokens are all invalidated by the cutover,
+which is why this was worth doing pre-launch rather than after.
+
+The tempting smaller fix - blacklist the caller's tokens inside `patch_user`, mirroring
+`erase_user` - is **not** sufficient. It closes (1) and (2), but not (3): the attacker's
+orphaned refresh token lives in a separate cookie jar and is simply never presented on the
+rename request, so there is nothing to blacklist. Only a subject that cannot change hands
+closes it.
+
+`PATCH /user` also gained a per-user rate limit on the username branch specifically. Its
+"Username not available" is the same availability oracle `/auth/complete` is already
+throttled for (see `AUTH_COMPLETE_RATE_LIMIT_PER_IP` and that route's docstring), and a
+signed-in caller could walk a wordlist through it without even needing a fresh onboarding
+token. It's scoped to the branch that actually answers the question - throttling the whole
+endpoint would 429 a settings page toggling `gear_service_emails`, which reveals nothing.
