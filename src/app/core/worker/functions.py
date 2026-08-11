@@ -6,7 +6,7 @@ from typing import Any
 
 import uvloop
 from arq.worker import Worker
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, bindparam, or_, select, update
 
 from ...models.gear_item import GearItem
 from ...models.gear_service_schedule import GearServiceSchedule
@@ -36,9 +36,13 @@ async def purge_expired_tokens(ctx: dict[Any, Any]) -> str:
     would have expired naturally, since an expired JWT is already rejected
     on its own. Without this cleanup the table grows unbounded, as every
     logout/account-deletion inserts new rows and nothing ever removes them.
+
+    UTC-aware, like every other timestamp comparison here: `expires_at` is a
+    `DateTime(timezone=True)` column written by `core.security._blacklist_one`, so a
+    naive local `datetime.now()` would compare against it off by the host's UTC offset.
     """
     async with local_session() as db:
-        now = datetime.now()
+        now = datetime.now(UTC)
         expired_count = await crud_token_blacklist.count(db, expires_at__lt=now)
         if expired_count == 0:
             logging.info("No expired blacklisted tokens to purge")
@@ -190,16 +194,26 @@ async def send_gear_service_digests(ctx: dict[Any, Any]) -> str:
             # way round.
             await send_gear_service_digest_email(bucket["email"], bucket["lines"])
 
-            for schedule_id, stage, due_on, due_at_dive_count in bucket["marks"]:
+            # One executemany for the whole bucket rather than a round trip per schedule
+            # - a diver whose entire kit comes due at once was previously N statements.
+            # Matches how `services.dive_stats` and `services.gear_stats` write.
+            #
+            # `id` is bound as `schedule_id` because SQLAlchemy reserves the plain column
+            # name in the WHERE clause of an executemany UPDATE for the SET values.
+            marks = [
+                {
+                    "schedule_id": schedule_id,
+                    "notified_stage": stage,
+                    "notified_for_due_on": due_on,
+                    "notified_for_due_at_dive_count": due_at_dive_count,
+                    "notified_at": now,
+                }
+                for schedule_id, stage, due_on, due_at_dive_count in bucket["marks"]
+            ]
+            if marks:
                 await db.execute(
-                    update(GearServiceSchedule)
-                    .where(GearServiceSchedule.id == schedule_id)
-                    .values(
-                        notified_stage=stage,
-                        notified_for_due_on=due_on,
-                        notified_for_due_at_dive_count=due_at_dive_count,
-                        notified_at=now,
-                    )
+                    update(GearServiceSchedule).where(GearServiceSchedule.id == bindparam("schedule_id")),
+                    marks,
                 )
             await db.commit()
             sent_users += 1

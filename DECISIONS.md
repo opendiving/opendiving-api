@@ -2385,3 +2385,163 @@ dive's own date.
 "fields the backend models actually support" rule above: it has a direct `Dive` column,
 and a format that carries a real lifetime dive number (Subsurface's XML does) can populate
 it. It is simply always null for the two Suunto parsers.
+
+## The admin panel is off by default, and refuses to boot insecurely in production
+
+`CRUD_ADMIN_ENABLED` used to default to `True` and `ADMIN_PASSWORD` to the literal
+`"!Ch4ng3Th1sP4ssW0rd!"` inherited from the upstream boilerplate, with `main.py` mounting
+the panel at `/admin` unconditionally. Unlike `/docs`, which `core/setup.py` disables in
+production and gates behind a superuser in staging, there was no `ENVIRONMENT` check at
+all. A deployment that set `SECRET_KEY` (startup fails without it) but never thought about
+`ADMIN_PASSWORD` therefore served a full create/update/delete interface over `User`,
+`Dive`, `GearItem` and everything else in `admin/views.py`, behind a password published in
+this repository.
+
+Three changes, in order of how much they matter:
+
+1. **`ADMIN_PASSWORD` has no default** (`str | None = None`). Unset now means "no admin
+   account", which `admin/initialize.py` already handled - it just never happened, because
+   the field always had a value.
+2. **`CRUD_ADMIN_ENABLED` defaults to `False`.** The panel bypasses every ownership check
+   in `api/v1` by talking to the models directly, so it should be something an operator
+   turns on, not something a fresh deploy inherits. `src/.env.example` enables it for local
+   development.
+3. **`Settings._reject_insecure_admin_config`** raises at startup when the panel is enabled
+   in production with a missing or boilerplate password. Chosen over silently disabling the
+   panel: an operator who *meant* to have it wants to know, and a hard failure at boot is
+   the loudest, cheapest place to find out. The missing IP allowlist warns rather than
+   raising - plenty of deployments front the panel with a VPN, and refusing to start would
+   break those for no gain.
+
+## `/auth/refresh` rotates the refresh token instead of reusing it
+
+The endpoint used to mint a new access token and hand the same refresh cookie back. A
+refresh token leaked from a browser (an XSS on the frontend, a shared machine, a stolen
+backup) therefore stayed usable for its full `REFRESH_TOKEN_EXPIRE_DAYS` - seven days by
+default - with nothing to revoke it and no way to notice it was being used.
+
+It now blacklists the presented token and issues a fresh pair via `issue_tokens`, the same
+helper every sign-in path uses. The blacklist entry costs one row that
+`purge_expired_tokens` already cleans up.
+
+The cost is real and worth stating: **two tabs refreshing at the same instant will race,
+and the loser gets a 401.** That is inherent to rotation without a grace window. It's
+accepted here because the access token lives 30 minutes, so refreshes are rare enough for
+a collision to be unlikely, and the failure mode is a re-login rather than data loss. If it
+turns out to bite in practice, the standard fix is a short reuse-detection window (accept a
+just-rotated token once more, and treat a *third* use as evidence of theft) rather than
+reverting to no rotation.
+
+The token is spent before its replacement is minted, so a crash between the two leaves the
+caller signed out rather than holding two live refresh tokens.
+
+## Blacklist expiries are UTC-aware, and so is the purge that reads them
+
+`core/security` wrote blacklist rows with `datetime.fromtimestamp(exp)` - no tzinfo, so the
+JWT's UTC `exp` was rendered in the *host's* local zone and stored into a
+`DateTime(timezone=True)` column. `purge_expired_tokens` then compared against a naive
+`datetime.now()`. The two errors cancelled out on a UTC host and on any host as long as
+both stayed wrong in the same direction, which is why nothing looked broken: a server in
+UTC+2 filed every entry two hours late and deleted it two hours early, consistently.
+
+Both are now `UTC`-aware. Worth noting because fixing *either one alone* makes the bug
+worse rather than better - the offsets stop cancelling, and revoked tokens get purged while
+still valid.
+
+## Pagination bounds live in `core/utils/pagination`, not in each route
+
+`page`/`items_per_page` come off the query string, and three of the eight list endpoints
+clamped them while five passed them straight into `crud.get_multi`. `GET /dives?items_per_page=999999999`
+was a request for the caller's entire dive log in one response; a negative value reached
+the database as a negative LIMIT.
+
+`clamp_pagination` is now called by all eight. It clamps rather than rejecting, so an
+existing client asking for too much gets the ceiling instead of a new 422. The three
+per-module `MAX_*_PER_PAGE = 100` constants collapsed into one
+`DEFAULT_MAX_ITEMS_PER_PAGE`, with the per-call override kept for a resource that ever
+needs a different bound.
+
+## Ownership checks go through one `fetch_owned_or_raise`
+
+The "fetch by public uuid, 404 if missing, 403 if it belongs to someone else" block existed
+in seven route files: three as differently-named private helpers (`_get_owned_dive`,
+`_get_owned_certification`, `_owned_gear_item`) and four inlined three times each. Roughly
+fifteen copies of six lines.
+
+That matters more than ordinary duplication because of the invariant the copies each
+restated in a comment: **the check must run before any `@cache`-wrapped read**, since
+`@cache` serves a hit without re-running authorization. An invariant documented in fifteen
+places is one that can be left out of the sixteenth.
+
+`api/dependencies.fetch_owned_or_raise` is now the only implementation. Each route file
+keeps a thin per-entity wrapper (`_get_owned_trip`, `_get_owned_gear_set`, ...) so call
+sites stay readable and each resource keeps its own not-found wording and return type;
+those wrappers are three lines of delegation with no logic.
+
+Deliberately *not* converted, because they answer differently on purpose:
+
+- `gear_service._owned_gear_item` and `gear_sets._resolve_item_ids` answer **422** for both
+  "missing" and "not yours". There the uuid is a reference inside a request body rather
+  than the resource being addressed, and one answer for both keeps someone else's uuids
+  unprobeable.
+- `gear_service`'s schedule/record routes scope by `user_id` down in
+  `resolve_schedule_for_user`, so there is no separate 403 to make.
+
+`tests/test_ownership.py` asserts no route file reintroduces the inline form.
+
+## `mypy` runs over `tests/`, with `call-arg` disabled there
+
+CI checked only `src`. Pointing it at `tests/` surfaced 109 errors, 108 of them
+`[call-arg]` - and all 108 were false.
+
+Every schema in `app/schemas` declares optional fields as
+`Annotated[T | None, Field(default=None)]`. Pydantic's mypy plugin only reads defaults out
+of the `x: T = Field(default=...)` assignment form, not out of `Annotated`, so it
+synthesizes an `__init__` in which those fields are required, and every test that builds a
+schema while omitting an optional field looks like a missing argument. (The plugin is
+configured and does load; this is a gap in what it handles, not a misconfiguration.
+Verified by diffing plugin-on against plugin-off output - identical.)
+
+So `[[tool.mypy.overrides]] module = "tests.*"` disables `call-arg` there, and only there.
+`arg-type`, `attr-defined`, `no-any-return` and the rest still apply to the suite;
+production code is untouched. Rewriting 108 call sites to pass explicit `None`s would have
+been a large diff that made the tests worse to read in order to satisfy a tooling gap. Drop
+the override once the plugin understands `Annotated` defaults.
+
+Two mypy invocations, not one: the app is reachable as both `app.*` (via `mypy_path`) and
+`src.app.*` (how the tests import it), and `mypy src tests` refuses with "source file found
+twice under different module names".
+
+## The runtime image now contains the app, and ships gunicorn — with one caveat
+
+Two things were wrong with the image and only showed up once it was actually run rather
+than merely built.
+
+**The final stage contained no application code.** It copied `/app/.venv` and nothing else,
+leaving `WORKDIR /code` empty, so `app.main:app` was unimportable. The container only ever
+worked because `docker-compose.yml` bind-mounts `./src/app` over `/code/app` - i.e. the
+image ran in local development and nowhere else. This predates the switch to gunicorn: the
+old `uvicorn app.main:app --reload` CMD failed identically without the bind mount. The final
+stage now `COPY`s the package in; the compose bind mount still overlays it for live editing,
+so it is a convenience rather than a requirement.
+
+**`--reload` is gone from the image.** It runs a single worker plus a filesystem watcher and
+restarts on any write. `docker-compose.yml` still overrides `command:` with the uvicorn
+`--reload` form, so local development is unchanged.
+
+**The caveat: the admin panel is not multi-worker safe.** With `-w 4`, every worker runs the
+FastAPI lifespan, so every worker calls `admin.initialize()` against the same SQLite file
+under `crudadmin_data/`. They race, and the losers die - observed as both
+`table admin_user already exists` and
+`UNIQUE constraint failed: admin_user.username`, depending on who gets there first. The
+whole container then fails to boot, because gunicorn gives up after enough workers fail.
+
+Verified: admin on + `-w 1` boots healthy; admin on + `-w 4` does not.
+
+`CRUD_ADMIN_REDIS_ENABLED` does **not** fix this - it moves *sessions* to Redis, while the
+admin-user table stays in SQLite, which is what the race is over. So an operator who wants
+the panel in production must run it on a single worker, ideally as a separate one-worker
+instance alongside the multi-worker API. This is survivable mostly because the panel now
+defaults to off (see above); if it ever needs to run alongside a multi-worker API, the fix
+is to move admin initialization out of the per-worker lifespan and into a one-shot startup
+step.

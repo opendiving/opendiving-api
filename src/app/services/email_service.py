@@ -14,9 +14,13 @@ from typing import Any
 import anyio
 import resend
 
-from ..core.config import settings
+from ..core.config import EnvironmentOption, settings
 
 logger = logging.getLogger(__name__)
+
+
+class EmailDeliveryError(RuntimeError):
+    """Raised when an email that carries a credential cannot be delivered."""
 
 
 def _send(payload: dict[str, Any]) -> None:
@@ -24,14 +28,32 @@ def _send(payload: dict[str, Any]) -> None:
     resend.Emails.send(payload)  # type: ignore[arg-type]
 
 
+def _refuse_to_log_credential_in_production(what: str) -> None:
+    """Guards the "no API key, so log the link instead" fallback used by the two senders
+    whose URL embeds a live single-use auth token.
+
+    That fallback is a local-development convenience, and a good one - it's how you sign
+    in without a Resend account. But the URL it prints *is* the credential, and
+    `core.logger` writes to a rotating file on disk, so the same code path in production
+    would quietly turn a forgotten `RESEND_API_KEY` into sign-in tokens sitting in
+    plaintext. Fail loudly there instead: a 500 on a sign-in attempt is recoverable and
+    obvious, a leaked token file is neither.
+    """
+    if settings.ENVIRONMENT == EnvironmentOption.PRODUCTION:
+        raise EmailDeliveryError(f"RESEND_API_KEY is not configured, so {what} cannot be delivered.")
+
+
 async def send_magic_link_email(email: str, magic_link_url: str) -> None:
     """Sends the magic-link sign-in email.
 
     A no-op (logged, not raised) when `RESEND_API_KEY` isn't configured, so local
     development without a Resend account doesn't hard-fail `POST /auth/email/request`
-    - the link is still generated and logged so it can be used manually.
+    - the link is still generated and logged so it can be used manually. In production
+    that same condition raises instead, since the logged link is a live credential (see
+    `_refuse_to_log_credential_in_production`).
     """
     if not settings.RESEND_API_KEY:
+        _refuse_to_log_credential_in_production("the magic-link sign-in email")
         logger.warning("RESEND_API_KEY not configured; magic link for %s: %s", email, magic_link_url)
         return
 
@@ -60,6 +82,7 @@ async def send_email_change_confirmation_email(new_email: str, confirm_url: str)
     controls the new address before the change takes effect.
     """
     if not settings.RESEND_API_KEY:
+        _refuse_to_log_credential_in_production("the email-change confirmation")
         logger.warning("RESEND_API_KEY not configured; email-change confirmation for %s: %s", new_email, confirm_url)
         return
 
@@ -90,13 +113,21 @@ async def send_gear_service_digest_email(email: str, lines: list[tuple[str, str,
     ordered and phrased by the caller. This function deliberately does no status
     arithmetic of its own, so exactly one place (`services.gear_service`) decides what
     "overdue" means.
+
+    The label and detail are escaped: unlike the magic-link or email-change bodies, they
+    are built from `GearItem.brand`/`name` and `GearServiceSchedule.label`, which the
+    diver typed and which no schema restricts to safe characters (see
+    `core.worker.functions.send_gear_service_digests`). Same reasoning as
+    `send_contact_form_email` below - content a person typed gets escaped, content this
+    server composed doesn't.
     """
     if not settings.RESEND_API_KEY:
         logger.warning("RESEND_API_KEY not configured; gear service digest for %s: %s", email, lines)
         return
 
     items = "".join(
-        f'<li><a href="{settings.FRONTEND_URL}/gear/{item_uuid}"><strong>{label}</strong></a> - {detail}</li>'
+        f'<li><a href="{settings.FRONTEND_URL}/gear/{html.escape(item_uuid)}">'
+        f"<strong>{html.escape(label)}</strong></a> - {html.escape(detail)}</li>"
         for label, detail, item_uuid in lines
     )
     subject = "Your dive gear needs servicing" if len(lines) == 1 else f"{len(lines)} pieces of gear need servicing"
@@ -176,7 +207,7 @@ async def send_email_changed_notification(old_email: str, new_email: str) -> Non
         "to": old_email,
         "subject": "Your OpenDiving account email was changed",
         "html": (
-            f"<p>Your OpenDiving account email was just changed to <strong>{new_email}</strong>.</p>"
+            f"<p>Your OpenDiving account email was just changed to <strong>{html.escape(new_email)}</strong>.</p>"
             "<p>If you made this change, no action is needed. If you didn't, please "
             "contact support immediately.</p>"
         ),

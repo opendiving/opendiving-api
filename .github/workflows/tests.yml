@@ -10,6 +10,49 @@ jobs:
   tests:
     runs-on: ubuntu-latest
 
+    # The suite is mostly pure-logic unit tests, but the DB-backed ones
+    # (tests/test_dive_check_constraints.py, tests/test_dive_numbering.py) guard
+    # `CheckConstraint` behaviour that only Postgres can enforce, and they skip
+    # themselves when nothing is listening. Without these services they skipped
+    # silently on every run and the constraints were effectively untested in CI.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      ENVIRONMENT: local
+      SECRET_KEY: test-secret-key-for-testing-only
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_SERVER: localhost
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: postgres
+      REDIS_CACHE_HOST: localhost
+      REDIS_CACHE_PORT: 6379
+      REDIS_QUEUE_HOST: localhost
+      REDIS_QUEUE_PORT: 6379
+
     steps:
       - uses: actions/checkout@v7
 
@@ -22,9 +65,20 @@ jobs:
       - name: Run tests with coverage
         id: tests
         run: uv run pytest --cov=src/app --cov-report=term-missing
-        env:
-          ENVIRONMENT: local
-          SECRET_KEY: test-secret-key-for-testing-only
+
+      # The DB-backed tests skip themselves rather than fail when Postgres is
+      # unreachable, which is the right behaviour locally but means a broken `services:`
+      # block above would look exactly like a green run. Fail the job instead.
+      - name: Assert the database-backed tests actually ran
+        if: always() && steps.tests.outcome != 'skipped'
+        run: |
+          uv run pytest tests/test_dive_check_constraints.py tests/test_dive_numbering.py \
+            -q --no-header -p no:cacheprovider \
+            | tee /tmp/db-tests.txt
+          if grep -qE "[0-9]+ skipped" /tmp/db-tests.txt; then
+            echo "::error::Database-backed tests skipped - Postgres was not reachable from the job."
+            exit 1
+          fi
 
       # Runs whenever the tests step actually executed (pass or fail), but
       # not if it was skipped entirely because an earlier step failed first.

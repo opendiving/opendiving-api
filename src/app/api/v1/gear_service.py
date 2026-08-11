@@ -13,14 +13,20 @@ DECISIONS.md for why putting the check inside a cached function is a vulnerabili
 import uuid as uuid_pkg
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import get_current_user
 from ...core.db.database import async_get_db
-from ...core.exceptions.http_exceptions import DuplicateValueException, ForbiddenException, NotFoundException
+from ...core.exceptions.http_exceptions import (
+    DuplicateValueException,
+    ForbiddenException,
+    NotFoundException,
+    UnprocessableEntityException,
+)
 from ...core.utils.cache import cache
+from ...core.utils.pagination import clamp_pagination
 from ...crud.crud_gear_items import crud_gear_items, get_gear_item_uuids_by_id
 from ...crud.crud_gear_service_records import (
     crud_gear_service_records,
@@ -115,7 +121,7 @@ async def _owned_gear_item(db: AsyncSession, gear_item_uuid: uuid_pkg.UUID, user
         return_as_model=True,
     )
     if db_gear_item is None:
-        raise HTTPException(status_code=422, detail="Gear item not found.")
+        raise UnprocessableEntityException("Gear item not found.")
     return cast(GearItemReadInternal, db_gear_item)
 
 
@@ -226,6 +232,8 @@ async def read_gear_service_schedules(
     if current_user["uuid"] != user_uuid:
         raise ForbiddenException()
 
+    page, items_per_page = clamp_pagination(page, items_per_page)
+
     gear_item_id = None
     if gear_item_uuid is not None:
         gear_item_id = (await _owned_gear_item(db, gear_item_uuid, current_user["id"])).id
@@ -310,7 +318,7 @@ async def patch_gear_service_schedule(
     effective_months = update_data.get("interval_months", schedule.interval_months)
     effective_dives = update_data.get("interval_dives", schedule.interval_dives)
     if effective_months is None and effective_dives is None:
-        raise HTTPException(status_code=422, detail="A service schedule needs an interval in months, in dives, or both")
+        raise UnprocessableEntityException("A service schedule needs an interval in months, in dives, or both")
 
     effective_kind = update_data.get("kind", schedule.kind)
     effective_label = update_data.get("label", schedule.label)
@@ -379,7 +387,7 @@ async def write_gear_service_record(
             db=db, schedule_uuid=record.gear_service_schedule_uuid, user_id=current_user["id"]
         )
         if schedule is None or schedule.gear_item_id != db_gear_item.id:
-            raise HTTPException(status_code=422, detail="Service schedule not found.")
+            raise UnprocessableEntityException("Service schedule not found.")
     else:
         schedule = await find_schedule_for_record(
             db=db, gear_item_id=db_gear_item.id, kind=record.kind.value, label=record.label
@@ -502,6 +510,8 @@ async def read_gear_service_records(
     if current_user["uuid"] != user_uuid:
         raise ForbiddenException()
 
+    page, items_per_page = clamp_pagination(page, items_per_page)
+
     gear_item_id = None
     if gear_item_uuid is not None:
         gear_item_id = (await _owned_gear_item(db, gear_item_uuid, current_user["id"])).id
@@ -512,7 +522,7 @@ async def read_gear_service_records(
             db=db, schedule_uuid=gear_service_schedule_uuid, user_id=current_user["id"]
         )
         if schedule is None:
-            raise HTTPException(status_code=422, detail="Service schedule not found.")
+            raise UnprocessableEntityException("Service schedule not found.")
         schedule_id = schedule.id
 
     return await _cached_read_records(

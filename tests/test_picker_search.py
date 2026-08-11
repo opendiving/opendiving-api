@@ -7,16 +7,18 @@ shape of the search `WHERE` clause, and the cache keys - rather than the endpoin
 top of a live Postgres/Redis, which are exercised by hand (see DECISIONS.md).
 """
 
+from pathlib import Path
 from typing import Any
 
 import pytest
 from sqlalchemy import ColumnElement, select
 from sqlalchemy.dialects import postgresql
 
-from src.app.api.v1.dive_sites import MAX_DIVE_SITES_PER_PAGE, _dive_site_cache
-from src.app.api.v1.gear_items import GEAR_ITEM_SEARCH_COLUMNS, MAX_GEAR_ITEMS_PER_PAGE
-from src.app.api.v1.trips import MAX_TRIPS_PER_PAGE, _trip_cache
+from src.app.api.v1.dive_sites import _dive_site_cache
+from src.app.api.v1.gear_items import GEAR_ITEM_SEARCH_COLUMNS
+from src.app.api.v1.trips import _trip_cache
 from src.app.core.utils.owned_resource_cache import OwnedResourceCache
+from src.app.core.utils.pagination import DEFAULT_MAX_ITEMS_PER_PAGE, clamp_pagination
 from src.app.core.utils.search import escape_like, search_clause
 from src.app.crud.crud_gear_items import crud_gear_items
 from src.app.models.dive_site import DiveSite
@@ -150,11 +152,46 @@ class TestListCacheKeys:
 
 
 class TestPageSizeCaps:
-    @pytest.mark.parametrize("cap", [MAX_DIVE_SITES_PER_PAGE, MAX_TRIPS_PER_PAGE, MAX_GEAR_ITEMS_PER_PAGE])
-    def test_every_picker_endpoint_caps_its_page_size(self, cap: int) -> None:
+    def test_the_cap_is_low_enough_to_matter(self) -> None:
         # Low enough that no single request can pull a whole table, which is exactly what
         # the pickers used to do in a loop.
-        assert cap == 100
+        assert DEFAULT_MAX_ITEMS_PER_PAGE == 100
+
+    @pytest.mark.parametrize("requested", [101, 1_000, 999_999_999])
+    def test_an_oversized_page_is_capped(self, requested: int) -> None:
+        _, items_per_page = clamp_pagination(1, requested)
+        assert items_per_page == DEFAULT_MAX_ITEMS_PER_PAGE
+
+    @pytest.mark.parametrize(("page", "items_per_page"), [(0, 0), (-1, -50)])
+    def test_non_positive_values_are_floored_to_one(self, page: int, items_per_page: int) -> None:
+        # A negative `items_per_page` would otherwise reach the database as a negative
+        # LIMIT, and a negative `page` as a negative OFFSET.
+        assert clamp_pagination(page, items_per_page) == (1, 1)
+
+    def test_a_reasonable_request_is_left_alone(self) -> None:
+        assert clamp_pagination(3, 25) == (3, 25)
+
+    def test_every_list_endpoint_clamps(self) -> None:
+        """The bug this replaces: three of eight list endpoints clamped and five didn't.
+
+        Asserting on the source keeps that from silently regressing when a new list
+        endpoint is added by copying one of the five that used to be unbounded.
+        """
+        list_routes = {
+            "certifications.py": "read_certifications",
+            "dive_sites.py": "read_dive_sites",
+            "dives.py": "read_dives",
+            "gear_items.py": "read_gear_items",
+            "gear_service.py": "read_gear_service_schedules",
+            "gear_sets.py": "read_gear_sets",
+            "trips.py": "read_trips",
+        }
+        routes_dir = Path(__file__).resolve().parents[1] / "src" / "app" / "api" / "v1"
+
+        for filename, function_name in list_routes.items():
+            source = (routes_dir / filename).read_text()
+            assert f"def {function_name}(" in source, f"{filename} no longer defines {function_name}"
+            assert "clamp_pagination(page, items_per_page)" in source, f"{filename} does not clamp pagination"
 
 
 @pytest.mark.parametrize(

@@ -5,10 +5,11 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Res
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...api.dependencies import get_current_user
+from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import ForbiddenException, NotFoundException, UnprocessableEntityException
 from ...core.utils.cache import cache
+from ...core.utils.pagination import clamp_pagination
 from ...crud.crud_certifications import crud_certifications
 from ...schemas.certification import (
     CertificationAgency,
@@ -74,25 +75,18 @@ async def _get_owned_certification(
 ) -> CertificationReadInternal:
     """Fetch a certification by public uuid and assert the caller owns it.
 
-    Every route starts here: a 404 for a missing row, a 403 for someone else's. Note the
-    ordering - this runs *before* any cached read helper is reached, because `@cache`
-    serves a cached response without re-running authorization (see `_cached_read_*`).
+    Thin wrapper over `fetch_owned_or_raise` - see there for the 404/403 split and, in
+    particular, why this must run before any `@cache`-wrapped read helper.
     """
-    filters: dict[str, Any] = {"uuid": uuid}
-    if not include_deleted:
-        filters["is_deleted"] = False
-
-    db_certification = await crud_certifications.get(
-        db=db, schema_to_select=CertificationReadInternal, return_as_model=True, **filters
+    return await fetch_owned_or_raise(
+        db=db,
+        crud=crud_certifications,
+        uuid=uuid,
+        current_user=current_user,
+        schema=CertificationReadInternal,
+        not_found_message="Certification not found",
+        include_deleted=include_deleted,
     )
-    if db_certification is None:
-        raise NotFoundException("Certification not found")
-
-    db_certification = cast(CertificationReadInternal, db_certification)
-    if db_certification.user_id != current_user["id"]:
-        raise ForbiddenException()
-
-    return db_certification
 
 
 @router.post("/certification", response_model=CertificationRead, status_code=201)
@@ -180,6 +174,8 @@ async def read_certifications(
     """List a user's certifications, newest first."""
     if current_user["uuid"] != user_uuid:
         raise ForbiddenException()
+
+    page, items_per_page = clamp_pagination(page, items_per_page)
 
     return await _cached_read_certifications(
         request,

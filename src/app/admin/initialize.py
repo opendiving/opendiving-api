@@ -6,10 +6,17 @@ from .views import register_admin_views
 
 
 def create_admin_interface() -> CRUDAdmin | None:
-    """Create and configure the admin interface."""
+    """Create and configure the admin interface.
+
+    Returns `None` - and so `main` never mounts anything at `CRUD_ADMIN_MOUNT_PATH` -
+    unless `CRUD_ADMIN_ENABLED` is explicitly on. Production additionally requires a
+    real `ADMIN_PASSWORD`, enforced at startup by `Settings._reject_insecure_admin_config`
+    rather than here, so the failure is loud instead of a silently absent panel.
+    """
     if not settings.CRUD_ADMIN_ENABLED:
         return None
 
+    admin_password = settings.ADMIN_PASSWORD
     session_backend = "memory"
     redis_config = None
 
@@ -38,11 +45,8 @@ def create_admin_interface() -> CRUDAdmin | None:
         enforce_https=settings.ENVIRONMENT == EnvironmentOption.PRODUCTION,
         track_events=settings.CRUD_ADMIN_TRACK_EVENTS,
         track_sessions_in_db=settings.CRUD_ADMIN_TRACK_SESSIONS,
-        initial_admin={
-            "username": settings.ADMIN_USERNAME,
-            "password": settings.ADMIN_PASSWORD,
-        }
-        if settings.ADMIN_USERNAME and settings.ADMIN_PASSWORD
+        initial_admin={"username": settings.ADMIN_USERNAME, "password": admin_password}
+        if settings.ADMIN_USERNAME and admin_password
         else None,
     )
 

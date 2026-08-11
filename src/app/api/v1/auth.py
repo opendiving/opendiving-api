@@ -28,7 +28,6 @@ from ...core.security import (
     TokenType,
     blacklist_token,
     blacklist_tokens,
-    create_access_token,
     create_onboarding_token,
     generate_secure_token,
     hash_token,
@@ -263,7 +262,17 @@ async def complete_profile(
     """Creates the `User` row (and its `AuthenticationProvider` link) for a verified
     identity that had no account yet, then signs the new user in. This is the *only*
     place a `User` row is ever created.
+
+    Rate limited per-IP because the username check below is an availability oracle:
+    someone holding a single onboarding token could otherwise walk a wordlist through
+    it and learn which usernames are taken.
     """
+    await enforce_rate_limit(
+        f"auth:complete:ip:{_client_ip(request)}",
+        settings.AUTH_COMPLETE_RATE_LIMIT_PER_IP,
+        settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
+    )
+
     token_data = await verify_onboarding_token(body.onboarding_token, db)
     if token_data is None:
         raise UnauthorizedException("This onboarding session is invalid or has expired.")
@@ -308,11 +317,26 @@ async def complete_profile(
 
 
 @router.post("/refresh")
-async def refresh_access_token(request: Request, db: AsyncSession = Depends(async_get_db)) -> dict[str, str]:
+async def refresh_access_token(
+    request: Request, response: Response, db: AsyncSession = Depends(async_get_db)
+) -> dict[str, str]:
     """Exchanges the httpOnly `refresh_token` cookie (set by `issue_tokens`) for a new
-    access token. See `DECISIONS.md` for why this is the one cookie-authenticated
-    endpoint in this flow and why that's still CSRF-safe.
+    access token *and a new refresh token*. See `DECISIONS.md` for why this is the one
+    cookie-authenticated endpoint in this flow and why that's still CSRF-safe.
+
+    The presented refresh token is blacklisted and replaced rather than reused. Without
+    rotation a single leaked cookie stays valid for the whole
+    `REFRESH_TOKEN_EXPIRE_DAYS` window with nothing to revoke it and no way to notice;
+    with rotation, the theft has a much shorter useful life and a second use of the same
+    token fails outright. The trade-off is that two tabs refreshing at the exact same
+    moment will race, and the loser gets a 401 - see `DECISIONS.md`.
     """
+    await enforce_rate_limit(
+        f"auth:refresh:ip:{_client_ip(request)}",
+        settings.AUTH_REFRESH_RATE_LIMIT_PER_IP,
+        settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
+    )
+
     refresh_token = request.cookies.get("refresh_token")
     if not refresh_token:
         raise UnauthorizedException("Refresh token missing.")
@@ -321,8 +345,11 @@ async def refresh_access_token(request: Request, db: AsyncSession = Depends(asyn
     if not user_data:
         raise UnauthorizedException("Invalid refresh token.")
 
-    new_access_token = await create_access_token(data={"sub": user_data.username_or_email})
-    return {"access_token": new_access_token, "token_type": "bearer"}
+    # Spend the presented token before minting its replacement, so a crash between the
+    # two leaves the caller signed out rather than holding two live refresh tokens.
+    await blacklist_token(refresh_token, db)
+
+    return await issue_tokens(response, user_data.username_or_email)
 
 
 @router.post("/logout")

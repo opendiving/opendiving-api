@@ -6,10 +6,11 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...api.dependencies import get_current_user
+from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import DuplicateValueException, ForbiddenException, NotFoundException
 from ...core.utils.cache import cache
+from ...core.utils.pagination import clamp_pagination
 from ...core.utils.search import search_clause, search_multi
 from ...crud.crud_gear_items import crud_gear_items, gear_item_name_exists
 from ...crud.crud_gear_service_schedules import get_schedules_for_gear_item, get_schedules_for_gear_items
@@ -32,13 +33,24 @@ router = APIRouter(tags=["gear"])
 # closed vocabulary with its own filter surface.
 GEAR_ITEM_SEARCH_COLUMNS = ("name", "brand")
 
-# `GET /gear-items` feeds both the gear page and the dive form's picker, so the page size
-# is a client choice - but an unbounded one lets a single request pull the whole table.
-MAX_GEAR_ITEMS_PER_PAGE = 100
 
+async def _get_owned_gear_item(
+    db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict, *, include_deleted: bool = False
+) -> GearItemReadInternal:
+    """Fetch a gear item by public uuid and assert the caller owns it.
 
-def _gear_item_owner_id(db_gear_item: Any) -> int:
-    return cast(int, db_gear_item["user_id"] if isinstance(db_gear_item, dict) else db_gear_item.user_id)
+    Thin wrapper over `fetch_owned_or_raise` - see there for the 404/403 split and, in
+    particular, why this must run before any `@cache`-wrapped read helper.
+    """
+    return await fetch_owned_or_raise(
+        db=db,
+        crud=crud_gear_items,
+        uuid=uuid,
+        current_user=current_user,
+        schema=GearItemReadInternal,
+        not_found_message="Gear item not found",
+        include_deleted=include_deleted,
+    )
 
 
 def _to_public_gear_item(
@@ -117,6 +129,11 @@ async def _cached_read_gear_items(
     without re-running any authorization logic. `include_archived` is part of the cache
     key so the picker's (non-archived) view and the management page's (full) view can't
     serve each other's results, and `search` for the same reason between two queries.
+
+    Hand-written rather than built with `OwnedResourceCache` (as trips, dive sites and
+    gear sets are) because of the two things that factory has no room for: the extra
+    `include_archived` filter dimension, and the batched service-schedule lookup below.
+    See that class's docstring for why the duplication is preferred over a hook.
     """
     offset = compute_offset(page, items_per_page)
     term = (search or "").strip()
@@ -185,13 +202,15 @@ async def read_gear_items(
     if current_user["uuid"] != user_uuid:
         raise ForbiddenException()
 
+    page, items_per_page = clamp_pagination(page, items_per_page)
+
     return await _cached_read_gear_items(
         request,
         user_id=current_user["id"],
         user_uuid=user_uuid,
         db=db,
-        page=max(page, 1),
-        items_per_page=min(max(items_per_page, 1), MAX_GEAR_ITEMS_PER_PAGE),
+        page=page,
+        items_per_page=items_per_page,
         include_archived=include_archived,
         # Normalized here rather than in the cache layer so that " MK25 " and "mk25"
         # share one cache entry instead of two identical ones under different keys.
@@ -224,15 +243,8 @@ async def read_gear_item(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> GearItemRead:
-    db_gear_item = await crud_gear_items.get(
-        db=db, uuid=uuid, is_deleted=False, schema_to_select=GearItemReadInternal, return_as_model=True
-    )
-    if db_gear_item is None:
-        raise NotFoundException("Gear item not found")
-
-    db_gear_item = cast(GearItemReadInternal, db_gear_item)
-    if db_gear_item.user_id != current_user["id"]:
-        raise ForbiddenException()
+    # Authorize before the cached read: `@cache` replays a hit without re-checking.
+    await _get_owned_gear_item(db, uuid, current_user)
 
     return await _cached_read_gear_item(
         request, user_id=current_user["id"], uuid=uuid, owner_uuid=current_user["uuid"], db=db
@@ -250,15 +262,7 @@ async def patch_gear_item(
     """Partial update, including archiving/unarchiving via `is_archived` - `archived_at`
     is derived here rather than accepted from the caller.
     """
-    db_gear_item = await crud_gear_items.get(
-        db=db, uuid=uuid, is_deleted=False, schema_to_select=GearItemReadInternal, return_as_model=True
-    )
-    if db_gear_item is None:
-        raise NotFoundException("Gear item not found")
-
-    db_gear_item = cast(GearItemReadInternal, db_gear_item)
-    if db_gear_item.user_id != current_user["id"]:
-        raise ForbiddenException()
+    db_gear_item = await _get_owned_gear_item(db, uuid, current_user)
 
     effective_name = values.name if values.name is not None else db_gear_item.name
     effective_brand = values.brand if "brand" in values.model_fields_set else db_gear_item.brand
@@ -302,16 +306,11 @@ async def erase_gear_item(
     this the digest would keep emailing about gear the diver can no longer see. The
     service *records* are left alone - see `soft_delete_schedules_for_gear_item`.
     """
-    db_gear_item = await crud_gear_items.get(db=db, uuid=uuid, schema_to_select=GearItemReadInternal)
-    if db_gear_item is None:
-        raise NotFoundException("Gear item not found")
+    # `include_deleted`: deleting an already-soft-deleted gear item is a no-op, not a 404.
+    db_gear_item = await _get_owned_gear_item(db, uuid, current_user, include_deleted=True)
+    owner_id = db_gear_item.user_id
 
-    owner_id = _gear_item_owner_id(db_gear_item)
-    if owner_id != current_user["id"]:
-        raise ForbiddenException()
-
-    gear_item_id = cast(int, db_gear_item["id"] if isinstance(db_gear_item, dict) else db_gear_item.id)
-    await soft_delete_schedules_for_gear_item(db=db, gear_item_id=gear_item_id, commit=False)
+    await soft_delete_schedules_for_gear_item(db=db, gear_item_id=db_gear_item.id, commit=False)
     await crud_gear_items.delete(db=db, uuid=uuid)
     await invalidate_gear_caches(owner_id)
     # Soft-deleted gear stays on the dives that used it, so their cached reads still

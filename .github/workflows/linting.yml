@@ -20,4 +20,7 @@ jobs:
         run: uv sync --extra dev
 
       - name: Run Ruff
-        run: uv run ruff check src
+        run: uv run ruff check src tests
+
+      - name: Check formatting
+        run: uv run ruff format --check src tests

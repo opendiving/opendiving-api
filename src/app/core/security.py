@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
+import anyio
 from fastapi.security import OAuth2PasswordBearer
 from google.auth.exceptions import GoogleAuthError
 from google.auth.transport import requests as google_requests
@@ -15,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
 from .db.crud_token_blacklist import crud_token_blacklist
+from .exceptions.http_exceptions import UnauthorizedException
 from .schemas import DiveFileTokenData, GoogleUserInfo, OnboardingTokenData, TokenBlacklistCreate, TokenData
 
 SECRET_KEY: SecretStr = settings.SECRET_KEY
@@ -85,13 +87,23 @@ async def verify_google_id_token(credential: str) -> GoogleUserInfo | None:
     if not settings.GOOGLE_CLIENT_ID:
         return None
 
-    try:
+    def _verify() -> dict[str, Any]:
         # `verify_oauth2_token` validates the signature (against Google's published
         # public keys), expiry, issuer, and - via `audience` - that this token was
         # actually issued for *this* app's OAuth client, not some other one.
-        payload = google_id_token.verify_oauth2_token(
+        #
+        # Fetching those public keys is a *blocking* HTTPS call (`google.auth.transport.
+        # requests` is built on `requests`), made whenever the library's key cache is cold
+        # or stale. Left on the event loop it stalls every other in-flight request for the
+        # duration of a round trip to Google, so it goes to a worker thread - the same
+        # treatment `services.email_service` gives Resend's equally blocking client.
+        verified: dict[str, Any] = google_id_token.verify_oauth2_token(
             credential, google_requests.Request(), audience=settings.GOOGLE_CLIENT_ID
         )
+        return verified
+
+    try:
+        payload = await anyio.to_thread.run_sync(_verify)
     except GoogleAuthError, ValueError:
         return None
 
@@ -273,6 +285,30 @@ def verify_dive_file_token(token: str) -> DiveFileTokenData | None:
 
 
 # -------------- blacklisting --------------
+async def _blacklist_one(token: str, db: AsyncSession) -> None:
+    """Record a single token as revoked until its own `exp` passes.
+
+    A token that can't be decoded can't be blacklisted, and the callers here reach this
+    from routes that already authenticated - so a `JWTError` means a malformed token was
+    handed in, which is a 401, not the unhandled 500 an escaping `JWTError` would
+    produce.
+
+    `exp` is seconds since the Unix epoch, i.e. UTC. `datetime.fromtimestamp` without a
+    tzinfo would render that in the *host's* local zone and store the result in a
+    `DateTime(timezone=True)` column - so a server in UTC+2 would file every entry two
+    hours late and `purge_expired_tokens` would delete each one two hours early.
+    """
+    try:
+        payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
+    except JWTError:
+        raise UnauthorizedException("Invalid token.") from None
+
+    exp_timestamp = payload.get("exp")
+    if exp_timestamp is not None:
+        expires_at = datetime.fromtimestamp(exp_timestamp, UTC)
+        await crud_token_blacklist.create(db, object=TokenBlacklistCreate(token=token, expires_at=expires_at))
+
+
 async def blacklist_tokens(access_token: str, refresh_token: str, db: AsyncSession) -> None:
     """Blacklist both access and refresh tokens.
 
@@ -286,16 +322,8 @@ async def blacklist_tokens(access_token: str, refresh_token: str, db: AsyncSessi
         Database session for performing database operations.
     """
     for token in [access_token, refresh_token]:
-        payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
-        exp_timestamp = payload.get("exp")
-        if exp_timestamp is not None:
-            expires_at = datetime.fromtimestamp(exp_timestamp)
-            await crud_token_blacklist.create(db, object=TokenBlacklistCreate(token=token, expires_at=expires_at))
+        await _blacklist_one(token, db)
 
 
 async def blacklist_token(token: str, db: AsyncSession) -> None:
-    payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
-    exp_timestamp = payload.get("exp")
-    if exp_timestamp is not None:
-        expires_at = datetime.fromtimestamp(exp_timestamp)
-        await crud_token_blacklist.create(db, object=TokenBlacklistCreate(token=token, expires_at=expires_at))
+    await _blacklist_one(token, db)

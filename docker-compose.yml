@@ -13,9 +13,13 @@ services:
       - "8000:8000"
     # expose:
     #   - "8000"
+    # Wait for the datastores to answer, not merely to have been started - otherwise the
+    # app's `create_all()` on startup races an initializing Postgres.
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       - ./src/app:/code/app
       - ./src/.env:/code/.env
@@ -33,8 +37,10 @@ services:
     env_file:
       - ./src/.env
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       - ./src/app:/code/app
       - ./src/.env:/code/.env
@@ -45,16 +51,30 @@ services:
       - ./src/.env
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     # -------- replace with comment to run migrations with docker --------
     expose:
       - "5432"
+    # Publishes Postgres on the host so `psql` and the test suite can reach it directly.
+    # Local development only - do not carry this stanza into a deployment, where it puts
+    # the database on a routable interface.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
 
   redis:
     image: redis:alpine
     volumes:
       - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     expose:
       - "6379"
 

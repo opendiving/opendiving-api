@@ -91,10 +91,16 @@ ignore = [
 ]
 
 [tool.ruff.lint.mccabe]
+# Ruff's default is 10. This codebase has a handful of legitimately branchy functions
+# (the dive-file parsers, the gear-service due-date arithmetic), and lowering this would
+# mostly generate noqa comments rather than simpler code. Raise the bar deliberately if
+# those get split up.
 max-complexity = 24
 
-[tool.ruff.lint.pydocstyle]
-convention = "numpy"
+# NOTE: a `[tool.ruff.lint.pydocstyle] convention = "numpy"` block used to sit here. It
+# did nothing - "D" was never in `select` above, so no docstring rule ever ran and the
+# convention setting had nothing to configure. Removed rather than left looking active;
+# add "D" to `select` if docstring linting is actually wanted.
 
 [tool.pytest.ini_options]
 filterwarnings = [
@@ -123,5 +129,24 @@ explicit_package_bases = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = "app.*"
+# Both spellings of the same code: `app.*` when checked as `mypy src` (which resolves
+# through `mypy_path`), `src.app.*` when reached from the test suite's imports. Without
+# the second, `disallow_untyped_defs` silently stopped applying to everything a test
+# pulls in.
+module = ["app.*", "src.app.*"]
 disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+# Every schema in `app.schemas` declares optional fields as
+# `Annotated[T | None, Field(default=None)]`. Pydantic's mypy plugin does not read
+# defaults out of `Annotated` - only the `x: T = Field(default=...)` assignment form -
+# so it synthesizes an `__init__` where those fields are required, and every test that
+# builds a schema while omitting an optional field is reported as a missing argument.
+# That was 108 false positives, which is why the test suite was never type-checked.
+#
+# Disabled only for `tests.*`, and only this one code: `arg-type`, `attr-defined`,
+# `no-any-return` and the rest still apply here. Production code is unaffected - drop
+# this override once the plugin handles `Annotated` defaults, and the real missing
+# arguments it would catch come back.
+disable_error_code = ["call-arg"]
