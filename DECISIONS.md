@@ -416,7 +416,7 @@ Once the route itself lived at `/user/{uuid}/dive-stats`, keeping its handler in
 single-endpoint `dive_stats.py` module (tagged `"dive-stats"`) no longer made sense either - by that
 point it was, structurally, just another single-user route under `/user/{uuid}/...`, like
 `email-change/request` or the plain `GET /user/{uuid}`. `read_dive_stats` was moved into `users.py`
-and now shares that module's `"users"` tag; `dive_stats.py` no longer exists, and
+and now shares that module's `"user"` tag; `dive_stats.py` no longer exists, and
 `api/v1/__init__.py` no longer registers a separate router for it. This only affects where the
 *route* lives - `models/`, `schemas/user_dive_stats.py`, `crud/crud_user_dive_stats.py`, and
 `services/dive_stats.py` (the recalculation logic invoked from `dives.py`) are unrelated internals
@@ -706,6 +706,16 @@ these are same-origin API calls from apps we control, not a public integration s
 While touching tags, `dive_sites.py`'s tag was also renamed from `"dive_sites"` to `"dive-sites"`,
 matching the dash-separated convention every other module's tag already followed (`"dive-stats"`,
 `"dive-site"`-style URL segments) - it was the one holdout still using an underscore.
+
+Later, `users.py`'s tag was renamed from `"users"` to `"user"` for the same reason: a tag names the
+URL segment its routes hang off, and since "Current-user routes moved off `/user/me` and
+`/user/{uuid}` onto a bare `/user`" (below) every route in that module lives under `/user` -
+`GET/PATCH/DELETE /user`, `/user/email-change/...`, `/user/dive-stats`, `/user/gas-use-history`,
+`/user/dive-activity`. There is no `/users` collection endpoint left, and the note at the top of
+`api/v1/users.py` explains why a public listing isn't coming back soon, so the plural heading in
+`/docs` grouped those routes under a path nothing serves. The module file keeps its `users.py` name,
+which follows the plural-module convention shared with `dives.py`/`trips.py` and is independent of
+the tag.
 
 ## Changing an account's email requires confirming the new address first
 
