@@ -36,7 +36,7 @@ from ...services.dive_activity import dive_activity
 from ...services.dive_gas import gas_use_history
 from ...services.email_service import send_email_change_confirmation_email, send_email_changed_notification
 
-router = APIRouter(tags=["users"])
+router = APIRouter(tags=["user"])
 
 # Note: there is no `POST /user` here - account creation only ever happens via
 # `POST /auth/complete` (see `api.v1.auth`), after an identity (email or Google) has
