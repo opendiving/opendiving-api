@@ -1,28 +1,26 @@
 # Authentication
 
-How sign-in, sign-up, account linking, session refresh, and email changes work
-in the OpenDiving API.
+How sign-in, sign-up, account linking, session refresh, and email changes work in the OpenDiving
+API.
 
-There is a single entry point into the app: email magic link or Google - no
-passwords, no separate sign up flow. See `src/app/api/v1/auth.py` for the endpoints
-(`/auth/email/request`, `/auth/email/verify`, `/auth/google`, `/auth/complete`) and
-`DECISIONS.md` for the full design rationale.
+There is a single entry point into the app: email magic link or Google - no passwords, no separate
+sign up flow. See `src/app/api/v1/auth.py` for the endpoints (`/auth/email/request`,
+`/auth/email/verify`, `/auth/google`, `/auth/complete`) and `DECISIONS.md` for the full design
+rationale.
 
-Changing an account's email (`src/app/api/v1/users.py`) reuses the same magic-link
-mechanics: `POST /user/email-change/request` emails a confirmation link to the
-*new* address, and the change only applies once `POST /user/email-change/verify`
-confirms it - see `DECISIONS.md`.
+Changing an account's email (`src/app/api/v1/users.py`) reuses the same magic-link mechanics:
+`POST /user/email-change/request` emails a confirmation link to the *new* address, and the change
+only applies once `POST /user/email-change/verify` confirms it - see `DECISIONS.md`.
 
 All endpoints below are mounted under `/api/v1` (e.g. `/api/v1/auth/email/request`).
 
 ### User journeys
 
 Every journey funnels through the same question, answered once by
-`services.auth_service.resolve_identity`: "has this verified identity (an email
-address, or - for Google - a stable provider subject id) been seen before?" The
-answer decides whether the caller is signed in immediately or sent to onboarding -
-there is no other branch point, and no `User` row is ever created outside of
-`POST /auth/complete`.
+`services.auth_service.resolve_identity`: "has this verified identity (an email address, or - for
+Google - a stable provider subject id) been seen before?" The answer decides whether the caller is
+signed in immediately or sent to onboarding - there is no other branch point, and no `User` row is
+ever created outside of `POST /auth/complete`.
 
 ```mermaid
 flowchart TD
@@ -40,9 +38,9 @@ flowchart TD
 
 #### 1. Sign up with email (new user)
 
-No separate "register" endpoint - a brand-new email just falls out of the same
-`/auth/email/request` → `/auth/email/verify` pair as signing in, because the server
-doesn't know yet whether the address belongs to anyone.
+No separate "register" endpoint - a brand-new email just falls out of the same `/auth/email/request`
+→ `/auth/email/verify` pair as signing in, because the server doesn't know yet whether the address
+belongs to anyone.
 
 ```mermaid
 sequenceDiagram
@@ -82,8 +80,8 @@ sequenceDiagram
 
 #### 2. Sign in with email (existing user)
 
-Identical first step to signing up - the difference only appears once the link is
-verified and `resolve_identity` finds a matching account.
+Identical first step to signing up - the difference only appears once the link is verified and
+`resolve_identity` finds a matching account.
 
 ```mermaid
 sequenceDiagram
@@ -111,9 +109,9 @@ sequenceDiagram
 
 #### 3. Sign in / sign up with Google
 
-One endpoint (`POST /auth/google`) covers both a brand-new Google sign-in and one
-for an account that already exists (either created via Google before, or via email
-and now linking Google for the first time).
+One endpoint (`POST /auth/google`) covers both a brand-new Google sign-in and one for an account
+that already exists (either created via Google before, or via email and now linking Google for the
+first time).
 
 ```mermaid
 sequenceDiagram
@@ -150,8 +148,8 @@ sequenceDiagram
 
 #### 4. Linking a second provider to an existing account
 
-No explicit "link account" action exists - linking is a side effect of
-`resolve_identity` recognizing the same email under a different provider.
+No explicit "link account" action exists - linking is a side effect of `resolve_identity`
+recognizing the same email under a different provider.
 
 ```mermaid
 sequenceDiagram
@@ -188,9 +186,9 @@ sequenceDiagram
 
 #### 6. Changing an account's email
 
-Shares the magic-link mechanics above, but requires an active session to start,
-and a precheck on the confirmation page so a stale/already-used link never shows a
-clickable button to begin with (see `DECISIONS.md`).
+Shares the magic-link mechanics above, but requires an active session to start, and a precheck on
+the confirmation page so a stale/already-used link never shows a clickable button to begin with (see
+`DECISIONS.md`).
 
 ```mermaid
 sequenceDiagram
