@@ -24,3 +24,9 @@ jobs:
 
       - name: Check formatting
         run: uv run ruff format --check src tests
+
+      # Paths are spelled out because mdformat 1.0 has no `--exclude`, and handing it a
+      # directory walks everything below it - `.venv/` included, which is 60-odd
+      # markdown files from site-packages.
+      - name: Check markdown formatting
+        run: uv run mdformat --check *.md docs

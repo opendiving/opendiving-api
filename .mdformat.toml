@@ -1,0 +1,10 @@
+# Markdown formatting for the docs at the repo root and under `docs/`.
+#
+# `wrap = 100` matches the `printWidth` opendiving-web's Prettier config uses for
+# markdown, so the two DECISIONS.md files stay visually alike. `number = true` keeps
+# ordered lists numbered 1., 2., 3. rather than rewriting every item to `1.`.
+#
+# mdformat has no `--exclude`, and pointing it at a directory walks `.venv/`, so the
+# paths are spelled out wherever it is invoked. See DECISIONS.md.
+wrap = 100
+number = true
