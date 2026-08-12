@@ -391,9 +391,9 @@ class SuuntoJsonParser(DiveParser):
             depth=series(depth),
             temperature=series(temperature),
             pressure=[
-                ParsedPressureSeries(gas_number=gas_number, t=series.t, v=series.v)
-                for gas_number, series in ((number, series(points)) for number, points in pressure.items())
-                if series is not None
+                ParsedPressureSeries(gas_number=gas_number, t=channel.t, v=channel.v)
+                for gas_number, channel in ((number, series(points)) for number, points in pressure.items())
+                if channel is not None
             ],
         )
 

@@ -688,11 +688,11 @@ class FitParser(DiveParser):
             # `<TransmitterId>`, and it keeps a single-cylinder dive labelled gas 1 there
             # and here alike.
             pressure=[
-                ParsedPressureSeries(gas_number=number, t=series.t, v=series.v)
-                for number, series in (
+                ParsedPressureSeries(gas_number=number, t=channel.t, v=channel.v)
+                for number, channel in (
                     (position, series([(elapsed(t), scaled_int(v, TENTHS_PER_UNIT)) for t, v in readings]))
                     for position, readings in enumerate(scan.pressure.values(), start=1)
                 )
-                if series is not None
+                if channel is not None
             ],
         )
