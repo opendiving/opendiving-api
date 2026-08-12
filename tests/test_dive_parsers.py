@@ -126,31 +126,57 @@ VALID_SUUNTO_JSON_WITH_GASES = """
 """
 
 
-def _ocean_json(samples: list[dict]) -> bytes:
+def _ocean_json(samples: list[dict], dive_time: float = 300.0) -> bytes:
     """A 2026 Suunto Ocean-shaped export: no `Header.Diving`, gas data only in the
-    samples' `Cylinders`. Five cylinder slots per sample with one paired, as the device
-    writes them."""
+    samples' `Cylinders` and `DiveEvents`. Five cylinder slots per sample with one
+    paired, as the device writes them. `DiveTime` is the in-water time, which the
+    samples routinely outlast."""
     return json.dumps(
         {
             "DeviceLog": {
-                "Header": {"DateTime": "2026-04-03T12:04:11.390+02:00", "Depth": {"Max": 21.1}},
+                "Header": {
+                    "DateTime": "2026-04-03T12:04:11.390+02:00",
+                    "DiveTime": dive_time,
+                    "Depth": {"Max": 21.1},
+                },
                 "Samples": samples,
             }
         }
     ).encode()
 
 
-def _ocean_sample(offset_seconds: int, pressure: int | None) -> dict:
+def _ocean_time(offset_seconds: int) -> str:
     minute, second = divmod(offset_seconds, 60)
+    return f"2026-04-03T12:{4 + minute:02d}:{11 + second:02d}.390+02:00"
+
+
+def _ocean_sample(offset_seconds: int, pressure: int | None, gas_number: int = 0) -> dict:
+    """One sample carrying a cylinder reading on `gas_number`, and null in every other slot."""
     return {
-        "TimeISO8601": f"2026-04-03T12:{4 + minute:02d}:{11 + second:02d}.390+02:00",
-        "Cylinders": [{"GasNumber": 0, "GasTime": 2789, "Pressure": pressure, "Ventilation": 0.00018}]
-        + [{"GasNumber": n, "GasTime": 0, "Pressure": None, "Ventilation": 0} for n in range(1, 5)],
+        "TimeISO8601": _ocean_time(offset_seconds),
+        "Cylinders": [
+            {
+                "GasNumber": n,
+                "GasTime": 2789 if n == gas_number else 0,
+                "Pressure": pressure if n == gas_number else None,
+                "Ventilation": 0.00018 if n == gas_number else 0,
+            }
+            for n in range(5)
+        ],
+    }
+
+
+def _ocean_gas_switch(offset_seconds: int, gas_number: int) -> dict:
+    """The only record this export keeps of *which* cylinders were on the dive."""
+    return {
+        "TimeISO8601": _ocean_time(offset_seconds),
+        "DiveEvents": {"GasSwitch": {"GasNumber": gas_number}},
     }
 
 
 OCEAN_JSON_WITH_CYLINDERS = _ocean_json(
     [
+        _ocean_gas_switch(0, 0),
         _ocean_sample(0, 20510938),
         _ocean_sample(10, 15000000),
         _ocean_sample(20, 9155000),
@@ -168,6 +194,29 @@ OCEAN_JSON_WITH_UNORDERED_CYLINDERS = _ocean_json(
         _ocean_sample(0, 20510938),
         _ocean_sample(10, 15000000),
     ]
+)
+
+# A real two-gas dive: the diver starts on gas 0 (transmitted) and switches to a deco
+# cylinder with no pod on it. Only gas 0 ever reports a pressure.
+OCEAN_JSON_MULTI_GAS = _ocean_json(
+    [
+        _ocean_gas_switch(0, 0),
+        _ocean_sample(0, 21162500),
+        _ocean_sample(60, 12727000),
+        _ocean_gas_switch(120, 1),
+    ]
+)
+
+# The dive ends at `DiveTime`, but the computer keeps logging on the boat - where the
+# diver purges the regulator and the transmitter reports an empty tank.
+OCEAN_JSON_WITH_POST_DIVE_PURGE = _ocean_json(
+    [
+        _ocean_gas_switch(0, 0),
+        _ocean_sample(0, 20469000),
+        _ocean_sample(240, 5334000),
+        _ocean_sample(360, 12000),
+    ],
+    dive_time=300.0,
 )
 
 
@@ -445,10 +494,52 @@ class TestSuuntoJsonParserParse:
         assert mixture.volume is None
 
     def test_ignores_cylinder_slots_that_never_reported(self):
-        """An Ocean reports five cylinder slots on every sample with only one paired."""
+        """An Ocean reports five cylinder slots on every sample with only one paired, and
+        a slot nothing was ever breathed from is not a cylinder."""
         parsed = SuuntoJsonParser.parse(OCEAN_JSON_WITH_CYLINDERS)
 
         assert len(parsed.mixtures) == 1
+
+    def test_lists_a_switched_to_cylinder_that_had_no_transmitter(self):
+        """The cylinder list comes from `DiveEvents.GasSwitch`, not from which tanks
+        transmitted - so a deco bottle with no pod still appears.
+
+        Building it from telemetry alone would emit a single mixture carrying both
+        pressures, which is exactly the shape `compute_gas_use` derives an RMV from: a
+        stage bottle's pressure drop would have been attributed to the whole dive. With
+        two cylinders present the RMV correctly declines to compute.
+        """
+        parsed = SuuntoJsonParser.parse(OCEAN_JSON_MULTI_GAS)
+
+        assert len(parsed.mixtures) == 2
+        # The pressures land on the cylinder that actually reported them - `Cylinders[]`
+        # and `GasSwitch` share one gas numbering, so this is read, not guessed.
+        assert parsed.mixtures[0].start_pressure == 211.62
+        assert parsed.mixtures[0].end_pressure == 127.27
+        assert parsed.mixtures[1].start_pressure is None
+        assert parsed.mixtures[1].end_pressure is None
+
+    def test_cylinders_follow_the_order_they_were_breathed_in(self):
+        """Switch order is chronological, so the back gas is first and deco gases follow -
+        matching how the form names the rows (`getDefaultMixtureName`)."""
+        parsed = SuuntoJsonParser.parse(OCEAN_JSON_MULTI_GAS)
+
+        assert [mixture.start_pressure is not None for mixture in parsed.mixtures] == [True, False]
+
+    def test_ignores_transmitter_readings_from_after_the_dive(self):
+        """The computer keeps logging on the boat, where the diver purges the regulator.
+
+        Two dives in the corpus end that way, and taking the file's final reading gave
+        them an end pressure of 0.14 bar instead of 53 and 76 - which `compute_gas_use`
+        turns into a diver who breathed their cylinder dry.
+        """
+        parsed = SuuntoJsonParser.parse(OCEAN_JSON_WITH_POST_DIVE_PURGE)
+        mixture = parsed.mixtures[0]
+
+        assert mixture.start_pressure == 204.69
+        # 53.34 bar at the end of the dive, not the 0.12 bar the purged hose reported
+        # a minute after it.
+        assert mixture.end_pressure == 53.34
 
     def test_cylinder_pressures_are_ordered_by_time_not_by_position(self):
         """The union of an Ocean's sample timestamps is not monotonic - separate sensor

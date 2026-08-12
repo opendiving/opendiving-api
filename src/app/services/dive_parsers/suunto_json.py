@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
@@ -132,13 +132,40 @@ def _parse_mixture(gas: dict[str, Any]) -> DiveMixtureSchema:
     )
 
 
-def _cylinder_pressures(samples: list[dict[str, Any]]) -> dict[int, tuple[float, float]]:
+def _dive_window_end(header: dict[str, Any]) -> datetime | None:
+    """When the dive itself ended, as opposed to when the device stopped logging.
+
+    `DiveTime` is the in-water time and `Duration` the whole logged period, and they are
+    not close: one dive in the corpus records `DiveTime` 3 888 s against `Duration`
+    4 231 s. That gap is the boat, and it is where the diver breaks down their kit.
+
+    `None` when the header has no `DiveTime`, which leaves the readings unbounded -
+    weaker, but never worse than not knowing. Deliberately does *not* fall back to
+    `Duration`: bounding a window by its own full length isn't a bound.
+    """
+    start_text = header.get("DateTime")
+    dive_time = header.get("DiveTime")
+    if not start_text or dive_time is None:
+        return None
+    return datetime.fromisoformat(start_text) + timedelta(seconds=float(dive_time))
+
+
+def _cylinder_pressures(samples: list[dict[str, Any]], dive_end: datetime | None) -> dict[int, tuple[float, float]]:
     """First and last transmitter reading per cylinder, from `Samples[].Cylinders[]`.
 
     Ordered by the sample's own timestamp rather than by position in the array: the
     *union* of an Ocean export's sample timestamps is not monotonic (adjacent entries go
     backwards by up to 0.7 s, because the separate sensor streams are appended out of
     order), so "the last entry in the file" is not reliably the last reading of the dive.
+
+    **Readings after the dive ended are dropped**, which matters far more than it sounds.
+    The transmitter keeps reporting while the computer is still logging on the surface,
+    so the last reading in the file is whatever the tank read once the diver purged the
+    regulator to break down their kit. Two dives in the corpus end that way, and taking
+    the final reading gave them an end pressure of **0.14 bar** instead of 53 and 76 -
+    which `compute_gas_use` would have turned into a diver breathing their whole cylinder
+    dry, and an RMV to match. Bounding on `DiveTime` moves every other dive by under
+    2 bar, the surface-breathing before derigging.
 
     A cylinder is only included once it has a real reading. An Ocean reports five slots
     on every sample with `Pressure: null` in the ones nothing is paired to, and its final
@@ -151,6 +178,8 @@ def _cylinder_pressures(samples: list[dict[str, Any]]) -> dict[int, tuple[float,
         if not time_text:
             continue
         moment = datetime.fromisoformat(time_text)
+        if dive_end is not None and moment > dive_end:
+            continue
         for cylinder in sample.get("Cylinders") or []:
             pressure = cylinder.get("Pressure")
             if pressure is None:
@@ -161,15 +190,51 @@ def _cylinder_pressures(samples: list[dict[str, Any]]) -> dict[int, tuple[float,
     return {number: (points[0][1], points[-1][1]) for number, points in ordered.items() if points}
 
 
-def _mixtures_from_cylinders(samples: list[dict[str, Any]]) -> list[DiveMixtureSchema]:
-    """Reconstruct mixtures from transmitter telemetry, for an export with no gas list.
+def _gases_breathed(samples: list[dict[str, Any]]) -> list[int]:
+    """Gas numbers the diver actually switched to, in the order they were first used.
+
+    `Samples[].DiveEvents.GasSwitch.GasNumber` is the only record this export keeps of
+    *which* cylinders were on the dive - and it is keyed by the same gas number as
+    `Cylinders[]`, which is what makes a transmitter reading attributable to a specific
+    cylinder rather than to "whichever tank this was". A real multi-gas dive in the
+    corpus opens with `GasSwitch: {GasNumber: 0}` and switches to `{GasNumber: 1}` at
+    12:23:58, matching the two gases its FIT twin lists.
+
+    Switch order is chronological, so the back gas comes first and deco gases follow -
+    which is also the order the dive form names rows in (`getDefaultMixtureName`).
+    """
+    order: list[int] = []
+    for sample in samples:
+        events = sample.get("DiveEvents")
+        for event in events if isinstance(events, list) else [events]:
+            if not isinstance(event, dict):
+                continue
+            switch = event.get("GasSwitch")
+            if not isinstance(switch, dict):
+                continue
+            number = switch.get("GasNumber")
+            if number is not None and int(number) not in order:
+                order.append(int(number))
+    return order
+
+
+def _mixtures_from_cylinders(samples: list[dict[str, Any]], dive_end: datetime | None) -> list[DiveMixtureSchema]:
+    """Reconstruct the dive's cylinders from gas-switch events and transmitter telemetry.
 
     The 2026 Suunto Ocean's JSON export is a third header shape: it has no
     `Header.Diving` block at all, so the `Gases[]` path finds nothing and every dive
-    imported from one came back with no mixtures - even though the file carries several
-    hundred `Cylinders[].Pressure` readings. Those readings are the whole point of a
-    transmitter, and they are what `compute_gas_use` needs, so the cylinders that
-    actually reported are turned into mixtures here.
+    imported from one came back with no mixtures - even though the file records both
+    which cylinders were breathed and several hundred pressure readings, just not where
+    the other exports keep them.
+
+    **A cylinder is listed because the diver switched to it, not because it transmitted.**
+    That distinction is what makes this safe on a multi-gas dive. Building the list from
+    telemetry alone would emit exactly one mixture for a two-tank dive - and a lone
+    mixture carrying both pressures is precisely the shape `compute_gas_use` derives an
+    RMV from, so a stage bottle's pressure drop would have been silently attributed to
+    the whole dive. Reading `GasSwitch` instead means a two-gas dive produces two
+    cylinders, each pressure lands on the numbered cylinder it actually belongs to, and
+    the RMV correctly declines to compute because there is more than one tank.
 
     Only the pressures are real, and nothing else is invented to fill the gap. This
     export records no gas fraction and no tank size anywhere - verified across the whole
@@ -178,16 +243,22 @@ def _mixtures_from_cylinders(samples: list[dict[str, Any]]) -> list[DiveMixtureS
     `DEFAULT_MIXTURE` to them, exactly as it would for a cylinder the diver added by
     hand. Reporting air here would have been indistinguishable from having read air.
     """
+    pressures = _cylinder_pressures(samples, dive_end)
+    breathed = _gases_breathed(samples)
+    # Switch order first, then any cylinder that transmitted without a recorded switch:
+    # evidence of a tank is evidence of a tank, whichever way round it arrived.
+    numbers = breathed + [number for number in sorted(pressures) if number not in breathed]
+
     return [
         DiveMixtureSchema(
-            end_pressure=_round2_or_none(_pascals_to_bar(end)),
+            end_pressure=_round2_or_none(_pascals_to_bar(pressures[number][1])) if number in pressures else None,
             helium=None,
             name=None,
             oxygen=None,
-            start_pressure=_round2_or_none(_pascals_to_bar(start)),
+            start_pressure=_round2_or_none(_pascals_to_bar(pressures[number][0])) if number in pressures else None,
             volume=None,
         )
-        for _, (start, end) in sorted(_cylinder_pressures(samples).items())
+        for number in numbers
     ]
 
 
@@ -350,7 +421,7 @@ class SuuntoJsonParser(DiveParser):
         # cylinders reconstructed from the sample stream.
         mixtures = [_parse_mixture(gas) for gas in diving.get("Gases") or []]
         if not mixtures:
-            mixtures = _mixtures_from_cylinders(samples)
+            mixtures = _mixtures_from_cylinders(samples, _dive_window_end(header))
 
         temperatures_celsius = [
             celsius

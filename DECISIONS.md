@@ -3130,6 +3130,54 @@ Three details this has to get right:
 size that telemetry alone cannot, so the sample-derived path is a fallback for an empty
 list, not a merge. The D5 exports are unaffected.
 
+**The cylinder list comes from `DiveEvents.GasSwitch`, not from which tanks
+transmitted** - and getting that round the right way is what makes this safe on a
+multi-gas dive. A `Samples[].DiveEvents` entry of `{"GasSwitch": {"GasNumber": 1}}` is
+the only record the export keeps of *which* cylinders were on the dive, and it is keyed
+by the same gas number as `Cylinders[]`, so a transmitter reading is attributable to a
+named cylinder rather than to "whichever tank this was".
+
+Listing only the tanks that transmitted would have been actively dangerous. A two-tank
+dive would produce exactly one mixture carrying both pressures - which is precisely the
+shape `compute_gas_use` derives an RMV from ("exactly one mixture, an average depth, both
+pressures") - so a stage bottle's pressure drop would have been silently charged to the
+whole dive. Reading the switches instead means a two-gas dive yields two cylinders, the
+pressures land on the one that reported them, and the RMV correctly declines to compute.
+Across the 19-dive Ocean corpus this finds 4 multi-gas dives, and on the one that also has
+a FIT twin the two formats now agree on the cylinder count.
+
+**Readings from after the dive ended are dropped, bounded by `Header.DiveTime`.** The
+transmitter keeps reporting while the computer logs on the surface, so the file's last
+reading is whatever the tank read once the diver purged the regulator to break down their
+kit - one dive records `DiveTime` 3 888 s against `Duration` 4 231 s, and that gap is the
+boat. Two dives in the corpus end on a purge, and taking the final reading gave them an end
+pressure of **0.14 bar** instead of 53 and 76: a diver who breathed their cylinder dry, and
+an RMV to match. The bound moves every other dive by under 2 bar (surface breathing before
+derigging). Deliberately not falling back to `Duration` when `DiveTime` is absent -
+bounding a window by its own full length is not a bound.
+
+The *profile* pressure series is deliberately left unbounded and still shows the purge as a
+cliff at the end. That is what the sensor reported, and the same reasoning keeps the XML
+parser on raw `Temperature` rather than `AveragedTemperature`: trimming is a chart decision
+that shouldn't be baked into storage. Only the mixture pressures are bounded, because only
+they feed an RMV.
+
+**What still cannot be recovered is the gas *mix*.** A cylinder's presence and pressures
+survive; what was in it does not. `Header.Settings` holds no gas configuration and the
+string `Oxygen` appears nowhere in any 2026 file, so the two Suunto Ocean exports remain
+complementary. The same dive, `69e21526bf486d396e2786b5`, imported both ways:
+
+| | cylinders | gas mixes | tank pressures |
+| --- | --- | --- | --- |
+| Ocean **FIT** | 2 | 21 % and 54 % | none - Suunto's FIT export carries no transmitter data |
+| Ocean **JSON** | 2 | none recorded anywhere | 211.62 → 127.16 bar on the transmitting one |
+
+A multi-gas diver still has to type the mixes in after a JSON import, or the pressures in
+after a FIT one. The real fix is letting a dive keep more than one source export and merging
+what each format knows, which `ux_dive_file_dive_id` (one file per dive) and the single-file
+parse-token flow both currently rule out - a deliberate design to revisit rather than an
+oversight.
+
 ## Parsers report what a file recorded, and `None` for what it didn't
 
 `DiveMixtureSchema`'s `oxygen`, `helium` and `volume` are nullable, and no parser
