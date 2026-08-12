@@ -23,7 +23,7 @@ from ...crud.crud_user_dive_stats import crud_user_dive_stats
 from ...crud.crud_users import crud_users
 from ...schemas.auth import LinkCheckResponse
 from ...schemas.authentication_request import AuthenticationRequestCreate, AuthenticationRequestUpdate
-from ...schemas.dive import DiveGasUsePoint
+from ...schemas.dive import DiveActivityPoint, DiveGasUsePoint
 from ...schemas.email_change import (
     EmailChangeRequest,
     EmailChangeRequestResponse,
@@ -32,6 +32,7 @@ from ...schemas.email_change import (
 )
 from ...schemas.user import UserRead, UserUpdate
 from ...schemas.user_dive_stats import UserDiveStatsRead, UserDiveStatsReadInternal
+from ...services.dive_activity import dive_activity
 from ...services.dive_gas import gas_use_history
 from ...services.email_service import send_email_change_confirmation_email, send_email_changed_notification
 
@@ -339,6 +340,38 @@ async def read_gas_use_history(
     Always the caller's own account, like `/user/dive-stats` - no uuid parameter.
     """
     return await _cached_gas_use_history(request, user_id=current_user["id"], db=db)
+
+
+# Keyed under `user_{id}_dives:` for the same reason as `_cached_gas_use_history` above:
+# `invalidate_dive_caches()` already sweeps that prefix after every dive write, so this
+# series drops with them and needs no invalidation change of its own. The same
+# authorization caveat applies - `@cache` serves a hit without re-running the route body,
+# so this must only ever be called with the calling user's own id.
+@cache(key_prefix="user_{user_id}_dives:dive_activity", resource_id_name="user_id", expiration=60)
+async def _cached_dive_activity(request: Request, user_id: int, db: AsyncSession) -> list[DiveActivityPoint]:
+    """Fetches (and caches) a user's dives-per-month series. Authorization happens in the
+    route below, before this is reached.
+    """
+    return await dive_activity(db=db, user_id=user_id)
+
+
+@router.get("/user/dive-activity", response_model=list[DiveActivityPoint])
+async def read_dive_activity(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> list[DiveActivityPoint]:
+    """How many dives the caller logged in each calendar month, oldest first.
+
+    Months without diving are absent, not zeroed - the client draws a fixed grid of months
+    or years and fills the gaps itself. Counts are bucketed by each dive's *own* local
+    month, so a dive keeps the month it was logged in wherever it's being read from.
+
+    The whole series rather than a page of it, like `/user/gas-use-history`: it exists to
+    be plotted, one small object per month with diving in it. Always the caller's own
+    account - no uuid parameter.
+    """
+    return await _cached_dive_activity(request, user_id=current_user["id"], db=db)
 
 
 @router.delete("/user")
