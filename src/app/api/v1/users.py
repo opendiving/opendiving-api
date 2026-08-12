@@ -349,7 +349,7 @@ async def read_gas_use_history(
 # so this must only ever be called with the calling user's own id.
 @cache(key_prefix="user_{user_id}_dives:dive_activity", resource_id_name="user_id", expiration=60)
 async def _cached_dive_activity(request: Request, user_id: int, db: AsyncSession) -> list[DiveActivityPoint]:
-    """Fetches (and caches) a user's dives-per-month series. Authorization happens in the
+    """Fetches (and caches) a user's dives-per-day series. Authorization happens in the
     route below, before this is reached.
     """
     return await dive_activity(db=db, user_id=user_id)
@@ -361,14 +361,17 @@ async def read_dive_activity(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> list[DiveActivityPoint]:
-    """How many dives the caller logged in each calendar month, oldest first.
+    """How many dives the caller logged on each calendar day, oldest first.
 
-    Months without diving are absent, not zeroed - the client draws a fixed grid of months
-    or years and fills the gaps itself. Counts are bucketed by each dive's *own* local
-    month, so a dive keeps the month it was logged in wherever it's being read from.
+    Days without diving are absent, not zeroed - the client draws a fixed grid of days,
+    months or years and fills the gaps itself. Counts are bucketed by each dive's *own*
+    local day, so a dive keeps the day it was logged on wherever it's being read from.
+
+    Days rather than months because the client windows this one series three ways, and
+    sums the finer buckets into the coarser ones itself (see `DiveActivityPoint`).
 
     The whole series rather than a page of it, like `/user/gas-use-history`: it exists to
-    be plotted, one small object per month with diving in it. Always the caller's own
+    be plotted, one small object per day with diving in it. Always the caller's own
     account - no uuid parameter.
     """
     return await _cached_dive_activity(request, user_id=current_user["id"], db=db)

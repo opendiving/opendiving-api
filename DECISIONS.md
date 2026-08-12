@@ -2743,44 +2743,75 @@ Two details in `_ascii_fallback` that look like padding and aren't:
 - A name with no ASCII in it at all folds to a bare extension, so `default` supplies the stem:
   "潜水.jpg" downloads as "card.jpg" rather than as the dotfile ".jpg".
 
-## Dives-per-month is counted in Python, off two columns, not by `date_trunc`
+## Dives-per-day is counted in Python, off two columns, not by `date_trunc`
 
-`GET /user/dive-activity` returns one `{year, month, dives}` per month a user actually dived in,
+`GET /user/dive-activity` returns one `{year, month, day, dives}` per day a user actually dived on,
 oldest first. The obvious implementation is a
-`GROUP BY date_trunc('month', start_time + make_interval(mins => utc_offset_minutes))`, which would
+`GROUP BY date_trunc('day', start_time + make_interval(mins => utc_offset_minutes))`, which would
 return the same rows without pulling any across the wire. It's deliberately not that.
 
 **The offset arithmetic has exactly one home.** `core/utils/datetime_offset.py` says so in its
 module docstring, and `combine_start_time` is what `_to_public_dive` and `gas_use_history` already
 reconstruct a dive's local time with. A `date_trunc` over `start_time + utc_offset_minutes` is a
 second copy of that rule in another language, and the failure mode when the two drift isn't an error
-\- it's a chart that quietly disagrees by one month with the dive pages it was built from, for the
-divers whose trips cross a date boundary. The same trade `gas_use_history` makes with
-`compute_gas_use`, for the same reason, at the same cost: two small columns per dive on a cached
-endpoint.
+\- it's a chart that quietly disagrees by a day with the dive pages it was built from, for the divers
+whose trips cross a date boundary. The same trade `gas_use_history` makes with `compute_gas_use`,
+for the same reason, at the same cost: two small columns per dive on a cached endpoint.
 
-**The month is the dive's own local one.** A dive that began at 00:30 on the 1st of May in Bangkok
+**The day is the dive's own local one.** A dive that began at 00:30 on the 1st of May in Bangkok
 (+07:00) is 17:30 on the 30th of April as an instant, and counting the stored instant files it under
 April. That is the rule "a dive displays in the timezone it was logged in" extended from formatting
 to bucketing - the server-side twin of the note the web app's `diveWallClockTime` carries.
 
-**Months with no diving are absent, not zeroed.** The client draws a fixed grid - twelve months, or
-every year between the first dive and the last - and has to fill its own gaps regardless, so sending
-empty buckets would be padding one shape into a different one. It also keeps the response
-proportional to the diving rather than to the calendar: a diver who logged one dive in 2014 and came
-back in 2026 gets two rows, not 145.
+**Days, not months, because the client windows one series three ways.** `DiveActivityCard` draws day
+by day, month by month or year by year, and the finest bucket is the only one that can serve all
+three - it sums days into months and months into years itself, which is arithmetic it already had to
+do to reach years. Sending months alongside would be the same dives counted twice, and a
+`granularity` query parameter would be a second cache entry and a second round trip for a switch
+that has to feel instant. The response stays bounded by the diving either way: one row per day
+dived, never one per day, which keeps it strictly smaller than the gas series the same dashboard
+already fetches - that one carries a whole object per dive.
+
+**Days with no diving are absent, not zeroed.** The client draws a fixed grid - a month's days,
+twelve months, or every year between the first dive and the last - and has to fill its own gaps
+regardless, so sending empty buckets would be padding one shape into a different one. It also keeps
+the response proportional to the diving rather than to the calendar: a diver who logged one dive in
+2014 and came back in 2026 gets two rows, not 4,400.
 
 **The result is sorted on the buckets, not left in query order.** `ORDER BY start_time` is
 chronological by *instant*, and the two facts above mean that isn't the same as chronological by
-month: the Bangkok dive above is an earlier instant than a London dive at 20:00 on the 30th of
-April, and they belong to different months. Sorting the counted buckets is the only place that can
-be fixed.
+day: the Bangkok dive above is an earlier instant than a London dive at 20:00 on the 30th of April,
+and they belong to different days.
 
 **Cached under `user_{id}_dives:dive_activity`**, the same prefix as the gas series and for the same
 reason: `invalidate_dive_caches()` already sweeps `user_{id}_dives:*` after every dive create,
 update and delete, so this series drops with them and needed no invalidation change at all. A key of
 its own would be a third pattern to remember to add there, and the bug from forgetting is a chart
 that silently keeps showing last week's diving.
+
+**Changing the shape of a cached response outlives the restart that ships it.** The cache stores
+JSON and a hit is returned without re-running the route body, so an entry written by the *previous*
+build is handed straight to FastAPI and fails `response_model` validation - a 500 on that endpoint
+until the TTL runs out. Adding `day` to `DiveActivityPoint` did exactly this, and it is worth
+recognising rather than debugging:
+
+```
+ResponseValidationError: {'type': 'missing', 'loc': ('response', 0, 'day'),
+                          'input': {'year': 2025, 'month': 10, 'dives': 47}}
+```
+
+Redis survives `docker compose restart api`, so the cure is to drop the stale keys rather than to
+restart again:
+
+```bash
+docker compose exec -T redis redis-cli --scan --pattern 'user_*_dives:dive_activity*' | xargs -r docker compose exec -T redis redis-cli DEL
+```
+
+Deliberately not fixed by versioning the key (`dive_activity_v2`). The window is one 60-second TTL,
+it self-heals, and pre-launch it can only ever be a developer switching branches with a warm Redis -
+which is a smaller cost than a version suffix that every future shape change has to remember to
+bump, and that goes stale the moment someone forgets. A longer-lived cache, or a deployed API, would
+flip that trade.
 
 ## FIT is one parser for both vendors, and its one real trap is developer fields
 
