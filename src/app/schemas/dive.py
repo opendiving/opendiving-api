@@ -149,21 +149,28 @@ class DiveGasUsePoint(BaseModel):
 
 
 class DiveActivityPoint(BaseModel):
-    """One calendar month of a user's diving (`GET /user/dive-activity`).
+    """One calendar day of a user's diving (`GET /user/dive-activity`).
 
     Counts only - no dive is named here, unlike `DiveGasUsePoint`. The series answers
-    "how much am I diving", which is a question about volume over time, and a month with
-    forty dives in it has nothing useful to say about any one of them.
+    "how much am I diving", which is a question about volume over time, and a day with
+    four dives in it has nothing useful to say about any one of them.
 
-    Discrete `year`/`month` rather than a date or a `"2026-04"` string, because that is
-    what this is: a bucket label, not an instant. A datetime would invite a timezone
-    conversion downstream and drop a month's dives into the one before it - the exact bug
-    `utc_offset_minutes` exists to prevent (see `services/dive_activity.py`).
+    A *day* rather than a month because the client windows the same series three ways -
+    day by day, month by month, year by year - and the finest bucket is the only one that
+    can serve all three. Summing days into months is arithmetic the client already does to
+    reach years; sending both would be the same dives counted twice, and the response
+    stays proportional to the diving either way (one row per day dived, never per day).
+
+    Discrete `year`/`month`/`day` rather than a date or a `"2026-04-12"` string, because
+    that is what this is: a bucket label, not an instant. A datetime would invite a
+    timezone conversion downstream and drop a day's dives into the one before it - the
+    exact bug `utc_offset_minutes` exists to prevent (see `services/dive_activity.py`).
     """
 
     year: Annotated[int, Field(examples=[2026], description="Calendar year, in the dives' own local time")]
     month: Annotated[int, Field(ge=1, le=12, examples=[4], description="Calendar month, 1-12")]
-    dives: Annotated[int, Field(examples=[7], description="Dives logged in that month")]
+    day: Annotated[int, Field(ge=1, le=31, examples=[12], description="Day of the month, 1-31")]
+    dives: Annotated[int, Field(examples=[3], description="Dives logged on that day")]
 
 
 class DiveReadWithMixtures(DiveRead):
