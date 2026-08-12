@@ -2438,6 +2438,51 @@ reverting to no rotation.
 The token is spent before its replacement is minted, so a crash between the two leaves the
 caller signed out rather than holding two live refresh tokens.
 
+That two-tab race is a genuine concurrency loss and is not the same thing as the
+same-second token *collision* described in the next section, which looked identical from
+the outside (a random logout) but happened with a single tab and had nothing to do with
+concurrency.
+
+## Every revocable token carries a `jti`
+
+`/auth/refresh` could hand back a refresh token that was already blacklisted, signing the
+user out on their next page load.
+
+The claims separating one token from another were `sub`, `token_type` and `exp` - and JWT
+`exp` has one-second resolution. Two tokens minted for the same subject inside the same
+wall-clock second therefore encoded to the *same string*. Since revocation stores the token
+string itself (`token_blacklist.token`, unique), identical tokens share one blacklist entry,
+and `refresh_access_token` blacklists the presented cookie before minting its replacement -
+so a collision handed the caller a token that had just been revoked, and the refresh after
+that returned 401. Sign in, navigate within the same second, get bounced to /signin.
+
+Nothing about the failure pointed at the cause: it was intermittent by construction (only
+when two issuances landed in the same second), the 401 arrived on a *later* request than
+the broken one, and the rotation race documented above was a ready-made false explanation.
+What settled it was seeing a `/auth/refresh` whose request cookie and `Set-Cookie` response
+hashed identically.
+
+`core.security._new_jti` now puts a `uuid4().hex` in every access, refresh and onboarding
+token. That is what makes keying the blacklist on the token string a *per-issuance* key -
+without it, "revoke this token" silently meant "revoke every token that happens to be
+byte-identical to it", which also let `/auth/logout` on one session kill a sibling session
+minted in the same second. Anything minted here that should be revocable needs the claim;
+dive-file tokens deliberately don't have one, because nothing revokes them by value and two
+identical parse receipts are simply the same receipt.
+
+Two things worth knowing:
+
+- **No one is signed out by deploying it.** Nothing reads `jti` back - `verify_token` never
+  looks at it - so tokens minted before the claim existed keep verifying until they expire.
+- **The blacklist table did not change.** Keying it on a `jti` column instead of the whole
+  token would be the tidier schema, but it buys nothing once issuances are unique, and it
+  would need a hand-written `ALTER TABLE` (see *"Schema changes have no migration tool"*)
+  plus a `jti` on every token type that gets blacklisted.
+
+The frontend carried a workaround for this: `sleepPastTheSecond()` in
+`opendiving-web/scripts/screenshots.mjs`, and *"The one-second refresh-token collision"* in
+`opendiving-web/DECISIONS.md`. Both can go once this is deployed.
+
 ## Blacklist expiries are UTC-aware, and so is the purge that reads them
 
 `core/security` wrote blacklist rows with `datetime.fromtimestamp(exp)` - no tzinfo, so the
