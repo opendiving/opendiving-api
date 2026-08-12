@@ -3122,15 +3122,48 @@ Three details this has to get right:
   Ocean reports five cylinder slots on every sample with only one paired, and its final
   samples null out even the live slot - reading those as the end pressure would report a
   dive that finished on an empty tank.
-- **Only the pressures are real.** The export records no gas fraction and no tank size
-  anywhere, so `oxygen`/`helium`/`volume` are 21/0/0 - exactly the blank row the web app's
-  own "add a mixture" button starts with (`MixtureFields`). That is a stand-in for
-  something never recorded rather than a reading; it just happens to be what the form
-  would have shown anyway, now with the pressures already filled in.
+- **Only the pressures are real, and nothing else is invented.** The export records no gas
+  fraction and no tank size anywhere, so `oxygen`/`helium`/`volume` come back `None` - see
+  the next section.
 
 `Gases` still wins wherever an export has one: it carries the gas fraction and the tank
 size that telemetry alone cannot, so the sample-derived path is a fallback for an empty
 list, not a merge. The D5 exports are unaffected.
+
+## Parsers report what a file recorded, and `None` for what it didn't
+
+`DiveMixtureSchema`'s `oxygen`, `helium` and `volume` are nullable, and no parser
+substitutes a value for gas data a file doesn't carry.
+
+All three used to coerce a missing reading to `0.0` (`_float(mix, "Size") or 0.0` and
+friends), and the FIT parser hardcoded `volume=0.0` because the format cannot express
+cylinder size at all. The result was a 0 % oxygen mix in a 0 L cylinder presented as if it
+had been read off the device - a hypoxic gas nobody dives and a volume
+`ck_dive_mixture_volume_positive` rejects outright. It was also actively destructive on the
+web form: `DEFAULT_MIXTURE` starts a hand-added cylinder at 11.1 L, and an imported
+`volume: 0.0` overwrote that with something the diver then had to notice and undo.
+
+The fix considered first was the opposite one - keep the defaults and add a `notices` array
+to `ParsedDiveResponse` explaining which values had been substituted. That is a worse
+design: it makes the API assert something untrue and then ships a second mechanism to walk
+it back. Not inventing is simpler, and it puts the fact in the data rather than in prose,
+so any client can act on it without parsing a message.
+
+Two consequences worth stating:
+
+- **The guess moved to the form, which is where it belongs.** `toMixtureFormValue`
+  (`dive-file-import.tsx`) fills a `null` from `DEFAULT_MIXTURE`, so the diver gets the
+  identical starting point they would from "add a mixture" - now with whatever the file
+  *did* record already filled in. The form has to pick something (its Zod schema requires
+  all three); the parser does not.
+- **The rule is "don't invent", not "treat zero as missing".** A nitrox export recording
+  `Helium: 0` has genuinely recorded 0 % helium, and that survives - hence `??` rather than
+  `||` on the frontend, and dropping the `or 0.0` rather than adding an `is None` guard on
+  the backend. `TestParsersInventNothing` pins both halves for all three parsers.
+
+`DiveMixtureCreate` (`schemas/dive_mixture.py`) and the DB constraints are untouched: that
+schema describes a dive being *saved*, where a cylinder really must have a volume. This one
+describes a *file*.
 
 **`volume` is 0.0 on every FIT mixture.** The format has nowhere to record cylinder size -
 not on `dive_gas`, and `tank_summary` carries only the volume *consumed*. That is the same

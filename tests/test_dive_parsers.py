@@ -437,11 +437,12 @@ class TestSuuntoJsonParserParse:
         # 20510938 Pa -> 205.11 bar, 9155000 Pa -> 91.55 bar.
         assert mixture.start_pressure == 205.11
         assert mixture.end_pressure == 91.55
-        # Nothing in this export records a gas fraction or a tank size, so these are the
-        # same blank-row values the web app's own "add a mixture" button starts with.
-        assert mixture.oxygen == 21.0
-        assert mixture.helium == 0.0
-        assert mixture.volume == 0.0
+        # Nothing in this export records a gas fraction or a tank size, and the parser
+        # does not invent one: reporting air here would be indistinguishable from having
+        # read air. The form fills these from `DEFAULT_MIXTURE` instead.
+        assert mixture.oxygen is None
+        assert mixture.helium is None
+        assert mixture.volume is None
 
     def test_ignores_cylinder_slots_that_never_reported(self):
         """An Ocean reports five cylinder slots on every sample with only one paired."""
@@ -665,10 +666,11 @@ class TestFitParserParse:
         assert len(parsed.mixtures) == 1
         mixture = parsed.mixtures[0]
         assert mixture.oxygen == 32.0
+        # An explicitly recorded 0 % helium, unlike `volume` below - this is a reading.
         assert mixture.helium == 0.0
-        # FIT has nowhere to record cylinder size, so this is the same "fill it in
-        # yourself" placeholder the Suunto parsers emit for an export that omits it.
-        assert mixture.volume == 0.0
+        # FIT has nowhere to record cylinder size at all, so it comes back null rather
+        # than as a cylinder of no volume.
+        assert mixture.volume is None
         assert mixture.name is None
 
     def test_skips_gases_the_diver_did_not_breathe(self):
@@ -788,6 +790,59 @@ class TestFitParserParse:
     def test_raises_dive_parse_error_on_bytes_that_are_not_fit(self):
         with pytest.raises(DiveParseError):
             FitParser.parse(b"this is not a FIT file")
+
+
+class TestParsersInventNothing:
+    """No parser substitutes a plausible value for gas data a file doesn't carry.
+
+    All three used to coerce a missing `oxygen`/`helium`/`volume` to `0.0`, which reads
+    as a hypoxic gas in a cylinder of no volume - obviously-wrong values presented as
+    readings, and `volume: 0.0` additionally overwrote the dive form's own 11.1 L
+    default with something `ck_dive_mixture_volume_positive` rejects. `None` is the only
+    honest answer for "the file didn't say"; the form fills the gap from
+    `DEFAULT_MIXTURE`. See `DiveMixtureSchema`.
+    """
+
+    def test_xml_leaves_an_omitted_gas_fraction_null(self):
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <DiveMixtures><DiveMixture><Name>Air</Name></DiveMixture></DiveMixtures>
+</Dive>
+""".encode()
+
+        mixture = SuuntoXmlParser.parse(content).mixtures[0]
+
+        assert mixture.oxygen is None
+        assert mixture.helium is None
+        assert mixture.volume is None
+
+    def test_json_leaves_an_omitted_gas_fraction_null(self):
+        content = json.dumps({"DeviceLog": {"Header": {"Diving": {"Gases": [{"State": "Primary"}]}}}}).encode()
+
+        mixture = SuuntoJsonParser.parse(content).mixtures[0]
+
+        assert mixture.oxygen is None
+        assert mixture.helium is None
+        assert mixture.volume is None
+
+    def test_fit_leaves_an_omitted_gas_fraction_null(self):
+        content = dive_fit_file(message("dive_gas", message_index=0, status="enabled"))
+
+        mixture = FitParser.parse(content).mixtures[0]
+
+        assert mixture.oxygen is None
+        assert mixture.helium is None
+        assert mixture.volume is None
+
+    def test_an_explicitly_recorded_zero_is_still_a_reading(self):
+        """The rule is "don't invent", not "treat zero as missing" - a nitrox export
+        that records `Helium: 0` has genuinely recorded 0 % helium."""
+        content = json.dumps({"DeviceLog": {"Header": {"Diving": {"Gases": [{"Oxygen": 0.32, "Helium": 0}]}}}}).encode()
+
+        mixture = SuuntoJsonParser.parse(content).mixtures[0]
+
+        assert mixture.helium == 0.0
+        assert mixture.oxygen == 32.0
 
 
 class TestParseDiveFile:

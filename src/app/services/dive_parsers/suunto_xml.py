@@ -271,19 +271,20 @@ class SuuntoXmlParser(DiveParser):
 
         Gas fractions are already percentages here (unlike the JSON export's 0-1
         fractions), but pressures are millibar - see the comment below for what reading
-        them as bar did to every transmitter-equipped dive. Missing values become 0.0
-        rather than null, since the model requires them.
+        them as bar did to every transmitter-equipped dive. An element the export omits
+        (or marks `xsi:nil`) stays `None` rather than becoming 0.0, since a gas fraction
+        that was never recorded is not a gas fraction of zero - see `DiveMixtureSchema`.
         """
         return DiveMixtureSchema(
             # Millibar, not bar - see `_MILLIBAR_PER_BAR`. Reading these as bar stored
             # `start_pressure = 205203` for every dive imported from a 2025+ transmitter
             # export, which made its `gas_use`/RMV meaningless.
             end_pressure=_round2_or_none(_millibar_to_bar(_float(mix, "EndPressure"))),
-            helium=_round2_or_none(_float(mix, "Helium")) or 0.0,
+            helium=_round2_or_none(_float(mix, "Helium")),
             # Left for the user to fill in themselves rather than parsed - see
             # DECISIONS.md.
             name=None,
-            oxygen=_round2_or_none(_float(mix, "Oxygen")) or 0.0,
+            oxygen=_round2_or_none(_float(mix, "Oxygen")),
             start_pressure=_round2_or_none(_millibar_to_bar(_float(mix, "StartPressure"))),
-            volume=_float(mix, "Size") or 0.0,
+            volume=_float(mix, "Size"),
         )

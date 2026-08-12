@@ -481,17 +481,17 @@ class FitParser(DiveParser):
         helium = _native_value(gas, "helium_content")
         return DiveMixtureSchema(
             end_pressure=tank.end if tank is not None else None,
-            helium=float(helium) if helium is not None else 0.0,
+            helium=float(helium) if helium is not None else None,
             # Left for the user to fill in themselves rather than parsed - see
             # DECISIONS.md.
             name=None,
-            oxygen=float(oxygen) if oxygen is not None else 0.0,
+            oxygen=float(oxygen) if oxygen is not None else None,
             start_pressure=tank.start if tank is not None else None,
-            # FIT has nowhere to record cylinder size - not on `dive_gas`, and
-            # `tank_summary` carries only the volume *consumed*. 0.0 is what the Suunto
-            # parsers already emit for an export that omits it, and what the dive form
-            # shows the diver to correct before saving.
-            volume=0.0,
+            # FIT has nowhere to record cylinder size at all - not on `dive_gas`, and
+            # `tank_summary` carries only the volume *consumed*. `None`, not 0.0: the
+            # format cannot express this, so the dive form applies its own
+            # `DEFAULT_MIXTURE` rather than being handed a cylinder of no volume.
+            volume=None,
         )
 
     @staticmethod

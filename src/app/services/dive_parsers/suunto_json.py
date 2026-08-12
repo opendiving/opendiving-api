@@ -20,12 +20,6 @@ _LITERS_PER_CUBIC_METER = Decimal("1000")
 _PERCENT_PER_FRACTION = Decimal("100")
 _TWO_DECIMAL_PLACES = Decimal("0.01")
 
-# The gas a cylinder reconstructed from transmitter telemetry alone is reported as. See
-# `_mixtures_from_cylinders`: the Ocean export records pressures but no gas fraction, and
-# this matches the blank mixture row the web app's own form starts with (`MixtureFields`),
-# so the diver sees a normal empty gas with the pressures already filled in.
-_UNRECORDED_OXYGEN_PERCENT = 21.0
-
 # The integer scales `parse_profile` emits in - depth in centimeters, temperature in
 # tenths of a degree, pressure in tenths of a bar. See `schemas/dive_profile.py`.
 _CENTIMETERS_PER_METER = Decimal("100")
@@ -122,18 +116,19 @@ def _series(points: list[tuple[float, int]]) -> ParsedSeries | None:
 def _parse_mixture(gas: dict[str, Any]) -> DiveMixtureSchema:
     """Map one `Gases[]` entry onto a `DiveMixture`, converting SI units as it goes.
 
-    Missing oxygen/helium/volume become 0.0 rather than null: the model requires them, and
-    an export that omits a gas fraction is one that never recorded it.
+    A key the entry omits stays `None` - an untransmitted backup cylinder really has no
+    start pressure, and an export that never recorded a gas fraction has not recorded a
+    0 % one. See `DiveMixtureSchema`.
     """
     return DiveMixtureSchema(
         end_pressure=_round2_or_none(_pascals_to_bar(gas.get("EndPressure"))),
-        helium=_round2_or_none(_fraction_to_percent(gas.get("Helium"))) or 0.0,
+        helium=_round2_or_none(_fraction_to_percent(gas.get("Helium"))),
         # Left for the user to fill in themselves rather than parsed - see
         # DECISIONS.md.
         name=None,
-        oxygen=_round2_or_none(_fraction_to_percent(gas.get("Oxygen"))) or 0.0,
+        oxygen=_round2_or_none(_fraction_to_percent(gas.get("Oxygen"))),
         start_pressure=_round2_or_none(_pascals_to_bar(gas.get("StartPressure"))),
-        volume=_cubic_meters_to_liters(gas.get("TankSize")) or 0.0,
+        volume=_cubic_meters_to_liters(gas.get("TankSize")),
     )
 
 
@@ -176,21 +171,21 @@ def _mixtures_from_cylinders(samples: list[dict[str, Any]]) -> list[DiveMixtureS
     transmitter, and they are what `compute_gas_use` needs, so the cylinders that
     actually reported are turned into mixtures here.
 
-    Only the pressures are real. The export records no gas fraction and no tank size
-    anywhere (verified across the full corpus - `Oxygen` does not appear in these files
-    at all), so `oxygen`/`helium`/`volume` are the same values the web app's own "add a
-    mixture" button starts a blank row with: air, and a volume the diver fills in. That
-    is a stand-in for something never recorded, not a reading - it just happens to be
-    the one the form would have shown anyway, now with the pressures already filled in.
+    Only the pressures are real, and nothing else is invented to fill the gap. This
+    export records no gas fraction and no tank size anywhere - verified across the whole
+    2026 corpus, where the string `Oxygen` does not appear in a single file - so
+    `oxygen`/`helium`/`volume` come back `None` and the dive form applies its own
+    `DEFAULT_MIXTURE` to them, exactly as it would for a cylinder the diver added by
+    hand. Reporting air here would have been indistinguishable from having read air.
     """
     return [
         DiveMixtureSchema(
             end_pressure=_round2_or_none(_pascals_to_bar(end)),
-            helium=0.0,
+            helium=None,
             name=None,
-            oxygen=_UNRECORDED_OXYGEN_PERCENT,
+            oxygen=None,
             start_pressure=_round2_or_none(_pascals_to_bar(start)),
-            volume=0.0,
+            volume=None,
         )
         for _, (start, end) in sorted(_cylinder_pressures(samples).items())
     ]
