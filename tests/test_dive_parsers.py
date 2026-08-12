@@ -992,6 +992,22 @@ class TestFitParserParse:
 
         assert (mixture.start_pressure, mixture.end_pressure) == (207.0, 62.0)
 
+    def test_a_named_pod_that_reported_nothing_is_not_a_cylinder(self):
+        """Naming a pod isn't on its own evidence of a cylinder.
+
+        A summary carrying a `sensor` and no pressures, with no telemetry from that pod to
+        merge in, produced an entirely null mixture - a phantom empty cylinder row in the
+        dive form for a file that recorded no cylinder data at all. The sensor-less branch
+        already refused exactly this.
+        """
+        content = fit_file(
+            message("file_id", type="activity", manufacturer="garmin"),
+            message("tank_summary", sensor=2411100050, volume_used=1500.0),
+            message("session", sport="diving", start_time=DIVE_START, max_depth=30.0),
+        )
+
+        assert FitParser.parse(content).mixtures == []
+
     def test_ignores_a_summary_that_describes_nothing(self):
         """No sensor to join on and no pressures to contribute - counting it as a cylinder
         would push the tank count past the gas list and null out the pod that did report."""
@@ -1329,6 +1345,34 @@ class TestFitParserDiveSummary:
         )
 
         assert FitParser.parse(content).max_depth == 31.0
+
+    def test_a_later_dive_s_summary_cannot_describe_the_first(self):
+        """`dive_summary` is exempt from the first-session cut - it is written *after* the
+        session it refers to, so gating it there would discard every one - but the
+        exemption was unbounded.
+
+        `_dive_summary` prefers a summary whose `reference_mesg` names a session, so a file
+        where dive 1's omits that field and dive 2's carries it handed dive 2's depth and
+        bottom time to dive 1. `TestFitParserMultiSession` establishes "the first dive,
+        samples included" as an invariant, and this was the one message class escaping it.
+        """
+        content = fit_file(
+            message("file_id", type="activity", manufacturer="garmin"),
+            message("session", sport="diving", start_time=DIVE_START, max_depth=30.0),
+            message("dive_summary", max_depth=30.0, bottom_time=1700.0),
+            message(
+                "session",
+                sport="diving",
+                start_time=DIVE_START + timedelta(seconds=7200),
+                max_depth=18.0,
+            ),
+            message("dive_summary", reference_mesg="session", max_depth=18.0, bottom_time=1400.0),
+        )
+
+        parsed = FitParser.parse(content)
+
+        assert parsed.max_depth == 30.0
+        assert parsed.duration == 1700
 
     def test_falls_back_to_the_only_summary_when_none_names_a_session(self):
         """A single-dive export commonly writes one with no `reference_mesg` at all."""

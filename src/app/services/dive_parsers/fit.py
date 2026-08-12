@@ -20,7 +20,7 @@ from itertools import chain
 from typing import Any
 
 import fitdecode
-from fitdecode.types import DevField
+from fitdecode.types import DevField, FieldData
 
 from ...schemas.dive_profile import ParsedPressureSeries, ParsedProfileSchema
 from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
@@ -63,6 +63,13 @@ _MAX_UTC_OFFSET_MINUTES = 14 * 60
 # Deliberately raises rather than truncating. A FIT file's `session` is written *after*
 # the samples it summarizes, so stopping early and keeping what we have would discard
 # the start time, duration and depths, and import a confidently empty dive.
+#
+# This bounds CPU, and memory only as a side effect: a file at the cap grows RSS by
+# ~44 MB, since the per-channel sample lists and the retained summary frames all scale
+# with frame count, and `run_in_threadpool` will run up to AnyIO's 40 of these at once.
+# Left alone deliberately - `MAX_DIVE_FILE_SIZE` and upload concurrency bound it in
+# practice, and picking a memory cap needs a deployment's actual ceiling rather than a
+# number chosen here.
 _MAX_FRAMES = 100_000
 
 # `message_index` is a bitfield, not a plain counter: the low 12 bits are the index and
@@ -96,7 +103,7 @@ def _native_value(frame: fitdecode.FitDataMessage, name: str) -> Any | None:
     return field_data.value if field_data is not None else None
 
 
-def _native_field(frame: fitdecode.FitDataMessage, name: str) -> Any | None:
+def _native_field(frame: fitdecode.FitDataMessage, name: str) -> FieldData | None:
     for field_data in frame.fields:
         if field_data.is_named(name) and not isinstance(field_data.field, DevField):
             return field_data
@@ -204,6 +211,9 @@ class _FitScan:
 
     session: fitdecode.FitDataMessage | None = None
     activity: fitdecode.FitDataMessage | None = None
+    # How many `session` messages have gone past, which is what bounds
+    # `dive_summaries` to the first dive - see `_collect`.
+    session_count: int = 0
     # Every `dive_summary` in the file, resolved by `_dive_summary` rather than kept as
     # "the first one": a Garmin freediving activity writes one per individual dive plus a
     # session-level one, and only the latter describes the activity being imported.
@@ -323,15 +333,21 @@ class FitParser(DiveParser):
         the corpus the only message following the first `session` is the `activity`.
         """
         if frame.name == "session":
+            scan.session_count += 1
             if scan.session is None:
                 scan.session = frame
         elif frame.name == "activity":
             if scan.activity is None:
                 scan.activity = frame
         elif frame.name == "dive_summary":
-            # Not gated on the session below: a `dive_summary` is written *after* the
-            # session it refers to, so gating it would discard every one of them.
-            scan.dive_summaries.append(frame)
+            # Cut at the *second* session rather than the first, unlike everything below:
+            # a `dive_summary` is written after the session it refers to, so gating it on
+            # the first would discard every one of them. Bounded all the same, because
+            # `_dive_summary` prefers a summary whose `reference_mesg` names a session -
+            # and with dive 1's summary omitting that field while dive 2's carries it,
+            # the unbounded list handed dive 2's depths and bottom time to dive 1.
+            if scan.session_count < 2:
+                scan.dive_summaries.append(frame)
         elif scan.session is not None:
             # Samples and gas for a dive this file describes after the one being imported.
             return
@@ -627,7 +643,14 @@ class FitParser(DiveParser):
             )
             summary_sensor = _native_raw(summary, "sensor")
             if summary_sensor is not None:
-                summaries[int(summary_sensor)] = pressures
+                # Naming a pod is not on its own evidence of a cylinder: a summary with
+                # no pressures earns one only if that pod also streamed telemetry to
+                # merge in. Otherwise a file whose sole tank message is
+                # `tank_summary(sensor=..., volume_used=...)` produced an entirely null
+                # phantom cylinder in the dive form - the same "describes nothing at all"
+                # the sensor-less branch below already refuses.
+                if pressures != _NO_PRESSURES or int(summary_sensor) in telemetry:
+                    summaries[int(summary_sensor)] = pressures
             elif pressures != _NO_PRESSURES:
                 unidentified.append(pressures)
 

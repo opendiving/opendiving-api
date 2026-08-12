@@ -3063,6 +3063,11 @@ summarize, which is the same property `_FitScan` already depends on - and it cos
 real, because across the whole corpus the *only* message following the first `session` is
 the `activity`, and not one record falls outside its session's window.
 
+The exemption is bounded at the *second* session, not left open. `_dive_summary` prefers a
+summary whose `reference_mesg` names a session, so a file where dive 1's summary omits that
+field and dive 2's carries it handed dive 2's depth and bottom time to dive 1 - the one
+message class escaping the invariant this section establishes.
+
 **`dive_summary` is chosen by `reference_mesg`, not by being first.** A Garmin freediving
 activity writes one per individual descent *plus* a session-level one, and `reference_mesg`
 names the message each refers to (`session` or `lap`). Taking the first would read a single
@@ -3149,7 +3154,11 @@ twice for one pod would otherwise count as two cylinders, and the exact-count ru
 then discards every pressure in the file - one repeated frame losing a real 207 -> 62 bar
 and the dive's RMV with it. A summary with no `sensor` cannot be joined to anything and
 stands as its own cylinder, unless it carries no pressures either - one that describes
-nothing is dropped rather than inflating the count past the gas list.
+nothing is dropped rather than inflating the count past the gas list. The same test applies
+to a summary that *does* name a pod: naming one is not on its own evidence of a cylinder, so
+it earns a mixture only if it carries a pressure or that pod also streamed telemetry.
+Otherwise a file whose only tank message is `tank_summary(sensor=..., volume_used=...)`
+produced an entirely null phantom cylinder in the dive form.
 
 **A file with tank telemetry and no `dive_gas` at all still yields cylinders.** Mixtures
 were built only from `dive_gas`, so a Descent dive logged in gauge mode - which writes no
