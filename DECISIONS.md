@@ -3141,6 +3141,29 @@ an empty field the diver can fill in. For the same "a serial is not a label" rea
 XML parser refuses `<TransmitterId>`, profile pressure series are labelled 1, 2, … in
 first-seen order rather than by `sensor`.
 
+**Known gap: FIT tank telemetry is not bounded to the in-water part of the dive.** The
+Suunto JSON parser bounds its equivalent on `Header.DiveTime`, because two dives in that
+corpus ended on a purged regulator and reported an end pressure of 0.14 bar. The same
+surface tail exists in FIT - both Ocean files log for ~5 minutes past the last reading
+deeper than 1.2 m (308 s and 302 s), which matches the 343 s gap between `DiveTime` and
+`Duration` in the JSON export of a comparable dive - so a pod still transmitting through
+that window has the same failure mode available to it.
+
+What FIT lacks is a field to bound on. Measured on `69e21526bf486d396e2786b5`:
+`total_elapsed_time` 4 301.72 s, `total_timer_time` 4 302.208 s and
+`session.timestamp - start_time` 4 302 s are all the same number - the whole logged period,
+tail included - and the depth channel keeps writing 0.0 m right up to the session end, so
+the last depth sample is not an end-of-dive marker either. `dive_summary.bottom_time`
+measures time *at depth* and so starts after the descent. The only bound left would be a
+depth threshold this codebase invented, which is the same class of guess `_tanks_for`
+refuses to make when pairing tanks to gases.
+
+It is therefore left unbounded and written down rather than quietly assumed away. **No file
+in the corpus carries any tank telemetry**, so this cannot be settled here: it needs a
+Descent export with a pod on it, comparing the last `tank_update` against the last record
+deeper than a metre. If there is a tail, `bottom_time` with `descent_time`/`ascent_time`
+are the fields most likely to reconstruct a window.
+
 **Suunto's FIT export contains no transmitter data at all**, which is a vendor limitation
 and not something the parser can work around. Dive `69e21526bf486d396e2786b5` exists in
 the corpus as *both* a `.fit` and a `.json`: the JSON carries 419 `Cylinders[].Pressure`

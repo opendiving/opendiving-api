@@ -561,6 +561,31 @@ class FitParser(DiveParser):
         A summary with no `sensor` cannot be joined to anything, so it stands as its own
         cylinder - unless it carries no pressures either, in which case it describes
         nothing at all and is dropped rather than inflating the count past the gas list.
+
+        **The telemetry is deliberately not bounded to the in-water part of the dive, and
+        that is a known gap rather than a considered non-problem.** `SuuntoJsonParser`
+        bounds its equivalent on `Header.DiveTime` because two dives in that corpus ended
+        with a purged regulator reporting 0.14 bar instead of 53 and 76 - a diver who
+        breathed their cylinder dry, as far as `compute_gas_use` is concerned. The same
+        surface tail exists here: both Ocean files log for ~5 minutes past the last reading
+        deeper than 1.2 m (308 s and 302 s), matching the 343 s gap between `DiveTime` and
+        `Duration` in the JSON export of a comparable dive.
+
+        What FIT lacks is anywhere to read the in-water time from. `total_elapsed_time`,
+        `total_timer_time` and `session.timestamp - start_time` are all 4 302 s on the same
+        dive - the whole logged period, tail included - and the depth channel keeps
+        reporting 0.0 m right up to the session end, so "the last depth sample" is not an
+        end-of-dive marker either. The only bound left would be a depth threshold this
+        module invented, which is the kind of guess `_tanks_for` refuses to make two
+        methods down.
+
+        So it is left unbounded, and this comment exists so the next reader does not
+        re-derive the question. To settle it, take a Descent export with a pod on it and
+        compare the last `tank_update` against the last record deeper than a metre: a tail
+        of surface readings means this needs the same treatment as the JSON parser, and
+        `dive_summary.bottom_time` plus `descent_time`/`ascent_time` are the fields most
+        likely to reconstruct a window. No file in the corpus has any tank telemetry at
+        all, so none of this can be checked here.
         """
         telemetry: dict[int, _TankPressures] = {}
         for sensor, unordered in scan.pressure.items():
