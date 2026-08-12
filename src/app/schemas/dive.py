@@ -148,6 +148,24 @@ class DiveGasUsePoint(BaseModel):
     gas_use: DiveGasUse
 
 
+class DiveActivityPoint(BaseModel):
+    """One calendar month of a user's diving (`GET /user/dive-activity`).
+
+    Counts only - no dive is named here, unlike `DiveGasUsePoint`. The series answers
+    "how much am I diving", which is a question about volume over time, and a month with
+    forty dives in it has nothing useful to say about any one of them.
+
+    Discrete `year`/`month` rather than a date or a `"2026-04"` string, because that is
+    what this is: a bucket label, not an instant. A datetime would invite a timezone
+    conversion downstream and drop a month's dives into the one before it - the exact bug
+    `utc_offset_minutes` exists to prevent (see `services/dive_activity.py`).
+    """
+
+    year: Annotated[int, Field(examples=[2026], description="Calendar year, in the dives' own local time")]
+    month: Annotated[int, Field(ge=1, le=12, examples=[4], description="Calendar month, 1-12")]
+    dives: Annotated[int, Field(examples=[7], description="Dives logged in that month")]
+
+
 class DiveReadWithMixtures(DiveRead):
     mixtures: Annotated[list[DiveMixtureRead], Field(default_factory=list)]
     # Deliberately here rather than on `DiveRead`, which `DiveReadWithMixtures` extends:

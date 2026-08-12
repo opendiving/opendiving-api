@@ -2969,3 +2969,43 @@ Two details in `_ascii_fallback` that look like padding and aren't:
   early.
 - A name with no ASCII in it at all folds to a bare extension, so `default` supplies the
   stem: "潜水.jpg" downloads as "card.jpg" rather than as the dotfile ".jpg".
+
+## Dives-per-month is counted in Python, off two columns, not by `date_trunc`
+
+`GET /user/dive-activity` returns one `{year, month, dives}` per month a user actually
+dived in, oldest first. The obvious implementation is a `GROUP BY date_trunc('month',
+start_time + make_interval(mins => utc_offset_minutes))`, which would return the same rows
+without pulling any across the wire. It's deliberately not that.
+
+**The offset arithmetic has exactly one home.** `core/utils/datetime_offset.py` says so in
+its module docstring, and `combine_start_time` is what `_to_public_dive` and
+`gas_use_history` already reconstruct a dive's local time with. A `date_trunc` over
+`start_time + utc_offset_minutes` is a second copy of that rule in another language, and
+the failure mode when the two drift isn't an error - it's a chart that quietly disagrees
+by one month with the dive pages it was built from, for the divers whose trips cross a
+date boundary. The same trade `gas_use_history` makes with `compute_gas_use`, for the same
+reason, at the same cost: two small columns per dive on a cached endpoint.
+
+**The month is the dive's own local one.** A dive that began at 00:30 on the 1st of May in
+Bangkok (+07:00) is 17:30 on the 30th of April as an instant, and counting the stored
+instant files it under April. That is the rule "a dive displays in the timezone it was
+logged in" extended from formatting to bucketing - the server-side twin of the note the
+web app's `diveWallClockTime` carries.
+
+**Months with no diving are absent, not zeroed.** The client draws a fixed grid - twelve
+months, or every year between the first dive and the last - and has to fill its own gaps
+regardless, so sending empty buckets would be padding one shape into a different one. It
+also keeps the response proportional to the diving rather than to the calendar: a diver
+who logged one dive in 2014 and came back in 2026 gets two rows, not 145.
+
+**The result is sorted on the buckets, not left in query order.** `ORDER BY start_time` is
+chronological by *instant*, and the two facts above mean that isn't the same as
+chronological by month: the Bangkok dive above is an earlier instant than a London dive at
+20:00 on the 30th of April, and they belong to different months. Sorting the counted
+buckets is the only place that can be fixed.
+
+**Cached under `user_{id}_dives:dive_activity`**, the same prefix as the gas series and for
+the same reason: `invalidate_dive_caches()` already sweeps `user_{id}_dives:*` after every
+dive create, update and delete, so this series drops with them and needed no invalidation
+change at all. A key of its own would be a third pattern to remember to add there, and the
+bug from forgetting is a chart that silently keeps showing last week's diving.
