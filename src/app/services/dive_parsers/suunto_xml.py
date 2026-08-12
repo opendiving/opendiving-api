@@ -8,7 +8,7 @@ from ...schemas.dive_profile import ParsedPressureSeries, ParsedProfileSchema, P
 from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from .base import DiveParser
 from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, scaled_int_or_none
-from .exceptions import DiveParseError, UnsupportedDiveFileError
+from .exceptions import EXTRACTION_ERRORS, DiveParseError, UnsupportedDiveFileError
 
 _SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
 _NIL = "{http://www.w3.org/2001/XMLSchema-instance}nil"
@@ -141,7 +141,7 @@ class SuuntoXmlParser(DiveParser):
 
         try:
             return cls._parse_dive(root)
-        except (TypeError, ValueError) as exc:
+        except EXTRACTION_ERRORS as exc:
             raise DiveParseError(f"Malformed Suunto XML dive data: {exc}") from exc
 
     @classmethod
@@ -163,7 +163,7 @@ class SuuntoXmlParser(DiveParser):
 
         try:
             return cls._parse_samples(root)
-        except (TypeError, ValueError) as exc:
+        except EXTRACTION_ERRORS as exc:
             raise DiveParseError(f"Malformed Suunto XML dive samples: {exc}") from exc
 
     @classmethod

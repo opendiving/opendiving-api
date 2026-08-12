@@ -26,7 +26,7 @@ from ...schemas.dive_profile import ParsedPressureSeries, ParsedProfileSchema
 from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from .base import DiveParser
 from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, scaled_int, series
-from .exceptions import DiveParseError
+from .exceptions import EXTRACTION_ERRORS, DiveParseError
 
 # Every FIT file carries the ASCII string `.FIT` at offset 8, immediately after the
 # 8-byte header preamble. It is the format's only magic number, and unlike the `.fit`
@@ -65,12 +65,12 @@ _MAX_UTC_OFFSET_MINUTES = 14 * 60
 # the start time, duration and depths, and import a confidently empty dive.
 _MAX_FRAMES = 100_000
 
-# What turning decoded messages into a dive may raise on a file that decoded but holds
-# nonsense. `ArithmeticError` is in here for `decimal.InvalidOperation`, which
-# `channels.scaled_int` raises when a corrupt float32 reading arrives as NaN and `quantize`
-# refuses it; the rest are the usual shape mismatches. `_scan` itself needs no such list
-# - it catches everything, for the reasons in its docstring.
-_EXTRACTION_ERRORS = (TypeError, ValueError, KeyError, AttributeError, ArithmeticError, AssertionError)
+# `message_index` is a bitfield, not a plain counter: the low 12 bits are the index and
+# the top bits are flags ("selected", plus a reserved span). The profile spells the mask
+# out as its own enum entry, `{4095: 'mask'}`. Without it, a gas at index 1 with the
+# selected bit set arrives as 32769 and sorts *after* an unflagged gas at index 2, which
+# reorders the mixtures and so misaligns `_tanks_for`'s positional pairing.
+_MESSAGE_INDEX_MASK = 0x0FFF
 
 
 def _native_value(frame: fitdecode.FitDataMessage, name: str) -> Any | None:
@@ -92,10 +92,33 @@ def _native_value(frame: fitdecode.FitDataMessage, name: str) -> Any | None:
     were the profile's scaled `uint32`, units and semantics included, while this returns
     `None` and lets the caller fall back to a field that means what it says.
     """
+    field_data = _native_field(frame, name)
+    return field_data.value if field_data is not None else None
+
+
+def _native_field(frame: fitdecode.FitDataMessage, name: str) -> Any | None:
     for field_data in frame.fields:
         if field_data.is_named(name) and not isinstance(field_data.field, DevField):
-            return field_data.value
+            return field_data
     return None
+
+
+def _native_raw(frame: fitdecode.FitDataMessage, name: str) -> Any | None:
+    """A field's *undecoded* value, for the ones that are identities rather than readings.
+
+    `fitdecode` renders a field whose profile type carries an enum by exact value match,
+    and FIT keeps bitfield masks in that same enum slot - `message_index` maps
+    `{4095: 'mask', 28672: 'reserved', 32768: 'selected'}` and `ant_channel_id`, the type
+    behind `tank_update`/`tank_summary`'s `sensor`, maps `{65535: 'ant_device_number',
+    ...}`. So a gas index or an ANT id that happens to land on one of those numbers comes
+    back as a **string**, and `int()` on it raises.
+
+    That is not a corrupt-file problem. `message_index = 0x8000` is gas index 0 with the
+    spec's "selected" bit set, which is an ordinary thing for a device to write about the
+    first configured gas - and it made the whole dive un-importable with a 422.
+    """
+    field_data = _native_field(frame, name)
+    return field_data.raw_value if field_data is not None else None
 
 
 def _first_not_none(*values: float | None) -> float | None:
@@ -231,7 +254,7 @@ class FitParser(DiveParser):
         """Extract the dive itself (not its samples - see `parse_profile`)."""
         try:
             return cls._parse_dive(cls._scan(content))
-        except _EXTRACTION_ERRORS as exc:
+        except EXTRACTION_ERRORS as exc:
             raise DiveParseError(f"Malformed FIT dive data: {exc}") from exc
 
     @classmethod
@@ -239,7 +262,7 @@ class FitParser(DiveParser):
         """Extract the `record` stream (and Garmin's `tank_update`s) as per-channel series."""
         try:
             return cls._parse_samples(cls._scan(content))
-        except _EXTRACTION_ERRORS as exc:
+        except EXTRACTION_ERRORS as exc:
             raise DiveParseError(f"Malformed FIT dive samples: {exc}") from exc
 
     @classmethod
@@ -277,7 +300,7 @@ class FitParser(DiveParser):
             # Ours, and already phrased for the diver - not something the decoder threw.
             raise
         except Exception as exc:
-            raise DiveParseError(f"Invalid FIT file: {exc or type(exc).__name__}") from exc
+            raise DiveParseError(f"Invalid FIT file: {str(exc) or type(exc).__name__}") from exc
         return scan
 
     @classmethod
@@ -354,7 +377,9 @@ class FitParser(DiveParser):
         """
         timestamp = _native_value(frame, "timestamp")
         pressure = _native_value(frame, "pressure")
-        sensor = _native_value(frame, "sensor")
+        # Raw, not rendered: an ANT id of 65535 decodes to the string
+        # "ant_device_number" through the profile's bitfield enum. See `_native_raw`.
+        sensor = _native_raw(frame, "sensor")
         if not isinstance(timestamp, datetime) or pressure is None or sensor is None:
             return
         scan.pressure.setdefault(int(sensor), []).append((timestamp, pressure))
@@ -506,11 +531,11 @@ class FitParser(DiveParser):
         for gas in scan.gases:
             if _native_value(gas, "status") in _UNUSED_GAS_STATUSES:
                 continue
-            index = _native_value(gas, "message_index")
+            index = _native_raw(gas, "message_index")
             if index is None:
                 unindexed.append(gas)
             else:
-                indexed.setdefault(int(index), gas)
+                indexed.setdefault(int(index) & _MESSAGE_INDEX_MASK, gas)
 
         return [indexed[index] for index in sorted(indexed)] + unindexed
 
@@ -600,7 +625,7 @@ class FitParser(DiveParser):
                 start=_native_value(summary, "start_pressure"),
                 end=_native_value(summary, "end_pressure"),
             )
-            summary_sensor = _native_value(summary, "sensor")
+            summary_sensor = _native_raw(summary, "sensor")
             if summary_sensor is not None:
                 summaries[int(summary_sensor)] = pressures
             elif pressures != _NO_PRESSURES:

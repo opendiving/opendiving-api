@@ -8,7 +8,7 @@ from ...schemas.dive_profile import ParsedPressureSeries, ParsedProfileSchema
 from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from .base import DiveParser
 from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, scaled_int_or_none, series
-from .exceptions import DiveParseError
+from .exceptions import EXTRACTION_ERRORS, DiveParseError
 
 logger = logging.getLogger(__name__)
 
@@ -311,7 +311,7 @@ class SuuntoJsonParser(DiveParser):
 
         try:
             return cls._parse_dive(data)
-        except (TypeError, ValueError, KeyError, AttributeError) as exc:
+        except EXTRACTION_ERRORS as exc:
             raise DiveParseError(f"Malformed Suunto JSON dive data: {exc}") from exc
 
     @classmethod
@@ -324,7 +324,7 @@ class SuuntoJsonParser(DiveParser):
 
         try:
             return cls._parse_samples(data)
-        except (TypeError, ValueError, KeyError, AttributeError) as exc:
+        except EXTRACTION_ERRORS as exc:
             raise DiveParseError(f"Malformed Suunto JSON dive samples: {exc}") from exc
 
     @staticmethod
@@ -426,9 +426,16 @@ class SuuntoJsonParser(DiveParser):
             # naive `Header.DateTime` with offset-aware sample timestamps turned a
             # previously fine import into a 422, and it failed in `_cylinder_pressures`
             # before any cylinder was even inspected.
+            #
+            # `EXTRACTION_ERRORS` rather than a tuple spelled out here, because a narrower
+            # one had already let this promise lapse: the guarded code runs `Decimal`
+            # arithmetic and `timedelta(seconds=...)`, and `json.loads` accepts bare
+            # `Infinity` and overflows large exponents to `inf`, so a cylinder pressure of
+            # `Infinity` raised `decimal.InvalidOperation` straight past it and took the
+            # header fields down with samples they had nothing to do with.
             try:
                 mixtures = _mixtures_from_cylinders(samples, _dive_window_end(header))
-            except TypeError, ValueError, KeyError, AttributeError:
+            except EXTRACTION_ERRORS:
                 logger.warning("Could not reconstruct cylinders from Suunto JSON samples", exc_info=True)
                 mixtures = []
 

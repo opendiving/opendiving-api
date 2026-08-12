@@ -56,7 +56,7 @@ def parse_dive_file_with_parser(filename: str, content: bytes) -> tuple[type[Div
             raise
         except Exception as exc:
             logger.exception("Unexpected error parsing a %s file", parser.key)
-            raise DiveParseError(f"Could not read this {parser.key} file: {exc or type(exc).__name__}") from exc
+            raise DiveParseError(f"Could not read this {parser.key} file: {str(exc) or type(exc).__name__}") from exc
     raise UnsupportedDiveFileError(f"No parser available for file: {filename}")
 
 

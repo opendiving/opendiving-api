@@ -3070,6 +3070,32 @@ descent's depth and bottom time as the whole dive's, through the `_depth`/`durat
 fallbacks. Falls back to the first summary of any kind, since a single-dive export commonly
 writes one with no `reference_mesg` at all.
 
+**`message_index` and `sensor` are read raw, not rendered.** `fitdecode` renders a field
+whose profile type carries an enum by exact value match, and FIT keeps bitfield masks in
+that same enum slot: `message_index` maps `{4095: 'mask', 28672: 'reserved',
+32768: 'selected'}`, and `ant_channel_id` - the type behind `tank_update`/`tank_summary`'s
+`sensor` - maps `{65535: 'ant_device_number', ...}`. A gas index or ANT id landing on one
+of those numbers therefore arrives as a **string**, and `int()` on it raises.
+
+That is not a corrupt-file problem: `message_index = 0x8000` is gas index 0 with the spec's
+"selected" bit set, which is an ordinary thing for a device to write about the first
+configured gas, and it made the dive un-importable with a 422. `_native_raw` reads
+`FieldData.raw_value` for exactly the fields that are identities rather than readings;
+`status` and `reference_mesg` still go through `_native_value`, because there the rendered
+string *is* the value.
+
+The index is then masked with `0x0FFF`, which the profile spells out as its own enum entry.
+Without it a gas at index 1 with the selected bit set is the number 32769 and sorts after an
+unflagged gas at index 2 - reordering the mixtures, and so misaligning `_tanks_for`'s
+positional pairing.
+
+**`str(exc) or type(exc).__name__`, not `exc or ...`.** `BaseException` defines neither
+`__bool__` nor `__len__`, so an exception instance is always truthy and the fallback was
+dead code. It mattered because the case it was written for is real: 15 of the `assert`
+statements in the pinned `fitdecode`'s reader carry no message, so a bare `AssertionError`
+interpolates to the empty string. Fuzzing put ~0.4 % of corrupt uploads on a 422 reading
+`Invalid FIT file: ` and nothing else - the exact outcome the fallback existed to prevent.
+
 **`start_time` carries the dive's real local offset, reconstructed from
 `activity.local_timestamp`.** Every timestamp in a FIT file is UTC, and `local_timestamp`
 on the `activity` message is that same instant written as local wall-clock time - so the
@@ -3363,10 +3389,18 @@ The truncated-file test gave false confidence here: truncation happens to raise
 `FitEOFError`, which *is* a `FitError`, so the one malformed-input case in the suite was
 the one case the narrow catch covered.
 
-Extraction (as opposed to decoding) keeps a named tuple of exception types,
-`_EXTRACTION_ERRORS`, which includes `ArithmeticError` for the `decimal.InvalidOperation`
-that `channels.scaled_int` raises when a corrupt float32 reading arrives as NaN and `quantize`
-refuses it.
+Extraction (as opposed to decoding) catches `EXTRACTION_ERRORS`, which includes
+`ArithmeticError` for the `decimal.InvalidOperation` that `channels.scaled_int` raises when
+a corrupt float32 reading arrives as NaN and `quantize` refuses it.
+
+That tuple lives in `dive_parsers/exceptions.py` and is **shared by all three parsers**,
+because it had already drifted once. The FIT parser gained `ArithmeticError`; the Suunto
+JSON parser kept the narrower tuple while running the same `Decimal` arithmetic on values
+`json.loads` will hand back as `inf` - it accepts a bare `Infinity` and overflows large
+exponents - so a cylinder pressure of `Infinity` escaped the "best-effort" cylinder
+reconstruction guard, escaped `parse()`, and landed on the registry backstop as a 422 that
+discarded header fields the bad samples had nothing to do with. `OverflowError` from
+`timedelta(seconds=1e300)` is the same shape. One tuple, one place, no drift.
 
 `parse_dive_file_with_parser` additionally converts anything unexpected out of *any*
 parser into a `DiveParseError`, and logs it. Each parser still guards its own failure modes

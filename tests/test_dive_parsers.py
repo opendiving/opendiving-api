@@ -579,6 +579,53 @@ class TestSuuntoJsonParserParse:
             assert parsed.max_depth == 21.1
             assert parsed.mixtures == []
 
+    @pytest.mark.parametrize(
+        ("label", "dive_time", "pressure"),
+        [
+            # `json.loads` accepts bare `Infinity`, which reaches `Decimal(...).quantize`
+            # in `_round2_or_none` and raises `decimal.InvalidOperation`.
+            ("an infinite cylinder pressure", "1800", "Infinity"),
+            # Finite, so `round()` outside the guard survives - but `timedelta(seconds=...)`
+            # inside it raises `OverflowError`. Both are `ArithmeticError` subclasses, and
+            # neither was in the guard's original tuple.
+            ("an overflowing DiveTime", "1e300", "20000000"),
+        ],
+    )
+    def test_arithmetic_in_a_bad_sample_does_not_fail_the_import(self, label, dive_time, pressure):
+        """The guard promises "best-effort enrichment", and a narrower tuple let that lapse.
+
+        `fit.py` had already widened its equivalent to include `ArithmeticError` after a
+        corrupt float32 arrived as NaN; this one kept the old tuple while running the same
+        `Decimal` arithmetic. The header fields are what the diver came for and have
+        nothing to do with the samples.
+        """
+        content = json.dumps(
+            {
+                "DeviceLog": {
+                    "Header": {
+                        "DateTime": "2026-04-03T12:04:11.390+02:00",
+                        "Depth": {"Max": 30.0},
+                    },
+                    "Samples": [
+                        {
+                            "TimeISO8601": "2026-04-03T12:04:12.390+02:00",
+                            "Cylinders": [{"GasNumber": 0, "Pressure": 1}],
+                        }
+                    ],
+                }
+            }
+        )
+        # Substituted rather than passed through `json.dumps`, which refuses to emit a
+        # bare `Infinity` and would render 1e300 as a float literal.
+        content = content.replace('"Pressure": 1', f'"Pressure": {pressure}').replace(
+            '"Depth": {"Max": 30.0}', f'"DiveTime": {dive_time}, "Depth": {{"Max": 30.0}}'
+        )
+
+        parsed = SuuntoJsonParser.parse(content.encode())
+
+        assert parsed.max_depth == 30.0
+        assert parsed.mixtures == []
+
     def test_ignores_transmitter_readings_from_after_the_dive(self):
         """The computer keeps logging on the boat, where the diver purges the regulator.
 
@@ -1109,6 +1156,24 @@ class TestFitParserParse:
     # deciding it cannot continue. That is the library working as intended on garbage, and
     # 500-odd of them would drown the suite's warning summary.
     @pytest.mark.filterwarnings("ignore::UserWarning")
+    def test_a_message_less_decoder_failure_still_gives_a_reason(self):
+        """Flipping byte 143 to 0x00 makes `fitdecode` fail one of the 15 message-less
+        `assert`s in its reader, which formats to the empty string.
+
+        The fallback for that was written as `exc or type(exc).__name__` - dead code, since
+        `BaseException` defines neither `__bool__` nor `__len__` and an exception instance
+        is therefore always truthy. Fuzzing put ~0.4 % of corrupt uploads on a 422 whose
+        detail was `Invalid FIT file: ` and nothing else.
+        """
+        corrupt = bytearray(VALID_FIT)
+        corrupt[143] = 0x00
+
+        with pytest.raises(DiveParseError) as raised:
+            FitParser.parse(bytes(corrupt))
+
+        assert not str(raised.value).endswith(": ")
+        assert "AssertionError" in str(raised.value)
+
     @pytest.mark.parametrize("entry_point", [FitParser.parse, FitParser.parse_profile])
     def test_raises_dive_parse_error_on_corrupt_but_untruncated_files(self, entry_point):
         """Corruption in the body, which is not the same failure as truncation.
@@ -1136,6 +1201,57 @@ class TestFitParserParse:
                 pass
             except Exception as exc:  # noqa: BLE001 - the point of the test
                 pytest.fail(f"{type(exc).__name__} escaped as a 500 instead of DiveParseError: {exc}")
+
+
+class TestFitBitfieldFields:
+    """`message_index` and `sensor` are identities and bitfields, not readings.
+
+    `fitdecode` renders a field whose profile type carries an enum by exact value match,
+    and FIT keeps bitfield masks in that same enum slot: `message_index` maps
+    `{4095: 'mask', 28672: 'reserved', 32768: 'selected'}`, and `ant_channel_id` - the type
+    behind `sensor` - maps `{65535: 'ant_device_number', ...}`. A gas index or ANT id that
+    lands on one of those comes back as a **string**, and `int()` on it raises.
+    """
+
+    @staticmethod
+    def _gas(index: int, oxygen: int):
+        return message("dive_gas", message_index=index, oxygen_content=oxygen, helium_content=0, status="enabled")
+
+    def test_a_gas_index_carrying_the_selected_bit_is_importable(self):
+        """`message_index = 0x8000` is gas index 0 with the spec's "selected" flag set -
+        an ordinary thing to write about the first configured gas, not corruption. It made
+        the whole dive un-importable with a 422."""
+        parsed = FitParser.parse(dive_fit_file(self._gas(0x8000, 21)))
+
+        assert [mixture.oxygen for mixture in parsed.mixtures] == [21.0]
+
+    def test_flagged_and_unflagged_gas_indices_sort_together(self):
+        """Without the `0x0FFF` mask a flagged index is a five-digit number: gas 1 arrives
+        as 32769 and sorts *after* gas 2, reordering the mixtures and so misaligning
+        `_tanks_for`'s positional pairing."""
+        content = dive_fit_file(self._gas(0, 21), self._gas(0x8000 | 1, 50), self._gas(2, 80))
+
+        assert [mixture.oxygen for mixture in FitParser.parse(content).mixtures] == [21.0, 50.0, 80.0]
+
+    def test_a_tank_summary_sensor_on_an_enum_boundary_is_read(self):
+        content = dive_fit_file(
+            self._gas(0, 21),
+            message("tank_summary", sensor=65535, start_pressure=207.0, end_pressure=62.0),
+        )
+        mixture = FitParser.parse(content).mixtures[0]
+
+        assert (mixture.start_pressure, mixture.end_pressure) == (207.0, 62.0)
+
+    def test_a_tank_update_sensor_on_an_enum_boundary_is_read(self):
+        content = dive_fit_file(
+            self._gas(0, 21),
+            message("tank_update", timestamp=DIVE_START, sensor=65535, pressure=207.0),
+            message("tank_update", timestamp=DIVE_START + timedelta(seconds=1800), sensor=65535, pressure=62.0),
+        )
+        profile = FitParser.parse_profile(content)
+
+        assert profile is not None
+        assert len(profile.pressure) == 1
 
 
 class TestFitParserMultiSession:
