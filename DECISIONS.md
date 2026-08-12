@@ -3009,3 +3009,160 @@ the same reason: `invalidate_dive_caches()` already sweeps `user_{id}_dives:*` a
 dive create, update and delete, so this series drops with them and needed no invalidation
 change at all. A key of its own would be a third pattern to remember to add there, and the
 bug from forgetting is a chart that silently keeps showing last week's diving.
+
+## FIT is one parser for both vendors, and its one real trap is developer fields
+
+`FitParser` (`services/dive_parsers/fit.py`) reads ANT/Garmin FIT activity files - what a
+Garmin Descent produces and what a Suunto Ocean or D5 exports natively - and it is
+deliberately **one** parser rather than one per manufacturer. FIT is self-describing: the
+global profile fixes field numbers, units and scale factors, so `session.max_depth` is
+`uint32` scaled by 1000 whoever wrote it. `fitdecode` applies that profile and hands back
+meters, Celsius, bar and whole percent, which is the opposite of the situation the two
+Suunto parsers are in (Pascal here, millibar there, Kelvin over there). Vendor differences
+are additive, not contradictory: Garmin also writes `dive_summary` and
+`tank_update`/`tank_summary`, Suunto writes neither. Both are read where present.
+
+`fitdecode` was chosen over `fitparse` and Garmin's own SDK because it is MIT, pure Python
+with no dependencies of its own, and - unlike `fitparse` - decodes developer fields, which
+the next paragraph makes non-negotiable. `export/parse-fit.py` had already settled on it.
+
+**Never build a `{field.name: field.value}` dict from `frame.fields`.** Suunto's exporter
+declares developer fields whose names collide with native profile fields, so a Suunto
+`session` carries **two** `max_depth` values: the native `uint32`/scale-1000 one (exactly
+32.41) and a `float32` developer duplicate (32.40999984741211). A dict comprehension keeps
+whichever came last, which is the lossy one - and that is precisely what the
+`export/parse-fit.py` prototype did, so the noise was visible in its output from the
+start. `_native_value()` walks the fields and skips anything that is a `fitdecode.types.
+DevField`. `fitdecode`'s own `get_value()` happens to return the right one, but only
+because it takes the first positional match and FIT encodes native fields ahead of
+developer ones; filtering on the type is what actually states the intent, and it is
+covered by `test_prefers_the_native_field_over_a_developer_field_of_the_same_name`.
+
+**`start_time` carries the dive's real local offset, reconstructed from
+`activity.local_timestamp`.** Every timestamp in a FIT file is UTC, and `local_timestamp`
+on the `activity` message is that same instant written as local wall-clock time - so the
+gap between the two *is* the UTC offset at the dive site, and nothing else in the file
+records it. This matters more than it looks: `DiveStartTime` rejects a naive datetime, and
+the frontend's `normalizeParsedStartTime` keeps whatever offset a parse supplies. Handing
+back plain UTC would therefore be *accepted* and would silently file an 11:16 Red Sea dive
+as 09:16. The offset is rounded to whole minutes and rejected past ±14 h - `timezone()`
+raises beyond ±24 h, which a corrupt file would otherwise turn into a 500.
+
+**`bottom_temperature` never reads `max_temperature`, though that is the field Suunto
+fills in.** Both Ocean exports in the corpus hold 22 °C in `session.max_temperature` while
+their samples run 22-25 °C: Suunto writes the *coldest* reading into a field named for the
+warmest. Reading it as a maximum would be wrong; reading it as a minimum would bake one
+vendor's bug into a shared parser. So `session.min_temperature` is used when present (a
+Garmin populates it), and otherwise the coldest `record` sample - ground truth, and it
+returns the same 22 °C on those files.
+
+**`dive_number` is not imported, same as both Suunto parsers.** `session.dive_number`
+counts dives on *that device* and restarts at 1 after a factory reset or a new computer.
+The corpus settles it outright: a D5 export reporting `dive_number` 5 carries the diver's
+own label for the same dive in `session.description` - "#28: Elphinstone Reef". The number
+comes from `GET /dives/next-number` instead.
+
+**A non-diving FIT file is a `DiveParseError`, not an `UnsupportedDiveFileError`** - a
+deliberate departure from the Suunto parsers. `UnsupportedDiveFileError` means "not my
+format, let the next parser try", and with no other FIT parser registered it surfaces as a
+415 "no parser available for this file" about a format that is very much supported. A bike
+ride *is* a FIT file this parser read successfully; it just holds no dive, and a 422 that
+says so is the more useful answer. A session with no `sport` is still accepted when the
+file carried depth samples, which is the stronger evidence anyway.
+
+**Tank pressures come from `tank_summary` if the device wrote one, otherwise off the ends
+of the `tank_update` telemetry.** A Descent streams `tank_update` throughout the dive
+whether or not it also emits a summary, so taking the first and last reading per pod is
+better than dropping the transmitter data. Readings are ordered by their own timestamps,
+not by arrival, since separate pods interleave.
+
+They are then **paired to gases by position, and only when the counts match.** Nothing in
+the format links the two: tank telemetry is keyed by the transmitter's ANT id and a
+`dive_gas` by its `message_index`. Position is the only available signal, so two gases and
+one pod leaves every pressure null rather than guessing - these feed `compute_gas_use`,
+and a confidently wrong start pressure yields a plausible, wrong RMV, which is worse than
+an empty field the diver can fill in. For the same "a serial is not a label" reason the
+XML parser refuses `<TransmitterId>`, profile pressure series are labelled 1, 2, … in
+first-seen order rather than by `sensor`.
+
+**Suunto's FIT export contains no transmitter data at all**, which is a vendor limitation
+and not something the parser can work around. Dive `69e21526bf486d396e2786b5` exists in
+the corpus as *both* a `.fit` and a `.json`: the JSON carries 419 `Cylinders[].Pressure`
+readings, and the FIT has zero pressure-shaped fields anywhere - no `tank_update`, no
+`tank_summary`, and a `dive_gas` holding only oxygen/helium/status. The two exports are
+complementary rather than redundant, and it is worth knowing which way round: **the FIT
+has the gas mixes** (that dive's 21 % and 54 %, which its JSON twin omits entirely) **and
+the JSON has the pressures.** So the `tank_update`/`tank_summary` paths above are written
+from the FIT profile's own unit definitions and remain the one part of this parser not
+confirmed against a real file; a Descent Mk2i/Mk3i export would close that.
+
+## The 2026 Suunto Ocean JSON is a third header shape, with gas data only in the samples
+
+`SuuntoJsonParser` was built against two header shapes - a "clean"/header-only one and a
+D5-style one nesting gas mixtures under `Header.Diving.Gases`. The 2026 Suunto Ocean
+export is a third: it has **no `Header.Diving` block at all**, so the `Gases` path found
+nothing and every dive imported from one came back with `mixtures: []` - despite the file
+carrying several hundred transmitter readings. Across the whole 2026 corpus,
+`hasDiving` is false on every file and the string `Oxygen` does not appear in any of them.
+
+What the Ocean does record is `Samples[].Cylinders[]`: `GasNumber`, `Pressure` (Pascal),
+`GasTime` and `Ventilation`. Those readings are the entire point of owning a transmitter
+and are what `compute_gas_use` needs, so `_mixtures_from_cylinders` reconstructs a mixture
+per cylinder that actually reported, taking `start_pressure`/`end_pressure` from its first
+and last reading. On a real file that turns "no mixtures" into 205.11 → 91.55 bar.
+
+Three details this has to get right:
+
+- **Ordered by the sample's own timestamp, not by array position.** The union of an
+  Ocean's sample timestamps is not monotonic (adjacent entries go backwards by up to
+  0.7 s, because separate sensor streams are appended out of order), so the last entry in
+  the array is not reliably the last reading of the dive. Same fact that forces
+  `_parse_samples` to sort each channel independently.
+- **A `null` `Pressure` is skipped, never treated as a reading or as the end of one.** An
+  Ocean reports five cylinder slots on every sample with only one paired, and its final
+  samples null out even the live slot - reading those as the end pressure would report a
+  dive that finished on an empty tank.
+- **Only the pressures are real.** The export records no gas fraction and no tank size
+  anywhere, so `oxygen`/`helium`/`volume` are 21/0/0 - exactly the blank row the web app's
+  own "add a mixture" button starts with (`MixtureFields`). That is a stand-in for
+  something never recorded rather than a reading; it just happens to be what the form
+  would have shown anyway, now with the pressures already filled in.
+
+`Gases` still wins wherever an export has one: it carries the gas fraction and the tank
+size that telemetry alone cannot, so the sample-derived path is a fallback for an empty
+list, not a merge. The D5 exports are unaffected.
+
+**`volume` is 0.0 on every FIT mixture.** The format has nowhere to record cylinder size -
+not on `dive_gas`, and `tank_summary` carries only the volume *consumed*. That is the same
+placeholder the Suunto parsers emit for an export that omits it, and the dive form shows it
+for the diver to correct before saving (`ck_dive_mixture_volume_positive` rejects 0).
+
+**`fitdecode`'s `CrcCheck.WARN`/`ErrorHandling.WARN` defaults are kept on purpose.** The
+CRC guards against transfer corruption, not tampering, and nothing downstream trusts it -
+refusing an otherwise readable dive log over a bad checksum would lose real data for no
+gain. Genuinely undecodable bytes still raise `fitdecode.FitError`, which becomes a
+`DiveParseError`.
+
+Both entry points decode the file in full. A FIT file is a stream whose `session` summary
+comes *after* the samples it summarizes, so there is no cheap header-only read to be had -
+`parse()` pays for the whole pass either way, which is also what makes the coldest-sample
+temperature fallback free.
+
+## FIT fixtures are written, not committed as blobs
+
+FIT is the first supported export that is binary, which would otherwise force a choice
+between committing opaque `.fit` files and not testing the interesting cases. Neither is
+good: a blob cannot be edited to express "a session whose developer field shadows a native
+one" or "a dive with no `activity` message", which is exactly what needs pinning down.
+
+`tests/helpers/fit.py` is therefore a minimal FIT *writer* - definition and data records,
+developer-field declarations, and the spec's nibble-table CRC-16 - driven by `fitdecode`'s
+own copy of the global profile. Field numbers, base types, scale factors and enum members
+are looked up rather than hardcoded, so a fixture reads `message("session",
+sport="diving", max_depth=32.41)` and cannot drift out of step with the profile the parser
+decodes through. The files it produces pass `CrcCheck.RAISE`.
+
+This keeps the inline-fixture, no-database style the rest of `test_dive_parsers.py` and
+`test_dive_profiles.py` are written in. Only what those tests need is implemented:
+little-endian, one definition per data message, no compressed timestamp headers, no
+accumulators.

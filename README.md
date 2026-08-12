@@ -13,10 +13,11 @@ serves it all over a clean, documented REST API — so your data is never more t
 
 - **Dive log API** — dives with gas mixtures (O₂/He, pressures), multiple ordered
   dive sites per dive, trips, weights, and notes. Soft deletes throughout.
-- **Dive-computer file parsing** — upload a Suunto export (XML or JSON) to
-  `POST /dive/parse` and get structured dive data back to pre-fill a form. Attach the
-  file to the dive afterwards and the **per-sample profile** (depth, temperature, tank
-  pressure) is extracted server-side and served with ETag caching.
+- **Dive-computer file parsing** — upload a FIT file (Garmin Descent, Suunto Ocean/D5) or
+  a Suunto XML/JSON export to `POST /dive/parse` and get structured dive data back to
+  pre-fill a form. Attach the file to the dive afterwards and the **per-sample profile**
+  (depth, temperature, tank pressure) is extracted server-side and served with ETag
+  caching.
 - **Air consumption** — SAC and RMV derived automatically for single-tank dives, plus
   a gas-use history endpoint powering the dashboard trend chart.
 - **Gear** — items, gear sets with default weights, service **schedules** (by months
@@ -30,8 +31,8 @@ serves it all over a clean, documented REST API — so your data is never more t
 
 ## Planned
 
-- **More parsers** — FIT (Garmin/Suunto), UDDF, and Subsurface formats; a pluggable
-  importer layer so every supported format is a migration path in.
+- **More parsers** — UDDF and Subsurface formats; a pluggable importer layer so every
+  supported format is a migration path in.
 - **Full export** — everything out in open formats (UDDF, JSON, CSV) in one request.
 - **Public share links** — read-only dive/trip pages, e.g. for verifying experience.
 - **Statistics endpoints** — records, per-year aggregates, site maps, species log.

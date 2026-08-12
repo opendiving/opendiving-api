@@ -1,6 +1,7 @@
 from ...schemas.parsed_dive import ParsedDiveSchema
 from .base import DiveParser
 from .exceptions import DiveParseError, UnsupportedDiveFileError
+from .fit import FitParser
 from .suunto_json import SuuntoJsonParser
 from .suunto_xml import SuuntoXmlParser
 
@@ -8,6 +9,7 @@ from .suunto_xml import SuuntoXmlParser
 _PARSERS: list[type[DiveParser]] = [
     SuuntoXmlParser,
     SuuntoJsonParser,
+    FitParser,
 ]
 
 

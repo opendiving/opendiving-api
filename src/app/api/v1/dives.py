@@ -221,7 +221,7 @@ def _to_public_dive_with_mixtures(
 @router.post("/dive/parse", response_model=ParsedDiveResponse)
 async def parse_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
-    file: Annotated[UploadFile, File(description="Dive-computer export file (e.g. Suunto XML or JSON)")],
+    file: Annotated[UploadFile, File(description="Dive-computer export file (Suunto XML or JSON, or a FIT file)")],
 ) -> ParsedDiveResponse:
     """Upload a dive-computer export file and receive the parsed dive data as JSON.
 

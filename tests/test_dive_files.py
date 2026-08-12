@@ -174,8 +174,19 @@ class TestParserMetadata:
         assert PARSER_BY_KEY == {parser.key: parser for parser in parsers_module._PARSERS}
 
     def test_content_types_are_ones_we_are_willing_to_serve(self) -> None:
-        for parser in parsers_module._PARSERS:
-            assert parser.content_type in {"application/xml", "application/json"}
+        """The closed set `read_dive_file` may put in a `Content-Type` header.
+
+        The bar is that a browser handed one of these can't be talked into *executing* it
+        at the app's own origin - so nothing in the `text/*` family, and nothing
+        `nosniff` wouldn't already pin down. `application/vnd.ant.fit` (the ANT+
+        registered type for a FIT file) clears it more easily than the two before it: it
+        is opaque binary with no renderer at all.
+        """
+        assert {parser.content_type for parser in parsers_module._PARSERS} <= {
+            "application/xml",
+            "application/json",
+            "application/vnd.ant.fit",
+        }
 
 
 class TestParseDiveFileWithParser:

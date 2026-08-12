@@ -20,6 +20,12 @@ _LITERS_PER_CUBIC_METER = Decimal("1000")
 _PERCENT_PER_FRACTION = Decimal("100")
 _TWO_DECIMAL_PLACES = Decimal("0.01")
 
+# The gas a cylinder reconstructed from transmitter telemetry alone is reported as. See
+# `_mixtures_from_cylinders`: the Ocean export records pressures but no gas fraction, and
+# this matches the blank mixture row the web app's own form starts with (`MixtureFields`),
+# so the diver sees a normal empty gas with the pressures already filled in.
+_UNRECORDED_OXYGEN_PERCENT = 21.0
+
 # The integer scales `parse_profile` emits in - depth in centimeters, temperature in
 # tenths of a degree, pressure in tenths of a bar. See `schemas/dive_profile.py`.
 _CENTIMETERS_PER_METER = Decimal("100")
@@ -129,6 +135,65 @@ def _parse_mixture(gas: dict[str, Any]) -> DiveMixtureSchema:
         start_pressure=_round2_or_none(_pascals_to_bar(gas.get("StartPressure"))),
         volume=_cubic_meters_to_liters(gas.get("TankSize")) or 0.0,
     )
+
+
+def _cylinder_pressures(samples: list[dict[str, Any]]) -> dict[int, tuple[float, float]]:
+    """First and last transmitter reading per cylinder, from `Samples[].Cylinders[]`.
+
+    Ordered by the sample's own timestamp rather than by position in the array: the
+    *union* of an Ocean export's sample timestamps is not monotonic (adjacent entries go
+    backwards by up to 0.7 s, because the separate sensor streams are appended out of
+    order), so "the last entry in the file" is not reliably the last reading of the dive.
+
+    A cylinder is only included once it has a real reading. An Ocean reports five slots
+    on every sample with `Pressure: null` in the ones nothing is paired to, and its final
+    samples null out even the live slot - so `None` readings are skipped rather than
+    ending the series.
+    """
+    readings: dict[int, list[tuple[datetime, float]]] = {}
+    for sample in samples:
+        time_text = sample.get("TimeISO8601")
+        if not time_text:
+            continue
+        moment = datetime.fromisoformat(time_text)
+        for cylinder in sample.get("Cylinders") or []:
+            pressure = cylinder.get("Pressure")
+            if pressure is None:
+                continue
+            readings.setdefault(int(cylinder["GasNumber"]), []).append((moment, pressure))
+
+    ordered = {number: sorted(points, key=lambda point: point[0]) for number, points in readings.items()}
+    return {number: (points[0][1], points[-1][1]) for number, points in ordered.items() if points}
+
+
+def _mixtures_from_cylinders(samples: list[dict[str, Any]]) -> list[DiveMixtureSchema]:
+    """Reconstruct mixtures from transmitter telemetry, for an export with no gas list.
+
+    The 2026 Suunto Ocean's JSON export is a third header shape: it has no
+    `Header.Diving` block at all, so the `Gases[]` path finds nothing and every dive
+    imported from one came back with no mixtures - even though the file carries several
+    hundred `Cylinders[].Pressure` readings. Those readings are the whole point of a
+    transmitter, and they are what `compute_gas_use` needs, so the cylinders that
+    actually reported are turned into mixtures here.
+
+    Only the pressures are real. The export records no gas fraction and no tank size
+    anywhere (verified across the full corpus - `Oxygen` does not appear in these files
+    at all), so `oxygen`/`helium`/`volume` are the same values the web app's own "add a
+    mixture" button starts a blank row with: air, and a volume the diver fills in. That
+    is a stand-in for something never recorded, not a reading - it just happens to be
+    the one the form would have shown anyway, now with the pressures already filled in.
+    """
+    return [
+        DiveMixtureSchema(
+            end_pressure=_round2_or_none(_pascals_to_bar(end)),
+            helium=0.0,
+            name=None,
+            oxygen=_UNRECORDED_OXYGEN_PERCENT,
+            start_pressure=_round2_or_none(_pascals_to_bar(start)),
+            volume=0.0,
+        )
+        for _, (start, end) in sorted(_cylinder_pressures(samples).items())
+    ]
 
 
 class SuuntoJsonParser(DiveParser):
@@ -284,7 +349,13 @@ class SuuntoJsonParser(DiveParser):
         depth = header.get("Depth") or {}
         temperature = header.get("Temperature") or {}
         diving = header.get("Diving") or {}
+        # `Gases` is the authoritative list where the export has one - it carries the gas
+        # fractions and tank size that telemetry alone can't. Only when it is absent
+        # entirely (the 2026 Ocean shape, which has no `Diving` block at all) are the
+        # cylinders reconstructed from the sample stream.
         mixtures = [_parse_mixture(gas) for gas in diving.get("Gases") or []]
+        if not mixtures:
+            mixtures = _mixtures_from_cylinders(samples)
 
         temperatures_celsius = [
             celsius

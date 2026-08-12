@@ -1,12 +1,15 @@
 """Unit tests for dive-computer export file parsers."""
 
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from src.app.services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file
+from src.app.services.dive_parsers.fit import FitParser
 from src.app.services.dive_parsers.suunto_json import SuuntoJsonParser
 from src.app.services.dive_parsers.suunto_xml import SuuntoXmlParser
+from tests.helpers.fit import DevField, Message, dive_fit_file, fit_file, message
 
 SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
 XSI_NS = "http://www.w3.org/2001/XMLSchema-instance"
@@ -121,6 +124,77 @@ VALID_SUUNTO_JSON_WITH_GASES = """
   }
 }
 """
+
+
+def _ocean_json(samples: list[dict]) -> bytes:
+    """A 2026 Suunto Ocean-shaped export: no `Header.Diving`, gas data only in the
+    samples' `Cylinders`. Five cylinder slots per sample with one paired, as the device
+    writes them."""
+    return json.dumps(
+        {
+            "DeviceLog": {
+                "Header": {"DateTime": "2026-04-03T12:04:11.390+02:00", "Depth": {"Max": 21.1}},
+                "Samples": samples,
+            }
+        }
+    ).encode()
+
+
+def _ocean_sample(offset_seconds: int, pressure: int | None) -> dict:
+    minute, second = divmod(offset_seconds, 60)
+    return {
+        "TimeISO8601": f"2026-04-03T12:{4 + minute:02d}:{11 + second:02d}.390+02:00",
+        "Cylinders": [{"GasNumber": 0, "GasTime": 2789, "Pressure": pressure, "Ventilation": 0.00018}]
+        + [{"GasNumber": n, "GasTime": 0, "Pressure": None, "Ventilation": 0} for n in range(1, 5)],
+    }
+
+
+OCEAN_JSON_WITH_CYLINDERS = _ocean_json(
+    [
+        _ocean_sample(0, 20510938),
+        _ocean_sample(10, 15000000),
+        _ocean_sample(20, 9155000),
+        # The Ocean nulls out even the live slot on its final samples - that must not be
+        # read as the end pressure, nor end the series.
+        _ocean_sample(30, None),
+    ]
+)
+
+# The same readings with the array out of chronological order, which is what the
+# interleaved sensor streams actually produce.
+OCEAN_JSON_WITH_UNORDERED_CYLINDERS = _ocean_json(
+    [
+        _ocean_sample(20, 9155000),
+        _ocean_sample(0, 20510938),
+        _ocean_sample(10, 15000000),
+    ]
+)
+
+
+# FIT fixtures are built rather than pasted - see `tests/helpers/fit.py` for why a
+# binary format gets a writer instead of committed blobs.
+DIVE_START = datetime(2026, 4, 17, 9, 49, 23, tzinfo=UTC)
+# When the device finished writing the file. The dive was logged at UTC+02:00, which is
+# recoverable only from the gap between this and `local_timestamp`.
+ACTIVITY_END = datetime(2026, 4, 17, 11, 1, 5, tzinfo=UTC)
+
+
+def _records(samples: list[tuple[int, float, int]]) -> list[Message]:
+    """`record` messages from `(seconds after the dive started, depth m, temperature C)`."""
+    return [
+        message("record", timestamp=DIVE_START + timedelta(seconds=offset), depth=depth, temperature=temperature)
+        for offset, depth, temperature in samples
+    ]
+
+
+# A whole dive: a Suunto Ocean-shaped export, down to the +02:00 offset and the single
+# nitrox mixture. `dive_fit_file` supplies the session around whatever is passed in.
+VALID_FIT = dive_fit_file(
+    message("activity", timestamp=ACTIVITY_END, local_timestamp=ACTIVITY_END + timedelta(hours=2), num_sessions=1),
+    message("dive_gas", message_index=0, oxygen_content=32, helium_content=0, status="enabled"),
+    *_records([(0, 1.45, 25), (1200, 45.91, 22), (2400, 20.0, 22), (4290, 0.0, 24)]),
+    total_elapsed_time=4301.72,
+)
 
 
 class TestSuuntoXmlParserCanParse:
@@ -351,6 +425,48 @@ class TestSuuntoJsonParserParse:
 
         assert len(parsed.mixtures) == 2
 
+    def test_reconstructs_mixtures_from_cylinder_telemetry(self):
+        """The 2026 Ocean export is a third header shape with no `Header.Diving` at all,
+        so the `Gases` path finds nothing - and every dive imported from one used to come
+        back with no mixtures, despite the file carrying hundreds of transmitter
+        readings."""
+        parsed = SuuntoJsonParser.parse(OCEAN_JSON_WITH_CYLINDERS)
+
+        assert len(parsed.mixtures) == 1
+        mixture = parsed.mixtures[0]
+        # 20510938 Pa -> 205.11 bar, 9155000 Pa -> 91.55 bar.
+        assert mixture.start_pressure == 205.11
+        assert mixture.end_pressure == 91.55
+        # Nothing in this export records a gas fraction or a tank size, so these are the
+        # same blank-row values the web app's own "add a mixture" button starts with.
+        assert mixture.oxygen == 21.0
+        assert mixture.helium == 0.0
+        assert mixture.volume == 0.0
+
+    def test_ignores_cylinder_slots_that_never_reported(self):
+        """An Ocean reports five cylinder slots on every sample with only one paired."""
+        parsed = SuuntoJsonParser.parse(OCEAN_JSON_WITH_CYLINDERS)
+
+        assert len(parsed.mixtures) == 1
+
+    def test_cylinder_pressures_are_ordered_by_time_not_by_position(self):
+        """The union of an Ocean's sample timestamps is not monotonic - separate sensor
+        streams are appended out of order - so the last entry in the array is not
+        reliably the last reading of the dive."""
+        parsed = SuuntoJsonParser.parse(OCEAN_JSON_WITH_UNORDERED_CYLINDERS)
+        mixture = parsed.mixtures[0]
+
+        assert mixture.start_pressure == 205.11
+        assert mixture.end_pressure == 91.55
+
+    def test_a_gases_block_wins_over_cylinder_telemetry(self):
+        """`Gases` carries the gas fraction and tank size that telemetry can't, so it is
+        authoritative wherever the export has one."""
+        parsed = SuuntoJsonParser.parse(VALID_SUUNTO_JSON_WITH_GASES.encode())
+
+        assert [mixture.oxygen for mixture in parsed.mixtures] == [21.0, 49.0]
+        assert parsed.mixtures[0].volume == 22.0
+
     def test_falls_back_to_duration_when_dive_time_absent(self):
         """D5-style exports report this as `Duration` rather than `DiveTime`."""
         parsed = SuuntoJsonParser.parse(VALID_SUUNTO_JSON_WITH_GASES.encode())
@@ -406,6 +522,274 @@ class TestSuuntoJsonParserParse:
             SuuntoJsonParser.parse(MALFORMED_JSON)
 
 
+class TestFitParserCanParse:
+    """Purely syntactic: a `.fit` name plus the `.FIT` magic at offset 8. No decoding
+    happens here, so nothing in this class can raise."""
+
+    def test_recognizes_a_fit_file(self):
+        assert FitParser.can_parse("dive.fit", VALID_FIT) is True
+
+    def test_rejects_non_fit_extension(self):
+        assert FitParser.can_parse("dive.xml", VALID_FIT) is False
+
+    def test_extension_check_is_case_insensitive(self):
+        assert FitParser.can_parse("DIVE.FIT", VALID_FIT) is True
+
+    def test_rejects_fit_extension_without_the_magic(self):
+        """A rename is not a format. `.fit` on a JSON export must not reach `parse()`."""
+        assert FitParser.can_parse("dive.fit", VALID_SUUNTO_JSON.encode()) is False
+
+    def test_rejects_a_file_too_short_to_hold_a_header(self):
+        assert FitParser.can_parse("dive.fit", b"\x0c\x20") is False
+
+
+class TestFitParserParse:
+    def test_extracts_the_dive(self):
+        parsed = FitParser.parse(VALID_FIT)
+
+        assert parsed.max_depth == 45.91
+        assert parsed.avg_depth == 19.43
+        assert parsed.duration == 4302
+        assert parsed.bottom_temperature == 22.0
+
+    def test_prefers_the_native_field_over_a_developer_field_of_the_same_name(self):
+        """The one thing a FIT reader has to get right for Suunto's exports.
+
+        Its exporter declares a `float32` developer field named `max_depth` alongside the
+        native `uint32`/scale-1000 one, so the same session carries 32.41 and
+        32.40999984741211. Collecting fields into a dict by name - the obvious way to
+        walk `frame.fields` - keeps the second.
+        """
+        content = fit_file(
+            message(
+                "session",
+                DevField(name="max_depth", value=32.41, field_number=5, units="m"),
+                sport="diving",
+                start_time=DIVE_START,
+                total_elapsed_time=2001.0,
+                max_depth=32.41,
+            ),
+        )
+
+        assert FitParser.parse(content).max_depth == 32.41
+
+    def test_start_time_carries_the_dive_s_own_utc_offset(self):
+        """`activity.local_timestamp` is the only record of where the dive happened.
+
+        Both are the same instant; the gap between them is the offset at the dive site.
+        Losing it would log an 11:49 Red Sea dive as 09:49.
+        """
+        parsed = FitParser.parse(VALID_FIT)
+
+        assert parsed.start_time == "2026-04-17T11:49:23+02:00"
+
+    def test_start_time_falls_back_to_utc_without_an_activity_message(self):
+        parsed = FitParser.parse(dive_fit_file())
+
+        assert parsed.start_time == "2026-04-17T09:49:23+00:00"
+
+    def test_ignores_a_local_timestamp_no_timezone_could_explain(self):
+        """A corrupt `local_timestamp` becomes "no offset recorded", not a 40-hour zone -
+        `timezone()` raises past +/-24 h, which would surface as a 500 on upload."""
+        content = dive_fit_file(
+            message(
+                "activity",
+                timestamp=ACTIVITY_END,
+                local_timestamp=ACTIVITY_END + timedelta(hours=40),
+                num_sessions=1,
+            ),
+        )
+
+        assert FitParser.parse(content).start_time == "2026-04-17T09:49:23+00:00"
+
+    def test_never_imports_the_computer_s_dive_number(self):
+        """`session.dive_number` counts dives on *that device*, not in the diver's log:
+        it restarts at 1 after a factory reset or a new computer. The corpus shows it
+        outright - a D5 reporting `dive_number` 5 for a dive the diver labelled "#28"."""
+        content = dive_fit_file(dive_number=5)
+
+        assert FitParser.parse(content).dive_number is None
+
+    def test_duration_falls_back_to_the_timer_time(self):
+        content = fit_file(
+            message("session", sport="diving", start_time=DIVE_START, total_timer_time=1800.4),
+        )
+
+        assert FitParser.parse(content).duration == 1800
+
+    def test_duration_falls_back_to_a_garmin_dive_summary(self):
+        content = fit_file(
+            message("dive_summary", bottom_time=1500.0, max_depth=30.0),
+            message("session", sport="diving", start_time=DIVE_START),
+        )
+
+        assert FitParser.parse(content).duration == 1500
+
+    def test_depths_fall_back_to_a_garmin_dive_summary(self):
+        content = fit_file(
+            message("dive_summary", avg_depth=11.2, max_depth=30.5),
+            message("session", sport="diving", start_time=DIVE_START, total_elapsed_time=1800.0),
+        )
+        parsed = FitParser.parse(content)
+
+        assert parsed.max_depth == 30.5
+        assert parsed.avg_depth == 11.2
+
+    def test_bottom_temperature_prefers_the_recorded_minimum(self):
+        content = dive_fit_file(min_temperature=18)
+
+        assert FitParser.parse(content).bottom_temperature == 18.0
+
+    def test_bottom_temperature_falls_back_to_the_coldest_sample(self):
+        content = dive_fit_file(
+            *_records([(0, 5.0, 25), (60, 30.0, 21), (120, 10.0, 24)]),
+        )
+
+        assert FitParser.parse(content).bottom_temperature == 21.0
+
+    def test_bottom_temperature_ignores_suunto_s_max_temperature(self):
+        """Suunto writes the *coldest* reading into `max_temperature`: both Ocean exports
+        in the corpus hold 22 there while their samples run 22-25. Reading it as a
+        maximum would be wrong and reading it as a minimum would bake one vendor's bug
+        into the parser, so the sample stream decides instead."""
+        content = dive_fit_file(
+            *_records([(0, 5.0, 25), (60, 30.0, 23)]),
+            max_temperature=22,
+        )
+
+        assert FitParser.parse(content).bottom_temperature == 23.0
+
+    def test_extracts_gas_mixtures(self):
+        parsed = FitParser.parse(VALID_FIT)
+
+        assert len(parsed.mixtures) == 1
+        mixture = parsed.mixtures[0]
+        assert mixture.oxygen == 32.0
+        assert mixture.helium == 0.0
+        # FIT has nowhere to record cylinder size, so this is the same "fill it in
+        # yourself" placeholder the Suunto parsers emit for an export that omits it.
+        assert mixture.volume == 0.0
+        assert mixture.name is None
+
+    def test_skips_gases_the_diver_did_not_breathe(self):
+        """A computer stores its whole configured gas list. Importing the disabled ones
+        would put deco gases on a recreational air dive."""
+        content = dive_fit_file(
+            message("dive_gas", message_index=0, oxygen_content=21, helium_content=0, status="enabled"),
+            message("dive_gas", message_index=1, oxygen_content=50, helium_content=0, status="disabled"),
+        )
+        parsed = FitParser.parse(content)
+
+        assert [mixture.oxygen for mixture in parsed.mixtures] == [21.0]
+
+    def test_orders_gases_by_message_index(self):
+        content = dive_fit_file(
+            message("dive_gas", message_index=1, oxygen_content=54, helium_content=0, status="enabled"),
+            message("dive_gas", message_index=0, oxygen_content=21, helium_content=0, status="enabled"),
+        )
+        parsed = FitParser.parse(content)
+
+        assert [mixture.oxygen for mixture in parsed.mixtures] == [21.0, 54.0]
+
+    def test_takes_tank_pressures_from_a_matching_garmin_tank_summary(self):
+        """Nothing in the file links a `tank_summary` (keyed by transmitter ANT id) to a
+        `dive_gas` (keyed by `message_index`), so they are paired by position."""
+        content = dive_fit_file(
+            message("dive_gas", message_index=0, oxygen_content=21, helium_content=0, status="enabled"),
+            message("tank_summary", sensor=2411100050, start_pressure=207.0, end_pressure=62.0),
+        )
+        mixture = FitParser.parse(content).mixtures[0]
+
+        assert mixture.start_pressure == 207.0
+        assert mixture.end_pressure == 62.0
+
+    def test_derives_tank_pressures_from_telemetry_without_a_tank_summary(self):
+        """A Descent streams `tank_update` throughout the dive whether or not it also
+        writes a `tank_summary`, so the first and last reading stand in for one."""
+        content = dive_fit_file(
+            message("dive_gas", message_index=0, oxygen_content=21, helium_content=0, status="enabled"),
+            message("tank_update", timestamp=DIVE_START, sensor=2411100050, pressure=207.0),
+            message("tank_update", timestamp=DIVE_START + timedelta(seconds=600), sensor=2411100050, pressure=150.0),
+            message("tank_update", timestamp=DIVE_START + timedelta(seconds=1800), sensor=2411100050, pressure=62.0),
+        )
+        mixture = FitParser.parse(content).mixtures[0]
+
+        assert mixture.start_pressure == 207.0
+        assert mixture.end_pressure == 62.0
+
+    def test_tank_telemetry_is_ordered_by_time_not_by_arrival(self):
+        """Two pods interleave in the file, so "last message seen" is not "last reading"."""
+        content = dive_fit_file(
+            message("dive_gas", message_index=0, oxygen_content=21, helium_content=0, status="enabled"),
+            message("tank_update", timestamp=DIVE_START + timedelta(seconds=1800), sensor=2411100050, pressure=62.0),
+            message("tank_update", timestamp=DIVE_START, sensor=2411100050, pressure=207.0),
+        )
+        mixture = FitParser.parse(content).mixtures[0]
+
+        assert mixture.start_pressure == 207.0
+        assert mixture.end_pressure == 62.0
+
+    def test_a_tank_summary_wins_over_the_telemetry(self):
+        """The device's own summary is authoritative where it wrote one."""
+        content = dive_fit_file(
+            message("dive_gas", message_index=0, oxygen_content=21, helium_content=0, status="enabled"),
+            message("tank_update", timestamp=DIVE_START, sensor=2411100050, pressure=190.0),
+            message("tank_summary", sensor=2411100050, start_pressure=207.0, end_pressure=62.0),
+        )
+        mixture = FitParser.parse(content).mixtures[0]
+
+        assert mixture.start_pressure == 207.0
+        assert mixture.end_pressure == 62.0
+
+    def test_leaves_tank_pressures_null_when_the_counts_disagree(self):
+        """Two gases and one pod: position says nothing, and a confidently wrong start
+        pressure produces a plausible, wrong RMV - worse than an empty field."""
+        content = dive_fit_file(
+            message("dive_gas", message_index=0, oxygen_content=21, helium_content=0, status="enabled"),
+            message("dive_gas", message_index=1, oxygen_content=50, helium_content=0, status="enabled"),
+            message("tank_summary", sensor=2411100050, start_pressure=207.0, end_pressure=62.0),
+        )
+        parsed = FitParser.parse(content)
+
+        assert [mixture.start_pressure for mixture in parsed.mixtures] == [None, None]
+
+    def test_rejects_a_fit_file_that_is_not_a_dive(self):
+        """A bike ride is a FIT file this parser read successfully - it just holds no
+        dive. `DiveParseError` (422, with the reason) rather than
+        `UnsupportedDiveFileError`, which would tell the diver 415 "no parser available
+        for this file" about a format that is very much supported."""
+        content = fit_file(
+            message("file_id", type="activity", manufacturer="garmin"),
+            message("session", sport="cycling", start_time=DIVE_START, total_elapsed_time=3600.0),
+        )
+
+        with pytest.raises(DiveParseError, match="not a dive"):
+            FitParser.parse(content)
+
+    def test_accepts_a_session_without_a_sport_when_it_carries_depth(self):
+        """Depth samples are stronger evidence than a missing `sport`."""
+        content = fit_file(
+            *_records([(0, 5.0, 25), (60, 30.0, 21)]),
+            message("session", start_time=DIVE_START, total_elapsed_time=1800.0, max_depth=30.0),
+        )
+
+        assert FitParser.parse(content).max_depth == 30.0
+
+    def test_raises_dive_parse_error_when_there_is_no_session(self):
+        content = fit_file(message("file_id", type="activity", manufacturer="suunto"))
+
+        with pytest.raises(DiveParseError, match="no session"):
+            FitParser.parse(content)
+
+    def test_raises_dive_parse_error_on_a_truncated_file(self):
+        with pytest.raises(DiveParseError):
+            FitParser.parse(VALID_FIT[: len(VALID_FIT) // 2])
+
+    def test_raises_dive_parse_error_on_bytes_that_are_not_fit(self):
+        with pytest.raises(DiveParseError):
+            FitParser.parse(b"this is not a FIT file")
+
+
 class TestParseDiveFile:
     def test_dispatches_to_suunto_parser(self):
         parsed = parse_dive_file("export.xml", VALID_SUUNTO_XML.encode())
@@ -428,3 +812,12 @@ class TestParseDiveFile:
     def test_raises_unsupported_for_json_without_device_log(self):
         with pytest.raises(UnsupportedDiveFileError):
             parse_dive_file("export.json", b'{"foo": "bar"}')
+
+    def test_dispatches_to_fit_parser(self):
+        parsed = parse_dive_file("dive.fit", VALID_FIT)
+
+        assert parsed.max_depth == 45.91
+
+    def test_raises_unsupported_for_fit_extension_without_the_magic(self):
+        with pytest.raises(UnsupportedDiveFileError):
+            parse_dive_file("dive.fit", b"time,depth\n0,0\n")
