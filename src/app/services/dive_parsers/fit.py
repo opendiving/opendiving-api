@@ -181,7 +181,10 @@ class _FitScan:
 
     session: fitdecode.FitDataMessage | None = None
     activity: fitdecode.FitDataMessage | None = None
-    dive_summary: fitdecode.FitDataMessage | None = None
+    # Every `dive_summary` in the file, resolved by `_dive_summary` rather than kept as
+    # "the first one": a Garmin freediving activity writes one per individual dive plus a
+    # session-level one, and only the latter describes the activity being imported.
+    dive_summaries: list[fitdecode.FitDataMessage] = field(default_factory=list)
     gases: list[fitdecode.FitDataMessage] = field(default_factory=list)
     tank_summaries: list[fitdecode.FitDataMessage] = field(default_factory=list)
 
@@ -281,10 +284,20 @@ class FitParser(DiveParser):
     def _collect(cls, scan: _FitScan, frame: fitdecode.FitDataMessage) -> None:
         """Route one decoded message into the scan.
 
-        Only the *first* `session`/`activity`/`dive_summary` is kept. A dive export
-        normally holds exactly one of each; where a device writes more (a multi-sport
-        file, a repetitive-dive series), the first is the one this file is about, and
-        `ParsedDiveSchema` describes a single dive either way.
+        Only the *first* `session` is kept. A dive export normally holds exactly one;
+        where a device writes more (a multi-sport file, a repetitive-dive series), the
+        first is the one this file is about, and `ParsedDiveSchema` describes a single
+        dive either way.
+
+        **Samples stop at that session, too.** A FIT file writes summary messages after
+        the samples they summarize, so anything following the first `session` belongs to
+        the next dive. Collecting the lot described the dive from session 1 while giving
+        it a profile spanning the whole file: a two-dive file came back as 1 800 seconds
+        deep 30 m, with a profile running to 7 260 s across a surface interval, so
+        `DiveProfileInfo.duration_seconds` and the dive's own `duration` disagreed. The
+        cut is positional rather than by the session's time window because `dive_gas`
+        carries no timestamp to filter on, and it costs nothing on a real file: across
+        the corpus the only message following the first `session` is the `activity`.
         """
         if frame.name == "session":
             if scan.session is None:
@@ -293,8 +306,12 @@ class FitParser(DiveParser):
             if scan.activity is None:
                 scan.activity = frame
         elif frame.name == "dive_summary":
-            if scan.dive_summary is None:
-                scan.dive_summary = frame
+            # Not gated on the session below: a `dive_summary` is written *after* the
+            # session it refers to, so gating it would discard every one of them.
+            scan.dive_summaries.append(frame)
+        elif scan.session is not None:
+            # Samples and gas for a dive this file describes after the one being imported.
+            return
         elif frame.name == "dive_gas":
             scan.gases.append(frame)
         elif frame.name == "tank_summary":
@@ -342,11 +359,28 @@ class FitParser(DiveParser):
             return
         scan.pressure.setdefault(int(sensor), []).append((timestamp, pressure))
 
+    @staticmethod
+    def _dive_summary(scan: _FitScan) -> fitdecode.FitDataMessage | None:
+        """The `dive_summary` describing the whole activity, not one dive inside it.
+
+        A Garmin freediving activity writes a `dive_summary` per individual descent
+        *plus* a session-level one, and `reference_mesg` says which is which - it names
+        the message type the summary refers to, `session` or `lap`. Taking the first one
+        seen would read a single descent's depth and bottom time as the whole dive's.
+
+        Falls back to the first summary of any kind, since a single-dive export commonly
+        writes one without a `reference_mesg` at all.
+        """
+        for summary in scan.dive_summaries:
+            if _native_value(summary, "reference_mesg") == "session":
+                return summary
+        return scan.dive_summaries[0] if scan.dive_summaries else None
+
     @classmethod
     def _parse_dive(cls, scan: _FitScan) -> ParsedDiveSchema:
         """Map the scanned messages onto `ParsedDiveSchema`."""
         session = cls._dive_session(scan)
-        summary = scan.dive_summary
+        summary = cls._dive_summary(scan)
 
         start_time = _native_value(session, "start_time")
         offset = _local_offset(scan.activity)

@@ -3048,6 +3048,28 @@ distinguishes the two implementations;
 `test_prefers_the_native_field_over_a_developer_field_of_the_same_name` covers the
 dict-comprehension bug the prototype had but would pass against `get_value` too.
 
+**A multi-session file is described by its first dive, samples included.** `_collect`
+already kept only the first `session` - a file holding several dives is still one
+`ParsedDiveSchema` - but collected `record`, `tank_update` and `dive_gas` from all of them,
+so the dive came from session 1 while its profile spanned the whole file. A two-dive
+fixture parsed as 1 800 seconds to 30 m with a profile running to 7 260 s across a surface
+interval, which put `DiveProfileInfo.duration_seconds` and the dive's own `duration` in
+open disagreement. Samples now stop at the first `session`.
+
+The cut is **positional**, not by the session's `start_time … timestamp` window, for one
+reason: `dive_gas` carries no timestamp to filter on, and a second dive's gas list was
+being imported too. It relies on FIT writing summary messages after the samples they
+summarize, which is the same property `_FitScan` already depends on - and it costs nothing
+real, because across the whole corpus the *only* message following the first `session` is
+the `activity`, and not one record falls outside its session's window.
+
+**`dive_summary` is chosen by `reference_mesg`, not by being first.** A Garmin freediving
+activity writes one per individual descent *plus* a session-level one, and `reference_mesg`
+names the message each refers to (`session` or `lap`). Taking the first would read a single
+descent's depth and bottom time as the whole dive's, through the `_depth`/`duration`
+fallbacks. Falls back to the first summary of any kind, since a single-dive export commonly
+writes one with no `reference_mesg` at all.
+
 **`start_time` carries the dive's real local offset, reconstructed from
 `activity.local_timestamp`.** Every timestamp in a FIT file is UTC, and `local_timestamp`
 on the `activity` message is that same instant written as local wall-clock time - so the

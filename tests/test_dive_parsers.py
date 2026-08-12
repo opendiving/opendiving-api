@@ -1138,6 +1138,93 @@ class TestFitParserParse:
                 pytest.fail(f"{type(exc).__name__} escaped as a 500 instead of DiveParseError: {exc}")
 
 
+class TestFitParserMultiSession:
+    """A file holding more than one dive is described by the first, samples included.
+
+    `_collect` already took that position for `session`, but collected `record`,
+    `tank_update` and `dive_gas` from every dive in the file - so the dive came from
+    session 1 while its profile spanned the lot, and `DiveProfileInfo.duration_seconds`
+    disagreed with the dive's own `duration`.
+    """
+
+    @staticmethod
+    def _two_dives() -> bytes:
+        def record(offset: int, depth: float):
+            return message("record", timestamp=DIVE_START + timedelta(seconds=offset), depth=depth, temperature=22)
+
+        return fit_file(
+            message("file_id", type="activity", manufacturer="garmin"),
+            message("dive_gas", message_index=0, oxygen_content=21, helium_content=0, status="enabled"),
+            record(0, 1.0),
+            record(60, 30.0),
+            message("session", sport="diving", start_time=DIVE_START, total_elapsed_time=1800.0, max_depth=30.0),
+            # Everything below belongs to the second dive.
+            message("dive_gas", message_index=0, oxygen_content=32, helium_content=0, status="enabled"),
+            record(7200, 1.0),
+            record(7260, 18.0),
+            message(
+                "session",
+                sport="diving",
+                start_time=DIVE_START + timedelta(seconds=7200),
+                total_elapsed_time=1500.0,
+                max_depth=18.0,
+            ),
+        )
+
+    def test_the_profile_stops_at_the_first_session(self):
+        profile = FitParser.parse_profile(self._two_dives())
+
+        assert profile is not None
+        assert profile.depth is not None
+        # Not [0, 60, 7200, 7260]: a two-hour span with a surface interval in the middle,
+        # against a dive that says it lasted 1 800 seconds.
+        assert profile.depth.t == [0.0, 60.0]
+        assert profile.depth.v == [100, 3000]
+
+    def test_the_dive_and_its_profile_agree(self):
+        content = self._two_dives()
+
+        parsed = FitParser.parse(content)
+        profile = FitParser.parse_profile(content)
+
+        assert parsed.duration == 1800
+        assert parsed.max_depth == 30.0
+        assert profile is not None and profile.depth is not None
+        assert max(profile.depth.v) == 3000  # 30.00 m, the first dive's depth
+
+    def test_gas_from_a_later_dive_is_not_imported(self):
+        """`dive_gas` carries no timestamp, which is why the cut is positional rather than
+        by the session's time window."""
+        parsed = FitParser.parse(self._two_dives())
+
+        assert [mixture.oxygen for mixture in parsed.mixtures] == [21.0]
+
+
+class TestFitParserDiveSummary:
+    def test_prefers_the_session_level_summary(self):
+        """A Garmin freediving activity writes a `dive_summary` per individual descent
+        plus a session-level one, and `reference_mesg` names which message each refers to.
+        Taking the first would read one descent's depth as the whole dive's."""
+        content = fit_file(
+            message("file_id", type="activity", manufacturer="garmin"),
+            message("session", sport="diving", start_time=DIVE_START, total_elapsed_time=3600.0),
+            message("dive_summary", reference_mesg="lap", reference_index=0, max_depth=12.0, bottom_time=45.0),
+            message("dive_summary", reference_mesg="session", reference_index=0, max_depth=31.0, bottom_time=2400.0),
+        )
+
+        assert FitParser.parse(content).max_depth == 31.0
+
+    def test_falls_back_to_the_only_summary_when_none_names_a_session(self):
+        """A single-dive export commonly writes one with no `reference_mesg` at all."""
+        content = fit_file(
+            message("file_id", type="activity", manufacturer="garmin"),
+            message("session", sport="diving", start_time=DIVE_START, total_elapsed_time=3600.0),
+            message("dive_summary", max_depth=27.5),
+        )
+
+        assert FitParser.parse(content).max_depth == 27.5
+
+
 class TestParsersInventNothing:
     """No parser substitutes a plausible value for gas data a file doesn't carry.
 
