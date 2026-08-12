@@ -912,6 +912,52 @@ class TestFitParserParse:
         assert mixture.start_pressure == 207.0
         assert mixture.end_pressure == 62.0
 
+    def test_fills_a_summary_s_missing_end_pressure_from_the_telemetry(self):
+        """The realistic dropout: a pod that stops reporting near the end writes a summary
+        with a start pressure and no end.
+
+        Falling back per *branch* - "any summary at all beats the telemetry" - keyed off
+        the frame existing rather than carrying numbers, so that null won and the last real
+        reading was discarded. It is the reading the whole SAC/RMV turns on, and dropout is
+        routine: `suunto_xml.py` records 224 of 441 samples missing it in the corpus.
+        """
+        content = dive_fit_file(
+            message("dive_gas", message_index=0, oxygen_content=21, helium_content=0, status="enabled"),
+            message("tank_update", timestamp=DIVE_START, sensor=2411100050, pressure=207.0),
+            message("tank_update", timestamp=DIVE_START + timedelta(seconds=1800), sensor=2411100050, pressure=62.0),
+            message("tank_summary", sensor=2411100050, start_pressure=207.0),
+        )
+        mixture = FitParser.parse(content).mixtures[0]
+
+        assert mixture.start_pressure == 207.0
+        assert mixture.end_pressure == 62.0
+
+    def test_a_summary_with_no_pressures_does_not_shadow_the_telemetry(self):
+        """A `tank_summary` carrying only `volume_used` says nothing about pressure. The
+        join is by the pod's ANT `sensor` id, which both messages carry, so it is exact."""
+        content = dive_fit_file(
+            message("dive_gas", message_index=0, oxygen_content=21, helium_content=0, status="enabled"),
+            message("tank_update", timestamp=DIVE_START, sensor=2411100050, pressure=207.0),
+            message("tank_update", timestamp=DIVE_START + timedelta(seconds=1800), sensor=2411100050, pressure=62.0),
+            message("tank_summary", sensor=2411100050, volume_used=1500.0),
+        )
+        mixture = FitParser.parse(content).mixtures[0]
+
+        assert (mixture.start_pressure, mixture.end_pressure) == (207.0, 62.0)
+
+    def test_ignores_a_summary_that_describes_nothing(self):
+        """No sensor to join on and no pressures to contribute - counting it as a cylinder
+        would push the tank count past the gas list and null out the pod that did report."""
+        content = dive_fit_file(
+            message("dive_gas", message_index=0, oxygen_content=21, helium_content=0, status="enabled"),
+            message("tank_update", timestamp=DIVE_START, sensor=2411100050, pressure=207.0),
+            message("tank_update", timestamp=DIVE_START + timedelta(seconds=1800), sensor=2411100050, pressure=62.0),
+            message("tank_summary", volume_used=1500.0),
+        )
+        mixture = FitParser.parse(content).mixtures[0]
+
+        assert (mixture.start_pressure, mixture.end_pressure) == (207.0, 62.0)
+
     def test_keeps_tank_pressures_when_the_file_has_no_gas_list(self):
         """A Descent dive logged in gauge mode writes no `dive_gas`, and a paired pod
         still reports throughout. Building mixtures only from `dive_gas` left nothing to

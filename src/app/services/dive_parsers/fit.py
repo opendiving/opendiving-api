@@ -148,6 +148,23 @@ class _TankPressures:
     end: float | None
 
 
+# A cylinder nothing has said anything about yet - the identity for `_merge_pressures`,
+# and what a `tank_summary` carrying neither pressure amounts to.
+_NO_PRESSURES = _TankPressures(start=None, end=None)
+
+
+def _merge_pressures(summary: _TankPressures, telemetry: _TankPressures) -> _TankPressures:
+    """One cylinder's figures, preferring its summary and filling gaps from its telemetry.
+
+    Per field, not per source: a summary that recorded a start and lost the end to a pod
+    dropout still contributes the start, and the telemetry supplies what it couldn't.
+    """
+    return _TankPressures(
+        start=_first_not_none(summary.start, telemetry.start),
+        end=_first_not_none(summary.end, telemetry.end),
+    )
+
+
 @dataclass(slots=True)
 class _FitScan:
     """Everything one pass over a FIT file collects.
@@ -482,41 +499,61 @@ class FitParser(DiveParser):
     def _tank_pressures(scan: _FitScan) -> list[_TankPressures]:
         """What each cylinder started and finished the dive on.
 
-        Two sources, in order of authority. `tank_summary` is the device's own summary and
-        is used when it wrote one. Failing that the figures are taken off the ends of the
-        `tank_update` telemetry - the first and last reading a pod sent - because a Descent
-        streams `tank_update` throughout the dive whether or not it also emits a summary,
-        and deriving two numbers from that stream is better than dropping the transmitter
-        data on the floor. Readings are ordered by their own timestamps rather than by
-        arrival, since separate pods interleave.
+        Two sources, joined **per cylinder and per field** rather than one taking over from
+        the other. `tank_summary` is the device's own figure and wins where it has one;
+        anything it leaves null falls through to the ends of that pod's `tank_update`
+        telemetry - the first and last reading it sent - since a Descent streams
+        `tank_update` throughout the dive whether or not it also emits a summary. Readings
+        are ordered by their own timestamps rather than by arrival, since pods interleave.
+
+        Falling through per *branch* - "if there are any summaries at all, ignore the
+        telemetry" - looked equivalent and wasn't: it keyed off a frame existing rather
+        than that frame carrying numbers. The realistic case is the partial one. A pod that
+        drops out near the end writes a summary with `start_pressure` set and
+        `end_pressure` null, and the last real reading - the one the whole SAC/RMV turns on
+        - was discarded in favour of that null. Transmitter dropout is routine rather than
+        hypothetical; `suunto_xml.py` records 224 of 441 samples missing it in the corpus.
+
+        The join is exact rather than positional: both messages carry the pod's ANT
+        `sensor` id, so this is a real key and not the kind of guess `_tanks_for` refuses
+        to make between tanks and gases.
 
         Summaries are **deduped by `sensor`, keeping the last**, the same way telemetry is
         grouped by it. A device that writes the summary twice for one pod would otherwise
         count as two cylinders, and `_tanks_for`'s exact-count rule then discards every
         pressure in the file - one repeated frame losing a real 207 -> 62 bar and the
-        dive's RMV with it. A summary carrying no `sensor` has no identity to dedupe on, so
-        those are kept as they come rather than collapsed into one.
-        """
-        if scan.tank_summaries:
-            by_sensor: dict[int, _TankPressures] = {}
-            unidentified: list[_TankPressures] = []
-            for summary in scan.tank_summaries:
-                pressures = _TankPressures(
-                    start=_native_value(summary, "start_pressure"),
-                    end=_native_value(summary, "end_pressure"),
-                )
-                sensor = _native_value(summary, "sensor")
-                if sensor is None:
-                    unidentified.append(pressures)
-                else:
-                    by_sensor[int(sensor)] = pressures
-            return list(by_sensor.values()) + unidentified
+        dive's RMV with it.
 
+        A summary with no `sensor` cannot be joined to anything, so it stands as its own
+        cylinder - unless it carries no pressures either, in which case it describes
+        nothing at all and is dropped rather than inflating the count past the gas list.
+        """
+        telemetry: dict[int, _TankPressures] = {}
+        for sensor, unordered in scan.pressure.items():
+            readings = sorted(unordered, key=lambda reading: reading[0])
+            if readings:
+                telemetry[sensor] = _TankPressures(start=readings[0][1], end=readings[-1][1])
+
+        summaries: dict[int, _TankPressures] = {}
+        unidentified: list[_TankPressures] = []
+        for summary in scan.tank_summaries:
+            pressures = _TankPressures(
+                start=_native_value(summary, "start_pressure"),
+                end=_native_value(summary, "end_pressure"),
+            )
+            summary_sensor = _native_value(summary, "sensor")
+            if summary_sensor is not None:
+                summaries[int(summary_sensor)] = pressures
+            elif pressures != _NO_PRESSURES:
+                unidentified.append(pressures)
+
+        # Summary order first - the device's own enumeration of its pods - then any pod
+        # that only ever streamed telemetry.
+        sensors = list(summaries) + [sensor for sensor in telemetry if sensor not in summaries]
         return [
-            _TankPressures(start=readings[0][1], end=readings[-1][1])
-            for readings in (sorted(unordered, key=lambda reading: reading[0]) for unordered in scan.pressure.values())
-            if readings
-        ]
+            _merge_pressures(summaries.get(sensor, _NO_PRESSURES), telemetry.get(sensor, _NO_PRESSURES))
+            for sensor in sensors
+        ] + unidentified
 
     @staticmethod
     def _mixture(gas: fitdecode.FitDataMessage | None, tank: _TankPressures | None) -> DiveMixtureSchema:

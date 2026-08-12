@@ -3086,10 +3086,22 @@ whether or not it also emits a summary, so taking the first and last reading per
 better than dropping the transmitter data. Readings are ordered by their own timestamps,
 not by arrival, since separate pods interleave.
 
+The two sources are joined **per cylinder and per field**, not one branch or the other. An
+earlier version fell through per branch - "if there are any summaries at all, ignore the
+telemetry" - which keyed off a frame existing rather than that frame carrying numbers. The
+realistic failure is the partial one: a pod that drops out near the end writes a summary
+with `start_pressure` set and `end_pressure` null, and the last real reading, the one the
+whole SAC/RMV turns on, was discarded in favour of that null. Transmitter dropout is
+routine rather than hypothetical - see the 224-of-441 figure in the DM5 section above. The
+join is exact rather than positional because both messages carry the pod's ANT `sensor`
+id, so unlike tanks-to-gases below there is a real key to join on.
+
 Summaries are deduped by `sensor` first, keeping the last. A device that writes the summary
 twice for one pod would otherwise count as two cylinders, and the exact-count rule below
 then discards every pressure in the file - one repeated frame losing a real 207 -> 62 bar
-and the dive's RMV with it.
+and the dive's RMV with it. A summary with no `sensor` cannot be joined to anything and
+stands as its own cylinder, unless it carries no pressures either - one that describes
+nothing is dropped rather than inflating the count past the gas list.
 
 **A file with tank telemetry and no `dive_gas` at all still yields cylinders.** Mixtures
 were built only from `dive_gas`, so a Descent dive logged in gauge mode - which writes no
