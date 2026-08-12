@@ -31,6 +31,12 @@ _STRING = 0x07
 _BYTE = 0x0D
 FLOAT32 = 0x88
 UINT8 = 0x02
+# Only `dense_record_stream` writes field definitions by hand, so these live here rather
+# than being looked up per field the way `_encode_message` does.
+_ENUM = 0x00
+_SINT8 = 0x01
+_UINT16 = 0x84
+_UINT32 = 0x86
 
 # Record-header bits (the "normal" header form - bit 7 clear).
 _DEFINITION_MESSAGE = 0x40
@@ -233,6 +239,41 @@ def fit_file(*messages: Message) -> bytes:
     header += struct.pack("<I", len(body))
     header += b".FIT"
 
+    out = bytes(header) + bytes(body)
+    return out + struct.pack("<H", _crc16(out))
+
+
+def dense_record_stream(records: int) -> bytes:
+    """A file holding `records` bare `record` messages, the way a device really writes one.
+
+    `fit_file` above emits a definition record per message, which is fine for fixtures but
+    makes it impossible to build the shape that actually matters for cost: one definition
+    followed by a long run of 10-byte data records. That is how a 5 MB file comes to hold
+    half a million samples, and it is the case `_MAX_FRAMES` exists for - so the encoder
+    for it lives here rather than in a benchmark script nobody runs.
+    """
+    file_id_global, _ = _message_type("file_id")
+    record_global, _ = _message_type("record")
+
+    body = bytearray()
+    # file_id: type=activity(4), manufacturer=suunto(23).
+    body += _definition(0, file_id_global, [(0, 1, _ENUM), (1, 2, _UINT16)], [])
+    body += bytes([0]) + bytes([4]) + struct.pack("<H", 23)
+
+    # timestamp (253, uint32), depth (92, uint32), temperature (13, sint8): a 1-byte
+    # record header plus 9 bytes of payload.
+    body += _definition(1, record_global, [(253, 4, _UINT32), (92, 4, _UINT32), (13, 1, _SINT8)], [])
+    origin = int((datetime(2026, 4, 17, 9, 49, 23, tzinfo=UTC) - _FIT_EPOCH).total_seconds())
+    for index in range(records):
+        body += bytes([1])
+        body += struct.pack("<I", origin + index)
+        body += struct.pack("<I", 1000 + (index % 40000))
+        body += struct.pack("<b", 22 + (index % 4))
+
+    header = bytearray([12, 0x20])
+    header += struct.pack("<H", 2140)
+    header += struct.pack("<I", len(body))
+    header += b".FIT"
     out = bytes(header) + bytes(body)
     return out + struct.pack("<H", _crc16(out))
 

@@ -7,10 +7,18 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from src.app.services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file
+from src.app.services.dive_parsers.fit import _MAX_FRAMES as MAX_FRAMES
 from src.app.services.dive_parsers.fit import FitParser
 from src.app.services.dive_parsers.suunto_json import SuuntoJsonParser
 from src.app.services.dive_parsers.suunto_xml import SuuntoXmlParser
-from tests.helpers.fit import DevField, Message, dive_fit_file, fit_file, message
+from tests.helpers.fit import (
+    DevField,
+    Message,
+    dense_record_stream,
+    dive_fit_file,
+    fit_file,
+    message,
+)
 
 SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
 XSI_NS = "http://www.w3.org/2001/XMLSchema-instance"
@@ -1019,6 +1027,37 @@ class TestFitParserParse:
     def test_raises_dive_parse_error_on_bytes_that_are_not_fit(self):
         with pytest.raises(DiveParseError):
             FitParser.parse(b"this is not a FIT file")
+
+    @pytest.mark.parametrize("entry_point", [FitParser.parse, FitParser.parse_profile])
+    def test_refuses_a_file_with_more_records_than_any_dive(self, entry_point):
+        """Decoding is linear in frames, and the file size cap alone doesn't bound it.
+
+        A device writes one definition record and then a long run of 10-byte `record`
+        messages, so a file at `MAX_DIVE_FILE_SIZE` holds ~524 000 of them and takes ~10 s
+        to decode - paid twice per import, since `/dive/parse` and `PUT /dive/{uuid}/file`
+        each read the file. Capping *collected samples* would not have helped: bare
+        decoding is 8 s of that 10 s, and the collection is under 1 s.
+
+        Refused rather than truncated, because a FIT file's `session` is written after the
+        samples it summarizes - keeping the first 100 000 frames would discard the start
+        time, duration and depths, and import a confidently empty dive.
+        """
+        with pytest.raises(DiveParseError, match="more than"):
+            entry_point(dense_record_stream(MAX_FRAMES + 1))
+
+    def test_accepts_a_file_right_up_to_the_cap(self):
+        """The cap is ~23x the largest real file in the corpus (a 72-minute multi-channel
+        Suunto Ocean dive at 4 339 frames), so it must not be anywhere near a real dive."""
+        # A little under the cap rather than exactly at it: the budget also covers the two
+        # definition records, the `file_id` data record, and the header and CRC frames
+        # `fitdecode` emits, so exact arithmetic here would pin an encoding detail rather
+        # than the behaviour.
+        records = MAX_FRAMES - 100
+        profile = FitParser.parse_profile(dense_record_stream(records))
+
+        assert profile is not None
+        assert profile.depth is not None
+        assert len(profile.depth.t) == records
 
     # `fitdecode` warns its way through a corrupt file ("invalid field size 77 ...") before
     # deciding it cannot continue. That is the library working as intended on garbage, and

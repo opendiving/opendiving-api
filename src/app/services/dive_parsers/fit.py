@@ -49,6 +49,22 @@ _UNUSED_GAS_STATUSES = frozenset({"disabled", "backup_only"})
 # +/-24 h, which would surface as an unhandled `ValueError` from a bad upload.
 _MAX_UTC_OFFSET_MINUTES = 14 * 60
 
+# How many frames a file may hold before it stops looking like a dive and starts looking
+# like a denial-of-service. Decoding is linear in frames and is *the* cost here: a 5 MB
+# file (`MAX_DIVE_FILE_SIZE`) of bare 10-byte `record` messages, which is how a device
+# actually encodes a long log, holds ~524 000 of them and takes ~10 s to decode - paid
+# twice per import, since `POST /dive/parse` and `PUT /dive/{uuid}/file` each read the
+# file. Stopping at this cap holds that to ~1.5 s.
+#
+# The largest real file in the corpus is a 72-minute multi-channel Suunto Ocean dive at
+# 4 339 frames - about one per second - so this is ~23x that, or roughly 28 hours of
+# continuous logging. Raise it with evidence if a real dive ever comes close.
+#
+# Deliberately raises rather than truncating. A FIT file's `session` is written *after*
+# the samples it summarizes, so stopping early and keeping what we have would discard
+# the start time, duration and depths, and import a confidently empty dive.
+_MAX_FRAMES = 100_000
+
 # What turning decoded messages into a dive may raise on a file that decoded but holds
 # nonsense. `ArithmeticError` is in here for `decimal.InvalidOperation`, which
 # `channels.scaled_int` raises when a corrupt float32 reading arrives as NaN and `quantize`
@@ -229,9 +245,17 @@ class FitParser(DiveParser):
         scan = _FitScan()
         try:
             with fitdecode.FitReader(io.BytesIO(content)) as fit:
-                for frame in fit:
+                for count, frame in enumerate(fit, start=1):
+                    if count > _MAX_FRAMES:
+                        raise DiveParseError(
+                            f"This FIT file holds more than {_MAX_FRAMES:,} records, which is far more "
+                            "than any dive. It looks like an activity log rather than a dive log."
+                        )
                     if isinstance(frame, fitdecode.FitDataMessage):
                         cls._collect(scan, frame)
+        except DiveParseError:
+            # Ours, and already phrased for the diver - not something the decoder threw.
+            raise
         except Exception as exc:
             raise DiveParseError(f"Invalid FIT file: {exc or type(exc).__name__}") from exc
         return scan

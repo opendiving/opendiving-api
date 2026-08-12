@@ -237,10 +237,11 @@ async def parse_dive(
     content = await read_upload_within_limit(file, MAX_DIVE_FILE_SIZE)
     try:
         # Off the event loop: parsing is pure CPU with nothing awaited inside it, and the
-        # FIT decoder is pure Python - ~90x more CPU per byte than the C-accelerated
-        # `json`/`expat` the Suunto parsers ride on (0.6 s for 500 KB, against 0.07 s for
-        # a 2.8 MB JSON export). Inline, one upload at `MAX_DIVE_FILE_SIZE` would stall
-        # every other request on this worker for several seconds.
+        # FIT decoder is pure Python, roughly two orders of magnitude more CPU per byte
+        # than the C-accelerated `json`/`expat` the Suunto parsers ride on (0.07 s for a
+        # 2.8 MB JSON export, against ~2 s per MB of densely-encoded FIT). What actually
+        # bounds the worst case is `_MAX_FRAMES`, not this: a 5 MB file of bare `record`
+        # messages took ~10 s to decode before that cap, and ~1.7 s after.
         parser, parsed = await run_in_threadpool(parse_dive_file_with_parser, file.filename, content)
     except UnsupportedDiveFileError as exc:
         # 415 and 409 stay raw `HTTPException`s - unlike 400/403/404/422, `http_exceptions`

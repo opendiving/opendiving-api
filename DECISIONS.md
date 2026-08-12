@@ -3138,11 +3138,34 @@ are what the diver actually came for.
 
 `POST /dive/parse` and `PUT /dive/{uuid}/file` both hand their bytes to
 `run_in_threadpool`. Parsing is pure CPU with nothing awaited inside it, and the FIT
-decoder is pure Python: ~0.6 s for a 500 KB file, against ~0.07 s for a 2.8 MB Suunto JSON
-export through the C-accelerated `json` module - roughly 90x more CPU per byte. Inline in an
-`async def`, a single upload at `MAX_DIVE_FILE_SIZE` (5 MB) would stall every other request
-on that worker for several seconds. The XML and JSON parsers went the same way rather than
-being special-cased: they are the same shape of work, just faster today.
+decoder is pure Python: ~2 s per MB of densely-encoded FIT, against ~0.07 s for a 2.8 MB
+Suunto JSON export through the C-accelerated `json` module - two orders of magnitude more
+CPU per byte. Inline in an `async def`, a single large upload would stall every other
+request on that worker. The XML and JSON parsers went the same way rather than being
+special-cased: they are the same shape of work, just faster today.
+
+**A thread is not a bound, though, and the file size cap wasn't one either.** This section
+originally sized the worst case from a 500 KB file at ~0.6 s, extrapolating to ~6 s at
+`MAX_DIVE_FILE_SIZE`. That was measured on a sparsely-encoded file and under-counted:
+a device writes *one* definition record followed by a long run of bare 10-byte `record`
+messages, so a 5 MB file holds ~524 000 of them and takes **~10 s** to decode - and the
+two-step import pays it twice, once at `/dive/parse` and once at `PUT /dive/{uuid}/file`.
+`run_in_threadpool` keeps the event loop free but AnyIO's default limiter is 40 threads,
+so 40 such uploads saturate the pool and everything else queues behind them. It needs
+authentication, so it is not an open DoS - but one diver with a long, high-rate log could
+do it by accident.
+
+`_MAX_FRAMES` (100 000) is the actual bound, and it is on **frames decoded**, not samples
+collected. That distinction is the whole fix: of the ~10 s, bare decoding is ~8 s and
+collecting the samples is under 1 s, so capping what `_collect_record` keeps would have
+saved about a fifth of the cost and left the rest unbounded. Stopping the decode holds the
+worst case to ~1.7 s regardless of what the file contains.
+
+It **raises** rather than truncating. A FIT file's `session` is written after the samples
+it summarizes, so keeping the first 100 000 frames and stopping would discard the start
+time, duration and depths, and import a confidently empty dive. The cap is ~23x the largest
+real file in the corpus - a 72-minute multi-channel Suunto Ocean dive at 4 339 frames,
+about one per second - or roughly 28 hours of continuous logging.
 
 ## The 2026 Suunto Ocean JSON is a third header shape, with gas data only in the samples
 
