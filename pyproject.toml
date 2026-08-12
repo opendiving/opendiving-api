@@ -42,6 +42,11 @@ dev = [
     "mypy>=1.8.0",
     "types-redis>=4.6.0",
     "ruff>=0.1.0",
+    # Formats the markdown docs (DECISIONS.md above all). mdformat-gfm adds the table
+    # and strikethrough support core mdformat lacks - without it, tables are reflowed
+    # as paragraphs. Settings live in `.mdformat.toml`.
+    "mdformat>=1.0.0",
+    "mdformat-gfm>=1.0.0",
 ]
 
 [build-system]

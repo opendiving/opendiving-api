@@ -39,6 +39,7 @@ Three workflows run on every pull request, and all must be green. Run them local
 ```bash
 uv run ruff check src tests
 uv run ruff format --check src tests
+uv run mdformat --check *.md docs
 uv run mypy src --config-file pyproject.toml
 uv run mypy tests --config-file pyproject.toml
 uv run pytest --cov=src/app --cov-report=term-missing
@@ -82,6 +83,17 @@ Ruff is configured with `fix = true`, so `uv run ruff check src tests` will repa
 can on its own, and `uv run ruff format src tests` handles the rest. Line length is 120.
 Everything under `app.*` is type-checked with `disallow_untyped_defs` — new functions need
 annotations.
+
+The markdown docs are formatted too — drop the `--check` to rewrite them:
+
+```bash
+uv run mdformat *.md docs
+```
+
+That covers `DECISIONS.md`, which you will be appending to. Write the new section however
+it comes out, run the command, and it gets wrapped to 100 columns like the rest; no
+counting characters by hand. The settings are in `.mdformat.toml`, and the paths are
+listed explicitly because `mdformat .` would walk into `.venv/`.
 
 Docstring style follows the numpy convention by habit, not by enforcement: no `D` rules
 are enabled, so nothing checks it.

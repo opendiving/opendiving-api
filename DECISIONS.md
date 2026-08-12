@@ -3499,3 +3499,37 @@ This keeps the inline-fixture, no-database style the rest of `test_dive_parsers.
 `test_dive_profiles.py` are written in. Only what those tests need is implemented:
 little-endian, one definition per data message, no compressed timestamp headers, no
 accumulators.
+
+## The markdown docs are formatted by mdformat, not Prettier
+
+`DECISIONS.md` grows by a section on most PRs, and until now nothing formatted it. Every
+new section guessed at the wrapping of the ones around it, and a paragraph edited in the
+middle either got rewrapped by hand or left one short line behind. `uv run mdformat *.md
+docs` does it now, and `.github/workflows/linting.yml` checks it alongside
+`ruff format --check`.
+
+opendiving-web formats its markdown with Prettier, which would have been the obvious way
+to keep the two repos identical - but there is no `package.json` here, and adding one plus
+a lockfile plus a `setup-node` step to a Python repo's CI to wrap paragraphs is a poor
+trade. mdformat installs from the same `uv sync --extra dev` as ruff and mypy. `wrap = 100`
+in `.mdformat.toml` matches the `printWidth` web's Prettier config already used for
+markdown, so the two `DECISIONS.md` files still look like siblings.
+
+Three things to know about it:
+
+- **`mdformat-gfm` is not optional.** Core mdformat is CommonMark only, and a GFM table is
+  not CommonMark - without the plugin it reflows the rows as if they were a paragraph.
+- **Paths are always spelled out** (`*.md docs`). Version 1.0 has no `--exclude`, and
+  handing it `.` walks `.venv/`, `.pytest_cache/` and any worktrees under `.claude/` -
+  about 60 markdown files that are not ours.
+- **A wrapped line that starts with `-` comes back escaped as `\-`.** This prose uses
+  ` - ` as an em dash, so it happens a handful of times per reflow. It renders as a plain
+  dash; leave it alone. mdformat is not being clever, it is avoiding a line that would
+  otherwise parse as a list item.
+
+`number = true` is set so ordered lists keep counting `1.`, `2.`, `3.` - the default
+renumbers every item to `1.`, which is valid markdown and unreadable in a diff.
+
+Adopting it reflowed all six documents in one commit, so `git blame` on any line of
+`DECISIONS.md` points at that commit rather than at whoever wrote the sentence. Blame its
+parent, or use `git log -L`.
