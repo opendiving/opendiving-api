@@ -14,7 +14,8 @@ import io
 import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatch
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException, UploadFile
@@ -27,7 +28,7 @@ from src.app.schemas.dive import DiveFileInfo
 from src.app.schemas.parsed_dive import ParsedDiveSchema
 from src.app.services import dive_parsers as parsers_module
 from src.app.services.cache_invalidation import invalidate_dive_caches
-from src.app.services.dive_files import MAX_DIVE_FILE_SIZE, _ExistingRow, reconcile
+from src.app.services.dive_files import MAX_DIVE_FILE_SIZE, _ExistingRow, reconcile, store_dive_file
 from src.app.services.dive_parsers import PARSER_BY_KEY, UnsupportedDiveFileError, parse_dive_file_with_parser
 from src.app.services.dive_parsers.base import DiveParser
 from src.app.services.dive_parsers.suunto_json import SuuntoJsonParser
@@ -303,3 +304,57 @@ class TestCacheInvalidation:
         # Another user's keys, and other resources', must be left alone.
         assert not matches("user_8_dive:019f-abc")
         assert not matches("user_7_certification:019f-abc")
+
+
+class TestProfileExtractionReleasesTheTransaction:
+    """Sampling a FIT file is up to ~1.5 s of CPU in a worker thread. The event loop is
+    free for that - `run_in_threadpool` bought that much - but the connection the lookups
+    rode in on would otherwise sit idle-in-transaction for the whole of it, so a burst of
+    FIT uploads ties up pool connections doing nothing.
+
+    An ordering test rather than a behavioural one: what can regress here is somebody
+    moving the extraction back above the release, and this is what would catch it.
+    """
+
+    @staticmethod
+    def _session(calls: list[str]) -> AsyncMock:
+        row = SimpleNamespace(uuid=uuid7(), updated_at=None)
+        result = MagicMock()
+        # `_find_by_digest` finds nothing, so the upload takes the insert path; the
+        # `RETURNING` at the end of it hands back the new row.
+        result.one_or_none.return_value = None
+        result.one.return_value = row
+        result.rowcount = 0
+
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=result)
+        db.rollback = AsyncMock(side_effect=lambda: calls.append("release"))
+        db.commit = AsyncMock(side_effect=lambda: calls.append("commit"))
+        return db
+
+    @pytest.mark.asyncio
+    async def test_releases_before_handing_the_file_to_the_thread(self, monkeypatch) -> None:
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "src.app.services.dive_files.extract_profile",
+            lambda parser, data: calls.append("extract"),
+        )
+
+        user_uuid = uuid7()
+        content = b"<Dive/>"
+        await store_dive_file(
+            self._session(calls),
+            user_id=1,
+            user_uuid=user_uuid,
+            dive_id=7,
+            upload=UploadFile(filename="export.xml", file=io.BytesIO(content)),
+            file_token=create_dive_file_token(
+                user_uuid=user_uuid,
+                sha256=hashlib.sha256(content).hexdigest(),
+                parser_key=SuuntoXmlParser.key,
+            ),
+        )
+
+        assert calls.index("release") < calls.index("extract"), (
+            f"the read transaction is still open during extraction: {calls}"
+        )

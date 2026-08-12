@@ -131,6 +131,26 @@ async def _find_by_digest(db: AsyncSession, *, user_id: int, digest: str) -> _Ex
     return None if row is None else _ExistingRow(*row)
 
 
+async def _release_read_transaction(db: AsyncSession) -> None:
+    """End the read-only transaction the lookups above opened, before a slow extraction.
+
+    `extract_profile` is up to ~1.5 s of pure CPU (see `_MAX_FRAMES`) handed to a worker
+    thread. Without this the connection it rode in on sits idle-in-transaction for all of
+    it, so a burst of FIT uploads ties up pool connections doing nothing - the event loop
+    is free, which is what `run_in_threadpool` bought, but the pool is not.
+
+    Safe at both call sites: nothing has been written yet, so there is nothing to preserve,
+    and the writes that follow open their own transaction. Nor can it strand a caller's
+    locals - both lookups return frozen dataclasses (`_ExistingRow`, `ExistingProfileRow`)
+    rather than ORM instances, so there is nothing to expire.
+
+    `rollback` rather than `commit` because it states what is true here: no work is being
+    persisted. If a write ever grows above one of these calls, it wants its own commit
+    rather than to be swept up by this.
+    """
+    await db.rollback()
+
+
 async def store_dive_file(
     db: AsyncSession,
     *,
@@ -181,6 +201,7 @@ async def store_dive_file(
         # so a repeated PUT after `PROFILE_EXTRACTOR_VERSION` was bumped opportunistically
         # upgrades it from bytes already in hand. Still a no-op in the normal case.
         if should_extract(await get_existing_profile(db, dive_id=dive_id), sha256=digest) == "extract":
+            await _release_read_transaction(db)
             profile = await run_in_threadpool(extract_profile, parser, data)
             if profile is not None:
                 await store_profile(
@@ -208,13 +229,9 @@ async def store_dive_file(
     #
     # In a thread for the same reason `POST /dive/parse` parses in one: sampling a FIT
     # file is pure Python and takes up to ~1.5 s at `_MAX_FRAMES`, and this is an
-    # `async def`.
-    #
-    # Known cost, not yet worth paying down: `_find_by_digest` above has already opened a
-    # transaction, so the connection sits idle-in-transaction for the duration. Still
-    # strictly better than the status quo it replaced, where the same work blocked the
-    # event loop outright. If a burst of FIT uploads ever ties up the pool, extract before
-    # the first read rather than moving the work back.
+    # `async def`. The read transaction is released first so the connection isn't held
+    # idle for the duration - see `_release_read_transaction`.
+    await _release_read_transaction(db)
     profile = await run_in_threadpool(extract_profile, parser, data)
 
     try:

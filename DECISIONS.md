@@ -3262,6 +3262,16 @@ CPU per byte. Inline in an `async def`, a single large upload would stall every 
 request on that worker. The XML and JSON parsers went the same way rather than being
 special-cased: they are the same shape of work, just faster today.
 
+**The read transaction is released before the handoff.** `run_in_threadpool` frees the
+event loop, not the connection: `_find_by_digest` and `get_existing_profile` have already
+opened a transaction, so without `_release_read_transaction` the connection sits
+idle-in-transaction for the whole extraction and a burst of FIT uploads ties up pool
+connections doing nothing. Safe because nothing has been written at either call site and
+the writes below open their own transaction - and because both lookups return frozen
+dataclasses rather than ORM instances, so releasing cannot expire a caller's locals.
+`TestProfileExtractionReleasesTheTransaction` pins the ordering, which is the part that
+can regress: the fix is invisible unless somebody moves the extraction back above it.
+
 **A thread is not a bound, though, and the file size cap wasn't one either.** This section
 originally sized the worst case from a 500 KB file at ~0.6 s, extrapolating to ~6 s at
 `MAX_DIVE_FILE_SIZE`. That was measured on a sparsely-encoded file and under-counted:
