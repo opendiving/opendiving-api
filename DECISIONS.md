@@ -2789,6 +2789,30 @@ update and delete, so this series drops with them and needed no invalidation cha
 its own would be a third pattern to remember to add there, and the bug from forgetting is a chart
 that silently keeps showing last week's diving.
 
+**Changing the shape of a cached response outlives the restart that ships it.** The cache stores
+JSON and a hit is returned without re-running the route body, so an entry written by the *previous*
+build is handed straight to FastAPI and fails `response_model` validation - a 500 on that endpoint
+until the TTL runs out. Adding `day` to `DiveActivityPoint` did exactly this, and it is worth
+recognising rather than debugging:
+
+```
+ResponseValidationError: {'type': 'missing', 'loc': ('response', 0, 'day'),
+                          'input': {'year': 2025, 'month': 10, 'dives': 47}}
+```
+
+Redis survives `docker compose restart api`, so the cure is to drop the stale keys rather than to
+restart again:
+
+```bash
+docker compose exec -T redis redis-cli --scan --pattern 'user_*_dives:dive_activity*' | xargs -r docker compose exec -T redis redis-cli DEL
+```
+
+Deliberately not fixed by versioning the key (`dive_activity_v2`). The window is one 60-second TTL,
+it self-heals, and pre-launch it can only ever be a developer switching branches with a warm Redis -
+which is a smaller cost than a version suffix that every future shape change has to remember to
+bump, and that goes stale the moment someone forgets. A longer-lived cache, or a deployed API, would
+flip that trade.
+
 ## FIT is one parser for both vendors, and its one real trap is developer fields
 
 `FitParser` (`services/dive_parsers/fit.py`) reads ANT/Garmin FIT activity files - what a Garmin

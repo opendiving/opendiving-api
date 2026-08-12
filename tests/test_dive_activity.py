@@ -11,6 +11,10 @@ from src.app.services.dive_activity import bucket_by_day
 
 BANGKOK = 7 * 60
 LONDON = 0
+# The mirror of Bangkok, and Honolulu rather than a mainland US offset on purpose: it
+# has never observed DST, so -10:00 is honest on an April date and a December one alike.
+# A "New York" fixture would have to be -04:00 in one test and -05:00 in the other.
+HONOLULU = -10 * 60
 
 
 def _dive(iso: str, offset_minutes: int = LONDON) -> tuple[datetime, int]:
@@ -70,6 +74,27 @@ class TestBucketByDay:
         points = bucket_by_day([_local("2026-01-01T00:30:00", BANGKOK)])
 
         assert [(point.year, point.month, point.day) for point in points] == [(2026, 1, 1)]
+
+    def test_buckets_a_dive_west_of_utc_by_its_own_local_day(self) -> None:
+        """The mirror of the Bangkok case, which the two above only cover from the east.
+
+        An evening dive in Honolulu on the last day of April is already the 1st of May in
+        UTC, so counting the stored instant files it a day - and a month - *late*, where
+        the Bangkok trap files it early. Both directions are the same off-by-one, and a
+        fixture set that only ever runs ahead of UTC can't tell a correct conversion from
+        one that adds the offset where it should subtract it.
+        """
+        points = bucket_by_day([_local("2026-04-30T22:00:00", HONOLULU)])
+
+        assert [(point.year, point.month, point.day) for point in points] == [(2026, 4, 30)]
+
+    def test_buckets_a_dive_west_of_utc_by_its_own_local_year(self) -> None:
+        """The westward trap one boundary up: a New Year's Eve dive in Honolulu is the
+        1st of January in UTC, and belongs to the year the diver did it in.
+        """
+        points = bucket_by_day([_local("2025-12-31T22:00:00", HONOLULU)])
+
+        assert [(point.year, point.month, point.day) for point in points] == [(2025, 12, 31)]
 
     def test_orders_days_by_the_calendar_not_by_the_instant(self) -> None:
         """These two arrive in the order the query returns them - the Bangkok dive is the
