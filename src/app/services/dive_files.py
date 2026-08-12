@@ -207,8 +207,14 @@ async def store_dive_file(
     # that true regardless of what it grows into.
     #
     # In a thread for the same reason `POST /dive/parse` parses in one: sampling a FIT
-    # file is pure Python and takes ~0.6 s per 500 KB, and this is an `async def` with a
-    # live transaction either side of it.
+    # file is pure Python and takes up to ~1.5 s at `_MAX_FRAMES`, and this is an
+    # `async def`.
+    #
+    # Known cost, not yet worth paying down: `_find_by_digest` above has already opened a
+    # transaction, so the connection sits idle-in-transaction for the duration. Still
+    # strictly better than the status quo it replaced, where the same work blocked the
+    # event loop outright. If a burst of FIT uploads ever ties up the pool, extract before
+    # the first read rather than moving the work back.
     profile = await run_in_threadpool(extract_profile, parser, data)
 
     try:

@@ -79,6 +79,13 @@ _MAX_FRAMES = 100_000
 # reorders the mixtures and so misaligns `_tanks_for`'s positional pairing.
 _MESSAGE_INDEX_MASK = 0x0FFF
 
+# How many cylinders one dive may describe. No device pairs more than a handful of
+# transmitters - a Descent Mk3i tops out around five - so a file claiming hundreds is
+# describing something other than a dive. Bounded because each distinct `sensor` becomes
+# a `DiveMixtureSchema` in the parse response and a pressure channel in the stored
+# profile, neither of which `_MAX_FRAMES` constrains.
+_MAX_CYLINDERS = 16
+
 
 def _native_value(frame: fitdecode.FitDataMessage, name: str) -> Any | None:
     """Read a field by name, ignoring any *developer* field that shares the name.
@@ -348,13 +355,21 @@ class FitParser(DiveParser):
             # the unbounded list handed dive 2's depths and bottom time to dive 1.
             if scan.session_count < 2:
                 scan.dive_summaries.append(frame)
+        elif frame.name == "tank_summary":
+            # Above the guard for exactly the reason `dive_summary` is: it summarizes the
+            # dive rather than sampling it, so a device may write it after the `session`
+            # - and gating it there dropped both pressures, which is the whole SAC/RMV.
+            # Nothing in the corpus could have caught this: no file in it has any tank
+            # telemetry, so "the only message after the first session is the activity"
+            # was measured on files with no `tank_summary` to place. Bounded at the
+            # second session all the same.
+            if scan.session_count < 2 and len(scan.tank_summaries) < _MAX_CYLINDERS:
+                scan.tank_summaries.append(frame)
         elif scan.session is not None:
             # Samples and gas for a dive this file describes after the one being imported.
             return
         elif frame.name == "dive_gas":
             scan.gases.append(frame)
-        elif frame.name == "tank_summary":
-            scan.tank_summaries.append(frame)
         elif frame.name == "record":
             cls._collect_record(scan, frame)
         elif frame.name == "tank_update":
@@ -398,7 +413,15 @@ class FitParser(DiveParser):
         sensor = _native_raw(frame, "sensor")
         if not isinstance(timestamp, datetime) or pressure is None or sensor is None:
             return
-        scan.pressure.setdefault(int(sensor), []).append((timestamp, pressure))
+        key = int(sensor)
+        # Every distinct ANT id becomes a mixture in the `/dive/parse` response and a
+        # channel in the stored profile, and nothing else bounded how many there could
+        # be: `_MAX_FRAMES` caps frames, `MAX_POINTS_PER_CHANNEL` caps points *within* a
+        # channel. A 1 MB file of `tank_update` records with unique sensors produced
+        # 99 000 mixtures and a 9.9 MB parse response - a ~9x amplification.
+        if key not in scan.pressure and len(scan.pressure) >= _MAX_CYLINDERS:
+            return
+        scan.pressure.setdefault(key, []).append((timestamp, pressure))
 
     @staticmethod
     def _dive_summary(scan: _FitScan) -> fitdecode.FitDataMessage | None:
@@ -571,7 +594,38 @@ class FitParser(DiveParser):
         return list(tanks) if len(tanks) == len(gases) else [None] * len(gases)
 
     @staticmethod
-    def _tank_pressures(scan: _FitScan) -> list[_TankPressures]:
+    def _cylinder_sensors(scan: _FitScan) -> list[int]:
+        """The pods this dive has, in the order a cylinder is numbered in.
+
+        One ordering for both places a cylinder gets a position: the mixture list on the
+        dive form, and the `gas_number` labels on the profile's pressure curves. They
+        used to be computed separately - mixtures summary-first, channels by the order
+        pods started streaming - so a device enumerating its summaries in a different
+        order than its telemetry arrived made the chart's "Gas 1" and the form's first
+        cylinder describe different tanks.
+
+        Summaries first, being the device's own enumeration of its pods, then any pod
+        that only ever streamed telemetry.
+        """
+        summary_sensors: list[int] = []
+        for summary in scan.tank_summaries:
+            sensor = _native_raw(summary, "sensor")
+            if sensor is None or int(sensor) in summary_sensors:
+                continue
+            # Naming a pod is not on its own evidence of a cylinder: a summary with no
+            # pressures earns a place only if that pod also streamed telemetry to merge
+            # in. Otherwise a file whose sole tank message is `tank_summary(sensor=...,
+            # volume_used=...)` grows an entirely null phantom cylinder on the form.
+            has_pressure = (
+                _native_value(summary, "start_pressure") is not None
+                or _native_value(summary, "end_pressure") is not None
+            )
+            if has_pressure or int(sensor) in scan.pressure:
+                summary_sensors.append(int(sensor))
+        return summary_sensors + [sensor for sensor in scan.pressure if sensor not in summary_sensors]
+
+    @classmethod
+    def _tank_pressures(cls, scan: _FitScan) -> list[_TankPressures]:
         """What each cylinder started and finished the dive on.
 
         Two sources, joined **per cylinder and per field** rather than one taking over from
@@ -643,20 +697,16 @@ class FitParser(DiveParser):
             )
             summary_sensor = _native_raw(summary, "sensor")
             if summary_sensor is not None:
-                # Naming a pod is not on its own evidence of a cylinder: a summary with
-                # no pressures earns one only if that pod also streamed telemetry to
-                # merge in. Otherwise a file whose sole tank message is
-                # `tank_summary(sensor=..., volume_used=...)` produced an entirely null
-                # phantom cylinder in the dive form - the same "describes nothing at all"
-                # the sensor-less branch below already refuses.
-                if pressures != _NO_PRESSURES or int(summary_sensor) in telemetry:
-                    summaries[int(summary_sensor)] = pressures
+                # Kept unfiltered: `_cylinder_sensors` decides which of these earn a
+                # cylinder, so that rule lives in one place and the profile's channel
+                # numbering can't disagree with the mixture list about it.
+                summaries[int(summary_sensor)] = pressures
             elif pressures != _NO_PRESSURES:
                 unidentified.append(pressures)
 
         # Summary order first - the device's own enumeration of its pods - then any pod
         # that only ever streamed telemetry.
-        sensors = list(summaries) + [sensor for sensor in telemetry if sensor not in summaries]
+        sensors = cls._cylinder_sensors(scan)
         return [
             _merge_pressures(summaries.get(sensor, _NO_PRESSURES), telemetry.get(sensor, _NO_PRESSURES))
             for sensor in sensors
@@ -735,11 +785,20 @@ class FitParser(DiveParser):
             # nonsense in a chart legend. Same reasoning as the XML parser's refusal to use
             # `<TransmitterId>`, and it keeps a single-cylinder dive labelled gas 1 there
             # and here alike.
+            # Numbered by position in `_cylinder_sensors`, the same ordering the
+            # mixtures use, so a pod sits at the same index on the chart legend as on
+            # the dive form. A sensor with a summary but no telemetry holds its place in
+            # the numbering without contributing a curve.
             pressure=[
                 ParsedPressureSeries(gas_number=number, t=channel.t, v=channel.v)
                 for number, channel in (
-                    (position, series([(elapsed(t), scaled_int(v, TENTHS_PER_UNIT)) for t, v in readings]))
-                    for position, readings in enumerate(scan.pressure.values(), start=1)
+                    (
+                        position,
+                        series(
+                            [(elapsed(t), scaled_int(v, TENTHS_PER_UNIT)) for t, v in scan.pressure.get(sensor, [])]
+                        ),
+                    )
+                    for position, sensor in enumerate(cls._cylinder_sensors(scan), start=1)
                 )
                 if channel is not None
             ],

@@ -7,8 +7,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from src.app.services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file
+from src.app.services.dive_parsers.fit import _MAX_CYLINDERS, FitParser
 from src.app.services.dive_parsers.fit import _MAX_FRAMES as MAX_FRAMES
-from src.app.services.dive_parsers.fit import FitParser
 from src.app.services.dive_parsers.suunto_json import SuuntoJsonParser
 from src.app.services.dive_parsers.suunto_xml import SuuntoXmlParser
 from tests.helpers.fit import (
@@ -991,6 +991,72 @@ class TestFitParserParse:
         mixture = FitParser.parse(content).mixtures[0]
 
         assert (mixture.start_pressure, mixture.end_pressure) == (207.0, 62.0)
+
+    def test_reads_a_tank_summary_written_after_the_session(self):
+        """`tank_summary` summarizes the dive rather than sampling it, so a device may
+        write it after the `session` - exactly as `dive_summary` is.
+
+        It sat below `_collect`'s first-session cut and was dropped, taking both
+        pressures with it and costing the dive its SAC/RMV. Every fixture missed this
+        because `dive_fit_file` appends the session last, so they all placed the summary
+        before it - and the corpus can't rule it out either, since no file in it has any
+        tank telemetry at all.
+        """
+        content = fit_file(
+            message("file_id", type="activity", manufacturer="garmin"),
+            message("dive_gas", message_index=0, oxygen_content=21, helium_content=0, status="enabled"),
+            message("session", sport="diving", start_time=DIVE_START, total_elapsed_time=1800.0),
+            message("tank_summary", sensor=2411100050, start_pressure=207.0, end_pressure=62.0),
+        )
+        mixture = FitParser.parse(content).mixtures[0]
+
+        assert (mixture.start_pressure, mixture.end_pressure) == (207.0, 62.0)
+
+    def test_caps_the_number_of_cylinders(self):
+        """Every distinct ANT id becomes a mixture in the parse response and a channel in
+        the stored profile, and nothing else bounded how many there could be: a 1 MB file
+        of `tank_update` records with unique sensors produced 99 000 mixtures and a 9.9 MB
+        response. No device pairs more than a handful of pods."""
+        content = dive_fit_file(
+            *(
+                message("tank_update", timestamp=DIVE_START, sensor=sensor, pressure=200.0)
+                for sensor in range(_MAX_CYLINDERS + 20)
+            ),
+        )
+
+        profile = FitParser.parse_profile(content)
+
+        assert profile is not None
+        assert len(profile.pressure) == _MAX_CYLINDERS
+
+    def test_the_form_and_the_chart_number_cylinders_the_same_way(self):
+        """A pod's position must mean the same thing on the dive form and the chart.
+
+        Mixtures were ordered summaries-first while profile channels were numbered by the
+        order pods started streaming, so a device enumerating its summaries in a different
+        order than its telemetry arrived made "Gas 1" on the chart and the first cylinder
+        on the form describe different tanks.
+        """
+        content = fit_file(
+            message("file_id", type="activity", manufacturer="garmin"),
+            message("dive_gas", message_index=0, oxygen_content=21, helium_content=0, status="enabled"),
+            message("dive_gas", message_index=1, oxygen_content=50, helium_content=0, status="enabled"),
+            # Pod 111 streams first...
+            message("tank_update", timestamp=DIVE_START, sensor=111, pressure=207.0),
+            message("tank_update", timestamp=DIVE_START + timedelta(seconds=10), sensor=222, pressure=150.0),
+            # ...but the summaries are written the other way round.
+            message("tank_summary", sensor=222, start_pressure=150.0, end_pressure=90.0),
+            message("tank_summary", sensor=111, start_pressure=207.0, end_pressure=62.0),
+            message("session", sport="diving", start_time=DIVE_START, total_elapsed_time=1800.0),
+        )
+
+        mixtures = FitParser.parse(content).mixtures
+        profile = FitParser.parse_profile(content)
+
+        assert profile is not None
+        # Cylinder 1 is pod 222 on both: 150 bar on the form, 1500 (tenths) on the chart.
+        assert [mixture.start_pressure for mixture in mixtures] == [150.0, 207.0]
+        assert [(channel.gas_number, channel.v[0]) for channel in profile.pressure] == [(1, 1500), (2, 2070)]
 
     def test_a_named_pod_that_reported_nothing_is_not_a_cylinder(self):
         """Naming a pod isn't on its own evidence of a cylinder.

@@ -3149,6 +3149,32 @@ routine rather than hypothetical - see the 224-of-441 figure in the DM5 section 
 join is exact rather than positional because both messages carry the pod's ANT `sensor`
 id, so unlike tanks-to-gases below there is a real key to join on.
 
+**`tank_summary` is collected above the first-session cut, like `dive_summary`.** It
+summarizes the dive rather than sampling it, so a device may write it after the `session`
+- and sitting below the cut, it was dropped, taking both pressures and the dive's SAC/RMV
+with it. Bounded at the second session all the same. `tank_update` stays below the cut: it
+is per-sample telemetry and belongs to the sample stream.
+
+Nothing in the corpus could have caught this, and no test did either: every fixture goes
+through `dive_fit_file`, which appends the `session` last, so they all placed the summary
+before it. The "the only message following the first session is the activity" measurement
+that justified the cut was taken on files that have no `tank_summary` to place.
+
+**Cylinders are capped at `_MAX_CYLINDERS` (16).** `_MAX_FRAMES` bounds frames and
+`MAX_POINTS_PER_CHANNEL` bounds points *within* a channel, but nothing bounded the number
+of distinct ANT `sensor` ids - and each one becomes a `DiveMixtureSchema` in the
+`/dive/parse` response and a pressure channel in the stored profile. A 1 MB file of
+`tank_update` records with unique sensors produced 99 000 mixtures and a 9.9 MB response, a
+~9x amplification. A Descent Mk3i pairs about five pods.
+
+**One ordering decides a cylinder's position everywhere**, via `_cylinder_sensors`. The
+mixture list and the profile's `gas_number` labels were computed separately - summaries
+first for one, order-of-first-telemetry for the other - so a device enumerating its
+summaries in a different order than its telemetry arrived made the chart's "Gas 1" and the
+form's first cylinder describe different tanks. The rule that a pressure-less summary earns
+a cylinder only if its pod also streamed telemetry lives in that same helper, so the two
+can never disagree about it either.
+
 Summaries are deduped by `sensor` first, keeping the last. A device that writes the summary
 twice for one pod would otherwise count as two cylinders, and the exact-count rule below
 then discards every pressure in the file - one repeated frame losing a real 207 -> 62 bar
