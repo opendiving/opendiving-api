@@ -119,13 +119,40 @@ async def verify_google_id_token(credential: str) -> GoogleUserInfo | None:
 
 
 # -------------- access / refresh tokens --------------
+def _new_jti() -> str:
+    """A unique id for one token issuance, so that no two tokens are ever byte-identical.
+
+    Without it they can be. The claims that distinguish one token from the next are
+    `sub`, `token_type` and `exp` - and `exp` has one-second resolution, so two tokens
+    minted for the same subject inside the same wall-clock second encode to exactly the
+    same string. Every revocable token here is revoked by storing that string in
+    `token_blacklist`, which means identical tokens share a single blacklist entry:
+
+    - `/auth/refresh` spends the presented cookie and *then* mints its replacement (see
+      `refresh_access_token`). When the replacement collides with the token just spent,
+      the caller is handed a refresh token that is already blacklisted and gets a 401 on
+      their next refresh - a random-looking logout, since it only happens when two
+      refreshes land in the same second.
+    - `/auth/logout` blacklists the access token it was given, which also revokes any
+      sibling session whose access token happens to be identical.
+    - An onboarding token is blacklisted to make it single-use, so two issued for the
+      same identity in the same second (a magic link opened twice, say) are spent
+      together and the second `/auth/complete` fails.
+
+    A random `jti` makes each issuance distinct, which is what makes keying the blacklist
+    on the token string correct. Nothing ever reads the claim back, so tokens minted
+    before it existed keep verifying and deploying this signs nobody out.
+    """
+    return uuid_pkg.uuid4().hex
+
+
 async def create_access_token(data: dict[str, Any], expires_delta: timedelta | None = None) -> str:
     to_encode = data.copy()
     if expires_delta:
         expire = datetime.now(UTC).replace(tzinfo=None) + expires_delta
     else:
         expire = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire, "token_type": TokenType.ACCESS})
+    to_encode.update({"exp": expire, "jti": _new_jti(), "token_type": TokenType.ACCESS})
     encoded_jwt: str = jwt.encode(to_encode, SECRET_KEY.get_secret_value(), algorithm=ALGORITHM)
     return encoded_jwt
 
@@ -136,7 +163,7 @@ async def create_refresh_token(data: dict[str, Any], expires_delta: timedelta | 
         expire = datetime.now(UTC).replace(tzinfo=None) + expires_delta
     else:
         expire = datetime.now(UTC).replace(tzinfo=None) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
-    to_encode.update({"exp": expire, "token_type": TokenType.REFRESH})
+    to_encode.update({"exp": expire, "jti": _new_jti(), "token_type": TokenType.REFRESH})
     encoded_jwt: str = jwt.encode(to_encode, SECRET_KEY.get_secret_value(), algorithm=ALGORITHM)
     return encoded_jwt
 
@@ -178,7 +205,8 @@ async def create_onboarding_token(data: OnboardingTokenData) -> str:
     verified-but-accountless identity from `/auth/email/verify` or `/auth/google` to
     `/auth/complete`. Never persisted anywhere - the signature and expiry are all that
     back it, same as access/refresh tokens - but it *is* recorded in the token
-    blacklist once used (see `blacklist_token`), making it single-use.
+    blacklist once used (see `blacklist_token`), making it single-use. Being blacklisted
+    by value is exactly why it carries a `jti` - see `_new_jti`.
     """
     expire = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=settings.ONBOARDING_TOKEN_EXPIRE_MINUTES)
     to_encode: dict[str, Any] = {
@@ -188,6 +216,7 @@ async def create_onboarding_token(data: OnboardingTokenData) -> str:
         "name": data.name,
         "avatar": data.avatar,
         "exp": expire,
+        "jti": _new_jti(),
         "token_type": TokenType.ONBOARDING,
     }
     encoded_jwt: str = jwt.encode(to_encode, SECRET_KEY.get_secret_value(), algorithm=ALGORITHM)
@@ -238,7 +267,9 @@ def create_dive_file_token(*, user_uuid: uuid_pkg.UUID, sha256: str, parser_key:
     Deliberately *not* blacklisted after use, unlike `create_onboarding_token`:
     re-uploading the same file to the same dive is an idempotent no-op by design, and
     the token confers no authority to replay - it can only ever store bytes its holder
-    already owns a parse of.
+    already owns a parse of. That is also why this is the one token here with no `jti`:
+    nothing revokes it by value, so two identical receipts are simply the same receipt
+    (see `_new_jti` for what goes wrong when a *revocable* token collides).
 
     The parser's `content_type` is deliberately absent. That value ends up in a response
     header on download, so it is resolved from `parser_key` against the live registry at
@@ -283,6 +314,10 @@ def verify_dive_file_token(token: str) -> DiveFileTokenData | None:
 # -------------- blacklisting --------------
 async def _blacklist_one(token: str, db: AsyncSession) -> None:
     """Record a single token as revoked until its own `exp` passes.
+
+    The row is keyed on the whole token string (`TokenBlacklist.token` is unique), which
+    is only a per-issuance key because every revocable token carries a `jti` - see
+    `_new_jti`. Anything minted here that should be revocable needs that claim.
 
     A token that can't be decoded can't be blacklisted, and the callers here reach this
     from routes that already authenticated - so a `JWTError` means a malformed token was

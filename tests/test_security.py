@@ -2,6 +2,7 @@
 
 import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -23,6 +24,7 @@ from src.app.core.security import (
     verify_onboarding_token,
     verify_token,
 )
+from tests.helpers.mocks import FrozenSecurityClock
 
 
 class TestMagicLinkTokens:
@@ -84,6 +86,70 @@ class TestTokenCreation:
         exp = datetime.fromtimestamp(payload["exp"], tz=UTC).replace(tzinfo=None)
 
         assert before + timedelta(minutes=4) < exp <= before + timedelta(minutes=5, seconds=1)
+
+
+class TestTokensMintedInTheSameSecond:
+    """Two tokens for one subject minted inside the same wall-clock second must still be
+    different tokens.
+
+    `exp` has one-second resolution, so before `jti` existed they were byte-identical -
+    and since revocation stores the token *string* (`token_blacklist.token`), one
+    blacklist entry covered both. `/auth/refresh` ran into it against itself: it spends
+    the presented cookie and then mints a replacement, so a collision handed the caller a
+    refresh token that was already revoked and 401'd their next refresh. See
+    `core.security._new_jti`.
+
+    The clock is frozen rather than the calls merely being made back to back - the
+    collision only shows up when both land in the same second, which is exactly what made
+    the original bug intermittent.
+    """
+
+    @staticmethod
+    def _claims(token: str) -> dict[str, Any]:
+        # `jwt.decode` is typed as returning `Any`; a decoded JWT payload is a dict.
+        claims: dict[str, Any] = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
+        return claims
+
+    @pytest.mark.asyncio
+    async def test_refresh_tokens_are_distinct(self):
+        with patch("src.app.core.security.datetime", FrozenSecurityClock):
+            first = await create_refresh_token({"sub": "someuser"})
+            second = await create_refresh_token({"sub": "someuser"})
+
+        assert first != second
+        # Nothing else in the payload separates them, so `jti` has to.
+        assert self._claims(first)["exp"] == self._claims(second)["exp"]
+        assert self._claims(first)["jti"] != self._claims(second)["jti"]
+
+    @pytest.mark.asyncio
+    async def test_access_tokens_are_distinct(self):
+        """Access tokens collide the same way, and `/auth/logout` blacklists them by
+        value - so without this, signing out of one session revokes any other session
+        whose access token was minted in the same second.
+        """
+        with patch("src.app.core.security.datetime", FrozenSecurityClock):
+            first = await create_access_token({"sub": "someuser"})
+            second = await create_access_token({"sub": "someuser"})
+
+        assert first != second
+        assert self._claims(first)["exp"] == self._claims(second)["exp"]
+        assert self._claims(first)["jti"] != self._claims(second)["jti"]
+
+    @pytest.mark.asyncio
+    async def test_onboarding_tokens_are_distinct(self):
+        """Onboarding tokens are blacklisted to make them single-use, so a collision
+        spends both: a magic link opened twice in the same second yields one usable
+        `/auth/complete` and one dead session.
+        """
+        data = OnboardingTokenData(email="new@example.com", provider="email")
+
+        with patch("src.app.core.security.datetime", FrozenSecurityClock):
+            first = await create_onboarding_token(data)
+            second = await create_onboarding_token(data)
+
+        assert first != second
+        assert self._claims(first)["exp"] == self._claims(second)["exp"]
+        assert self._claims(first)["jti"] != self._claims(second)["jti"]
 
 
 class TestVerifyToken:
