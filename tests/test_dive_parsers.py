@@ -1,6 +1,7 @@
 """Unit tests for dive-computer export file parsers."""
 
 import json
+import random
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -145,9 +146,16 @@ def _ocean_json(samples: list[dict], dive_time: float = 300.0) -> bytes:
     ).encode()
 
 
+# Real arithmetic rather than string interpolation of `4 + minute`/`11 + second`, which
+# didn't carry: an offset of 49 s produced `12:04:60` and one of 3 360 s `12:60:11`. The
+# fixtures below happened to dodge it, and the next one to pick a natural offset would have
+# got a `ValueError` from `datetime.fromisoformat` deep inside the parser, reading as a
+# parser bug rather than a broken fixture.
+OCEAN_ORIGIN = datetime.fromisoformat("2026-04-03T12:04:11.390+02:00")
+
+
 def _ocean_time(offset_seconds: int) -> str:
-    minute, second = divmod(offset_seconds, 60)
-    return f"2026-04-03T12:{4 + minute:02d}:{11 + second:02d}.390+02:00"
+    return (OCEAN_ORIGIN + timedelta(seconds=offset_seconds)).isoformat()
 
 
 def _ocean_sample(offset_seconds: int, pressure: int | None, gas_number: int = 0) -> dict:
@@ -526,6 +534,43 @@ class TestSuuntoJsonParserParse:
 
         assert [mixture.start_pressure is not None for mixture in parsed.mixtures] == [True, False]
 
+    def test_a_broken_sample_stream_does_not_fail_the_import(self):
+        """Cylinder reconstruction is best-effort enrichment, not part of the contract.
+
+        It runs for *every* export with no `Gases` block - including ones that never had
+        cylinder data - and walks a barely-documented sample stream, so a structural
+        surprise there used to turn a previously fine import into a 422. The header fields
+        are what the diver came for and must survive.
+        """
+        odd_samples = [
+            # A naive `Header.DateTime` against offset-aware sample timestamps: comparing
+            # them raises, and it did so before any cylinder was even inspected.
+            json.dumps(
+                {
+                    "DeviceLog": {
+                        "Header": {"DateTime": "2026-04-03T12:04:11.390", "DiveTime": 300, "Depth": {"Max": 21.1}},
+                        "Samples": [{"TimeISO8601": "2026-04-03T12:04:12.390+02:00", "Depth": 5.0}],
+                    }
+                }
+            ).encode(),
+            # A cylinder reading with no gas number to attach it to.
+            json.dumps(
+                {
+                    "DeviceLog": {
+                        "Header": {"DateTime": "2026-04-03T12:04:11.390+02:00", "Depth": {"Max": 21.1}},
+                        "Samples": [
+                            {"TimeISO8601": "2026-04-03T12:04:12.390+02:00", "Cylinders": [{"Pressure": 20000000}]}
+                        ],
+                    }
+                }
+            ).encode(),
+        ]
+
+        for content in odd_samples:
+            parsed = SuuntoJsonParser.parse(content)
+            assert parsed.max_depth == 21.1
+            assert parsed.mixtures == []
+
     def test_ignores_transmitter_readings_from_after_the_dive(self):
         """The computer keeps logging on the boat, where the diver purges the regulator.
 
@@ -664,6 +709,31 @@ class TestFitParserParse:
         )
 
         assert FitParser.parse(content).max_depth == 32.41
+
+    def test_a_developer_field_never_stands_in_for_a_missing_native_one(self):
+        """The case that actually separates `_native_value` from `fitdecode.get_value`.
+
+        A valid FIT file cannot order a developer field ahead of a native one - the
+        definition record carries native field definitions first and developer ones after,
+        so `get_value`'s "first match by position" is always the native field when both
+        exist, and the test above passes either way. What `get_value` gets wrong is a
+        message carrying *only* the developer duplicate: it hands back a vendor's float32
+        as though it were the profile's scaled `uint32`, units, semantics and all.
+
+        Here the session declares Suunto's `float32` `max_depth` and no native one, so the
+        honest answer is that this file records no max depth - not 32.40999984741211.
+        """
+        content = fit_file(
+            message(
+                "session",
+                DevField(name="max_depth", value=32.41, field_number=5, units="m"),
+                sport="diving",
+                start_time=DIVE_START,
+                total_elapsed_time=2001.0,
+            ),
+        )
+
+        assert FitParser.parse(content).max_depth is None
 
     def test_start_time_carries_the_dive_s_own_utc_offset(self):
         """`activity.local_timestamp` is the only record of where the dive happened.
@@ -834,6 +904,74 @@ class TestFitParserParse:
         assert mixture.start_pressure == 207.0
         assert mixture.end_pressure == 62.0
 
+    def test_keeps_tank_pressures_when_the_file_has_no_gas_list(self):
+        """A Descent dive logged in gauge mode writes no `dive_gas`, and a paired pod
+        still reports throughout. Building mixtures only from `dive_gas` left nothing to
+        hang the pressures on and discarded every reading - the opposite of the rule the
+        JSON parser follows, where evidence of a tank is evidence of a tank."""
+        content = dive_fit_file(
+            message("tank_summary", sensor=2411100050, start_pressure=207.0, end_pressure=62.0),
+            message("tank_update", timestamp=DIVE_START, sensor=2411100050, pressure=207.0),
+        )
+        mixtures = FitParser.parse(content).mixtures
+
+        assert len(mixtures) == 1
+        assert (mixtures[0].start_pressure, mixtures[0].end_pressure) == (207.0, 62.0)
+        # Nothing recorded the gas, so nothing is claimed about it.
+        assert mixtures[0].oxygen is None
+        assert mixtures[0].helium is None
+
+    def test_ignores_a_backup_only_cylinder(self):
+        """`dive_gas_status` is `{disabled, enabled, backup_only}`, and a `backup_only`
+        cylinder is by definition one that was carried and not breathed. Importing a pony
+        bottle as a second mixture costs the dive its SAC/RMV, since `compute_gas_use`
+        requires exactly one."""
+        content = dive_fit_file(
+            message("dive_gas", message_index=0, oxygen_content=21, helium_content=0, status="enabled"),
+            message("dive_gas", message_index=1, oxygen_content=21, helium_content=0, status="backup_only"),
+        )
+
+        assert len(FitParser.parse(content).mixtures) == 1
+
+    def test_keeps_an_unindexed_gas_apart_from_message_index_zero(self):
+        """A positional fallback must not share a key space with a real `message_index`.
+
+        Keying both into one dict made a gas at position 0 collide with a gas declaring
+        `message_index=0`, so one of the two silently vanished - here the 50 % deco gas -
+        and sorted positions and indices together as if they were on one scale.
+        """
+        content = dive_fit_file(
+            message("dive_gas", oxygen_content=21, helium_content=0, status="enabled"),
+            message("dive_gas", message_index=0, oxygen_content=50, helium_content=0, status="enabled"),
+        )
+
+        assert sorted(mixture.oxygen for mixture in FitParser.parse(content).mixtures) == [21.0, 50.0]
+
+    def test_dedupes_repeated_tank_summaries_for_one_pod(self):
+        """A device that writes the summary twice for one transmitter would otherwise
+        count as two cylinders, and the exact-count pairing rule then throws away every
+        pressure in the file."""
+        content = dive_fit_file(
+            message("dive_gas", message_index=0, oxygen_content=21, helium_content=0, status="enabled"),
+            message("tank_summary", sensor=2411100050, start_pressure=207.0, end_pressure=62.0),
+            message("tank_summary", sensor=2411100050, start_pressure=207.0, end_pressure=62.0),
+        )
+        mixture = FitParser.parse(content).mixtures[0]
+
+        assert (mixture.start_pressure, mixture.end_pressure) == (207.0, 62.0)
+
+    def test_still_pairs_two_pods_to_two_gases(self):
+        """The dedupe must not collapse genuinely different transmitters."""
+        content = dive_fit_file(
+            message("dive_gas", message_index=0, oxygen_content=21, helium_content=0, status="enabled"),
+            message("dive_gas", message_index=1, oxygen_content=50, helium_content=0, status="enabled"),
+            message("tank_summary", sensor=111, start_pressure=207.0, end_pressure=62.0),
+            message("tank_summary", sensor=222, start_pressure=180.0, end_pressure=90.0),
+        )
+        mixtures = FitParser.parse(content).mixtures
+
+        assert [(m.oxygen, m.start_pressure) for m in mixtures] == [(21.0, 207.0), (50.0, 180.0)]
+
     def test_leaves_tank_pressures_null_when_the_counts_disagree(self):
         """Two gases and one pod: position says nothing, and a confidently wrong start
         pressure produces a plausible, wrong RMV - worse than an empty field."""
@@ -881,6 +1019,38 @@ class TestFitParserParse:
     def test_raises_dive_parse_error_on_bytes_that_are_not_fit(self):
         with pytest.raises(DiveParseError):
             FitParser.parse(b"this is not a FIT file")
+
+    # `fitdecode` warns its way through a corrupt file ("invalid field size 77 ...") before
+    # deciding it cannot continue. That is the library working as intended on garbage, and
+    # 500-odd of them would drown the suite's warning summary.
+    @pytest.mark.filterwarnings("ignore::UserWarning")
+    @pytest.mark.parametrize("entry_point", [FitParser.parse, FitParser.parse_profile])
+    def test_raises_dive_parse_error_on_corrupt_but_untruncated_files(self, entry_point):
+        """Corruption in the body, which is not the same failure as truncation.
+
+        The truncated-file test above passes against a catch of `fitdecode.FitError`
+        alone, because truncation happens to raise `FitEOFError` - so it gave false
+        confidence. Flipping bytes past the header does not: within 400 mutations this
+        found `AssertionError` from `reader.py`, `ValueError: size` from a bad field
+        definition, and `TypeError: '>=' not supported between instances of 'tuple' and
+        'int'` from `processors.py`, each of which escaped `parse()` and became a 500
+        from `POST /dive/parse`, which handles only the two parser errors.
+
+        Fixed seed, so a failure here is reproducible rather than a flake.
+        """
+        rng = random.Random(7)
+        for _ in range(400):
+            corrupt = bytearray(VALID_FIT)
+            for _ in range(rng.randint(1, 4)):
+                # Past the 12-byte header, so `can_parse`'s magic check still matches and
+                # the bytes reach the decoder rather than being rejected as "not FIT".
+                corrupt[rng.randrange(12, len(corrupt))] = rng.randrange(256)
+            try:
+                entry_point(bytes(corrupt))
+            except DiveParseError:
+                pass
+            except Exception as exc:  # noqa: BLE001 - the point of the test
+                pytest.fail(f"{type(exc).__name__} escaped as a 500 instead of DiveParseError: {exc}")
 
 
 class TestParsersInventNothing:

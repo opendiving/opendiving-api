@@ -1,9 +1,13 @@
+import logging
+
 from ...schemas.parsed_dive import ParsedDiveSchema
 from .base import DiveParser
 from .exceptions import DiveParseError, UnsupportedDiveFileError
 from .fit import FitParser
 from .suunto_json import SuuntoJsonParser
 from .suunto_xml import SuuntoXmlParser
+
+logger = logging.getLogger(__name__)
 
 # Register new dive-computer parsers here, in the order they should be tried.
 _PARSERS: list[type[DiveParser]] = [
@@ -29,6 +33,14 @@ def parse_dive_file_with_parser(filename: str, content: bytes) -> tuple[type[Div
     `parse()`, and the next candidate gets a turn. Only the parser that actually
     returned a result may be recorded.
 
+    Anything a parser raises that isn't one of those two is converted here rather than
+    left to reach the route, which knows only those two and would answer a corrupt upload
+    with a 500. Each parser still guards its own failure modes and produces a better
+    message than this can; the backstop exists because every one of them drives a
+    third-party decoder over bytes a stranger supplied, and "the parsers are careful" is
+    not the same guarantee as "the endpoint cannot 500". Logged with the parser key, since
+    a file reaching here is either a bug worth seeing or a corpus entry worth having.
+
     Raises:
         UnsupportedDiveFileError: if no registered parser recognizes the file.
         DiveParseError: if a parser recognizes the file but fails to parse it.
@@ -40,6 +52,11 @@ def parse_dive_file_with_parser(filename: str, content: bytes) -> tuple[type[Div
             return parser, parser.parse(content)
         except UnsupportedDiveFileError:
             continue
+        except DiveParseError:
+            raise
+        except Exception as exc:
+            logger.exception("Unexpected error parsing a %s file", parser.key)
+            raise DiveParseError(f"Could not read this {parser.key} file: {exc or type(exc).__name__}") from exc
     raise UnsupportedDiveFileError(f"No parser available for file: {filename}")
 
 

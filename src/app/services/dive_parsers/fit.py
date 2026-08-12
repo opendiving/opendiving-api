@@ -16,15 +16,16 @@ the format's one real trap, see `_native_value`.
 import io
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from decimal import ROUND_HALF_UP, Decimal
+from itertools import chain
 from typing import Any
 
 import fitdecode
 from fitdecode.types import DevField
 
-from ...schemas.dive_profile import ParsedPressureSeries, ParsedProfileSchema, ParsedSeries
+from ...schemas.dive_profile import ParsedPressureSeries, ParsedProfileSchema
 from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from .base import DiveParser
+from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, scaled_int, series
 from .exceptions import DiveParseError
 
 # Every FIT file carries the ASCII string `.FIT` at offset 8, immediately after the
@@ -34,21 +35,26 @@ _FIT_MAGIC = b".FIT"
 _FIT_MAGIC_OFFSET = 8
 _FIT_MAGIC_END = _FIT_MAGIC_OFFSET + len(_FIT_MAGIC)
 
-# The integer scales `parse_profile` emits in - depth in centimeters, temperature in
-# tenths of a degree, pressure in tenths of a bar. See `schemas/dive_profile.py`.
-_CENTIMETERS_PER_METER = Decimal("100")
-_TENTHS_PER_UNIT = Decimal("10")
-
 # `dive_gas.status` values that mean the diver did not breathe this cylinder. A FIT
 # device stores its whole configured gas list, so a recreational air dive on a computer
-# with two deco gases programmed in would otherwise import three mixtures.
-_UNUSED_GAS_STATUS = "disabled"
+# with two deco gases programmed in would otherwise import three mixtures. The profile's
+# enum is `{0: disabled, 1: enabled, 2: backup_only}`, and `backup_only` belongs here for
+# exactly the reason the name says: a pony bottle that was carried and not breathed. Left
+# in, it costs the dive its SAC/RMV, since `compute_gas_use` needs exactly one mixture.
+_UNUSED_GAS_STATUSES = frozenset({"disabled", "backup_only"})
 
 # Real UTC offsets run from -12:00 to +14:00. A wider gap between `activity.timestamp`
 # and `activity.local_timestamp` means one of the two is corrupt, and is treated as
 # "no offset recorded" rather than propagated - `timezone()` itself raises beyond
 # +/-24 h, which would surface as an unhandled `ValueError` from a bad upload.
 _MAX_UTC_OFFSET_MINUTES = 14 * 60
+
+# What turning decoded messages into a dive may raise on a file that decoded but holds
+# nonsense. `ArithmeticError` is in here for `decimal.InvalidOperation`, which
+# `channels.scaled_int` raises when a corrupt float32 reading arrives as NaN and `quantize`
+# refuses it; the rest are the usual shape mismatches. `_scan` itself needs no such list
+# - it catches everything, for the reasons in its docstring.
+_EXTRACTION_ERRORS = (TypeError, ValueError, KeyError, AttributeError, ArithmeticError, AssertionError)
 
 
 def _native_value(frame: fitdecode.FitDataMessage, name: str) -> Any | None:
@@ -62,34 +68,18 @@ def _native_value(frame: fitdecode.FitDataMessage, name: str) -> Any | None:
     `frame.fields`, and what the original `export/parse-fit.py` prototype did - keeps
     whichever came last, which is the lossy one.
 
-    `fitdecode`'s own `get_value()` happens to return the native field here, but only
-    because it takes the first match by position and FIT encodes native fields ahead of
-    developer ones. Filtering on the type is what actually expresses the intent, so a
-    file that orders them differently can't quietly reintroduce float32 noise.
+    `fitdecode`'s own `get_value()` returns the native field *when both are present*, but
+    only as a side effect of taking the first match by position: a definition record
+    carries native field definitions ahead of developer ones, so a valid file cannot order
+    them the other way round. Where the two genuinely differ is a message carrying **only**
+    the developer duplicate - `get_value` then hands back a vendor's float32 as though it
+    were the profile's scaled `uint32`, units and semantics included, while this returns
+    `None` and lets the caller fall back to a field that means what it says.
     """
     for field_data in frame.fields:
         if field_data.is_named(name) and not isinstance(field_data.field, DevField):
             return field_data.value
     return None
-
-
-def _scaled_int(value: float, factor: Decimal) -> int:
-    """Scale a reading into the integer units the profile is stored in.
-
-    Via `Decimal(str(value))` rather than `round(value * factor)`, consistent with the
-    Suunto parsers: `fitdecode` produces these by dividing a raw integer by the profile's
-    scale factor in binary floating point, so a depth of 25.85 m can arrive fractionally
-    below it and `round(25.85 * 10)` lands on 258. `str()` recovers the shortest decimal
-    that round-trips - the digits the device meant - and `ROUND_HALF_UP` keeps a half a
-    half, rather than Python's banker's rounding.
-
-    Takes a plain `float`, unlike its counterparts in the Suunto parsers: every caller
-    here has already dropped the samples that had no reading, and an optional parameter
-    would need an `or 0` at each call site that would quietly turn "no reading" into a
-    reading of zero - which for depth is a real, distinct value (a Suunto Ocean records
-    0.0 m at the surface).
-    """
-    return int((Decimal(str(value)) * factor).quantize(Decimal(1), rounding=ROUND_HALF_UP))
 
 
 def _first_not_none(*values: float | None) -> float | None:
@@ -99,18 +89,6 @@ def _first_not_none(*values: float | None) -> float | None:
     through to the next candidate.
     """
     return next((value for value in values if value is not None), None)
-
-
-def _series(points: list[tuple[float, int]]) -> ParsedSeries | None:
-    """Turn `(seconds, value)` pairs into a time-sorted series, or `None` if there are none.
-
-    A stable sort keyed on the timestamp alone, so two readings that landed on the same
-    second keep the order the file listed them in.
-    """
-    if not points:
-        return None
-    ordered = sorted(points, key=lambda point: point[0])
-    return ParsedSeries(t=[t for t, _ in ordered], v=[v for _, v in ordered])
 
 
 def _local_offset(activity: fitdecode.FitDataMessage | None) -> timezone | None:
@@ -215,19 +193,17 @@ class FitParser(DiveParser):
     @classmethod
     def parse(cls, content: bytes) -> ParsedDiveSchema:
         """Extract the dive itself (not its samples - see `parse_profile`)."""
-        scan = cls._scan(content)
         try:
-            return cls._parse_dive(scan)
-        except (TypeError, ValueError, KeyError, AttributeError) as exc:
+            return cls._parse_dive(cls._scan(content))
+        except _EXTRACTION_ERRORS as exc:
             raise DiveParseError(f"Malformed FIT dive data: {exc}") from exc
 
     @classmethod
     def parse_profile(cls, content: bytes) -> ParsedProfileSchema | None:
         """Extract the `record` stream (and Garmin's `tank_update`s) as per-channel series."""
-        scan = cls._scan(content)
         try:
-            return cls._parse_samples(scan)
-        except (TypeError, ValueError, KeyError, AttributeError) as exc:
+            return cls._parse_samples(cls._scan(content))
+        except _EXTRACTION_ERRORS as exc:
             raise DiveParseError(f"Malformed FIT dive samples: {exc}") from exc
 
     @classmethod
@@ -239,6 +215,16 @@ class FitParser(DiveParser):
         off still imports. The CRC here guards against transfer corruption, not
         tampering - nothing downstream trusts it - and refusing an otherwise readable
         dive log over it would lose real data for no gain.
+
+        **Catches `Exception`, not just `fitdecode.FitError`.** This is the one place a
+        third-party decoder is walked over bytes a stranger uploaded, and a corrupt file
+        does not reliably present as the library's own error type: flipping a few bytes
+        past the header raises `AssertionError` from `reader.py`, `ValueError: size` from
+        a bad field definition, and `TypeError: '>=' not supported between instances of
+        'tuple' and 'int'` from `processors.py`. Every one of those escaped as a 500 from
+        `POST /dive/parse`, which catches only the two parser errors. Truncation happens
+        to raise `FitEOFError` - a real `FitError` - which is why the truncated-file test
+        gave false confidence.
         """
         scan = _FitScan()
         try:
@@ -246,8 +232,8 @@ class FitParser(DiveParser):
                 for frame in fit:
                     if isinstance(frame, fitdecode.FitDataMessage):
                         cls._collect(scan, frame)
-        except fitdecode.FitError as exc:
-            raise DiveParseError(f"Invalid FIT file: {exc}") from exc
+        except Exception as exc:
+            raise DiveParseError(f"Invalid FIT file: {exc or type(exc).__name__}") from exc
         return scan
 
     @classmethod
@@ -411,21 +397,47 @@ class FitParser(DiveParser):
 
     @classmethod
     def _mixtures(cls, scan: _FitScan) -> list[DiveMixtureSchema]:
-        """Map `dive_gas` entries onto `DiveMixture`s, with Garmin tank pressures where present.
+        """Map `dive_gas` entries onto `DiveMixture`s, with tank pressures where present."""
+        gases = cls._breathed_gases(scan)
+        if not gases:
+            # Tank telemetry with no gas list at all still describes real cylinders - a
+            # Descent dive logged in gauge mode writes no `dive_gas`, and a pod paired to
+            # it reports throughout. Emitting the pressures on their own is the same rule
+            # the JSON parser follows in this file's sibling: evidence of a tank is
+            # evidence of a tank, whichever way round it arrived. Returns `[]` when there
+            # is no telemetry either.
+            return [cls._mixture(None, tank) for tank in cls._tank_pressures(scan)]
 
-        Gases are keyed by `message_index` (FIT's index for repeated messages), deduped
-        on it keeping the first, and emitted in index order - a device may re-announce
-        its gas list mid-file.
+        return [cls._mixture(gas, tank) for gas, tank in zip(gases, cls._tanks_for(scan, gases), strict=True)]
+
+    @staticmethod
+    def _breathed_gases(scan: _FitScan) -> list[fitdecode.FitDataMessage]:
+        """The `dive_gas` entries for cylinders the diver actually breathed, device order first.
+
+        A FIT device stores its whole configured gas list, so both `disabled` and
+        `backup_only` are dropped - a `backup_only` cylinder is by definition one that was
+        carried and not breathed, and importing a pony bottle as a second mixture costs the
+        dive its SAC/RMV, since `compute_gas_use` requires exactly one.
+
+        Deduped on `message_index` keeping the first, since a device may re-announce its
+        list mid-file. Entries *without* an index are kept in a separate space and appended
+        rather than being keyed by their position: keying a position into the same dict as
+        a real `message_index` made a gas at position 0 collide with a gas declaring
+        `message_index=0` - one of the two vanished - and then sorted positions and indices
+        together as though the two numbers were on one scale.
         """
-        gases: dict[int, fitdecode.FitDataMessage] = {}
-        for position, gas in enumerate(scan.gases):
-            if _native_value(gas, "status") == _UNUSED_GAS_STATUS:
+        indexed: dict[int, fitdecode.FitDataMessage] = {}
+        unindexed: list[fitdecode.FitDataMessage] = []
+        for gas in scan.gases:
+            if _native_value(gas, "status") in _UNUSED_GAS_STATUSES:
                 continue
             index = _native_value(gas, "message_index")
-            gases.setdefault(int(index) if index is not None else position, gas)
+            if index is None:
+                unindexed.append(gas)
+            else:
+                indexed.setdefault(int(index), gas)
 
-        ordered = [gases[index] for index in sorted(gases)]
-        return [cls._mixture(gas, tank) for gas, tank in zip(ordered, cls._tanks_for(scan, ordered), strict=True)]
+        return [indexed[index] for index in sorted(indexed)] + unindexed
 
     @classmethod
     def _tanks_for(cls, scan: _FitScan, gases: list[fitdecode.FitDataMessage]) -> list[_TankPressures | None]:
@@ -453,15 +465,28 @@ class FitParser(DiveParser):
         and deriving two numbers from that stream is better than dropping the transmitter
         data on the floor. Readings are ordered by their own timestamps rather than by
         arrival, since separate pods interleave.
+
+        Summaries are **deduped by `sensor`, keeping the last**, the same way telemetry is
+        grouped by it. A device that writes the summary twice for one pod would otherwise
+        count as two cylinders, and `_tanks_for`'s exact-count rule then discards every
+        pressure in the file - one repeated frame losing a real 207 -> 62 bar and the
+        dive's RMV with it. A summary carrying no `sensor` has no identity to dedupe on, so
+        those are kept as they come rather than collapsed into one.
         """
         if scan.tank_summaries:
-            return [
-                _TankPressures(
+            by_sensor: dict[int, _TankPressures] = {}
+            unidentified: list[_TankPressures] = []
+            for summary in scan.tank_summaries:
+                pressures = _TankPressures(
                     start=_native_value(summary, "start_pressure"),
                     end=_native_value(summary, "end_pressure"),
                 )
-                for summary in scan.tank_summaries
-            ]
+                sensor = _native_value(summary, "sensor")
+                if sensor is None:
+                    unidentified.append(pressures)
+                else:
+                    by_sensor[int(sensor)] = pressures
+            return list(by_sensor.values()) + unidentified
 
         return [
             _TankPressures(start=readings[0][1], end=readings[-1][1])
@@ -470,15 +495,19 @@ class FitParser(DiveParser):
         ]
 
     @staticmethod
-    def _mixture(gas: fitdecode.FitDataMessage, tank: _TankPressures | None) -> DiveMixtureSchema:
+    def _mixture(gas: fitdecode.FitDataMessage | None, tank: _TankPressures | None) -> DiveMixtureSchema:
         """Map one `dive_gas` (plus its cylinder's pressures, if any) onto a `DiveMixture`.
 
         No unit conversion: the FIT profile already defines `oxygen_content`/
         `helium_content` as whole percent and tank pressures as bar, which is what the
         model stores.
+
+        `gas` is `None` for a cylinder known only from its transmitter, which is a file
+        with tank telemetry and no gas list - the mixture then carries pressures and
+        nothing else.
         """
-        oxygen = _native_value(gas, "oxygen_content")
-        helium = _native_value(gas, "helium_content")
+        oxygen = _native_value(gas, "oxygen_content") if gas is not None else None
+        helium = _native_value(gas, "helium_content") if gas is not None else None
         return DiveMixtureSchema(
             end_pressure=tank.end if tank is not None else None,
             helium=float(helium) if helium is not None else None,
@@ -500,12 +529,17 @@ class FitParser(DiveParser):
 
         Only reached when there is at least one reading, which `_parse_samples` has
         already established.
+
+        Streams into `min` rather than building the list first: a long Ocean dive is ~4 300
+        records plus telemetry, and this wants one value out of all of them.
         """
-        timestamps = [timestamp for timestamp, _ in scan.depth]
-        timestamps += [timestamp for timestamp, _ in scan.temperature]
-        for readings in scan.pressure.values():
-            timestamps += [timestamp for timestamp, _ in readings]
-        return min(timestamps)
+        return min(
+            chain(
+                (timestamp for timestamp, _ in scan.depth),
+                (timestamp for timestamp, _ in scan.temperature),
+                *((timestamp for timestamp, _ in readings) for readings in scan.pressure.values()),
+            )
+        )
 
     @classmethod
     def _parse_samples(cls, scan: _FitScan) -> ParsedProfileSchema | None:
@@ -526,8 +560,8 @@ class FitParser(DiveParser):
             return (timestamp - origin).total_seconds()
 
         return ParsedProfileSchema(
-            depth=_series([(elapsed(t), _scaled_int(v, _CENTIMETERS_PER_METER)) for t, v in scan.depth]),
-            temperature=_series([(elapsed(t), _scaled_int(v, _TENTHS_PER_UNIT)) for t, v in scan.temperature]),
+            depth=series([(elapsed(t), scaled_int(v, CENTIMETERS_PER_METER)) for t, v in scan.depth]),
+            temperature=series([(elapsed(t), scaled_int(v, TENTHS_PER_UNIT)) for t, v in scan.temperature]),
             # Labelled 1, 2, ... in the order the device first reported each pod, never by
             # `sensor` - that is an ANT id (a serial, e.g. 2411100050), so it would read as
             # nonsense in a chart legend. Same reasoning as the XML parser's refusal to use
@@ -536,7 +570,7 @@ class FitParser(DiveParser):
             pressure=[
                 ParsedPressureSeries(gas_number=number, t=series.t, v=series.v)
                 for number, series in (
-                    (position, _series([(elapsed(t), _scaled_int(v, _TENTHS_PER_UNIT)) for t, v in readings]))
+                    (position, series([(elapsed(t), scaled_int(v, TENTHS_PER_UNIT)) for t, v in readings]))
                     for position, readings in enumerate(scan.pressure.values(), start=1)
                 )
                 if series is not None

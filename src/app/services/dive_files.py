@@ -17,6 +17,7 @@ from sqlalchemy import CursorResult, delete, insert, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import undefer
+from starlette.concurrency import run_in_threadpool
 from uuid6 import uuid7
 
 from ..core.security import verify_dive_file_token
@@ -180,7 +181,7 @@ async def store_dive_file(
         # so a repeated PUT after `PROFILE_EXTRACTOR_VERSION` was bumped opportunistically
         # upgrades it from bytes already in hand. Still a no-op in the normal case.
         if should_extract(await get_existing_profile(db, dive_id=dive_id), sha256=digest) == "extract":
-            profile = extract_profile(parser, data)
+            profile = await run_in_threadpool(extract_profile, parser, data)
             if profile is not None:
                 await store_profile(
                     db, dive_id=dive_id, profile=profile, source_sha256=digest, parser_key=parser.key, commit=True
@@ -204,7 +205,11 @@ async def store_dive_file(
     # anyway - it logs and returns `None`, because a file that can't be sampled is still
     # worth storing (see `services/dive_profiles.py`) - but the ordering is what makes
     # that true regardless of what it grows into.
-    profile = extract_profile(parser, data)
+    #
+    # In a thread for the same reason `POST /dive/parse` parses in one: sampling a FIT
+    # file is pure Python and takes ~0.6 s per 500 KB, and this is an `async def` with a
+    # live transaction either side of it.
+    profile = await run_in_threadpool(extract_profile, parser, data)
 
     try:
         # Replacement, not versioning: whatever this dive had is gone. Runs before the

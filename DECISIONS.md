@@ -3033,10 +3033,20 @@ declares developer fields whose names collide with native profile fields, so a S
 whichever came last, which is the lossy one - and that is precisely what the
 `export/parse-fit.py` prototype did, so the noise was visible in its output from the
 start. `_native_value()` walks the fields and skips anything that is a `fitdecode.types.
-DevField`. `fitdecode`'s own `get_value()` happens to return the right one, but only
-because it takes the first positional match and FIT encodes native fields ahead of
-developer ones; filtering on the type is what actually states the intent, and it is
-covered by `test_prefers_the_native_field_over_a_developer_field_of_the_same_name`.
+DevField`.
+
+`fitdecode`'s own `get_value()` returns the right one *when both are present*, but only as
+a side effect of taking the first positional match: a definition record carries native
+field definitions ahead of developer ones, so a valid FIT file cannot order them the other
+way round, and no test can construct one that does. Where the two genuinely differ is a
+message carrying **only** the developer duplicate - `get_value` then hands back a vendor's
+`float32` as though it were the profile's scaled `uint32`, units and semantics included,
+while `_native_value` answers `None` and lets the caller fall back to a field that means
+what it says. That is the case worth pinning, and
+`test_a_developer_field_never_stands_in_for_a_missing_native_one` is the test that
+distinguishes the two implementations;
+`test_prefers_the_native_field_over_a_developer_field_of_the_same_name` covers the
+dict-comprehension bug the prototype had but would pass against `get_value` too.
 
 **`start_time` carries the dive's real local offset, reconstructed from
 `activity.local_timestamp`.** Every timestamp in a FIT file is UTC, and `local_timestamp`
@@ -3076,6 +3086,18 @@ whether or not it also emits a summary, so taking the first and last reading per
 better than dropping the transmitter data. Readings are ordered by their own timestamps,
 not by arrival, since separate pods interleave.
 
+Summaries are deduped by `sensor` first, keeping the last. A device that writes the summary
+twice for one pod would otherwise count as two cylinders, and the exact-count rule below
+then discards every pressure in the file - one repeated frame losing a real 207 -> 62 bar
+and the dive's RMV with it.
+
+**A file with tank telemetry and no `dive_gas` at all still yields cylinders.** Mixtures
+were built only from `dive_gas`, so a Descent dive logged in gauge mode - which writes no
+gas list, while a paired pod reports throughout - had nothing to hang its pressures on and
+discarded every reading. That contradicted the rule the Ocean JSON path follows in the same
+breath: evidence of a tank is evidence of a tank, whichever way round it arrived. Such a
+mixture carries pressures and nothing else, `oxygen`/`helium`/`volume` all `None`.
+
 They are then **paired to gases by position, and only when the counts match.** Nothing in
 the format links the two: tank telemetry is keyed by the transmitter's ANT id and a
 `dive_gas` by its `message_index`. Position is the only available signal, so two gases and
@@ -3095,6 +3117,32 @@ has the gas mixes** (that dive's 21 % and 54 %, which its JSON twin omits entire
 the JSON has the pressures.** So the `tank_update`/`tank_summary` paths above are written
 from the FIT profile's own unit definitions and remain the one part of this parser not
 confirmed against a real file; a Descent Mk2i/Mk3i export would close that.
+
+## Cylinder reconstruction is best-effort, and never fails an import
+
+`_mixtures_from_cylinders` runs for **every** Suunto JSON export with no `Gases` block,
+including ones that have no cylinder data and never did, and it walks a sample stream whose
+shape is barely documented. Written unguarded, any structural surprise in there turned a
+previously fine import into a 422: an export pairing a naive `Header.DateTime` with
+offset-aware sample timestamps failed on `moment > dive_end` *before a single cylinder was
+inspected*, and a `Cylinders[]` entry missing `GasNumber` failed on the key lookup.
+
+Two changes, and the order matters. Both causes are fixed at source - timestamps are
+compared only when both sides agree on tz-awareness, and a reading with no gas number is
+skipped rather than indexed - and the call is *additionally* wrapped so the whole thing
+degrades to "no mixtures" and logs. The wrapper is not the fix; it is the acknowledgement
+that this is enrichment layered onto a format we do not control, while the header fields
+are what the diver actually came for.
+
+## Uploaded files are parsed in a thread, not on the event loop
+
+`POST /dive/parse` and `PUT /dive/{uuid}/file` both hand their bytes to
+`run_in_threadpool`. Parsing is pure CPU with nothing awaited inside it, and the FIT
+decoder is pure Python: ~0.6 s for a 500 KB file, against ~0.07 s for a 2.8 MB Suunto JSON
+export through the C-accelerated `json` module - roughly 90x more CPU per byte. Inline in an
+`async def`, a single upload at `MAX_DIVE_FILE_SIZE` (5 MB) would stall every other request
+on that worker for several seconds. The XML and JSON parsers went the same way rather than
+being special-cased: they are the same shape of work, just faster today.
 
 ## The 2026 Suunto Ocean JSON is a third header shape, with gas data only in the samples
 
@@ -3213,16 +3261,38 @@ Two consequences worth stating:
 schema describes a dive being *saved*, where a cylinder really must have a volume. This one
 describes a *file*.
 
-**`volume` is 0.0 on every FIT mixture.** The format has nowhere to record cylinder size -
-not on `dive_gas`, and `tank_summary` carries only the volume *consumed*. That is the same
-placeholder the Suunto parsers emit for an export that omits it, and the dive form shows it
-for the diver to correct before saving (`ck_dive_mixture_volume_positive` rejects 0).
+**`volume` is `None` on every FIT mixture.** The format has nowhere to record cylinder
+size - not on `dive_gas`, and `tank_summary` carries only the volume *consumed* - so this
+is the clearest case of the rule above: a value the file cannot express is not reported.
+The form fills it from `DEFAULT_MIXTURE`.
 
 **`fitdecode`'s `CrcCheck.WARN`/`ErrorHandling.WARN` defaults are kept on purpose.** The
 CRC guards against transfer corruption, not tampering, and nothing downstream trusts it -
 refusing an otherwise readable dive log over a bad checksum would lose real data for no
-gain. Genuinely undecodable bytes still raise `fitdecode.FitError`, which becomes a
-`DiveParseError`.
+gain.
+
+**`_scan` catches `Exception`, not `fitdecode.FitError`.** This is the only place in the
+codebase where a third-party binary decoder walks bytes a stranger uploaded, and a corrupt
+file does not reliably present as the library's own error type. Fuzzing a valid FIT with
+1-4 byte flips past the header found three escapes within 400 mutations: `AssertionError`
+from `reader.py`, `ValueError: size` from a bad field definition, and `TypeError: '>=' not
+supported between instances of 'tuple' and 'int'` from `processors.py`. `POST /dive/parse`
+handles only `UnsupportedDiveFileError` and `DiveParseError`, so each of those was a 500.
+
+The truncated-file test gave false confidence here: truncation happens to raise
+`FitEOFError`, which *is* a `FitError`, so the one malformed-input case in the suite was
+the one case the narrow catch covered.
+
+Extraction (as opposed to decoding) keeps a named tuple of exception types,
+`_EXTRACTION_ERRORS`, which includes `ArithmeticError` for the `decimal.InvalidOperation`
+that `channels.scaled_int` raises when a corrupt float32 reading arrives as NaN and `quantize`
+refuses it.
+
+`parse_dive_file_with_parser` additionally converts anything unexpected out of *any*
+parser into a `DiveParseError`, and logs it. Each parser still guards its own failure modes
+and produces a better message; the backstop exists because "the parsers are careful" is a
+weaker guarantee than "the endpoint cannot 500", and a new parser shouldn't have to
+rediscover that.
 
 Both entry points decode the file in full. A FIT file is a stream whose `session` summary
 comes *after* the samples it summarizes, so there is no cheap header-only read to be had -

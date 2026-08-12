@@ -1,12 +1,16 @@
 import json
+import logging
 from datetime import datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
-from ...schemas.dive_profile import ParsedPressureSeries, ParsedProfileSchema, ParsedSeries
+from ...schemas.dive_profile import ParsedPressureSeries, ParsedProfileSchema
 from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from .base import DiveParser
+from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, scaled_int_or_none, series
 from .exceptions import DiveParseError
+
+logger = logging.getLogger(__name__)
 
 # Suunto app / Suunto Ocean JSON exports report temperature in Kelvin (SI units),
 # unlike the Suunto DM5 XML export which already uses Celsius.
@@ -20,10 +24,8 @@ _LITERS_PER_CUBIC_METER = Decimal("1000")
 _PERCENT_PER_FRACTION = Decimal("100")
 _TWO_DECIMAL_PLACES = Decimal("0.01")
 
-# The integer scales `parse_profile` emits in - depth in centimeters, temperature in
-# tenths of a degree, pressure in tenths of a bar. See `schemas/dive_profile.py`.
-_CENTIMETERS_PER_METER = Decimal("100")
-_TENTHS_PER_UNIT = Decimal("10")
+# Pascal -> tenths of a bar. The depth/temperature conversions this shares with the other
+# parsers live in `channels.py`; see `schemas/dive_profile.py` for the scales themselves.
 _TENTH_BAR_PER_PASCAL = Decimal("0.0001")
 
 
@@ -80,37 +82,12 @@ def _round2_or_none(value: float | None) -> float | None:
     return float(Decimal(str(value)).quantize(_TWO_DECIMAL_PLACES))
 
 
-def _scaled_int(value: float | None, factor: Decimal) -> int | None:
-    """Scale a reading into the integer units the profile is stored in.
-
-    Decimal for the same reason as everything else in this module: the readings arrive as
-    decimal literals from `json.loads`, and multiplying them as binary floats puts values
-    on the wrong side of a rounding boundary several thousand times per dive.
-    `ROUND_HALF_UP` rather than Python's banker's rounding, so a half is always a half.
-    """
-    if value is None:
-        return None
-    return int((Decimal(str(value)) * factor).quantize(Decimal(1), rounding=ROUND_HALF_UP))
-
-
 def _celsius_tenths(kelvin: float | None) -> int | None:
     """Kelvin straight to tenths of a degree Celsius, without a float in between."""
     if kelvin is None:
         return None
-    tenths = (Decimal(str(kelvin)) - _KELVIN_TO_CELSIUS_OFFSET) * _TENTHS_PER_UNIT
+    tenths = (Decimal(str(kelvin)) - _KELVIN_TO_CELSIUS_OFFSET) * TENTHS_PER_UNIT
     return int(tenths.quantize(Decimal(1), rounding=ROUND_HALF_UP))
-
-
-def _series(points: list[tuple[float, int]]) -> ParsedSeries | None:
-    """Turn `(seconds, value)` pairs into a time-sorted series, or `None` if there are none.
-
-    A stable sort keyed on the timestamp alone, so two readings that landed on the same
-    instant keep the order the file listed them in.
-    """
-    if not points:
-        return None
-    ordered = sorted(points, key=lambda point: point[0])
-    return ParsedSeries(t=[t for t, _ in ordered], v=[v for _, v in ordered])
 
 
 def _parse_mixture(gas: dict[str, Any]) -> DiveMixtureSchema:
@@ -150,13 +127,29 @@ def _dive_window_end(header: dict[str, Any]) -> datetime | None:
     return datetime.fromisoformat(start_text) + timedelta(seconds=float(dive_time))
 
 
-def _cylinder_pressures(samples: list[dict[str, Any]], dive_end: datetime | None) -> dict[int, tuple[float, float]]:
-    """First and last transmitter reading per cylinder, from `Samples[].Cylinders[]`.
+def _scan_samples(
+    samples: list[dict[str, Any]], dive_end: datetime | None
+) -> tuple[dict[int, tuple[float, float]], list[int]]:
+    """Everything a reconstructed cylinder needs, in one pass over the samples.
 
-    Ordered by the sample's own timestamp rather than by position in the array: the
-    *union* of an Ocean export's sample timestamps is not monotonic (adjacent entries go
-    backwards by up to 0.7 s, because the separate sensor streams are appended out of
-    order), so "the last entry in the file" is not reliably the last reading of the dive.
+    Returns the first and last transmitter reading per cylinder, and the gas numbers the
+    diver switched to in the order they were first used. Both come off the same sample
+    object, so they are collected together: walking the array twice meant two passes over
+    ~8 300 samples and, more expensively, parsing every `TimeISO8601` twice.
+
+    **Gas switches are what make the cylinder list correct**, not the telemetry.
+    `DiveEvents.GasSwitch.GasNumber` is the only record this export keeps of *which*
+    cylinders were on the dive, and it is keyed by the same gas number as `Cylinders[]` -
+    which is what makes a transmitter reading attributable to a specific cylinder rather
+    than to "whichever tank this was". Switch order is chronological, so the back gas
+    comes first and deco gases follow, matching how the form names rows
+    (`getDefaultMixtureName`).
+
+    Pressures are ordered by the sample's own timestamp rather than by position in the
+    array: the *union* of an Ocean export's sample timestamps is not monotonic (adjacent
+    entries go backwards by up to 0.7 s, because the separate sensor streams are appended
+    out of order), so "the last entry in the file" is not reliably the last reading of the
+    dive.
 
     **Readings after the dive ended are dropped**, which matters far more than it sounds.
     The transmitter keeps reporting while the computer is still logging on the surface,
@@ -172,50 +165,55 @@ def _cylinder_pressures(samples: list[dict[str, Any]], dive_end: datetime | None
     samples null out even the live slot - so `None` readings are skipped rather than
     ending the series.
     """
-    readings: dict[int, list[tuple[datetime, float]]] = {}
+    extremes: dict[int, tuple[tuple[datetime, float], tuple[datetime, float]]] = {}
+    order: list[int] = []
     for sample in samples:
+        _collect_gas_switch(sample, order)
+
         time_text = sample.get("TimeISO8601")
         if not time_text:
             continue
         moment = datetime.fromisoformat(time_text)
-        if dive_end is not None and moment > dive_end:
+        # Compared only when both sides agree on tz-awareness. A header that writes a
+        # naive `DateTime` alongside offset-aware sample timestamps is malformed, but it
+        # is malformed in a way that has nothing to do with cylinders, and `>` between a
+        # naive and an aware datetime raises - which used to fail the whole import here,
+        # before a single cylinder had been looked at.
+        if dive_end is not None and (moment.tzinfo is None) == (dive_end.tzinfo is None) and moment > dive_end:
             continue
         for cylinder in sample.get("Cylinders") or []:
             pressure = cylinder.get("Pressure")
-            if pressure is None:
+            gas_number = cylinder.get("GasNumber")
+            # A reading with no cylinder to attach it to is dropped, not guessed at -
+            # every real Ocean sample numbers all five slots, so this is a malformed file
+            # rather than a shape worth supporting.
+            if pressure is None or gas_number is None:
                 continue
-            readings.setdefault(int(cylinder["GasNumber"]), []).append((moment, pressure))
+            # A running earliest/latest rather than every reading kept and sorted at the
+            # end: only two of the ~350 readings per cylinder are ever used, and this is
+            # already the hot loop over an 8 000-sample export.
+            reading = (moment, float(pressure))
+            first, last = extremes.get(int(gas_number), (reading, reading))
+            extremes[int(gas_number)] = (
+                reading if reading[0] < first[0] else first,
+                reading if reading[0] >= last[0] else last,
+            )
 
-    ordered = {number: sorted(points, key=lambda point: point[0]) for number, points in readings.items()}
-    return {number: (points[0][1], points[-1][1]) for number, points in ordered.items() if points}
+    return {number: (first[1], last[1]) for number, (first, last) in extremes.items()}, order
 
 
-def _gases_breathed(samples: list[dict[str, Any]]) -> list[int]:
-    """Gas numbers the diver actually switched to, in the order they were first used.
-
-    `Samples[].DiveEvents.GasSwitch.GasNumber` is the only record this export keeps of
-    *which* cylinders were on the dive - and it is keyed by the same gas number as
-    `Cylinders[]`, which is what makes a transmitter reading attributable to a specific
-    cylinder rather than to "whichever tank this was". A real multi-gas dive in the
-    corpus opens with `GasSwitch: {GasNumber: 0}` and switches to `{GasNumber: 1}` at
-    12:23:58, matching the two gases its FIT twin lists.
-
-    Switch order is chronological, so the back gas comes first and deco gases follow -
-    which is also the order the dive form names rows in (`getDefaultMixtureName`).
-    """
-    order: list[int] = []
-    for sample in samples:
-        events = sample.get("DiveEvents")
-        for event in events if isinstance(events, list) else [events]:
-            if not isinstance(event, dict):
-                continue
-            switch = event.get("GasSwitch")
-            if not isinstance(switch, dict):
-                continue
-            number = switch.get("GasNumber")
-            if number is not None and int(number) not in order:
-                order.append(int(number))
-    return order
+def _collect_gas_switch(sample: dict[str, Any], order: list[int]) -> None:
+    """Append any gas number this sample switched to, if it is not already known."""
+    events = sample.get("DiveEvents")
+    for event in events if isinstance(events, list) else [events]:
+        if not isinstance(event, dict):
+            continue
+        switch = event.get("GasSwitch")
+        if not isinstance(switch, dict):
+            continue
+        number = switch.get("GasNumber")
+        if number is not None and int(number) not in order:
+            order.append(int(number))
 
 
 def _mixtures_from_cylinders(samples: list[dict[str, Any]], dive_end: datetime | None) -> list[DiveMixtureSchema]:
@@ -243,8 +241,7 @@ def _mixtures_from_cylinders(samples: list[dict[str, Any]], dive_end: datetime |
     `DEFAULT_MIXTURE` to them, exactly as it would for a cylinder the diver added by
     hand. Reporting air here would have been indistinguishable from having read air.
     """
-    pressures = _cylinder_pressures(samples, dive_end)
-    breathed = _gases_breathed(samples)
+    pressures, breathed = _scan_samples(samples, dive_end)
     # Switch order first, then any cylinder that transmitted without a recorded switch:
     # evidence of a tank is evidence of a tank, whichever way round it arrived.
     numbers = breathed + [number for number in sorted(pressures) if number not in breathed]
@@ -365,7 +362,7 @@ class SuuntoJsonParser(DiveParser):
                 continue
             elapsed = (datetime.fromisoformat(time_text) - origin).total_seconds()
 
-            depth_cm = _scaled_int(sample.get("Depth"), _CENTIMETERS_PER_METER)
+            depth_cm = scaled_int_or_none(sample.get("Depth"), CENTIMETERS_PER_METER)
             if depth_cm is not None:
                 depth.append((elapsed, depth_cm))
 
@@ -380,7 +377,7 @@ class SuuntoJsonParser(DiveParser):
             # plan gas from would be actively wrong, and it is close enough in shape to a
             # pressure reading to be picked up by mistake by the next person.
             for cylinder in sample.get("Cylinders") or []:
-                cylinder_bar10 = _scaled_int(cylinder.get("Pressure"), _TENTH_BAR_PER_PASCAL)
+                cylinder_bar10 = scaled_int_or_none(cylinder.get("Pressure"), _TENTH_BAR_PER_PASCAL)
                 if cylinder_bar10 is None:
                     continue
                 # A Suunto Ocean reports five cylinder slots on every sample with only
@@ -391,11 +388,11 @@ class SuuntoJsonParser(DiveParser):
             return None
 
         return ParsedProfileSchema(
-            depth=_series(depth),
-            temperature=_series(temperature),
+            depth=series(depth),
+            temperature=series(temperature),
             pressure=[
                 ParsedPressureSeries(gas_number=gas_number, t=series.t, v=series.v)
-                for gas_number, series in ((number, _series(points)) for number, points in pressure.items())
+                for gas_number, series in ((number, series(points)) for number, points in pressure.items())
                 if series is not None
             ],
         )
@@ -421,7 +418,19 @@ class SuuntoJsonParser(DiveParser):
         # cylinders reconstructed from the sample stream.
         mixtures = [_parse_mixture(gas) for gas in diving.get("Gases") or []]
         if not mixtures:
-            mixtures = _mixtures_from_cylinders(samples, _dive_window_end(header))
+            # Best-effort enrichment, so it degrades to "no mixtures" rather than taking
+            # the import down with it. Unlike the header fields above, this walks the
+            # whole sample stream of an export shape that is barely documented, and it
+            # runs for *every* file with no `Gases` block - including ones that have no
+            # cylinder data at all and never did. Before this guard, an export mixing a
+            # naive `Header.DateTime` with offset-aware sample timestamps turned a
+            # previously fine import into a 422, and it failed in `_cylinder_pressures`
+            # before any cylinder was even inspected.
+            try:
+                mixtures = _mixtures_from_cylinders(samples, _dive_window_end(header))
+            except TypeError, ValueError, KeyError, AttributeError:
+                logger.warning("Could not reconstruct cylinders from Suunto JSON samples", exc_info=True)
+                mixtures = []
 
         temperatures_celsius = [
             celsius

@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
@@ -235,7 +236,12 @@ async def parse_dive(
 
     content = await read_upload_within_limit(file, MAX_DIVE_FILE_SIZE)
     try:
-        parser, parsed = parse_dive_file_with_parser(file.filename, content)
+        # Off the event loop: parsing is pure CPU with nothing awaited inside it, and the
+        # FIT decoder is pure Python - ~90x more CPU per byte than the C-accelerated
+        # `json`/`expat` the Suunto parsers ride on (0.6 s for 500 KB, against 0.07 s for
+        # a 2.8 MB JSON export). Inline, one upload at `MAX_DIVE_FILE_SIZE` would stall
+        # every other request on this worker for several seconds.
+        parser, parsed = await run_in_threadpool(parse_dive_file_with_parser, file.filename, content)
     except UnsupportedDiveFileError as exc:
         # 415 and 409 stay raw `HTTPException`s - unlike 400/403/404/422, `http_exceptions`
         # has no class for either code.
