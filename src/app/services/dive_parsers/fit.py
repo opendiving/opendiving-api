@@ -79,11 +79,15 @@ _MAX_FRAMES = 100_000
 # reorders the mixtures and so misaligns `_tanks_for`'s positional pairing.
 _MESSAGE_INDEX_MASK = 0x0FFF
 
-# How many cylinders one dive may describe. No device pairs more than a handful of
-# transmitters - a Descent Mk3i tops out around five - so a file claiming hundreds is
-# describing something other than a dive. Bounded because each distinct `sensor` becomes
-# a `DiveMixtureSchema` in the parse response and a pressure channel in the stored
-# profile, neither of which `_MAX_FRAMES` constrains.
+# How many cylinders one dive may describe, **in total**. No device pairs more than a
+# handful of transmitters - a Descent Mk3i tops out around five - so a file claiming
+# hundreds is describing something other than a dive.
+#
+# Bounded because each cylinder becomes a `DiveMixtureSchema` in the `/dive/parse`
+# response and a pressure channel in the stored profile, neither of which `_MAX_FRAMES`
+# constrains. Every list that feeds those is truncated to it - the gas list, the tank
+# summaries, the telemetry sensors, and the merged result - rather than any one of them,
+# since capping the sources separately still let their union run to three times this.
 _MAX_CYLINDERS = 16
 
 
@@ -576,7 +580,14 @@ class FitParser(DiveParser):
             else:
                 indexed.setdefault(int(index) & _MESSAGE_INDEX_MASK, gas)
 
-        return [indexed[index] for index in sorted(indexed)] + unindexed
+        # Capped like the tank paths, and for the same reason: every entry becomes a
+        # `DiveMixtureSchema` in the `/dive/parse` response. `dive_gas` is 2 bytes of
+        # payload, so `_MAX_FRAMES` alone let a 220 KB file return 20 000 mixtures - a
+        # bigger amplification through the same field than the `tank_update` case this
+        # constant was introduced for. Truncated at the end rather than at collection:
+        # `status` is filtered above, so a collect-time `len(scan.gases)` bound would let
+        # sixteen disabled entries crowd out the gases actually breathed.
+        return ([indexed[index] for index in sorted(indexed)] + unindexed)[:_MAX_CYLINDERS]
 
     @classmethod
     def _tanks_for(cls, scan: _FitScan, gases: list[fitdecode.FitDataMessage]) -> list[_TankPressures | None]:
@@ -622,7 +633,9 @@ class FitParser(DiveParser):
             )
             if has_pressure or int(sensor) in scan.pressure:
                 summary_sensors.append(int(sensor))
-        return summary_sensors + [sensor for sensor in scan.pressure if sensor not in summary_sensors]
+        return (summary_sensors + [sensor for sensor in scan.pressure if sensor not in summary_sensors])[
+            :_MAX_CYLINDERS
+        ]
 
     @classmethod
     def _tank_pressures(cls, scan: _FitScan) -> list[_TankPressures]:
@@ -697,20 +710,32 @@ class FitParser(DiveParser):
             )
             summary_sensor = _native_raw(summary, "sensor")
             if summary_sensor is not None:
-                # Kept unfiltered: `_cylinder_sensors` decides which of these earn a
-                # cylinder, so that rule lives in one place and the profile's channel
-                # numbering can't disagree with the mixture list about it.
-                summaries[int(summary_sensor)] = pressures
+                # Merged per field rather than last-frame-wins. Overwriting made the
+                # dedup order-dependent in exactly the way its own docstring says it
+                # exists to prevent: a bare `volume_used` repeat *after* a real summary
+                # wiped a genuine 207 -> 62 bar, while the same two frames the other way
+                # round kept it. `_cylinder_sensors` admits the cylinder on whichever
+                # frame carries pressures, so this is also what keeps the two agreeing.
+                #
+                # Kept unfiltered otherwise: `_cylinder_sensors` decides which of these
+                # earn a cylinder, so that rule lives in one place and the profile's
+                # channel numbering can't disagree with the mixture list about it.
+                summaries[int(summary_sensor)] = _merge_pressures(
+                    summaries.get(int(summary_sensor), _NO_PRESSURES), pressures
+                )
             elif pressures != _NO_PRESSURES:
                 unidentified.append(pressures)
 
         # Summary order first - the device's own enumeration of its pods - then any pod
         # that only ever streamed telemetry.
         sensors = cls._cylinder_sensors(scan)
-        return [
-            _merge_pressures(summaries.get(sensor, _NO_PRESSURES), telemetry.get(sensor, _NO_PRESSURES))
-            for sensor in sensors
-        ] + unidentified
+        return (
+            [
+                _merge_pressures(summaries.get(sensor, _NO_PRESSURES), telemetry.get(sensor, _NO_PRESSURES))
+                for sensor in sensors
+            ]
+            + unidentified
+        )[:_MAX_CYLINDERS]
 
     @staticmethod
     def _mixture(gas: fitdecode.FitDataMessage | None, tank: _TankPressures | None) -> DiveMixtureSchema:

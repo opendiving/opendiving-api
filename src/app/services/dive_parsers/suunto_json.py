@@ -28,6 +28,11 @@ _TWO_DECIMAL_PLACES = Decimal("0.01")
 # parsers live in `channels.py`; see `schemas/dive_profile.py` for the scales themselves.
 _TENTH_BAR_PER_PASCAL = Decimal("0.0001")
 
+# How many cylinders one dive may describe. Mirrors `FitParser`'s cap and exists for the
+# same reason: each becomes a `DiveMixtureSchema` in the `/dive/parse` response, and a
+# `GasSwitch` event is a few dozen bytes, so nothing else bounds the count.
+_MAX_CYLINDERS = 16
+
 
 def _decimal_multiply(value: float | None, factor: Decimal) -> float | None:
     """Multiply `value` by `factor` using Decimal arithmetic (see `_kelvin_to_celsius`
@@ -167,8 +172,13 @@ def _scan_samples(
     """
     extremes: dict[int, tuple[tuple[datetime, float], tuple[datetime, float]]] = {}
     order: list[int] = []
+    # A set alongside the list purely for the membership test. `not in order` on a
+    # growing list runs once per sample, so a file with many distinct `GasNumber`s made
+    # this quadratic - 8 000 of them took 0.26 s against 0.02 s for 2 000, and the curve
+    # keeps going. The list is still what carries the order.
+    seen: set[int] = set()
     for sample in samples:
-        _collect_gas_switch(sample, order)
+        _collect_gas_switch(sample, order, seen)
 
         time_text = sample.get("TimeISO8601")
         if not time_text:
@@ -202,8 +212,12 @@ def _scan_samples(
     return {number: (first[1], last[1]) for number, (first, last) in extremes.items()}, order
 
 
-def _collect_gas_switch(sample: dict[str, Any], order: list[int]) -> None:
-    """Append any gas number this sample switched to, if it is not already known."""
+def _collect_gas_switch(sample: dict[str, Any], order: list[int], seen: set[int]) -> None:
+    """Append any gas number this sample switched to, if it is not already known.
+
+    `seen` is the membership test and `order` the result - see `_scan_samples` for why
+    they are separate.
+    """
     events = sample.get("DiveEvents")
     for event in events if isinstance(events, list) else [events]:
         if not isinstance(event, dict):
@@ -212,8 +226,10 @@ def _collect_gas_switch(sample: dict[str, Any], order: list[int]) -> None:
         if not isinstance(switch, dict):
             continue
         number = switch.get("GasNumber")
-        if number is not None and int(number) not in order:
-            order.append(int(number))
+        if number is None or int(number) in seen:
+            continue
+        seen.add(int(number))
+        order.append(int(number))
 
 
 def _mixtures_from_cylinders(samples: list[dict[str, Any]], dive_end: datetime | None) -> list[DiveMixtureSchema]:
@@ -244,7 +260,11 @@ def _mixtures_from_cylinders(samples: list[dict[str, Any]], dive_end: datetime |
     pressures, breathed = _scan_samples(samples, dive_end)
     # Switch order first, then any cylinder that transmitted without a recorded switch:
     # evidence of a tank is evidence of a tank, whichever way round it arrived.
-    numbers = breathed + [number for number in sorted(pressures) if number not in breathed]
+    # Capped for the same reason the FIT parser caps its cylinders: every entry becomes a
+    # `DiveMixtureSchema` in the `/dive/parse` response, and nothing else bounds how many
+    # distinct `GasNumber`s a file may claim. No Suunto pairs more than five.
+    switched = set(breathed)
+    numbers = (breathed + [number for number in sorted(pressures) if number not in switched])[:_MAX_CYLINDERS]
 
     return [
         DiveMixtureSchema(
@@ -382,7 +402,13 @@ class SuuntoJsonParser(DiveParser):
                     continue
                 # A Suunto Ocean reports five cylinder slots on every sample with only
                 # one populated, so a slot is only a series once it has a real reading.
-                pressure.setdefault(int(cylinder["GasNumber"]), []).append((elapsed, cylinder_bar10))
+                gas_number = int(cylinder["GasNumber"])
+                # Capped like the mixtures, and for the parallel reason: each cylinder
+                # becomes a pressure channel in the stored profile, and `downsample` caps
+                # points *within* a channel rather than how many there are.
+                if gas_number not in pressure and len(pressure) >= _MAX_CYLINDERS:
+                    continue
+                pressure.setdefault(gas_number, []).append((elapsed, cylinder_bar10))
 
         if not depth and not temperature and not pressure:
             return None

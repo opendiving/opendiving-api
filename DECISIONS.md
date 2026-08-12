@@ -3160,7 +3160,30 @@ through `dive_fit_file`, which appends the `session` last, so they all placed th
 before it. The "the only message following the first session is the activity" measurement
 that justified the cut was taken on files that have no `tank_summary` to place.
 
-**Cylinders are capped at `_MAX_CYLINDERS` (16).** `_MAX_FRAMES` bounds frames and
+**Cylinders are capped at `_MAX_CYLINDERS` (16), on every list that can reach the
+response.** The first pass capped the tank telemetry and left `dive_gas` - the *primary*
+mixture source - unbounded, which is a bigger hole than the one it closed: a `dive_gas`
+record is two bytes of payload, so `_MAX_FRAMES` alone let a 220 KB file return 20 000
+mixtures through the same `/dive/parse` field. The Suunto JSON path had the same shape via
+`DiveEvents.GasSwitch`, and both parsers' `parse_profile` could store a profile with tens
+of thousands of pressure channels, since `downsample` bounds points *within* a channel
+rather than how many channels there are.
+
+The cap is now a **total**, not per source: capping the sources separately still let their
+union reach three times it. The gas list is truncated at the end rather than at collection,
+because `status` filtering happens later - a collect-time `len(scan.gases)` bound would let
+sixteen `disabled` entries crowd out the gases actually breathed.
+
+**Gas-switch dedup is set-based.** `int(number) not in order` against a growing list ran
+once per sample, so a file with many distinct `GasNumber`s was quadratic: 8 000 of them
+took 0.26 s against 0.02 s for 2 000, and the curve kept going. The list still carries the
+order; the set only answers the membership question.
+
+**Duplicate `tank_summary` frames merge per field rather than the last one winning.**
+Overwriting made the dedup order-dependent in precisely the way its own docstring says it
+prevents - a `volume_used`-only repeat *after* a real summary wiped a genuine 207 -> 62 bar,
+while the same two frames the other way round kept it. The test that was supposed to cover
+this gave both duplicates identical pressures, so it could not see the asymmetry. `_MAX_FRAMES` bounds frames and
 `MAX_POINTS_PER_CHANNEL` bounds points *within* a channel, but nothing bounded the number
 of distinct ANT `sensor` ids - and each one becomes a `DiveMixtureSchema` in the
 `/dive/parse` response and a pressure channel in the stored profile. A 1 MB file of

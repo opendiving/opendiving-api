@@ -9,6 +9,7 @@ import pytest
 from src.app.services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file
 from src.app.services.dive_parsers.fit import _MAX_CYLINDERS, FitParser
 from src.app.services.dive_parsers.fit import _MAX_FRAMES as MAX_FRAMES
+from src.app.services.dive_parsers.suunto_json import _MAX_CYLINDERS as JSON_MAX_CYLINDERS
 from src.app.services.dive_parsers.suunto_json import SuuntoJsonParser
 from src.app.services.dive_parsers.suunto_xml import SuuntoXmlParser
 from tests.helpers.fit import (
@@ -626,6 +627,31 @@ class TestSuuntoJsonParserParse:
         assert parsed.max_depth == 30.0
         assert parsed.mixtures == []
 
+    def test_caps_the_number_of_reconstructed_cylinders(self):
+        """Each becomes a `DiveMixtureSchema` in the `/dive/parse` response, and a
+        `GasSwitch` event is a few dozen bytes - so without a cap a file under the upload
+        limit returned tens of thousands of mixtures. Membership is set-based for the same
+        reason: `not in` against a growing list ran once per sample and made this
+        quadratic.
+        """
+        samples = [
+            {
+                "TimeISO8601": "2026-04-03T12:04:11.390+02:00",
+                "DiveEvents": {"GasSwitch": {"GasNumber": number}},
+            }
+            for number in range(200)
+        ]
+        content = json.dumps(
+            {
+                "DeviceLog": {
+                    "Header": {"DateTime": "2026-04-03T12:04:11.390+02:00", "DiveTime": 300},
+                    "Samples": samples,
+                }
+            }
+        ).encode()
+
+        assert len(SuuntoJsonParser.parse(content).mixtures) == JSON_MAX_CYLINDERS
+
     def test_ignores_transmitter_readings_from_after_the_dive(self):
         """The computer keeps logging on the boat, where the diver purges the regulator.
 
@@ -1129,6 +1155,40 @@ class TestFitParserParse:
         )
 
         assert sorted(mixture.oxygen for mixture in FitParser.parse(content).mixtures) == [21.0, 50.0]
+
+    def test_a_bare_repeat_cannot_wipe_a_real_summary(self):
+        """Duplicates merge per field rather than the last frame winning outright.
+
+        Overwriting made the dedup order-dependent in exactly the way its own docstring
+        says it exists to prevent: a `volume_used`-only repeat *after* a real summary wiped
+        a genuine 207 -> 62 bar, while the same two frames the other way round kept it.
+        The existing dedup test gives both duplicates identical pressures, so it cannot see
+        the asymmetry.
+        """
+        real = message("tank_summary", sensor=2411100050, start_pressure=207.0, end_pressure=62.0)
+        bare = message("tank_summary", sensor=2411100050, volume_used=1500.0)
+
+        for order in ([real, bare], [bare, real]):
+            content = fit_file(
+                message("file_id", type="activity", manufacturer="garmin"),
+                message("dive_gas", message_index=0, oxygen_content=21, helium_content=0, status="enabled"),
+                *order,
+                message("session", sport="diving", start_time=DIVE_START),
+            )
+            mixture = FitParser.parse(content).mixtures[0]
+
+            assert (mixture.start_pressure, mixture.end_pressure) == (207.0, 62.0)
+
+    def test_caps_the_number_of_gases(self):
+        """`dive_gas` is the primary mixture source and was the one list `_MAX_CYLINDERS`
+        didn't bound. Its payload is two bytes, so `_MAX_FRAMES` alone let a 220 KB file
+        return 20 000 mixtures - a larger amplification through the same response field
+        than the `tank_update` case the cap was introduced for."""
+        content = dive_fit_file(
+            *(message("dive_gas", oxygen_content=21) for _ in range(_MAX_CYLINDERS + 500)),
+        )
+
+        assert len(FitParser.parse(content).mixtures) == _MAX_CYLINDERS
 
     def test_dedupes_repeated_tank_summaries_for_one_pod(self):
         """A device that writes the summary twice for one transmitter would otherwise
