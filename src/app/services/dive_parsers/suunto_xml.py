@@ -1,5 +1,5 @@
 import xml.etree.ElementTree as ET
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 
 import defusedxml.ElementTree as DET
 from defusedxml.common import DefusedXmlException
@@ -7,7 +7,8 @@ from defusedxml.common import DefusedXmlException
 from ...schemas.dive_profile import ParsedPressureSeries, ParsedProfileSchema, ParsedSeries
 from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from .base import DiveParser
-from .exceptions import DiveParseError, UnsupportedDiveFileError
+from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, scaled_int_or_none
+from .exceptions import EXTRACTION_ERRORS, DiveParseError, UnsupportedDiveFileError
 
 _SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
 _NIL = "{http://www.w3.org/2001/XMLSchema-instance}nil"
@@ -20,11 +21,9 @@ _TWO_DECIMAL_PLACES = Decimal("0.01")
 # both are 205.2 bar. This went unnoticed for a long time because pre-2025 exports have
 # no transmitter and write `0`.
 _MILLIBAR_PER_BAR = Decimal("1000")
-# Depth in meters -> centimeters, temperature in Celsius -> tenths of a degree, and
-# sample pressure in millibar -> tenths of a bar. See `schemas/dive_profile.py` for why
-# the profile is stored as scaled integers at all.
-_CENTIMETERS_PER_METER = Decimal("100")
-_TENTHS_PER_UNIT = Decimal("10")
+# Millibar -> tenths of a bar. The depth/temperature conversions this shares with the
+# other parsers live in `channels.py`; see `schemas/dive_profile.py` for why the profile
+# is stored as scaled integers at all.
 _TENTH_BAR_PER_MILLIBAR = Decimal("0.01")
 
 # The one cylinder a DM5 export's samples can describe. The format reports a single
@@ -79,20 +78,6 @@ def _millibar_to_bar(value: float | None) -> float | None:
     floating-point noise the rounding below would then have to hide.
     """
     return _decimal_divide(value, _MILLIBAR_PER_BAR)
-
-
-def _scaled_int(value: float | None, factor: Decimal) -> int | None:
-    """Scale a reading into the integer units the profile is stored in.
-
-    `Decimal(str(value))` rather than `round(value * factor)`: the raw readings arrive as
-    decimal literals in the file, and multiplying them as binary floats puts values like
-    25.85 on the wrong side of a rounding boundary (`round(25.85 * 10)` is 258, because
-    the product is really 258.49999999999997). Several thousand times per dive.
-    `ROUND_HALF_UP` rather than Python's banker's rounding, so a half is always a half.
-    """
-    if value is None:
-        return None
-    return int((Decimal(str(value)) * factor).quantize(Decimal(1), rounding=ROUND_HALF_UP))
 
 
 def _round2_or_none(value: float | None) -> float | None:
@@ -156,7 +141,7 @@ class SuuntoXmlParser(DiveParser):
 
         try:
             return cls._parse_dive(root)
-        except (TypeError, ValueError) as exc:
+        except EXTRACTION_ERRORS as exc:
             raise DiveParseError(f"Malformed Suunto XML dive data: {exc}") from exc
 
     @classmethod
@@ -178,7 +163,7 @@ class SuuntoXmlParser(DiveParser):
 
         try:
             return cls._parse_samples(root)
-        except (TypeError, ValueError) as exc:
+        except EXTRACTION_ERRORS as exc:
             raise DiveParseError(f"Malformed Suunto XML dive samples: {exc}") from exc
 
     @classmethod
@@ -209,19 +194,19 @@ class SuuntoXmlParser(DiveParser):
             # chart breaks only the line that actually stopped recording. This is what
             # a mid-dive transmitter dropout looks like (224 of 441 samples, in the real
             # corpus), and it must not truncate depth.
-            depth = _scaled_int(_float(sample, "Depth"), _CENTIMETERS_PER_METER)
+            depth = scaled_int_or_none(_float(sample, "Depth"), CENTIMETERS_PER_METER)
             if depth is not None:
                 depth_t.append(time)
                 depth_v.append(depth)
 
             # `Temperature`, not `AveragedTemperature`: the raw reading is what the sensor
             # saw, and smoothing is a chart decision that shouldn't be baked into storage.
-            temperature = _scaled_int(_float(sample, "Temperature"), _TENTHS_PER_UNIT)
+            temperature = scaled_int_or_none(_float(sample, "Temperature"), TENTHS_PER_UNIT)
             if temperature is not None:
                 temperature_t.append(time)
                 temperature_v.append(temperature)
 
-            pressure = _scaled_int(_float(sample, "Pressure"), _TENTH_BAR_PER_MILLIBAR)
+            pressure = scaled_int_or_none(_float(sample, "Pressure"), _TENTH_BAR_PER_MILLIBAR)
             if pressure is not None:
                 pressure_t.append(time)
                 pressure_v.append(pressure)
@@ -271,19 +256,20 @@ class SuuntoXmlParser(DiveParser):
 
         Gas fractions are already percentages here (unlike the JSON export's 0-1
         fractions), but pressures are millibar - see the comment below for what reading
-        them as bar did to every transmitter-equipped dive. Missing values become 0.0
-        rather than null, since the model requires them.
+        them as bar did to every transmitter-equipped dive. An element the export omits
+        (or marks `xsi:nil`) stays `None` rather than becoming 0.0, since a gas fraction
+        that was never recorded is not a gas fraction of zero - see `DiveMixtureSchema`.
         """
         return DiveMixtureSchema(
             # Millibar, not bar - see `_MILLIBAR_PER_BAR`. Reading these as bar stored
             # `start_pressure = 205203` for every dive imported from a 2025+ transmitter
             # export, which made its `gas_use`/RMV meaningless.
             end_pressure=_round2_or_none(_millibar_to_bar(_float(mix, "EndPressure"))),
-            helium=_round2_or_none(_float(mix, "Helium")) or 0.0,
+            helium=_round2_or_none(_float(mix, "Helium")),
             # Left for the user to fill in themselves rather than parsed - see
             # DECISIONS.md.
             name=None,
-            oxygen=_round2_or_none(_float(mix, "Oxygen")) or 0.0,
+            oxygen=_round2_or_none(_float(mix, "Oxygen")),
             start_pressure=_round2_or_none(_millibar_to_bar(_float(mix, "StartPressure"))),
-            volume=_float(mix, "Size") or 0.0,
+            volume=_float(mix, "Size"),
         )

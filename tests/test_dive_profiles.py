@@ -5,10 +5,12 @@ worth testing here is either a parser reading bytes or a pure function reshaping
 """
 
 import json
+from datetime import timedelta
 
 import pytest
 
 from src.app.services.dive_parsers import _PARSERS, DiveParseError
+from src.app.services.dive_parsers.fit import FitParser
 from src.app.services.dive_parsers.suunto_json import SuuntoJsonParser
 from src.app.services.dive_parsers.suunto_xml import SuuntoXmlParser
 from src.app.services.dive_profiles import (
@@ -22,13 +24,22 @@ from src.app.services.dive_profiles import (
     normalize,
     should_extract,
 )
+from tests.helpers.fit import dive_fit_file
+from tests.helpers.fit import message as fit_message
 from tests.test_dive_parsers import (
     BILLION_LAUGHS_XML,
     SUUNTO_NS,
+    VALID_FIT,
     VALID_SUUNTO_JSON,
     VALID_SUUNTO_XML,
     XSI_NS,
     XXE_XML,
+)
+from tests.test_dive_parsers import (
+    DIVE_START as FIT_DIVE_START,
+)
+from tests.test_dive_parsers import (
+    _records as _fit_records,
 )
 
 
@@ -305,6 +316,90 @@ class TestSuuntoJsonParseProfile:
     def test_raises_dive_parse_error_on_malformed_json(self):
         with pytest.raises(DiveParseError):
             SuuntoJsonParser.parse_profile(b'{"DeviceLog": {')
+
+
+class TestFitParseProfile:
+    def test_extracts_depth_and_temperature_in_their_stored_scales(self):
+        content = dive_fit_file(
+            *_fit_records([(0, 1.45, 25), (10, 12.3, 24), (20, 45.91, 22)]),
+        )
+        profile = FitParser.parse_profile(content)
+
+        assert profile.depth.t == [0.0, 10.0, 20.0]
+        # Centimeters and tenths of a degree - see `schemas/dive_profile.py`.
+        assert profile.depth.v == [145, 1230, 4591]
+        assert profile.temperature.v == [250, 240, 220]
+
+    def test_gives_each_channel_its_own_axis(self):
+        """FIT channels are sampled independently: a Suunto Ocean dive writes 4 295
+        records of which only 431 carry depth, while 4 294 carry temperature. A shared
+        axis would be 90 % null in the depth column."""
+        content = dive_fit_file(
+            fit_message("record", timestamp=FIT_DIVE_START, depth=1.45),
+            fit_message("record", timestamp=FIT_DIVE_START + timedelta(seconds=1), temperature=25),
+            fit_message("record", timestamp=FIT_DIVE_START + timedelta(seconds=2), temperature=24),
+        )
+        profile = FitParser.parse_profile(content)
+
+        assert profile.depth.t == [0.0]
+        assert profile.temperature.t == [1.0, 2.0]
+
+    def test_keeps_a_zero_depth_reading(self):
+        """0.0 m is a real reading at the surface, not a missing one - a Suunto Ocean
+        records it. It must survive the integer scaling rather than being treated as
+        absent."""
+        content = dive_fit_file(*_fit_records([(0, 0.0, 25), (10, 5.0, 25)]))
+        profile = FitParser.parse_profile(content)
+
+        assert profile.depth.v == [0, 500]
+
+    def test_scales_depth_without_binary_floating_point_noise(self):
+        """`fitdecode` divides a raw integer by the profile's scale factor in binary
+        floating point, so 25.85 can arrive fractionally below itself and
+        `round(25.85 * 100)` would land on 2584."""
+        content = dive_fit_file(*_fit_records([(0, 25.85, 24)]))
+
+        assert FitParser.parse_profile(content).depth.v == [2585]
+
+    def test_rebases_samples_onto_the_session_start(self):
+        content = dive_fit_file(*_fit_records([(30, 5.0, 25), (90, 12.0, 24)]))
+
+        assert FitParser.parse_profile(content).depth.t == [30.0, 90.0]
+
+    def test_extracts_garmin_transmitter_pressure(self):
+        """`tank_update.pressure` is already bar - the FIT profile scales it - unlike the
+        Pascal and millibar the two Suunto exports use."""
+        content = dive_fit_file(
+            fit_message("tank_update", timestamp=FIT_DIVE_START, sensor=2411100050, pressure=207.0),
+            fit_message(
+                "tank_update", timestamp=FIT_DIVE_START + timedelta(seconds=60), sensor=2411100050, pressure=198.5
+            ),
+        )
+        profile = FitParser.parse_profile(content)
+
+        assert len(profile.pressure) == 1
+        assert profile.pressure[0].t == [0.0, 60.0]
+        # Tenths of a bar.
+        assert profile.pressure[0].v == [2070, 1985]
+
+    def test_labels_cylinders_by_position_not_by_ant_sensor_id(self):
+        """`sensor` is the pod's ANT serial (e.g. 2411100050). Same reasoning as the XML
+        parser's refusal to use `<TransmitterId>`: it would read as nonsense in a chart
+        legend, and it keeps a single-cylinder dive labelled gas 1 in both parsers."""
+        content = dive_fit_file(
+            fit_message("tank_update", timestamp=FIT_DIVE_START, sensor=2411100050, pressure=207.0),
+            fit_message("tank_update", timestamp=FIT_DIVE_START, sensor=1900500123, pressure=180.0),
+        )
+        profile = FitParser.parse_profile(content)
+
+        assert [cylinder.gas_number for cylinder in profile.pressure] == [1, 2]
+
+    def test_returns_none_when_the_file_carries_no_samples(self):
+        assert FitParser.parse_profile(dive_fit_file()) is None
+
+    def test_raises_dive_parse_error_on_a_truncated_file(self):
+        with pytest.raises(DiveParseError):
+            FitParser.parse_profile(VALID_FIT[: len(VALID_FIT) // 2])
 
 
 class TestParserRegistryProfileSupport:

@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
@@ -221,7 +222,7 @@ def _to_public_dive_with_mixtures(
 @router.post("/dive/parse", response_model=ParsedDiveResponse)
 async def parse_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
-    file: Annotated[UploadFile, File(description="Dive-computer export file (e.g. Suunto XML or JSON)")],
+    file: Annotated[UploadFile, File(description="Dive-computer export file (Suunto XML or JSON, or a FIT file)")],
 ) -> ParsedDiveResponse:
     """Upload a dive-computer export file and receive the parsed dive data as JSON.
 
@@ -235,7 +236,13 @@ async def parse_dive(
 
     content = await read_upload_within_limit(file, MAX_DIVE_FILE_SIZE)
     try:
-        parser, parsed = parse_dive_file_with_parser(file.filename, content)
+        # Off the event loop: parsing is pure CPU with nothing awaited inside it, and the
+        # FIT decoder is pure Python, roughly two orders of magnitude more CPU per byte
+        # than the C-accelerated `json`/`expat` the Suunto parsers ride on (0.07 s for a
+        # 2.8 MB JSON export, against ~2 s per MB of densely-encoded FIT). What actually
+        # bounds the worst case is `_MAX_FRAMES`, not this: a 5 MB file of bare `record`
+        # messages took ~10 s to decode before that cap, and ~1.7 s after.
+        parser, parsed = await run_in_threadpool(parse_dive_file_with_parser, file.filename, content)
     except UnsupportedDiveFileError as exc:
         # 415 and 409 stay raw `HTTPException`s - unlike 400/403/404/422, `http_exceptions`
         # has no class for either code.
