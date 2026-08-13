@@ -993,6 +993,23 @@ class TestDownsample:
         # The sparse tail survives rather than being crowded out by the dense head.
         assert max(profile.depth.t) == series.t[-1]
 
+    def test_keeps_the_first_and_last_sample(self):
+        """Min/max bucketing does not give this for free. `min` returns the first of equal
+        values, so a channel ending in a run of identical readings - a diver floating at the
+        surface, which is how a 1 Hz recording usually ends - would pick the start of that
+        run and drop the true final sample, leaving the channel short of the dive.
+        """
+        flat_ending = ProfileSeries(
+            t=list(range(9_000)),
+            v=[(index * 37) % 500 for index in range(8_500)] + [0] * 500,
+        )
+
+        profile = downsample(NormalizedProfile(depth=flat_ending), max_points=1200)
+
+        assert profile.depth.t[0] == 0
+        assert profile.depth.t[-1] == 8_999
+        assert len(profile.depth.t) <= 1200
+
     def test_caps_every_channel_independently(self):
         profile = downsample(
             NormalizedProfile(
@@ -1254,6 +1271,26 @@ class TestFinalizeProfile:
         # And the channel really was thinned, so the mean could not have been taken from it.
         assert len(profile.depth.t) < len(depths)
         assert profile.gas_attribution[0].mean_depth_cm != round(sum(profile.depth.v) / len(profile.depth.v))
+
+    def test_attributed_time_never_exceeds_the_span_it_is_a_fraction_of(self):
+        """The invariant `attributed_seconds`/`duration_seconds` exists to state, and the
+        one place the two halves can disagree: attribution is derived from the
+        full-resolution channel while the stored span comes off the thinned one. A 77-minute
+        1 Hz dive - the cadence every FIT export uses, and past `MAX_POINTS_PER_CHANNEL`
+        within twenty minutes - ending in a flat stretch at the surface is what used to make
+        the denominator the shorter of the two, and a client print `100.2%`.
+        """
+        depths = [min(3000, second * 10) if second < 4_500 else 0 for second in range(4_620)]
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[float(second) for second in range(4_620)], v=depths),
+            events=[_switch(0.0, 1), _switch(3000.0, 2)],
+        )
+
+        profile = finalize_profile(parsed)
+
+        assert sum(entry.seconds for entry in profile.gas_attribution) <= profile.duration_seconds
+        # And exactly equal here, since the dive begins on a gas and never stops being on one.
+        assert sum(entry.seconds for entry in profile.gas_attribution) == profile.duration_seconds
 
 
 class TestShouldExtract:

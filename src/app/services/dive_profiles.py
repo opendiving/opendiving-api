@@ -64,8 +64,9 @@ logger = logging.getLogger(__name__)
 #
 # 2: the deco `ceiling` channel and `events`, which every parser had been dropping.
 # 3: `gas_attribution`, derived from those events - which gas was breathed for how long
-#    and how deep. Nothing about the stored *samples* changed, but the row did, and this
-#    is the only selector the backfill has.
+#    and how deep - and `_downsample_series` keeping each channel's first and last sample,
+#    which it had not been guaranteeing. The second is why this covers the samples and not
+#    only the new column.
 PROFILE_EXTRACTOR_VERSION = 3
 
 # Per channel, applied server-side at extraction. A 2026 Suunto Ocean export carries
@@ -425,6 +426,13 @@ def derive_gas_attribution(profile: NormalizedProfile) -> list[GasAttribution]:
     each end of every stretch, and there is no dive in the corpus for the rule to be
     checked against.
 
+    At a boundary the two halves also count the sample *on* it differently: a stretch's
+    seconds run up to the next switch's second, while the sample taken at that second is
+    assigned to the gas being switched to. So one reading sits on the far side of the
+    boundary from the second it was counted in - one sample out of tens or hundreds, and
+    the alternative (counting it into the stretch that was ending) is no more correct, since
+    the switch happened at some unrecorded instant within that sampling interval either way.
+
     **Runs before `downsample`**, which is what `finalize_profile` exists to sequence.
     Min/max bucketing keeps each bucket's extremes and discards everything between them,
     so a mean taken afterwards would be a mean of the dive's peaks and troughs rather than
@@ -516,16 +524,26 @@ def _downsample_series(t: list[int], v: list[int], max_points: int) -> tuple[lis
 
     Buckets are chosen on time rather than on index, so a channel with an irregular
     cadence isn't unevenly weighted; each bucket emits its min and its max in time order.
+
+    **The first and last samples are always kept**, which min/max bucketing does not give
+    for free: `min` returns the *first* of equal values, so a dive that ends with a run of
+    identical readings - a diver floating at the surface, which is how a 1 Hz recording
+    usually ends - picks the beginning of that run and drops the true final sample. The
+    channel then stops seconds before the dive did. Invisible on a chart, and not invisible
+    at all once `duration_seconds` became the denominator of a coverage fraction whose
+    numerator is derived from the *full-resolution* channel: the fraction came out over
+    100%. Endpoints are also just the right thing for a series that says when a dive
+    started and stopped.
     """
     if len(t) <= max_points:
         return t, v
 
-    # Two points per bucket (the min and the max), so the cap is what bounds the bucket
-    # count rather than the other way round.
-    buckets = max_points // 2
+    # Two points per bucket (the min and the max), and two more for the endpoints below,
+    # so the cap is what bounds the bucket count rather than the other way round.
+    buckets = (max_points - 2) // 2
     span = t[-1] - t[0]
 
-    picked: list[int] = []
+    picked: list[int] = [0]
     start = 0
     for bucket in range(buckets):
         # Index-based fallback when every sample shares one timestamp, which can't be
@@ -546,7 +564,12 @@ def _downsample_series(t: list[int], v: list[int], max_points: int) -> tuple[lis
         picked.extend(sorted({lowest, highest}))
         start = end
 
-    return [t[index] for index in picked], [v[index] for index in picked]
+    picked.append(len(t) - 1)
+    # Deduped rather than guarded, because either endpoint may already have been picked as
+    # its bucket's min or max. `dict.fromkeys` keeps the order, which is the increasing
+    # index order every bucket appended in - so the series stays sorted by construction.
+    kept = list(dict.fromkeys(picked))
+    return [t[index] for index in kept], [v[index] for index in kept]
 
 
 def downsample(

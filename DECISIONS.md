@@ -1927,6 +1927,20 @@ reports 0.6 bar mid-dive survives downsampling and stretches the pressure axis. 
 own data faithfully drawn, and inventing a plausibility filter would mean silently discarding
 readings - the opposite of the property the bucketing was chosen for.
 
+**The first and last samples are pinned as well**, which the bucketing does *not* give for free, and
+the reason it had to be added is worth keeping. `min()` returns the first of equal values, so a
+channel that ends in a run of identical readings — a diver floating at the surface, which is how a 1
+Hz recording usually ends — picks the beginning of that run as its bucket's minimum and drops the
+true final sample. The channel then stops seconds before the dive did.
+
+That was invisible while nothing compared the stored span against anything. It stopped being
+invisible when `duration_seconds` became the denominator of Phase 4's coverage fraction whose
+numerator is derived from the **full-resolution** channel: on a 77-minute 1 Hz dive the fraction
+came out at 100.2%. Pinning the endpoints is the fix rather than clamping the fraction, because the
+shorter span was the thing that was wrong — a series that says when a dive started and stopped
+should end where the recording did. `buckets` drops to `(max_points - 2) // 2` so the cap still
+holds, and the endpoints are deduped against the picks in case a bucket already chose them.
+
 ## `parse_profile` is separate from `parse`, and never runs on the `/dive/parse` path
 
 `DiveParser` gained a **non-abstract** `parse_profile(content) -> ParsedProfileSchema | None` rather
@@ -4364,9 +4378,12 @@ Two consequences for clients:
 
 ## `PROFILE_EXTRACTOR_VERSION` 3, and the manual DDL for `gas_attribution`
 
-`PROFILE_EXTRACTOR_VERSION` went 2 → 3. Nothing about the stored *samples* changed this time, which
-is a first: the bump is there because the row gained a column the extractor fills, and the version
-is the only thing the backfill selects on. The existing script picks the corpus up unchanged:
+`PROFILE_EXTRACTOR_VERSION` went 2 → 3, for two changes at once: the row gained a column the
+extractor fills, and `_downsample_series` now pins each channel's first and last sample (see
+*"Profiles are capped at 1 200 points"*), so the stored samples differ too. One bump covers both
+because nothing had yet been extracted at 3 — had it, the endpoint change would have needed a 4 of
+its own, since a profile stored under a version has to be a pure function of it. The existing script
+picks the corpus up unchanged:
 
 ```bash
 docker compose exec api python -m src.scripts.backfill_dive_profiles

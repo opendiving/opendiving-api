@@ -209,6 +209,14 @@ def _tank_arithmetic(mixture: DiveMixtureRead, attributed: GasAttribution) -> _T
 # own duration, so there is no segmentation to go wrong, and adding a ceiling there would
 # change a long-standing figure - which is exactly what the split between the two
 # derivations exists to prevent.
+#
+# **And deliberately one-sided.** The mirror fault exists - a switch recorded *early* gives
+# a cylinder more time than it was breathed, and its rate comes out too low - but there is
+# no floor to catch it with, because the low side has no wall the high side has. Nothing
+# resembles 2 062 L/min except an artefact; 2 L/min is what a stage bottle that was cracked
+# open for a couple of breaths and logged with a 10 bar drop honestly computes to, and a
+# floor set anywhere near real dives would refuse them. So this catches the direction that
+# can be caught, and the other is left to the coverage fraction and the diver's own eyes.
 MAX_PLAUSIBLE_RMV = 100.0
 
 
