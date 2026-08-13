@@ -22,6 +22,7 @@ from typing import Any
 import fitdecode
 from fitdecode.types import DevField, FieldData
 
+from ...schemas.dive_mixture import GasRole
 from ...schemas.dive_profile import ParsedPressureSeries, ParsedProfileSchema
 from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from .base import DiveParser
@@ -139,6 +140,24 @@ def _native_raw(frame: fitdecode.FitDataMessage, name: str) -> Any | None:
     return field_data.raw_value if field_data is not None else None
 
 
+def _role(gas: fitdecode.FitDataMessage | None) -> GasRole | None:
+    """What a `dive_gas` says the cylinder was carried for, where it says anything.
+
+    `mode` is the only field on the message that speaks to this, and it answers only one
+    half of the question: its enum is `{0: open_circuit, 1: closed_circuit_diluent}`, so
+    a diluent identifies itself outright while `open_circuit` covers a back gas and a
+    stage bottle alike and therefore maps to nothing.
+
+    Pointedly **not** derived from `status`, the other candidate. That is
+    `enabled`/`disabled`/`backup_only` - whether the gas was breathed at all, which
+    `_breathed_gases` already uses it for - and reading `backup_only` as a role would
+    relabel a pony bottle as though the file had described its purpose.
+    """
+    if gas is None:
+        return None
+    return GasRole.DILUENT if _native_value(gas, "mode") == "closed_circuit_diluent" else None
+
+
 def _first_not_none(*values: float | None) -> float | None:
     """The first value that was actually recorded.
 
@@ -246,8 +265,8 @@ class FitParser(DiveParser):
     models (`models/dive.py`, `models/dive_mixture.py`), plus - separately, via
     `parse_profile` - the per-sample depth/temperature/tank-pressure curves stored as
     `DiveProfile`. FIT activity files carry a great deal more (GPS track, ascent rates,
-    CNS/OTU loading, deco ceilings, heart rate, battery telemetry) with nowhere to
-    persist it, so none of that is parsed.
+    deco ceilings, heart rate, battery telemetry) with nowhere to persist it, so none of
+    that is parsed.
     """
 
     key = "fit"
@@ -470,6 +489,27 @@ class FitParser(DiveParser):
         return ParsedDiveSchema(
             avg_depth=cls._depth(session, summary, "avg_depth"),
             bottom_temperature=cls._bottom_temperature(scan, session),
+            # Both messages carry the same three fields, and `_summary_field` prefers
+            # Garmin's `dive_summary` for the same reason `_depth` does.
+            #
+            # `end_cns` is already whole percent (the profile's own unit), unlike the
+            # Suunto JSON export's 0-1 fraction. There is no `start_otu` anywhere in the
+            # FIT profile, so `otu_start` stays null rather than being back-derived.
+            #
+            # **`o2_toxicity` is the dive's ending OTU total, not the OTUs it added**,
+            # which the profile's bare "OTUs" unit does not settle. The corpus does: the
+            # 2025-03-06 08:29 dive exists as both a FIT and a DM5 XML export, and where
+            # the XML records `OtuStart 22 -> OtuEnd 23`, the FIT writes
+            # `o2_toxicity = 23`. Read as a delta it would have been 1.
+            cns_start=cls._summary_field(session, summary, "start_cns"),
+            cns_end=cls._summary_field(session, summary, "end_cns"),
+            otu_start=None,
+            otu_end=cls._summary_field(session, summary, "o2_toxicity"),
+            # FIT records no surface pressure for a dive. `record.absolute_pressure` is
+            # the *ambient* pressure at each sample, so the closest thing available would
+            # be "whatever the first sample read", which is a guess about when the diver
+            # entered the water rather than a barometer reading.
+            surface_pressure_bar=None,
             # Deliberately not parsed, though `session.dive_number` is right there. It is
             # the *computer's* counter, not the diver's lifetime dive number - it starts
             # at 1 on a new or factory-reset device. The example corpus shows this
@@ -523,6 +563,23 @@ class FitParser(DiveParser):
         return depth
 
     @staticmethod
+    def _summary_field(
+        session: fitdecode.FitDataMessage, summary: fitdecode.FitDataMessage | None, name: str
+    ) -> float | None:
+        """A field carried by both `dive_summary` and `session`, preferring the summary.
+
+        The mirror of `_depth`, which prefers the session and falls back to the summary.
+        The order is the other way round here because these are the *dive's* oxygen
+        accounting: on a multi-dive Garmin file the session totals cover the whole
+        activity, whereas `_dive_summary` has already picked out the summary that
+        describes the dive being imported.
+        """
+        value = _native_value(summary, name) if summary is not None else None
+        if value is None:
+            value = _native_value(session, name)
+        return float(value) if value is not None else None
+
+    @staticmethod
     def _bottom_temperature(scan: _FitScan, session: fitdecode.FitDataMessage) -> float | None:
         """The coldest water this dive saw - `session.min_temperature`, else the coldest sample.
 
@@ -540,7 +597,19 @@ class FitParser(DiveParser):
 
     @classmethod
     def _mixtures(cls, scan: _FitScan) -> list[DiveMixtureSchema]:
-        """Map `dive_gas` entries onto `DiveMixture`s, with tank pressures where present."""
+        """Map `dive_gas` entries onto `DiveMixture`s, with tank pressures where present.
+
+        Cylinders are numbered by their 1-based position in this list, which is the same
+        ordering `_cylinder_sensors` numbers the profile's pressure channels by - so a
+        pod sits at the same `gas_number` on the chart legend as on the dive form.
+
+        **That correspondence is only as good as the pairing underneath it.** Where a
+        file has two gases and one pod, `_tanks_for` refuses to guess which is which and
+        leaves both pressures null, but the mixtures are still numbered 1 and 2 while the
+        only pressure channel is numbered 1 - so the numbers line up by position without
+        the file having said they describe the same cylinder. The number is a label, and
+        anything joining on it (per-tank gas accounting) has to treat it as one.
+        """
         gases = cls._breathed_gases(scan)
         if not gases:
             # Tank telemetry with no gas list at all still describes real cylinders - a
@@ -549,9 +618,14 @@ class FitParser(DiveParser):
             # the JSON parser follows in this file's sibling: evidence of a tank is
             # evidence of a tank, whichever way round it arrived. Returns `[]` when there
             # is no telemetry either.
-            return [cls._mixture(None, tank) for tank in cls._tank_pressures(scan)]
+            return [
+                cls._mixture(None, tank, gas_number) for gas_number, tank in enumerate(cls._tank_pressures(scan), 1)
+            ]
 
-        return [cls._mixture(gas, tank) for gas, tank in zip(gases, cls._tanks_for(scan, gases), strict=True)]
+        return [
+            cls._mixture(gas, tank, gas_number)
+            for gas_number, (gas, tank) in enumerate(zip(gases, cls._tanks_for(scan, gases), strict=True), start=1)
+        ]
 
     @staticmethod
     def _breathed_gases(scan: _FitScan) -> list[fitdecode.FitDataMessage]:
@@ -738,7 +812,9 @@ class FitParser(DiveParser):
         )[:_MAX_CYLINDERS]
 
     @staticmethod
-    def _mixture(gas: fitdecode.FitDataMessage | None, tank: _TankPressures | None) -> DiveMixtureSchema:
+    def _mixture(
+        gas: fitdecode.FitDataMessage | None, tank: _TankPressures | None, gas_number: int
+    ) -> DiveMixtureSchema:
         """Map one `dive_gas` (plus its cylinder's pressures, if any) onto a `DiveMixture`.
 
         No unit conversion: the FIT profile already defines `oxygen_content`/
@@ -753,11 +829,19 @@ class FitParser(DiveParser):
         helium = _native_value(gas, "helium_content") if gas is not None else None
         return DiveMixtureSchema(
             end_pressure=tank.end if tank is not None else None,
+            gas_number=gas_number,
             helium=float(helium) if helium is not None else None,
             # Left for the user to fill in themselves rather than parsed - see
             # DECISIONS.md.
             name=None,
             oxygen=float(oxygen) if oxygen is not None else None,
+            # `dive_gas` has no ppO2 field in the FIT profile at all - the limits live on
+            # `dive_settings` (`po2_warn`/`po2_critical`), which are the *device's*
+            # thresholds for the whole dive rather than this cylinder's plan. Reading one
+            # of those into a per-mixture column would attribute a global setting to
+            # every gas, so it stays null and the client falls back to its own default.
+            po2_limit=None,
+            role=_role(gas),
             start_pressure=tank.start if tank is not None else None,
             # FIT has nowhere to record cylinder size at all - not on `dive_gas`, and
             # `tank_summary` carries only the volume *consumed*. `None`, not 0.0: the

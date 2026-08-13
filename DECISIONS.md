@@ -2097,6 +2097,241 @@ restart. No column was added to `dive` or any other existing table - the FK live
 `DiveProfile` is deliberately **not** registered in `admin/views.py`, for the same reason as
 `DiveFile` and `CertificationFile`.
 
+## `DiveMixture.po2_limit` is not the `po2` column that was removed
+
+*"`DiveMixture.po2` was replaced with `helium`"* above records a `po2` column being dropped, so
+adding `po2_limit` needs to say why this isn't that decision being quietly undone.
+
+The old `po2` **was the gas description**. Mixtures at the time tracked a PO₂ set-point *instead of*
+a helium fraction, which is a rebreather's way of describing a loop and cannot describe an
+open-circuit trimix at all; swapping it for `helium` is what let a 21/35 be written down.
+`po2_limit` is the orthogonal fact and **coexists with `helium`**: it is the ppO₂ the diver planned
+this gas to, which is what turns a fraction into a maximum operating depth. Nothing about it
+competes with `oxygen`/`helium` for the same slot - the two together are the gas, and this is the
+plan for it.
+
+That it is a real recorded reading rather than a modelling choice is settled by the corpus. Both
+Suunto exports write it per mixture, and the one two-gas dive in the XML corpus
+(`Dive_2025-06-03-1215.xml`) carries `<PO2>1.4</PO2>` on its 21/0 back gas and `<PO2>1.6</PO2>` on
+its 49/0 deco bottle. That single field is the *only* thing in the file distinguishing the two rows'
+purpose (`<Type>` is 1 for both - see below), and it is exactly what the frontend's `mod()` takes as
+its ppO₂ argument, so `po2_limit ?? PPO2_WORKING` makes an imported dive's MODs the device's own
+rather than the app's defaults.
+
+Units differ per format and both are converted at the parser: the XML export writes plain bar
+(`1.4`), the JSON export Pascal (`140000`). `ck_dive_mixture_po2_limit_range` (0.4-2.0 bar) exists
+to catch the second one being read as the first.
+
+## `DiveMixture.role` is a structured column, not the gas-name synthesis that was rejected
+
+*"`ParsedDiveSchema`/`DiveMixtureSchema` trimmed to fields the backend models actually support"*
+above rejects Suunto's `Gases[].State` ("Primary") as a source for `DiveMixture.name`, on the
+grounds that it "describes a gas's *role* (primary/deco/bailout), not an actual gas label a diver
+would recognize". That rejection is about `name`, and it stands: nothing here pre-fills `name`, and
+both parsers still leave it null.
+
+Role is the fact that sentence identifies and then has nowhere to put. It gets its own nullable
+`VARCHAR(20)` column, typed by `GasRole` (`schemas/dive_mixture.py`) - a `StrEnum`, the same shape
+and for the same reasons as `GearType`, including having no mirroring DB `CHECK`. The two are shown
+side by side rather than one standing in for the other: a dive detail page renders `gasName()`'s
+"EAN50" **and** a "deco" badge. Editable on the form, because the file usually doesn't say.
+
+**What each format actually records:**
+
+- **Suunto JSON** - `Header.Diving.Gases[].State`, through a normalization table
+  (`_GAS_ROLE_BY_STATE`) rather than a `GasRole(state)` cast: the vocabulary is Suunto's, so a value
+  we haven't seen has to come out `None` rather than raise. "Primary" (18 of 18 gases in the corpus)
+  maps to `bottom`. Not to be confused with the `State: "OC"` under `DiveHeader`/`DiveFooter`, which
+  is a loop type and which this parser doesn't read.
+- **FIT** - `dive_gas.mode`, whose enum is `{0: open_circuit, 1: closed_circuit_diluent}`. A diluent
+  identifies itself; `open_circuit` covers a back gas and a stage bottle alike, so it maps to
+  nothing. Deliberately **not** `dive_gas.status` (`enabled`/`disabled`/`backup_only`), which is
+  whether the gas was breathed - `_breathed_gases` already uses it for that - and reading
+  `backup_only` as a role would relabel a pony bottle as though the file had described its purpose.
+- **Suunto XML** - **nothing**, though `<Type>` looks like the field for it. It is `1` for all 353
+  mixtures in the 384-export corpus, *including both cylinders of the two-gas dive*, where a 21/0
+  back gas and a 49/0 deco bottle are both `<Type>1</Type>`. Whatever it encodes, it is not what the
+  cylinder was carried for, and mapping it would have confidently labelled a deco bottle "bottom".
+  This is the one place the Phase 2 plan said to read a field and the data said not to.
+
+## `DiveMixture.gas_number` is a label, and only the JSON export really has one
+
+How the source export identifies a cylinder, and the join key to the profile's per-cylinder pressure
+channels (`dive_profile.data.pressure[].gas_number`), which is what will let per-tank gas accounting
+attribute a pressure curve to a mixture row.
+
+Only `SuuntoJsonParser`'s sample-reconstruction path reads a number the *file* states
+(`DiveEvents.GasSwitch.GasNumber` / `Cylinders[].GasNumber`); everywhere else it is synthesized from
+position, because the formats have no such field. The XML export's `<TransmitterId>` and FIT's
+`tank_update.sensor` are ANT device serials (e.g. 2411100050), not indices - the same reason neither
+is used to label a chart legend.
+
+So it is a **label, not a trustworthy index**, and anything joining on it has to say so. The sharp
+edge is in `FitParser._mixtures`: where a file holds two gases and one pod, `_tanks_for` refuses to
+guess which gas the pod belongs to and leaves both pressures null, but the mixtures are still
+numbered 1 and 2 while the only pressure channel is numbered 1. The numbers then line up by position
+without the file ever having said the two describe the same cylinder. Per-tank attribution must
+refuse a partial result there rather than take the coincidence.
+
+### The constraint was `>= 1` for about an hour, and the corpus rejected it
+
+Worth recording, because the instinct is to write `>= 1` and the reasoning for it sounds fine: every
+parser that *synthesizes* a number counts from 1, so a 0 would be an off-by-one worth catching
+before it reaches a chart.
+
+The first real run of `backfill_dive_tech_fields` failed on `ck_dive_mixture_gas_number_positive`
+against a stored Suunto Ocean export. **The Ocean numbers its cylinders from 0** - 7 107
+`Cylinders[].GasNumber: 0` readings across the 2026 corpus, and `GasSwitch` events to both 0 and 1 -
+and the profiles already stored for those dives label their pressure channels `0` to match, because
+`_parse_samples` has always kept the file's own number.
+
+So a 1-based floor would have forced the mixture to carry a number its own pressure curve does not
+have, breaking the one join this column exists for, on exactly the multi-mixture corpus that join is
+being built for. The constraint is `ck_dive_mixture_gas_number_non_negative` (`>= 0`), and the
+premise it was guarding - "1-based everywhere" - was simply false.
+
+The bound stays at zero rather than disappearing: it still catches a negative, which no format
+produces and which would be a sign bug rather than a numbering convention.
+
+## CNS, OTU and surface pressure are written by the import, never by the form
+
+`dive.cns_start`/`cns_end`/`otu_start`/`otu_end`/`surface_pressure_bar` are filled server-side in
+`services/dive_files.py::store_dive_file`, inside the same `run_in_threadpool` hop and the same
+transaction as the profile extraction, and they are **not** on `DiveCreate`/`DiveUpdate` at all -
+`DiveTechScalars` (`schemas/dive.py`) is mixed into the read shapes only, so `DiveCreate`'s
+`extra="forbid"` turns an attempt to set one into a 422 rather than a silently accepted fiction.
+
+That asymmetry with the *mixture* fields - which do round-trip through the form - is the point. CNS
+and OTU depend on the decompression algorithm the device ran and on exposure carried over from
+earlier dives, neither of which anything in a logged dive reconstructs, so a hand-typed value would
+be a guess wearing a reading's clothes. A diver genuinely does know which bottle was their deco gas.
+
+Consequences worth knowing:
+
+- The write is **unconditional** where the profile's is not: replacing an export that recorded
+  exposure with one that doesn't clears the old readings rather than leaving them attributed to a
+  file they didn't come from. Only an extraction that *failed* (logged, returns `None`) leaves them
+  alone, because that is "couldn't read", not "the file says nothing".
+- `delete_dive_file` clears them too, alongside the profile and for the same reason - a reading
+  whose source export is gone can never be re-derived or checked. The mixtures are pointedly not
+  cleared: those went through the form and the diver may have edited them since.
+- `extract_tech_scalars` **never raises**, mirroring `extract_profile`. Note it catches
+  `DiveParseError`/`UnsupportedDiveFileError` and then bare `Exception` - *not* `EXTRACTION_ERRORS`,
+  which is the tuple parsers catch *internally* before re-raising a `DiveParseError` and does not
+  contain either parser error. Catching that tuple here would have let a malformed file fail the
+  upload it rode in on.
+- `surface_pressure_bar` is display-only. `services/dive_gas.py` assumes 1 bar at the surface, and
+  that is a recorded deliberate choice - this column does not feed SAC/RMV.
+
+## The same three readings are in three different units across the two Suunto exports
+
+Cross-checked by matching dives that exist as both a DM5 XML and a JSON export, which is the only
+way any of this is visible - each format is internally consistent and plausible on its own.
+
+| Reading          | XML                 | JSON                | Same dive (2021-03-28 10:49)                    |
+| ---------------- | ------------------- | ------------------- | ----------------------------------------------- |
+| CNS              | whole percent       | **0-1 fraction**    | `<CnsEnd>7</CnsEnd>` vs `EndTissue.CNS: 0.069`  |
+| OTU              | same absolute count | same absolute count | `<OtuEnd>18</OtuEnd>` vs `EndTissue.OTU: 17.89` |
+| Surface pressure | **Pascal**          | Pascal              | `105700` in both, i.e. 1.057 bar                |
+
+Two traps in that table:
+
+**JSON CNS is a fraction.** Stored unconverted, a 69 % oxygen clock would read 0.069 %. The parser
+multiplies by 100.
+
+**XML `SurfacePressure` is Pascal, and this module's own comment said otherwise.**
+`_MILLIBAR_PER_BAR` was documented as covering "**every** pressure" in DM5 XML and named
+`SurfacePressure (105500 = 1.055 bar)` as an example - which is millibar arithmetic reaching a
+Pascal answer. Cylinder pressures really are millibar (`StartPressure: 207141` is 207.141 bar), but
+this one field is not: read as millibar, 105700 would be 105.7 bar, a hundred metres of seawater at
+the surface. Both corpora settle it - all 384 XML exports land in 103100-106700, plausible
+barometrically only on the Pascal reading, and the JSON export of the same dives writes the
+identical integer into a field the other parser already treated as Pascal.
+`ck_dive_surface_pressure_range` (0.5-1.2 bar) is the backstop.
+
+**FIT is the odd one out again, and gets the same treatment it always does.** `session`/
+`dive_summary` carry `start_cns`/`end_cns` (already whole percent) and `o2_toxicity` (OTUs), but
+there is no start OTU anywhere in the profile and no surface pressure at all, so `otu_start` and
+`surface_pressure_bar` stay null rather than being back-derived. `record.absolute_pressure` is the
+*ambient* pressure per sample, so the nearest available stand-in would be a guess about when the
+diver entered the water.
+
+`o2_toxicity`'s unit is ambiguous in the profile - "OTUs", which could be the dive's total or its
+increment - and the corpus decides it. The 2025-03-06 08:29 dive exists as both a FIT and an XML
+export: the XML records `OtuStart 22 -> OtuEnd 23`, and the FIT writes `o2_toxicity = 23`. It is the
+**ending total**. Read as a delta it would have been 1, and every repetitive dive's OTU would have
+been understated by its own history.
+
+## The tech-field backfill is a second script, not a flag on the profile one
+
+`src/scripts/backfill_dive_tech_fields.py`, run the same way:
+
+```bash
+docker compose exec api python -m src.scripts.backfill_dive_tech_fields
+```
+
+Separate from `backfill_dive_profiles` because the two select on different things.
+`PROFILE_EXTRACTOR_VERSION` lets that one skip a dive whose profile is already current; these
+columns have no version of their own, so every dive with a stored export is a candidate on every run
+\- which is cheap (a header parse, not a sample stream) and is what makes it correct to re-run after
+a parser fix with no version to bump. Both halves are idempotent.
+
+The two halves are backfilled on **different terms**, which is why the report counts them
+separately:
+
+- **Dive scalars are overwritten outright.** No other path writes them, so the file is the only
+  authority and a re-run writes the same numbers.
+- **Mixture fields are best-effort**, via `merge_mixture_fields` - pure and DB-free, following the
+  `reconcile()` idiom. Mixtures are replaced wholesale on every save (see *"Mixtures are always
+  replaced wholesale"*), so a stored row's `id` postdates the import and cannot identify which
+  parsed cylinder it came from. Position is the only join available, and on its own it is too weak:
+  a diver who swapped their deco bottle would get the parsed second gas written onto a different
+  tank. So the counts must match **and** every pair must still agree on `(oxygen, helium)` - the
+  part of a cylinder nobody retypes - and it is all-or-nothing per dive, because a half-matching
+  list is an edited list. Anything else is counted in `mixtures_skipped` and left alone.
+
+A parsed fraction of `None` is not compared: the file never recorded it, the form filled in
+`DEFAULT_MIXTURE`, and that difference is not evidence of an edit.
+
+## Manual DDL for the Phase 2 tech fields
+
+Per *"Schema changes have no migration tool"* - eight new columns on two existing tables, so
+`create_all()` does nothing and both the columns and their `CHECK`s need applying by hand:
+
+```sql
+ALTER TABLE dive ADD COLUMN cns_start DOUBLE PRECISION;
+ALTER TABLE dive ADD COLUMN cns_end DOUBLE PRECISION;
+ALTER TABLE dive ADD COLUMN otu_start DOUBLE PRECISION;
+ALTER TABLE dive ADD COLUMN otu_end DOUBLE PRECISION;
+ALTER TABLE dive ADD COLUMN surface_pressure_bar DOUBLE PRECISION;
+ALTER TABLE dive ADD CONSTRAINT ck_dive_cns_start_non_negative CHECK (cns_start IS NULL OR cns_start >= 0);
+ALTER TABLE dive ADD CONSTRAINT ck_dive_cns_end_non_negative CHECK (cns_end IS NULL OR cns_end >= 0);
+ALTER TABLE dive ADD CONSTRAINT ck_dive_otu_start_non_negative CHECK (otu_start IS NULL OR otu_start >= 0);
+ALTER TABLE dive ADD CONSTRAINT ck_dive_otu_end_non_negative CHECK (otu_end IS NULL OR otu_end >= 0);
+ALTER TABLE dive ADD CONSTRAINT ck_dive_surface_pressure_range CHECK (surface_pressure_bar IS NULL OR (surface_pressure_bar >= 0.5 AND surface_pressure_bar <= 1.2));
+
+ALTER TABLE dive_mixture ADD COLUMN po2_limit DOUBLE PRECISION;
+ALTER TABLE dive_mixture ADD COLUMN gas_number INTEGER;
+ALTER TABLE dive_mixture ADD COLUMN role VARCHAR(20);
+ALTER TABLE dive_mixture ADD CONSTRAINT ck_dive_mixture_po2_limit_range CHECK (po2_limit IS NULL OR (po2_limit >= 0.4 AND po2_limit <= 2.0));
+ALTER TABLE dive_mixture ADD CONSTRAINT ck_dive_mixture_gas_number_non_negative CHECK (gas_number IS NULL OR gas_number >= 0);
+```
+
+`CNS` is `DOUBLE PRECISION` rather than an integer even though the XML export rounds it to whole
+percent, because the JSON export of the same dive records 0.069 - storing that as 7 would throw away
+precision the file has. All nullable: every one of these is absent from at least one supported
+format, and a dive logged by hand has none of them.
+
+The `CHECK`s all follow the existing `<col> IS NULL OR ...` shape (see *"Domain `CheckConstraint`s
+need a manual `ALTER TABLE`"*). CNS and OTU are `>= 0` rather than `> 0` for the same reason as
+`weight`: a dive that began with no oxygen loading records a real 0. Neither has an upper bound -
+CNS above 100 % is precisely the reading a diver most needs to see. Surface pressure is bounded on
+both sides because it has real physical limits and the band is what catches the Pascal/millibar
+error above.
+
+Both `_DIVE_CONSTRAINT_MESSAGES` (`api/v1/dives.py`) and `_MIXTURE_CONSTRAINT_MESSAGES` gained
+entries, so a violation surfaces as a sentence naming the field rather than a raw 500.
+
 ## The contact form is an API endpoint, not a `mailto:`
 
 `POST /api/v1/contact` (`api/v1/contact.py`) is the only endpoint here that mails a *human* rather
@@ -3255,6 +3490,77 @@ Both entry points decode the file in full. A FIT file is a stream whose `session
 *after* the samples it summarizes, so there is no cheap header-only read to be had - `parse()` pays
 for the whole pass either way, which is also what makes the coldest-sample temperature fallback
 free.
+
+## A zero cylinder pressure is not a reading, and that does not contradict the rule above
+
+`DiveMixtureSchema` nulls a `start_pressure`/`end_pressure` of 0 for every parser. Read next to
+*"The rule is 'don't invent', not 'treat zero as missing'"* in the section above, that looks like
+the exact thing that rule forbids, so the two are worth separating properly - the tension is real
+and resolving it by picking a side would have been wrong either way.
+
+**The rule constrains what a parser may invent, and this invents nothing.** `Helium: 0` survives
+because 0 is inside the range a gas fraction takes on a real dive: a nitrox mix genuinely contains 0
+% helium, a diver breathes it, and `TestParsersInventNothing` still pins that. A cylinder pressure
+of 0 bar is not inside the range that quantity takes on a dive that happened - at 0 bar a regulator
+delivers nothing - so the question is never "is this zero real?" but "what did the file mean by
+writing it?".
+
+**DM5 means "no transmitter", and its own JSON export proves it.** Three facts from the local
+corpus:
+
+- 255 of the 353 mixtures in the 384 XML exports record exactly `<StartPressure>0</StartPressure>`
+  and `<EndPressure>0</EndPressure>` - the pre-transmitter majority of the log.
+- All 255 are precisely the mixtures whose `<TransmitterId>` is `xsi:nil`, and all 98 with real
+  pressures have a serial. 353 of 353 agree, and not one mixture pairs a zero with a real pressure.
+- `Dive_2025-06-03-1215.xml` and `compare/d5-last-header.json` are the *same dive* - same timestamp,
+  same transmitter serial 2411100050, same 22 L/11 L cylinders at 21 %/49 % and ppO₂ 1.4/1.6. On the
+  untransmitted 49 % deco bottle the XML writes `0`/`0` and the JSON **omits `StartPressure` and
+  `EndPressure` entirely**, while keeping `Helium: 0` in the same object. The file distinguishes a
+  recorded zero from an unrecorded value, in one cylinder, in the vendor's own two formats.
+
+So reading the zero literally made two exports of one dive disagree, and made `SuuntoXmlParser`
+assert something `SuuntoJsonParser` declined to. This is the same judgement
+`_mixtures_from_cylinders` already makes when it skips a `null` Ocean `Pressure` rather than calling
+it the end of the dive.
+
+**What it was costing.** `mergeMixture` (`lib/dive-import.ts`) carries a cylinder's pressures over
+from the form only when the file recorded *neither*, and 0 is not nullish - so an XML import
+overwrote pressures already on the form with a fill of zero, the same destructive-default failure
+`volume: 0.0` used to cause. Then `diveMixtureSchema` requires a positive `start_pressure`, so the
+dive's **edit form could never be submitted again**: a validation error on Tank 2's "Start pressure
+(bar)", a field the diver never touched, clearable only by emptying both boxes by hand. That is 72 %
+of the cylinders in the corpus, not one unlucky deco bottle.
+
+**Relaxing the Zod rule to `min(0)` was the alternative, and it is the worse half of the trade.** It
+would clear the error by storing "this cylinder started and finished the dive on 0 bar" as fact -
+rendered as a fill on the dive detail page, still overwriting the form's pressures on import, still
+disagreeing with the same dive's JSON. The form rule is also doing real work: a saved cylinder that
+started at 0 bar is nonsense whoever typed it. The honest fix is for the file's non-reading not to
+become a number in the first place. (`end_pressure` already allows 0 there, which is a separate
+asymmetry and deliberately left alone.)
+
+**Why it lives on the schema rather than in `SuuntoXmlParser`,** where all the evidence is: the fact
+is about the field, not the format. No export can express a cylinder breathed from 0 bar, so no
+parser should claim one, and a fourth parser inherits the rule instead of rediscovering it. The JSON
+and FIT corpora never write a zero here - they say "no transmitter" by omission and by having no
+tank messages at all - so their half of the guard is unattested consistency rather than a fix.
+
+`compute_gas_use` was never fooled by the `0`/`0` pair on its own (a drop of zero returns `None`),
+but it would have been by the mixed pair this also rules out, and `<= 0` covers a negative gauge
+reading on the same terms.
+
+**Dives imported before this kept the zeros**, and a parser fix cannot reach them - the form is what
+writes mixtures, and those rows are already saved. Their edit forms stay stuck until the stored
+values are nulled by hand, which is one statement and no migration (there is no migration tool - see
+*"Schema changes have no migration tool"*):
+
+```sql
+UPDATE dive_mixture SET start_pressure = NULL, end_pressure = NULL
+WHERE start_pressure <= 0 AND end_pressure <= 0;
+```
+
+Both columns together and both `<= 0`, matching the parser: a row with one real pressure was never
+produced by this bug and is not this statement's to touch.
 
 ## FIT fixtures are written, not committed as blobs
 

@@ -91,6 +91,15 @@ _DIVE_CONSTRAINT_MESSAGES = {
     "ck_dive_max_depth_positive": "Max depth must be positive.",
     "ck_dive_avg_depth_positive": "Average depth must be positive.",
     "ck_dive_weight_non_negative": "Weight must be zero or positive.",
+    # Unreachable through the form - these columns are written only by the import path
+    # (see DECISIONS.md) - but a constraint with no message here surfaces as a raw 500,
+    # and the whole point of the map is that the DB is the backstop for whatever reaches
+    # it. A violation would mean a parser unit bug, so the messages say so.
+    "ck_dive_cns_start_non_negative": "Imported CNS values must be zero or positive.",
+    "ck_dive_cns_end_non_negative": "Imported CNS values must be zero or positive.",
+    "ck_dive_otu_start_non_negative": "Imported OTU values must be zero or positive.",
+    "ck_dive_otu_end_non_negative": "Imported OTU values must be zero or positive.",
+    "ck_dive_surface_pressure_range": "Imported surface pressure must be between 0.5 and 1.2 bar.",
 }
 
 
@@ -121,6 +130,8 @@ _MIXTURE_CONSTRAINT_MESSAGES = {
     "ck_dive_mixture_helium_range": "Helium percentage must be between 0 and 100.",
     "ck_dive_mixture_oxygen_helium_sum": "Oxygen and helium percentages cannot sum to more than 100.",
     "ck_dive_mixture_pressure_order": "End pressure cannot be greater than start pressure.",
+    "ck_dive_mixture_po2_limit_range": "Gas ppO2 limit must be between 0.4 and 2.0 bar.",
+    "ck_dive_mixture_gas_number_non_negative": "Gas number cannot be negative.",
 }
 
 

@@ -155,6 +155,39 @@ class TestDiveCheckConstraints:
         db.add(_make_dive(dive_owner.id, weight=None))
         db.commit()
 
+    def test_negative_cns_is_rejected(self, db: Session, dive_owner: User) -> None:
+        _assert_violates(db, _make_dive(dive_owner.id, cns_start=-1), "ck_dive_cns_start_non_negative")
+        _assert_violates(db, _make_dive(dive_owner.id, cns_end=-1), "ck_dive_cns_end_non_negative")
+
+    def test_negative_otu_is_rejected(self, db: Session, dive_owner: User) -> None:
+        _assert_violates(db, _make_dive(dive_owner.id, otu_start=-1), "ck_dive_otu_start_non_negative")
+        _assert_violates(db, _make_dive(dive_owner.id, otu_end=-1), "ck_dive_otu_end_non_negative")
+
+    def test_zero_cns_and_otu_are_allowed(self, db: Session, dive_owner: User) -> None:
+        """`>= 0`, not `> 0`: a dive that began with no oxygen loading records a real 0,
+        and that is worth telling apart from having recorded nothing."""
+        db.add(_make_dive(dive_owner.id, cns_start=0, cns_end=0, otu_start=0, otu_end=0))
+        db.commit()
+
+    def test_cns_over_one_hundred_percent_is_allowed(self, db: Session, dive_owner: User) -> None:
+        """Deliberately unbounded above - a CNS clock past 100 % is precisely the reading
+        a diver most needs to see, and clamping it would hide it."""
+        db.add(_make_dive(dive_owner.id, cns_end=140.0))
+        db.commit()
+
+    def test_surface_pressure_outside_the_barometric_band_is_rejected(self, db: Session, dive_owner: User) -> None:
+        """The band exists to catch a unit error, not an unusual dive site: both Suunto
+        exports write this field in Pascal, so an unconverted 105700 is off by five
+        orders of magnitude."""
+        _assert_violates(db, _make_dive(dive_owner.id, surface_pressure_bar=105700.0), "ck_dive_surface_pressure_range")
+        _assert_violates(db, _make_dive(dive_owner.id, surface_pressure_bar=0.1), "ck_dive_surface_pressure_range")
+
+    def test_real_surface_pressures_are_allowed(self, db: Session, dive_owner: User) -> None:
+        """1.057 bar is a real reading off a 2025 export; 0.55 is roughly a 5 000 m lake."""
+        db.add(_make_dive(dive_owner.id, surface_pressure_bar=1.057))
+        db.add(_make_dive(dive_owner.id, surface_pressure_bar=0.55))
+        db.commit()
+
 
 class TestDiveMixtureCheckConstraints:
     @pytest.fixture
@@ -222,4 +255,34 @@ class TestDiveMixtureCheckConstraints:
 
     def test_null_end_pressure_is_allowed(self, db: Session, dive: Dive) -> None:
         db.add(_make_mixture(dive.id, start_pressure=200, end_pressure=None))
+        db.commit()
+
+    def test_po2_limit_outside_the_diveable_band_is_rejected(self, db: Session, dive: Dive) -> None:
+        """140000 is what a Suunto JSON export writes for 1.4 bar. Reaching the database
+        unconverted is the failure this constraint exists for."""
+        _assert_violates(db, _make_mixture(dive.id, po2_limit=140000.0), "ck_dive_mixture_po2_limit_range")
+        _assert_violates(db, _make_mixture(dive.id, po2_limit=0.1), "ck_dive_mixture_po2_limit_range")
+
+    def test_real_po2_limits_are_allowed(self, db: Session, dive: Dive) -> None:
+        """1.4 on a back gas and 1.6 on a deco bottle - both real, on the same dive."""
+        db.add(_make_mixture(dive.id, po2_limit=1.4))
+        db.add(_make_mixture(dive.id, po2_limit=1.6))
+        db.commit()
+
+    def test_zero_gas_number_is_allowed(self, db: Session, dive: Dive) -> None:
+        """A Suunto Ocean numbers its cylinders from 0, and the profiles already stored
+        for those dives label their pressure channels `0` to match. This started out as a
+        `>= 1` check and the backfill's first real run rejected the corpus on it - see
+        DECISIONS.md."""
+        db.add(_make_mixture(dive.id, gas_number=0))
+        db.commit()
+
+    def test_negative_gas_number_is_rejected(self, db: Session, dive: Dive) -> None:
+        """No format produces one, so this is a sign bug rather than a convention."""
+        _assert_violates(db, _make_mixture(dive.id, gas_number=-1), "ck_dive_mixture_gas_number_non_negative")
+
+    def test_null_tech_fields_are_allowed(self, db: Session, dive: Dive) -> None:
+        """A hand-entered cylinder has no position in any file, and most exports record
+        no ppO2 or role."""
+        db.add(_make_mixture(dive.id, po2_limit=None, gas_number=None, role=None))
         db.commit()

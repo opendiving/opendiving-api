@@ -24,11 +24,20 @@ from uuid6 import uuid7
 
 from src.app.core.security import ALGORITHM, SECRET_KEY, TokenType, create_dive_file_token, verify_dive_file_token
 from src.app.core.utils.uploads import read_upload_within_limit
-from src.app.schemas.dive import DiveFileInfo
-from src.app.schemas.parsed_dive import ParsedDiveSchema
+from src.app.schemas.dive import DiveFileInfo, DiveTechScalars
+from src.app.schemas.dive_mixture import DiveMixtureRead, GasRole
+from src.app.schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from src.app.services import dive_parsers as parsers_module
 from src.app.services.cache_invalidation import invalidate_dive_caches
-from src.app.services.dive_files import MAX_DIVE_FILE_SIZE, _ExistingRow, reconcile, store_dive_file
+from src.app.services.dive_files import (
+    MAX_DIVE_FILE_SIZE,
+    TECH_SCALAR_FIELDS,
+    _ExistingRow,
+    extract_tech_scalars,
+    merge_mixture_fields,
+    reconcile,
+    store_dive_file,
+)
 from src.app.services.dive_parsers import PARSER_BY_KEY, UnsupportedDiveFileError, parse_dive_file_with_parser
 from src.app.services.dive_parsers.base import DiveParser
 from src.app.services.dive_parsers.suunto_json import SuuntoJsonParser
@@ -358,3 +367,206 @@ class TestProfileExtractionReleasesTheTransaction:
         assert calls.index("release") < calls.index("extract"), (
             f"the read transaction is still open during extraction: {calls}"
         )
+
+
+class TestTechScalarExtraction:
+    """`extract_tech_scalars` mirrors `extract_profile`'s contract: it reads the header
+    off already-stored bytes, and it never fails the upload it rode in on."""
+
+    def test_reads_the_scalars_off_a_parseable_file(self) -> None:
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <CnsStart>8</CnsStart><CnsEnd>9</CnsEnd>
+  <OtuStart>22</OtuStart><OtuEnd>23</OtuEnd>
+  <SurfacePressure>105700</SurfacePressure>
+</Dive>
+""".encode()
+
+        assert extract_tech_scalars(SuuntoXmlParser, content) == {
+            "cns_start": 8.0,
+            "cns_end": 9.0,
+            "otu_start": 22.0,
+            "otu_end": 23.0,
+            "surface_pressure_bar": 1.057,
+        }
+
+    def test_covers_exactly_the_columns_the_read_schema_publishes(self) -> None:
+        """`TECH_SCALAR_FIELDS` is derived from `DiveTechScalars` rather than listed, so
+        adding a field to the schema without a parser writing it would show up here
+        rather than as a column that silently stays null forever."""
+        assert set(TECH_SCALAR_FIELDS) == set(DiveTechScalars.model_fields)
+        assert set(TECH_SCALAR_FIELDS) <= set(ParsedDiveSchema.model_fields)
+
+    def test_an_unreadable_file_returns_none_rather_than_raising(self) -> None:
+        """The upload must survive a header this build can't read: the file is the
+        durable artifact, and refusing the attach would discard the very corpus entry
+        needed to fix the parser. Note the catch is `DiveParseError`, *not*
+        `EXTRACTION_ERRORS` - that tuple is what parsers catch internally before
+        re-raising, and does not contain the parser errors themselves."""
+        assert extract_tech_scalars(SuuntoXmlParser, b"<Dive><Unclosed>") is None
+
+    def test_a_file_that_records_nothing_yields_an_all_null_write(self) -> None:
+        """Distinct from the `None` above, and the distinction is load-bearing: this is
+        "the file says nothing", which *clears* a previous export's readings, whereas
+        `None` is "couldn't read" and leaves them alone."""
+        content = f'<?xml version="1.0" encoding="utf-8"?><Dive xmlns="{SUUNTO_NS}"/>'.encode()
+
+        assert extract_tech_scalars(SuuntoXmlParser, content) == dict.fromkeys(TECH_SCALAR_FIELDS)
+
+
+class TestMixtureFieldMerge:
+    """`merge_mixture_fields` decides whether a backfill may write onto stored cylinders.
+
+    Mixtures are replaced wholesale on every save, so a stored row's `id` postdates the
+    import and can't say which parsed cylinder it came from. Position is the only join
+    available, and it is only trusted when the gas fractions still agree.
+    """
+
+    @staticmethod
+    def _parsed(**overrides: object) -> DiveMixtureSchema:
+        defaults: dict[str, object] = {
+            "end_pressure": None,
+            "gas_number": 1,
+            "helium": 0.0,
+            "name": None,
+            "oxygen": 21.0,
+            "po2_limit": 1.4,
+            "role": None,
+            "start_pressure": None,
+            "volume": None,
+        }
+        return DiveMixtureSchema(**(defaults | overrides))  # type: ignore[arg-type]
+
+    @staticmethod
+    def _stored(mixture_id: int, **overrides: object) -> DiveMixtureRead:
+        defaults: dict[str, object] = {"id": mixture_id, "volume": 12.0, "oxygen": 21.0, "helium": 0.0}
+        return DiveMixtureRead(**(defaults | overrides))  # type: ignore[arg-type]
+
+    def test_applies_positionally_when_every_pair_still_matches(self) -> None:
+        parsed = [self._parsed(), self._parsed(oxygen=50.0, gas_number=2, po2_limit=1.6, role=GasRole.DECO)]
+        stored = [self._stored(11), self._stored(12, oxygen=50.0)]
+
+        assert merge_mixture_fields(parsed, stored) == [
+            (11, {"po2_limit": 1.4, "gas_number": 1, "role": None}),
+            (12, {"po2_limit": 1.6, "gas_number": 2, "role": GasRole.DECO}),
+        ]
+
+    def test_refuses_when_a_gas_fraction_no_longer_matches(self) -> None:
+        """The diver swapped their deco bottle. Applying positionally would write the
+        parsed second gas's ppO2 onto a cylinder that isn't it."""
+        parsed = [self._parsed(), self._parsed(oxygen=50.0, gas_number=2)]
+        stored = [self._stored(11), self._stored(12, oxygen=32.0)]
+
+        assert merge_mixture_fields(parsed, stored) is None
+
+    def test_refuses_when_the_counts_disagree(self) -> None:
+        assert merge_mixture_fields([self._parsed()], [self._stored(11), self._stored(12)]) is None
+        assert merge_mixture_fields([], []) is None
+
+    def test_is_all_or_nothing_rather_than_per_row(self) -> None:
+        """A half-matching list is an edited list, and half-applying to it would leave
+        cylinders sourced from two different places with nothing recording which is which."""
+        parsed = [self._parsed(), self._parsed(oxygen=50.0, gas_number=2)]
+        stored = [self._stored(11), self._stored(12, oxygen=99.0)]
+
+        assert merge_mixture_fields(parsed, stored) is None
+
+    def test_a_fraction_the_file_never_recorded_is_not_a_mismatch(self) -> None:
+        """The form filled in `DEFAULT_MIXTURE` because the file said nothing. That
+        difference is not evidence the diver edited anything."""
+        parsed = [self._parsed(oxygen=None, helium=None)]
+        stored = [self._stored(11, oxygen=21.0)]
+
+        assert merge_mixture_fields(parsed, stored) == [(11, {"po2_limit": 1.4, "gas_number": 1, "role": None})]
+
+
+class TestScalarsAreWrittenAtAttach:
+    """The import path owns these columns outright - the form cannot set them at all
+    (`DiveTechScalars` is on the read shapes only), so this is the only write."""
+
+    @staticmethod
+    def _session() -> AsyncMock:
+        row = SimpleNamespace(uuid=uuid7(), updated_at=None)
+        result = MagicMock()
+        result.one_or_none.return_value = None
+        result.one.return_value = row
+        result.rowcount = 0
+
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=result)
+        return db
+
+    @staticmethod
+    async def _attach(db: AsyncMock, content: bytes) -> None:
+        user_uuid = uuid7()
+        await store_dive_file(
+            db,
+            user_id=1,
+            user_uuid=user_uuid,
+            dive_id=7,
+            upload=UploadFile(filename="export.xml", file=io.BytesIO(content)),
+            file_token=create_dive_file_token(
+                user_uuid=user_uuid,
+                sha256=hashlib.sha256(content).hexdigest(),
+                parser_key=SuuntoXmlParser.key,
+            ),
+        )
+
+    @staticmethod
+    def _captured_writes(monkeypatch) -> list[dict]:
+        """What the attach path handed `store_tech_scalars`, if anything.
+
+        Captured at that seam rather than by inspecting the emitted `UPDATE`: the
+        decision under test is *what the import decided to write*, and reading it back
+        off SQLAlchemy's statement internals would pin the assertion to how the write is
+        spelled rather than to what it says.
+        """
+        writes: list[dict] = []
+
+        async def capture(db, *, dive_id, scalars, commit=False):
+            writes.append(scalars)
+
+        monkeypatch.setattr("src.app.services.dive_files.store_tech_scalars", capture)
+        return writes
+
+    @pytest.mark.asyncio
+    async def test_an_export_that_records_exposure_writes_it(self, monkeypatch) -> None:
+        writes = self._captured_writes(monkeypatch)
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}"><CnsEnd>20</CnsEnd><SurfacePressure>105700</SurfacePressure></Dive>
+""".encode()
+
+        await self._attach(self._session(), content)
+
+        assert writes == [
+            {
+                "cns_start": None,
+                "cns_end": 20.0,
+                "otu_start": None,
+                "otu_end": None,
+                "surface_pressure_bar": 1.057,
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_an_export_that_records_none_clears_what_was_there(self, monkeypatch) -> None:
+        """Unconditional, unlike the profile write beside it: leaving a previous
+        export's CNS on a dive whose file has been replaced would attribute a reading to
+        bytes it didn't come from."""
+        writes = self._captured_writes(monkeypatch)
+        content = f'<?xml version="1.0" encoding="utf-8"?><Dive xmlns="{SUUNTO_NS}"/>'.encode()
+
+        await self._attach(self._session(), content)
+
+        assert writes == [dict.fromkeys(TECH_SCALAR_FIELDS)]
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_header_leaves_the_dive_alone(self, monkeypatch) -> None:
+        """ "Couldn't read" is not "the file says nothing", so nothing is written and the
+        upload still succeeds - the file is what a later backfill needs."""
+        writes = self._captured_writes(monkeypatch)
+        monkeypatch.setattr("src.app.services.dive_files.extract_tech_scalars", lambda parser, data: None)
+
+        await self._attach(self._session(), b"<Dive/>")
+
+        assert writes == []

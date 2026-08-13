@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
+from ...schemas.dive_mixture import GasRole
 from ...schemas.dive_profile import ParsedPressureSeries, ParsedProfileSchema
 from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from .base import DiveParser
@@ -95,7 +96,23 @@ def _celsius_tenths(kelvin: float | None) -> int | None:
     return int(tenths.quantize(Decimal(1), rounding=ROUND_HALF_UP))
 
 
-def _parse_mixture(gas: dict[str, Any]) -> DiveMixtureSchema:
+# `Gases[].State` onto `GasRole`. A normalization table rather than a `GasRole(state)`
+# cast, because the two vocabularies are not the same one: this field is Suunto's, and
+# every value it can hold that we have not seen must come out `None` rather than raise or
+# become a role we invented. "Primary" is the only value the corpus has (18 of 18 gases
+# across the D5 exports), so the table is honest about being nearly empty - the point is
+# the lookup's *shape*, which stays right when a "Deco"/"Diluent" export finally turns up.
+#
+# Note this is a different thing from the `State` under `DiveHeader`/`DiveFooter`, which
+# reads "OC" (open circuit - a loop type, not a role) and which this parser never touches.
+_GAS_ROLE_BY_STATE = {"primary": GasRole.BOTTOM}
+
+
+def _role(state: Any) -> GasRole | None:
+    return _GAS_ROLE_BY_STATE.get(state.strip().lower()) if isinstance(state, str) else None
+
+
+def _parse_mixture(gas: dict[str, Any], gas_number: int) -> DiveMixtureSchema:
     """Map one `Gases[]` entry onto a `DiveMixture`, converting SI units as it goes.
 
     A key the entry omits stays `None` - an untransmitted backup cylinder really has no
@@ -104,11 +121,21 @@ def _parse_mixture(gas: dict[str, Any]) -> DiveMixtureSchema:
     """
     return DiveMixtureSchema(
         end_pressure=_round2_or_none(_pascals_to_bar(gas.get("EndPressure"))),
+        # Position in `Gases[]`, counted from 1. This block carries no `GasNumber` of
+        # its own, unlike the sample-reconstructed path below, and 1 is what the same D5
+        # dive's `Cylinders[].GasNumber` reports for its single cylinder - so the two
+        # agree where both exist. A *Suunto Ocean* numbers from 0, but an Ocean export
+        # has no `Gases` block at all and never reaches here.
+        gas_number=gas_number,
         helium=_round2_or_none(_fraction_to_percent(gas.get("Helium"))),
         # Left for the user to fill in themselves rather than parsed - see
         # DECISIONS.md.
         name=None,
         oxygen=_round2_or_none(_fraction_to_percent(gas.get("Oxygen"))),
+        # Pascal here, unlike the XML export's plain bar: 140000 is 1.4 bar. Same
+        # conversion as the cylinder pressures beside it.
+        po2_limit=_round2_or_none(_pascals_to_bar(gas.get("PO2"))),
+        role=_role(gas.get("State")),
         start_pressure=_round2_or_none(_pascals_to_bar(gas.get("StartPressure"))),
         volume=_cubic_meters_to_liters(gas.get("TankSize")),
     )
@@ -269,9 +296,19 @@ def _mixtures_from_cylinders(samples: list[dict[str, Any]], dive_end: datetime |
     return [
         DiveMixtureSchema(
             end_pressure=_round2_or_none(_pascals_to_bar(pressures[number][1])) if number in pressures else None,
+            # The file's own number, not a position - this is the one export shape that
+            # states it, in the `GasSwitch`/`Cylinders[]` entries these cylinders were
+            # reconstructed from, and it is the same number `_parse_samples` labels the
+            # pressure channels with. Keeping it means a mixture row and its curve on the
+            # chart refer to the same cylinder by the same name.
+            gas_number=number,
             helium=None,
             name=None,
             oxygen=None,
+            # This shape records neither, for the same reason it records no gas fraction:
+            # there is no `Gases` block anywhere in it.
+            po2_limit=None,
+            role=None,
             start_pressure=_round2_or_none(_pascals_to_bar(pressures[number][0])) if number in pressures else None,
             volume=None,
         )
@@ -286,7 +323,7 @@ class SuuntoJsonParser(DiveParser):
     backend models (`models/dive.py`, `models/dive_mixture.py`), plus -
     separately, via `parse_profile` - the per-sample depth/temperature/tank-
     pressure curves stored as `DiveProfile`. The export has plenty of other
-    fields (tissue-loading/CNS/OTU stats, algorithm metadata, GPS track,
+    fields (per-compartment tissue loading, algorithm metadata, GPS track,
     battery telemetry) with nowhere to persist them, so they aren't parsed at
     all. Gas mixtures come from
     `DeviceLog.Header.Diving.Gases` (present in Suunto D5-style exports; absent
@@ -442,7 +479,9 @@ class SuuntoJsonParser(DiveParser):
         # fractions and tank size that telemetry alone can't. Only when it is absent
         # entirely (the 2026 Ocean shape, which has no `Diving` block at all) are the
         # cylinders reconstructed from the sample stream.
-        mixtures = [_parse_mixture(gas) for gas in diving.get("Gases") or []]
+        mixtures = [
+            _parse_mixture(gas, gas_number) for gas_number, gas in enumerate(diving.get("Gases") or [], start=1)
+        ]
         if not mixtures:
             # Best-effort enrichment, so it degrades to "no mixtures" rather than taking
             # the import down with it. Unlike the header fields above, this walks the
@@ -480,12 +519,31 @@ class SuuntoJsonParser(DiveParser):
                 if celsius is not None
             ]
 
+        start_tissue = diving.get("StartTissue") or {}
+        end_tissue = diving.get("EndTissue") or {}
+
         return ParsedDiveSchema(
             avg_depth=header.get("DepthAverage", depth.get("Avg")),
             # The colder of the two recorded extremes is the best available proxy
             # for temperature at depth, since the JSON header doesn't break
             # temperature down by phase of the dive the way the XML export does.
             bottom_temperature=min(temperatures_celsius) if temperatures_celsius else None,
+            # **CNS is a 0-1 fraction here and whole percent in the XML export**, which
+            # is invisible until the same dive is read both ways: `EndTissue.CNS: 0.069`
+            # against `<CnsEnd>7</CnsEnd>`. Storing it unconverted would report a 69 %
+            # oxygen clock as 0.069 %. OTU needs no conversion - it is the same absolute
+            # count in both (17.89 against a rounded 18 on that dive).
+            #
+            # Rounded to 2 places like the gas readings, for the same reason: this export
+            # writes OTU as a full float32 (`17.89002799987793`), and no dive computer
+            # accounts oxygen exposure to a hundred-billionth of an OTU.
+            cns_start=_round2_or_none(_fraction_to_percent(start_tissue.get("CNS"))),
+            cns_end=_round2_or_none(_fraction_to_percent(end_tissue.get("CNS"))),
+            otu_start=_round2_or_none(start_tissue.get("OTU")),
+            otu_end=_round2_or_none(end_tissue.get("OTU")),
+            # Pascal, the same integer the XML export writes into its own
+            # `<SurfacePressure>`.
+            surface_pressure_bar=_pascals_to_bar(diving.get("SurfacePressure")),
             dive_number=None,
             # D5-style exports report this as `Duration` rather than `DiveTime`.
             duration=_round_or_none(header.get("DiveTime", header.get("Duration"))),
