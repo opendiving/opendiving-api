@@ -138,6 +138,46 @@ class DiveFileInfo(PublicUUIDSchema):
     updated_at: datetime | None = None
 
 
+class DiveTankGasUse(BaseModel):
+    """One cylinder's consumption on a multi-cylinder dive.
+
+    Only ever produced for a dive whose import recorded which gas was breathed when (see
+    `dive_profile.gas_attribution`); the time and the mean depth here are that cylinder's
+    own, not the dive's. `gas_number` is what joins this back to the `DiveMixture` it was
+    computed from - the client already has the mixtures, so nothing about the gas itself
+    is repeated here.
+    """
+
+    gas_number: Annotated[
+        int, Field(examples=[1], description="The cylinder this describes, as `DiveMixture.gas_number` labels it")
+    ]
+    gas_used: Annotated[
+        float, Field(examples=[1863.4], description="Gas breathed from this cylinder, in liters at surface pressure")
+    ]
+    rmv: Annotated[
+        float,
+        Field(
+            examples=[14.29],
+            description="Respiratory minute volume while breathing this cylinder, in liters per minute at surface "
+            "pressure",
+        ),
+    ]
+    sac_bar_per_min: Annotated[
+        float, Field(examples=[1.19], description="This cylinder's own surface air consumption, in bar per minute")
+    ]
+    seconds_on_gas: Annotated[
+        int, Field(examples=[2355], description="How long this cylinder was breathed, in seconds")
+    ]
+    mean_depth: Annotated[
+        float,
+        Field(
+            examples=[24.8],
+            description="Mean depth over the time this cylinder was breathed, in meters - the depth its consumption "
+            "was normalized from, and not the dive's average depth",
+        ),
+    ]
+
+
 class DiveGasUse(BaseModel):
     """Surface-normalized gas consumption for a dive, derived from its duration, average
     depth and cylinder pressures - see `services/dive_gas.py` for the arithmetic and for
@@ -147,6 +187,11 @@ class DiveGasUse(BaseModel):
     enough to know what it consumed or it doesn't, and a half-populated version - litres
     used but no rate, say - would read as a number worth acting on when it isn't. Divers
     plan gas off these figures.
+
+    The figures describe **the cylinders accounted for**, which on a single-cylinder dive
+    is the dive. On a multi-cylinder one they are the totals over `tanks`, and
+    `attributed_seconds`/`duration_seconds` are what say how much of the dive that covers -
+    a staged deco bottle with no pressures logged contributes neither its gas nor its time.
     """
 
     gas_used: Annotated[float, Field(examples=[1800.0], description="Gas breathed, in liters at surface pressure")]
@@ -159,11 +204,42 @@ class DiveGasUse(BaseModel):
         ),
     ]
     sac_bar_per_min: Annotated[
-        float,
+        float | None,
         Field(
             examples=[1.19],
             description="Surface air consumption in bar per minute. Only meaningful alongside this dive's cylinder "
-            "volume, but it's what a pressure gauge actually shows.",
+            "volume, but it's what a pressure gauge actually shows. **Null on a multi-cylinder dive**, where there "
+            "is no such thing: 10 bar out of an 11 L stage and 10 bar out of a 22 L twinset are different amounts of "
+            "gas. Each entry in `tanks` carries its own, which is meaningful because a tank has one volume.",
+        ),
+    ]
+    tanks: Annotated[
+        list[DiveTankGasUse],
+        Field(
+            default_factory=list,
+            description="Per-cylinder breakdown, on a dive whose import recorded which gas was breathed when. Empty "
+            "on a single-cylinder dive, where the figures above already describe the one tank. May hold a single "
+            "entry: a two-cylinder dive whose deco bottle logged no pressures is the commonest shape there is.",
+        ),
+    ]
+    attributed_seconds: Annotated[
+        int | None,
+        Field(
+            default=None,
+            examples=[2355],
+            description="Seconds of the dive the figures above account for, when they come from `tanks`. Null when "
+            "the dive has one cylinder and the whole dive is accounted for.",
+        ),
+    ]
+    duration_seconds: Annotated[
+        int | None,
+        Field(
+            default=None,
+            examples=[4619],
+            description="What `attributed_seconds` is a fraction of: the span the dive's profile recorded, which is "
+            "what the attribution ran over. Deliberately not the dive's own `duration`, which is the diver's record "
+            "and may have been edited - the two halves of the fraction have to come from the same place to be worth "
+            "anything. Null alongside `attributed_seconds`.",
         ),
     ]
 
@@ -185,7 +261,14 @@ class DiveGasUsePoint(BaseModel):
             description="The dive's own offset-aware start time, exactly as `DiveRead` reports it - the x axis",
         ),
     ]
-    avg_depth: Annotated[float, Field(description="Average depth the consumption was normalized from, in meters")]
+    avg_depth: Annotated[
+        float,
+        Field(
+            description="The dive's own average depth, in meters - a label for the point, not necessarily the depth "
+            "the figure was normalized from. On a single-cylinder dive it is both; on a multi-cylinder one each tank "
+            "was normalized against its own `mean_depth`, which can be a long way from this.",
+        ),
+    ]
     gas_use: DiveGasUse
 
 

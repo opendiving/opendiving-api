@@ -5,6 +5,10 @@ Deliberately its own module rather than an addition to `parsed_dive.py`: that on
 of readings the browser has no use for while filling in a form, and it would have to be
 posted back to be stored - which would make the stored samples client-supplied and
 reopen the exact trust problem the parse token exists to close.
+
+One shape here is neither wire nor parser: `GasAttribution` is what a summary *column*
+holds. It lives here rather than in the service because it is read back out of JSONB and
+wants validating on the way in, which is what the models in this package are for.
 """
 
 import uuid as uuid_pkg
@@ -160,6 +164,33 @@ class ParsedProfileSchema(BaseModel):
             _validate_series(cylinder.t, cylinder.v, f"pressure[gas {cylinder.gas_number}]")
         _validate_events(self.events)
         return self
+
+
+class GasAttribution(BaseModel):
+    """How long one cylinder was breathed, and how deep - the answer a multi-tank dive
+    needs and that nothing else in the log records.
+
+    **Stored, not served.** This is the shape of `dive_profile.gas_attribution`, derived
+    once at extraction and read back by `services/dive_gas.py`; no response body carries
+    it. A Pydantic model rather than a plain dataclass precisely because it is read back
+    out of JSONB, where a row written by an older extractor is a real possibility - the
+    validation is the seam that turns a stale payload into an error at the read rather
+    than an `AttributeError` three frames later.
+
+    One entry per gas number, not per stretch on it: a diver who goes back to their back
+    gas after a deco stop has two intervals on it and one cylinder, and it is the cylinder
+    the pressures belong to. `seconds` is therefore the total time on that gas and
+    `mean_depth_cm` the mean over all of it.
+
+    No pressures here, deliberately - see `compute_multi_tank_gas_use`. What this carries
+    is exactly what the profile knows and the mixtures don't.
+    """
+
+    gas_number: int
+    seconds: int
+    # In the same centimeters as the depth channel, and for the same reason: it is a depth,
+    # and it is a mean of depth samples.
+    mean_depth_cm: int
 
 
 class DiveProfileSeries(BaseModel):
