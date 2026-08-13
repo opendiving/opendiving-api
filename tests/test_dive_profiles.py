@@ -21,6 +21,7 @@ from src.app.services.dive_parsers.suunto_json import SuuntoJsonParser
 from src.app.services.dive_parsers.suunto_xml import SuuntoXmlParser
 from src.app.services.dive_profiles import (
     MAX_EVENTS,
+    MAX_LABEL_CHARS,
     MAX_POINTS_PER_CHANNEL,
     ExistingProfileRow,
     LoadedProfile,
@@ -870,6 +871,41 @@ class TestNormalize:
             (50, ProfileEventType.SAFETY_STOP),
             (50, ProfileEventType.OTHER),
         ]
+
+    def test_truncates_a_label_rather_than_rejecting_it(self):
+        """`label` is the only field in the payload carrying text straight off an uploaded
+        file, so it is the only one nothing else bounds - `MAX_EVENTS` counts markers and
+        every channel is capped by point count. Unbounded, a 5 MB export of long alert
+        strings becomes a 5 MB JSONB row on a table designed for tens of KB.
+
+        Truncated rather than refused: `extract_profile` must never fail the upload it rode
+        in on, so a file whose one long alert took its depth curve with it is the outcome
+        this avoids.
+        """
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[0.0], v=[10]),
+            events=[ParsedProfileEvent(t=0.0, type=ProfileEventType.OTHER, label="x" * 5_000)],
+        )
+
+        profile = normalize(parsed)
+
+        assert profile.events[0].label == "x" * MAX_LABEL_CHARS
+        # Far past any device's wording - the longest in the corpus is 28 characters.
+        assert MAX_LABEL_CHARS == 120
+
+    def test_an_event_after_the_last_sample_keeps_its_own_time(self):
+        """The clamp is deliberately one-sided. Zero is where every format's dive begins, so
+        pinning to it lands on a real boundary; there is no such boundary at the other end,
+        and dragging a late marker back onto the last sample would invent a time for it."""
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[0.0, 10.0], v=[124, 256]),
+            events=[ParsedProfileEvent(t=90.0, type=ProfileEventType.BOOKMARK)],
+        )
+
+        profile = normalize(parsed)
+
+        assert [event.t for event in profile.events] == [90]
+        assert profile.duration_seconds == 10
 
     def test_the_ceiling_shares_the_depth_channels_origin(self):
         parsed = SuuntoXmlParser.parse_profile(

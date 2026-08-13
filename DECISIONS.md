@@ -2451,6 +2451,25 @@ handful of bytes. Events are truncated rather than bucketed: there is no "highes
 chart showing *some* of a dive's switches with no way to say so is worse than one showing none, so
 hitting the cap is logged.
 
+**A count cap is only half a bound, because `label` is the one field in the payload that isn't a
+number.** Every channel is bounded by `MAX_POINTS_PER_CHANNEL`, and every other value is an integer;
+`label` is text copied straight off an uploaded file, so without a bound of its own the payload's
+real ceiling is `MAX_DIVE_FILE_SIZE` - a 2.4 MB export of long alert strings measured at 2.4 MB
+stored, essentially 1:1, on a table whose whole design assumes tens of KB and serves them whole on
+every `GET /dive/{uuid}/profile`. `MAX_LABEL_CHARS = 120` closes it, and the same file now stores 10
+KB. Self-inflicted and per-user rather than cross-tenant, but the row outlives the upload.
+
+Truncated in `_rebase_events` rather than bounded by a `Field(max_length=...)`, which would raise:
+`extract_profile` must never fail the upload it rode in on, and a file whose one long alert took its
+depth curve down with it is precisely the outcome that contract exists to prevent. One place, so all
+three formats inherit it - the same discipline as `ceiling_cm`. 120 is far past any real device's
+wording: the longest in the corpus is `Mandatory Safety Stop Broken`, at 28.
+
+Worth flagging to the clients: this is the first parser-derived free-text string to reach a response
+body at all. `DiveMixture.name` is deliberately `None` from every parser (see *"Parsers report what
+a file recorded"*), so until now everything a client rendered from an import was a number or a value
+from a closed vocabulary. `label` is file-controlled text.
+
 ## `PROFILE_EXTRACTOR_VERSION` 2, and the manual DDL for the two summary columns
 
 `PROFILE_EXTRACTOR_VERSION` went 1 → 2, because the same bytes now yield different stored samples.

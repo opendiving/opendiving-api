@@ -267,9 +267,12 @@ class SuuntoXmlParser(DiveParser):
         """Group `DiveSamples/Dive.Sample` into one series per channel.
 
         Each channel gets its own time axis rather than sharing one: a sample element may
-        carry any subset of depth, temperature and tank pressure, so a shared axis would be
-        mostly nulls. Samples without a `Time` are skipped - a reading with no position on
-        the axis can't be plotted.
+        carry any subset of depth, deco ceiling, temperature and tank pressure, so a shared
+        axis would be mostly nulls. Samples without a `Time` are skipped - a reading with no
+        position on the axis can't be plotted.
+
+        Events do not come from here at all - this format keeps its gas changes on the
+        mixtures rather than on the samples. See `_gas_switches`.
         """
         depth_t: list[float] = []
         depth_v: list[int] = []

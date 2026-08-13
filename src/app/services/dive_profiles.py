@@ -1,4 +1,7 @@
-"""Extraction and storage for a dive's per-sample depth/temperature/pressure curves.
+"""Extraction and storage for a dive's per-sample curves and the events alongside them.
+
+Four channels - depth, deco ceiling, temperature and per-cylinder tank pressure - plus the
+moments a device marked rather than sampled: gas switches, stops, bookmarks and alerts.
 
 The **only** module that reads or writes `dive_profile.data` - the same seam discipline
 as `services/dive_files.py`, for the same reason: the payload's encoding is an
@@ -66,6 +69,15 @@ MAX_POINTS_PER_CHANNEL = 1200
 # approaches it: the worst dive in the corpus produces 17.
 MAX_EVENTS = 200
 
+# And how long one marker's `label` may be, which is what makes the cap above mean anything.
+# `label` is the only field in the payload carrying text straight off an uploaded file -
+# every channel is bounded by `MAX_POINTS_PER_CHANNEL` and every other value is a number -
+# so without this a 5 MB export of nothing but long alert strings becomes a 5 MB JSONB row,
+# on a table whose whole design assumes tens of KB and serves them whole on every read.
+# 120 is far past any device's wording: the longest in the corpus is "Mandatory Safety Stop
+# Broken", at 28.
+MAX_LABEL_CHARS = 120
+
 
 @dataclass(frozen=True, slots=True)
 class ProfileSeries:
@@ -110,6 +122,13 @@ class NormalizedProfile:
         `ceiling` sits next to `depth` because it is drawn on depth's axis rather than one
         of its own - a ceiling of 3 m has to land at the same y as a depth of 3 m, or the
         shaded no-ascent region wouldn't bound the curve it describes.
+
+        **Nothing in `src` reads this.** What ships is `get_profile_infos_for_dives`, which
+        derives the same list from which summary columns came back non-NULL - a row's own
+        account of itself, rather than one the extractor remembered. This is the same
+        ordering stated where it can be asserted directly against a profile in hand, and the
+        two are meant to agree; a test that finds them disagreeing has found a bug in the
+        column-derived one, which is the copy that matters.
         """
         present = []
         if self.depth is not None:
@@ -228,6 +247,16 @@ def _rebase_events(parsed: ParsedProfileSchema, origin: float) -> list[ProfileEv
     Phase 4's per-tank attribution has to begin from. There is nowhere else on a chart for
     "before the first reading" to go, so it goes at the start.
 
+    **The high end is deliberately not clamped**, and the asymmetry is the point rather than
+    an oversight. Zero is where the dive begins for every format, so pinning to it moves a
+    marker by a second or two onto a boundary that is real. There is no equivalent at the
+    other end: `duration_seconds` is the span of the *samples*, and a device goes on
+    recording after the last one - a Suunto Ocean writes 8 292 samples of which 395 carry
+    depth, and a FIT `user_marker` can be pressed after the final `record`. A marker there
+    happened when the file says it happened, and dragging it back onto the last sample would
+    invent a time to keep it on screen. A chart that draws past its x domain is the chart's
+    to clip.
+
     The origin is the *sample* channels' - see `normalize`. Events are sorted here rather
     than being required to arrive sorted, because unlike the sample channels there is only
     one stream of them and nothing a parser knows that this doesn't: the XML export lists
@@ -236,18 +265,24 @@ def _rebase_events(parsed: ParsedProfileSchema, origin: float) -> list[ProfileEv
     listed them in.
 
     Deduped on the whole event, keeping the first. Rounding onto integer seconds is what
-    makes this necessary: a device that records the same occurrence twice within a second -
-    a `Notify` and the matching `State` transition, in the Suunto JSON exports - would
-    otherwise stack two identical ticks on one pixel.
+    makes this necessary: the same `GasSwitch` can arrive under both `Events` and
+    `DiveEvents` on one Suunto JSON sample, and two samples a fraction of a second apart can
+    repeat one `Notify` - either would otherwise stack two identical ticks on one pixel.
+
+    `label` is truncated here rather than bounded on the schema, which would raise: a file
+    whose one long alert took its depth curve down with it is exactly what the never-fail
+    contract on `extract_profile` exists to prevent. One place, so all three formats inherit
+    it, the same way `ceiling_cm` holds the zero rule.
     """
     seen: set[tuple[int, ProfileEventType, int | None, str | None]] = set()
     ordered: list[ProfileEvent] = []
     for event in sorted(parsed.events, key=lambda event: event.t):
-        key = (max(0, round(event.t - origin)), event.type, event.gas_number, event.label)
+        label = event.label[:MAX_LABEL_CHARS] if event.label is not None else None
+        key = (max(0, round(event.t - origin)), event.type, event.gas_number, label)
         if key in seen:
             continue
         seen.add(key)
-        ordered.append(ProfileEvent(t=key[0], type=event.type, gas_number=event.gas_number, label=event.label))
+        ordered.append(ProfileEvent(t=key[0], type=event.type, gas_number=event.gas_number, label=label))
     return ordered
 
 
