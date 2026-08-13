@@ -68,3 +68,24 @@ class DiveParser(ABC):
                 at all is `None`, not an error.
         """
         return None
+
+    @classmethod
+    def parse_all(cls, content: bytes) -> tuple[ParsedDiveSchema, ParsedProfileSchema | None]:
+        """Both extractions over one set of bytes, for a caller that wants both.
+
+        Exists because `PUT /dive/{uuid}/file` always wants both, and for a format whose
+        two entry points each decode the whole file that costs two decodes. Overriding it
+        is how a parser says "I can do these together for less than the sum of the parts";
+        this default says the opposite, which is the right answer for a format cheap
+        enough that sharing would be machinery for nothing.
+
+        **Not** an all-or-nothing replacement for the two methods it calls: `_extract_all`
+        falls back to them when this raises, precisely so a file whose samples are
+        malformed still yields its header. So an override may fail both halves together -
+        the caller repairs that - but must not return a *worse* result than the two
+        methods would have.
+
+        Raises:
+            UnsupportedDiveFileError, DiveParseError: as `parse`/`parse_profile` do.
+        """
+        return cls.parse(content), cls.parse_profile(content)

@@ -37,16 +37,24 @@ from src.app.services.dive_files import (
     MAX_DIVE_FILE_SIZE,
     TECH_SCALAR_FIELDS,
     _ExistingRow,
+    _extract_all,
     backfill_tech_fields,
     extract_tech_scalars,
     merge_mixture_fields,
     reconcile,
     store_dive_file,
 )
-from src.app.services.dive_parsers import PARSER_BY_KEY, UnsupportedDiveFileError, parse_dive_file_with_parser
+from src.app.services.dive_parsers import (
+    PARSER_BY_KEY,
+    DiveParseError,
+    UnsupportedDiveFileError,
+    parse_dive_file_with_parser,
+)
 from src.app.services.dive_parsers.base import DiveParser
+from src.app.services.dive_parsers.fit import FitParser
 from src.app.services.dive_parsers.suunto_json import SuuntoJsonParser
 from src.app.services.dive_parsers.suunto_xml import SuuntoXmlParser
+from tests.helpers.fit import dive_fit_file
 
 SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
 
@@ -372,6 +380,91 @@ class TestProfileExtractionReleasesTheTransaction:
         assert calls.index("release") < calls.index("extract"), (
             f"the read transaction is still open during extraction: {calls}"
         )
+
+
+class TestExtractAllSharesOneDecode:
+    """`_extract_all` goes through `parse_all`, and falls back when that fails.
+
+    The point of the fallback is the property the two extractions have separately and
+    `parse_all` cannot: a file whose samples are malformed still yields its header
+    scalars. Losing it would be invisible - the dive would just quietly stop carrying
+    CNS and OTU whenever its profile was unreadable.
+    """
+
+    XML = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}"><CnsEnd>20</CnsEnd><SurfacePressure>105700</SurfacePressure></Dive>
+""".encode()
+
+    def test_prefers_the_shared_decode(self) -> None:
+        calls: list[str] = []
+
+        class Sharing(SuuntoXmlParser):
+            @classmethod
+            def parse_all(cls, content):
+                calls.append("parse_all")
+                return super().parse_all(content)
+
+        profile, scalars = _extract_all(Sharing, self.XML)
+
+        assert calls == ["parse_all"]
+        assert scalars is not None and scalars["cns_end"] == 20.0
+        assert profile is None  # this file carries no samples
+
+    def test_a_failed_shared_decode_still_yields_the_half_that_works(self) -> None:
+        """The case the fallback exists for. A `parse_all` that dies takes both halves
+        with it; the two methods behind it do not, so the header survives."""
+
+        class BrokenTogether(SuuntoXmlParser):
+            @classmethod
+            def parse_all(cls, content):
+                raise DiveParseError("samples are unreadable, and this took the header too")
+
+        profile, scalars = _extract_all(BrokenTogether, self.XML)
+
+        assert profile is None
+        assert scalars is not None and scalars["cns_end"] == 20.0
+
+    def test_the_fallback_covers_an_unexpected_failure_too(self) -> None:
+        """Not just the two parser exceptions: an override is third-party code as far as
+        this function is concerned, and a `TypeError` out of it must not fail an upload
+        that the two methods behind it would have served."""
+
+        class Exploding(SuuntoXmlParser):
+            @classmethod
+            def parse_all(cls, content):
+                raise TypeError("an override with a bug in it")
+
+        _, scalars = _extract_all(Exploding, self.XML)
+
+        assert scalars is not None and scalars["cns_end"] == 20.0
+
+    def test_fit_decodes_once_where_it_used_to_decode_twice(self) -> None:
+        """The whole point of the override. Counted rather than timed - a wall-clock
+        assertion would be flaky on a loaded machine, and the scan count is the actual
+        claim."""
+        scans = 0
+        original = FitParser._scan.__func__  # type: ignore[attr-defined]
+
+        class Counting(FitParser):
+            @classmethod
+            def _scan(cls, content):
+                nonlocal scans
+                scans += 1
+                return original(cls, content)
+
+        _extract_all(Counting, dive_fit_file(end_cns=9, o2_toxicity=23))
+
+        assert scans == 1
+
+    def test_the_shared_decode_returns_what_the_two_methods_would_have(self) -> None:
+        """Pinned on FIT specifically, since it is the one parser where `parse_all` is a
+        different code path rather than a delegation."""
+        content = dive_fit_file(end_cns=9, o2_toxicity=23)
+
+        dive, samples = FitParser.parse_all(content)
+
+        assert dive == FitParser.parse(content)
+        assert samples == FitParser.parse_profile(content)
 
 
 class TestTechScalarExtraction:

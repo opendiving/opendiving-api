@@ -34,6 +34,7 @@ from .dive_profiles import (
     NormalizedProfile,
     delete_profile_for_dive,
     extract_profile,
+    finalize_profile,
     get_existing_profile,
     should_extract,
     store_profile,
@@ -192,8 +193,35 @@ def _extract_all(
     separately, but they are always wanted together and both are pure CPU - so pairing
     them here keeps `store_dive_file` to a single thread handoff instead of two, and
     keeps the "released the read transaction first" reasoning applying to one call.
+
+    Goes through `parse_all` so a parser that can do both off one decode does: FIT
+    otherwise scans the file twice, at roughly double the CPU of the single pass it
+    needs. On any failure it falls back to the two independent extractions, which is
+    what preserves their most useful property - a file whose *samples* are malformed
+    still yields its header scalars, and vice versa. The fallback re-decodes, and that
+    is the right trade: it costs a second pass only on a file that was already failing,
+    where nothing about the latency budget matters any more.
     """
-    return extract_profile(parser, content), extract_tech_scalars(parser, content)
+    try:
+        parsed, profile = parser.parse_all(content)
+    except Exception:
+        # Deliberately bare: `parse_all` promises the two parser exceptions, but the
+        # fallback is correct for anything at all and swallowing more here costs nothing
+        # - `extract_profile` and `extract_tech_scalars` do their own logging, with the
+        # per-half message that says which of the two actually went wrong.
+        return extract_profile(parser, content), extract_tech_scalars(parser, content)
+
+    try:
+        scalars: dict[str, float | None] | None = {name: getattr(parsed, name) for name in TECH_SCALAR_FIELDS}
+    except AttributeError:
+        logger.exception("Unexpected error extracting tech scalars from a %s file", parser.key)
+        scalars = None
+
+    try:
+        return finalize_profile(parser, profile), scalars
+    except Exception:
+        logger.exception("Unexpected error extracting a profile from a %s file", parser.key)
+        return None, scalars
 
 
 async def store_tech_scalars(

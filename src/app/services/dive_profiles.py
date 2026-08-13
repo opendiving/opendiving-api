@@ -284,19 +284,30 @@ def extract_profile(parser: type[DiveParser], content: bytes) -> NormalizedProfi
     swallowed, and the dive simply has no profile until a backfill run picks it up.
     """
     try:
-        parsed = parser.parse_profile(content)
-        if parsed is None:
-            return None
-        normalized = normalize(parsed)
-        if normalized is None:
-            return None
-        return downsample(normalized)
+        return finalize_profile(parser, parser.parse_profile(content))
     except DiveParseError:
         logger.warning("Profile extraction failed for a %s file: malformed samples", parser.key, exc_info=True)
         return None
     except Exception:
         logger.exception("Unexpected error extracting a profile from a %s file", parser.key)
         return None
+
+
+def finalize_profile(parser: type[DiveParser], parsed: ParsedProfileSchema | None) -> NormalizedProfile | None:
+    """Normalize and cap an already-parsed profile.
+
+    Split out of `extract_profile` for `_extract_all`, which gets its `parsed` from
+    `parse_all` and would otherwise have to repeat these three steps - and repeat them
+    exactly, since a profile normalized one way at attach and another way in a backfill
+    is the kind of drift nothing would notice. **Raises**, unlike its caller: the
+    never-raises promise belongs to the wrappers, and this is the shared middle.
+    """
+    if parsed is None:
+        return None
+    normalized = normalize(parsed)
+    if normalized is None:
+        return None
+    return downsample(normalized)
 
 
 def should_extract(

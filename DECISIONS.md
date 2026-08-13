@@ -3701,22 +3701,45 @@ stale numbers stay. `backfill_tech_fields` is the path for that — it re-reads 
 every run precisely so that it needs no version to bump — so a fix of that shape ships with a
 backfill run, not with instructions to re-upload.
 
-## `extract_tech_scalars` re-parses, and on FIT that means decoding the file twice
+## `parse_all` exists so FIT decodes the file once, and `_extract_all` falls back when it can't
 
-`_extract_all` pairs `extract_profile` and `extract_tech_scalars` into one `run_in_threadpool` hop.
-Both take the same bytes, and on FIT both reach `FitParser._scan` — `parse` and `parse_profile` each
-call it — so the file is decoded once per extraction. Measured on a 26 KB export from the corpus: 55
-ms + 58 ms, against 58 ms for a single scan feeding both. It scales with `_MAX_FRAMES` up to the
-~1.5 s the profile extraction is already budgeted at, so worst-case attach latency roughly doubles
-and one threadpool worker is held for both passes. The two Suunto parsers are cheap enough that it
-does not matter there.
+`_extract_all` pairs the profile and the tech scalars into one `run_in_threadpool` hop. Both take
+the same bytes, and on FIT both used to reach `FitParser._scan` — `parse` and `parse_profile` each
+call it — so the file was decoded once per extraction. Measured on a 26 KB export from the corpus:
+55 ms + 58 ms, against 58 ms for a single scan feeding both, and it scales with `_MAX_FRAMES` up to
+the ~1.5 s the profile extraction is already budgeted at. So worst-case attach latency roughly
+doubled and one bounded threadpool worker was held for both passes. The two Suunto parsers are 2–11
+ms and were never the problem.
 
-Left as it is for now, and recorded rather than quietly tolerated, because collapsing it is a real
-change rather than a tidy-up. The two extractions currently **fail independently**: a file whose
-sample stream is malformed still yields its header scalars, which is why a dive can carry CNS and
-OTU with no profile. A single `parse_all` entry point returning both has to preserve that or drop it
-on purpose, and the answer is not obvious — for FIT they share the scan and would fail together
-anyway, while for the Suunto parsers they genuinely are independent code paths.
+`DiveParser.parse_all` is the seam. Its default implementation is `parse()` + `parse_profile()` —
+the honest answer for a format where sharing would be machinery for nothing, and what both Suunto
+parsers keep. `FitParser` overrides it to scan once. `_extract_all` measures 1.83× faster on FIT and
+returns output identical to the old pair on all 420 real files in the corpus.
+
+**The trade-off this was first written up as needing is smaller than it looked**, and the first
+version of this section overstated it. It said a single entry point had to preserve the two
+extractions' independent failure "or drop it on purpose, and the answer is not obvious". Splitting
+the independence into its two levels makes it obvious:
+
+- **At the decode.** `_scan` is a pure function of the bytes, so a file that fails it fails it for
+  both entry points anyway. FIT's independence *at this level was already notional* — both halves
+  returned `None`, just with two log lines. Sharing the scan gives up nothing real.
+- **At the interpretation.** `_parse_dive` raising where `_parse_samples` would not is a genuine
+  case, and it is preserved by guarding the two steps separately inside the override rather than
+  under one `try`. Verified alongside it: neither step consumes the scan, so the two orderings and
+  the un-shared calls all produce identical results.
+
+What is left over is that an override *can* still fail both halves together — the shared scan, or a
+bug in the override itself. `_extract_all` repairs that by falling back to the two independent
+extractions on any exception, so the property survives end to end: a file whose samples are
+malformed still yields its header scalars. The fallback re-decodes, which is the right trade, since
+it costs a second pass only on a file that was already failing and whose latency no longer matters.
+The bare `except` there is deliberate — an override is effectively third-party code from that
+function's point of view, and the fallback is correct for anything it might raise.
+
+`TestExtractAllSharesOneDecode` pins all of it, including a scan **count** rather than a wall-clock
+time: timing assertions are flaky on a loaded machine, and one-scan-not-two is the actual claim.
+Neutering the override makes it fail with `assert 2 == 1`.
 
 ## FIT fixtures are written, not committed as blobs
 
