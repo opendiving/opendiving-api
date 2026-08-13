@@ -2332,6 +2332,182 @@ error above.
 Both `_DIVE_CONSTRAINT_MESSAGES` (`api/v1/dives.py`) and `_MIXTURE_CONSTRAINT_MESSAGES` gained
 entries, so a violation surfaces as a sentence naming the field rather than a raw 500.
 
+## The deco ceiling is a fourth channel, on depth's axis and depth's scale
+
+`dive_profile.data` gained `"ceiling": {t, v}`, and `CEILING_SCALE` is defined as `DEPTH_SCALE`
+rather than as a number of its own. A ceiling *is* a depth - the shallowest the diver may go - and
+it is drawn as a shaded region bounding the depth curve, so a ceiling of 3 m and a depth of 3 m have
+to be the same integer or the shading would not line up with the line it describes. Named all the
+same, so a reader of the payload does not have to know they are the same constant.
+
+**A ceiling of zero is not a ceiling**, and `ceiling_cm` in `dive_parsers/channels.py` is the one
+place that judgement is made, so the three formats cannot disagree about the same dive. Zero means
+"you may surface", which is the absence of an obligation rather than an obligation at 0 m; stored as
+a reading it would draw a flat line along the surface of every no-deco dive in the log.
+
+The corpus is what settles that this is a reading of nothing rather than a reading, because the two
+Suunto exports write the same fact two different ways:
+
+|                       | DM5 XML                     | JSON export of the same dive |
+| --------------------- | --------------------------- | ---------------------------- |
+| No decompression owed | `<Ceiling i:nil="true"/>`   | `"Ceiling": 0`               |
+| Owed a stop           | `<Ceiling>3.02</Ceiling>`   | `"Ceiling": 3.02`            |
+| Across the corpus     | 1 760 readings, 3.0-15.44 m | same dives, same readings    |
+
+Not one of the 384 XML exports writes a zero. Read literally, the JSON twin of a no-deco dive would
+grow a ceiling channel its XML twin doesn't have - which file the diver happened to import would
+decide whether their dive appears to have had a decompression obligation. With the rule applied, all
+three deco dives that exist as both files produce **identical** channels, to the reading:
+`Dive_2025-06-03-1215.xml` is 266 samples peaking at 13.11 m either way.
+
+This does not contradict *"A zero cylinder pressure is not a reading"* or *"Parsers report what a
+file recorded"*; it is a third case and worth keeping distinct. A zero pressure is dropped because
+the device wrote a number where it had **measured nothing**. A zero helium fraction is kept because
+the device measured and the answer was zero. A zero ceiling is dropped because the device measured,
+the answer was zero, and *for this quantity zero is the absence of the thing being measured*. Depth
+is the counter-example that keeps the distinction honest: a Suunto Ocean records a real 0.0 m at the
+surface, so `scaled_int_or_none` stays faithful to a zero and only `ceiling_cm` doesn't.
+
+Only 11 of 384 XML exports carry a ceiling at all, which is the shape to expect: this channel is
+absent from every recreational dive and is the whole point of the feature on the few that aren't.
+
+FIT's ceiling is **`record.next_stop_depth`** - the depth of the next required stop, scaled by the
+global profile like `depth` beside it. Its three neighbours in that message (`next_stop_time`,
+`time_to_surface`, `ndl_time`) all measure durations, and reading one of them as a depth is the
+mistake the test guards. No file in the corpus writes the field at all, which is the same position
+`tank_update` was in when it was implemented, and it is tested the same way - through the in-memory
+writer in `tests/helpers/fit.py`, per *"FIT fixtures are written, not committed as blobs"*.
+
+`max_ceiling_cm` is the summary column, and `channels` derives `ceiling` from it being non-NULL -
+the same "a column saying which curves a row carries is a column that can disagree with the row"
+rule the other extremes follow.
+
+## Profile events are a closed vocabulary, and Suunto's `<Marks>` is deliberately not read into it
+
+`dive_profile.data` gained `"events": [{t, type, gas_number?, label?}]` with
+`type ∈ {gas_switch, deep_stop, safety_stop, bookmark, other}` (`ProfileEventType`). Closed, like
+`GasRole`, and for the same reason: three formats spell the same occurrence three ways and a chart
+has to know what it is drawing. `other` carries the device's own wording in `label`, and
+`_validate_events` **rejects an `other` without one** - an unlabelled `other` is a tick that tells
+the diver nothing, which would mean a parser dropped the only thing it had to keep.
+
+Events are validated by their own function rather than by `_validate_series`. They share no
+invariants with a channel: no `v` to be the same length as, an empty list is the ordinary case
+rather than a channel that should have been omitted, and - the part that would have been wrong -
+**events are not required to arrive sorted.** The XML export nests gas changes inside each
+`<DiveMixture>`, so file order is cylinder order. `normalize` sorts them, which it can do because
+there is one stream of them and nothing a parser knows that it doesn't; sorting sample channels
+stays the parser's job because only it knows which timestamps belong to which sensor.
+
+**Rebasing clamps at zero rather than dropping.** An event before the first sample is the ordinary
+case: the XML export numbers samples from `<Time>1</Time>` while recording the dive's opening gas
+selection at `<GasChangeTime>0</GasChangeTime>`, so the naive rebase puts it at -1. Dropping it
+would lose which gas the dive *started* on - the one marker a two-gas dive most needs, and where
+Phase 4's per-tank attribution has to begin. There is nowhere else on a chart for "before the first
+reading" to go. Events get no vote on the origin itself, though: one mistimed marker must not slide
+every curve away from the axis the samples define, so a file of events and no samples has no profile
+at all.
+
+Per format:
+
+- **Suunto XML** emits gas switches only. `<DiveGasChanges>` sits *inside* each `<DiveMixture>`,
+  which makes it the one gas-switch record in any of the three formats needing no join - the
+  cylinder is the element the time was found in, so its `gas_number` is its position in
+  `<DiveMixtures>`, exactly what `_parse_mixture` assigns. A marker and its row in the mixtures
+  table name the same cylinder by construction. 363 switches across the corpus, 14 of them to a
+  second cylinder.
+- **Suunto JSON** reads `GasSwitch` (from both `Events` and `DiveEvents` - the D5 shapes use one key
+  and the 2026 Ocean the other), the two `Notify` values the diver is being told to act on
+  (`Deep Stop`, `Safety Stop`), and `Alarm`/`Warning` as `other` carrying the device's wording -
+  `Ceiling Broken`, `PO2 High`, `Ascent Speed`. Only the `Active: true` edge: these arrive in pairs
+  (`Deep Stop` true at 1 424 s, false at 1 454 s, being one 30-second stop) and a tick cannot show
+  which half of a pair it is. **Everything under `State` is dropped** - the computer narrating its
+  own mode (`Below Surface`, `Wet Outside`, `Surface Calculation`), five of which land on t=0 of
+  every dive in the corpus - along with the Ocean's `DiveState`, `DiveStatus`, `Lap` and `Pause`.
+  The prompts either side of a stop (`Deep Stop Ahead`, `Stop done`) go too, or one stop would draw
+  three ticks.
+- **FIT** maps `dive_gas_switched`, `user_marker` → `bookmark`, and `dive_alert` → `other` labelled
+  with the profile's own 40-member alert enum (`deco_ceiling_broken`, `po2_crit_high`). `timer` is
+  the deliberate omission and the only `event` any file in the corpus writes: its start/stop pair is
+  where the dive begins and ends, which the profile's axis already says. A switch's `data` field is
+  the gas's **`message_index`**, not a `gas_number`, so it is resolved through `_breathed_gases` to
+  the same 1-based position the mixtures use; a switch naming a gas that list dropped (a `disabled`
+  entry) keeps a null `gas_number` rather than guessing, the same refusal `_tanks_for` makes.
+
+**`<Marks>` is a refusal, not an omission**, and this is the second time this format has invited the
+same mistake. It is the only other event-shaped block in the export and the obvious source for
+bookmarks and stops, but its `<Type>` is an undocumented numeric code and the corpus says plainly
+that it cannot be guessed: 29 distinct values across 4 068 marks, of which the two commonest (`257`
+and `19`) appear in **all 384** exports at about 1.3 per dive - which is not what a diver-pressed
+bookmark looks like - and `<Heading>` is nil on 4 068 of 4 095. Mapping `276`/`277` onto "deep stop
+entered/left" would be exactly the *"`<Type>` is deliberately not read as the role"* mistake from
+Phase 2: a confident label over a number nobody has decoded. The JSON export of these same dives
+spells its events out in words, so a diver who wants them has a file that says so.
+
+`MAX_EVENTS = 200` caps the stored list, and `FitParser._MAX_EVENTS = 100` caps collection. Both
+exist for the reason `_MAX_CYLINDERS` does rather than because a real dive approaches them - the
+worst in the corpus produces 17 - since `_MAX_FRAMES` allows 100 000 frames and an `event` is a
+handful of bytes. Events are truncated rather than bucketed: there is no "highest" gas switch, and a
+chart showing *some* of a dive's switches with no way to say so is worse than one showing none, so
+hitting the cap is logged.
+
+**A count cap is only half a bound, because `label` is the one field in the payload that isn't a
+number.** Every channel is bounded by `MAX_POINTS_PER_CHANNEL`, and every other value is an integer;
+`label` is text copied straight off an uploaded file, so without a bound of its own the payload's
+real ceiling is `MAX_DIVE_FILE_SIZE` - a 2.4 MB export of long alert strings measured at 2.4 MB
+stored, essentially 1:1, on a table whose whole design assumes tens of KB and serves them whole on
+every `GET /dive/{uuid}/profile`. `MAX_LABEL_CHARS = 120` closes it, and the same file now stores 10
+KB. Self-inflicted and per-user rather than cross-tenant, but the row outlives the upload.
+
+Truncated in `_rebase_events` rather than bounded by a `Field(max_length=...)`, which would raise:
+`extract_profile` must never fail the upload it rode in on, and a file whose one long alert took its
+depth curve down with it is precisely the outcome that contract exists to prevent. One place, so all
+three formats inherit it - the same discipline as `ceiling_cm`. 120 is far past any real device's
+wording: the longest in the corpus is `Mandatory Safety Stop Broken`, at 28.
+
+Worth flagging to the clients: this is the first parser-derived free-text string to reach a response
+body at all. `DiveMixture.name` is deliberately `None` from every parser (see *"Parsers report what
+a file recorded"*), so until now everything a client rendered from an import was a number or a value
+from a closed vocabulary. `label` is file-controlled text.
+
+## `PROFILE_EXTRACTOR_VERSION` 2, and the manual DDL for the two summary columns
+
+`PROFILE_EXTRACTOR_VERSION` went 1 → 2, because the same bytes now yield different stored samples.
+That is the whole mechanism: `should_extract` re-extracts anything behind the version, so the
+existing script picks the corpus up with **no change**:
+
+```bash
+docker compose exec api python -m src.scripts.backfill_dive_profiles
+```
+
+**Every profile ETag changes**, since the ETag is `{source_sha256}:{extractor_version}`, and the
+backfill flushes the dive caches of every user it touches. Both are intended and both are why this
+is worth running off-peak rather than during the day.
+
+Two summary columns on the existing `dive_profile` table, so per *"Schema changes have no migration
+tool"* `create_all()` does nothing and they need applying by hand:
+
+```sql
+ALTER TABLE dive_profile ADD COLUMN max_ceiling_cm INTEGER;
+ALTER TABLE dive_profile ADD COLUMN event_count INTEGER;
+```
+
+No `CHECK`s. These are written only by `store_profile` from values the extractor derived, never from
+a request body - unlike the Phase 2 columns, where the constraint is what catches a unit error
+coming off a parser. There is nothing a diver can type into either.
+
+Both nullable, and the two nulls mean different things on purpose. `max_ceiling_cm IS NULL` is "this
+dive owed no decompression", which is what `channels` derives the ceiling curve's presence from.
+`event_count IS NULL` is "extracted before this version recorded events at all" - a row the backfill
+has not reached - whereas `0` is this extractor having looked and found none. `store_profile` always
+writes a count, so the null only ever survives on a stale row, and `to_read_schema` reads the two
+optional payload keys with `.get` for the same reason: a version-1 row must read back without a
+`KeyError` while the backfill is still running.
+
+`DiveProfileInfo` gained `event_count` and `max_ceiling` alongside them. `event_count` is
+deliberately not folded into `channels`: events are not a curve, and a client deciding whether to
+offer a markers toggle wants the count rather than membership of a list of axes.
+
 ## The contact form is an API endpoint, not a `mailto:`
 
 `POST /api/v1/contact` (`api/v1/contact.py`) is the only endpoint here that mails a *human* rather

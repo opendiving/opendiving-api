@@ -892,7 +892,7 @@ async def read_dive_profile(
         Query(description="Opaque cache-busting version token; ignored by the server"),
     ] = None,
 ) -> Response | DiveProfileRead:
-    """Serve a dive's per-sample depth/temperature/tank-pressure curves.
+    """Serve a dive's per-sample depth/ceiling/temperature/tank-pressure curves and its events.
 
     Deliberately *not* `@cache`d, and for a sharper reason than the file route above. A
     profile is **immutable** for a given (source file, extractor version) pair, which

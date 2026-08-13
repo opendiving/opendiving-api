@@ -20,17 +20,22 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     per dive, only ever fetched whole for one dive and drawn. A sample table would exist
     purely to be `ORDER BY t`-ed back into the arrays below.
 
-    `data` holds independently-sampled per-channel series, not one shared time axis:
+    `data` holds independently-sampled per-channel series, not one shared time axis, plus
+    the moments the device marked rather than sampled:
 
         {"depth":       {"t": [0, 10, 20], "v": [139, 372, 632]},
+         "ceiling":     {"t": [20],        "v": [300]},
          "temperature": {"t": [0, 1, 2],   "v": [219, 219, 218]},
-         "pressure":    [{"gas_number": 1, "t": [0, 10], "v": [2052, 2041]}]}
+         "pressure":    [{"gas_number": 1, "t": [0, 10], "v": [2052, 2041]}],
+         "events":      [{"t": 0, "type": "gas_switch", "gas_number": 1}]}
 
-    `t` is integer elapsed seconds from the first sample; `v` is integer-scaled (depth in
-    cm, temperature in 0.1 C, pressure in 0.1 bar) so a float round-trip can't reintroduce
-    `20.600000000000023`-class noise several thousand times per dive. There are no nulls
-    inside a series - a sensor dropout is a gap in `t`, which the chart breaks the
-    polyline across. See `services/dive_profiles.py` for the shape's full rationale.
+    `t` is integer elapsed seconds from the first sample; `v` is integer-scaled (depth and
+    ceiling in cm, temperature in 0.1 C, pressure in 0.1 bar) so a float round-trip can't
+    reintroduce `20.600000000000023`-class noise several thousand times per dive. There
+    are no nulls inside a series - a sensor dropout is a gap in `t`, which the chart breaks
+    the polyline across, and on the ceiling channel a gap is a stretch of the dive with no
+    decompression obligation. See `services/dive_profiles.py` for the shape's full
+    rationale.
 
     Mirrors `DiveFile` deliberately: a `deferred` payload, one unique index on `dive_id`,
     and no `SoftDeleteMixin` (a soft-deleted blob occupies its bytes forever with nothing
@@ -85,10 +90,20 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     # what `channels` on the read schema is derived from, so there is no redundant
     # "which curves are present" column to drift out of step with the payload.
     max_depth_cm: Mapped[int | None] = mapped_column(Integer, default=None)
+    # In the same centimeters as `max_depth_cm`, since a ceiling is a depth and is drawn
+    # against the depth axis. NULL means the dive never had a decompression obligation,
+    # which is the same test the `ceiling` channel's presence is derived from.
+    max_ceiling_cm: Mapped[int | None] = mapped_column(Integer, default=None)
     min_temperature_c10: Mapped[int | None] = mapped_column(Integer, default=None)
     max_temperature_c10: Mapped[int | None] = mapped_column(Integer, default=None)
     min_pressure_bar10: Mapped[int | None] = mapped_column(Integer, default=None)
     max_pressure_bar10: Mapped[int | None] = mapped_column(Integer, default=None)
+    # Not an extreme like the columns above, and it is here for the reason they are: to
+    # answer "is there anything to draw" for the dive detail response without decoding the
+    # payload. Events have no extremes to be derived from, so this is a plain count - `0`
+    # is a profile whose file recorded no events, and NULL is one extracted before this
+    # extractor version recorded any.
+    event_count: Mapped[int | None] = mapped_column(Integer, default=None)
 
     __table_args__ = (
         # One profile per dive. Re-importing a different export for the same dive

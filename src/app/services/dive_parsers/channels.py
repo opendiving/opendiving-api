@@ -50,6 +50,35 @@ def scaled_int_or_none(value: float | None, factor: Decimal) -> int | None:
     return None if value is None else scaled_int(value, factor)
 
 
+def ceiling_cm(value: float | None) -> int | None:
+    """A deco ceiling in centimeters, or `None` where the diver owed no stop.
+
+    **A ceiling of zero is not a ceiling**, and this is the one place that judgement is
+    made so the three formats cannot disagree about the same dive. The ceiling is the depth
+    a diver may not ascend above; zero means "you may surface", which is the absence of an
+    obligation rather than an obligation at 0 m. Drawing it would put a flat line along the
+    surface across every no-deco dive in the log.
+
+    The corpus is what settles that this is a reading of nothing rather than a reading:
+    the two Suunto exports write the *same fact* two different ways. DM5 XML writes
+    `<Ceiling i:nil="true"/>` and never once writes a zero - across all 384 exports the
+    1 760 non-nil readings run 3.0 m to 15.44 m - while the JSON export of the same dives
+    writes `"Ceiling": 0` on every no-deco sample. Treating the JSON zero as a reading
+    would give one dive a ceiling channel and its twin none, depending only on which file
+    the diver happened to import.
+
+    Distinct from `scaled_int_or_none`, which is deliberately faithful to a zero
+    (`suunto_json` records a real 0.0 m depth at the surface), and from the zero-pressure
+    rule on `DiveMixtureSchema`, which drops a zero because the device wrote one where it
+    had measured nothing. Here the device measured, and zero is what "no ceiling" looks
+    like. Negatives, which no export in the corpus produces, go the same way.
+    """
+    if value is None:
+        return None
+    scaled = scaled_int(value, CENTIMETERS_PER_METER)
+    return scaled if scaled > 0 else None
+
+
 def series(points: list[tuple[float, int]]) -> ParsedSeries | None:
     """Turn `(seconds, value)` pairs into a time-sorted series, or `None` if there are none.
 

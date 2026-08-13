@@ -9,20 +9,31 @@ from datetime import timedelta
 
 import pytest
 
+from src.app.schemas.dive_profile import (
+    ParsedProfileEvent,
+    ParsedProfileSchema,
+    ParsedSeries,
+    ProfileEventType,
+)
 from src.app.services.dive_parsers import _PARSERS, DiveParseError
 from src.app.services.dive_parsers.fit import FitParser
 from src.app.services.dive_parsers.suunto_json import SuuntoJsonParser
 from src.app.services.dive_parsers.suunto_xml import SuuntoXmlParser
 from src.app.services.dive_profiles import (
+    MAX_EVENTS,
+    MAX_LABEL_CHARS,
     MAX_POINTS_PER_CHANNEL,
     ExistingProfileRow,
+    LoadedProfile,
     NormalizedProfile,
+    ProfileEvent,
     ProfilePressureSeries,
     ProfileSeries,
     downsample,
     extract_profile,
     normalize,
     should_extract,
+    to_read_schema,
 )
 from tests.helpers.fit import dive_fit_file
 from tests.helpers.fit import message as fit_message
@@ -43,21 +54,38 @@ from tests.test_dive_parsers import (
 )
 
 
-def _xml_with_samples(samples: str) -> bytes:
+def _xml_with_samples(samples: str, mixtures: str = "") -> bytes:
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <Dive xmlns="{SUUNTO_NS}" xmlns:i="{XSI_NS}">
   <MaxDepth>25.5</MaxDepth>
+  <DiveMixtures>{mixtures}</DiveMixtures>
   <DiveSamples>{samples}</DiveSamples>
 </Dive>
 """.encode()
 
 
-def _sample(time: int, *, depth: str | None = None, temperature: str | None = None, pressure: str | None = None) -> str:
+def _mixture(*gas_change_times: int, oxygen: str = "21") -> str:
+    """One `<DiveMixture>`, with its gas changes nested inside it as the format keeps them."""
+    changes = "".join(
+        f"<DiveGasChange><GasChangeTime>{time}</GasChangeTime></DiveGasChange>" for time in gas_change_times
+    )
+    return f"<DiveMixture><DiveGasChanges>{changes}</DiveGasChanges><Oxygen>{oxygen}</Oxygen></DiveMixture>"
+
+
+def _sample(
+    time: int,
+    *,
+    depth: str | None = None,
+    temperature: str | None = None,
+    pressure: str | None = None,
+    ceiling: str | None = None,
+) -> str:
     def element(tag: str, value: str | None) -> str:
         return f"<{tag}>{value}</{tag}>" if value is not None else f'<{tag} i:nil="true" />'
 
     return (
         "<Dive.Sample>"
+        + element("Ceiling", ceiling)
         + element("Depth", depth)
         + element("Pressure", pressure)
         + element("Temperature", temperature)
@@ -155,6 +183,67 @@ class TestSuuntoXmlParseProfile:
         assert None not in profile.depth.v
         # The channel that kept recording keeps all three.
         assert profile.temperature.t == [1.0, 11.0, 21.0]
+
+    def test_extracts_the_ceiling_channel_in_centimeters(self):
+        """The same scale as depth, deliberately: the ceiling is drawn against the depth
+        axis, so 3 m of ceiling has to be the same number as 3 m of depth."""
+        content = _xml_with_samples(
+            _sample(1, depth="12.4", ceiling="3") + _sample(11, depth="9.0", ceiling="3.02") + _sample(21, depth="4.0")
+        )
+
+        profile = SuuntoXmlParser.parse_profile(content)
+
+        assert profile.ceiling.t == [1.0, 11.0]
+        assert profile.ceiling.v == [300, 302]
+        # The stretch with no obligation is a gap in the channel, not a zero - and depth
+        # keeps all three readings.
+        assert profile.depth.t == [1.0, 11.0, 21.0]
+
+    def test_omits_the_ceiling_channel_when_the_dive_owed_no_stop(self):
+        """373 of the corpus's 384 exports, which is every no-deco dive in it."""
+        content = _xml_with_samples(_sample(1, depth="12.4") + _sample(11, depth="9.0"))
+
+        profile = SuuntoXmlParser.parse_profile(content)
+
+        assert profile.ceiling is None
+
+    def test_a_zero_ceiling_is_no_ceiling(self):
+        """This format writes `xsi:nil` rather than a zero, so this case is unattested
+        here - but the rule is shared with the JSON export, which writes `0` for the same
+        fact, and the two must not disagree about the same dive."""
+        content = _xml_with_samples(_sample(1, depth="12.4", ceiling="0"))
+
+        assert SuuntoXmlParser.parse_profile(content).ceiling is None
+
+    def test_gas_switches_are_numbered_by_the_cylinder_they_are_nested_in(self):
+        """`<DiveGasChanges>` sits *inside* each `<DiveMixture>`, so the switch and the
+        cylinder need no join - the real two-gas dive is `Dive_2025-06-03-1215.xml`."""
+        content = _xml_with_samples(
+            _sample(1, depth="12.4"), mixtures=_mixture(0, oxygen="21") + _mixture(2356, oxygen="49")
+        )
+
+        events = SuuntoXmlParser.parse_profile(content).events
+
+        assert [(event.t, event.type, event.gas_number) for event in events] == [
+            (0.0, ProfileEventType.GAS_SWITCH, 1),
+            (2356.0, ProfileEventType.GAS_SWITCH, 2),
+        ]
+
+    def test_marks_are_not_read_as_events(self):
+        """`<Type>` is an undocumented numeric code - 29 distinct values across the corpus,
+        two of which appear in all 384 files. Mapping them onto stops or bookmarks would be
+        the `<Type>`-as-gas-role mistake again."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}" xmlns:i="{XSI_NS}">
+  <DiveSamples>{_sample(1, depth="12.4")}</DiveSamples>
+  <Marks>
+    <Mark><Heading i:nil="true" /><MarkTime>949</MarkTime><Type>268</Type></Mark>
+    <Mark><Heading i:nil="true" /><MarkTime>2148</MarkTime><Type>266</Type></Mark>
+  </Marks>
+</Dive>
+""".encode()
+
+        assert SuuntoXmlParser.parse_profile(content).events == []
 
     def test_returns_none_when_the_file_has_no_dive_samples_element(self):
         assert SuuntoXmlParser.parse_profile(VALID_SUUNTO_XML.encode()) is None
@@ -310,6 +399,158 @@ class TestSuuntoJsonParseProfile:
         assert profile.depth.v == [124, 256]
         assert profile.temperature.t == sorted(profile.temperature.t)
 
+    def test_a_zero_ceiling_is_no_ceiling(self):
+        """**The difference that makes `ceiling_cm` necessary.** This export writes
+        `"Ceiling": 0` on every no-deco sample where the DM5 XML of the same dive writes
+        `xsi:nil`. Read as a reading, one file would give a dive a ceiling channel flat
+        along the surface and its twin none at all."""
+        content = _json_with_samples(
+            [
+                {"Depth": 12.4, "Ceiling": 0, "TimeISO8601": "2025-05-31T12:59:16.310+02:00"},
+                {"Depth": 9.0, "Ceiling": 0, "TimeISO8601": "2025-05-31T12:59:26.310+02:00"},
+            ]
+        )
+
+        profile = SuuntoJsonParser.parse_profile(content)
+
+        assert profile.ceiling is None
+        assert profile.depth is not None
+
+    def test_extracts_the_ceiling_channel_where_the_dive_owed_a_stop(self):
+        content = _json_with_samples(
+            [
+                {"Depth": 30.0, "Ceiling": 0, "TimeISO8601": "2025-05-31T12:59:16.310+02:00"},
+                {"Depth": 24.0, "Ceiling": 3, "TimeISO8601": "2025-05-31T12:59:26.310+02:00"},
+                {"Depth": 12.0, "Ceiling": 6.05, "TimeISO8601": "2025-05-31T12:59:36.310+02:00"},
+            ]
+        )
+
+        profile = SuuntoJsonParser.parse_profile(content)
+
+        assert profile.ceiling.v == [300, 605]
+        # Only the samples that had one - the no-obligation head of the dive is a gap.
+        assert profile.ceiling.t == pytest.approx([20.0, 30.0])
+
+    def test_reads_gas_switches_from_either_event_key(self):
+        """The D5 shapes write `Events`; the 2026 Ocean writes `DiveEvents`."""
+        content = _json_with_samples(
+            [
+                {
+                    "Depth": 1.0,
+                    "Events": [{"GasSwitch": {"GasNumber": 1}}],
+                    "TimeISO8601": "2025-05-31T12:59:16.310+02:00",
+                },
+                {
+                    "Depth": 30.0,
+                    "DiveEvents": [{"GasSwitch": {"GasNumber": 0}}],
+                    "TimeISO8601": "2025-05-31T12:59:26.310+02:00",
+                },
+            ]
+        )
+
+        events = SuuntoJsonParser.parse_profile(content).events
+
+        assert [(event.type, event.gas_number) for event in events] == [
+            (ProfileEventType.GAS_SWITCH, 1),
+            # An Ocean numbers from 0, and that is the label its cylinders carry too.
+            (ProfileEventType.GAS_SWITCH, 0),
+        ]
+
+    def test_maps_the_two_stop_notifications_and_ignores_the_prompts_around_them(self):
+        """ "Deep Stop Ahead" is the warning before and "Stop done" the confirmation after;
+        marking all three would put three ticks on the chart for one stop."""
+        content = _json_with_samples(
+            [
+                {
+                    "Depth": 20.0,
+                    "Events": [{"Notify": {"Type": "Deep Stop Ahead", "Active": True}}],
+                    "TimeISO8601": "2025-05-31T12:59:16.310+02:00",
+                },
+                {
+                    "Depth": 18.0,
+                    "Events": [{"Notify": {"Type": "Deep Stop", "Active": True}}],
+                    "TimeISO8601": "2025-05-31T12:59:26.310+02:00",
+                },
+                {
+                    "Depth": 5.0,
+                    "Events": [{"Notify": {"Type": "Safety Stop", "Active": True}}],
+                    "TimeISO8601": "2025-05-31T12:59:36.310+02:00",
+                },
+                {
+                    "Depth": 5.0,
+                    "Events": [{"Notify": {"Type": "Stop done", "Active": True}}],
+                    "TimeISO8601": "2025-05-31T12:59:46.310+02:00",
+                },
+            ]
+        )
+
+        events = SuuntoJsonParser.parse_profile(content).events
+
+        assert [event.type for event in events] == [ProfileEventType.DEEP_STOP, ProfileEventType.SAFETY_STOP]
+
+    def test_emits_only_the_active_edge_of_a_paired_notification(self):
+        """`Deep Stop` true at 1 424 s and false at 1 454 s is one 30-second stop. A tick
+        can't show which half of a pair it is, so it marks the start."""
+        content = _json_with_samples(
+            [
+                {
+                    "Depth": 18.0,
+                    "Events": [{"Notify": {"Type": "Deep Stop", "Active": True}}],
+                    "TimeISO8601": "2025-05-31T12:59:16.310+02:00",
+                },
+                {
+                    "Depth": 18.0,
+                    "Events": [{"Notify": {"Type": "Deep Stop", "Active": False}}],
+                    "TimeISO8601": "2025-05-31T12:59:46.310+02:00",
+                },
+            ]
+        )
+
+        events = SuuntoJsonParser.parse_profile(content).events
+
+        assert [(event.t, event.type) for event in events] == [(10.0, ProfileEventType.DEEP_STOP)]
+
+    def test_alarms_and_warnings_keep_the_device_s_own_wording(self):
+        content = _json_with_samples(
+            [
+                {
+                    "Depth": 30.0,
+                    "Events": [
+                        {"Warning": {"Type": "Ceiling Broken", "Active": True}},
+                        {"Alarm": {"Type": "PO2 High", "Active": True}},
+                    ],
+                    "TimeISO8601": "2025-05-31T12:59:16.310+02:00",
+                }
+            ]
+        )
+
+        events = SuuntoJsonParser.parse_profile(content).events
+
+        assert [(event.type, event.label) for event in events] == [
+            (ProfileEventType.OTHER, "Ceiling Broken"),
+            (ProfileEventType.OTHER, "PO2 High"),
+        ]
+
+    def test_drops_the_device_narrating_its_own_state(self):
+        """Five of these land on t=0 of every dive in the corpus. "Wet Outside" is not an
+        event on a dive."""
+        content = _json_with_samples(
+            [
+                {
+                    "Depth": 1.0,
+                    "Events": [
+                        {"State": {"Type": "Dive Active", "Active": True}},
+                        {"State": {"Type": "Below Surface", "Active": True}},
+                        {"State": {"Type": "Tank pressure available", "Active": True}},
+                    ],
+                    "DiveEvents": [{"DiveState": "Diving"}, {"DiveStatus": True}],
+                    "TimeISO8601": "2025-05-31T12:59:16.310+02:00",
+                }
+            ]
+        )
+
+        assert SuuntoJsonParser.parse_profile(content).events == []
+
     def test_returns_none_for_a_header_only_export(self):
         assert SuuntoJsonParser.parse_profile(VALID_SUUNTO_JSON.encode()) is None
 
@@ -394,6 +635,105 @@ class TestFitParseProfile:
 
         assert [cylinder.gas_number for cylinder in profile.pressure] == [1, 2]
 
+    def test_extracts_the_ceiling_from_next_stop_depth(self):
+        """FIT's deco ceiling is `record.next_stop_depth` - the depth of the next required
+        stop. Unattested in the corpus, like `tank_update` was, so it is written here.
+
+        Its three neighbours in the profile (`next_stop_time`, `time_to_surface`,
+        `ndl_time`) all measure durations, and reading one of those as a depth is the
+        mistake this test exists to catch.
+        """
+        content = dive_fit_file(
+            fit_message("record", timestamp=FIT_DIVE_START, depth=30.0, next_stop_depth=0.0),
+            fit_message("record", timestamp=FIT_DIVE_START + timedelta(seconds=10), depth=24.0, next_stop_depth=6.0),
+            fit_message("record", timestamp=FIT_DIVE_START + timedelta(seconds=20), depth=9.0, next_stop_depth=3.0),
+        )
+        profile = FitParser.parse_profile(content)
+
+        # Centimeters, and the zero is the absence of an obligation rather than a reading.
+        assert profile.ceiling.t == [10.0, 20.0]
+        assert profile.ceiling.v == [600, 300]
+        assert profile.depth.t == [0.0, 10.0, 20.0]
+
+    def test_omits_the_ceiling_channel_on_a_no_deco_dive(self):
+        content = dive_fit_file(*_fit_records([(0, 12.0, 25), (10, 9.0, 25)]))
+
+        assert FitParser.parse_profile(content).ceiling is None
+
+    def test_maps_a_gas_switch_onto_the_cylinder_position_not_the_message_index(self):
+        """`event.data` holds the switched-to gas's `message_index`, which is the device's
+        key for a `dive_gas` and not the 1-based position mixtures are numbered by."""
+        content = dive_fit_file(
+            fit_message("dive_gas", message_index=0, oxygen_content=21, status="enabled"),
+            fit_message("dive_gas", message_index=1, oxygen_content=54, status="enabled"),
+            fit_message("event", timestamp=FIT_DIVE_START, event="dive_gas_switched", event_type="marker", data=0),
+            fit_message(
+                "event",
+                timestamp=FIT_DIVE_START + timedelta(seconds=2356),
+                event="dive_gas_switched",
+                event_type="marker",
+                data=1,
+            ),
+            *_fit_records([(0, 12.0, 25)]),
+        )
+
+        events = FitParser.parse_profile(content).events
+
+        assert [(event.t, event.type, event.gas_number) for event in events] == [
+            (0.0, ProfileEventType.GAS_SWITCH, 1),
+            (2356.0, ProfileEventType.GAS_SWITCH, 2),
+        ]
+
+    def test_a_switch_to_a_gas_the_file_does_not_describe_keeps_a_null_number(self):
+        """A `disabled` gas is dropped from the mixture list, so a switch naming it has no
+        position to resolve to. The switch still happened - guessing a cylinder for it
+        would be the join-by-hope `_tanks_for` refuses to make."""
+        content = dive_fit_file(
+            fit_message("dive_gas", message_index=0, oxygen_content=21, status="enabled"),
+            fit_message("dive_gas", message_index=1, oxygen_content=54, status="disabled"),
+            fit_message("event", timestamp=FIT_DIVE_START, event="dive_gas_switched", event_type="marker", data=1),
+            *_fit_records([(0, 12.0, 25)]),
+        )
+
+        events = FitParser.parse_profile(content).events
+
+        assert [(event.type, event.gas_number) for event in events] == [(ProfileEventType.GAS_SWITCH, None)]
+
+    def test_reads_a_user_marker_as_a_bookmark_and_an_alert_as_its_own_words(self):
+        content = dive_fit_file(
+            fit_message(
+                "event", timestamp=FIT_DIVE_START + timedelta(seconds=30), event="user_marker", event_type="marker"
+            ),
+            fit_message(
+                "event",
+                timestamp=FIT_DIVE_START + timedelta(seconds=60),
+                event="dive_alert",
+                event_type="marker",
+                # 9 is `deco_ceiling_broken` in the profile's own `dive_alert` enum, which
+                # is what `data` renders through for this event.
+                data=9,
+            ),
+            *_fit_records([(0, 12.0, 25)]),
+        )
+
+        events = FitParser.parse_profile(content).events
+
+        assert [(event.t, event.type, event.label) for event in events] == [
+            (30.0, ProfileEventType.BOOKMARK, None),
+            (60.0, ProfileEventType.OTHER, "deco_ceiling_broken"),
+        ]
+
+    def test_ignores_the_timer_events_that_bound_every_file(self):
+        """`timer` start/stop is the only `event` any file in the corpus writes, and it
+        says where the dive begins and ends - which the profile's own axis already does."""
+        content = dive_fit_file(
+            fit_message("event", timestamp=FIT_DIVE_START, event="timer", event_type="start"),
+            fit_message("event", timestamp=FIT_DIVE_START + timedelta(seconds=600), event="timer", event_type="stop"),
+            *_fit_records([(0, 12.0, 25)]),
+        )
+
+        assert FitParser.parse_profile(content).events == []
+
     def test_returns_none_when_the_file_carries_no_samples(self):
         assert FitParser.parse_profile(dive_fit_file()) is None
 
@@ -448,9 +788,135 @@ class TestNormalize:
         assert profile.temperature.v == [259, 258]
 
     def test_returns_none_for_a_profile_with_no_readings(self):
-        from src.app.schemas.dive_profile import ParsedProfileSchema
-
         assert normalize(ParsedProfileSchema()) is None
+
+    def test_returns_none_for_a_file_of_events_and_no_samples(self):
+        """Events don't make a profile. There is no axis for them to be drawn against, and
+        letting them stand alone would give a dive a chart with nothing on it."""
+        parsed = ParsedProfileSchema(
+            events=[ParsedProfileEvent(t=10.0, type=ProfileEventType.GAS_SWITCH, gas_number=1)]
+        )
+
+        assert normalize(parsed) is None
+
+    def test_rebases_events_against_the_samples_origin_not_their_own(self):
+        """A marker annotates the curve, so it has to move with it. Given its own origin,
+        the first event would always sit at t=0 regardless of when it happened."""
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[100.0, 110.0], v=[124, 256]),
+            events=[ParsedProfileEvent(t=130.0, type=ProfileEventType.SAFETY_STOP)],
+        )
+
+        profile = normalize(parsed)
+
+        assert profile.depth.t == [0, 10]
+        assert [event.t for event in profile.events] == [30]
+
+    def test_an_event_before_the_first_sample_lands_at_the_start(self):
+        """The ordinary case, not a corrupt one: a Suunto XML export numbers samples from
+        `<Time>1</Time>` while recording the opening gas selection at `GasChangeTime` 0.
+        Dropping it would lose which gas the dive *started* on."""
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[1.0, 11.0], v=[124, 256]),
+            events=[ParsedProfileEvent(t=0.0, type=ProfileEventType.GAS_SWITCH, gas_number=1)],
+        )
+
+        profile = normalize(parsed)
+
+        assert [(event.t, event.gas_number) for event in profile.events] == [(0, 1)]
+
+    def test_events_do_not_move_the_origin_the_channels_are_rebased_onto(self):
+        """One mistimed marker must not slide every curve away from its own axis."""
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[100.0, 110.0], v=[124, 256]),
+            events=[ParsedProfileEvent(t=-500.0, type=ProfileEventType.BOOKMARK)],
+        )
+
+        profile = normalize(parsed)
+
+        assert profile.depth.t == [0, 10]
+        assert [event.t for event in profile.events] == [0]
+
+    def test_sorts_events_that_the_file_listed_out_of_order(self):
+        """The XML export nests gas changes inside each `<DiveMixture>`, so file order is
+        cylinder order rather than time order."""
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[0.0, 3000.0], v=[124, 256]),
+            events=[
+                ParsedProfileEvent(t=2356.0, type=ProfileEventType.GAS_SWITCH, gas_number=2),
+                ParsedProfileEvent(t=0.0, type=ProfileEventType.GAS_SWITCH, gas_number=1),
+            ],
+        )
+
+        profile = normalize(parsed)
+
+        assert [(event.t, event.gas_number) for event in profile.events] == [(0, 1), (2356, 2)]
+
+    def test_collapses_two_identical_events_that_round_onto_one_second(self):
+        """Rounding onto integer seconds is what makes this necessary - a device that logs
+        the same occurrence twice within a second would stack two ticks on one pixel."""
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[0.0, 100.0], v=[124, 256]),
+            events=[
+                ParsedProfileEvent(t=50.1, type=ProfileEventType.SAFETY_STOP),
+                ParsedProfileEvent(t=50.4, type=ProfileEventType.SAFETY_STOP),
+                # A different type at the same second is a different event and survives.
+                ParsedProfileEvent(t=50.2, type=ProfileEventType.OTHER, label="Ceiling Broken"),
+            ],
+        )
+
+        profile = normalize(parsed)
+
+        assert [(event.t, event.type) for event in profile.events] == [
+            (50, ProfileEventType.SAFETY_STOP),
+            (50, ProfileEventType.OTHER),
+        ]
+
+    def test_truncates_a_label_rather_than_rejecting_it(self):
+        """`label` is the only field in the payload carrying text straight off an uploaded
+        file, so it is the only one nothing else bounds - `MAX_EVENTS` counts markers and
+        every channel is capped by point count. Unbounded, a 5 MB export of long alert
+        strings becomes a 5 MB JSONB row on a table designed for tens of KB.
+
+        Truncated rather than refused: `extract_profile` must never fail the upload it rode
+        in on, so a file whose one long alert took its depth curve with it is the outcome
+        this avoids.
+        """
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[0.0], v=[10]),
+            events=[ParsedProfileEvent(t=0.0, type=ProfileEventType.OTHER, label="x" * 5_000)],
+        )
+
+        profile = normalize(parsed)
+
+        assert profile.events[0].label == "x" * MAX_LABEL_CHARS
+        # Far past any device's wording - the longest in the corpus is 28 characters.
+        assert MAX_LABEL_CHARS == 120
+
+    def test_an_event_after_the_last_sample_keeps_its_own_time(self):
+        """The clamp is deliberately one-sided. Zero is where every format's dive begins, so
+        pinning to it lands on a real boundary; there is no such boundary at the other end,
+        and dragging a late marker back onto the last sample would invent a time for it."""
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[0.0, 10.0], v=[124, 256]),
+            events=[ParsedProfileEvent(t=90.0, type=ProfileEventType.BOOKMARK)],
+        )
+
+        profile = normalize(parsed)
+
+        assert [event.t for event in profile.events] == [90]
+        assert profile.duration_seconds == 10
+
+    def test_the_ceiling_shares_the_depth_channels_origin(self):
+        parsed = SuuntoXmlParser.parse_profile(
+            _xml_with_samples(_sample(1, depth="30.0") + _sample(11, depth="24.0", ceiling="3"))
+        )
+
+        profile = normalize(parsed)
+
+        assert profile.depth.t == [0, 10]
+        assert profile.ceiling.t == [10]
+        assert profile.channels == ["depth", "ceiling"]
 
     def test_summary_properties_describe_the_recorded_span(self):
         parsed = SuuntoXmlParser.parse_profile(
@@ -533,8 +999,32 @@ class TestDownsample:
         assert len(profile.pressure[0].t) <= 1200
         assert profile.pressure[0].gas_number == 1
 
-    def test_the_real_cap_is_the_module_default(self):
+    def test_caps_the_ceiling_channel_like_depth(self):
+        profile = downsample(NormalizedProfile(ceiling=self._sawtooth(9_000)), max_points=1200)
+
+        assert len(profile.ceiling.t) <= 1200
+        assert max(profile.ceiling.v) == max(self._sawtooth(9_000).v)
+
+    def test_truncates_events_rather_than_bucketing_them(self):
+        """Min/max over a window of markers means nothing - there is no "highest" gas
+        switch - so the cap is a plain head-of-list."""
+        events = [ProfileEvent(t=second, type=ProfileEventType.BOOKMARK) for second in range(500)]
+
+        profile = downsample(NormalizedProfile(depth=self._sawtooth(50), events=events), max_events=10)
+
+        assert [event.t for event in profile.events] == list(range(10))
+
+    def test_leaves_events_under_the_cap_alone(self):
+        events = [ProfileEvent(t=second, type=ProfileEventType.BOOKMARK) for second in range(17)]
+
+        profile = downsample(NormalizedProfile(depth=self._sawtooth(50), events=events))
+
+        assert len(profile.events) == 17
+
+    def test_the_real_caps_are_the_module_defaults(self):
         assert MAX_POINTS_PER_CHANNEL == 1200
+        # Far above any real dive: the worst in the corpus produces 17 markers.
+        assert MAX_EVENTS == 200
 
 
 class TestShouldExtract:
@@ -598,11 +1088,136 @@ class TestExtractProfile:
         assert xml.pressure[0].v == js.pressure[0].v
         assert xml.pressure[0].gas_number == js.pressure[0].gas_number
 
+    def test_the_two_exports_spell_no_ceiling_differently_and_still_agree(self):
+        """The XML writes `xsi:nil` and the JSON writes `0` for the same fact. Verified
+        against the real pairs: all three deco dives in the corpus that exist as both files
+        produce identical ceiling channels, to the reading (`Dive_2025-06-03-1215.xml` is
+        266 samples peaking at 13.11 m either way).
+        """
+        xml = extract_profile(
+            SuuntoXmlParser,
+            _xml_with_samples(_sample(1, depth="30.0") + _sample(11, depth="24.0", ceiling="3")),
+        )
+        js = extract_profile(
+            SuuntoJsonParser,
+            _json_with_samples(
+                [
+                    {"Depth": 30.0, "Ceiling": 0, "TimeISO8601": "2025-05-31T12:59:07.000+02:00"},
+                    {"Depth": 24.0, "Ceiling": 3, "TimeISO8601": "2025-05-31T12:59:17.000+02:00"},
+                ]
+            ),
+        )
+
+        assert xml.ceiling.t == js.ceiling.t == [10]
+        assert xml.ceiling.v == js.ceiling.v == [300]
+
 
 class TestToData:
     def test_omits_absent_channels_rather_than_writing_nulls(self):
         data = NormalizedProfile(depth=ProfileSeries(t=[0, 1], v=[10, 20])).to_data()
 
         assert data == {"depth": {"t": [0, 1], "v": [10, 20]}}
+        assert "ceiling" not in data
         assert "temperature" not in data
         assert "pressure" not in data
+        assert "events" not in data
+
+    def test_writes_the_ceiling_as_a_channel_beside_depth(self):
+        data = NormalizedProfile(
+            depth=ProfileSeries(t=[0, 1], v=[3000, 2400]), ceiling=ProfileSeries(t=[1], v=[300])
+        ).to_data()
+
+        assert data["ceiling"] == {"t": [1], "v": [300]}
+
+    def test_leaves_out_the_keys_an_event_has_no_value_for(self):
+        """So `gas_number` present-and-null can't come to mean something different from
+        absent - the same rule the channels follow."""
+        data = NormalizedProfile(
+            depth=ProfileSeries(t=[0], v=[10]),
+            events=[
+                ProfileEvent(t=0, type=ProfileEventType.GAS_SWITCH, gas_number=1),
+                ProfileEvent(t=60, type=ProfileEventType.OTHER, label="Ceiling Broken"),
+                ProfileEvent(t=90, type=ProfileEventType.SAFETY_STOP),
+            ],
+        ).to_data()
+
+        assert data["events"] == [
+            {"t": 0, "type": "gas_switch", "gas_number": 1},
+            {"t": 60, "type": "other", "label": "Ceiling Broken"},
+            {"t": 90, "type": "safety_stop"},
+        ]
+
+
+class TestToReadSchema:
+    """The stored payload back out as the wire shape. Pure, so it is tested here rather
+    than through the endpoint."""
+
+    def test_round_trips_every_channel_and_event(self):
+        profile = NormalizedProfile(
+            depth=ProfileSeries(t=[0, 10], v=[3000, 2400]),
+            ceiling=ProfileSeries(t=[10], v=[300]),
+            temperature=ProfileSeries(t=[0], v=[219]),
+            pressure=[ProfilePressureSeries(gas_number=1, t=[0], v=[2052])],
+            events=[
+                ProfileEvent(t=0, type=ProfileEventType.GAS_SWITCH, gas_number=1),
+                ProfileEvent(t=60, type=ProfileEventType.OTHER, label="Ceiling Broken"),
+            ],
+        )
+
+        read = to_read_schema(LoadedProfile(duration_seconds=10, data=profile.to_data()))
+
+        assert read.ceiling.v == [300]
+        assert [(event.t, event.type, event.gas_number, event.label) for event in read.events] == [
+            (0, ProfileEventType.GAS_SWITCH, 1, None),
+            (60, ProfileEventType.OTHER, None, "Ceiling Broken"),
+        ]
+
+    def test_reads_a_payload_written_before_ceilings_and_events_existed(self):
+        """Extractor version 1's rows, which a backfill has not reached yet. The optional
+        keys are read with `.get` for exactly this: a `KeyError` here would 500 the profile
+        endpoint for every dive imported before the bump."""
+        read = to_read_schema(LoadedProfile(duration_seconds=10, data={"depth": {"t": [0], "v": [3000]}}))
+
+        assert read.depth.v == [3000]
+        assert read.ceiling is None
+        assert read.events == []
+
+
+class TestParsedProfileValidation:
+    """`_validate_events` is a separate validator from `_validate_series` on purpose - the
+    two shapes share no invariants worth checking together."""
+
+    def test_rejects_an_other_with_no_label(self):
+        """The escape hatch exists to carry the device's own wording. Without it the marker
+        is a tick that tells the diver nothing, which means a parser dropped the one thing
+        it had to keep."""
+        with pytest.raises(ValueError, match="no label"):
+            ParsedProfileSchema(
+                depth=ParsedSeries(t=[0.0], v=[10]),
+                events=[ParsedProfileEvent(t=1.0, type=ProfileEventType.OTHER)],
+            )
+
+    def test_accepts_the_typed_events_without_a_label(self):
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[0.0], v=[10]),
+            events=[ParsedProfileEvent(t=1.0, type=ProfileEventType.BOOKMARK)],
+        )
+
+        assert parsed.events[0].label is None
+
+    def test_does_not_require_events_to_arrive_sorted(self):
+        """Unlike a series: there is one stream of events and `normalize` sorts it, where
+        only a parser knows which sample timestamps belong to which sensor."""
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[0.0], v=[10]),
+            events=[
+                ParsedProfileEvent(t=2356.0, type=ProfileEventType.GAS_SWITCH, gas_number=2),
+                ParsedProfileEvent(t=0.0, type=ProfileEventType.GAS_SWITCH, gas_number=1),
+            ],
+        )
+
+        assert [event.t for event in parsed.events] == [2356.0, 0.0]
+
+    def test_still_rejects_an_unsorted_ceiling_series(self):
+        with pytest.raises(ValueError, match="ceiling: timestamps are not sorted"):
+            ParsedProfileSchema(ceiling=ParsedSeries(t=[10.0, 1.0], v=[300, 600]))
