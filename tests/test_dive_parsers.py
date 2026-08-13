@@ -1810,6 +1810,35 @@ class TestTechScalars:
         assert dive.cns_start == 0.0
         assert dive.mixtures == [mixture]
 
+    def test_a_zero_or_negative_depth_reads_as_no_depth(self):
+        """`<= 0`, against `_drop_negative_exposure`'s `< 0` one method over - the two
+        constraints genuinely differ (`ck_dive_max_depth_positive` is `> 0`,
+        `ck_dive_cns_start_non_negative` is `>= 0`), because a dive that began with no
+        oxygen loading recorded a real 0 and a dive to 0 m did not happen."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <AvgDepth>0</AvgDepth><MaxDepth>-3.2</MaxDepth><CnsStart>0</CnsStart>
+</Dive>
+""".encode()
+
+        parsed = SuuntoXmlParser.parse(content)
+
+        assert (parsed.avg_depth, parsed.max_depth) == (None, None)
+        # The neighbouring rule is untouched: 0 is still a reading where the column says so.
+        assert parsed.cns_start == 0.0
+
+    def test_a_real_depth_survives_the_guard(self):
+        """The guard must not cost the corpus, where every recorded depth is positive."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <AvgDepth>12.3</AvgDepth><MaxDepth>25.5</MaxDepth>
+</Dive>
+""".encode()
+
+        parsed = SuuntoXmlParser.parse(content)
+
+        assert (parsed.avg_depth, parsed.max_depth) == (12.3, 25.5)
+
     def test_a_recorded_zero_exposure_is_still_a_reading(self):
         """`< 0`, not `<= 0`. A dive that began with no oxygen loading recorded a real 0,
         and the four constraints are `>= 0` precisely to keep that apart from null."""
@@ -1859,15 +1888,30 @@ class TestTechScalars:
 
         assert mixture.gas_number == 0
 
-    def test_every_bounded_column_this_phase_adds_has_a_parse_side_guard(self):
+    def test_every_single_column_bound_a_parser_can_reach_has_a_parse_side_guard(self):
         """The drift guard for the rule itself.
 
         The rule was applied to two of seven columns and then written up as covering all
         of them, which is how five stayed unguarded through two review rounds. Counted
         here against the constraints rather than restated in prose, so the next column
         with a `CHECK` either gets a validator or fails this.
+
+        Now counts the two depth columns as well. They are older than the phase that
+        guarded the rest, which is exactly why they were missed - the set worth checking
+        is "bounded and reachable from a parser", not "bounded and added recently".
+
+        **Single-column bounds only, and the rest is deliberate rather than forgotten.**
+        `ck_dive_mixture_oxygen_helium_sum` and `ck_dive_mixture_pressure_order` constrain
+        a *pair*, so there is no "the bad value" to null - honouring them on the parse side
+        means choosing which of two recorded readings to discard, which is a different
+        decision from "this number is not a reading" and is not made here. `duration`,
+        `volume`, `oxygen` and `helium` are single-column and still unguarded; they are
+        pre-existing and out of this phase's scope, and they are listed here so the gap is
+        recorded rather than implied.
         """
         bounded = {
+            (Dive, "avg_depth"),
+            (Dive, "max_depth"),
             (Dive, "cns_start"),
             (Dive, "cns_end"),
             (Dive, "otu_start"),

@@ -172,6 +172,32 @@ class ParsedDiveSchema(_ParserOutput):
     otu_end: float | None = None
     surface_pressure_bar: float | None = None
 
+    @field_validator("avg_depth", "max_depth")
+    @classmethod
+    def _drop_non_positive_depth(cls, value: float | None) -> float | None:
+        """A dive to 0 m is not a dive - `ck_dive_max_depth_positive` and its `avg` twin.
+
+        `<= 0`, not `< 0`, and the contrast with `_drop_negative_exposure` right below is
+        the whole point: those four constraints are `>= 0` because a dive that began with
+        no oxygen loading records a real 0, while these two are `> 0` because no depth
+        reading of 0 describes a dive that happened. The model's own comments say so, and
+        this mirrors each one on its own terms rather than picking one rule for "depth-ish
+        numbers".
+
+        These are the last two bounded columns a parsed value could reach unguarded, and
+        they are older than the phase that guarded the rest - which is why they were
+        missed. They land like `po2_limit` and `gas_number` rather than like the exposure
+        readings: nothing writes them server-side, so the failure is on the form. A 0 from
+        a file pre-fills the dive form via `POST /dive/parse`, and the save then dies on
+        the `CHECK` - `DiveCreate` carries no bound of its own to catch it earlier - over
+        a field the diver never chose and, for `avg_depth`, cannot see.
+
+        Unattested: all 384 XML exports and 531 JSON readings in the corpus record positive
+        depths, and a FIT `max_depth` is a `uint32` of millimetres. Here because of where
+        the value lands, on the same terms as `_drop_implausible_surface_pressure`.
+        """
+        return None if value is not None and value <= 0 else value
+
     @field_validator("cns_start", "cns_end", "otu_start", "otu_end")
     @classmethod
     def _drop_negative_exposure(cls, value: float | None) -> float | None:

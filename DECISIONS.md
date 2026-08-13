@@ -3761,6 +3761,27 @@ columns was written up as though it covered all seven, and the write-up then rea
 work was done. A claim of completeness in this file should be countable against the thing it claims
 to cover.
 
+**And once it was countable, the count was still scoped wrong.** The test asked "every bounded
+column *this phase adds*", which quietly excused `avg_depth` and `max_depth` — bounded by
+`ck_dive_max_depth_positive` and its `avg` twin, reachable by all three parsers, and unguarded
+purely because they are older than the phase. The set worth checking is **bounded and reachable from
+a parser**, not bounded and recent; scoping a completeness check to the current changeset is how a
+pre-existing gap survives a review that was specifically looking for gaps.
+
+Those two use `<= 0` where the exposure guard beside them uses `< 0`, and the contrast is the point:
+a dive that began with no oxygen loading recorded a real 0, and a dive to 0 m did not happen. Each
+mirrors its own constraint rather than one rule being chosen for "depth-ish numbers". Unattested and
+free — all 768 depth readings across the 384 XML exports and all 80 across the JSON survive the
+guard unchanged.
+
+What is still uncovered is now written down rather than implied. `ck_dive_mixture_oxygen_helium_sum`
+and `ck_dive_mixture_pressure_order` constrain a *pair*, so there is no "the bad value" to null —
+honouring them on the parse side means choosing which of two recorded readings to discard, which is
+a different decision from "this number is not a reading" and is deliberately not made in a
+validator. `duration`, `volume`, `oxygen` and `helium` are single-column and still unguarded:
+pre-existing, out of this phase's scope, and named in the test's docstring so the next person
+counting finds them listed rather than absent.
+
 **Where the handler goes, and why the first attempt was in the wrong place.** The `noop` branch's
 `try` originally wrapped `await db.commit()` alone. That catches nothing: a `CHECK` is not
 deferrable in Postgres, so it is evaluated as the `UPDATE` executes and SQLAlchemy raises

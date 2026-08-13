@@ -72,7 +72,7 @@ run at the published port instead:
 POSTGRES_SERVER=localhost ENVIRONMENT=local SECRET_KEY=testsecret uv run pytest -q
 ```
 
-That is the difference between `703 passed, 70 skipped` and `773 passed`. The totals move with every
+That is the difference between `705 passed, 70 skipped` and `775 passed`. The totals move with every
 test added and these two will drift; **`70 skipped` against no skip line at all is the part worth
 reading**, and it is the only thing on screen that tells you which of the two runs you just did. CI
 sets exactly that variable and fails the job if anything skips (see below), so this is about getting
