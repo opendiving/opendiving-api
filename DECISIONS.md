@@ -4195,3 +4195,158 @@ item to `1.`, which is valid markdown and unreadable in a diff.
 Adopting it reflowed all six documents in one commit, so `git blame` on any line of `DECISIONS.md`
 points at that commit rather than at whoever wrote the sentence. Blame its parent, or use
 `git log -L`.
+
+## Per-tank gas use is attributed from the device's gas switches, and from nothing else
+
+`compute_gas_use` has refused a multi-cylinder dive since it was written, on the grounds that "there
+is nothing to say which of them were breathed at what depth". `dive_profile.gas_attribution` is now
+that something: one entry per gas number, holding the seconds on that gas and the mean depth over
+them, derived at extraction by `derive_gas_attribution` from the gas-switch events Phase 3 started
+recording. `compute_multi_tank_gas_use` joins it to the mixtures on `gas_number` and normalizes each
+cylinder against *its own* time and depth.
+
+The size of what that unlocks, on the corpus's showcase dive (`Dive_2025-06-03-1215.xml`, a 22 L
+back gas and an 11 L EAN49 bottle): the dive reported no gas use at all before, and now reports 1
+863 L breathed off the back gas at an RMV of 12.37, over the 2 355 s before the switch, at a mean
+depth of **28.37 m** — where the dive's own average depth is 17.79 m. Using the dive average would
+have understated the rate by a third. That gap *is* the feature.
+
+**Two other sources were considered and rejected**, both of which the plan for this phase had
+expected to use:
+
+- **Per-cylinder pressure activity** — reading "this tank was being breathed" off the stretch where
+  its pressure falls. Unavailable and unsound, and the corpus says both. Unavailable: all 19
+  multi-gas exports in it carry exactly **one** pressure channel, because a diver has one
+  transmitter and it stays on the back gas, so there is never a second curve to compare against.
+  Unsound: the same dive settles it, since the XML export records the back gas at 122.44 bar at the
+  switch and its own transmitter goes on reading down to 117.8 bar at the surface — 4.6 bar "used"
+  by a cylinder nobody was breathing, as it cooled.
+- **A single-gas fallback**, attributing the whole dive to the one cylinder when a file records no
+  switches. It would be dead code twice over: a one-mixture dive already yields a figure through
+  `compute_gas_use` without any attribution, and no file in the corpus carries a pressure channel
+  without a gas-switch event beside it.
+
+What the events do carry is good: 19 multi-gas exports, **every one** of them opening with a switch
+at t=0, so there is no leading stretch of unattributed dive in practice. Corroboration that they are
+trustworthy comes free — DM5 XML stops logging the back gas's pressure 4 s before it records the
+switch away from it.
+
+Details worth knowing:
+
+- **One entry per gas number, not per stretch.** `Dive_2025-03-07-1510` switches seven times between
+  two cylinders; the pressures it will be joined to belong to a cylinder, not to a stretch of the
+  dive, so the seconds are summed and the mean depth is taken across all of a gas's stretches.
+- **The same gas selected twice running is one stretch.** Suunto writes this whenever a diver
+  browses the gas list without changing anything (`Dive_2025-03-08-1440` records switches to gas 2
+  at 3 081 s and again at 3 087 s).
+- **A switch before the first sample is the gas the dive started on** and is clipped forward, for
+  the same reason `_rebase_events` clamps it to zero rather than dropping it. A stretch *before* the
+  first switch is left unattributed instead of being guessed at.
+- **Attribution runs before `downsample`**, which is the load-bearing ordering in
+  `finalize_profile`. Min/max bucketing keeps each bucket's extremes and discards everything between
+  them, so a mean taken afterwards would be a mean of the dive's peaks and troughs rather than of
+  the dive.
+
+## The cylinder pressures come from the mixtures, not from the profile's pressure curve
+
+`gas_attribution` carries no pressures, though the plan for this phase had it carrying
+`start_pressure_bar10`/`end_pressure_bar10`. Consumption is derived from
+`DiveMixture.start_pressure` and `end_pressure`, exactly as the single-cylinder path already did.
+
+Two reasons, and the corpus supplies both. **They disagree**: for `685013ad01561e19711148d5.json`
+the header records the back gas ending at 122.44 bar while that file's own sample stream ends at
+117.8 bar, because the transmitter keeps reading while the cylinder cools after the diver has
+switched away. The header is the device's account of the cylinder, and the series is a thermometer
+with a pressure gauge attached. **And the mixtures are editable**: they round-trip through the dive
+form, where a diver can correct a mistyped end pressure, while a profile is immutable until the
+export is re-imported. A profile-derived pressure would silently outrank the correction.
+
+So the split is clean, and it is the reason the column is called `gas_attribution` rather than the
+plan's `gas_usage`: it holds the attribution — which cylinder, for how long, how deep — and nothing
+that any other table already knows.
+
+## A multi-cylinder figure covers the cylinders it can account for, and says so
+
+`DiveGasUse` gained `tanks` and `attributed_seconds`. The three existing figures stay required and
+now mean "the cylinders accounted for", which on a one-cylinder dive is still the dive.
+
+The alternative was all-or-nothing per dive, matching `merge_mixture_fields` and the general refusal
+in this module — and it was rejected because it would ship nothing at all. The commonest tech shape
+in the corpus by a distance is one transmitter on the back gas and a staged deco bottle with no
+pressures logged, which is *every* multi-gas dive in it: 19 of 19. Refusing those would have left
+the feature with no dive to work on. The back gas's own figures are correct on their own terms — gas
+from its pressures, time from the switches, depth from the samples in between — so what is needed is
+not suppression but a statement of scope, and `attributed_seconds` is it. On the showcase dive it
+reads 2 355 against a `duration` of 4 619: the client can say the figure covers half the dive, which
+is true, and is more than "no data" ever said.
+
+What is still refused outright:
+
+- **A duplicate `gas_number` across the mixtures** kills the whole dive's figure rather than its own
+  row. The number is a label a device chose, not an index this code assigned (see
+  *"`DiveMixture.gas_number` is a label"*), so a duplicate makes every join ambiguous, and taking
+  the first match would attribute a back gas's time to a deco bottle in silence.
+- **A cylinder the attribution never mentions**, or one that fails the per-tank checks (no
+  pressures, no pressure drop, no time, no depth), is left out — the same conditions
+  `compute_gas_use` applies to a whole dive, applied per tank, because a cylinder must not be worth
+  a different amount of gas for having been logged next to another one.
+- **A dive where no cylinder survives** returns `None`, exactly as before.
+
+`sac_bar_per_min` is the one figure that had to be *defined* rather than summed, because bar/min is
+meaningless across cylinders of different sizes. It is the total gas over the total volume over the
+total surface-minutes — what one cylinder of their combined volume would have shown — which reduces
+to `compute_gas_use`'s formula when there is a single tank, so a dive's headline figure cannot jump
+merely because a second cylinder was added. The per-tank `sac_bar_per_min` is each cylinder's own
+and is the one a diver reads.
+
+**`resolve_gas_use` is the only entry point**, and it dispatches on cylinder count alone. A
+single-cylinder dive with a profile is deliberately *not* re-derived from the profile's mean depth:
+`avg_depth` is the diver's record and may have been edited, and changing which number a
+long-standing figure comes from is not a change to make in passing.
+
+Two consequences for clients:
+
+- The **dashboard RMV trendline gains points retroactively** once the backfill runs — every
+  multi-cylinder dive that could not produce a figure before. The local corpus gained one on a
+  344-point series.
+- `gas_use_history` skips a multi-cylinder dive whose `avg_depth` is null even when its tanks do
+  produce figures, because `DiveGasUsePoint.avg_depth` is what the tooltip reads and the multi-tank
+  path never consults it. Unreachable for an imported dive — every export in the corpus records an
+  average depth — and inventing one from the attributed depths would put a number on the chart that
+  the dive does not claim.
+
+## `PROFILE_EXTRACTOR_VERSION` 3, and the manual DDL for `gas_attribution`
+
+`PROFILE_EXTRACTOR_VERSION` went 2 → 3. Nothing about the stored *samples* changed this time, which
+is a first: the bump is there because the row gained a column the extractor fills, and the version
+is the only thing the backfill selects on. The existing script picks the corpus up unchanged:
+
+```bash
+docker compose exec api python -m src.scripts.backfill_dive_profiles
+```
+
+Every profile ETag changes with it, and the backfill flushes the dive caches of every user it
+touches — same as the 1 → 2 bump, and the same reason to run it off-peak.
+
+One column on the existing table, so per *"Schema changes have no migration tool"* `create_all()`
+does nothing and it needs applying by hand:
+
+```sql
+ALTER TABLE dive_profile ADD COLUMN gas_attribution JSONB;
+```
+
+Nullable, and the null means what `event_count`'s does: NULL is "extracted before attribution
+existed" and `[]` is "this extractor looked and found nothing to attribute". `store_profile` always
+writes a list, so the null only survives on a row the backfill has not reached, and
+`get_gas_attribution_for_dives` returns `[]` for either — a caller does the same thing with both.
+
+No `CHECK`s, for the reason the Phase 3 columns have none: nothing here comes from a request body.
+The validation that does exist is `GasAttribution.model_validate` on the way *out*, which is why the
+stored shape is a Pydantic model rather than a plain dataclass — a payload written by an older
+extractor is a real possibility, and it has to degrade to "this dive has no per-tank figure" with a
+warning rather than to a 500 on the dive detail page.
+
+**Not `deferred`, unlike `data`.** It is a handful of integers per cylinder and it is read on every
+dive detail response, which is exactly the case the deferred payload exists to keep off that path.
+It is fetched by its own narrow query rather than by `get_profile_infos_for_dives`, because
+`gas_use_history` needs this column and none of the other ten over a user's whole log.

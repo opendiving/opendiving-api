@@ -7,10 +7,16 @@ The **only** module that reads or writes `dive_profile.data` - the same seam dis
 as `services/dive_files.py`, for the same reason: the payload's encoding is an
 implementation detail, and everything above this module deals in `NormalizedProfile`.
 
-Two halves. The top one is pure and DB-free (`normalize`, `downsample`,
-`extract_profile`, `should_extract`), following the `reconcile()` idiom in
+Two halves. The top one is pure and DB-free (`normalize`, `derive_gas_attribution`,
+`downsample`, `extract_profile`, `should_extract`), following the `reconcile()` idiom in
 `dive_files.py`: the decisions worth testing are testable without a database. The bottom
 one persists.
+
+One thing here is not a curve: `derive_gas_attribution` reads the gas switches back
+against the depth channel to work out which cylinder was breathed for how long and how
+deep, and that lands in a summary column rather than in `data`. It is the profile's job
+because the samples are the only evidence for it, and it is consumed a table away by
+`services/dive_gas.py`, which owns every figure derived from it.
 
 **Why JSONB rather than a packed `bytea`.** A packed int16 encoding would be perhaps 3x
 smaller on a column Postgres already TOASTs and compresses, and would make
@@ -21,10 +27,12 @@ on the box, is worth more than the bytes. This is the codebase's first JSONB col
 """
 
 import logging
-from dataclasses import dataclass, field
+from bisect import bisect_right
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
+from pydantic import ValidationError
 from sqlalchemy import CursorResult, delete, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import undefer
@@ -41,6 +49,7 @@ from ..schemas.dive_profile import (
     DiveProfilePressureSeries,
     DiveProfileRead,
     DiveProfileSeries,
+    GasAttribution,
     ParsedProfileSchema,
     ProfileEventType,
 )
@@ -54,7 +63,10 @@ logger = logging.getLogger(__name__)
 # something to select on.
 #
 # 2: the deco `ceiling` channel and `events`, which every parser had been dropping.
-PROFILE_EXTRACTOR_VERSION = 2
+# 3: `gas_attribution`, derived from those events - which gas was breathed for how long
+#    and how deep. Nothing about the stored *samples* changed, but the row did, and this
+#    is the only selector the backfill has.
+PROFILE_EXTRACTOR_VERSION = 3
 
 # Per channel, applied server-side at extraction. A 2026 Suunto Ocean export carries
 # 3 933 temperature samples on one dive, which is already past this; depth (395) never
@@ -114,6 +126,11 @@ class NormalizedProfile:
     temperature: ProfileSeries | None = None
     pressure: list[ProfilePressureSeries] = field(default_factory=list)
     events: list[ProfileEvent] = field(default_factory=list)
+    # Not a channel and not stored in `data`: a summary column, derived from `events` and
+    # `depth` by `derive_gas_attribution` and carried here so one `NormalizedProfile` is
+    # still everything `store_profile` needs. Empty on a profile whose file said nothing
+    # about which gas was breathed when, which is most of them.
+    gas_attribution: list[GasAttribution] = field(default_factory=list)
 
     @property
     def channels(self) -> list[str]:
@@ -340,6 +357,111 @@ def normalize(parsed: ParsedProfileSchema) -> NormalizedProfile | None:
     )
 
 
+def derive_gas_attribution(profile: NormalizedProfile) -> list[GasAttribution]:
+    """Which gas was breathed for how long, and how deep, from the switches the device recorded.
+
+    The one fact a multi-tank dive is missing. Cylinder volumes and pressures are already
+    on the mixtures; what nothing in the log records is *when* each was breathed, without
+    which a staged deco bottle and a back gas are both divided by the whole dive's average
+    depth - which is exactly why `compute_gas_use` refuses a dive with more than one
+    cylinder (see its docstring).
+
+    **Gas-switch events are the only source, deliberately.** Two others were considered:
+
+    - *Per-cylinder pressure activity* - reading "this tank was being breathed" off the
+      stretch where its pressure falls. The corpus says it is both unavailable and unsound.
+      Unavailable: all 19 multi-gas exports in it carry exactly **one** pressure channel,
+      because a diver has one transmitter and it stays on the back gas, so there is never a
+      second curve to compare against. Unsound: tank pressure moves with temperature, and
+      the same dive proves it - `Dive_2025-06-03-1215` records the back gas at 122.44 bar
+      at the switch, and its own transmitter goes on to read 117.8 bar at the surface, 4.6
+      bar "used" by a cylinder nobody was breathing.
+    - *A single-gas fallback* - attributing the whole dive to the one cylinder when a file
+      records no switches at all. It would be dead code: a one-mixture dive already yields
+      a figure through `compute_gas_use` with no attribution involved, and no file in the
+      corpus carries a pressure channel without a gas-switch event beside it.
+
+    A switch before the first depth sample is the dive *starting* on that gas - the
+    ordinary case, since a Suunto records the opening selection at t=0 (see
+    `_rebase_events`) - so it is clipped forward to the first sample rather than dropped.
+    A stretch *before* the first switch, however, is left unattributed: nothing says what
+    was breathed then, and `compute_multi_tank_gas_use` reports the shortfall as
+    `attributed_seconds` rather than quietly dividing a cylinder's gas by less time than it
+    was breathed for.
+
+    One entry per gas number rather than per interval, because the pressures it will be
+    joined to belong to a cylinder rather than to a stretch of the dive: a diver who
+    returns to their back gas for the ascent has two intervals on it and one tank.
+    Ordered by when each gas was first breathed - the order a diver lists cylinders in.
+
+    **Runs before `downsample`**, which is what `finalize_profile` exists to sequence.
+    Min/max bucketing keeps each bucket's extremes and discards everything between them,
+    so a mean taken afterwards would be a mean of the dive's peaks and troughs rather than
+    of the dive.
+    """
+    if profile.depth is None:
+        return []
+
+    switch_times: list[int] = []
+    switch_gases: list[int] = []
+    first_sample, last_sample = profile.depth.t[0], profile.depth.t[-1]
+    for event in profile.events:
+        if event.type is not ProfileEventType.GAS_SWITCH or event.gas_number is None:
+            continue
+        # Sorted by `normalize`, so the first switch at or before the first sample is the
+        # gas the dive began on and any earlier one is superseded by it.
+        moment = max(event.t, first_sample)
+        if moment > last_sample:
+            break
+        if switch_gases and switch_gases[-1] == event.gas_number:
+            # The same gas selected twice running is one stretch on it, not two. Suunto
+            # writes this whenever a diver browses the gas list without changing anything.
+            continue
+        if switch_times and switch_times[-1] == moment:
+            # Two switches on one second: the later one is what the diver ended up on, the
+            # same last-reading-wins rule `_rebase` applies to a channel.
+            switch_gases[-1] = event.gas_number
+            continue
+        switch_times.append(moment)
+        switch_gases.append(event.gas_number)
+
+    if not switch_times:
+        return []
+
+    seconds: dict[int, int] = {}
+    for index, (moment, gas_number) in enumerate(zip(switch_times, switch_gases, strict=True)):
+        # The last stretch runs to the last depth sample: a dive ends where its recording
+        # does, and there is no switch marking the surface.
+        until = switch_times[index + 1] if index + 1 < len(switch_times) else last_sample
+        seconds[gas_number] = seconds.get(gas_number, 0) + (until - moment)
+
+    depth_totals: dict[int, int] = {}
+    depth_counts: dict[int, int] = {}
+    for moment, centimeters in zip(profile.depth.t, profile.depth.v, strict=True):
+        index = bisect_right(switch_times, moment) - 1
+        if index < 0:
+            continue
+        gas_number = switch_gases[index]
+        depth_totals[gas_number] = depth_totals.get(gas_number, 0) + centimeters
+        depth_counts[gas_number] = depth_counts.get(gas_number, 0) + 1
+
+    attribution = []
+    for gas_number in dict.fromkeys(switch_gases):
+        # A gas whose every stretch fell between two depth samples has a time but no depth
+        # to normalize it against, and is dropped rather than given a borrowed one.
+        count = depth_counts.get(gas_number, 0)
+        if count == 0:
+            continue
+        attribution.append(
+            GasAttribution(
+                gas_number=gas_number,
+                seconds=seconds[gas_number],
+                mean_depth_cm=round(depth_totals[gas_number] / count),
+            )
+        )
+    return attribution
+
+
 def _downsample_series(t: list[int], v: list[int], max_points: int) -> tuple[list[int], list[int]]:
     """Min/max bucketing over time, to at most `max_points` points.
 
@@ -421,6 +543,9 @@ def downsample(
             )
         ],
         events=profile.events[:max_events],
+        # Passed through untouched: it was derived from the full-resolution channels on
+        # purpose (see `derive_gas_attribution`), so thinning them must not disturb it.
+        gas_attribution=profile.gas_attribution,
     )
 
 
@@ -451,13 +576,18 @@ def finalize_profile(parsed: ParsedProfileSchema | None) -> NormalizedProfile | 
     exactly, since a profile normalized one way at attach and another way in a backfill
     is the kind of drift nothing would notice. **Raises**, unlike its caller: the
     never-raises promise belongs to the wrappers, and this is the shared middle.
+
+    The order of the last two steps is load-bearing rather than incidental: gas attribution
+    reads a mean depth off the depth channel, and `downsample` keeps each bucket's extremes
+    and throws away the samples between them. Deriving it here, where both are in view,
+    is what stops the two ever being sequenced the other way round.
     """
     if parsed is None:
         return None
     normalized = normalize(parsed)
     if normalized is None:
         return None
-    return downsample(normalized)
+    return downsample(replace(normalized, gas_attribution=derive_gas_attribution(normalized)))
 
 
 def should_extract(
@@ -534,6 +664,9 @@ async def store_profile(
             max_temperature_c10=max(temperature_values) if temperature_values else None,
             min_pressure_bar10=min(pressure_values) if pressure_values else None,
             max_pressure_bar10=max(pressure_values) if pressure_values else None,
+            # A list rather than `None` when there is nothing to attribute, for the same
+            # reason `event_count` is a count rather than `None`: this extractor looked.
+            gas_attribution=[entry.model_dump() for entry in profile.gas_attribution],
             data=profile.to_data(),
             # Spelled out rather than left to `PublicUUIDMixin`'s `default_factory`: that
             # is a dataclass-level default applied when the ORM constructs an instance,
@@ -681,6 +814,40 @@ async def get_profile_infos_for_dives(db: AsyncSession, *, dive_ids: list[int]) 
             updated_at=row.updated_at,
         )
     return infos
+
+
+async def get_gas_attribution_for_dives(db: AsyncSession, *, dive_ids: list[int]) -> dict[int, list[GasAttribution]]:
+    """Resolve several dives' per-cylinder attribution in one query.
+
+    Separate from `get_profile_infos_for_dives` although both read summary columns of the
+    same row, because the two answer different questions for different callers: that one
+    builds the `profile` a response carries, this one feeds `compute_multi_tank_gas_use`
+    and is never serialized. `gas_use_history` needs this and none of the rest, over every
+    dive a user has - so folding it into the other would mean either a second query there
+    anyway or eleven columns fetched to use one.
+
+    A dive with no profile, or one extracted before attribution existed, comes back as an
+    empty list rather than being absent: "nothing to attribute" is what the caller does
+    with either, and a NULL column on a stale row means the backfill has not reached it
+    yet, not that the file was silent.
+
+    A stored entry that no longer validates is dropped with a warning rather than raising.
+    The column is a summary the extractor can rewrite at will, and a shape older than the
+    current one must degrade to "this dive has no per-tank figure" - never to a 500 on the
+    dive detail page, which is where this is read.
+    """
+    if not dive_ids:
+        return {}
+
+    stmt = select(DiveProfile.dive_id, DiveProfile.gas_attribution).where(DiveProfile.dive_id.in_(set(dive_ids)))
+
+    attribution: dict[int, list[GasAttribution]] = {dive_id: [] for dive_id in dive_ids}
+    for row in await db.execute(stmt):
+        try:
+            attribution[row.dive_id] = [GasAttribution.model_validate(entry) for entry in row.gas_attribution or []]
+        except ValidationError:
+            logger.warning("Ignoring unreadable gas attribution stored for dive %s", row.dive_id, exc_info=True)
+    return attribution
 
 
 # How many files are processed between commits. Small enough that an interrupted run

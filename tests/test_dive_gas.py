@@ -1,13 +1,19 @@
 """Unit tests for gas-consumption arithmetic (`services/dive_gas.py`).
 
-Same convention as `test_gear_service.py`: `compute_gas_use` is pure, so the whole
+Same convention as `test_gear_service.py`: both derivations are pure, so the whole
 truth table - the worked numbers and every reason a dive can't produce one - is
 covered here without a database. Endpoint behaviour on top of a live Postgres/Redis
 is exercised by hand (see DECISIONS.md), not here.
 """
 
 from src.app.schemas.dive_mixture import DiveMixtureRead
-from src.app.services.dive_gas import METERS_PER_BAR, compute_gas_use
+from src.app.schemas.dive_profile import GasAttribution
+from src.app.services.dive_gas import (
+    METERS_PER_BAR,
+    compute_gas_use,
+    compute_multi_tank_gas_use,
+    resolve_gas_use,
+)
 
 
 def _mixture(
@@ -15,6 +21,7 @@ def _mixture(
     volume: float = 12.0,
     start_pressure: float | None = 200.0,
     end_pressure: float | None = 50.0,
+    gas_number: int | None = None,
 ) -> DiveMixtureRead:
     """A single air cylinder. `id`/`oxygen`/`helium` are required by the schema but
     irrelevant to consumption - RMV is a volume rate, so what's *in* the cylinder
@@ -28,6 +35,7 @@ def _mixture(
         end_pressure=end_pressure,
         oxygen=21.0,
         helium=0.0,
+        gas_number=gas_number,
     )
 
 
@@ -177,3 +185,224 @@ class TestComputeGasUseReturnsNone:
         assert compute_gas_use(duration=0, avg_depth=18.0, mixtures=[_mixture()]) is None
         assert compute_gas_use(duration=-60, avg_depth=18.0, mixtures=[_mixture()]) is None
         assert compute_gas_use(duration=45 * 60, avg_depth=18.0, mixtures=[_mixture(volume=0.0)]) is None
+
+
+def _attributed(gas_number: int, *, seconds: int, mean_depth_cm: int) -> GasAttribution:
+    """One cylinder's stretch of the dive, as the profile extractor derived it from the
+    device's own gas switches (see `services/dive_profiles.py::derive_gas_attribution`)."""
+    return GasAttribution(gas_number=gas_number, seconds=seconds, mean_depth_cm=mean_depth_cm)
+
+
+class TestComputeMultiTankGasUse:
+    """The two cylinders are deliberately the two dives `TestComputeGasUse` already works
+    out on its own - a 12 L at 200 -> 50 bar for 45 min at 18 m (1800 L, RMV 14.29) and an
+    11.1 L at 210 -> 70 bar for 40 min at 12 m (1554 L, RMV 17.66). Every number below is
+    therefore checkable against a figure that was verified single-tank first, which is the
+    property that matters: a cylinder must not be worth a different amount of gas for
+    having been logged next to another one.
+    """
+
+    def _tanks(self) -> tuple[list[DiveMixtureRead], list[GasAttribution]]:
+        mixtures = [
+            _mixture(gas_number=1),
+            _mixture(gas_number=2, volume=11.1, start_pressure=210.0, end_pressure=70.0),
+        ]
+        attribution = [
+            _attributed(1, seconds=45 * 60, mean_depth_cm=1800),
+            _attributed(2, seconds=40 * 60, mean_depth_cm=1200),
+        ]
+        return mixtures, attribution
+
+    def test_gives_each_cylinder_its_own_figures(self):
+        mixtures, attribution = self._tanks()
+
+        result = compute_multi_tank_gas_use(mixtures=mixtures, gas_attribution=attribution)
+
+        assert result is not None
+        assert [(tank.gas_number, tank.gas_used, tank.rmv) for tank in result.tanks] == [
+            (1, 1800.0, 14.29),
+            (2, 1554.0, 17.66),
+        ]
+        assert [(tank.seconds, tank.mean_depth) for tank in result.tanks] == [(2700, 18.0), (2400, 12.0)]
+
+    def test_a_tank_is_normalized_against_its_own_depth_not_the_dive_s(self):
+        """The reason the whole feature exists. The same deco bottle emptied at 6 m and at
+        30 m is a wildly different consumption rate, and before attribution both were
+        divided by whatever the dive averaged.
+        """
+        mixtures = [_mixture(gas_number=1), _mixture(gas_number=2)]
+        shallow = compute_multi_tank_gas_use(
+            mixtures=mixtures,
+            gas_attribution=[
+                _attributed(1, seconds=1800, mean_depth_cm=3000),
+                _attributed(2, seconds=1800, mean_depth_cm=1000),
+            ],
+        )
+
+        assert shallow is not None
+        # 4 bar ambient against 2 bar: the same litres over the same time is half the rate.
+        assert shallow.tanks[0].rmv == round(shallow.tanks[1].rmv / 2, 2)
+
+    def test_the_dive_figures_are_the_totals_over_the_tanks(self):
+        mixtures, attribution = self._tanks()
+
+        result = compute_multi_tank_gas_use(mixtures=mixtures, gas_attribution=attribution)
+
+        assert result.gas_used == 1800.0 + 1554.0
+        # 126 surface-minutes on the first cylinder and 88 on the second.
+        assert result.rmv == round(3354 / 214, 2)
+        # `sac_bar_per_min` is defined as what one cylinder of the combined volume would
+        # have shown, which is `compute_gas_use`'s own formula with the sums put in.
+        assert result.sac_bar_per_min == round(3354 / 23.1 / 214, 2)
+        assert result.attributed_seconds == 2700 + 2400
+
+    def test_a_cylinder_that_recorded_no_pressures_is_left_out_and_the_shortfall_shows(self):
+        """The commonest tech shape in the corpus by a distance: one transmitter on the
+        back gas, a staged deco bottle with nothing logged. The back gas still yields a
+        figure, and `attributed_seconds` is what says the dive was longer than the figure
+        covers.
+        """
+        mixtures = [
+            _mixture(gas_number=1),
+            _mixture(gas_number=2, volume=11.0, start_pressure=None, end_pressure=None),
+        ]
+        attribution = [
+            _attributed(1, seconds=2355, mean_depth_cm=2837),
+            _attributed(2, seconds=2327, mean_depth_cm=655),
+        ]
+
+        result = compute_multi_tank_gas_use(mixtures=mixtures, gas_attribution=attribution)
+
+        assert result is not None
+        assert [tank.gas_number for tank in result.tanks] == [1]
+        assert result.attributed_seconds == 2355
+        assert result.gas_used == result.tanks[0].gas_used
+
+    def test_a_cylinder_the_attribution_never_mentions_is_left_out(self):
+        """A hand-added cylinder has no `gas_number` to join on, and one the device never
+        recorded a switch to was never attributed any time."""
+        mixtures = [_mixture(gas_number=1), _mixture(gas_number=7)]
+
+        result = compute_multi_tank_gas_use(
+            mixtures=mixtures, gas_attribution=[_attributed(1, seconds=2700, mean_depth_cm=1800)]
+        )
+
+        assert [tank.gas_number for tank in result.tanks] == [1]
+
+    def test_the_tanks_are_ordered_as_the_mixtures_are(self):
+        """Cylinder order on the dive is the diver's, and the client joins each tank back
+        to the mixture row it sits beside."""
+        mixtures = [_mixture(gas_number=2), _mixture(gas_number=1)]
+        attribution = [
+            _attributed(1, seconds=2700, mean_depth_cm=1800),
+            _attributed(2, seconds=2400, mean_depth_cm=1200),
+        ]
+
+        result = compute_multi_tank_gas_use(mixtures=mixtures, gas_attribution=attribution)
+
+        assert [tank.gas_number for tank in result.tanks] == [2, 1]
+
+
+class TestComputeMultiTankGasUseReturnsNone:
+    def test_when_the_dive_has_fewer_than_two_cylinders(self):
+        """One cylinder is `compute_gas_use`'s, and the split is what keeps a long-standing
+        figure from changing which number it comes from."""
+        assert (
+            compute_multi_tank_gas_use(
+                mixtures=[_mixture(gas_number=1)],
+                gas_attribution=[_attributed(1, seconds=2700, mean_depth_cm=1800)],
+            )
+            is None
+        )
+
+    def test_when_nothing_records_which_gas_was_breathed_when(self):
+        """A FIT export with two gases and no `dive_gas_switched` event is exactly this,
+        and it is where the feature has to keep saying nothing."""
+        assert (
+            compute_multi_tank_gas_use(mixtures=[_mixture(gas_number=1), _mixture(gas_number=2)], gas_attribution=[])
+            is None
+        )
+
+    def test_when_two_cylinders_claim_the_same_gas_number(self):
+        """The number is a label a device chose, not an index this code assigned, so a
+        duplicate makes every join ambiguous rather than only its own - and picking the
+        first would attribute a back gas's time to a deco bottle in silence.
+        """
+        assert (
+            compute_multi_tank_gas_use(
+                mixtures=[_mixture(gas_number=1), _mixture(gas_number=1)],
+                gas_attribution=[_attributed(1, seconds=2700, mean_depth_cm=1800)],
+            )
+            is None
+        )
+
+    def test_when_no_cylinder_can_produce_a_figure(self):
+        mixtures = [
+            _mixture(gas_number=1, start_pressure=None),
+            _mixture(gas_number=2, start_pressure=200.0, end_pressure=200.0),
+        ]
+        attribution = [
+            _attributed(1, seconds=2700, mean_depth_cm=1800),
+            _attributed(2, seconds=2400, mean_depth_cm=1200),
+        ]
+
+        assert compute_multi_tank_gas_use(mixtures=mixtures, gas_attribution=attribution) is None
+
+    def test_when_a_cylinder_has_no_time_or_no_depth(self):
+        """The same guards `compute_gas_use` applies to a dive, applied per tank: a zero in
+        either would be a division by zero or a rate normalized against the surface.
+        """
+        mixtures = [_mixture(gas_number=1), _mixture(gas_number=2)]
+
+        assert (
+            compute_multi_tank_gas_use(
+                mixtures=mixtures,
+                gas_attribution=[
+                    _attributed(1, seconds=0, mean_depth_cm=1800),
+                    _attributed(2, seconds=2400, mean_depth_cm=0),
+                ],
+            )
+            is None
+        )
+
+
+class TestResolveGasUse:
+    """The one entry point every caller uses, so the choice between the two derivations
+    lives in a single place."""
+
+    def test_a_single_cylinder_dive_is_computed_exactly_as_before(self):
+        attribution = [_attributed(1, seconds=600, mean_depth_cm=3000)]
+
+        result = resolve_gas_use(
+            duration=45 * 60, avg_depth=18.0, mixtures=[_mixture(gas_number=1)], gas_attribution=attribution
+        )
+
+        assert result == compute_gas_use(duration=45 * 60, avg_depth=18.0, mixtures=[_mixture(gas_number=1)])
+        # In particular the profile's own mean depth does not get to override the dive's
+        # `avg_depth`, which is the diver's record and may have been edited.
+        assert result.rmv == 14.29
+        assert result.tanks == []
+        assert result.attributed_seconds is None
+
+    def test_a_multi_cylinder_dive_without_attribution_still_says_nothing(self):
+        """Every multi-cylinder dive in the log before Phase 4, and every one imported from
+        a file that records no gas switches after it."""
+        assert (
+            resolve_gas_use(duration=45 * 60, avg_depth=18.0, mixtures=[_mixture(gas_number=1), _mixture(gas_number=2)])
+            is None
+        )
+
+    def test_a_multi_cylinder_dive_with_attribution_is_computed_per_tank(self):
+        result = resolve_gas_use(
+            duration=45 * 60,
+            avg_depth=18.0,
+            mixtures=[_mixture(gas_number=1), _mixture(gas_number=2)],
+            gas_attribution=[
+                _attributed(1, seconds=2700, mean_depth_cm=1800),
+                _attributed(2, seconds=2400, mean_depth_cm=1200),
+            ],
+        )
+
+        assert result is not None
+        assert len(result.tanks) == 2
+        assert result.attributed_seconds == 5100

@@ -10,6 +10,7 @@ from datetime import timedelta
 import pytest
 
 from src.app.schemas.dive_profile import (
+    ParsedPressureSeries,
     ParsedProfileEvent,
     ParsedProfileSchema,
     ParsedSeries,
@@ -29,8 +30,10 @@ from src.app.services.dive_profiles import (
     ProfileEvent,
     ProfilePressureSeries,
     ProfileSeries,
+    derive_gas_attribution,
     downsample,
     extract_profile,
+    finalize_profile,
     normalize,
     should_extract,
     to_read_schema,
@@ -1025,6 +1028,207 @@ class TestDownsample:
         assert MAX_POINTS_PER_CHANNEL == 1200
         # Far above any real dive: the worst in the corpus produces 17 markers.
         assert MAX_EVENTS == 200
+
+
+def _switch(t: float, gas_number: int | None) -> ParsedProfileEvent:
+    return ParsedProfileEvent(t=t, type=ProfileEventType.GAS_SWITCH, gas_number=gas_number)
+
+
+def _dive_on_two_gases() -> ParsedProfileSchema:
+    """The corpus's commonest tech shape, in miniature: a back gas breathed deep, a switch
+    to a deco bottle, and a shallow stop on it. Depth every 100 s, in centimeters.
+    """
+    return ParsedProfileSchema(
+        depth=ParsedSeries(t=[0.0, 100.0, 200.0, 300.0, 400.0], v=[3000, 3000, 3000, 600, 600]),
+        events=[_switch(0.0, 1), _switch(300.0, 2)],
+    )
+
+
+class TestDeriveGasAttribution:
+    """Which cylinder was breathed for how long, and how deep - the fact Phase 4 turns
+    into per-tank consumption. See `derive_gas_attribution` for why gas-switch events are
+    the only source it will take.
+    """
+
+    def test_splits_a_two_gas_dive_at_the_switch(self):
+        profile = normalize(_dive_on_two_gases())
+
+        attribution = derive_gas_attribution(profile)
+
+        # 0-300 s on gas 1 at a flat 30 m; 300-400 s on gas 2 at 6 m. The dive's own
+        # average depth - 24 m - describes neither, which is the whole point.
+        assert [(entry.gas_number, entry.seconds, entry.mean_depth_cm) for entry in attribution] == [
+            (1, 300, 3000),
+            (2, 100, 600),
+        ]
+
+    def test_a_gas_returned_to_is_one_entry_with_the_time_added_up(self):
+        """A diver who goes back to their back gas for the ascent has two stretches on it
+        and one cylinder, and it is the cylinder the pressures belong to."""
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[0.0, 100.0, 200.0, 300.0], v=[3000, 600, 3000, 1500]),
+            events=[_switch(0.0, 1), _switch(100.0, 2), _switch(200.0, 1)],
+        )
+
+        attribution = derive_gas_attribution(normalize(parsed))
+
+        assert [(entry.gas_number, entry.seconds) for entry in attribution] == [(1, 200), (2, 100)]
+        # Mean over both stretches on gas 1 - 30 m, then 30 m and 15 m after the switch
+        # back - and not over the 6 m spent on the deco bottle in between.
+        assert attribution[0].mean_depth_cm == 2500
+
+    def test_the_same_gas_selected_twice_running_is_one_stretch(self):
+        """Suunto writes this whenever a diver browses the gas list without changing
+        anything - `Dive_2025-03-08-1440` records switches to gas 2 at 3 081 s and 3 087 s."""
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[0.0, 100.0, 200.0], v=[3000, 3000, 3000]),
+            events=[_switch(0.0, 1), _switch(100.0, 1)],
+        )
+
+        attribution = derive_gas_attribution(normalize(parsed))
+
+        assert [(entry.gas_number, entry.seconds) for entry in attribution] == [(1, 200)]
+
+    def test_a_switch_before_the_first_sample_is_the_gas_the_dive_started_on(self):
+        """The ordinary case for a Suunto: the opening selection is recorded at t=0 while
+        samples are numbered from `<Time>1</Time>`."""
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[10.0, 110.0], v=[3000, 3000]),
+            events=[_switch(0.0, 1)],
+        )
+
+        attribution = derive_gas_attribution(normalize(parsed))
+
+        assert [(entry.gas_number, entry.seconds) for entry in attribution] == [(1, 100)]
+
+    def test_time_before_the_first_switch_is_left_unattributed(self):
+        """Nothing says what was breathed then. The shortfall is what
+        `compute_multi_tank_gas_use` reports as `attributed_seconds` rather than dividing a
+        cylinder's gas by less time than it was breathed for."""
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[0.0, 100.0, 200.0, 300.0], v=[3000, 3000, 3000, 3000]),
+            events=[_switch(200.0, 2)],
+        )
+
+        attribution = derive_gas_attribution(normalize(parsed))
+
+        assert [(entry.gas_number, entry.seconds) for entry in attribution] == [(2, 100)]
+
+    def test_a_file_with_no_switches_attributes_nothing(self):
+        """No single-gas fallback: a one-cylinder dive already yields a figure through
+        `compute_gas_use`, so inferring one here would be a second answer to a question
+        that already has one."""
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[0.0, 100.0], v=[3000, 3000]),
+            pressure=[ParsedPressureSeries(gas_number=1, t=[0.0, 100.0], v=[2052, 1800])],
+        )
+
+        assert derive_gas_attribution(normalize(parsed)) == []
+
+    def test_a_switch_that_does_not_say_which_gas_attributes_nothing(self):
+        """FIT records this when a switch names a gas the file's own list dropped, and it
+        keeps a null `gas_number` rather than guessing (see `_breathed_gases`). There is
+        nothing here to join a cylinder to."""
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[0.0, 100.0], v=[3000, 3000]),
+            events=[_switch(50.0, None)],
+        )
+
+        assert derive_gas_attribution(normalize(parsed)) == []
+
+    def test_a_switch_after_the_last_sample_is_ignored(self):
+        """A `user_marker` can be pressed after the final `record` (see `_rebase_events`),
+        and there is no dive left after the recording stops to attribute to it."""
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[0.0, 100.0], v=[3000, 3000]),
+            events=[_switch(0.0, 1), _switch(500.0, 2)],
+        )
+
+        attribution = derive_gas_attribution(normalize(parsed))
+
+        assert [(entry.gas_number, entry.seconds) for entry in attribution] == [(1, 100)]
+
+    def test_two_switches_on_one_second_keep_the_later_gas(self):
+        """The same last-reading-wins rule `_rebase` applies to a channel: what the diver
+        ended up on is what they breathed."""
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[0.0, 100.0], v=[3000, 3000]),
+            events=[_switch(0.0, 1), _switch(0.4, 2)],
+        )
+
+        attribution = derive_gas_attribution(normalize(parsed))
+
+        assert [(entry.gas_number, entry.seconds) for entry in attribution] == [(2, 100)]
+
+    def test_a_gas_with_no_depth_sample_of_its_own_is_dropped(self):
+        """It has a time but no depth to normalize it against, and a borrowed one would be
+        a number the file never recorded."""
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[0.0, 100.0], v=[3000, 3000]),
+            events=[_switch(0.0, 1), _switch(50.0, 2), _switch(60.0, 1)],
+        )
+
+        attribution = derive_gas_attribution(normalize(parsed))
+
+        assert [entry.gas_number for entry in attribution] == [1]
+
+    def test_a_profile_with_no_depth_channel_attributes_nothing(self):
+        """A pressure-and-temperature-only export has no depth for a mean to be taken of,
+        and every figure downstream is normalized against depth."""
+        parsed = ParsedProfileSchema(
+            temperature=ParsedSeries(t=[0.0, 100.0], v=[260, 259]),
+            events=[_switch(0.0, 1)],
+        )
+
+        assert derive_gas_attribution(normalize(parsed)) == []
+
+    def test_reads_the_switches_a_two_gas_xml_export_nests_in_its_mixtures(self):
+        """End to end from the bytes, on the shape the corpus actually holds: the XML
+        export keeps each cylinder's gas changes inside its own `<DiveMixture>`, so
+        `Dive_2025-06-03-1215` reads as gas 1 from the start and gas 2 at 2 355 s.
+
+        The seconds are 299 and 101 rather than 300 and 100 because this format numbers its
+        samples from `<Time>1</Time>` and its gas changes from 0, so rebasing moves every
+        switch a second earlier - the same off-by-one that makes the opening selection land
+        at -1 before it is clamped.
+        """
+        content = _xml_with_samples(
+            "".join(_sample(1 + index * 100, depth="30.0" if index < 3 else "6.0") for index in range(5)),
+            mixtures=_mixture(0) + _mixture(300, oxygen="49"),
+        )
+
+        profile = extract_profile(SuuntoXmlParser, content)
+
+        assert [(entry.gas_number, entry.seconds, entry.mean_depth_cm) for entry in profile.gas_attribution] == [
+            (1, 299, 3000),
+            (2, 101, 600),
+        ]
+
+
+class TestFinalizeProfile:
+    def test_attributes_before_downsampling_so_the_mean_is_of_the_dive(self):
+        """The load-bearing ordering in `finalize_profile`. Min/max bucketing keeps each
+        bucket's extremes and discards what lies between them, so a mean taken afterwards
+        would be a mean of the dive's peaks and troughs. This dive spends most of its time
+        at 30 m with two brief excursions to 40 m and 20 m per bucket; the true mean is far
+        nearer 30 m than the 30 m the extremes would average to by luck, so the sawtooth is
+        deliberately lopsided.
+        """
+        depths = []
+        for index in range(2000):
+            depths.append(4000 if index % 100 == 0 else 1000)
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[float(index) for index in range(2000)], v=depths),
+            events=[_switch(0.0, 1)],
+        )
+
+        profile = finalize_profile(parsed)
+
+        # The honest mean: 1% of the samples at 40 m, the rest at 10 m.
+        assert profile.gas_attribution[0].mean_depth_cm == round(sum(depths) / len(depths))
+        # And the channel really was thinned, so the mean could not have been taken from it.
+        assert len(profile.depth.t) < len(depths)
+        assert profile.gas_attribution[0].mean_depth_cm != round(sum(profile.depth.v) / len(profile.depth.v))
 
 
 class TestShouldExtract:

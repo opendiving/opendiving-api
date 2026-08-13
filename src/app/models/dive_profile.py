@@ -104,6 +104,15 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     # is a profile whose file recorded no events, and NULL is one extracted before this
     # extractor version recorded any.
     event_count: Mapped[int | None] = mapped_column(Integer, default=None)
+    # Which gas was breathed for how long and how deep, one entry per gas number - the one
+    # thing a multi-tank dive needs that no other table records. Here rather than inside
+    # `data` because a dive read has to join it against the mixtures on every detail
+    # response, and `data` is `deferred` precisely so that never loads tens of KB.
+    #
+    # NULL is "extracted before attribution existed" and `[]` is "this extractor looked and
+    # found nothing to attribute" - the same distinction `event_count` draws, and the same
+    # one a later backfill selects on.
+    gas_attribution: Mapped[list | None] = mapped_column(JSONB, default=None)
 
     __table_args__ = (
         # One profile per dive. Re-importing a different export for the same dive

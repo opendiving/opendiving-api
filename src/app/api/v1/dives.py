@@ -1,5 +1,6 @@
 import hashlib
 import uuid as uuid_pkg
+from collections.abc import Sequence
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
@@ -54,7 +55,7 @@ from ...schemas.dive import (
     DiveUpdateRequest,
 )
 from ...schemas.dive_mixture import DiveMixtureRead
-from ...schemas.dive_profile import DiveProfileInfo, DiveProfileRead
+from ...schemas.dive_profile import DiveProfileInfo, DiveProfileRead, GasAttribution
 from ...schemas.gear_item import GearItemInfo
 from ...schemas.parsed_dive import ParsedDiveResponse
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_gear_caches
@@ -70,10 +71,11 @@ from ...services.dive_files import (
     load_dive_file,
     store_dive_file,
 )
-from ...services.dive_gas import compute_gas_use
+from ...services.dive_gas import resolve_gas_use
 from ...services.dive_numbering import renumber_dives, suggest_dive_number, summarize_numbering
 from ...services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file_with_parser
 from ...services.dive_profiles import (
+    get_gas_attribution_for_dives,
     get_profile_infos_for_dives,
     get_profile_version,
     load_profile,
@@ -205,12 +207,18 @@ def _to_public_dive_with_mixtures(
     mixtures: list[DiveMixtureRead],
     source_file: DiveFileInfo | None = None,
     profile: DiveProfileInfo | None = None,
+    gas_attribution: Sequence[GasAttribution] = (),
 ) -> DiveReadWithMixtures:
     """Assemble a dive's public shape from the row plus everything a read embeds.
 
     Internal FKs are dropped in favour of the related resources' uuids and summaries, so
     the related rows are passed in already fetched - the caller batches them across a page
     rather than querying per dive.
+
+    `gas_attribution` is the one input here that never reaches the response: it is the
+    profile's account of which cylinder was breathed when, and it exists solely so a
+    multi-cylinder dive can produce `gas_use`. Defaulted empty for the create path, where
+    the dive cannot yet have a file to have been extracted from.
     """
     data = _to_public_start_time(db_dive if isinstance(db_dive, dict) else db_dive.model_dump())
     return DiveReadWithMixtures(
@@ -226,7 +234,12 @@ def _to_public_dive_with_mixtures(
         # read) go through here, so gas use is derived in exactly one place. Safe to
         # compute before caching, unlike gear service status: nothing about it depends
         # on when it's read.
-        gas_use=compute_gas_use(duration=data["duration"], avg_depth=data["avg_depth"], mixtures=mixtures),
+        gas_use=resolve_gas_use(
+            duration=data["duration"],
+            avg_depth=data["avg_depth"],
+            mixtures=mixtures,
+            gas_attribution=gas_attribution,
+        ),
     )
 
 
@@ -608,6 +621,10 @@ async def _cached_read_dive(
     source_files = await get_file_infos_for_dives(db=db, dive_ids=[db_dive["id"]])
     # Written batched though only ever called with one id, matching `get_file_infos_for_dives`.
     profiles = await get_profile_infos_for_dives(db=db, dive_ids=[db_dive["id"]])
+    # A second narrow read of the same row, rather than a column on the summary above: this
+    # one is never serialized, and it is the query `gas_use_history` needs on its own over
+    # a whole log. See `get_gas_attribution_for_dives`.
+    attribution = await get_gas_attribution_for_dives(db=db, dive_ids=[db_dive["id"]])
     return _to_public_dive_with_mixtures(
         db_dive,
         user_uuid=owner_uuid,
@@ -617,6 +634,7 @@ async def _cached_read_dive(
         mixtures=mixtures,
         source_file=source_files.get(db_dive["id"]),
         profile=profiles.get(db_dive["id"]),
+        gas_attribution=attribution[db_dive["id"]],
     )
 
 
