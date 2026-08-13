@@ -1178,6 +1178,25 @@ class TestDeriveGasAttribution:
 
         assert [entry.gas_number for entry in attribution] == [1]
 
+    def test_a_switch_landing_on_the_last_depth_sample_attributes_nothing_to_it(self):
+        """There is no dive left after the last sample, so the stretch is zero seconds and
+        the gas is left out of the attribution entirely rather than entered with a time of
+        nothing. What makes that the right place to drop it is downstream: an entry
+        claiming a cylinder while accounting for none of the dive reads to
+        `compute_multi_tank_gas_use` as a cylinder that merely produced no figure, and the
+        remaining tanks would then be reported as covering the whole dive. A switch one
+        second later is already handled by the `break`, and one second must not decide
+        between a refusal and a wrong figure.
+        """
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[0.0, 100.0, 200.0], v=[3000, 3000, 3000]),
+            events=[_switch(0.0, 1), _switch(200.0, 2)],
+        )
+
+        attribution = derive_gas_attribution(normalize(parsed))
+
+        assert [(entry.gas_number, entry.seconds) for entry in attribution] == [(1, 200)]
+
     def test_a_profile_with_no_depth_channel_attributes_nothing(self):
         """A pressure-and-temperature-only export has no depth for a mean to be taken of,
         and every figure downstream is normalized against depth."""

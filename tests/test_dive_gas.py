@@ -9,6 +9,7 @@ is exercised by hand (see DECISIONS.md), not here.
 from src.app.schemas.dive_mixture import DiveMixtureRead
 from src.app.schemas.dive_profile import GasAttribution
 from src.app.services.dive_gas import (
+    MAX_PLAUSIBLE_RMV,
     METERS_PER_BAR,
     compute_gas_use,
     compute_multi_tank_gas_use,
@@ -346,6 +347,52 @@ class TestComputeMultiTankGasUseReturnsNone:
         )
 
         assert result is None
+
+    def test_when_a_cylinder_s_whole_drop_lands_in_a_stretch_too_short_to_breathe_it(self):
+        """The same fault as the case above, arriving by the other door: the switch was
+        recorded, but late. The deco bottle here is credited with 50 bar out of 11 L over
+        ten seconds - 2 062 L/min, which is not a diver - and the time it was really
+        breathed for is inside gas 1's stretch, dragging that tank's rate down too. Both
+        halves of the coverage fraction would agree and read as the whole dive.
+        """
+        mixtures = [
+            _mixture(gas_number=1, volume=22.0, start_pressure=220.0, end_pressure=90.0),
+            _mixture(gas_number=2, volume=11.0, start_pressure=200.0, end_pressure=150.0),
+        ]
+
+        result = compute_multi_tank_gas_use(
+            mixtures=mixtures,
+            attribution=_attribution(
+                _attributed(1, seconds=2690, mean_depth_cm=2750),
+                _attributed(2, seconds=10, mean_depth_cm=600),
+                duration_seconds=2700,
+            ),
+        )
+
+        assert result is None
+
+    def test_but_not_when_a_hard_working_diver_merely_breathes_fast(self):
+        """The ceiling is set where a real dive cannot reach it, because a false positive
+        costs the dive every figure it had. 40 L/min on the deco bottle is a diver working
+        hard, and it must still produce numbers.
+        """
+        mixtures = [
+            _mixture(gas_number=1, volume=22.0, start_pressure=220.0, end_pressure=90.0),
+            _mixture(gas_number=2, volume=11.0, start_pressure=200.0, end_pressure=150.0),
+        ]
+
+        result = compute_multi_tank_gas_use(
+            mixtures=mixtures,
+            attribution=_attribution(
+                _attributed(1, seconds=2100, mean_depth_cm=2750),
+                _attributed(2, seconds=600, mean_depth_cm=600),
+                duration_seconds=2700,
+            ),
+        )
+
+        assert result is not None
+        assert result.tanks[1].rmv == 34.38
+        assert max(tank.rmv for tank in result.tanks) < MAX_PLAUSIBLE_RMV
 
     def test_when_the_dive_has_fewer_than_two_cylinders(self):
         """One cylinder is `compute_gas_use`'s, and the split is what keeps a long-standing

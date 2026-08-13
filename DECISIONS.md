@@ -4312,7 +4312,24 @@ What is still refused outright:
   because a cylinder must not be worth a different amount of gas for having been logged next to
   another one. Unlike the case above, the attribution *knew* about it, so its seconds are excluded
   from every other tank's and the shortfall it leaves is real and reported.
+- **A tank whose figures come out physiologically impossible** refuses the dive too, and it is the
+  same fault as the one above arriving by the only door that one cannot watch: a switch recorded
+  *late* rather than not at all. A whole cylinder's drop divided by a ten-second stretch computes 2
+  062 L/min — arithmetically fine, and not a diver. `MAX_PLAUSIBLE_RMV = 100` is set far above any
+  figure a dive produces rather than near one (a working diver peaks around 40, a frightened one
+  might touch 60–80 briefly), because a false positive costs a dive every figure it had, including
+  the honest ones. It is deliberately not applied to `compute_gas_use`: one cylinder is divided by
+  the dive's own duration, so there is no segmentation to go wrong, and a ceiling there would change
+  a long-standing figure.
 - **A dive where no cylinder survives** returns `None`, exactly as before.
+
+The zero-length stretch that used to slip between two of these rules is now dropped in
+`derive_gas_attribution` instead. A switch rebasing exactly onto the last depth sample yields a
+stretch of no seconds, and an entry that claims a cylinder while accounting for none of the dive
+reads here as a cylinder that merely produced no figure — so the surviving tanks were reported as
+covering the whole dive while a breathed cylinder's litres were missing. Absent from the
+attribution, that cylinder reaches the refusal above. A switch one second later already took that
+path, and one second must not decide between a refusal and a wrong figure.
 
 `tanks` therefore very often holds exactly **one** entry, and that is the normal case rather than a
 degenerate one — it is what every multi-gas dive in the corpus produces. A client that treats a

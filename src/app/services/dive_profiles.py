@@ -480,8 +480,19 @@ def derive_gas_attribution(profile: NormalizedProfile) -> list[GasAttribution]:
     for gas_number in dict.fromkeys(switch_gases):
         # A gas whose every stretch fell between two depth samples has a time but no depth
         # to normalize it against, and is dropped rather than given a borrowed one.
+        #
+        # So is one that was attributed no time at all, which happens when a switch rebases
+        # exactly onto the last depth sample: there is no dive left after it, so the stretch
+        # is zero seconds long. Dropped **here** rather than left for the consumer to
+        # discard, because the two are not equivalent - an entry that claims a cylinder and
+        # accounts for none of the dive lets `compute_multi_tank_gas_use` take it for a
+        # cylinder that simply produced no figure, and report the remaining tanks as
+        # covering the whole dive. Absent from the attribution, the same cylinder reaches
+        # the branch that refuses a dive whose breathed cylinder was never attributed. A
+        # switch one second later already takes that path, via the `break` above; a
+        # difference of one second must not decide between a refusal and a wrong figure.
         count = depth_counts.get(gas_number, 0)
-        if count == 0:
+        if count == 0 or seconds[gas_number] <= 0:
             continue
         attribution.append(
             GasAttribution(

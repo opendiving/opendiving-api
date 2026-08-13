@@ -182,6 +182,27 @@ def _tank_arithmetic(mixture: DiveMixtureRead, attributed: GasAttribution) -> _T
     )
 
 
+# A per-tank RMV above this is a segmentation artefact, not a diver. A whole cylinder's
+# pressure drop divided by a stretch of seconds is arithmetically valid and physiologically
+# impossible: what it really means is that the device recorded the switch long after the
+# cylinder was actually breathed, so the time it was breathed for is sitting inside another
+# tank's stretch - the same fault the unattributed-but-breathed branch refuses, arriving
+# through the one door that branch cannot watch.
+#
+# 100 L/min is deliberately far above any figure a dive produces rather than near one. A
+# working diver peaks around 40 and a frightened one might touch 60-80 over a short stretch;
+# maximal human ventilation is higher still but not for the length of time a gas is breathed
+# for. The artefacts this catches are not near the line - the case that prompted it computes
+# 2 062 L/min - so the threshold is set where a real if extreme dive cannot reach it, because
+# a false positive costs a dive every figure it had, including the honest ones.
+#
+# Deliberately not applied to `compute_gas_use`: a single cylinder is divided by the dive's
+# own duration, so there is no segmentation to go wrong, and adding a ceiling there would
+# change a long-standing figure - which is exactly what the split between the two
+# derivations exists to prevent.
+MAX_PLAUSIBLE_RMV = 100.0
+
+
 def compute_multi_tank_gas_use(
     *, mixtures: Sequence[DiveMixtureRead], attribution: ProfileGasAttribution
 ) -> DiveGasUse | None:
@@ -210,6 +231,9 @@ def compute_multi_tank_gas_use(
     - **A tank that fails `_tank_arithmetic` is left out** on the same terms. Unlike the
       case above, the attribution knew about it, so its seconds are excluded from every
       other tank's and the shortfall is real and reported.
+    - **A tank whose figures come out physiologically impossible refuses the dive**, which
+      is the same fault as the second case arriving by a different route - a switch
+      recorded late rather than not at all. See `MAX_PLAUSIBLE_RMV`.
 
     The dive-level figures are then the totals over the tanks that survived, and
     `attributed_seconds` against `duration_seconds` is what makes that honest: the time
@@ -250,8 +274,16 @@ def compute_multi_tank_gas_use(
                 return None
             continue
         tank = _tank_arithmetic(mixture, attributed)
-        if tank is not None:
-            tanks.append(tank)
+        if tank is None:
+            continue
+        if tank.gas_used / tank.surface_minutes > MAX_PLAUSIBLE_RMV:
+            # See `MAX_PLAUSIBLE_RMV`. Refuses the dive rather than dropping the tank,
+            # because the time this cylinder was really breathed for is inside another
+            # tank's stretch: the figures that would survive are wrong too, and dropping
+            # this one would leave a coverage fraction reading as very nearly the whole
+            # dive - the shortfall being precisely the few seconds that caused the fault.
+            return None
+        tanks.append(tank)
 
     if not tanks:
         return None
@@ -310,9 +342,9 @@ async def gas_use_history(db: AsyncSession, user_id: int) -> list[DiveGasUsePoin
     trend across a diving career, so a page of ten would be meaningless, and `GET /dives`
     doesn't carry mixtures anyway.
 
-    Three queries - the dives, then their mixtures and their profiles' gas attribution,
-    both batched - and `resolve_gas_use` decides per dive. The obvious optimization is to
-    push its conditions into SQL (a `HAVING
+    Three queries - the dives, then their mixtures batched, then the gas attribution of the
+    multi-cylinder subset those mixtures identify - and `resolve_gas_use` decides per dive.
+    The obvious optimization is to push its conditions into SQL (a `HAVING
     count(*) = 1`, `avg_depth IS NOT NULL`, both pressures present) so the un-derivable
     majority never comes back; it's left out on purpose. That would be a second,
     silent copy of the rules in a second language, and the failure mode when the two
@@ -342,7 +374,14 @@ async def gas_use_history(db: AsyncSession, user_id: int) -> list[DiveGasUsePoin
 
     dive_ids = [dive.id for dive in dives]
     mixtures_by_dive = await get_mixtures_for_dives(db=db, dive_ids=dive_ids)
-    attribution_by_dive = await get_gas_attribution_for_dives(db=db, dive_ids=dive_ids)
+    # Only a dive `resolve_gas_use` will take the multi-tank path for can use an
+    # attribution, and the mixtures above already say which those are - so the JSONB column
+    # is fetched for those alone rather than for a recreational diver's whole log. Spelled
+    # as the same `!= 1` that does the dispatching, so there is one rule rather than two
+    # that can drift into fetching the wrong subset.
+    attribution_by_dive = await get_gas_attribution_for_dives(
+        db=db, dive_ids=[dive_id for dive_id in dive_ids if len(mixtures_by_dive[dive_id]) != 1]
+    )
 
     points = []
     for dive in dives:
@@ -361,7 +400,7 @@ async def gas_use_history(db: AsyncSession, user_id: int) -> list[DiveGasUsePoin
             duration=dive.duration,
             avg_depth=dive.avg_depth,
             mixtures=mixtures_by_dive[dive.id],
-            attribution=attribution_by_dive[dive.id],
+            attribution=attribution_by_dive.get(dive.id),
         )
         if gas_use is None:
             continue
