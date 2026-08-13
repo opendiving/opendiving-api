@@ -89,6 +89,29 @@ class ParsedDiveSchema(BaseModel):
     otu_end: float | None = None
     surface_pressure_bar: float | None = None
 
+    @field_validator("surface_pressure_bar")
+    @classmethod
+    def _drop_implausible_surface_pressure(cls, value: float | None) -> float | None:
+        """Outside 0.5-1.2 bar this is a unit error or an absent-marker, not a reading.
+
+        The same band `ck_dive_surface_pressure_range` enforces, and deliberately the same
+        numbers rather than a looser sanity check: the point is that no value can reach
+        that column without having passed the bound the column applies. Nulled rather than
+        rejected, on the `_drop_unpressurized` principle above - a file whose barometer
+        reading is unusable is still a file worth storing, and the alternative is failing
+        the attach of an otherwise perfectly importable export.
+
+        Unattested in the corpus, unlike `_drop_unpressurized`: the 384 XML exports span
+        1.031-1.067 bar and the 531 JSON readings 0.997-1.067, so not one of the 915 comes
+        near either bound. It is here because of where the value lands, rather than because
+        a file was caught writing a bad one - `store_tech_scalars` runs
+        inside `store_dive_file`'s transaction, so a `CHECK` violation from a parsed number
+        surfaces to the diver as `IntegrityError` -> "the file changed while this upload was
+        in flight", advice that would be both wrong and unactionable: the retry it asks for
+        fails identically every time.
+        """
+        return None if value is not None and not (0.5 <= value <= 1.2) else value
+
 
 class ParsedDiveResponse(ParsedDiveSchema):
     """What `POST /dive/parse` returns: the parsed dive, plus a token the client hands

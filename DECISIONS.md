@@ -3562,6 +3562,96 @@ WHERE start_pressure <= 0 AND end_pressure <= 0;
 Both columns together and both `<= 0`, matching the parser: a row with one real pressure was never
 produced by this bug and is not this statement's to touch.
 
+## The mixture backfill joins on position, so the read it joins against must be ordered
+
+`merge_mixture_fields` lines parsed cylinders up with stored ones **by position** — mixtures are
+replaced wholesale on every save, so a stored row's `id` postdates the import and cannot say which
+parsed cylinder it came from. That much is recorded in its docstring. What the first version left
+implicit is that a positional join is only as good as the order of the list it is handed, and
+`crud_dive_mixtures.get_mixtures_for_dive` was `SELECT ... WHERE dive_id = :id` with no `ORDER BY`.
+
+**Postgres does not owe you insertion order.** Without an `ORDER BY` a seq scan returns heap order,
+which matches insertion order right up until a row is updated in place and its new tuple version
+lands somewhere else in the heap. `backfill_tech_fields` issues exactly such an `UPDATE`, against
+exactly these rows. So the read came back in one order before a backfill and potentially another
+order after it — and because the backfill re-reads every candidate on every run by design, the
+second run is the one that reads the reordered rows back.
+
+**The `(oxygen, helium)` agreement check does not backstop this.** It looks like it should: a
+mis-ordered pair ought to fail the fraction comparison and return `None`. But `None` on the parsed
+side is explicitly *not* evidence of a mismatch (the form filled in `DEFAULT_MIXTURE` because the
+file said nothing), and a parser that records no fractions at all leaves every row `None`. The 2026
+Suunto Ocean shape is precisely that: `_mixtures_from_cylinders` reconstructs cylinders from sample
+data, which carries gas numbers and pressures but no `Gases` block anywhere — see *"The 2026 Suunto
+Ocean JSON is a third header shape"*. Every parsed row is `oxygen=None, helium=None`, the guard
+compares nothing, and every permutation passes.
+
+Four exports in the local corpus are that shape — `69de1eef…`, `69e0c3aa…`, `69e0f35b…`,
+`69e21526…`, each two cylinders numbered `[0, 1]` with both fractions null on both rows. It is also
+the one export shape whose `gas_number` is *the file's own label* rather than a synthesized
+position, which is what makes it the expensive one to get wrong: `gas_number` is the join key to
+`dive_profile.data.pressure[].gas_number`, so swapping it attributes each tank's pressure curve to
+the other cylinder on the chart. Silently, and with no way to tell afterwards which run did it.
+
+The fix is `.order_by(DiveMixture.id)`, which *is* the import's position
+(`replace_mixtures_for_dive` adds rows in list order). Applied to `get_mixtures_for_dives` as well,
+so the list and detail endpoints cannot disagree about which tank is first. Stated in both
+docstrings and pinned by `TestStoredMixturesAreReadInSavedOrder`, because the coupling is invisible
+from either end: nothing in `merge_mixture_fields` reveals that it depends on a clause in another
+module, and nothing in the crud module reveals that dropping the clause corrupts data rather than
+shuffling a list.
+
+## A parsed value the database refuses must not take the upload — or the backfill run — with it
+
+`ck_dive_surface_pressure_range` bounds `surface_pressure_bar` to 0.5–1.2 bar, and nothing between
+the parser and the write applied those bounds: `ParsedDiveSchema.surface_pressure_bar` was a bare
+`float | None` and both `_pascals_to_bar` calls passed the file's value through raw. The column is
+new in this phase, and so is the gap.
+
+**This is about where the failure lands, not about a file that was caught misbehaving.** Both
+corpora sit well inside the band — 384 XML exports across 103 100–106 700 Pa, 531 JSON readings
+across 99 693–106 700 Pa, not one outside 0.5–1.2 bar. The band itself was chosen from that corpus.
+What makes it worth guarding anyway is that `store_tech_scalars` runs *inside* `store_dive_file`'s
+transaction, under the `try` whose only handler is:
+
+```python
+except IntegrityError as exc:
+    raise DiveFileConflictError("The source file for this dive changed while this upload was in flight. Please try again.")
+```
+
+That message is about a concurrent upload winning a race on a unique index. A `CHECK` violation from
+a parsed number is not that, and the advice is worse than merely wrong — the retry it asks for fails
+identically every time, for a file that is otherwise perfectly importable. The same exception on the
+`noop` branch is worse still: that `commit()` is outside any `try`, and `write_dive_file` catches
+only the three dive-file exceptions, so it escapes as a 500 with the session left in a failed
+transaction.
+
+So three changes, each fixing a different link:
+
+- **A validator on `ParsedDiveSchema`**, mirroring the CHECK's own numbers rather than a looser
+  sanity check — the point is that nothing reaches the column having passed a weaker test than the
+  column's. Nulled rather than rejected, on the `_drop_unpressurized` principle: a file whose
+  barometer reading is unusable is still a file worth storing. Placed on the schema rather than in
+  either Suunto parser for the same reason as that one — the fact is about the field, not the
+  format.
+- **The `noop` branch's commit wrapped in `try`/`rollback`.** That branch is an opportunistic
+  re-extraction of a file the dive already has; failing it must not fail a request whose correct
+  answer is still "you already have this". The explicit rollback is what stops a failed transaction
+  poisoning the next statement on the session.
+- **A `begin_nested()` savepoint per dive in `backfill_tech_fields`**, so a rejected dive is counted
+  into `failed` instead of aborting the run. Without it the exception propagates past `main()`, the
+  enclosing `async with local_session()` rolls back up to `_BACKFILL_BATCH_SIZE` dives of finished
+  work, and — since nothing advances a version column — the next run reaches the same dive and dies
+  the same way. The backfill could never get past it without hand-narrowing `--parser-key`.
+
+**`po2_limit` deliberately got no matching validator**, though `ck_dive_mixture_po2_limit_range`
+bounds it to 0.4–2.0 and `merge_mixture_fields` writes it through a raw `UPDATE` that bypasses
+Pydantic entirely. The corpus writes `<PO2>` as exactly two values, 1.4 (277 mixtures) and 1.6 (76),
+and says "not set" with `i:nil="true"` (363) — never with a zero. `DiveMixtureCreate` already
+carries `ge=0.4, le=2.0`, so the form path is covered, and the savepoint above covers the backfill
+path without inventing a rule for a value no file has been seen to write. Adding an unevidenced
+guard here would be the "treat zero as missing" reflex the section above rejects, one field over.
+
 ## FIT fixtures are written, not committed as blobs
 
 FIT is the first supported export that is binary, which would otherwise force a choice between

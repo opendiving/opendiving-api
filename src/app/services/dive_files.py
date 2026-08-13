@@ -278,10 +278,21 @@ async def store_dive_file(
                 )
             if scalars is not None:
                 await store_tech_scalars(db, dive_id=dive_id, scalars=scalars, commit=False)
-            # One commit for both, where the profile used to commit on its own: they come
-            # out of the same bytes, and a dive whose exposure readings were upgraded but
-            # whose profile wasn't would be describing two different extractions.
-            await db.commit()
+            try:
+                # One commit for both, where the profile used to commit on its own: they
+                # come out of the same bytes, and a dive whose exposure readings were
+                # upgraded but whose profile wasn't would be describing two different
+                # extractions.
+                await db.commit()
+            except IntegrityError:
+                # This branch is an opportunistic upgrade of a file the dive already has,
+                # so failing it must not fail the request: the caller re-uploaded bytes
+                # that are already stored, and the correct answer to that is still "you
+                # already have this". Rolled back explicitly - without it the session
+                # stays in a failed transaction and the *next* statement on it dies
+                # somewhere unrelated.
+                logger.exception("Opportunistic re-extraction for dive %s could not be stored", dive_id)
+                await db.rollback()
         return _info(existing)
 
     if outcome == "conflict" and existing is not None:
@@ -511,6 +522,17 @@ def merge_mixture_fields(
     must match **and** every pair must still agree on `(oxygen, helium)`, which is the
     part of a cylinder a diver has no reason to retype and every reason to leave alone.
 
+    Because the join is positional, **`stored` must be in the order the cylinders were
+    saved in**, which is what `get_mixtures_for_dive`'s `ORDER BY id` guarantees and
+    nothing in this function can check. The `(oxygen, helium)` agreement above is not a
+    backstop for a mis-ordered list either: a parser that records no fractions at all
+    leaves both `None` on every row, and `None` is explicitly not evidence of a mismatch
+    (below). A 2026 Suunto Ocean export is exactly that shape - `_mixtures_from_cylinders`
+    reconstructs its cylinders from sample data, which carries pressures and gas numbers
+    but no `Gases` block - so on the one format whose `gas_number` is the file's own label
+    rather than a synthesized position, an unordered read would swap the labels with
+    nothing to catch it.
+
     All-or-nothing per dive, not per row: a list that half-matches is a list that has been
     edited, and half-applying to it would leave a set of cylinders that came from two
     different places with nothing recording which is which.
@@ -598,15 +620,26 @@ async def backfill_tech_fields(
 
         try:
             parsed = parser.parse(file.data)
-        except DiveParseError, UnsupportedDiveFileError:
+            # Inside the `try` rather than below it, matching `extract_tech_scalars`: a
+            # name in `TECH_SCALAR_FIELDS` that `ParsedDiveSchema` doesn't carry raises
+            # `AttributeError` here, and one dive that can't be read is not a reason to
+            # abandon the other 900. `test_covers_exactly_the_columns_the_read_schema_
+            # publishes` is what actually stops the two drifting; this just means the
+            # drift is reported per dive instead of killing the run.
+            scalars = {name: getattr(parsed, name) for name in TECH_SCALAR_FIELDS}
+        except DiveParseError, UnsupportedDiveFileError, AttributeError:
             # Counted rather than swallowed. A file that parsed at import time and does
             # not now is a parser regression, and a run that reported only successes
             # would hide it - the same reasoning as `BackfillReport`'s five counts.
-            logger.warning("Skipping dive %s: its %s export no longer parses", row.dive_id, row.parser_key)
+            # Worded for all three: an `AttributeError` here is schema drift, not a file
+            # that stopped parsing, and a message naming only the latter would send
+            # whoever reads the log looking at the wrong thing.
+            logger.warning(
+                "Skipping dive %s: its %s export could not be read", row.dive_id, row.parser_key, exc_info=True
+            )
             failed += 1
             continue
 
-        scalars = {name: getattr(parsed, name) for name in TECH_SCALAR_FIELDS}
         stored = await get_mixtures_for_dive(db, row.dive_id)
         updates = merge_mixture_fields(parsed.mixtures, stored)
         if updates is None:
@@ -617,11 +650,28 @@ async def backfill_tech_fields(
             mixtures_updated += len(updates or [])
             continue
 
-        await store_tech_scalars(db, dive_id=row.dive_id, scalars=scalars, commit=False)
+        try:
+            # A savepoint, so a dive the database rejects costs only that dive. Without it
+            # the failure propagates out of this function and the enclosing `async with
+            # local_session()` rolls back every uncommitted dive since the last batch
+            # commit - and because nothing here advances a version column, the next run
+            # reaches the same dive and dies the same way. The backfill could then never
+            # get past it without hand-narrowing `--parser-key`.
+            async with db.begin_nested():
+                await store_tech_scalars(db, dive_id=row.dive_id, scalars=scalars, commit=False)
+                for mixture_id, values in updates or []:
+                    await db.execute(update(DiveMixture).where(DiveMixture.id == mixture_id).values(**values))
+        except IntegrityError:
+            # A parsed value the schema let through and the database won't take: a parser
+            # unit bug, and the file that proves it is still attached to the dive. Counted
+            # rather than raised, for the same reason as the parse failure above - a run
+            # that stopped on it would report less than one that finished and said so.
+            logger.warning("Skipping dive %s: its parsed values violate a constraint", row.dive_id, exc_info=True)
+            failed += 1
+            continue
+
         dives_updated += 1
-        for mixture_id, values in updates or []:
-            await db.execute(update(DiveMixture).where(DiveMixture.id == mixture_id).values(**values))
-            mixtures_updated += 1
+        mixtures_updated += len(updates or [])
         touched_user_ids.add(row.user_id)
 
         if index % _BACKFILL_BATCH_SIZE == 0:

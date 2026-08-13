@@ -6,7 +6,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from src.app.models.dive import Dive
 from src.app.schemas.dive_mixture import GasRole
+from src.app.schemas.parsed_dive import ParsedDiveSchema
 from src.app.services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file
 from src.app.services.dive_parsers.fit import _MAX_CYLINDERS, FitParser
 from src.app.services.dive_parsers.fit import _MAX_FRAMES as MAX_FRAMES
@@ -1594,6 +1596,48 @@ class TestTechScalars:
 
         assert parsed.otu_start is None
         assert parsed.surface_pressure_bar is None
+
+    def test_an_out_of_band_surface_pressure_reads_as_no_reading(self):
+        """Unattested in the corpus - all 384 XML exports land in 1.031-1.067 bar - but
+        the band is the one `ck_dive_surface_pressure_range` enforces, and the column is
+        written inside `store_dive_file`'s transaction. A value the CHECK rejects would
+        therefore fail the *attach* of an otherwise importable file, reported to the diver
+        as a concurrent-upload conflict that no retry can clear. Nulled here instead."""
+        for reading in ("0", "105700000", "-105700"):
+            content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <SurfacePressure>{reading}</SurfacePressure>
+</Dive>
+""".encode()
+
+            assert SuuntoXmlParser.parse(content).surface_pressure_bar is None, reading
+
+    def test_the_bounds_are_the_ones_the_database_enforces(self):
+        """Not a looser sanity check that happens to sit inside the CHECK: the point is
+        that nothing can reach the column having passed a weaker test than the column's."""
+        constraint = next(
+            c for c in Dive.__table__.constraints if getattr(c, "name", None) == "ck_dive_surface_pressure_range"
+        )
+        sqltext = str(constraint.sqltext)
+
+        def parsed_with(pressure: float) -> float | None:
+            return ParsedDiveSchema(
+                avg_depth=None,
+                bottom_temperature=None,
+                dive_number=None,
+                duration=None,
+                max_depth=None,
+                start_time=None,
+                mixtures=[],
+                surface_pressure_bar=pressure,
+            ).surface_pressure_bar
+
+        assert "0.5" in sqltext and "1.2" in sqltext
+        # The bounds themselves are inclusive on both sides, as the CHECK's `>=`/`<=` are.
+        assert parsed_with(0.5) == 0.5
+        assert parsed_with(1.2) == 1.2
+        assert parsed_with(0.49) is None
+        assert parsed_with(1.21) is None
 
     def test_fit_prefers_the_dive_summary_over_the_session(self):
         """The mirror of `_depth`'s preference, reversed on purpose: on a multi-dive file

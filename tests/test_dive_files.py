@@ -20,10 +20,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException, UploadFile
 from jose import jwt
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import IntegrityError
 from uuid6 import uuid7
 
 from src.app.core.security import ALGORITHM, SECRET_KEY, TokenType, create_dive_file_token, verify_dive_file_token
 from src.app.core.utils.uploads import read_upload_within_limit
+from src.app.crud.crud_dive_mixtures import get_mixtures_for_dive, get_mixtures_for_dives
 from src.app.schemas.dive import DiveFileInfo, DiveTechScalars
 from src.app.schemas.dive_mixture import DiveMixtureRead, GasRole
 from src.app.schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
@@ -33,6 +36,7 @@ from src.app.services.dive_files import (
     MAX_DIVE_FILE_SIZE,
     TECH_SCALAR_FIELDS,
     _ExistingRow,
+    backfill_tech_fields,
     extract_tech_scalars,
     merge_mixture_fields,
     reconcile,
@@ -478,6 +482,132 @@ class TestMixtureFieldMerge:
         stored = [self._stored(11, oxygen=21.0)]
 
         assert merge_mixture_fields(parsed, stored) == [(11, {"po2_limit": 1.4, "gas_number": 1, "role": None})]
+
+    def test_the_fraction_guard_cannot_catch_a_mis_ordered_all_null_list(self) -> None:
+        """Why `get_mixtures_for_dive` has to order by `id`, stated as a test.
+
+        A 2026 Suunto Ocean export reconstructs its cylinders from sample data, which
+        carries gas numbers and pressures but no fractions at all - so every parsed row is
+        `oxygen=None, helium=None`, the guard above compares nothing, and *both* orderings
+        below are accepted. The ordering of `stored` is the only thing deciding which
+        cylinder gets `gas_number=0`, and `gas_number` is the join key to the profile's
+        per-cylinder pressure channels: swap it and each tank's curve is attributed to the
+        other one. Four exports in the corpus are exactly this shape.
+        """
+        parsed = [
+            self._parsed(oxygen=None, helium=None, gas_number=0),
+            self._parsed(oxygen=None, helium=None, gas_number=1),
+        ]
+
+        in_order = merge_mixture_fields(parsed, [self._stored(11), self._stored(12)])
+        reversed_order = merge_mixture_fields(parsed, [self._stored(12), self._stored(11)])
+
+        assert in_order is not None and reversed_order is not None
+        assert [(mixture_id, values["gas_number"]) for mixture_id, values in in_order] == [(11, 0), (12, 1)]
+        assert [(mixture_id, values["gas_number"]) for mixture_id, values in reversed_order] == [(12, 0), (11, 1)]
+
+
+class TestStoredMixturesAreReadInSavedOrder:
+    """The `ORDER BY` that `merge_mixture_fields`' positional join rests on.
+
+    Asserted on the compiled SQL rather than against a live Postgres, like the rest of
+    this suite. That is the whole of the guarantee anyway: without the clause Postgres may
+    return heap order, and heap order stops matching insertion order as soon as a row is
+    updated in place - which `backfill_tech_fields` does to these very rows.
+    """
+
+    class _RecordingSession:
+        """Captures the statements handed to `execute` and returns an empty result."""
+
+        def __init__(self) -> None:
+            self.statements: list[object] = []
+
+        async def execute(self, statement: object) -> MagicMock:
+            self.statements.append(statement)
+            result = MagicMock()
+            result.scalars.return_value.all.return_value = []
+            return result
+
+    @staticmethod
+    def _sql(statement: object) -> str:
+        return str(
+            statement.compile(  # type: ignore[attr-defined]
+                dialect=postgresql.dialect(paramstyle="named"), compile_kwargs={"literal_binds": True}
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_single_dive_read_orders_by_id(self) -> None:
+        session = self._RecordingSession()
+
+        await get_mixtures_for_dive(session, 7)  # type: ignore[arg-type]
+
+        assert "ORDER BY dive_mixture.id" in self._sql(session.statements[0])
+
+    @pytest.mark.asyncio
+    async def test_the_batched_read_orders_by_id_too(self) -> None:
+        """So a dive's cylinders come back the same way whether the list endpoint or the
+        detail endpoint asked for them."""
+        session = self._RecordingSession()
+
+        await get_mixtures_for_dives(session, [7, 8])  # type: ignore[arg-type]
+
+        assert "ORDER BY dive_mixture.id" in self._sql(session.statements[0])
+
+
+class TestBackfillDoesNotStopOnOneBadDive:
+    """A dive the database refuses costs that dive, not the run and not the batch.
+
+    Nothing here advances a version column - `backfill_tech_fields` re-reads every
+    candidate on every run by design - so a dive that raises on one run raises on the next
+    one too. Without the savepoint the first such dive would be permanently fatal: the
+    enclosing session rolls back up to `_BACKFILL_BATCH_SIZE` dives of finished work, and
+    re-running walks into the same dive and dies the same way.
+    """
+
+    XML = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}"><CnsEnd>20</CnsEnd></Dive>
+""".encode()
+
+    class _Savepoint:
+        """Stands in for `begin_nested`: lets the exception out, as the real one does
+        after rolling the savepoint back."""
+
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *exc_info: object) -> bool:
+            return False
+
+    def _db(self, candidates: list[SimpleNamespace]) -> AsyncMock:
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[candidates, *[MagicMock() for _ in range(20)]])
+        db.begin_nested = MagicMock(return_value=self._Savepoint())
+        return db
+
+    @pytest.mark.asyncio
+    async def test_a_constraint_violation_is_counted_and_the_run_continues(self, monkeypatch) -> None:
+        candidates = [SimpleNamespace(dive_id=n, parser_key=SuuntoXmlParser.key, user_id=1) for n in (1, 2, 3)]
+        written: list[int] = []
+
+        async def flaky_store(db, *, dive_id, scalars, commit=False):
+            if dive_id == 2:
+                raise IntegrityError("UPDATE dive ...", {}, Exception("ck_dive_surface_pressure_range"))
+            written.append(dive_id)
+
+        monkeypatch.setattr("src.app.services.dive_files.store_tech_scalars", flaky_store)
+        monkeypatch.setattr(
+            "src.app.services.dive_files.load_dive_file",
+            AsyncMock(return_value=SimpleNamespace(data=self.XML)),
+        )
+        monkeypatch.setattr("src.app.crud.crud_dive_mixtures.get_mixtures_for_dive", AsyncMock(return_value=[]))
+        monkeypatch.setattr("src.app.services.cache_invalidation.invalidate_dive_caches", AsyncMock())
+
+        report = await backfill_tech_fields(self._db(candidates))
+
+        # The dive after the bad one is the assertion that matters: the run got past it.
+        assert written == [1, 3]
+        assert (report.examined, report.dives_updated, report.failed) == (3, 2, 1)
 
 
 class TestScalarsAreWrittenAtAttach:
