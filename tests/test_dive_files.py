@@ -546,13 +546,42 @@ class TestMixtureFieldMerge:
         return DiveMixtureRead(**(defaults | overrides))  # type: ignore[arg-type]
 
     def test_applies_positionally_when_every_pair_still_matches(self) -> None:
+        """The first cylinder's `role` is absent from its update rather than written as
+        `None` - see `test_a_field_the_file_does_not_record_is_never_written`."""
         parsed = [self._parsed(), self._parsed(oxygen=50.0, gas_number=2, po2_limit=1.6, role=GasRole.DECO)]
         stored = [self._stored(11), self._stored(12, oxygen=50.0)]
 
         assert merge_mixture_fields(parsed, stored) == [
-            (11, {"po2_limit": 1.4, "gas_number": 1, "role": None}),
+            (11, {"po2_limit": 1.4, "gas_number": 1}),
             (12, {"po2_limit": 1.6, "gas_number": 2, "role": GasRole.DECO}),
         ]
+
+    def test_a_field_the_file_does_not_record_is_never_written(self) -> None:
+        """Fill-only, and it is `DiveMixtureSchema`'s own rule applied to the write: `None`
+        means "the file did not record this", so spreading one into an `UPDATE` turns an
+        absent reading into a value.
+
+        All three fields are client-writable, which is what makes it data loss rather than
+        a tidiness point. A FIT import produces `po2_limit=None` always and `role=None` for
+        any open-circuit gas; the diver then sets 1.6 and `deco` on their stage bottle
+        through the form, touching neither fraction - so the guard above still admits the
+        join, and an overwriting backfill would put both back to `NULL` on a script whose
+        docstring calls it safe to run repeatedly.
+        """
+        parsed = [self._parsed(po2_limit=None, role=None, gas_number=None)]
+        stored = [self._stored(11, po2_limit=1.6, role=GasRole.DECO, gas_number=0)]
+
+        # Nothing to write at all, so the row is absent rather than carrying an empty dict.
+        assert merge_mixture_fields(parsed, stored) == []
+
+    def test_a_recorded_value_still_overwrites_what_is_stored(self) -> None:
+        """What fill-only does *not* cost: where the file records a value the backfill
+        still owns it, so a parser correction lands on the next run. It declines only where
+        the file has nothing to say."""
+        parsed = [self._parsed(po2_limit=1.6, role=GasRole.DECO)]
+        stored = [self._stored(11, po2_limit=1.4, role=GasRole.BOTTOM)]
+
+        assert merge_mixture_fields(parsed, stored) == [(11, {"po2_limit": 1.6, "gas_number": 1, "role": GasRole.DECO})]
 
     def test_refuses_when_a_gas_fraction_no_longer_matches(self) -> None:
         """The diver swapped their deco bottle. Applying positionally would write the
@@ -584,7 +613,7 @@ class TestMixtureFieldMerge:
         parsed = [self._parsed(oxygen=None, helium=None)]
         stored = [self._stored(11, oxygen=21.0)]
 
-        assert merge_mixture_fields(parsed, stored) == [(11, {"po2_limit": 1.4, "gas_number": 1, "role": None})]
+        assert merge_mixture_fields(parsed, stored) == [(11, {"po2_limit": 1.4, "gas_number": 1})]
 
     def test_the_fraction_guard_cannot_catch_a_mis_ordered_all_null_list(self) -> None:
         """Why `get_mixtures_for_dive` has to order by `id`, stated as a test.

@@ -284,7 +284,7 @@ def extract_profile(parser: type[DiveParser], content: bytes) -> NormalizedProfi
     swallowed, and the dive simply has no profile until a backfill run picks it up.
     """
     try:
-        return finalize_profile(parser, parser.parse_profile(content))
+        return finalize_profile(parser.parse_profile(content))
     except DiveParseError:
         logger.warning("Profile extraction failed for a %s file: malformed samples", parser.key, exc_info=True)
         return None
@@ -293,7 +293,7 @@ def extract_profile(parser: type[DiveParser], content: bytes) -> NormalizedProfi
         return None
 
 
-def finalize_profile(parser: type[DiveParser], parsed: ParsedProfileSchema | None) -> NormalizedProfile | None:
+def finalize_profile(parsed: ParsedProfileSchema | None) -> NormalizedProfile | None:
     """Normalize and cap an already-parsed profile.
 
     Split out of `extract_profile` for `_extract_all`, which gets its `parsed` from

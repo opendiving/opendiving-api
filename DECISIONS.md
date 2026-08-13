@@ -3642,6 +3642,39 @@ from either end: nothing in `merge_mixture_fields` reveals that it depends on a 
 module, and nothing in the crud module reveals that dropping the clause corrupts data rather than
 shuffling a list.
 
+**The mixture half is fill-only, and the dive's own scalars are not.** `merge_mixture_fields`
+originally spread all three fields into every update, `None`s included:
+
+```python
+{"po2_limit": parsed_mix.po2_limit, "gas_number": parsed_mix.gas_number, "role": parsed_mix.role}
+```
+
+That is silent data loss, because all three are client-writable — they sit on `DiveMixtureBase`, so
+they reach `DiveMixtureCreate`, and `PATCH /dive/{uuid}` replaces mixtures wholesale. The guard
+above compares only `oxygen`/`helium`, so an edit confined to these three is invisible to it. A FIT
+import produces `po2_limit=None` always and `role=None` for any open-circuit gas (`_role` maps only
+`closed_circuit_diluent`); a diver who then sets 1.6 and `deco` on their stage bottle has touched
+neither fraction, so the join is still admitted and the backfill writes both back to `NULL` — on a
+script whose docstring calls it "idempotent, and safe to run repeatedly", and whose
+`mixtures_skipped` counter is documented as capturing exactly the diver-edited case it misses here.
+
+The deeper reason is not "protect diver edits", though. It is that `None` from a parser means **"the
+file did not record this"** — the invariant `DiveMixtureSchema`'s docstring is built on, the one the
+`0.0`-instead-of-null bug was fixed to establish. Spreading one into an `UPDATE` converts an absent
+reading into a value, which is precisely the conflation that schema exists to prevent. Dropping the
+`None`s is that rule applied to the write rather than to the guard.
+
+What fill-only costs is bounded and worth naming: a parser correction still lands, because where the
+file *records* a value the backfill overwrites as before. It declines only where the file has
+nothing to say, which is where it had no business writing anything.
+
+The asymmetry with the dive's own scalars a few lines up — overwritten outright, `None`s and all —
+is deliberate and rests on one fact: nothing but the import writes those columns (`DiveTechScalars`
+is mixed into the read shapes only, and `DiveCreate`/`DiveUpdate` are `extra="forbid"`), so there is
+no edit to lose. These three have another writer. A rule about whether to overwrite is really a
+question about who else writes the column, and the two halves of this backfill answer it differently
+because the answers differ.
+
 ## A parsed value the database refuses must not take the upload — or the backfill run — with it
 
 `ck_dive_surface_pressure_range` bounds `surface_pressure_bar` to 0.5–1.2 bar, and nothing between

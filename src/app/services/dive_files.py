@@ -220,7 +220,7 @@ def _extract_all(
         scalars = None
 
     try:
-        return finalize_profile(parser, profile), scalars
+        return finalize_profile(profile), scalars
     except Exception:
         logger.exception("Unexpected error extracting a profile from a %s file", parser.key)
         return None, scalars
@@ -578,7 +578,9 @@ def merge_mixture_fields(
 
     `(id, values)` per row to update, or `None` when the two lists can't be shown to
     describe the same cylinders. Pure and DB-free, following the `reconcile()` idiom in
-    this module - the decision worth testing is testable without a database.
+    this module - the decision worth testing is testable without a database. A row the
+    file says nothing about is absent from the result rather than present with an empty
+    dict, so `[]` is a legitimate answer meaning "matched, nothing to write".
 
     Position is the only available join: mixtures are replaced wholesale on every save
     (`crud_dive_mixtures.replace_mixtures_for_dive`), so a stored row's `id` is newer than
@@ -616,12 +618,40 @@ def merge_mixture_fields(
             return None
         if parsed_mix.helium is not None and parsed_mix.helium != stored_mix.helium:
             return None
-        updates.append(
-            (
-                stored_mix.id,
-                {"po2_limit": parsed_mix.po2_limit, "gas_number": parsed_mix.gas_number, "role": parsed_mix.role},
+        # **Fill-only: a parsed `None` is dropped, not written.** This is the same rule as
+        # the fraction comparison above, applied to the write instead of the guard.
+        # `DiveMixtureSchema`'s whole premise is that `None` means "the file did not record
+        # this" rather than "this is nothing" - so spreading one into an `UPDATE` turns the
+        # absence of a reading into a value, which is the exact conflation that schema
+        # exists to prevent.
+        #
+        # It is also silent data loss, because all three of these are client-writable
+        # (`DiveMixtureBase` -> `DiveMixtureCreate`, and `PATCH /dive/{uuid}` replaces
+        # mixtures wholesale). A FIT import produces `po2_limit=None` always and
+        # `role=None` for any open-circuit gas; a diver who then sets 1.6 and `deco` on
+        # their stage bottle has touched neither fraction, so the guard above still admits
+        # the join and the backfill would have written both back to `NULL`.
+        #
+        # The dive's own scalars are overwritten outright a few lines up, and the asymmetry
+        # is the point: nothing but the import writes those, so there is no edit to lose.
+        # These three have another writer.
+        #
+        # A parser *correction* still lands, which is what the fill-only rule costs and
+        # doesn't: where the file records a value the backfill overwrites as before, and it
+        # declines only where the file has nothing to say.
+        # Annotated rather than inferred: `dict` is invariant in its value type, so the
+        # comprehension's own `dict[str, float | int | GasRole]` is not a `dict[str, object]`.
+        values: dict[str, object] = {
+            name: value
+            for name, value in (
+                ("po2_limit", parsed_mix.po2_limit),
+                ("gas_number", parsed_mix.gas_number),
+                ("role", parsed_mix.role),
             )
-        )
+            if value is not None
+        }
+        if values:
+            updates.append((stored_mix.id, values))
     return updates
 
 
