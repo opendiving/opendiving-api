@@ -293,10 +293,16 @@ class TestComputeMultiTankGasUse:
         # the client renders "these figures cover 39 of the 78 minutes recorded" from it.
         assert (result.attributed_seconds, result.duration_seconds) == (2355, 4682)
 
-    def test_a_cylinder_the_attribution_never_mentions_is_left_out(self):
+    def test_an_unmentioned_cylinder_that_was_never_breathed_is_left_out(self):
         """A hand-added cylinder has no `gas_number` to join on, and one the device never
-        recorded a switch to was never attributed any time."""
-        mixtures = [_mixture(gas_number=1), _mixture(gas_number=7)]
+        recorded a switch to was never attributed any time. Neither says anything is wrong
+        as long as the cylinder's own pressures agree it was not breathed - an unused pony
+        bottle, or a stage with nothing logged."""
+        mixtures = [
+            _mixture(gas_number=1),
+            _mixture(gas_number=7, start_pressure=200.0, end_pressure=200.0),
+            _mixture(gas_number=None, start_pressure=None, end_pressure=None),
+        ]
 
         result = compute_multi_tank_gas_use(
             mixtures=mixtures, attribution=_attribution(_attributed(1, seconds=2700, mean_depth_cm=1800))
@@ -319,6 +325,28 @@ class TestComputeMultiTankGasUse:
 
 
 class TestComputeMultiTankGasUseReturnsNone:
+    def test_when_a_cylinder_was_breathed_and_the_attribution_never_mentions_it(self):
+        """The one case where a missing cylinder makes the *surviving* figures wrong rather
+        than merely partial, so it cannot be reported as partial either.
+
+        The deco bottle here has a real 100 bar drop and no attribution entry, which means
+        the file's switches never accounted for the time it was breathed - so that time is
+        sitting inside gas 1's stretch, inflating its seconds and understating its rate.
+        Both halves of the coverage fraction would agree and read as the whole dive, which
+        is precisely the claim `attributed_seconds` exists to stop anyone making.
+        """
+        mixtures = [
+            _mixture(gas_number=1, volume=22.0, start_pressure=220.0, end_pressure=60.0),
+            _mixture(gas_number=2, volume=11.0, start_pressure=200.0, end_pressure=100.0),
+        ]
+
+        result = compute_multi_tank_gas_use(
+            mixtures=mixtures,
+            attribution=_attribution(_attributed(1, seconds=4300, mean_depth_cm=1779), duration_seconds=4300),
+        )
+
+        assert result is None
+
     def test_when_the_dive_has_fewer_than_two_cylinders(self):
         """One cylinder is `compute_gas_use`'s, and the split is what keeps a long-standing
         figure from changing which number it comes from."""

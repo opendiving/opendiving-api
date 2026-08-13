@@ -139,6 +139,23 @@ class _TankArithmetic:
     surface_minutes: float
 
 
+def _pressure_used(mixture: DiveMixtureRead) -> float | None:
+    """What this cylinder's own pressures say came out of it, or `None` if they say nothing.
+
+    The mixture half of `compute_gas_use`'s conditions, split out because it answers a
+    second question too: a cylinder that was demonstrably breathed and that the profile
+    never attributed any time to is evidence the attribution is incomplete, not a cylinder
+    to pass over. Equal pressures are the unused pony bottle that function documents - not
+    breathed, and no evidence of anything.
+    """
+    if mixture.start_pressure is None or mixture.end_pressure is None:
+        return None
+    if mixture.volume <= 0:
+        return None
+    pressure_used = mixture.start_pressure - mixture.end_pressure
+    return pressure_used if pressure_used > 0 else None
+
+
 def _tank_arithmetic(mixture: DiveMixtureRead, attributed: GasAttribution) -> _TankArithmetic | None:
     """One cylinder's consumption, or `None` when this cylinder can't produce one.
 
@@ -147,13 +164,10 @@ def _tank_arithmetic(mixture: DiveMixtureRead, attributed: GasAttribution) -> _T
     The difference is only where the two inputs come from: the time and the depth are this
     cylinder's own (from the profile), not the dive's.
     """
-    if mixture.start_pressure is None or mixture.end_pressure is None:
+    pressure_used = _pressure_used(mixture)
+    if pressure_used is None:
         return None
-    if mixture.volume <= 0 or attributed.seconds <= 0 or attributed.mean_depth_cm <= 0:
-        return None
-
-    pressure_used = mixture.start_pressure - mixture.end_pressure
-    if pressure_used <= 0:
+    if attributed.seconds <= 0 or attributed.mean_depth_cm <= 0:
         return None
 
     mean_depth = attributed.mean_depth_cm / DEPTH_SCALE
@@ -186,10 +200,16 @@ def compute_multi_tank_gas_use(
       a label a device chose, not an index this code assigned (see DECISIONS.md), so two
       cylinders claiming one label make every join ambiguous, not just theirs - and picking
       the first would silently attribute a back gas's time to a deco bottle.
-    - **A cylinder the attribution doesn't mention is left out**, not guessed at. The
-      commonest case in the corpus by far: a diver carries one transmitter, so the deco
-      bottle has no pressures and could produce no figure anyway.
-    - **A tank that fails `_tank_arithmetic` is left out** on the same terms.
+    - **A cylinder the attribution doesn't mention is left out** when its own pressures say
+      it was never breathed, which is the commonest case in the corpus by far: a diver
+      carries one transmitter, so the deco bottle has no pressures and could produce no
+      figure anyway. **But one that was demonstrably breathed refuses the whole dive**, for
+      the reason spelled out at that branch: the time it was breathed for is inside another
+      tank's stretch, so the surviving figures are wrong rather than incomplete, and no
+      coverage fraction can say so.
+    - **A tank that fails `_tank_arithmetic` is left out** on the same terms. Unlike the
+      case above, the attribution knew about it, so its seconds are excluded from every
+      other tank's and the shortfall is real and reported.
 
     The dive-level figures are then the totals over the tanks that survived, and
     `attributed_seconds` against `duration_seconds` is what makes that honest: the time
@@ -217,6 +237,17 @@ def compute_multi_tank_gas_use(
     for mixture in mixtures:
         attributed = attributed_by_number.get(mixture.gas_number) if mixture.gas_number is not None else None
         if attributed is None:
+            # A cylinder the attribution never mentions, whose own pressures say gas came
+            # out of it, refuses the dive. Its litres are missing from the totals *and*
+            # the time it was breathed for is sitting inside some other tank's stretch,
+            # inflating that tank's seconds and understating its rate - so the figures
+            # that survive are wrong, not merely partial, and the coverage fraction cannot
+            # show it: both halves would agree and read as the whole dive. This is the
+            # sidemount pair the device sees as one gas, and the deco bottle whose switch
+            # the diver never confirmed on the computer. A cylinder with *no* pressure
+            # drop is passed over instead, because there is nothing to have misplaced.
+            if _pressure_used(mixture) is not None:
+                return None
             continue
         tank = _tank_arithmetic(mixture, attributed)
         if tank is not None:
@@ -315,6 +346,17 @@ async def gas_use_history(db: AsyncSession, user_id: int) -> list[DiveGasUsePoin
 
     points = []
     for dive in dives:
+        if dive.avg_depth is None:
+            # Not a condition of the *arithmetic* - the multi-tank path normalizes each
+            # cylinder against its own mean depth and never consults this - but of the
+            # point: `DiveGasUsePoint.avg_depth` is what the tooltip reads, and inventing
+            # one from the attributed depths would put a number on the chart that the dive
+            # does not claim. Tested first rather than after the figure is computed, so
+            # that this reads as "this dive cannot be plotted" rather than as a figure
+            # derived and thrown away. Unreachable for an imported dive: every export in
+            # the corpus records an average depth.
+            continue
+
         gas_use = resolve_gas_use(
             duration=dive.duration,
             avg_depth=dive.avg_depth,
@@ -322,12 +364,6 @@ async def gas_use_history(db: AsyncSession, user_id: int) -> list[DiveGasUsePoin
             attribution=attribution_by_dive[dive.id],
         )
         if gas_use is None:
-            continue
-        if dive.avg_depth is None:
-            # Only reachable on the multi-tank path, which normalizes each cylinder
-            # against its own mean depth and so never consults this one. The point still
-            # has to carry it - it is what the tooltip reads - and inventing it from the
-            # attributed depths would put a number the dive doesn't claim on the chart.
             continue
 
         points.append(
@@ -338,8 +374,11 @@ async def gas_use_history(db: AsyncSession, user_id: int) -> list[DiveGasUsePoin
                 # it - a point on this graph has to be the same instant, labeled the same
                 # way, as the dive page it links to.
                 start_time=combine_start_time(dive.start_time, dive.utc_offset_minutes),
-                # Non-null by construction: `compute_gas_use` returned a figure, which it
-                # only does for a usable average depth.
+                # Non-null because the guard at the top of the loop skipped every dive
+                # without one. Not, as it once was, because the arithmetic demanded it:
+                # `compute_multi_tank_gas_use` can return a figure for a dive whose
+                # `avg_depth` is null, so removing that guard as redundant would put a
+                # `None` into a required `float` here.
                 avg_depth=dive.avg_depth,
                 gas_use=gas_use,
             )

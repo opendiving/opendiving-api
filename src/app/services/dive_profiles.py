@@ -414,6 +414,17 @@ def derive_gas_attribution(profile: NormalizedProfile) -> list[GasAttribution]:
     returns to their back gas for the ascent has two intervals on it and one tank.
     Ordered by when each gas was first breathed - the order a diver lists cylinders in.
 
+    **`seconds` is wall clock and `mean_depth_cm` is an unweighted mean of the samples
+    inside it**, which are the same measure only while the depth channel's cadence is
+    even. Every format in the corpus samples depth on a fixed interval (10 s or 20 s for
+    the Suunto XML export, ~11 s for an Ocean, 1 Hz for FIT), and this runs before
+    `downsample`, so nothing has thinned them unevenly either. Where it would bite is a
+    sensor dropout - a gap in `t` inside one stretch - which would weight the mean toward
+    whichever side was still recording while `seconds` counts the gap in full. Interval
+    weighting would fix that and is deliberately not done: it would need an edge rule at
+    each end of every stretch, and there is no dive in the corpus for the rule to be
+    checked against.
+
     **Runs before `downsample`**, which is what `finalize_profile` exists to sequence.
     Min/max bucketing keeps each bucket's extremes and discards everything between them,
     so a mean taken afterwards would be a mean of the dive's peaks and troughs rather than

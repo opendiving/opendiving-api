@@ -261,7 +261,14 @@ class DiveGasUsePoint(BaseModel):
             description="The dive's own offset-aware start time, exactly as `DiveRead` reports it - the x axis",
         ),
     ]
-    avg_depth: Annotated[float, Field(description="Average depth the consumption was normalized from, in meters")]
+    avg_depth: Annotated[
+        float,
+        Field(
+            description="The dive's own average depth, in meters - a label for the point, not necessarily the depth "
+            "the figure was normalized from. On a single-cylinder dive it is both; on a multi-cylinder one each tank "
+            "was normalized against its own `mean_depth`, which can be a long way from this.",
+        ),
+    ]
     gas_use: DiveGasUse
 
 

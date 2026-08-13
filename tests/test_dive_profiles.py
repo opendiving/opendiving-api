@@ -5,11 +5,15 @@ worth testing here is either a parser reading bytes or a pure function reshaping
 """
 
 import json
+import logging
 from datetime import timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from src.app.schemas.dive_profile import (
+    GasAttribution,
     ParsedPressureSeries,
     ParsedProfileEvent,
     ParsedProfileSchema,
@@ -28,12 +32,14 @@ from src.app.services.dive_profiles import (
     LoadedProfile,
     NormalizedProfile,
     ProfileEvent,
+    ProfileGasAttribution,
     ProfilePressureSeries,
     ProfileSeries,
     derive_gas_attribution,
     downsample,
     extract_profile,
     finalize_profile,
+    get_gas_attribution_for_dives,
     normalize,
     should_extract,
     to_read_schema,
@@ -1425,3 +1431,60 @@ class TestParsedProfileValidation:
     def test_still_rejects_an_unsorted_ceiling_series(self):
         with pytest.raises(ValueError, match="ceiling: timestamps are not sorted"):
             ParsedProfileSchema(ceiling=ParsedSeries(t=[10.0, 1.0], v=[300, 600]))
+
+
+class TestGetGasAttributionForDives:
+    """The one DB-facing piece in this module, mocked at the session.
+
+    Against the grain of the file's no-database style, and deliberately: what is worth
+    pinning is not the SQL but the three shapes a stored column can hand back, one of
+    which - a payload an older extractor wrote - is *guaranteed* to occur between a deploy
+    and the backfill that follows it, on the dive detail page.
+    """
+
+    def _db(self, rows: list[SimpleNamespace]) -> AsyncMock:
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=rows)
+        return db
+
+    def _row(self, gas_attribution: object) -> SimpleNamespace:
+        return SimpleNamespace(dive_id=7, duration_seconds=4300, gas_attribution=gas_attribution)
+
+    @pytest.mark.asyncio
+    async def test_reads_a_stored_attribution_back_with_the_span_it_was_derived_over(self):
+        rows = [self._row([{"gas_number": 0, "seconds": 2075, "mean_depth_cm": 3399}])]
+
+        attribution = await get_gas_attribution_for_dives(self._db(rows), dive_ids=[7])
+
+        assert attribution[7].duration_seconds == 4300
+        assert attribution[7].entries == [GasAttribution(gas_number=0, seconds=2075, mean_depth_cm=3399)]
+
+    @pytest.mark.asyncio
+    async def test_a_dive_with_no_profile_comes_back_empty_rather_than_absent(self):
+        """ "Nothing to attribute" is what the caller does with either, so a dive that has
+        no profile row must not be a `KeyError` at the call site."""
+        attribution = await get_gas_attribution_for_dives(self._db([]), dive_ids=[7])
+
+        assert attribution[7] == ProfileGasAttribution()
+
+    @pytest.mark.asyncio
+    async def test_a_row_written_before_attribution_existed_reads_as_nothing_attributed(self):
+        """NULL is "the backfill has not reached this row", `[]` is "this extractor looked
+        and found nothing" - and both mean the same thing to the caller."""
+        attribution = await get_gas_attribution_for_dives(self._db([self._row(None)]), dive_ids=[7])
+
+        assert attribution[7].entries == []
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_stored_shape_degrades_to_no_figure_rather_than_raising(self, caplog):
+        """The branch that keeps a stale payload off the dive detail page's error path. An
+        entry missing `seconds` is what a differently-shaped older extraction looks like;
+        it must cost the dive its per-tank figure, not its whole response.
+        """
+        rows = [self._row([{"gas_number": 1}])]
+
+        with caplog.at_level(logging.WARNING):
+            attribution = await get_gas_attribution_for_dives(self._db(rows), dive_ids=[7])
+
+        assert attribution[7].entries == []
+        assert "unreadable gas attribution" in caplog.text

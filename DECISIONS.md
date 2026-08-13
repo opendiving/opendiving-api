@@ -4297,10 +4297,21 @@ What is still refused outright:
   row. The number is a label a device chose, not an index this code assigned (see
   *"`DiveMixture.gas_number` is a label"*), so a duplicate makes every join ambiguous, and taking
   the first match would attribute a back gas's time to a deco bottle in silence.
-- **A cylinder the attribution never mentions**, or one that fails the per-tank checks (no
-  pressures, no pressure drop, no time, no depth), is left out — the same conditions
-  `compute_gas_use` applies to a whole dive, applied per tank, because a cylinder must not be worth
-  a different amount of gas for having been logged next to another one.
+- **A cylinder the attribution never mentions, whose own pressures say it was breathed**, refuses
+  the dive as well — and this one is easy to get wrong, because it looks like the benign case above
+  it. It is not. A cylinder with a real pressure drop and no attribution entry means the file's
+  switches never accounted for the time it was breathed, so that time is sitting inside some other
+  tank's stretch, inflating that tank's seconds and understating its rate. The surviving figures are
+  *wrong*, not merely partial, and the coverage fraction cannot say so: both halves would agree and
+  read as the whole dive, which is the exact claim `attributed_seconds` was added to prevent. Two
+  ways to reach it — a sidemount pair the computer sees as one gas, and a deco bottle whose switch
+  the diver never confirmed on the device — and neither loses anything relative to `main`, where
+  every multi-cylinder dive returned `None` regardless.
+- **A cylinder that fails the per-tank checks** (no pressures, no pressure drop, no time, no depth)
+  is left out — the same conditions `compute_gas_use` applies to a whole dive, applied per tank,
+  because a cylinder must not be worth a different amount of gas for having been logged next to
+  another one. Unlike the case above, the attribution *knew* about it, so its seconds are excluded
+  from every other tank's and the shortfall it leaves is real and reported.
 - **A dive where no cylinder survives** returns `None`, exactly as before.
 
 `tanks` therefore very often holds exactly **one** entry, and that is the normal case rather than a
