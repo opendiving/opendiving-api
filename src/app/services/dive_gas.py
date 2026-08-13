@@ -32,7 +32,7 @@ from ..models.dive import Dive
 from ..schemas.dive import DiveGasUse, DiveGasUsePoint, DiveTankGasUse
 from ..schemas.dive_mixture import DiveMixtureRead
 from ..schemas.dive_profile import DEPTH_SCALE, GasAttribution
-from .dive_profiles import get_gas_attribution_for_dives
+from .dive_profiles import ProfileGasAttribution, get_gas_attribution_for_dives
 
 # Metres of water per bar of ambient pressure. Salt water is nearer 10.06 m/bar and
 # fresh water 10.33, but a dive has no water-type field and every dive log in
@@ -114,9 +114,11 @@ def compute_gas_use(
         rmv=round(gas_used / surface_minutes, 2),
         sac_bar_per_min=round(pressure_used / surface_minutes, 2),
         # One cylinder has nothing to break down into, and the figures cover the whole
-        # dive by construction - there is no stretch of it breathed off something else.
+        # dive by construction - there is no stretch of it breathed off something else,
+        # so there is no fraction to report either.
         tanks=[],
         attributed_seconds=None,
+        duration_seconds=None,
     )
 
 
@@ -132,7 +134,6 @@ class _TankArithmetic:
     gas_number: int
     seconds: int
     mean_depth: float
-    volume: float
     pressure_used: float
     gas_used: float
     surface_minutes: float
@@ -161,7 +162,6 @@ def _tank_arithmetic(mixture: DiveMixtureRead, attributed: GasAttribution) -> _T
         gas_number=attributed.gas_number,
         seconds=attributed.seconds,
         mean_depth=mean_depth,
-        volume=mixture.volume,
         pressure_used=pressure_used,
         gas_used=gas_used,
         surface_minutes=(1 + mean_depth / METERS_PER_BAR) * (attributed.seconds / 60),
@@ -169,7 +169,7 @@ def _tank_arithmetic(mixture: DiveMixtureRead, attributed: GasAttribution) -> _T
 
 
 def compute_multi_tank_gas_use(
-    *, mixtures: Sequence[DiveMixtureRead], gas_attribution: Sequence[GasAttribution]
+    *, mixtures: Sequence[DiveMixtureRead], attribution: ProfileGasAttribution
 ) -> DiveGasUse | None:
     """Consumption for a dive with several cylinders, or `None` if it can't be known.
 
@@ -192,25 +192,25 @@ def compute_multi_tank_gas_use(
     - **A tank that fails `_tank_arithmetic` is left out** on the same terms.
 
     The dive-level figures are then the totals over the tanks that survived, and
-    `attributed_seconds` is what makes that honest: it is the time those tanks cover, and a
-    caller comparing it against the dive's own duration can see how much of the dive is
-    missing rather than reading the totals as the whole story.
+    `attributed_seconds` against `duration_seconds` is what makes that honest: the time
+    those tanks cover, over the span the profile recorded, so a caller can see how much of
+    the dive is missing rather than reading the totals as the whole story.
 
-    `sac_bar_per_min` is the only figure that needs defining rather than summing, because
-    bar/min is meaningless across cylinders of different sizes. It is the total gas over
-    the total volume over the total surface-minutes - what a single cylinder holding all of
-    it would have shown - which is exactly `compute_gas_use`'s formula when there is one
-    tank, and so cannot make a dive's figure jump when a second cylinder is added.
+    `sac_bar_per_min` is **null** here rather than summed. Bar/min is a rate only against a
+    known cylinder volume - 10 bar out of an 11 L stage and 10 bar out of a 22 L twinset
+    are different amounts of gas - so there is no dive-wide figure to give, only the
+    per-tank ones, each of which has exactly one volume behind it. Litres and RMV do sum,
+    because both are already volumes at the surface.
     """
-    if len(mixtures) < 2 or not gas_attribution:
+    if len(mixtures) < 2 or not attribution.entries:
         return None
 
     numbered = [mixture.gas_number for mixture in mixtures if mixture.gas_number is not None]
     if len(set(numbered)) != len(numbered):
         return None
 
-    attributed_by_number = {attributed.gas_number: attributed for attributed in gas_attribution}
-    if len(attributed_by_number) != len(gas_attribution):
+    attributed_by_number = {attributed.gas_number: attributed for attributed in attribution.entries}
+    if len(attributed_by_number) != len(attribution.entries):
         return None
 
     tanks = []
@@ -226,25 +226,25 @@ def compute_multi_tank_gas_use(
         return None
 
     gas_used = sum(tank.gas_used for tank in tanks)
-    volume = sum(tank.volume for tank in tanks)
     surface_minutes = sum(tank.surface_minutes for tank in tanks)
 
     return DiveGasUse(
         gas_used=round(gas_used, 2),
         rmv=round(gas_used / surface_minutes, 2),
-        sac_bar_per_min=round(gas_used / volume / surface_minutes, 2),
+        sac_bar_per_min=None,
         tanks=[
             DiveTankGasUse(
                 gas_number=tank.gas_number,
                 gas_used=round(tank.gas_used, 2),
                 rmv=round(tank.gas_used / tank.surface_minutes, 2),
                 sac_bar_per_min=round(tank.pressure_used / tank.surface_minutes, 2),
-                seconds=tank.seconds,
+                seconds_on_gas=tank.seconds,
                 mean_depth=round(tank.mean_depth, 2),
             )
             for tank in tanks
         ],
         attributed_seconds=sum(tank.seconds for tank in tanks),
+        duration_seconds=attribution.duration_seconds,
     )
 
 
@@ -253,7 +253,7 @@ def resolve_gas_use(
     duration: int,
     avg_depth: float | None,
     mixtures: Sequence[DiveMixtureRead],
-    gas_attribution: Sequence[GasAttribution] = (),
+    attribution: ProfileGasAttribution | None = None,
 ) -> DiveGasUse | None:
     """Whichever of the two derivations this dive supports.
 
@@ -269,7 +269,7 @@ def resolve_gas_use(
     """
     if len(mixtures) == 1:
         return compute_gas_use(duration=duration, avg_depth=avg_depth, mixtures=mixtures)
-    return compute_multi_tank_gas_use(mixtures=mixtures, gas_attribution=gas_attribution)
+    return compute_multi_tank_gas_use(mixtures=mixtures, attribution=attribution or ProfileGasAttribution())
 
 
 async def gas_use_history(db: AsyncSession, user_id: int) -> list[DiveGasUsePoint]:
@@ -319,7 +319,7 @@ async def gas_use_history(db: AsyncSession, user_id: int) -> list[DiveGasUsePoin
             duration=dive.duration,
             avg_depth=dive.avg_depth,
             mixtures=mixtures_by_dive[dive.id],
-            gas_attribution=attribution_by_dive[dive.id],
+            attribution=attribution_by_dive[dive.id],
         )
         if gas_use is None:
             continue

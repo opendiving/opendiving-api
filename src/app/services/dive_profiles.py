@@ -215,6 +215,26 @@ class LoadedProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class ProfileGasAttribution:
+    """A dive's per-cylinder attribution and the span it was derived over.
+
+    The two travel together because they are the two halves of one fraction: "these
+    figures cover 39 of the 77 minutes recorded" is only falsifiable if both numbers come
+    off the same profile row. The dive's own `duration` is the diver's record and may have
+    been edited, which would make the fraction say whatever the edit said.
+
+    `duration_seconds` is the profile's full span rather than the depth channel's, which
+    is what the attribution actually walked. The two differ by seconds where they differ
+    at all - a device goes on logging temperature a moment past the last depth reading -
+    and the profile's span is the one already stored, already meant by "the recorded
+    dive", and the one a client can line up against `DiveProfileInfo`.
+    """
+
+    duration_seconds: int = 0
+    entries: list[GasAttribution] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
 class ExistingProfileRow:
     """The extraction-idempotency lookup's result - summary columns only, never `data`."""
 
@@ -816,7 +836,7 @@ async def get_profile_infos_for_dives(db: AsyncSession, *, dive_ids: list[int]) 
     return infos
 
 
-async def get_gas_attribution_for_dives(db: AsyncSession, *, dive_ids: list[int]) -> dict[int, list[GasAttribution]]:
+async def get_gas_attribution_for_dives(db: AsyncSession, *, dive_ids: list[int]) -> dict[int, ProfileGasAttribution]:
     """Resolve several dives' per-cylinder attribution in one query.
 
     Separate from `get_profile_infos_for_dives` although both read summary columns of the
@@ -827,9 +847,9 @@ async def get_gas_attribution_for_dives(db: AsyncSession, *, dive_ids: list[int]
     anyway or eleven columns fetched to use one.
 
     A dive with no profile, or one extracted before attribution existed, comes back as an
-    empty list rather than being absent: "nothing to attribute" is what the caller does
-    with either, and a NULL column on a stale row means the backfill has not reached it
-    yet, not that the file was silent.
+    empty `ProfileGasAttribution` rather than being absent: "nothing to attribute" is what
+    the caller does with either, and a NULL column on a stale row means the backfill has
+    not reached it yet, not that the file was silent.
 
     A stored entry that no longer validates is dropped with a warning rather than raising.
     The column is a summary the extractor can rewrite at will, and a shape older than the
@@ -839,14 +859,18 @@ async def get_gas_attribution_for_dives(db: AsyncSession, *, dive_ids: list[int]
     if not dive_ids:
         return {}
 
-    stmt = select(DiveProfile.dive_id, DiveProfile.gas_attribution).where(DiveProfile.dive_id.in_(set(dive_ids)))
+    stmt = select(DiveProfile.dive_id, DiveProfile.duration_seconds, DiveProfile.gas_attribution).where(
+        DiveProfile.dive_id.in_(set(dive_ids))
+    )
 
-    attribution: dict[int, list[GasAttribution]] = {dive_id: [] for dive_id in dive_ids}
+    attribution: dict[int, ProfileGasAttribution] = {dive_id: ProfileGasAttribution() for dive_id in dive_ids}
     for row in await db.execute(stmt):
         try:
-            attribution[row.dive_id] = [GasAttribution.model_validate(entry) for entry in row.gas_attribution or []]
+            entries = [GasAttribution.model_validate(entry) for entry in row.gas_attribution or []]
         except ValidationError:
             logger.warning("Ignoring unreadable gas attribution stored for dive %s", row.dive_id, exc_info=True)
+            continue
+        attribution[row.dive_id] = ProfileGasAttribution(duration_seconds=row.duration_seconds, entries=entries)
     return attribution
 
 

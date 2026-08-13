@@ -4263,12 +4263,14 @@ export is re-imported. A profile-derived pressure would silently outrank the cor
 
 So the split is clean, and it is the reason the column is called `gas_attribution` rather than the
 plan's `gas_usage`: it holds the attribution — which cylinder, for how long, how deep — and nothing
-that any other table already knows.
+that any other table already knows. The per-tank field a client reads keeps the plan's own name,
+`seconds_on_gas`, because on the wire it sits beside `seconds`-less figures where a bare `seconds`
+would not say what it counted.
 
 ## A multi-cylinder figure covers the cylinders it can account for, and says so
 
-`DiveGasUse` gained `tanks` and `attributed_seconds`. The three existing figures stay required and
-now mean "the cylinders accounted for", which on a one-cylinder dive is still the dive.
+`DiveGasUse` gained `tanks`, `attributed_seconds` and `duration_seconds`. `gas_used` and `rmv` now
+mean "the cylinders accounted for", which on a one-cylinder dive is still the dive.
 
 The alternative was all-or-nothing per dive, matching `merge_mixture_fields` and the general refusal
 in this module — and it was rejected because it would ship nothing at all. The commonest tech shape
@@ -4276,9 +4278,18 @@ in the corpus by a distance is one transmitter on the back gas and a staged deco
 pressures logged, which is *every* multi-gas dive in it: 19 of 19. Refusing those would have left
 the feature with no dive to work on. The back gas's own figures are correct on their own terms — gas
 from its pressures, time from the switches, depth from the samples in between — so what is needed is
-not suppression but a statement of scope, and `attributed_seconds` is it. On the showcase dive it
-reads 2 355 against a `duration` of 4 619: the client can say the figure covers half the dive, which
-is true, and is more than "no data" ever said.
+not suppression but a statement of scope, and the coverage fraction is it. On the showcase dive it
+reads 2 355 of 4 682: the client can say the figures cover half the dive, which is true, and is more
+than "no data" ever said.
+
+**Both halves of that fraction come off the same profile row**, which is why `duration_seconds` is
+sent rather than left to the client to take from the dive's own `duration`. `duration` is the
+diver's record and can be hand-edited, and a fraction whose denominator can be edited is
+unfalsifiable — 2 355 of "whatever the diver typed" says nothing about how much of the dive was
+attributed. The number sent is the profile's span, which is what the attribution ran over. (Strictly
+it walked the *depth* channel, which can end a few seconds before the longest channel does; the two
+differ by seconds where they differ at all, and the profile's span is the one already stored and
+already meant by "the recorded dive".)
 
 What is still refused outright:
 
@@ -4292,12 +4303,20 @@ What is still refused outright:
   a different amount of gas for having been logged next to another one.
 - **A dive where no cylinder survives** returns `None`, exactly as before.
 
-`sac_bar_per_min` is the one figure that had to be *defined* rather than summed, because bar/min is
-meaningless across cylinders of different sizes. It is the total gas over the total volume over the
-total surface-minutes — what one cylinder of their combined volume would have shown — which reduces
-to `compute_gas_use`'s formula when there is a single tank, so a dive's headline figure cannot jump
-merely because a second cylinder was added. The per-tank `sac_bar_per_min` is each cylinder's own
-and is the one a diver reads.
+`tanks` therefore very often holds exactly **one** entry, and that is the normal case rather than a
+degenerate one — it is what every multi-gas dive in the corpus produces. A client that treats a
+one-entry `tanks` as "not really a per-tank dive" would hide the only figure those dives have.
+
+**`sac_bar_per_min` is null on the multi-cylinder path**, and is the one figure that does not sum.
+Litres and RMV do, because both are already volumes at the surface; bar/min is a rate only against a
+known cylinder volume, and 10 bar out of an 11 L stage is not 10 bar out of a 22 L twinset. The
+field was briefly given a definition instead — total gas over total volume over total
+surface-minutes, what one cylinder of their combined size would have shown, which does reduce to
+`compute_gas_use`'s formula for a single tank — and that was dropped. It is arithmetically sound and
+practically useless: a diver reads bar/min to plan against a *specific* cylinder, and a combined
+figure is plannable against neither of them. Each entry in `tanks` carries its own, which is
+meaningful because a tank has one volume. The web app reached the same conclusion independently and
+typed the field `number | null` before this side did.
 
 **`resolve_gas_use` is the only entry point**, and it dispatches on cylinder count alone. A
 single-cylinder dive with a profile is deliberately *not* re-derived from the profile's mean depth:

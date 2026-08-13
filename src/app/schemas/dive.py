@@ -165,7 +165,9 @@ class DiveTankGasUse(BaseModel):
     sac_bar_per_min: Annotated[
         float, Field(examples=[1.19], description="This cylinder's own surface air consumption, in bar per minute")
     ]
-    seconds: Annotated[int, Field(examples=[2355], description="How long this cylinder was breathed, in seconds")]
+    seconds_on_gas: Annotated[
+        int, Field(examples=[2355], description="How long this cylinder was breathed, in seconds")
+    ]
     mean_depth: Annotated[
         float,
         Field(
@@ -186,10 +188,10 @@ class DiveGasUse(BaseModel):
     used but no rate, say - would read as a number worth acting on when it isn't. Divers
     plan gas off these figures.
 
-    The three figures describe **the cylinders accounted for**, which on a single-cylinder
-    dive is the dive. On a multi-cylinder one they are the totals over `tanks`, and
-    `attributed_seconds` is what says how much of the dive that covers - a staged deco
-    bottle with no pressures logged contributes neither its gas nor its time.
+    The figures describe **the cylinders accounted for**, which on a single-cylinder dive
+    is the dive. On a multi-cylinder one they are the totals over `tanks`, and
+    `attributed_seconds`/`duration_seconds` are what say how much of the dive that covers -
+    a staged deco bottle with no pressures logged contributes neither its gas nor its time.
     """
 
     gas_used: Annotated[float, Field(examples=[1800.0], description="Gas breathed, in liters at surface pressure")]
@@ -202,12 +204,13 @@ class DiveGasUse(BaseModel):
         ),
     ]
     sac_bar_per_min: Annotated[
-        float,
+        float | None,
         Field(
             examples=[1.19],
             description="Surface air consumption in bar per minute. Only meaningful alongside this dive's cylinder "
-            "volume, but it's what a pressure gauge actually shows. Across several cylinders it is what one cylinder "
-            "of their combined volume would have shown.",
+            "volume, but it's what a pressure gauge actually shows. **Null on a multi-cylinder dive**, where there "
+            "is no such thing: 10 bar out of an 11 L stage and 10 bar out of a 22 L twinset are different amounts of "
+            "gas. Each entry in `tanks` carries its own, which is meaningful because a tank has one volume.",
         ),
     ]
     tanks: Annotated[
@@ -215,7 +218,8 @@ class DiveGasUse(BaseModel):
         Field(
             default_factory=list,
             description="Per-cylinder breakdown, on a dive whose import recorded which gas was breathed when. Empty "
-            "on a single-cylinder dive, where the figures above already describe the one tank.",
+            "on a single-cylinder dive, where the figures above already describe the one tank. May hold a single "
+            "entry: a two-cylinder dive whose deco bottle logged no pressures is the commonest shape there is.",
         ),
     ]
     attributed_seconds: Annotated[
@@ -223,9 +227,19 @@ class DiveGasUse(BaseModel):
         Field(
             default=None,
             examples=[2355],
-            description="Seconds of the dive the figures above account for, when they come from `tanks`. Compare "
-            "against the dive's `duration`: a shortfall is time on a cylinder that recorded no pressures. Null when "
+            description="Seconds of the dive the figures above account for, when they come from `tanks`. Null when "
             "the dive has one cylinder and the whole dive is accounted for.",
+        ),
+    ]
+    duration_seconds: Annotated[
+        int | None,
+        Field(
+            default=None,
+            examples=[4619],
+            description="What `attributed_seconds` is a fraction of: the span the dive's profile recorded, which is "
+            "what the attribution ran over. Deliberately not the dive's own `duration`, which is the diver's record "
+            "and may have been edited - the two halves of the fraction have to come from the same place to be worth "
+            "anything. Null alongside `attributed_seconds`.",
         ),
     ]
 

@@ -14,6 +14,7 @@ from src.app.services.dive_gas import (
     compute_multi_tank_gas_use,
     resolve_gas_use,
 )
+from src.app.services.dive_profiles import ProfileGasAttribution
 
 
 def _mixture(
@@ -114,6 +115,9 @@ class TestComputeGasUse:
         result = compute_gas_use(duration=37 * 60, avg_depth=13.7, mixtures=[_mixture()])
 
         assert result is not None
+        # Non-null on this path by construction - only the multi-cylinder one has no
+        # cylinder volume to express a pressure rate against.
+        assert result.sac_bar_per_min is not None
         assert result.rmv == round(result.rmv, 2)
         assert result.sac_bar_per_min == round(result.sac_bar_per_min, 2)
 
@@ -193,6 +197,12 @@ def _attributed(gas_number: int, *, seconds: int, mean_depth_cm: int) -> GasAttr
     return GasAttribution(gas_number=gas_number, seconds=seconds, mean_depth_cm=mean_depth_cm)
 
 
+def _attribution(*entries: GasAttribution, duration_seconds: int = 6000) -> ProfileGasAttribution:
+    """The attribution as it comes off a profile row, span included - the denominator
+    `attributed_seconds` is a fraction of."""
+    return ProfileGasAttribution(duration_seconds=duration_seconds, entries=list(entries))
+
+
 class TestComputeMultiTankGasUse:
     """The two cylinders are deliberately the two dives `TestComputeGasUse` already works
     out on its own - a 12 L at 200 -> 50 bar for 45 min at 18 m (1800 L, RMV 14.29) and an
@@ -202,28 +212,28 @@ class TestComputeMultiTankGasUse:
     having been logged next to another one.
     """
 
-    def _tanks(self) -> tuple[list[DiveMixtureRead], list[GasAttribution]]:
+    def _tanks(self) -> tuple[list[DiveMixtureRead], ProfileGasAttribution]:
         mixtures = [
             _mixture(gas_number=1),
             _mixture(gas_number=2, volume=11.1, start_pressure=210.0, end_pressure=70.0),
         ]
-        attribution = [
+        attribution = _attribution(
             _attributed(1, seconds=45 * 60, mean_depth_cm=1800),
             _attributed(2, seconds=40 * 60, mean_depth_cm=1200),
-        ]
+        )
         return mixtures, attribution
 
     def test_gives_each_cylinder_its_own_figures(self):
         mixtures, attribution = self._tanks()
 
-        result = compute_multi_tank_gas_use(mixtures=mixtures, gas_attribution=attribution)
+        result = compute_multi_tank_gas_use(mixtures=mixtures, attribution=attribution)
 
         assert result is not None
         assert [(tank.gas_number, tank.gas_used, tank.rmv) for tank in result.tanks] == [
             (1, 1800.0, 14.29),
             (2, 1554.0, 17.66),
         ]
-        assert [(tank.seconds, tank.mean_depth) for tank in result.tanks] == [(2700, 18.0), (2400, 12.0)]
+        assert [(tank.seconds_on_gas, tank.mean_depth) for tank in result.tanks] == [(2700, 18.0), (2400, 12.0)]
 
     def test_a_tank_is_normalized_against_its_own_depth_not_the_dive_s(self):
         """The reason the whole feature exists. The same deco bottle emptied at 6 m and at
@@ -233,10 +243,10 @@ class TestComputeMultiTankGasUse:
         mixtures = [_mixture(gas_number=1), _mixture(gas_number=2)]
         shallow = compute_multi_tank_gas_use(
             mixtures=mixtures,
-            gas_attribution=[
+            attribution=_attribution(
                 _attributed(1, seconds=1800, mean_depth_cm=3000),
                 _attributed(2, seconds=1800, mean_depth_cm=1000),
-            ],
+            ),
         )
 
         assert shallow is not None
@@ -246,14 +256,16 @@ class TestComputeMultiTankGasUse:
     def test_the_dive_figures_are_the_totals_over_the_tanks(self):
         mixtures, attribution = self._tanks()
 
-        result = compute_multi_tank_gas_use(mixtures=mixtures, gas_attribution=attribution)
+        result = compute_multi_tank_gas_use(mixtures=mixtures, attribution=attribution)
 
         assert result.gas_used == 1800.0 + 1554.0
         # 126 surface-minutes on the first cylinder and 88 on the second.
         assert result.rmv == round(3354 / 214, 2)
-        # `sac_bar_per_min` is defined as what one cylinder of the combined volume would
-        # have shown, which is `compute_gas_use`'s own formula with the sums put in.
-        assert result.sac_bar_per_min == round(3354 / 23.1 / 214, 2)
+        # Litres and RMV sum; bar/min does not, because the two cylinders are different
+        # sizes and a rate against no particular volume is a rate of nothing.
+        assert result.sac_bar_per_min is None
+        # Each tank's own: 150 bar over 126 surface-minutes, and 140 over 88.
+        assert [tank.sac_bar_per_min for tank in result.tanks] == [1.19, 1.59]
         assert result.attributed_seconds == 2700 + 2400
 
     def test_a_cylinder_that_recorded_no_pressures_is_left_out_and_the_shortfall_shows(self):
@@ -266,17 +278,20 @@ class TestComputeMultiTankGasUse:
             _mixture(gas_number=1),
             _mixture(gas_number=2, volume=11.0, start_pressure=None, end_pressure=None),
         ]
-        attribution = [
+        attribution = _attribution(
             _attributed(1, seconds=2355, mean_depth_cm=2837),
             _attributed(2, seconds=2327, mean_depth_cm=655),
-        ]
+            duration_seconds=4682,
+        )
 
-        result = compute_multi_tank_gas_use(mixtures=mixtures, gas_attribution=attribution)
+        result = compute_multi_tank_gas_use(mixtures=mixtures, attribution=attribution)
 
         assert result is not None
         assert [tank.gas_number for tank in result.tanks] == [1]
-        assert result.attributed_seconds == 2355
         assert result.gas_used == result.tanks[0].gas_used
+        # Half the dive, and both halves of the fraction come off the same profile row -
+        # the client renders "these figures cover 39 of the 78 minutes recorded" from it.
+        assert (result.attributed_seconds, result.duration_seconds) == (2355, 4682)
 
     def test_a_cylinder_the_attribution_never_mentions_is_left_out(self):
         """A hand-added cylinder has no `gas_number` to join on, and one the device never
@@ -284,7 +299,7 @@ class TestComputeMultiTankGasUse:
         mixtures = [_mixture(gas_number=1), _mixture(gas_number=7)]
 
         result = compute_multi_tank_gas_use(
-            mixtures=mixtures, gas_attribution=[_attributed(1, seconds=2700, mean_depth_cm=1800)]
+            mixtures=mixtures, attribution=_attribution(_attributed(1, seconds=2700, mean_depth_cm=1800))
         )
 
         assert [tank.gas_number for tank in result.tanks] == [1]
@@ -293,12 +308,12 @@ class TestComputeMultiTankGasUse:
         """Cylinder order on the dive is the diver's, and the client joins each tank back
         to the mixture row it sits beside."""
         mixtures = [_mixture(gas_number=2), _mixture(gas_number=1)]
-        attribution = [
+        attribution = _attribution(
             _attributed(1, seconds=2700, mean_depth_cm=1800),
             _attributed(2, seconds=2400, mean_depth_cm=1200),
-        ]
+        )
 
-        result = compute_multi_tank_gas_use(mixtures=mixtures, gas_attribution=attribution)
+        result = compute_multi_tank_gas_use(mixtures=mixtures, attribution=attribution)
 
         assert [tank.gas_number for tank in result.tanks] == [2, 1]
 
@@ -310,7 +325,7 @@ class TestComputeMultiTankGasUseReturnsNone:
         assert (
             compute_multi_tank_gas_use(
                 mixtures=[_mixture(gas_number=1)],
-                gas_attribution=[_attributed(1, seconds=2700, mean_depth_cm=1800)],
+                attribution=_attribution(_attributed(1, seconds=2700, mean_depth_cm=1800)),
             )
             is None
         )
@@ -319,7 +334,9 @@ class TestComputeMultiTankGasUseReturnsNone:
         """A FIT export with two gases and no `dive_gas_switched` event is exactly this,
         and it is where the feature has to keep saying nothing."""
         assert (
-            compute_multi_tank_gas_use(mixtures=[_mixture(gas_number=1), _mixture(gas_number=2)], gas_attribution=[])
+            compute_multi_tank_gas_use(
+                mixtures=[_mixture(gas_number=1), _mixture(gas_number=2)], attribution=_attribution()
+            )
             is None
         )
 
@@ -331,7 +348,7 @@ class TestComputeMultiTankGasUseReturnsNone:
         assert (
             compute_multi_tank_gas_use(
                 mixtures=[_mixture(gas_number=1), _mixture(gas_number=1)],
-                gas_attribution=[_attributed(1, seconds=2700, mean_depth_cm=1800)],
+                attribution=_attribution(_attributed(1, seconds=2700, mean_depth_cm=1800)),
             )
             is None
         )
@@ -341,12 +358,12 @@ class TestComputeMultiTankGasUseReturnsNone:
             _mixture(gas_number=1, start_pressure=None),
             _mixture(gas_number=2, start_pressure=200.0, end_pressure=200.0),
         ]
-        attribution = [
+        attribution = _attribution(
             _attributed(1, seconds=2700, mean_depth_cm=1800),
             _attributed(2, seconds=2400, mean_depth_cm=1200),
-        ]
+        )
 
-        assert compute_multi_tank_gas_use(mixtures=mixtures, gas_attribution=attribution) is None
+        assert compute_multi_tank_gas_use(mixtures=mixtures, attribution=attribution) is None
 
     def test_when_a_cylinder_has_no_time_or_no_depth(self):
         """The same guards `compute_gas_use` applies to a dive, applied per tank: a zero in
@@ -357,10 +374,10 @@ class TestComputeMultiTankGasUseReturnsNone:
         assert (
             compute_multi_tank_gas_use(
                 mixtures=mixtures,
-                gas_attribution=[
+                attribution=_attribution(
                     _attributed(1, seconds=0, mean_depth_cm=1800),
                     _attributed(2, seconds=2400, mean_depth_cm=0),
-                ],
+                ),
             )
             is None
         )
@@ -371,10 +388,10 @@ class TestResolveGasUse:
     lives in a single place."""
 
     def test_a_single_cylinder_dive_is_computed_exactly_as_before(self):
-        attribution = [_attributed(1, seconds=600, mean_depth_cm=3000)]
+        attribution = _attribution(_attributed(1, seconds=600, mean_depth_cm=3000))
 
         result = resolve_gas_use(
-            duration=45 * 60, avg_depth=18.0, mixtures=[_mixture(gas_number=1)], gas_attribution=attribution
+            duration=45 * 60, avg_depth=18.0, mixtures=[_mixture(gas_number=1)], attribution=attribution
         )
 
         assert result == compute_gas_use(duration=45 * 60, avg_depth=18.0, mixtures=[_mixture(gas_number=1)])
@@ -397,10 +414,10 @@ class TestResolveGasUse:
             duration=45 * 60,
             avg_depth=18.0,
             mixtures=[_mixture(gas_number=1), _mixture(gas_number=2)],
-            gas_attribution=[
+            attribution=_attribution(
                 _attributed(1, seconds=2700, mean_depth_cm=1800),
                 _attributed(2, seconds=2400, mean_depth_cm=1200),
-            ],
+            ),
         )
 
         assert result is not None
