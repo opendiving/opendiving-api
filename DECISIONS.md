@@ -3656,8 +3656,36 @@ the "treat zero as missing" reflex it was mistaken for.
 
 Still unattested, and stated as such in the validator: across the whole corpus the three parsers
 produce 371 `po2_limit` values and every one is 1.4 or 1.6. It is the unattested half of the same
-rule — a limit of 0 bar is not a limit, the way 0 bar is not a fill — and it leaves no bounded
-column that a parsed value can reach unchecked.
+rule — a limit of 0 bar is not a limit, the way 0 bar is not a fill.
+
+**That pass then claimed to have finished the job, and hadn't — by five columns.** Both this section
+and the validator asserted it left "no bounded column that a parsed value can reach unchecked". The
+phase adds **seven** bounded columns and two had guards: `surface_pressure_bar` and `po2_limit`. The
+other five — `cns_start`, `cns_end`, `otu_start`, `otu_end` (`>= 0` each) and `gas_number` (`>= 0`)
+— were still passed through raw by all three parsers.
+
+The CNS/OTU gap was the live one, and it is the exact failure the surface-pressure validator was
+written to prevent, on the columns right beside it: a `<CnsStart>-4</CnsStart>` in an export makes
+`store_tech_scalars` violate `ck_dive_cns_start_non_negative` inside `store_dive_file`'s
+transaction, so `PUT /dive/{uuid}/file` rolls back and answers **409 "The source file for this dive
+changed while this upload was in flight. Please try again."** The file is never stored and every
+retry fails identically — flatly contradicting `extract_tech_scalars`' own stated priority that a
+header this build can't read must not fail the upload that would have preserved it.
+
+`gas_number` lands differently but is the same bug as `po2_limit`'s: only `_mixtures_from_cylinders`
+reads a number a *file* chose (`int(cylinder["GasNumber"])` out of the Ocean's sample data) — the
+other three paths synthesize it with `enumerate` and cannot go negative by construction. That one
+path is enough, since a negative label reaches `/dive/parse`, pre-fills the form, and
+`DiveMixtureCreate`'s `ge=0` then 422s a field the diver never chose and cannot see.
+
+Both validators use `< 0`, not `<= 0`: **0 is a real value in all five cases** — a dive that began
+with no oxygen loading, and a Suunto Ocean's first cylinder — which is why those constraints are
+`>= 0` rather than `> 0` in the first place.
+
+The generalizable bit is not "add the missing validators". It is that a rule applied to two of seven
+columns was written up as though it covered all seven, and the write-up then read as evidence the
+work was done. A claim of completeness in this file should be countable against the thing it claims
+to cover.
 
 **Where the handler goes, and why the first attempt was in the wrong place.** The `noop` branch's
 `try` originally wrapped `await db.commit()` alone. That catches nothing: a `CHECK` is not

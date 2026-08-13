@@ -5,11 +5,12 @@ import random
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pydantic import BaseModel
 
 from src.app.models.dive import Dive
 from src.app.models.dive_mixture import DiveMixture
 from src.app.schemas.dive_mixture import GasRole
-from src.app.schemas.parsed_dive import ParsedDiveSchema
+from src.app.schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from src.app.services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file
 from src.app.services.dive_parsers.fit import _MAX_CYLINDERS, FitParser
 from src.app.services.dive_parsers.fit import _MAX_FRAMES as MAX_FRAMES
@@ -27,6 +28,21 @@ from tests.helpers.fit import (
 
 SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
 XSI_NS = "http://www.w3.org/2001/XMLSchema-instance"
+
+
+def _validated_fields(model: type[BaseModel]) -> set[str]:
+    """Field names some `field_validator` on this schema covers.
+
+    Read off Pydantic's own decorator registry rather than listed by hand, so the guard
+    in `test_every_bounded_column_this_phase_adds_has_a_parse_side_guard` cannot pass by
+    being updated alongside the thing it is checking.
+    """
+    return {
+        field
+        for decorator in model.__pydantic_decorators__.field_validators.values()
+        for field in decorator.info.fields
+    }
+
 
 VALID_SUUNTO_XML = f"""<?xml version="1.0" encoding="utf-8"?>
 <Dive xmlns="{SUUNTO_NS}" xmlns:i="{XSI_NS}">
@@ -1639,6 +1655,100 @@ class TestTechScalars:
         assert parsed_with(1.2) == 1.2
         assert parsed_with(0.49) is None
         assert parsed_with(1.21) is None
+
+    def test_a_negative_exposure_reading_reads_as_no_reading(self):
+        """Oxygen loading does not run backwards. Unguarded, a negative here violated
+        `ck_dive_cns_start_non_negative` *inside* `store_dive_file`'s transaction, so the
+        attach rolled back and the diver got a 409 telling them to retry an upload that
+        could never succeed."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <CnsStart>-4</CnsStart><CnsEnd>-1</CnsEnd><OtuStart>-9</OtuStart><OtuEnd>-0.5</OtuEnd>
+</Dive>
+""".encode()
+
+        parsed = SuuntoXmlParser.parse(content)
+
+        assert (parsed.cns_start, parsed.cns_end) == (None, None)
+        assert (parsed.otu_start, parsed.otu_end) == (None, None)
+
+    def test_a_recorded_zero_exposure_is_still_a_reading(self):
+        """`< 0`, not `<= 0`. A dive that began with no oxygen loading recorded a real 0,
+        and the four constraints are `>= 0` precisely to keep that apart from null."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <CnsStart>0</CnsStart><OtuStart>0</OtuStart>
+</Dive>
+""".encode()
+
+        parsed = SuuntoXmlParser.parse(content)
+
+        assert parsed.cns_start == 0.0
+        assert parsed.otu_start == 0.0
+
+    def test_a_negative_gas_number_reads_as_no_label(self):
+        """Only `_mixtures_from_cylinders` reads a number a file chose; the other three
+        paths synthesize it with `enumerate`. One path is enough to 422 a form field the
+        diver never chose."""
+        mixture = DiveMixtureSchema(
+            end_pressure=None,
+            gas_number=-7,
+            helium=None,
+            name=None,
+            oxygen=None,
+            po2_limit=None,
+            role=None,
+            start_pressure=None,
+            volume=None,
+        )
+
+        assert mixture.gas_number is None
+
+    def test_gas_number_zero_is_a_real_label(self):
+        """A Suunto Ocean numbers its cylinders from 0, which is why the constraint is
+        `>= 0` and not the 1-based check it started as."""
+        mixture = DiveMixtureSchema(
+            end_pressure=None,
+            gas_number=0,
+            helium=None,
+            name=None,
+            oxygen=None,
+            po2_limit=None,
+            role=None,
+            start_pressure=None,
+            volume=None,
+        )
+
+        assert mixture.gas_number == 0
+
+    def test_every_bounded_column_this_phase_adds_has_a_parse_side_guard(self):
+        """The drift guard for the rule itself.
+
+        The rule was applied to two of seven columns and then written up as covering all
+        of them, which is how five stayed unguarded through two review rounds. Counted
+        here against the constraints rather than restated in prose, so the next column
+        with a `CHECK` either gets a validator or fails this.
+        """
+        bounded = {
+            (Dive, "cns_start"),
+            (Dive, "cns_end"),
+            (Dive, "otu_start"),
+            (Dive, "otu_end"),
+            (Dive, "surface_pressure_bar"),
+            (DiveMixture, "po2_limit"),
+            (DiveMixture, "gas_number"),
+        }
+        # Every one of those really is constrained on the model side...
+        for model, column in bounded:
+            constraints = " ".join(str(getattr(c, "sqltext", "")) for c in model.__table__.constraints)
+            assert column in constraints, f"{model.__name__}.{column} has no CHECK"
+
+        # ...and every one is validated on the way in, on whichever schema carries it.
+        guarded = {
+            *((Dive, name) for name in _validated_fields(ParsedDiveSchema)),
+            *((DiveMixture, name) for name in _validated_fields(DiveMixtureSchema)),
+        }
+        assert bounded <= guarded, f"unguarded: {bounded - guarded}"
 
     def test_an_out_of_band_po2_limit_reads_as_no_limit(self):
         """The last bounded field a parsed value could reach unguarded. Unattested - the

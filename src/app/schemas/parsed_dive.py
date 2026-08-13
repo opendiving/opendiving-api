@@ -67,24 +67,43 @@ class DiveMixtureSchema(BaseModel):
         """
         return None if value is not None and value <= 0 else value
 
+    @field_validator("gas_number")
+    @classmethod
+    def _drop_negative_gas_number(cls, value: int | None) -> int | None:
+        """A label, but not a negative one - `ck_dive_mixture_gas_number_non_negative`.
+
+        `< 0`, not `<= 0`: **0 is a real label**, which is the whole point of that
+        constraint being `>= 0` rather than the 1-based check it started as - a Suunto
+        Ocean numbers its cylinders from 0 and the stored profiles label their pressure
+        channels to match.
+
+        Only one parser can produce a number a file chose: `_mixtures_from_cylinders`
+        reads `int(cylinder["GasNumber"])` out of the Ocean's sample data. The other three
+        paths synthesize it with `enumerate`, so they cannot go negative by construction.
+        That one path is enough - a negative label reaches `/dive/parse`, pre-fills the
+        form, and `DiveMixtureCreate`'s `ge=0` then 422s a field the diver never chose and
+        cannot see, which is exactly the failure `_drop_implausible_po2_limit` below is
+        written up for.
+        """
+        return None if value is not None and value < 0 else value
+
     @field_validator("po2_limit")
     @classmethod
     def _drop_implausible_po2_limit(cls, value: float | None) -> float | None:
         """Outside 0.4-2.0 bar this is not a ppO₂ anyone planned a gas to.
 
         The band `ck_dive_mixture_po2_limit_range` enforces, mirrored here on the same
-        terms as `ParsedDiveSchema._drop_implausible_surface_pressure`: this is the last
-        bounded column a parsed value could reach without having passed the bound the
-        column applies. `backfill_tech_fields` writes this one through a Core `UPDATE`
-        that bypasses Pydantic entirely, so the schema is the only place the guard can
-        sit and still cover both paths.
+        terms as `ParsedDiveSchema._drop_implausible_surface_pressure`: no parsed value
+        should reach a bounded column without having passed the bound the column applies.
+        `backfill_tech_fields` writes this one through a Core `UPDATE` that bypasses
+        Pydantic entirely, so the schema is the only place the guard can sit and still
+        cover both paths.
 
         Unattested, and the *format* trap `_drop_unpressurized` documents does not apply
         here: DM5 says "no ppO₂ recorded" with `<PO2 i:nil="true"/>` (363 of 716 mixtures)
         rather than with a zero, and across the whole corpus the three parsers produce 371
         `po2_limit` values of which every one is 1.4 or 1.6. This is the unattested half
-        of the same rule - a limit of 0 bar is not a limit, the way 0 bar is not a fill -
-        and it is here so no bounded field is left as the one exception.
+        of the same rule - a limit of 0 bar is not a limit, the way 0 bar is not a fill.
         """
         return None if value is not None and not (0.4 <= value <= 2.0) else value
 
@@ -109,6 +128,22 @@ class ParsedDiveSchema(BaseModel):
     otu_start: float | None = None
     otu_end: float | None = None
     surface_pressure_bar: float | None = None
+
+    @field_validator("cns_start", "cns_end", "otu_start", "otu_end")
+    @classmethod
+    def _drop_negative_exposure(cls, value: float | None) -> float | None:
+        """Oxygen loading does not run backwards, and `ck_dive_*_non_negative` says so.
+
+        `< 0`, not `<= 0`: a dive that began with **no** oxygen loading records a real 0,
+        and telling that apart from "didn't record it" is exactly why those four
+        constraints are `>= 0` rather than `> 0`. `test_zero_cns_and_otu_are_allowed`
+        pins the boundary from the database's side.
+
+        All three parsers pass these through raw - XML `_float(root, "CnsStart")`, JSON
+        `_fraction_to_percent(start_tissue.get("CNS"))`, FIT `float(value)` off the
+        summary - so a negative in any export reached the `UPDATE` unmodified.
+        """
+        return None if value is not None and value < 0 else value
 
     @field_validator("surface_pressure_bar")
     @classmethod
