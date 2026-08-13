@@ -3644,13 +3644,79 @@ So three changes, each fixing a different link:
   work, and — since nothing advances a version column — the next run reaches the same dive and dies
   the same way. The backfill could never get past it without hand-narrowing `--parser-key`.
 
-**`po2_limit` deliberately got no matching validator**, though `ck_dive_mixture_po2_limit_range`
-bounds it to 0.4–2.0 and `merge_mixture_fields` writes it through a raw `UPDATE` that bypasses
-Pydantic entirely. The corpus writes `<PO2>` as exactly two values, 1.4 (277 mixtures) and 1.6 (76),
-and says "not set" with `i:nil="true"` (363) — never with a zero. `DiveMixtureCreate` already
-carries `ge=0.4, le=2.0`, so the form path is covered, and the savepoint above covers the backfill
-path without inventing a rule for a value no file has been seen to write. Adding an unevidenced
-guard here would be the "treat zero as missing" reflex the section above rejects, one field over.
+**`po2_limit` got the same validator, on the second pass.** The first version of this section argued
+against one: the corpus writes `<PO2>` as exactly two values, 1.4 (277 mixtures) and 1.6 (76), and
+says "not set" with `i:nil="true"` (363) — never with a zero — and `DiveMixtureCreate` already
+carries `ge=0.4, le=2.0`, so "the form path is covered". That last step is where the reasoning went
+wrong. `DiveMixtureCreate`'s bound does not _protect_ the form path, it **is** the failure on it:
+`POST /dive/parse` hands the parsed mixture to the client to pre-fill with, so an out-of-band
+`po2_limit` comes back on save and 422s a field the diver never chose. That is the same
+unsubmittable-form bug `_drop_unpressurized` was written to fix, one field over — the opposite of
+the "treat zero as missing" reflex it was mistaken for.
+
+Still unattested, and stated as such in the validator: across the whole corpus the three parsers
+produce 371 `po2_limit` values and every one is 1.4 or 1.6. It is the unattested half of the same
+rule — a limit of 0 bar is not a limit, the way 0 bar is not a fill — and it leaves no bounded
+column that a parsed value can reach unchecked.
+
+**Where the handler goes, and why the first attempt was in the wrong place.** The `noop` branch's
+`try` originally wrapped `await db.commit()` alone. That catches nothing: a `CHECK` is not
+deferrable in Postgres, so it is evaluated as the `UPDATE` executes and SQLAlchemy raises
+`IntegrityError` out of `execute()` — checked against the local database rather than reasoned about.
+The writes have to sit inside the `try` alongside the commit.
+`TestReExtractionFailureDoesNotFailTheRequest` pins it and fails against the commit-only shape.
+
+The same fact is what makes the savepoint further up load-bearing rather than decorative:
+`begin_nested` has to enclose the statements, not just the commit that follows them.
+
+## `load_dive_file` detaches the row it read, because the blob outlives the need for it
+
+`local_session` is built `expire_on_commit=False` (`core/db/database.py`), which is right for the
+request path — a committed ORM instance stays usable instead of triggering a fresh `SELECT` per
+attribute on the way out through a response model. The cost lands somewhere that path never sees.
+
+`load_dive_file` is the one query that pulls `dive_file.data`, via an explicit `undefer`. The
+instance it loads stays in the session's identity map with that blob materialized, and no commit
+expires it. In a request that is invisible: the session dies at the end of it. In
+`backfill_tech_fields` and `backfill_profiles`, which walk every stored export in one session and
+commit in batches of 50, it means every file the run has read is still resident — a few thousand
+dives at a few hundred KB is hundreds of MB of RSS in the `api` container, growing monotonically to
+the end of the run.
+
+`db.expunge(file)` before returning, because `LoadedDiveFile` has already copied out the four things
+any caller wants. Placed in `load_dive_file` rather than in the backfill loop so both scripts and
+the download route get it from the one place that knows a blob was loaded at all.
+
+## The tech scalars re-extract on the profile's version gate, not one of their own
+
+`store_dive_file`'s `noop` branch re-reads a file the dive already has when
+`PROFILE_EXTRACTOR_VERSION` says the stored profile is stale, and the scalars were folded into that
+same condition rather than given a version of their own. Two columns' worth of extra state to bump,
+review and get wrong, for a re-upload path that is already opportunistic.
+
+The consequence is worth stating because it is not visible from the branch: **a scalar-only parser
+fix does not reach existing dives through a re-upload.** Correcting a CNS or `SurfacePressure`
+reading without touching sample extraction leaves `should_extract` answering "current", and the
+stale numbers stay. `backfill_tech_fields` is the path for that — it re-reads every candidate on
+every run precisely so that it needs no version to bump — so a fix of that shape ships with a
+backfill run, not with instructions to re-upload.
+
+## `extract_tech_scalars` re-parses, and on FIT that means decoding the file twice
+
+`_extract_all` pairs `extract_profile` and `extract_tech_scalars` into one `run_in_threadpool` hop.
+Both take the same bytes, and on FIT both reach `FitParser._scan` — `parse` and `parse_profile` each
+call it — so the file is decoded once per extraction. Measured on a 26 KB export from the corpus: 55
+ms + 58 ms, against 58 ms for a single scan feeding both. It scales with `_MAX_FRAMES` up to the
+~1.5 s the profile extraction is already budgeted at, so worst-case attach latency roughly doubles
+and one threadpool worker is held for both passes. The two Suunto parsers are cheap enough that it
+does not matter there.
+
+Left as it is for now, and recorded rather than quietly tolerated, because collapsing it is a real
+change rather than a tidy-up. The two extractions currently **fail independently**: a file whose
+sample stream is malformed still yields its header scalars, which is why a dive can carry CNS and
+OTU with no profile. A single `parse_all` entry point returning both has to preserve that or drop it
+on purpose, and the answer is not obvious — for FIT they share the scan and would fail together
+anyway, while for the Suunto parsers they genuinely are independent code paths.
 
 ## FIT fixtures are written, not committed as blobs
 

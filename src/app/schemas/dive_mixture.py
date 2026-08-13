@@ -63,8 +63,9 @@ class DiveMixtureBase(BaseModel):
             ge=0,
             examples=[1],
             description="How the source export identifies this cylinder, and the join key to the profile's "
-            "per-cylinder pressure channels. A label, not an index - some devices number from 0. Carried "
-            "through edits rather than edited; a hand-added cylinder has none.",
+            "per-cylinder pressure channels. A label, not an index - some devices number from 0. Clients are "
+            "expected to echo back what a dive was imported with rather than assign one; a hand-added cylinder "
+            "has none.",
         ),
     ]
     role: Annotated[

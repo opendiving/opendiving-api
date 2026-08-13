@@ -67,6 +67,27 @@ class DiveMixtureSchema(BaseModel):
         """
         return None if value is not None and value <= 0 else value
 
+    @field_validator("po2_limit")
+    @classmethod
+    def _drop_implausible_po2_limit(cls, value: float | None) -> float | None:
+        """Outside 0.4-2.0 bar this is not a ppO₂ anyone planned a gas to.
+
+        The band `ck_dive_mixture_po2_limit_range` enforces, mirrored here on the same
+        terms as `ParsedDiveSchema._drop_implausible_surface_pressure`: this is the last
+        bounded column a parsed value could reach without having passed the bound the
+        column applies. `backfill_tech_fields` writes this one through a Core `UPDATE`
+        that bypasses Pydantic entirely, so the schema is the only place the guard can
+        sit and still cover both paths.
+
+        Unattested, and the *format* trap `_drop_unpressurized` documents does not apply
+        here: DM5 says "no ppO₂ recorded" with `<PO2 i:nil="true"/>` (363 of 716 mixtures)
+        rather than with a zero, and across the whole corpus the three parsers produce 371
+        `po2_limit` values of which every one is 1.4 or 1.6. This is the unattested half
+        of the same rule - a limit of 0 bar is not a limit, the way 0 bar is not a fill -
+        and it is here so no bounded field is left as the one exception.
+        """
+        return None if value is not None and not (0.4 <= value <= 2.0) else value
+
 
 class ParsedDiveSchema(BaseModel):
     avg_depth: float | None

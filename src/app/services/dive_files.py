@@ -161,6 +161,16 @@ def extract_tech_scalars(parser: type[DiveParser], content: bytes) -> dict[str, 
     Returns a dict rather than a schema because it is spread straight into an `UPDATE`;
     an all-`None` result is still written, so replacing an export that recorded exposure
     with one that doesn't clears the old dive's readings rather than stranding them.
+
+    **This re-parse is not free, and on FIT it is not incremental either.** `parse` and
+    `parse_profile` each call `FitParser._scan`, so pairing them in `_extract_all` decodes
+    the file twice: measured at 55 ms + 58 ms on a 26 KB export where a single scan
+    serving both is 58 ms, and both scales with `_MAX_FRAMES` up to the ~1.5 s the profile
+    extraction is budgeted at. The two Suunto parsers are cheap enough for it not to
+    matter. Collapsing it wants a parser entry point that scans once and returns both,
+    which is a real change rather than a tidy-up: `extract_profile` and this function
+    currently fail *independently*, so a file whose samples are malformed still yields its
+    header scalars, and a single entry point has to keep that or lose it deliberately.
     """
     try:
         parsed = parser.parse(content)
@@ -269,20 +279,33 @@ async def store_dive_file(
         # The *profile*, though, is a function of (these bytes, the extractor version),
         # so a repeated PUT after `PROFILE_EXTRACTOR_VERSION` was bumped opportunistically
         # upgrades it from bytes already in hand. Still a no-op in the normal case.
+        #
+        # The tech scalars ride that same version gate, having none of their own, which
+        # makes a scalar-only parser fix invisible here: correcting a CNS or surface-
+        # pressure reading without touching the profile leaves `should_extract` saying
+        # "current" and the stale numbers in place. `backfill_tech_fields` is what picks
+        # those up - it re-reads every candidate on every run precisely so it needs no
+        # version to bump - so a fix of that shape ships with a backfill run, not with a
+        # re-upload.
         if should_extract(await get_existing_profile(db, dive_id=dive_id), sha256=digest) == "extract":
             await _release_read_transaction(db)
             profile, scalars = await run_in_threadpool(_extract_all, parser, data)
-            if profile is not None:
-                await store_profile(
-                    db, dive_id=dive_id, profile=profile, source_sha256=digest, parser_key=parser.key, commit=False
-                )
-            if scalars is not None:
-                await store_tech_scalars(db, dive_id=dive_id, scalars=scalars, commit=False)
             try:
+                if profile is not None:
+                    await store_profile(
+                        db, dive_id=dive_id, profile=profile, source_sha256=digest, parser_key=parser.key, commit=False
+                    )
+                if scalars is not None:
+                    await store_tech_scalars(db, dive_id=dive_id, scalars=scalars, commit=False)
                 # One commit for both, where the profile used to commit on its own: they
                 # come out of the same bytes, and a dive whose exposure readings were
                 # upgraded but whose profile wasn't would be describing two different
                 # extractions.
+                #
+                # The writes are inside the `try`, not just the commit: a `CHECK` is not
+                # deferrable in Postgres, so it is evaluated as the `UPDATE` runs and
+                # `IntegrityError` is raised from `execute()` rather than from `commit()`.
+                # A handler wrapped around the commit alone would never see one.
                 await db.commit()
             except IntegrityError:
                 # This branch is an opportunistic upgrade of a file the dive already has,
@@ -392,6 +415,13 @@ async def load_dive_file(db: AsyncSession, *, dive_id: int) -> LoadedDiveFile | 
     file = (await db.execute(stmt)).scalar_one_or_none()
     if file is None:
         return None
+
+    # Detached before returning, because everything worth having is copied out below and
+    # what stays behind is a megabyte. `local_session` is built `expire_on_commit=False`,
+    # so an attached instance keeps its undeferred `data` materialized in the identity map
+    # for the life of the session - and the batch commit in a backfill does not expire it.
+    # A run over a few thousand dives would otherwise hold every export it had read.
+    db.expunge(file)
 
     return LoadedDiveFile(
         data=file.data,

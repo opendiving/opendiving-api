@@ -27,6 +27,7 @@ from uuid6 import uuid7
 from src.app.core.security import ALGORITHM, SECRET_KEY, TokenType, create_dive_file_token, verify_dive_file_token
 from src.app.core.utils.uploads import read_upload_within_limit
 from src.app.crud.crud_dive_mixtures import get_mixtures_for_dive, get_mixtures_for_dives
+from src.app.models.dive import Dive
 from src.app.schemas.dive import DiveFileInfo, DiveTechScalars
 from src.app.schemas.dive_mixture import DiveMixtureRead, GasRole
 from src.app.schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
@@ -400,6 +401,11 @@ class TestTechScalarExtraction:
         rather than as a column that silently stays null forever."""
         assert set(TECH_SCALAR_FIELDS) == set(DiveTechScalars.model_fields)
         assert set(TECH_SCALAR_FIELDS) <= set(ParsedDiveSchema.model_fields)
+        # The other direction, and the one that fails in production rather than in CI:
+        # these names are spread into `update(Dive).values(**scalars)`, so a field on
+        # `DiveTechScalars` that is not a `Dive` column raises at attach time, on a real
+        # upload, rather than anywhere a developer would see it first.
+        assert set(TECH_SCALAR_FIELDS) <= set(Dive.__table__.columns.keys())
 
     def test_an_unreadable_file_returns_none_rather_than_raising(self) -> None:
         """The upload must survive a header this build can't read: the file is the
@@ -553,6 +559,73 @@ class TestStoredMixturesAreReadInSavedOrder:
         await get_mixtures_for_dives(session, [7, 8])  # type: ignore[arg-type]
 
         assert "ORDER BY dive_mixture.id" in self._sql(session.statements[0])
+
+
+class TestReExtractionFailureDoesNotFailTheRequest:
+    """The `noop` branch's handler has to sit around the *writes*, not the commit.
+
+    A `CHECK` is not deferrable in Postgres, so it is evaluated as the `UPDATE` runs and
+    `IntegrityError` comes out of `execute()`. A `try` wrapped around `commit()` alone -
+    which is what the first version of this handler did - catches nothing, the request
+    500s, and the session is left in a failed transaction for whatever runs next.
+    """
+
+    XML = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}"><CnsEnd>20</CnsEnd></Dive>
+""".encode()
+
+    @staticmethod
+    def _session_for_reupload() -> AsyncMock:
+        """A session whose dedupe lookup already holds this dive's file, so the attach
+        takes the `noop` branch."""
+        existing = _existing(dive_id=7)
+        result = MagicMock()
+        result.one_or_none.return_value = (
+            existing.id,
+            existing.dive_id,
+            existing.uuid,
+            existing.content_type,
+            existing.byte_size,
+            existing.original_filename,
+            existing.parser_key,
+            existing.updated_at,
+        )
+
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=result)
+        return db
+
+    @pytest.mark.asyncio
+    async def test_a_rejected_write_is_swallowed_and_rolled_back(self, monkeypatch) -> None:
+        db = self._session_for_reupload()
+
+        async def rejecting_store(db, *, dive_id, scalars, commit=False):
+            raise IntegrityError("UPDATE dive ...", {}, Exception("ck_dive_cns_start_non_negative"))
+
+        monkeypatch.setattr("src.app.services.dive_files.store_tech_scalars", rejecting_store)
+        monkeypatch.setattr("src.app.services.dive_files.should_extract", lambda *a, **k: "extract")
+        monkeypatch.setattr("src.app.services.dive_files.get_existing_profile", AsyncMock(return_value=None))
+        monkeypatch.setattr("src.app.services.dive_files.store_profile", AsyncMock())
+
+        user_uuid = uuid7()
+        info = await store_dive_file(
+            db,
+            user_id=1,
+            user_uuid=user_uuid,
+            dive_id=7,
+            upload=UploadFile(filename="export.xml", file=io.BytesIO(self.XML)),
+            file_token=create_dive_file_token(
+                user_uuid=user_uuid,
+                sha256=hashlib.sha256(self.XML).hexdigest(),
+                parser_key=SuuntoXmlParser.key,
+            ),
+        )
+
+        # The caller re-uploaded bytes that are already stored; the right answer to that
+        # is still "you already have this", not a 500.
+        assert info.original_filename == "export.xml"
+        # And the session is usable afterwards, which is the half a missing handler cost.
+        db.rollback.assert_awaited()
 
 
 class TestBackfillDoesNotStopOnOneBadDive:

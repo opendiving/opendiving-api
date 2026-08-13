@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from src.app.models.dive import Dive
+from src.app.models.dive_mixture import DiveMixture
 from src.app.schemas.dive_mixture import GasRole
 from src.app.schemas.parsed_dive import ParsedDiveSchema
 from src.app.services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file
@@ -1638,6 +1639,42 @@ class TestTechScalars:
         assert parsed_with(1.2) == 1.2
         assert parsed_with(0.49) is None
         assert parsed_with(1.21) is None
+
+    def test_an_out_of_band_po2_limit_reads_as_no_limit(self):
+        """The last bounded field a parsed value could reach unguarded. Unattested - the
+        corpus writes `<PO2>` as 1.4 or 1.6 and says "not recorded" with `i:nil` - but the
+        backfill writes this column through a Core `UPDATE` that never sees Pydantic, so
+        the schema is the only place a guard covers both the import and the backfill."""
+        for reading in ("0", "0.39", "2.01", "140000"):
+            content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <DiveMixtures><DiveMixture><Oxygen>21</Oxygen><Helium>0</Helium><PO2>{reading}</PO2></DiveMixture></DiveMixtures>
+</Dive>
+""".encode()
+
+            assert SuuntoXmlParser.parse(content).mixtures[0].po2_limit is None, reading
+
+    def test_a_recorded_po2_limit_inside_the_band_survives(self):
+        """The guard must not cost the 353 mixtures in the corpus that do record one."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <DiveMixtures>
+    <DiveMixture><Oxygen>21</Oxygen><Helium>0</Helium><PO2>1.4</PO2></DiveMixture>
+    <DiveMixture><Oxygen>50</Oxygen><Helium>0</Helium><PO2>1.6</PO2></DiveMixture>
+  </DiveMixtures>
+</Dive>
+""".encode()
+
+        assert [m.po2_limit for m in SuuntoXmlParser.parse(content).mixtures] == [1.4, 1.6]
+
+    def test_the_po2_bounds_are_the_ones_the_database_enforces(self):
+        constraint = next(
+            c
+            for c in DiveMixture.__table__.constraints
+            if getattr(c, "name", None) == "ck_dive_mixture_po2_limit_range"
+        )
+
+        assert "0.4" in str(constraint.sqltext) and "2.0" in str(constraint.sqltext)
 
     def test_fit_prefers_the_dive_summary_over_the_session(self):
         """The mirror of `_depth`'s preference, reversed on purpose: on a multi-dive file
