@@ -624,7 +624,15 @@ async def _cached_read_dive(
     # A second narrow read of the same row, rather than a column on the summary above: this
     # one is never serialized, and it is the query `gas_use_history` needs on its own over
     # a whole log. See `get_gas_attribution_for_dives`.
-    attribution = await get_gas_attribution_for_dives(db=db, dive_ids=[db_dive["id"]])
+    #
+    # Only for a dive that can use it, which the mixtures just read already say. Anything
+    # else - every single-cylinder dive, and every dive logged without a cylinder at all -
+    # would be paying a round trip against the row `get_profile_infos_for_dives` just read
+    # for a value `compute_multi_tank_gas_use` discards on its first line.
+    attribution = None
+    if len(mixtures) >= 2:
+        attribution = (await get_gas_attribution_for_dives(db=db, dive_ids=[db_dive["id"]]))[db_dive["id"]]
+
     return _to_public_dive_with_mixtures(
         db_dive,
         user_uuid=owner_uuid,
@@ -634,7 +642,7 @@ async def _cached_read_dive(
         mixtures=mixtures,
         source_file=source_files.get(db_dive["id"]),
         profile=profiles.get(db_dive["id"]),
-        attribution=attribution[db_dive["id"]],
+        attribution=attribution,
     )
 
 

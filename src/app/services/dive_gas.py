@@ -142,15 +142,19 @@ class _TankArithmetic:
 def _pressure_used(mixture: DiveMixtureRead) -> float | None:
     """What this cylinder's own pressures say came out of it, or `None` if they say nothing.
 
-    The mixture half of `compute_gas_use`'s conditions, split out because it answers a
-    second question too: a cylinder that was demonstrably breathed and that the profile
+    Deliberately narrow: pressures only. It is used twice, and the second use is what makes
+    the narrowness matter - a cylinder that was demonstrably breathed and that the profile
     never attributed any time to is evidence the attribution is incomplete, not a cylinder
-    to pass over. Equal pressures are the unused pony bottle that function documents - not
-    breathed, and no evidence of anything.
+    to pass over. Volume does not belong in that judgement. A cylinder that went 200 -> 100
+    bar *was* breathed whatever its recorded capacity says; a capacity that can't be turned
+    into litres is a reason it produces no figure, checked where the multiplication happens
+    (`_tank_arithmetic`), not a reason to decide it was never breathed and quietly report
+    the rest of the dive as fully accounted for.
+
+    Equal pressures are the unused pony bottle `compute_gas_use` documents - not breathed,
+    and evidence of nothing.
     """
     if mixture.start_pressure is None or mixture.end_pressure is None:
-        return None
-    if mixture.volume <= 0:
         return None
     pressure_used = mixture.start_pressure - mixture.end_pressure
     return pressure_used if pressure_used > 0 else None
@@ -166,6 +170,11 @@ def _tank_arithmetic(mixture: DiveMixtureRead, attributed: GasAttribution) -> _T
     """
     pressure_used = _pressure_used(mixture)
     if pressure_used is None:
+        return None
+    # `ck_dive_mixture_volume_positive` makes this unreachable from a stored row; it is
+    # here for the same reason `compute_gas_use` re-checks it, and because this is the
+    # line that would otherwise multiply by it.
+    if mixture.volume <= 0:
         return None
     if attributed.seconds <= 0 or attributed.mean_depth_cm <= 0:
         return None
@@ -374,13 +383,15 @@ async def gas_use_history(db: AsyncSession, user_id: int) -> list[DiveGasUsePoin
 
     dive_ids = [dive.id for dive in dives]
     mixtures_by_dive = await get_mixtures_for_dives(db=db, dive_ids=dive_ids)
-    # Only a dive `resolve_gas_use` will take the multi-tank path for can use an
-    # attribution, and the mixtures above already say which those are - so the JSONB column
-    # is fetched for those alone rather than for a recreational diver's whole log. Spelled
-    # as the same `!= 1` that does the dispatching, so there is one rule rather than two
-    # that can drift into fetching the wrong subset.
+    # Only a dive with several cylinders can use an attribution, and the mixtures above
+    # already say which those are - so the JSONB column is fetched for those alone rather
+    # than for a recreational diver's whole log. `>= 2` rather than the dispatcher's
+    # `!= 1`: the two select the same dives among those that can produce a figure, but a
+    # dive logged with no cylinders at all is common in a long log and can no more use an
+    # attribution than a single-cylinder one - `compute_multi_tank_gas_use` discards it on
+    # its first line either way.
     attribution_by_dive = await get_gas_attribution_for_dives(
-        db=db, dive_ids=[dive_id for dive_id in dive_ids if len(mixtures_by_dive[dive_id]) != 1]
+        db=db, dive_ids=[dive_id for dive_id in dive_ids if len(mixtures_by_dive[dive_id]) >= 2]
     )
 
     points = []
