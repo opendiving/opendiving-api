@@ -1,3 +1,5 @@
+import math
+
 from pydantic import BaseModel, field_validator
 
 from .dive_mixture import GasRole
@@ -63,9 +65,12 @@ class DiveMixtureSchema(BaseModel):
         reading, and putting it on the schema means a fourth parser inherits it.
 
         `<= 0` rather than `== 0` - a negative gauge reading is no more a fill than a zero
-        - though only the zero is attested.
+        - though only the zero is attested. `isfinite` for the reason
+        `ParsedDiveSchema._drop_negative_exposure` is written up at length: `nan <= 0` is
+        `False`, so without it a `NaN` pressure is passed through as a reading and 500s
+        `POST /dive/parse` on serialization, which is not an answer a diver can act on.
         """
-        return None if value is not None and value <= 0 else value
+        return None if value is not None and not (math.isfinite(value) and value > 0) else value
 
     @field_validator("gas_number")
     @classmethod
@@ -142,8 +147,28 @@ class ParsedDiveSchema(BaseModel):
         All three parsers pass these through raw - XML `_float(root, "CnsStart")`, JSON
         `_fraction_to_percent(start_tissue.get("CNS"))`, FIT `float(value)` off the
         summary - so a negative in any export reached the `UPDATE` unmodified.
+
+        **`isfinite` rather than `>= 0` alone, because `NaN` is not caught by either this
+        guard or the constraint behind it.** `nan < 0` is `False` in Python, so a `NaN`
+        passes straight through; `'NaN'::float8 >= 0` is *true* in Postgres, which sorts
+        `NaN` above every number, so `ck_dive_cns_start_non_negative` is not the backstop
+        it looks like. Nothing upstream stops one either: `<CnsStart>NaN</CnsStart>` is a
+        float literal to `float()`, and `json.loads` accepts a bare `NaN` token.
+
+        What it costs is the whole list, not the row. `DiveTechScalars` rides on
+        `DiveRead` (see its docstring for why), and `JSONResponse` serializes with
+        `allow_nan=False` - so one stored `NaN` turns `GET /dives` into a 500 that only
+        hand-written SQL clears. `store_tech_scalars` at attach is reached only behind a
+        `/dive/parse` that would have failed to serialize first, but `backfill_tech_fields`
+        re-parses stored files and writes through a Core `UPDATE` with no serialization in
+        between - so the guard has to be here, on the value, not on any route.
+
+        The two-sided validators (`_drop_implausible_surface_pressure`,
+        `_drop_implausible_po2_limit`) reject `NaN` already, since `not (0.5 <= nan <= 1.2)`
+        is `True` - but incidentally, as a property of the comparison rather than anything
+        they say. This one says it.
         """
-        return None if value is not None and value < 0 else value
+        return None if value is not None and not (math.isfinite(value) and value >= 0) else value
 
     @field_validator("surface_pressure_bar")
     @classmethod

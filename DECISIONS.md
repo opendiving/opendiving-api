@@ -3697,6 +3697,91 @@ The writes have to sit inside the `try` alongside the commit.
 The same fact is what makes the savepoint further up load-bearing rather than decorative:
 `begin_nested` has to enclose the statements, not just the commit that follows them.
 
+**And the pass after *that* found the guards themselves had a hole: `NaN`.** The five one-sided
+validators were written as `value < 0` and the constraints behind them as `>= 0`, and neither stops
+a `NaN`:
+
+```python
+nan < 0        # False in Python — the validator passes it straight through
+'NaN'::float8 >= 0   # true in Postgres, which sorts NaN above every number
+```
+
+So the CHECK is not the backstop it looks like. Nothing upstream stops one either —
+`<CnsStart>NaN</CnsStart>` is a float literal to `float()`, and `json.loads` accepts a bare `NaN`
+token — and it was reproducible end to end: a Suunto-shaped export with `NaN` in its tissue block
+parsed cleanly to `cns_start=nan`.
+
+What it costs is the **whole list, not the row**. `DiveTechScalars` rides on `DiveRead` rather than
+`DiveReadWithMixtures` precisely so it lands on the list response, and `JSONResponse` serializes
+with `allow_nan=False`:
+
+```
+ValueError: Out of range float values are not JSON compliant: nan
+```
+
+One poisoned row 500s `GET /dives` until someone clears it with hand-written SQL.
+
+The reachability is worth being precise about, because it is what makes this a real bug rather than
+a theoretical one. The *upload* path is accidentally gated: `POST /dive/parse` serializes
+`ParsedDiveResponse`, which carries these fields, so it 500s before any `file_token` is minted. The
+**backfill is not gated** — it re-parses stored files and writes through a Core `UPDATE` with no
+serialization anywhere in between. An export attached before this phase, when CNS/OTU were not
+parsed and so never serialized, gets `NaN` written on the first `backfill_dive_tech_fields` run: the
+exact operation this phase exists to ship.
+
+The two-sided validators were safe already, since `not (0.5 <= nan <= 1.2)` is `True` — but
+incidentally, as a property of how the comparison falls out rather than anything they say.
+`isfinite` makes it explicit, and covers `inf`, which passes `>= 0` honestly and is no more a
+reading:
+
+```python
+return None if value is not None and not (math.isfinite(value) and value >= 0) else value
+```
+
+`_drop_unpressurized` got the same treatment for the same reason one field over — `nan <= 0` is
+`False` too, and a `NaN` cylinder pressure 500s `/dive/parse` on the way back to the import form,
+which is not an answer a diver can act on.
+
+This is a pre-existing *class* rather than something the phase invented — `'NaN'::float8 > 0` is
+also true, so `avg_depth`/`max_depth` have the same hole — but the phase adds five columns to it,
+and the stated invariant that no parsed value reaches a bounded column without passing the bound the
+column applies is exactly what `NaN` defeats. The lesson is narrower than "validate harder": **a
+one-sided float comparison is not a bound**, in either language, and a CHECK written as `>= 0` does
+not become one by being in the database.
+
+## Replacing an export clears its readings even when the new one can't be read
+
+`store_dive_file`'s replace path wrote the tech scalars under `if scalars is not None`, so an
+extraction that *failed* left the previous export's CNS and OTU on the dive — after the `DELETE`
+that removed the file they came from. The comment defended this as "couldn't read" ≠ "says nothing",
+which is right on the `noop` branch, where the file is unchanged and still attached and a later
+backfill can re-read it. On replace it is wrong: the file is gone, so those numbers are exactly the
+nothing-can-re-derive-or-check state `delete_dive_file` clears them to avoid, now attributed to an
+export the dive no longer has.
+
+The profile beside them already followed the correct rule — `delete_profile_for_dive` is
+unconditional there — so this is the scalars catching up, not a new policy. Nothing is lost by
+clearing: the new file is stored, and `backfill_tech_fields` re-reads every candidate on every run.
+
+Narrow enough to be worth naming: it needs the parse to fail at attach after having *succeeded* at
+`/dive/parse` on the same bytes. The asymmetry between the two branches is now deliberate and pinned
+from both sides — `test_an_unreadable_header_still_clears_the_previous_export` and
+`test_an_unreadable_header_leaves_the_dive_alone_on_this_branch`.
+
+## The backfill's batch boundary counts writes, not positions
+
+`if index % _BACKFILL_BATCH_SIZE == 0: await db.commit()` sat below several `continue`s, so a dive
+that failed on exactly index 50 skipped that commit and left up to two batches riding on the next
+one — an interrupted run losing twice what the batching promises. Counting dives actually written
+since the last commit (`pending`) is immune to where the failures fall.
+
+The same loop's `mixtures_skipped` had a smaller version of the same shape: `+= len(stored)` reports
+**0** for the dive whose cylinders were edited most, since "the diver deleted every cylinder" is a
+count mismatch with an empty `stored`. `max(len(stored), len(parsed.mixtures))` counts whichever
+side had rows. It matters because that field is the run's one interesting signal — it is the diver
+having edited their cylinders, which is a reason not to touch them rather than a failure — and a
+report reading "nothing skipped" for a skipped dive is worse than no report.
+
 ## `load_dive_file` detaches the row it read, because the blob outlives the need for it
 
 `local_session` is built `expire_on_commit=False` (`core/db/database.py`), which is right for the

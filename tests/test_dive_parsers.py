@@ -1672,6 +1672,59 @@ class TestTechScalars:
         assert (parsed.cns_start, parsed.cns_end) == (None, None)
         assert (parsed.otu_start, parsed.otu_end) == (None, None)
 
+    def test_a_nan_exposure_reading_reads_as_no_reading(self):
+        """`NaN` is caught by neither `value < 0` nor `cns_start >= 0` - it compares false
+        against every bound in Python and *true* against them in Postgres, which sorts it
+        above all numbers. Stored, it makes `GET /dives` 500 for the whole list, because
+        `JSONResponse` serializes with `allow_nan=False`. `backfill_tech_fields` is the
+        path that reaches the column without serializing anything on the way."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <CnsStart>NaN</CnsStart><CnsEnd>NaN</CnsEnd><OtuStart>NaN</OtuStart><OtuEnd>NaN</OtuEnd>
+</Dive>
+""".encode()
+
+        parsed = SuuntoXmlParser.parse(content)
+
+        assert (parsed.cns_start, parsed.cns_end) == (None, None)
+        assert (parsed.otu_start, parsed.otu_end) == (None, None)
+        # The point of nulling rather than passing through: the result is serializable.
+        json.dumps(parsed.model_dump(), allow_nan=False)
+
+    def test_a_nan_infinity_or_pressure_never_reaches_a_bounded_column(self):
+        """The same hole in every guard that is one-sided. `inf` passes `>= 0` honestly
+        and is no more a reading than `NaN`; a `NaN` cylinder pressure passes `<= 0` and
+        500s `POST /dive/parse` on the way back to the import form."""
+        exposure = ParsedDiveSchema(
+            avg_depth=None,
+            bottom_temperature=None,
+            dive_number=None,
+            duration=None,
+            max_depth=None,
+            start_time=None,
+            mixtures=[],
+            cns_start=float("nan"),
+            cns_end=float("inf"),
+            otu_start=float("-inf"),
+            otu_end=float("nan"),
+        )
+        mixture = DiveMixtureSchema(
+            end_pressure=float("nan"),
+            gas_number=None,
+            helium=None,
+            name=None,
+            oxygen=None,
+            po2_limit=float("nan"),
+            role=None,
+            start_pressure=float("inf"),
+            volume=None,
+        )
+
+        assert (exposure.cns_start, exposure.cns_end) == (None, None)
+        assert (exposure.otu_start, exposure.otu_end) == (None, None)
+        assert (mixture.start_pressure, mixture.end_pressure) == (None, None)
+        assert mixture.po2_limit is None
+
     def test_a_recorded_zero_exposure_is_still_a_reading(self):
         """`< 0`, not `<= 0`. A dive that began with no oxygen loading recorded a real 0,
         and the four constraints are `>= 0` precisely to keep that apart from null."""

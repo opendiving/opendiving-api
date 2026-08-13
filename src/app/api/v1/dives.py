@@ -942,8 +942,12 @@ async def erase_dive_file(
     """Delete the stored dive-computer export from a dive, leaving the dive itself.
 
     403 unless the caller owns it; 404 when the dive has no source file, so this is not
-    idempotent - a repeat delete reports the absence rather than succeeding quietly. The
-    dive keeps whatever values were parsed out of the file; only the file goes.
+    idempotent - a repeat delete reports the absence rather than succeeding quietly.
+
+    The dive keeps everything that went through the form, its cylinders included. What
+    goes with the file is what was only ever read *off* it: the extracted profile, and the
+    CNS, OTU and surface-pressure readings - none of which can be re-derived or checked
+    against anything once the export is gone.
     """
     db_dive = await _get_owned_dive(db, uuid, current_user)
 

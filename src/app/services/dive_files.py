@@ -163,15 +163,17 @@ def extract_tech_scalars(parser: type[DiveParser], content: bytes) -> dict[str, 
     an all-`None` result is still written, so replacing an export that recorded exposure
     with one that doesn't clears the old dive's readings rather than stranding them.
 
-    **This re-parse is not free, and on FIT it is not incremental either.** `parse` and
-    `parse_profile` each call `FitParser._scan`, so pairing them in `_extract_all` decodes
-    the file twice: measured at 55 ms + 58 ms on a 26 KB export where a single scan
-    serving both is 58 ms, and both scales with `_MAX_FRAMES` up to the ~1.5 s the profile
-    extraction is budgeted at. The two Suunto parsers are cheap enough for it not to
-    matter. Collapsing it wants a parser entry point that scans once and returns both,
-    which is a real change rather than a tidy-up: `extract_profile` and this function
-    currently fail *independently*, so a file whose samples are malformed still yields its
-    header scalars, and a single entry point has to keep that or lose it deliberately.
+    **On the attach path this is now the fallback, not the normal route.** `_extract_all`
+    goes through `parser.parse_all`, which decodes once and returns both halves; pairing
+    this function with `extract_profile` instead makes FIT call `FitParser._scan` twice,
+    measured at 55 ms + 58 ms on a 26 KB export where the single scan serving both is
+    58 ms, and scaling with `_MAX_FRAMES` up to the ~1.5 s the profile extraction is
+    budgeted at. The two Suunto parsers are cheap enough for it not to matter.
+
+    That second pass is what buys the property the fallback exists for: this function and
+    `extract_profile` fail *independently*, so a file whose samples are malformed still
+    yields its header scalars, and vice versa. Paying a redundant decode on a file that
+    was already failing is the right side of that trade.
     """
     try:
         parsed = parser.parse(content)
@@ -406,13 +408,19 @@ async def store_dive_file(
             await store_profile(
                 db, dive_id=dive_id, profile=profile, source_sha256=digest, parser_key=parser.key, commit=False
             )
-        # Unconditional where the profile above is not, and deliberately so: a
-        # replacement export that records no exposure must clear the previous export's
-        # readings rather than leave them attributed to a file they didn't come from.
-        # Only an extraction that *failed* (a `None` result, already logged) leaves them
-        # alone, since that is "couldn't read", not "the file says nothing".
-        if scalars is not None:
-            await store_tech_scalars(db, dive_id=dive_id, scalars=scalars, commit=False)
+        # Unconditional, and unlike the no-op branch above a *failed* extraction clears
+        # them too. There the "couldn't read" / "says nothing" distinction is worth
+        # keeping, because the file those readings came from is still attached and a
+        # later backfill can re-read it. Here it is gone: the `DELETE` above replaced it,
+        # so keeping its CNS and OTU leaves exactly the numbers-nothing-can-re-derive
+        # state `delete_dive_file` clears them to avoid, now attributed to an export the
+        # dive no longer has. Same rule the profile above already follows.
+        await store_tech_scalars(
+            db,
+            dive_id=dive_id,
+            scalars=scalars if scalars is not None else dict.fromkeys(TECH_SCALAR_FIELDS),
+            commit=False,
+        )
         await db.commit()
     except IntegrityError as exc:
         # Two uploads for the same dive raced between the delete and the insert. One
@@ -659,9 +667,13 @@ async def backfill_tech_fields(
 
     candidates = list(await db.execute(stmt))
     examined = dives_updated = mixtures_updated = mixtures_skipped = failed = 0
+    # Dives written since the last commit, rather than a position in `candidates`. An
+    # index-modulo test sits below several `continue`s, so a dive that failed on exactly
+    # the boundary skipped that commit and left up to two batches riding on the next one.
+    pending = 0
     touched_user_ids: set[int] = set()
 
-    for index, row in enumerate(candidates, start=1):
+    for row in candidates:
         examined += 1
 
         parser = PARSER_BY_KEY.get(row.parser_key)
@@ -701,7 +713,11 @@ async def backfill_tech_fields(
         stored = await get_mixtures_for_dive(db, row.dive_id)
         updates = merge_mixture_fields(parsed.mixtures, stored)
         if updates is None:
-            mixtures_skipped += len(stored)
+            # `max`, not `len(stored)`: the count mismatch that refuses the merge includes
+            # the diver having deleted every cylinder, and `len(stored)` is 0 there - so
+            # the run reported "nothing skipped" for precisely the dive whose cylinders
+            # were edited most. Whichever side has rows is what went unwritten.
+            mixtures_skipped += max(len(stored), len(parsed.mixtures))
 
         if dry_run:
             dives_updated += 1
@@ -732,8 +748,10 @@ async def backfill_tech_fields(
         mixtures_updated += len(updates or [])
         touched_user_ids.add(row.user_id)
 
-        if index % _BACKFILL_BATCH_SIZE == 0:
+        pending += 1
+        if pending >= _BACKFILL_BATCH_SIZE:
             await db.commit()
+            pending = 0
 
     if not dry_run:
         await db.commit()

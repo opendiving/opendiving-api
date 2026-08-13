@@ -565,6 +565,10 @@ class TestMixtureFieldMerge:
     def test_refuses_when_the_counts_disagree(self) -> None:
         assert merge_mixture_fields([self._parsed()], [self._stored(11), self._stored(12)]) is None
         assert merge_mixture_fields([], []) is None
+        # The diver deleted every cylinder. Refused like any other count mismatch - and
+        # the one the report used to count as zero mixtures skipped, because it sized the
+        # skip off `stored`, which is empty here. See `backfill_tech_fields`.
+        assert merge_mixture_fields([self._parsed()], []) is None
 
     def test_is_all_or_nothing_rather_than_per_row(self) -> None:
         """A half-matching list is an edited list, and half-applying to it would leave
@@ -720,6 +724,41 @@ class TestReExtractionFailureDoesNotFailTheRequest:
         # And the session is usable afterwards, which is the half a missing handler cost.
         db.rollback.assert_awaited()
 
+    @pytest.mark.asyncio
+    async def test_an_unreadable_header_leaves_the_dive_alone_on_this_branch(self, monkeypatch) -> None:
+        """The asymmetry with the attach path, and it is deliberate. There the previous
+        export has been deleted, so keeping its readings strands them; here the file is
+        unchanged and still attached, so "couldn't read it *this* build" is not "the file
+        says nothing" - and a later backfill, or a re-upload after a parser fix, can still
+        get them. Clearing on this branch would throw away readings over a transient."""
+        writes: list[dict] = []
+
+        async def capture(db, *, dive_id, scalars, commit=False):
+            writes.append(scalars)
+
+        monkeypatch.setattr("src.app.services.dive_files.store_tech_scalars", capture)
+        monkeypatch.setattr("src.app.services.dive_files.should_extract", lambda *a, **k: "extract")
+        monkeypatch.setattr("src.app.services.dive_files.get_existing_profile", AsyncMock(return_value=None))
+        monkeypatch.setattr("src.app.services.dive_files.store_profile", AsyncMock())
+        monkeypatch.setattr("src.app.services.dive_files.extract_tech_scalars", lambda parser, data: None)
+        monkeypatch.setattr("src.app.services.dive_files._extract_all", lambda parser, data: (None, None))
+
+        user_uuid = uuid7()
+        await store_dive_file(
+            self._session_for_reupload(),
+            user_id=1,
+            user_uuid=user_uuid,
+            dive_id=7,
+            upload=UploadFile(filename="export.xml", file=io.BytesIO(self.XML)),
+            file_token=create_dive_file_token(
+                user_uuid=user_uuid,
+                sha256=hashlib.sha256(self.XML).hexdigest(),
+                parser_key=SuuntoXmlParser.key,
+            ),
+        )
+
+        assert writes == []
+
 
 class TestBackfillDoesNotStopOnOneBadDive:
     """A dive the database refuses costs that dive, not the run and not the batch.
@@ -857,12 +896,16 @@ class TestScalarsAreWrittenAtAttach:
         assert writes == [dict.fromkeys(TECH_SCALAR_FIELDS)]
 
     @pytest.mark.asyncio
-    async def test_an_unreadable_header_leaves_the_dive_alone(self, monkeypatch) -> None:
-        """ "Couldn't read" is not "the file says nothing", so nothing is written and the
-        upload still succeeds - the file is what a later backfill needs."""
+    async def test_an_unreadable_header_still_clears_the_previous_export(self, monkeypatch) -> None:
+        """On this path the file the old readings came from has just been deleted, so
+        "couldn't read the new one" cannot be a reason to keep them: they would be
+        attributed to an export the dive no longer has, which is the stranded state
+        `delete_dive_file` clears them to avoid. The same rule the profile beside them
+        already follows. Nothing is lost - the new file is stored, and
+        `backfill_tech_fields` re-reads every candidate on every run."""
         writes = self._captured_writes(monkeypatch)
         monkeypatch.setattr("src.app.services.dive_files.extract_tech_scalars", lambda parser, data: None)
 
         await self._attach(self._session(), b"<Dive/>")
 
-        assert writes == []
+        assert writes == [dict.fromkeys(TECH_SCALAR_FIELDS)]
