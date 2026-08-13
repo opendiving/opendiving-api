@@ -43,6 +43,9 @@ _TENTH_BAR_PER_MILLIBAR = Decimal("0.01")
 # the mixture's `<TransmitterId>`: that is a device serial (e.g. 2411100050), so using it
 # would both read as nonsense in a chart legend and make one dive disagree with itself
 # depending on which export it was imported from.
+#
+# Only the *fallback* now - `_transmitted_gas_number` resolves the real one where the file
+# says which cylinder the pod was on. Kept for the cases where it can't.
 _XML_GAS_NUMBER = 1
 
 
@@ -62,6 +65,38 @@ def _text(element: ET.Element, tag: str) -> str | None:
     if child is None or child.get(_NIL) == "true":
         return None
     return child.text
+
+
+def _transmitted_gas_number(root: ET.Element) -> int:
+    """Which cylinder the sample stream's one `<Pressure>` channel belongs to.
+
+    The channel carries no cylinder identity of its own, so the label has to come from
+    somewhere else, and `<TransmitterId>` is the only field that knows: it is `xsi:nil` on
+    exactly the cylinders that had no pod. Returning the *position* of the one that did
+    puts the curve on the same `gas_number` `_parse_mixture` gave that cylinder.
+
+    This used to be hardcoded to `_XML_GAS_NUMBER`, which is right only while the
+    transmitted cylinder is also the first one. It is throughout the corpus - all 11
+    two-mixture exports have the pod on mixture 1 - so the failure needs a dive the corpus
+    doesn't contain: a transmitted deco bottle behind an untransmitted back gas. There the
+    curve was labelled 1 and belonged to 2, and the back gas is exactly the cylinder whose
+    own pressures `_drop_unpressurized` nulls, so nothing downstream could have noticed.
+
+    The corpus is unusually clear that this field can carry the join. Across 342 exports
+    with mixtures: 98 have exactly one transmitted cylinder, 244 have none, and **not one
+    has two** - and non-nil `<TransmitterId>` agrees with a non-zero `<StartPressure>` on
+    all 353 mixtures, with pressure samples present in precisely the 98. So "exactly one"
+    is the only shape that occurs, and it is the only shape this resolves.
+
+    Falls back to `_XML_GAS_NUMBER` otherwise. With no transmitted cylinder there are no
+    pressure samples to label anyway; with several the format could not say which is which
+    regardless, since it has one `<Pressure>` per sample and no key on it. A wrong guess
+    there is no worse than the hardcoded one it replaces, and a `gas_number` is a label -
+    `merge_mixture_fields` and the chart legend both treat it as one.
+    """
+    mixtures = root.findall(f"{_tag('DiveMixtures')}/{_tag('DiveMixture')}")
+    transmitted = [i for i, mix in enumerate(mixtures, start=1) if _text(mix, "TransmitterId") is not None]
+    return transmitted[0] if len(transmitted) == 1 else _XML_GAS_NUMBER
 
 
 def _float(element: ET.Element, tag: str) -> float | None:
@@ -232,7 +267,9 @@ class SuuntoXmlParser(DiveParser):
             depth=ParsedSeries(t=depth_t, v=depth_v) if depth_t else None,
             temperature=ParsedSeries(t=temperature_t, v=temperature_v) if temperature_t else None,
             pressure=(
-                [ParsedPressureSeries(gas_number=_XML_GAS_NUMBER, t=pressure_t, v=pressure_v)] if pressure_t else []
+                [ParsedPressureSeries(gas_number=_transmitted_gas_number(root), t=pressure_t, v=pressure_v)]
+                if pressure_t
+                else []
             ),
         )
 
@@ -300,10 +337,14 @@ class SuuntoXmlParser(DiveParser):
             # `start_pressure = 205203` for every dive imported from a 2025+ transmitter
             # export, which made its `gas_use`/RMV meaningless.
             end_pressure=_round2_or_none(_millibar_to_bar(_float(mix, "EndPressure"))),
-            # Position in `<DiveMixtures>`, 1-based, which is the same numbering
-            # `_XML_GAS_NUMBER` pins the single pressure channel to and the same one the
-            # JSON export of a D5 dive reports in `Cylinders[].GasNumber`. The format has
-            # no number of its own; `<TransmitterId>` is a device serial, not an index.
+            # Position in `<DiveMixtures>`, 1-based, which is the numbering the JSON export
+            # of a D5 dive reports in `Cylinders[].GasNumber`. The format has no number of
+            # its own; `<TransmitterId>` is a device serial, not an index.
+            #
+            # The profile's pressure channel is labelled to match, but by
+            # `_transmitted_gas_number` reading `<TransmitterId>` - *not* by both sides
+            # counting from 1 and hoping. An earlier version of this comment claimed the
+            # latter, which held only while the pod was on the first cylinder.
             gas_number=gas_number,
             helium=_round2_or_none(_float(mix, "Helium")),
             # Left for the user to fill in themselves rather than parsed - see

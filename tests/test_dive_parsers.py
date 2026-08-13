@@ -1593,6 +1593,53 @@ class TestTechScalars:
         assert parsed.otu_end == 17.89
         assert parsed.surface_pressure_bar == 1.061
 
+    @staticmethod
+    def _xml_with_pod_on(position: int, mixtures: int = 2) -> bytes:
+        """Two cylinders, `<TransmitterId>` on exactly one of them, and one pressure
+        sample. DM5 writes `0` pressures and `xsi:nil` on the untransmitted mixture."""
+        rows = "".join(
+            f"""    <DiveMixture>
+      <Oxygen>{21 if i == 1 else 50}</Oxygen><Helium>0</Helium>
+      <StartPressure>{200000 if i == position else 0}</StartPressure>
+      <EndPressure>{120000 if i == position else 0}</EndPressure>
+      {f"<TransmitterId>241110005{i}</TransmitterId>" if i == position else '<TransmitterId xsi:nil="true"/>'}
+    </DiveMixture>
+"""
+            for i in range(1, mixtures + 1)
+        )
+        return f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <DiveMixtures>
+{rows}  </DiveMixtures>
+  <DiveSamples>
+    <Dive.Sample><Time>60</Time><Depth>1200</Depth><Pressure>1900</Pressure></Dive.Sample>
+  </DiveSamples>
+</Dive>
+""".encode()
+
+    def test_the_xml_pressure_channel_is_labelled_from_the_transmitter_not_from_position(self):
+        """A transmitted deco bottle behind an untransmitted back gas. Hardcoding the
+        channel to 1 put the deco bottle's curve on the back gas - and the back gas is
+        exactly the cylinder whose own pressures `_drop_unpressurized` nulls, so nothing
+        downstream could have caught the mislabel. Unattested: all 11 two-mixture exports
+        in the corpus have the pod on mixture 1, which is why it survived."""
+        profile = SuuntoXmlParser.parse_profile(self._xml_with_pod_on(2))
+        parsed = SuuntoXmlParser.parse(self._xml_with_pod_on(2))
+
+        assert profile is not None
+        assert [series.gas_number for series in profile.pressure] == [2]
+        # And it is the mixture the pod was actually on - the join the label exists for.
+        transmitted = [mix for mix in parsed.mixtures if mix.start_pressure is not None]
+        assert [mix.gas_number for mix in transmitted] == [2]
+
+    def test_the_usual_shape_still_labels_the_channel_one(self):
+        """The corpus's only attested arrangement, and the fallback when the file names no
+        transmitter at all - there are no pressure samples to mislabel in that case."""
+        profile = SuuntoXmlParser.parse_profile(self._xml_with_pod_on(1))
+
+        assert profile is not None
+        assert [series.gas_number for series in profile.pressure] == [1]
+
     def test_fit_reads_o2_toxicity_as_the_ending_total_not_the_dive_s_share(self):
         """The 2025-03-06 08:29 dive exists as both a FIT and an XML export. The XML
         records `OtuStart 22 -> OtuEnd 23`; the FIT writes `o2_toxicity = 23`. Read as

@@ -3337,6 +3337,47 @@ and depths, and import a confidently empty dive. The cap is ~23x the largest rea
 \- a 72-minute multi-channel Suunto Ocean dive at 4 339 frames, about one per second - or roughly 28
 hours of continuous logging.
 
+## The XML pressure channel is labelled from `<TransmitterId>`, not from counting to one
+
+`SuuntoXmlParser._parse_samples` emitted its single pressure series as `gas_number=1`
+unconditionally, and `_parse_mixture`'s comment asserted that this was "the same numbering
+`_XML_GAS_NUMBER` pins the single pressure channel to". Those are two independent numbering schemes
+that agree only while the transmitted cylinder is also the *first* one.
+
+The dive that breaks it is a transmitted deco bottle behind an untransmitted back gas. The back gas
+becomes `gas_number=1`, the deco bottle `2`, and the sole pressure curve is labelled `1` — so
+anything joining on the key attributes the deco bottle's curve to the back gas. It is worse than a
+visible mislabel, because the back gas is exactly the cylinder whose own `<StartPressure>0</...>`
+`_drop_unpressurized` nulls: the row the curve is wrongly attached to has no pressures of its own to
+contradict it, so nothing downstream can notice.
+
+**Unattested, and the corpus is why it survived.** All 11 two-mixture exports of the 342 with
+mixtures have the pod on mixture 1, so every real file labelled the channel correctly by accident.
+
+Unlike FIT — which has the same shape and documents it as a known limit in `_mixtures`, because a
+FIT file genuinely cannot say which pod belongs to which gas — this format carries the evidence to
+resolve it, and the corpus is unusually clear that it does:
+
+- 98 exports have **exactly one** transmitted cylinder, 244 have none, and **not one has two**.
+- Non-nil `<TransmitterId>` agrees with a non-zero `<StartPressure>` on all 353 mixtures — the same
+  353-of-353 correlation `_drop_unpressurized` is built on, read the other way round.
+- Pressure samples are present in precisely those 98 files.
+
+So `_transmitted_gas_number` returns the position of the one mixture whose `<TransmitterId>` is not
+nil, and "exactly one" is the only shape that occurs. It falls back to `_XML_GAS_NUMBER` otherwise:
+with none there are no pressure samples to label anyway, and with several the format could not say
+which is which regardless — one `<Pressure>` per sample, no key on it. A wrong guess there is no
+worse than the hardcoded one it replaces.
+
+Verified as a no-op on every real file: all 384 exports parse, 98 emit a pressure channel, and all
+98 are still labelled `1`. The change differs only on the dive the corpus does not contain, which is
+what `test_the_xml_pressure_channel_is_labelled_from_the_transmitter_not_from_position` constructs.
+
+The generalizable bit is the comment, not the code. Two schemes that both start at 1 will agree on
+every example you have, and a comment saying they are "the same numbering" reads as though the file
+guarantees it. It didn't — the agreement was a property of the corpus, and writing it down as a fact
+is what would have kept anyone from checking.
+
 ## The 2026 Suunto Ocean JSON is a third header shape, with gas data only in the samples
 
 `SuuntoJsonParser` was built against two header shapes - a "clean"/header-only one and a D5-style
