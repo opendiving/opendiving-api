@@ -1691,39 +1691,77 @@ class TestTechScalars:
         # The point of nulling rather than passing through: the result is serializable.
         json.dumps(parsed.model_dump(), allow_nan=False)
 
-    def test_a_nan_infinity_or_pressure_never_reaches_a_bounded_column(self):
-        """The same hole in every guard that is one-sided. `inf` passes `>= 0` honestly
-        and is no more a reading than `NaN`; a `NaN` cylinder pressure passes `<= 0` and
-        500s `POST /dive/parse` on the way back to the import form."""
-        exposure = ParsedDiveSchema(
-            avg_depth=None,
-            bottom_temperature=None,
+    def test_no_non_finite_float_leaves_a_parser_on_any_field(self):
+        """The rule is on `_ParserOutput`, not on the bounds, because the bounds are
+        comparisons and `NaN` compares `False` against all of them. `avg_depth`,
+        `max_depth` and `bottom_temperature` carry no bound at all and are the proof -
+        under a per-field fix they would still have 500'd `POST /dive/parse`. `inf` counts
+        too: it passes `>= 0` honestly and is no more a reading than `NaN`."""
+        dive = ParsedDiveSchema(
+            avg_depth=float("nan"),
+            bottom_temperature=float("nan"),
             dive_number=None,
             duration=None,
-            max_depth=None,
+            max_depth=float("inf"),
             start_time=None,
             mixtures=[],
             cns_start=float("nan"),
             cns_end=float("inf"),
             otu_start=float("-inf"),
             otu_end=float("nan"),
+            surface_pressure_bar=float("nan"),
         )
         mixture = DiveMixtureSchema(
             end_pressure=float("nan"),
             gas_number=None,
-            helium=None,
+            helium=float("nan"),
             name=None,
-            oxygen=None,
+            oxygen=float("inf"),
             po2_limit=float("nan"),
             role=None,
             start_pressure=float("inf"),
-            volume=None,
+            volume=float("nan"),
         )
 
-        assert (exposure.cns_start, exposure.cns_end) == (None, None)
-        assert (exposure.otu_start, exposure.otu_end) == (None, None)
-        assert (mixture.start_pressure, mixture.end_pressure) == (None, None)
-        assert mixture.po2_limit is None
+        assert all(value is None for value in dive.model_dump().values() if not isinstance(value, list))
+        assert all(value is None for value in mixture.model_dump().values())
+        # The point of nulling rather than passing through: both are serializable.
+        json.dumps(dive.model_dump(), allow_nan=False)
+        json.dumps(mixture.model_dump(), allow_nan=False)
+
+    def test_the_finite_guard_does_not_touch_anything_else(self):
+        """It runs for every field, including the ones it must leave alone - a wildcard
+        validator that nulled a `str`, an `int`, an enum or the mixtures list would be a
+        far worse bug than the one it fixes."""
+        mixture = DiveMixtureSchema(
+            end_pressure=120.0,
+            gas_number=0,
+            helium=0.0,
+            name="Air",
+            oxygen=21.0,
+            po2_limit=1.4,
+            role=GasRole.BOTTOM,
+            start_pressure=200.0,
+            volume=11.1,
+        )
+        dive = ParsedDiveSchema(
+            avg_depth=12.5,
+            bottom_temperature=8.0,
+            dive_number=41,
+            duration=2400,
+            max_depth=27.3,
+            start_time="2026-06-03T12:15:00",
+            mixtures=[mixture],
+            cns_start=0.0,
+            otu_end=53.0,
+        )
+
+        assert (mixture.name, mixture.gas_number, mixture.role) == ("Air", 0, GasRole.BOTTOM)
+        assert (dive.dive_number, dive.duration, dive.start_time) == (41, 2400, "2026-06-03T12:15:00")
+        assert (dive.avg_depth, dive.max_depth, dive.bottom_temperature) == (12.5, 27.3, 8.0)
+        # Zero is a reading, and the wildcard is not a truthiness test.
+        assert dive.cns_start == 0.0
+        assert dive.mixtures == [mixture]
 
     def test_a_recorded_zero_exposure_is_still_a_reading(self):
         """`< 0`, not `<= 0`. A dive that began with no oxygen loading recorded a real 0,

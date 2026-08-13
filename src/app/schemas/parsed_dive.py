@@ -5,7 +5,47 @@ from pydantic import BaseModel, field_validator
 from .dive_mixture import GasRole
 
 
-class DiveMixtureSchema(BaseModel):
+class _ParserOutput(BaseModel):
+    """Base for the shapes a parser returns, holding the one rule that applies to all of
+    them: **no non-finite float leaves a parser.**
+
+    Stated once, on every field, rather than per-field alongside the bounds below, because
+    the bounds are the wrong place to catch this and the first attempt proved it. Each of
+    those guards was written as a comparison - `value < 0`, `value <= 0` - and a `NaN`
+    compares `False` against all of them, so it passed straight through every one-sided
+    check while the two-sided ones happened to reject it as a side effect of how `and`
+    falls out. A rule that holds only where someone remembered to bound a field is not the
+    rule; `avg_depth`, `max_depth` and `bottom_temperature` have no bound at all and were
+    the proof.
+
+    The constraints behind those columns are not the backstop they look like either:
+    `'NaN'::float8 >= 0` and `'NaN'::float8 > 0` are both **true** in Postgres, which sorts
+    `NaN` above every number. Nor is anything upstream - `<CnsStart>NaN</CnsStart>` is a
+    float literal to `float()`, and `json.loads` accepts a bare `NaN` token, so both Suunto
+    formats can express one.
+
+    What it costs is the whole list, not the row. `DiveTechScalars` rides on `DiveRead`
+    (see its docstring for why), and `JSONResponse` serializes with `allow_nan=False` - so
+    one stored `NaN` turns `GET /dives` into a 500 that only hand-written SQL clears. The
+    attach path is reached only behind a `POST /dive/parse` that would fail to serialize
+    first, but `backfill_tech_fields` re-parses stored files and writes through a Core
+    `UPDATE` with no serialization in between, so a route-level guard would not have
+    covered it.
+
+    `isfinite` rather than an `isnan` check: `inf` passes `>= 0` honestly and is no more a
+    reading than `NaN` is. Nulled rather than rejected, on the `_drop_unpressurized`
+    principle - a file with one unusable number is still a file worth storing.
+    """
+
+    @field_validator("*")
+    @classmethod
+    def _drop_non_finite(cls, value: object) -> object:
+        # Typed as `object` because this runs for every field, including the `str`, `int`,
+        # enum and `list` ones it deliberately passes through untouched.
+        return None if isinstance(value, float) and not math.isfinite(value) else value
+
+
+class DiveMixtureSchema(_ParserOutput):
     """One cylinder as a dive-computer export describes it.
 
     **Every field is nullable, and `None` means "the file did not record this"** - a
@@ -65,12 +105,10 @@ class DiveMixtureSchema(BaseModel):
         reading, and putting it on the schema means a fourth parser inherits it.
 
         `<= 0` rather than `== 0` - a negative gauge reading is no more a fill than a zero
-        - though only the zero is attested. `isfinite` for the reason
-        `ParsedDiveSchema._drop_negative_exposure` is written up at length: `nan <= 0` is
-        `False`, so without it a `NaN` pressure is passed through as a reading and 500s
-        `POST /dive/parse` on serialization, which is not an answer a diver can act on.
+        - though only the zero is attested. `NaN` is not this validator's to catch, and
+        deliberately so: `_ParserOutput._drop_non_finite` has already run it out.
         """
-        return None if value is not None and not (math.isfinite(value) and value > 0) else value
+        return None if value is not None and value <= 0 else value
 
     @field_validator("gas_number")
     @classmethod
@@ -113,7 +151,7 @@ class DiveMixtureSchema(BaseModel):
         return None if value is not None and not (0.4 <= value <= 2.0) else value
 
 
-class ParsedDiveSchema(BaseModel):
+class ParsedDiveSchema(_ParserOutput):
     avg_depth: float | None
     bottom_temperature: float | None
     dive_number: int | None
@@ -146,29 +184,11 @@ class ParsedDiveSchema(BaseModel):
 
         All three parsers pass these through raw - XML `_float(root, "CnsStart")`, JSON
         `_fraction_to_percent(start_tissue.get("CNS"))`, FIT `float(value)` off the
-        summary - so a negative in any export reached the `UPDATE` unmodified.
-
-        **`isfinite` rather than `>= 0` alone, because `NaN` is not caught by either this
-        guard or the constraint behind it.** `nan < 0` is `False` in Python, so a `NaN`
-        passes straight through; `'NaN'::float8 >= 0` is *true* in Postgres, which sorts
-        `NaN` above every number, so `ck_dive_cns_start_non_negative` is not the backstop
-        it looks like. Nothing upstream stops one either: `<CnsStart>NaN</CnsStart>` is a
-        float literal to `float()`, and `json.loads` accepts a bare `NaN` token.
-
-        What it costs is the whole list, not the row. `DiveTechScalars` rides on
-        `DiveRead` (see its docstring for why), and `JSONResponse` serializes with
-        `allow_nan=False` - so one stored `NaN` turns `GET /dives` into a 500 that only
-        hand-written SQL clears. `store_tech_scalars` at attach is reached only behind a
-        `/dive/parse` that would have failed to serialize first, but `backfill_tech_fields`
-        re-parses stored files and writes through a Core `UPDATE` with no serialization in
-        between - so the guard has to be here, on the value, not on any route.
-
-        The two-sided validators (`_drop_implausible_surface_pressure`,
-        `_drop_implausible_po2_limit`) reject `NaN` already, since `not (0.5 <= nan <= 1.2)`
-        is `True` - but incidentally, as a property of the comparison rather than anything
-        they say. This one says it.
+        summary - so a negative in any export reached the `UPDATE` unmodified. `NaN` is
+        `_ParserOutput._drop_non_finite`'s job, and reading that docstring is the point:
+        this guard was written as `< 0` alone and did not catch one.
         """
-        return None if value is not None and not (math.isfinite(value) and value >= 0) else value
+        return None if value is not None and value < 0 else value
 
     @field_validator("surface_pressure_bar")
     @classmethod

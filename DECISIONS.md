@@ -3730,24 +3730,45 @@ parsed and so never serialized, gets `NaN` written on the first `backfill_dive_t
 exact operation this phase exists to ship.
 
 The two-sided validators were safe already, since `not (0.5 <= nan <= 1.2)` is `True` — but
-incidentally, as a property of how the comparison falls out rather than anything they say.
-`isfinite` makes it explicit, and covers `inf`, which passes `>= 0` honestly and is no more a
-reading:
+incidentally, as a property of how the comparison falls out rather than anything they say. **The
+first fix was per-field `isfinite`, and it was the wrong shape.** Adding
+`math.isfinite(value) and value >= 0` to each of the five one-sided guards makes those five fields
+safe and says nothing about the rest — and the rest is where the rule was still broken. `avg_depth`,
+`max_depth` and `bottom_temperature` carry no bound at all, so there was no guard to add `isfinite`
+to, and a `NaN` in any of them still 500s `POST /dive/parse` on serialization. Whack-a-mole across
+the fields that happen to have bounds is not the invariant.
+
+So it lives on a base class instead, `_ParserOutput`, as a wildcard validator — **no non-finite
+float leaves a parser** — stated once and applied to every field of every parser output shape,
+inherited by `DiveMixtureSchema`, `ParsedDiveSchema` and `ParsedDiveResponse`:
 
 ```python
-return None if value is not None and not (math.isfinite(value) and value >= 0) else value
+@field_validator("*")
+@classmethod
+def _drop_non_finite(cls, value: object) -> object:
+    return None if isinstance(value, float) and not math.isfinite(value) else value
 ```
 
-`_drop_unpressurized` got the same treatment for the same reason one field over — `nan <= 0` is
-`False` too, and a `NaN` cylinder pressure 500s `/dive/parse` on the way back to the import form,
-which is not an answer a diver can act on.
+`isfinite` rather than an `isnan` check, because `inf` passes `>= 0` honestly and is no more a
+reading. Typed `object` because it runs for the `str`, `int`, enum and `list` fields too, and
+passing those through untouched is load-bearing — a wildcard that nulled `name`, `gas_number`,
+`role` or `mixtures` would be a far worse bug than the one it fixes.
+`test_the_finite_guard_does_not_touch_anything_else` pins that half specifically.
+
+The bound validators then go back to being about *bounds* — `value < 0`, `value <= 0`, the two
+ranges — each pointing at the base for the `NaN` case rather than restating it. Order between the
+wildcard and a field's own validator does not matter: whichever runs first, a `NaN` that survives a
+comparison-based guard is nulled by the wildcard, and a `NaN` the wildcard nulls first arrives at
+the bound as `None`.
 
 This is a pre-existing *class* rather than something the phase invented — `'NaN'::float8 > 0` is
-also true, so `avg_depth`/`max_depth` have the same hole — but the phase adds five columns to it,
-and the stated invariant that no parsed value reaches a bounded column without passing the bound the
-column applies is exactly what `NaN` defeats. The lesson is narrower than "validate harder": **a
-one-sided float comparison is not a bound**, in either language, and a CHECK written as `>= 0` does
-not become one by being in the database.
+also true, so the depth columns were exposed the same way and for the same reason — but the phase
+adds five columns to it, and the stated invariant that no parsed value reaches a bounded column
+without passing the bound the column applies is exactly what `NaN` defeats. The lesson is narrower
+than "validate harder", and it is two things: **a one-sided float comparison is not a bound**, in
+either language, and a CHECK written as `>= 0` does not become one by being in the database — and
+**a rule that holds only where someone remembered to bound a field is not the rule**. The second is
+why this sits on the base class rather than on five validators.
 
 ## Replacing an export clears its readings even when the new one can't be read
 
