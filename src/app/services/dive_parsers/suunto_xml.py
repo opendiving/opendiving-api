@@ -14,13 +14,23 @@ _SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
 _NIL = "{http://www.w3.org/2001/XMLSchema-instance}nil"
 _TWO_DECIMAL_PLACES = Decimal("0.01")
 
-# DM5 XML expresses **every** pressure in millibar - cylinder start/end pressures, the
-# per-sample transmitter readings, `CylinderWorkPressure` (200000 = 200 bar) and
-# `SurfacePressure` (105500 = 1.055 bar) alike. Cross-checked against the same dive
-# exported as JSON, where `DiveMixture/StartPressure: 205203` reads `20520312` Pascal:
-# both are 205.2 bar. This went unnoticed for a long time because pre-2025 exports have
-# no transmitter and write `0`.
+# DM5 XML expresses its *cylinder* pressures in millibar - start/end pressures, the
+# per-sample transmitter readings and `CylinderWorkPressure` (200000 = 200 bar) alike.
+# Cross-checked against the same dive exported as JSON, where
+# `DiveMixture/StartPressure: 205203` reads `20520312` Pascal: both are 205.2 bar. This
+# went unnoticed for a long time because pre-2025 exports have no transmitter and write
+# `0`.
 _MILLIBAR_PER_BAR = Decimal("1000")
+
+# `SurfacePressure` is the exception, and this comment used to say otherwise. It is
+# **Pascal**, not millibar: 105700 is 1.057 bar, and reading it as millibar would give
+# 105.7 bar - a hundred metres of seawater, at the surface. The corpus settles it twice
+# over. Every one of the 384 XML exports lands in 103100-106700, which is a plausible
+# barometric range only on the Pascal reading; and the same dives exported as JSON write
+# the identical integer into `Header.Diving.SurfacePressure`, which that parser already
+# treats as Pascal. `ck_dive_surface_pressure_range` (0.5-1.2 bar) is the backstop that
+# would catch this being got wrong again.
+_PASCALS_PER_BAR = Decimal("100000")
 # Millibar -> tenths of a bar. The depth/temperature conversions this shares with the
 # other parsers live in `channels.py`; see `schemas/dive_profile.py` for why the profile
 # is stored as scaled integers at all.
@@ -33,6 +43,9 @@ _TENTH_BAR_PER_MILLIBAR = Decimal("0.01")
 # the mixture's `<TransmitterId>`: that is a device serial (e.g. 2411100050), so using it
 # would both read as nonsense in a chart legend and make one dive disagree with itself
 # depending on which export it was imported from.
+#
+# Only the *fallback* now - `_transmitted_gas_number` resolves the real one where the file
+# says which cylinder the pod was on. Kept for the cases where it can't.
 _XML_GAS_NUMBER = 1
 
 
@@ -54,6 +67,38 @@ def _text(element: ET.Element, tag: str) -> str | None:
     return child.text
 
 
+def _transmitted_gas_number(root: ET.Element) -> int:
+    """Which cylinder the sample stream's one `<Pressure>` channel belongs to.
+
+    The channel carries no cylinder identity of its own, so the label has to come from
+    somewhere else, and `<TransmitterId>` is the only field that knows: it is `xsi:nil` on
+    exactly the cylinders that had no pod. Returning the *position* of the one that did
+    puts the curve on the same `gas_number` `_parse_mixture` gave that cylinder.
+
+    This used to be hardcoded to `_XML_GAS_NUMBER`, which is right only while the
+    transmitted cylinder is also the first one. It is throughout the corpus - all 11
+    two-mixture exports have the pod on mixture 1 - so the failure needs a dive the corpus
+    doesn't contain: a transmitted deco bottle behind an untransmitted back gas. There the
+    curve was labelled 1 and belonged to 2, and the back gas is exactly the cylinder whose
+    own pressures `_drop_unpressurized` nulls, so nothing downstream could have noticed.
+
+    The corpus is unusually clear that this field can carry the join. Across 342 exports
+    with mixtures: 98 have exactly one transmitted cylinder, 244 have none, and **not one
+    has two** - and non-nil `<TransmitterId>` agrees with a non-zero `<StartPressure>` on
+    all 353 mixtures, with pressure samples present in precisely the 98. So "exactly one"
+    is the only shape that occurs, and it is the only shape this resolves.
+
+    Falls back to `_XML_GAS_NUMBER` otherwise. With no transmitted cylinder there are no
+    pressure samples to label anyway; with several the format could not say which is which
+    regardless, since it has one `<Pressure>` per sample and no key on it. A wrong guess
+    there is no worse than the hardcoded one it replaces, and a `gas_number` is a label -
+    `merge_mixture_fields` and the chart legend both treat it as one.
+    """
+    mixtures = root.findall(f"{_tag('DiveMixtures')}/{_tag('DiveMixture')}")
+    transmitted = [i for i, mix in enumerate(mixtures, start=1) if _text(mix, "TransmitterId") is not None]
+    return transmitted[0] if len(transmitted) == 1 else _XML_GAS_NUMBER
+
+
 def _float(element: ET.Element, tag: str) -> float | None:
     val = _text(element, tag)
     return float(val) if val is not None else None
@@ -71,13 +116,18 @@ def _decimal_divide(value: float | None, divisor: Decimal) -> float | None:
 
 
 def _millibar_to_bar(value: float | None) -> float | None:
-    """Convert a DM5 pressure reading to bar. See `_MILLIBAR_PER_BAR`.
+    """Convert a DM5 cylinder-pressure reading to bar. See `_MILLIBAR_PER_BAR`.
 
     Via Decimal (constructed from `str(value)`) rather than plain float division, for the
     same reason as `SuuntoJsonParser._pascals_to_bar`: it avoids introducing binary
     floating-point noise the rounding below would then have to hide.
     """
     return _decimal_divide(value, _MILLIBAR_PER_BAR)
+
+
+def _pascals_to_bar(value: float | None) -> float | None:
+    """Convert `SurfacePressure` to bar - the one field here that isn't millibar."""
+    return _decimal_divide(value, _PASCALS_PER_BAR)
 
 
 def _round2_or_none(value: float | None) -> float | None:
@@ -97,9 +147,8 @@ class SuuntoXmlParser(DiveParser):
     Extracts the fields with a direct equivalent on the `Dive`/`DiveMixture` backend
     models (`models/dive.py`, `models/dive_mixture.py`), plus - separately, via
     `parse_profile` - the per-sample depth/temperature/tank-pressure curves stored as
-    `DiveProfile`. The export has plenty of other fields (algorithm/tissue-loading/CNS/OTU
-    stats, PO2 set points, deco stops, `<Marks>`) with nowhere to persist them, so they
-    aren't parsed at all.
+    `DiveProfile`. The export has plenty of other fields (algorithm/tissue-loading stats,
+    deco stops, `<Marks>`) with nowhere to persist them, so they aren't parsed at all.
     """
 
     key = "suunto_xml"
@@ -218,7 +267,9 @@ class SuuntoXmlParser(DiveParser):
             depth=ParsedSeries(t=depth_t, v=depth_v) if depth_t else None,
             temperature=ParsedSeries(t=temperature_t, v=temperature_v) if temperature_t else None,
             pressure=(
-                [ParsedPressureSeries(gas_number=_XML_GAS_NUMBER, t=pressure_t, v=pressure_v)] if pressure_t else []
+                [ParsedPressureSeries(gas_number=_transmitted_gas_number(root), t=pressure_t, v=pressure_v)]
+                if pressure_t
+                else []
             ),
         )
 
@@ -230,11 +281,26 @@ class SuuntoXmlParser(DiveParser):
         rather than derived. `DiveNumberInSerie` is deliberately ignored - see the comment
         below for why importing it would misnumber a diver's log.
         """
-        mixtures = [cls._parse_mixture(mix) for mix in root.findall(f"{_tag('DiveMixtures')}/{_tag('DiveMixture')}")]
+        mixtures = [
+            cls._parse_mixture(mix, gas_number)
+            for gas_number, mix in enumerate(root.findall(f"{_tag('DiveMixtures')}/{_tag('DiveMixture')}"), start=1)
+        ]
 
         return ParsedDiveSchema(
             avg_depth=_float(root, "AvgDepth"),
             bottom_temperature=_float(root, "BottomTemperature"),
+            # Already whole percent here, unlike the JSON export of the same dive, which
+            # writes CNS as a 0-1 fraction (`CnsEnd: 7` against `EndTissue.CNS: 0.069`).
+            # OTU is the same absolute count in both.
+            cns_start=_float(root, "CnsStart"),
+            cns_end=_float(root, "CnsEnd"),
+            otu_start=_float(root, "OtuStart"),
+            otu_end=_float(root, "OtuEnd"),
+            # Pascal, not millibar - the one pressure in this format that isn't. See
+            # `_PASCALS_PER_BAR`. Not passed through `_round2_or_none` like the cylinder
+            # pressures are: the Decimal division is already exact (105700 -> 1.057), and
+            # rounding to 2 places would throw away the file's own 100 Pa resolution.
+            surface_pressure_bar=_pascals_to_bar(_float(root, "SurfacePressure")),
             # Deliberately not parsed, though the export has a `DiveNumberInSerie`. That
             # is the *computer's* counter, not the diver's lifetime dive number: it starts
             # at 1 on a new or factory-reset device and restarts again on the next one, so
@@ -251,7 +317,7 @@ class SuuntoXmlParser(DiveParser):
         )
 
     @staticmethod
-    def _parse_mixture(mix: ET.Element) -> DiveMixtureSchema:
+    def _parse_mixture(mix: ET.Element, gas_number: int) -> DiveMixtureSchema:
         """Map one `<DiveMixture>` onto a `DiveMixture`.
 
         Gas fractions are already percentages here (unlike the JSON export's 0-1
@@ -259,17 +325,42 @@ class SuuntoXmlParser(DiveParser):
         them as bar did to every transmitter-equipped dive. An element the export omits
         (or marks `xsi:nil`) stays `None` rather than becoming 0.0, since a gas fraction
         that was never recorded is not a gas fraction of zero - see `DiveMixtureSchema`.
+
+        A cylinder with no transmitter is the one case this format writes a value for
+        something it didn't measure: `<StartPressure>0</StartPressure>` on 255 of the
+        corpus's 353 mixtures, where the same dive's JSON omits the key outright.
+        `DiveMixtureSchema` nulls those on the way in - the evidence for it is in that
+        validator, since it holds for every parser rather than just this one.
         """
         return DiveMixtureSchema(
             # Millibar, not bar - see `_MILLIBAR_PER_BAR`. Reading these as bar stored
             # `start_pressure = 205203` for every dive imported from a 2025+ transmitter
             # export, which made its `gas_use`/RMV meaningless.
             end_pressure=_round2_or_none(_millibar_to_bar(_float(mix, "EndPressure"))),
+            # Position in `<DiveMixtures>`, 1-based, which is the numbering the JSON export
+            # of a D5 dive reports in `Cylinders[].GasNumber`. The format has no number of
+            # its own; `<TransmitterId>` is a device serial, not an index.
+            #
+            # The profile's pressure channel is labelled to match, but by
+            # `_transmitted_gas_number` reading `<TransmitterId>` - *not* by both sides
+            # counting from 1 and hoping. An earlier version of this comment claimed the
+            # latter, which held only while the pod was on the first cylinder.
+            gas_number=gas_number,
             helium=_round2_or_none(_float(mix, "Helium")),
             # Left for the user to fill in themselves rather than parsed - see
             # DECISIONS.md.
             name=None,
             oxygen=_round2_or_none(_float(mix, "Oxygen")),
+            # Already bar here (`<PO2>1.4</PO2>`), unlike the JSON export's Pascal.
+            po2_limit=_float(mix, "PO2"),
+            # **`<Type>` is deliberately not read as the role**, though it is the only
+            # candidate field this format has. It is 1 for all 353 mixtures in the corpus
+            # - including both cylinders of the one two-gas dive, where a 21/0 back gas
+            # and a 49/0 deco bottle are both `<Type>1</Type>`. Whatever it encodes, it
+            # is not what the cylinder was carried for, and mapping it would confidently
+            # label a deco bottle "bottom". `<PO2>` is the field that actually separates
+            # those two rows (1.4 against 1.6), and it is read above.
+            role=None,
             start_pressure=_round2_or_none(_millibar_to_bar(_float(mix, "StartPressure"))),
             volume=_float(mix, "Size"),
         )

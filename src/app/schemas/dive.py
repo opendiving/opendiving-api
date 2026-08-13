@@ -37,6 +37,47 @@ class DiveBase(BaseModel):
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
 
 
+class DiveTechScalars(BaseModel):
+    """Readings a dive computer keeps that the diver has no way to supply by hand.
+
+    Its own mixin rather than fields on `DiveBase` precisely so it lands on the read
+    shapes and *not* on `DiveCreate`/`DiveUpdate`: these are written only by the import
+    path (`services/dive_files.py::store_dive_file`), and `DiveCreate`'s `extra="forbid"`
+    then makes an attempt to set one a 422 rather than a silently accepted fiction.
+
+    CNS and OTU depend on the decompression algorithm the device ran and on the diver's
+    exposure carried over from earlier dives, so nothing on a logged dive reconstructs
+    them - a typed-in value would be a guess presented as a reading. See DECISIONS.md.
+
+    On `DiveRead` rather than `DiveReadWithMixtures`, unlike `source_file`/`gas_use`/
+    `profile`: those are kept off the list response because each costs
+    `_cached_read_dives` an extra query, and these are plain columns on the row that is
+    being selected anyway.
+    """
+
+    cns_start: Annotated[
+        float | None, Field(default=None, examples=[8.0], description="CNS oxygen-toxicity clock at the start, in %")
+    ]
+    cns_end: Annotated[
+        float | None, Field(default=None, examples=[9.0], description="CNS oxygen-toxicity clock at the end, in %")
+    ]
+    otu_start: Annotated[
+        float | None, Field(default=None, examples=[22.0], description="Oxygen tolerance units at the start")
+    ]
+    otu_end: Annotated[
+        float | None, Field(default=None, examples=[23.0], description="Oxygen tolerance units at the end")
+    ]
+    surface_pressure_bar: Annotated[
+        float | None,
+        Field(
+            default=None,
+            examples=[1.057],
+            description="Ambient pressure at the surface, in bar. Display only - gas-use maths deliberately "
+            "assumes 1 bar (see `services/dive_gas.py`).",
+        ),
+    ]
+
+
 class DiveSiteInfo(PublicUUIDSchema):
     """Summary of a dive site visited during a dive, keyed by its public `uuid`."""
 
@@ -44,7 +85,7 @@ class DiveSiteInfo(PublicUUIDSchema):
     location: str | None = None
 
 
-class DiveRead(DiveBase, PublicUUIDSchema):
+class DiveRead(DiveBase, DiveTechScalars, PublicUUIDSchema):
     """Public representation of a dive, keyed by its opaque `uuid` rather than the
     sequential internal `id` (which is never exposed over the API). Cross-resource
     references (owning user, trip) are likewise exposed via their `uuid`.
@@ -66,7 +107,7 @@ class DiveRead(DiveBase, PublicUUIDSchema):
     ]
 
 
-class DiveReadInternal(DiveBase, PublicUUIDSchema):
+class DiveReadInternal(DiveBase, DiveTechScalars, PublicUUIDSchema):
     """Mirrors the actual `dive` table columns (integer PK/FK), for server-side lookups
     only - never returned directly over the API (use `DiveRead`/`DiveReadWithMixtures`
     for the public shape, which additionally resolves `user_id`/`trip_id` to the owning

@@ -2097,6 +2097,241 @@ restart. No column was added to `dive` or any other existing table - the FK live
 `DiveProfile` is deliberately **not** registered in `admin/views.py`, for the same reason as
 `DiveFile` and `CertificationFile`.
 
+## `DiveMixture.po2_limit` is not the `po2` column that was removed
+
+*"`DiveMixture.po2` was replaced with `helium`"* above records a `po2` column being dropped, so
+adding `po2_limit` needs to say why this isn't that decision being quietly undone.
+
+The old `po2` **was the gas description**. Mixtures at the time tracked a PO₂ set-point *instead of*
+a helium fraction, which is a rebreather's way of describing a loop and cannot describe an
+open-circuit trimix at all; swapping it for `helium` is what let a 21/35 be written down.
+`po2_limit` is the orthogonal fact and **coexists with `helium`**: it is the ppO₂ the diver planned
+this gas to, which is what turns a fraction into a maximum operating depth. Nothing about it
+competes with `oxygen`/`helium` for the same slot - the two together are the gas, and this is the
+plan for it.
+
+That it is a real recorded reading rather than a modelling choice is settled by the corpus. Both
+Suunto exports write it per mixture, and the one two-gas dive in the XML corpus
+(`Dive_2025-06-03-1215.xml`) carries `<PO2>1.4</PO2>` on its 21/0 back gas and `<PO2>1.6</PO2>` on
+its 49/0 deco bottle. That single field is the *only* thing in the file distinguishing the two rows'
+purpose (`<Type>` is 1 for both - see below), and it is exactly what the frontend's `mod()` takes as
+its ppO₂ argument, so `po2_limit ?? PPO2_WORKING` makes an imported dive's MODs the device's own
+rather than the app's defaults.
+
+Units differ per format and both are converted at the parser: the XML export writes plain bar
+(`1.4`), the JSON export Pascal (`140000`). `ck_dive_mixture_po2_limit_range` (0.4-2.0 bar) exists
+to catch the second one being read as the first.
+
+## `DiveMixture.role` is a structured column, not the gas-name synthesis that was rejected
+
+*"`ParsedDiveSchema`/`DiveMixtureSchema` trimmed to fields the backend models actually support"*
+above rejects Suunto's `Gases[].State` ("Primary") as a source for `DiveMixture.name`, on the
+grounds that it "describes a gas's *role* (primary/deco/bailout), not an actual gas label a diver
+would recognize". That rejection is about `name`, and it stands: nothing here pre-fills `name`, and
+both parsers still leave it null.
+
+Role is the fact that sentence identifies and then has nowhere to put. It gets its own nullable
+`VARCHAR(20)` column, typed by `GasRole` (`schemas/dive_mixture.py`) - a `StrEnum`, the same shape
+and for the same reasons as `GearType`, including having no mirroring DB `CHECK`. The two are shown
+side by side rather than one standing in for the other: a dive detail page renders `gasName()`'s
+"EAN50" **and** a "deco" badge. Editable on the form, because the file usually doesn't say.
+
+**What each format actually records:**
+
+- **Suunto JSON** - `Header.Diving.Gases[].State`, through a normalization table
+  (`_GAS_ROLE_BY_STATE`) rather than a `GasRole(state)` cast: the vocabulary is Suunto's, so a value
+  we haven't seen has to come out `None` rather than raise. "Primary" (18 of 18 gases in the corpus)
+  maps to `bottom`. Not to be confused with the `State: "OC"` under `DiveHeader`/`DiveFooter`, which
+  is a loop type and which this parser doesn't read.
+- **FIT** - `dive_gas.mode`, whose enum is `{0: open_circuit, 1: closed_circuit_diluent}`. A diluent
+  identifies itself; `open_circuit` covers a back gas and a stage bottle alike, so it maps to
+  nothing. Deliberately **not** `dive_gas.status` (`enabled`/`disabled`/`backup_only`), which is
+  whether the gas was breathed - `_breathed_gases` already uses it for that - and reading
+  `backup_only` as a role would relabel a pony bottle as though the file had described its purpose.
+- **Suunto XML** - **nothing**, though `<Type>` looks like the field for it. It is `1` for all 353
+  mixtures in the 384-export corpus, *including both cylinders of the two-gas dive*, where a 21/0
+  back gas and a 49/0 deco bottle are both `<Type>1</Type>`. Whatever it encodes, it is not what the
+  cylinder was carried for, and mapping it would have confidently labelled a deco bottle "bottom".
+  This is the one place the Phase 2 plan said to read a field and the data said not to.
+
+## `DiveMixture.gas_number` is a label, and only the JSON export really has one
+
+How the source export identifies a cylinder, and the join key to the profile's per-cylinder pressure
+channels (`dive_profile.data.pressure[].gas_number`), which is what will let per-tank gas accounting
+attribute a pressure curve to a mixture row.
+
+Only `SuuntoJsonParser`'s sample-reconstruction path reads a number the *file* states
+(`DiveEvents.GasSwitch.GasNumber` / `Cylinders[].GasNumber`); everywhere else it is synthesized from
+position, because the formats have no such field. The XML export's `<TransmitterId>` and FIT's
+`tank_update.sensor` are ANT device serials (e.g. 2411100050), not indices - the same reason neither
+is used to label a chart legend.
+
+So it is a **label, not a trustworthy index**, and anything joining on it has to say so. The sharp
+edge is in `FitParser._mixtures`: where a file holds two gases and one pod, `_tanks_for` refuses to
+guess which gas the pod belongs to and leaves both pressures null, but the mixtures are still
+numbered 1 and 2 while the only pressure channel is numbered 1. The numbers then line up by position
+without the file ever having said the two describe the same cylinder. Per-tank attribution must
+refuse a partial result there rather than take the coincidence.
+
+### The constraint was `>= 1` for about an hour, and the corpus rejected it
+
+Worth recording, because the instinct is to write `>= 1` and the reasoning for it sounds fine: every
+parser that *synthesizes* a number counts from 1, so a 0 would be an off-by-one worth catching
+before it reaches a chart.
+
+The first real run of `backfill_dive_tech_fields` failed on `ck_dive_mixture_gas_number_positive`
+against a stored Suunto Ocean export. **The Ocean numbers its cylinders from 0** - 7 107
+`Cylinders[].GasNumber: 0` readings across the 2026 corpus, and `GasSwitch` events to both 0 and 1 -
+and the profiles already stored for those dives label their pressure channels `0` to match, because
+`_parse_samples` has always kept the file's own number.
+
+So a 1-based floor would have forced the mixture to carry a number its own pressure curve does not
+have, breaking the one join this column exists for, on exactly the multi-mixture corpus that join is
+being built for. The constraint is `ck_dive_mixture_gas_number_non_negative` (`>= 0`), and the
+premise it was guarding - "1-based everywhere" - was simply false.
+
+The bound stays at zero rather than disappearing: it still catches a negative, which no format
+produces and which would be a sign bug rather than a numbering convention.
+
+## CNS, OTU and surface pressure are written by the import, never by the form
+
+`dive.cns_start`/`cns_end`/`otu_start`/`otu_end`/`surface_pressure_bar` are filled server-side in
+`services/dive_files.py::store_dive_file`, inside the same `run_in_threadpool` hop and the same
+transaction as the profile extraction, and they are **not** on `DiveCreate`/`DiveUpdate` at all -
+`DiveTechScalars` (`schemas/dive.py`) is mixed into the read shapes only, so `DiveCreate`'s
+`extra="forbid"` turns an attempt to set one into a 422 rather than a silently accepted fiction.
+
+That asymmetry with the *mixture* fields - which do round-trip through the form - is the point. CNS
+and OTU depend on the decompression algorithm the device ran and on exposure carried over from
+earlier dives, neither of which anything in a logged dive reconstructs, so a hand-typed value would
+be a guess wearing a reading's clothes. A diver genuinely does know which bottle was their deco gas.
+
+Consequences worth knowing:
+
+- The write is **unconditional** where the profile's is not: replacing an export that recorded
+  exposure with one that doesn't clears the old readings rather than leaving them attributed to a
+  file they didn't come from. Only an extraction that *failed* (logged, returns `None`) leaves them
+  alone, because that is "couldn't read", not "the file says nothing".
+- `delete_dive_file` clears them too, alongside the profile and for the same reason - a reading
+  whose source export is gone can never be re-derived or checked. The mixtures are pointedly not
+  cleared: those went through the form and the diver may have edited them since.
+- `extract_tech_scalars` **never raises**, mirroring `extract_profile`. Note it catches
+  `DiveParseError`/`UnsupportedDiveFileError` and then bare `Exception` - *not* `EXTRACTION_ERRORS`,
+  which is the tuple parsers catch *internally* before re-raising a `DiveParseError` and does not
+  contain either parser error. Catching that tuple here would have let a malformed file fail the
+  upload it rode in on.
+- `surface_pressure_bar` is display-only. `services/dive_gas.py` assumes 1 bar at the surface, and
+  that is a recorded deliberate choice - this column does not feed SAC/RMV.
+
+## The same three readings are in three different units across the two Suunto exports
+
+Cross-checked by matching dives that exist as both a DM5 XML and a JSON export, which is the only
+way any of this is visible - each format is internally consistent and plausible on its own.
+
+| Reading          | XML                 | JSON                | Same dive (2021-03-28 10:49)                    |
+| ---------------- | ------------------- | ------------------- | ----------------------------------------------- |
+| CNS              | whole percent       | **0-1 fraction**    | `<CnsEnd>7</CnsEnd>` vs `EndTissue.CNS: 0.069`  |
+| OTU              | same absolute count | same absolute count | `<OtuEnd>18</OtuEnd>` vs `EndTissue.OTU: 17.89` |
+| Surface pressure | **Pascal**          | Pascal              | `105700` in both, i.e. 1.057 bar                |
+
+Two traps in that table:
+
+**JSON CNS is a fraction.** Stored unconverted, a 69 % oxygen clock would read 0.069 %. The parser
+multiplies by 100.
+
+**XML `SurfacePressure` is Pascal, and this module's own comment said otherwise.**
+`_MILLIBAR_PER_BAR` was documented as covering "**every** pressure" in DM5 XML and named
+`SurfacePressure (105500 = 1.055 bar)` as an example - which is millibar arithmetic reaching a
+Pascal answer. Cylinder pressures really are millibar (`StartPressure: 207141` is 207.141 bar), but
+this one field is not: read as millibar, 105700 would be 105.7 bar, a hundred metres of seawater at
+the surface. Both corpora settle it - all 384 XML exports land in 103100-106700, plausible
+barometrically only on the Pascal reading, and the JSON export of the same dives writes the
+identical integer into a field the other parser already treated as Pascal.
+`ck_dive_surface_pressure_range` (0.5-1.2 bar) is the backstop.
+
+**FIT is the odd one out again, and gets the same treatment it always does.** `session`/
+`dive_summary` carry `start_cns`/`end_cns` (already whole percent) and `o2_toxicity` (OTUs), but
+there is no start OTU anywhere in the profile and no surface pressure at all, so `otu_start` and
+`surface_pressure_bar` stay null rather than being back-derived. `record.absolute_pressure` is the
+*ambient* pressure per sample, so the nearest available stand-in would be a guess about when the
+diver entered the water.
+
+`o2_toxicity`'s unit is ambiguous in the profile - "OTUs", which could be the dive's total or its
+increment - and the corpus decides it. The 2025-03-06 08:29 dive exists as both a FIT and an XML
+export: the XML records `OtuStart 22 -> OtuEnd 23`, and the FIT writes `o2_toxicity = 23`. It is the
+**ending total**. Read as a delta it would have been 1, and every repetitive dive's OTU would have
+been understated by its own history.
+
+## The tech-field backfill is a second script, not a flag on the profile one
+
+`src/scripts/backfill_dive_tech_fields.py`, run the same way:
+
+```bash
+docker compose exec api python -m src.scripts.backfill_dive_tech_fields
+```
+
+Separate from `backfill_dive_profiles` because the two select on different things.
+`PROFILE_EXTRACTOR_VERSION` lets that one skip a dive whose profile is already current; these
+columns have no version of their own, so every dive with a stored export is a candidate on every run
+\- which is cheap (a header parse, not a sample stream) and is what makes it correct to re-run after
+a parser fix with no version to bump. Both halves are idempotent.
+
+The two halves are backfilled on **different terms**, which is why the report counts them
+separately:
+
+- **Dive scalars are overwritten outright.** No other path writes them, so the file is the only
+  authority and a re-run writes the same numbers.
+- **Mixture fields are best-effort**, via `merge_mixture_fields` - pure and DB-free, following the
+  `reconcile()` idiom. Mixtures are replaced wholesale on every save (see *"Mixtures are always
+  replaced wholesale"*), so a stored row's `id` postdates the import and cannot identify which
+  parsed cylinder it came from. Position is the only join available, and on its own it is too weak:
+  a diver who swapped their deco bottle would get the parsed second gas written onto a different
+  tank. So the counts must match **and** every pair must still agree on `(oxygen, helium)` - the
+  part of a cylinder nobody retypes - and it is all-or-nothing per dive, because a half-matching
+  list is an edited list. Anything else is counted in `mixtures_skipped` and left alone.
+
+A parsed fraction of `None` is not compared: the file never recorded it, the form filled in
+`DEFAULT_MIXTURE`, and that difference is not evidence of an edit.
+
+## Manual DDL for the Phase 2 tech fields
+
+Per *"Schema changes have no migration tool"* - eight new columns on two existing tables, so
+`create_all()` does nothing and both the columns and their `CHECK`s need applying by hand:
+
+```sql
+ALTER TABLE dive ADD COLUMN cns_start DOUBLE PRECISION;
+ALTER TABLE dive ADD COLUMN cns_end DOUBLE PRECISION;
+ALTER TABLE dive ADD COLUMN otu_start DOUBLE PRECISION;
+ALTER TABLE dive ADD COLUMN otu_end DOUBLE PRECISION;
+ALTER TABLE dive ADD COLUMN surface_pressure_bar DOUBLE PRECISION;
+ALTER TABLE dive ADD CONSTRAINT ck_dive_cns_start_non_negative CHECK (cns_start IS NULL OR cns_start >= 0);
+ALTER TABLE dive ADD CONSTRAINT ck_dive_cns_end_non_negative CHECK (cns_end IS NULL OR cns_end >= 0);
+ALTER TABLE dive ADD CONSTRAINT ck_dive_otu_start_non_negative CHECK (otu_start IS NULL OR otu_start >= 0);
+ALTER TABLE dive ADD CONSTRAINT ck_dive_otu_end_non_negative CHECK (otu_end IS NULL OR otu_end >= 0);
+ALTER TABLE dive ADD CONSTRAINT ck_dive_surface_pressure_range CHECK (surface_pressure_bar IS NULL OR (surface_pressure_bar >= 0.5 AND surface_pressure_bar <= 1.2));
+
+ALTER TABLE dive_mixture ADD COLUMN po2_limit DOUBLE PRECISION;
+ALTER TABLE dive_mixture ADD COLUMN gas_number INTEGER;
+ALTER TABLE dive_mixture ADD COLUMN role VARCHAR(20);
+ALTER TABLE dive_mixture ADD CONSTRAINT ck_dive_mixture_po2_limit_range CHECK (po2_limit IS NULL OR (po2_limit >= 0.4 AND po2_limit <= 2.0));
+ALTER TABLE dive_mixture ADD CONSTRAINT ck_dive_mixture_gas_number_non_negative CHECK (gas_number IS NULL OR gas_number >= 0);
+```
+
+`CNS` is `DOUBLE PRECISION` rather than an integer even though the XML export rounds it to whole
+percent, because the JSON export of the same dive records 0.069 - storing that as 7 would throw away
+precision the file has. All nullable: every one of these is absent from at least one supported
+format, and a dive logged by hand has none of them.
+
+The `CHECK`s all follow the existing `<col> IS NULL OR ...` shape (see *"Domain `CheckConstraint`s
+need a manual `ALTER TABLE`"*). CNS and OTU are `>= 0` rather than `> 0` for the same reason as
+`weight`: a dive that began with no oxygen loading records a real 0. Neither has an upper bound -
+CNS above 100 % is precisely the reading a diver most needs to see. Surface pressure is bounded on
+both sides because it has real physical limits and the band is what catches the Pascal/millibar
+error above.
+
+Both `_DIVE_CONSTRAINT_MESSAGES` (`api/v1/dives.py`) and `_MIXTURE_CONSTRAINT_MESSAGES` gained
+entries, so a violation surfaces as a sentence naming the field rather than a raw 500.
+
 ## The contact form is an API endpoint, not a `mailto:`
 
 `POST /api/v1/contact` (`api/v1/contact.py`) is the only endpoint here that mails a *human* rather
@@ -3102,6 +3337,47 @@ and depths, and import a confidently empty dive. The cap is ~23x the largest rea
 \- a 72-minute multi-channel Suunto Ocean dive at 4 339 frames, about one per second - or roughly 28
 hours of continuous logging.
 
+## The XML pressure channel is labelled from `<TransmitterId>`, not from counting to one
+
+`SuuntoXmlParser._parse_samples` emitted its single pressure series as `gas_number=1`
+unconditionally, and `_parse_mixture`'s comment asserted that this was "the same numbering
+`_XML_GAS_NUMBER` pins the single pressure channel to". Those are two independent numbering schemes
+that agree only while the transmitted cylinder is also the *first* one.
+
+The dive that breaks it is a transmitted deco bottle behind an untransmitted back gas. The back gas
+becomes `gas_number=1`, the deco bottle `2`, and the sole pressure curve is labelled `1` — so
+anything joining on the key attributes the deco bottle's curve to the back gas. It is worse than a
+visible mislabel, because the back gas is exactly the cylinder whose own `<StartPressure>0</...>`
+`_drop_unpressurized` nulls: the row the curve is wrongly attached to has no pressures of its own to
+contradict it, so nothing downstream can notice.
+
+**Unattested, and the corpus is why it survived.** All 11 two-mixture exports of the 342 with
+mixtures have the pod on mixture 1, so every real file labelled the channel correctly by accident.
+
+Unlike FIT — which has the same shape and documents it as a known limit in `_mixtures`, because a
+FIT file genuinely cannot say which pod belongs to which gas — this format carries the evidence to
+resolve it, and the corpus is unusually clear that it does:
+
+- 98 exports have **exactly one** transmitted cylinder, 244 have none, and **not one has two**.
+- Non-nil `<TransmitterId>` agrees with a non-zero `<StartPressure>` on all 353 mixtures — the same
+  353-of-353 correlation `_drop_unpressurized` is built on, read the other way round.
+- Pressure samples are present in precisely those 98 files.
+
+So `_transmitted_gas_number` returns the position of the one mixture whose `<TransmitterId>` is not
+nil, and "exactly one" is the only shape that occurs. It falls back to `_XML_GAS_NUMBER` otherwise:
+with none there are no pressure samples to label anyway, and with several the format could not say
+which is which regardless — one `<Pressure>` per sample, no key on it. A wrong guess there is no
+worse than the hardcoded one it replaces.
+
+Verified as a no-op on every real file: all 384 exports parse, 98 emit a pressure channel, and all
+98 are still labelled `1`. The change differs only on the dive the corpus does not contain, which is
+what `test_the_xml_pressure_channel_is_labelled_from_the_transmitter_not_from_position` constructs.
+
+The generalizable bit is the comment, not the code. Two schemes that both start at 1 will agree on
+every example you have, and a comment saying they are "the same numbering" reads as though the file
+guarantees it. It didn't — the agreement was a property of the corpus, and writing it down as a fact
+is what would have kept anyone from checking.
+
 ## The 2026 Suunto Ocean JSON is a third header shape, with gas data only in the samples
 
 `SuuntoJsonParser` was built against two header shapes - a "clean"/header-only one and a D5-style
@@ -3255,6 +3531,444 @@ Both entry points decode the file in full. A FIT file is a stream whose `session
 *after* the samples it summarizes, so there is no cheap header-only read to be had - `parse()` pays
 for the whole pass either way, which is also what makes the coldest-sample temperature fallback
 free.
+
+## A zero cylinder pressure is not a reading, and that does not contradict the rule above
+
+`DiveMixtureSchema` nulls a `start_pressure`/`end_pressure` of 0 for every parser. Read next to
+*"The rule is 'don't invent', not 'treat zero as missing'"* in the section above, that looks like
+the exact thing that rule forbids, so the two are worth separating properly - the tension is real
+and resolving it by picking a side would have been wrong either way.
+
+**The rule constrains what a parser may invent, and this invents nothing.** `Helium: 0` survives
+because 0 is inside the range a gas fraction takes on a real dive: a nitrox mix genuinely contains 0
+% helium, a diver breathes it, and `TestParsersInventNothing` still pins that. A cylinder pressure
+of 0 bar is not inside the range that quantity takes on a dive that happened - at 0 bar a regulator
+delivers nothing - so the question is never "is this zero real?" but "what did the file mean by
+writing it?".
+
+**DM5 means "no transmitter", and its own JSON export proves it.** Three facts from the local
+corpus:
+
+- 255 of the 353 mixtures in the 384 XML exports record exactly `<StartPressure>0</StartPressure>`
+  and `<EndPressure>0</EndPressure>` - the pre-transmitter majority of the log.
+- All 255 are precisely the mixtures whose `<TransmitterId>` is `xsi:nil`, and all 98 with real
+  pressures have a serial. 353 of 353 agree, and not one mixture pairs a zero with a real pressure.
+- `Dive_2025-06-03-1215.xml` and `compare/d5-last-header.json` are the *same dive* - same timestamp,
+  same transmitter serial 2411100050, same 22 L/11 L cylinders at 21 %/49 % and ppO₂ 1.4/1.6. On the
+  untransmitted 49 % deco bottle the XML writes `0`/`0` and the JSON **omits `StartPressure` and
+  `EndPressure` entirely**, while keeping `Helium: 0` in the same object. The file distinguishes a
+  recorded zero from an unrecorded value, in one cylinder, in the vendor's own two formats.
+
+So reading the zero literally made two exports of one dive disagree, and made `SuuntoXmlParser`
+assert something `SuuntoJsonParser` declined to. This is the same judgement
+`_mixtures_from_cylinders` already makes when it skips a `null` Ocean `Pressure` rather than calling
+it the end of the dive.
+
+**What it was costing.** `mergeMixture` (`lib/dive-import.ts`) carries a cylinder's pressures over
+from the form only when the file recorded *neither*, and 0 is not nullish - so an XML import
+overwrote pressures already on the form with a fill of zero, the same destructive-default failure
+`volume: 0.0` used to cause. Then `diveMixtureSchema` requires a positive `start_pressure`, so the
+dive's **edit form could never be submitted again**: a validation error on Tank 2's "Start pressure
+(bar)", a field the diver never touched, clearable only by emptying both boxes by hand. That is 72 %
+of the cylinders in the corpus, not one unlucky deco bottle.
+
+**Relaxing the Zod rule to `min(0)` was the alternative, and it is the worse half of the trade.** It
+would clear the error by storing "this cylinder started and finished the dive on 0 bar" as fact -
+rendered as a fill on the dive detail page, still overwriting the form's pressures on import, still
+disagreeing with the same dive's JSON. The form rule is also doing real work: a saved cylinder that
+started at 0 bar is nonsense whoever typed it. The honest fix is for the file's non-reading not to
+become a number in the first place. (`end_pressure` already allows 0 there, which is a separate
+asymmetry and deliberately left alone.)
+
+**Why it lives on the schema rather than in `SuuntoXmlParser`,** where all the evidence is: the fact
+is about the field, not the format. No export can express a cylinder breathed from 0 bar, so no
+parser should claim one, and a fourth parser inherits the rule instead of rediscovering it. The JSON
+and FIT corpora never write a zero here - they say "no transmitter" by omission and by having no
+tank messages at all - so their half of the guard is unattested consistency rather than a fix.
+
+`compute_gas_use` was never fooled by the `0`/`0` pair on its own (a drop of zero returns `None`),
+but it would have been by the mixed pair this also rules out, and `<= 0` covers a negative gauge
+reading on the same terms.
+
+**Dives imported before this kept the zeros**, and a parser fix cannot reach them - the form is what
+writes mixtures, and those rows are already saved. Their edit forms stay stuck until the stored
+values are nulled by hand, which is one statement and no migration (there is no migration tool - see
+*"Schema changes have no migration tool"*):
+
+```sql
+UPDATE dive_mixture SET start_pressure = NULL, end_pressure = NULL
+WHERE start_pressure <= 0 AND end_pressure <= 0;
+```
+
+Both columns together and both `<= 0`, matching the parser: a row with one real pressure was never
+produced by this bug and is not this statement's to touch.
+
+## The mixture backfill joins on position, so the read it joins against must be ordered
+
+`merge_mixture_fields` lines parsed cylinders up with stored ones **by position** — mixtures are
+replaced wholesale on every save, so a stored row's `id` postdates the import and cannot say which
+parsed cylinder it came from. That much is recorded in its docstring. What the first version left
+implicit is that a positional join is only as good as the order of the list it is handed, and
+`crud_dive_mixtures.get_mixtures_for_dive` was `SELECT ... WHERE dive_id = :id` with no `ORDER BY`.
+
+**Postgres does not owe you insertion order.** Without an `ORDER BY` a seq scan returns heap order,
+which matches insertion order right up until a row is updated in place and its new tuple version
+lands somewhere else in the heap. `backfill_tech_fields` issues exactly such an `UPDATE`, against
+exactly these rows. So the read came back in one order before a backfill and potentially another
+order after it — and because the backfill re-reads every candidate on every run by design, the
+second run is the one that reads the reordered rows back.
+
+**The `(oxygen, helium)` agreement check does not backstop this.** It looks like it should: a
+mis-ordered pair ought to fail the fraction comparison and return `None`. But `None` on the parsed
+side is explicitly *not* evidence of a mismatch (the form filled in `DEFAULT_MIXTURE` because the
+file said nothing), and a parser that records no fractions at all leaves every row `None`. The 2026
+Suunto Ocean shape is precisely that: `_mixtures_from_cylinders` reconstructs cylinders from sample
+data, which carries gas numbers and pressures but no `Gases` block anywhere — see *"The 2026 Suunto
+Ocean JSON is a third header shape"*. Every parsed row is `oxygen=None, helium=None`, the guard
+compares nothing, and every permutation passes.
+
+Four exports in the local corpus are that shape — `69de1eef…`, `69e0c3aa…`, `69e0f35b…`,
+`69e21526…`, each two cylinders numbered `[0, 1]` with both fractions null on both rows. It is also
+the one export shape whose `gas_number` is *the file's own label* rather than a synthesized
+position, which is what makes it the expensive one to get wrong: `gas_number` is the join key to
+`dive_profile.data.pressure[].gas_number`, so swapping it attributes each tank's pressure curve to
+the other cylinder on the chart. Silently, and with no way to tell afterwards which run did it.
+
+The fix is `.order_by(DiveMixture.id)`, which *is* the import's position
+(`replace_mixtures_for_dive` adds rows in list order). Applied to `get_mixtures_for_dives` as well,
+so the list and detail endpoints cannot disagree about which tank is first. Stated in both
+docstrings and pinned by `TestStoredMixturesAreReadInSavedOrder`, because the coupling is invisible
+from either end: nothing in `merge_mixture_fields` reveals that it depends on a clause in another
+module, and nothing in the crud module reveals that dropping the clause corrupts data rather than
+shuffling a list.
+
+**The mixture half is fill-only, and the dive's own scalars are not.** `merge_mixture_fields`
+originally spread all three fields into every update, `None`s included:
+
+```python
+{"po2_limit": parsed_mix.po2_limit, "gas_number": parsed_mix.gas_number, "role": parsed_mix.role}
+```
+
+That is silent data loss, because all three are client-writable — they sit on `DiveMixtureBase`, so
+they reach `DiveMixtureCreate`, and `PATCH /dive/{uuid}` replaces mixtures wholesale. The guard
+above compares only `oxygen`/`helium`, so an edit confined to these three is invisible to it. A FIT
+import produces `po2_limit=None` always and `role=None` for any open-circuit gas (`_role` maps only
+`closed_circuit_diluent`); a diver who then sets 1.6 and `deco` on their stage bottle has touched
+neither fraction, so the join is still admitted and the backfill writes both back to `NULL` — on a
+script whose docstring calls it "idempotent, and safe to run repeatedly", and whose
+`mixtures_skipped` counter is documented as capturing exactly the diver-edited case it misses here.
+
+The deeper reason is not "protect diver edits", though. It is that `None` from a parser means **"the
+file did not record this"** — the invariant `DiveMixtureSchema`'s docstring is built on, the one the
+`0.0`-instead-of-null bug was fixed to establish. Spreading one into an `UPDATE` converts an absent
+reading into a value, which is precisely the conflation that schema exists to prevent. Dropping the
+`None`s is that rule applied to the write rather than to the guard.
+
+What fill-only costs is bounded and worth naming: a parser correction still lands, because where the
+file *records* a value the backfill overwrites as before. It declines only where the file has
+nothing to say, which is where it had no business writing anything.
+
+The asymmetry with the dive's own scalars a few lines up — overwritten outright, `None`s and all —
+is deliberate and rests on one fact: nothing but the import writes those columns (`DiveTechScalars`
+is mixed into the read shapes only, and `DiveCreate`/`DiveUpdate` are `extra="forbid"`), so there is
+no edit to lose. These three have another writer. A rule about whether to overwrite is really a
+question about who else writes the column, and the two halves of this backfill answer it differently
+because the answers differ.
+
+## A parsed value the database refuses must not take the upload — or the backfill run — with it
+
+`ck_dive_surface_pressure_range` bounds `surface_pressure_bar` to 0.5–1.2 bar, and nothing between
+the parser and the write applied those bounds: `ParsedDiveSchema.surface_pressure_bar` was a bare
+`float | None` and both `_pascals_to_bar` calls passed the file's value through raw. The column is
+new in this phase, and so is the gap.
+
+**This is about where the failure lands, not about a file that was caught misbehaving.** Both
+corpora sit well inside the band — 384 XML exports across 103 100–106 700 Pa, 531 JSON readings
+across 99 693–106 700 Pa, not one outside 0.5–1.2 bar. The band itself was chosen from that corpus.
+What makes it worth guarding anyway is that `store_tech_scalars` runs *inside* `store_dive_file`'s
+transaction, under the `try` whose only handler is:
+
+```python
+except IntegrityError as exc:
+    raise DiveFileConflictError("The source file for this dive changed while this upload was in flight. Please try again.")
+```
+
+That message is about a concurrent upload winning a race on a unique index. A `CHECK` violation from
+a parsed number is not that, and the advice is worse than merely wrong — the retry it asks for fails
+identically every time, for a file that is otherwise perfectly importable. The same exception on the
+`noop` branch is worse still: that `commit()` is outside any `try`, and `write_dive_file` catches
+only the three dive-file exceptions, so it escapes as a 500 with the session left in a failed
+transaction.
+
+So three changes, each fixing a different link:
+
+- **A validator on `ParsedDiveSchema`**, mirroring the CHECK's own numbers rather than a looser
+  sanity check — the point is that nothing reaches the column having passed a weaker test than the
+  column's. Nulled rather than rejected, on the `_drop_unpressurized` principle: a file whose
+  barometer reading is unusable is still a file worth storing. Placed on the schema rather than in
+  either Suunto parser for the same reason as that one — the fact is about the field, not the
+  format.
+- **The `noop` branch's commit wrapped in `try`/`rollback`.** That branch is an opportunistic
+  re-extraction of a file the dive already has; failing it must not fail a request whose correct
+  answer is still "you already have this". The explicit rollback is what stops a failed transaction
+  poisoning the next statement on the session.
+- **A `begin_nested()` savepoint per dive in `backfill_tech_fields`**, so a rejected dive is counted
+  into `failed` instead of aborting the run. Without it the exception propagates past `main()`, the
+  enclosing `async with local_session()` rolls back up to `_BACKFILL_BATCH_SIZE` dives of finished
+  work, and — since nothing advances a version column — the next run reaches the same dive and dies
+  the same way. The backfill could never get past it without hand-narrowing `--parser-key`.
+
+**`po2_limit` got the same validator, on the second pass.** The first version of this section argued
+against one: the corpus writes `<PO2>` as exactly two values, 1.4 (277 mixtures) and 1.6 (76), and
+says "not set" with `i:nil="true"` (363) — never with a zero — and `DiveMixtureCreate` already
+carries `ge=0.4, le=2.0`, so "the form path is covered". That last step is where the reasoning went
+wrong. `DiveMixtureCreate`'s bound does not _protect_ the form path, it **is** the failure on it:
+`POST /dive/parse` hands the parsed mixture to the client to pre-fill with, so an out-of-band
+`po2_limit` comes back on save and 422s a field the diver never chose. That is the same
+unsubmittable-form bug `_drop_unpressurized` was written to fix, one field over — the opposite of
+the "treat zero as missing" reflex it was mistaken for.
+
+Still unattested, and stated as such in the validator: across the whole corpus the three parsers
+produce 371 `po2_limit` values and every one is 1.4 or 1.6. It is the unattested half of the same
+rule — a limit of 0 bar is not a limit, the way 0 bar is not a fill.
+
+**That pass then claimed to have finished the job, and hadn't — by five columns.** Both this section
+and the validator asserted it left "no bounded column that a parsed value can reach unchecked". The
+phase adds **seven** bounded columns and two had guards: `surface_pressure_bar` and `po2_limit`. The
+other five — `cns_start`, `cns_end`, `otu_start`, `otu_end` (`>= 0` each) and `gas_number` (`>= 0`)
+— were still passed through raw by all three parsers.
+
+The CNS/OTU gap was the live one, and it is the exact failure the surface-pressure validator was
+written to prevent, on the columns right beside it: a `<CnsStart>-4</CnsStart>` in an export makes
+`store_tech_scalars` violate `ck_dive_cns_start_non_negative` inside `store_dive_file`'s
+transaction, so `PUT /dive/{uuid}/file` rolls back and answers **409 "The source file for this dive
+changed while this upload was in flight. Please try again."** The file is never stored and every
+retry fails identically — flatly contradicting `extract_tech_scalars`' own stated priority that a
+header this build can't read must not fail the upload that would have preserved it.
+
+`gas_number` lands differently but is the same bug as `po2_limit`'s: only `_mixtures_from_cylinders`
+reads a number a *file* chose (`int(cylinder["GasNumber"])` out of the Ocean's sample data) — the
+other three paths synthesize it with `enumerate` and cannot go negative by construction. That one
+path is enough, since a negative label reaches `/dive/parse`, pre-fills the form, and
+`DiveMixtureCreate`'s `ge=0` then 422s a field the diver never chose and cannot see.
+
+Both validators use `< 0`, not `<= 0`: **0 is a real value in all five cases** — a dive that began
+with no oxygen loading, and a Suunto Ocean's first cylinder — which is why those constraints are
+`>= 0` rather than `> 0` in the first place.
+
+The generalizable bit is not "add the missing validators". It is that a rule applied to two of seven
+columns was written up as though it covered all seven, and the write-up then read as evidence the
+work was done. A claim of completeness in this file should be countable against the thing it claims
+to cover.
+
+**And once it was countable, the count was still scoped wrong.** The test asked "every bounded
+column *this phase adds*", which quietly excused `avg_depth` and `max_depth` — bounded by
+`ck_dive_max_depth_positive` and its `avg` twin, reachable by all three parsers, and unguarded
+purely because they are older than the phase. The set worth checking is **bounded and reachable from
+a parser**, not bounded and recent; scoping a completeness check to the current changeset is how a
+pre-existing gap survives a review that was specifically looking for gaps.
+
+Those two use `<= 0` where the exposure guard beside them uses `< 0`, and the contrast is the point:
+a dive that began with no oxygen loading recorded a real 0, and a dive to 0 m did not happen. Each
+mirrors its own constraint rather than one rule being chosen for "depth-ish numbers". Unattested and
+free — all 768 depth readings across the 384 XML exports and all 80 across the JSON survive the
+guard unchanged.
+
+What is still uncovered is now written down rather than implied. `ck_dive_mixture_oxygen_helium_sum`
+and `ck_dive_mixture_pressure_order` constrain a *pair*, so there is no "the bad value" to null —
+honouring them on the parse side means choosing which of two recorded readings to discard, which is
+a different decision from "this number is not a reading" and is deliberately not made in a
+validator. `duration`, `volume`, `oxygen` and `helium` are single-column and still unguarded:
+pre-existing, out of this phase's scope, and named in the test's docstring so the next person
+counting finds them listed rather than absent.
+
+**Where the handler goes, and why the first attempt was in the wrong place.** The `noop` branch's
+`try` originally wrapped `await db.commit()` alone. That catches nothing: a `CHECK` is not
+deferrable in Postgres, so it is evaluated as the `UPDATE` executes and SQLAlchemy raises
+`IntegrityError` out of `execute()` — checked against the local database rather than reasoned about.
+The writes have to sit inside the `try` alongside the commit.
+`TestReExtractionFailureDoesNotFailTheRequest` pins it and fails against the commit-only shape.
+
+The same fact is what makes the savepoint further up load-bearing rather than decorative:
+`begin_nested` has to enclose the statements, not just the commit that follows them.
+
+**And the pass after *that* found the guards themselves had a hole: `NaN`.** The five one-sided
+validators were written as `value < 0` and the constraints behind them as `>= 0`, and neither stops
+a `NaN`:
+
+```python
+nan < 0        # False in Python — the validator passes it straight through
+'NaN'::float8 >= 0   # true in Postgres, which sorts NaN above every number
+```
+
+So the CHECK is not the backstop it looks like. Nothing upstream stops one either —
+`<CnsStart>NaN</CnsStart>` is a float literal to `float()`, and `json.loads` accepts a bare `NaN`
+token — and it was reproducible end to end: a Suunto-shaped export with `NaN` in its tissue block
+parsed cleanly to `cns_start=nan`.
+
+What it costs is the **whole list, not the row**. `DiveTechScalars` rides on `DiveRead` rather than
+`DiveReadWithMixtures` precisely so it lands on the list response, and `JSONResponse` serializes
+with `allow_nan=False`:
+
+```
+ValueError: Out of range float values are not JSON compliant: nan
+```
+
+One poisoned row 500s `GET /dives` until someone clears it with hand-written SQL.
+
+The reachability is worth being precise about, because it is what makes this a real bug rather than
+a theoretical one. The *upload* path is accidentally gated: `POST /dive/parse` serializes
+`ParsedDiveResponse`, which carries these fields, so it 500s before any `file_token` is minted. The
+**backfill is not gated** — it re-parses stored files and writes through a Core `UPDATE` with no
+serialization anywhere in between. An export attached before this phase, when CNS/OTU were not
+parsed and so never serialized, gets `NaN` written on the first `backfill_dive_tech_fields` run: the
+exact operation this phase exists to ship.
+
+The two-sided validators were safe already, since `not (0.5 <= nan <= 1.2)` is `True` — but
+incidentally, as a property of how the comparison falls out rather than anything they say. **The
+first fix was per-field `isfinite`, and it was the wrong shape.** Adding
+`math.isfinite(value) and value >= 0` to each of the five one-sided guards makes those five fields
+safe and says nothing about the rest — and the rest is where the rule was still broken. `avg_depth`,
+`max_depth` and `bottom_temperature` carry no bound at all, so there was no guard to add `isfinite`
+to, and a `NaN` in any of them still 500s `POST /dive/parse` on serialization. Whack-a-mole across
+the fields that happen to have bounds is not the invariant.
+
+So it lives on a base class instead, `_ParserOutput`, as a wildcard validator — **no non-finite
+float leaves a parser** — stated once and applied to every field of every parser output shape,
+inherited by `DiveMixtureSchema`, `ParsedDiveSchema` and `ParsedDiveResponse`:
+
+```python
+@field_validator("*")
+@classmethod
+def _drop_non_finite(cls, value: object) -> object:
+    return None if isinstance(value, float) and not math.isfinite(value) else value
+```
+
+`isfinite` rather than an `isnan` check, because `inf` passes `>= 0` honestly and is no more a
+reading. Typed `object` because it runs for the `str`, `int`, enum and `list` fields too, and
+passing those through untouched is load-bearing — a wildcard that nulled `name`, `gas_number`,
+`role` or `mixtures` would be a far worse bug than the one it fixes.
+`test_the_finite_guard_does_not_touch_anything_else` pins that half specifically.
+
+The bound validators then go back to being about *bounds* — `value < 0`, `value <= 0`, the two
+ranges — each pointing at the base for the `NaN` case rather than restating it. Order between the
+wildcard and a field's own validator does not matter: whichever runs first, a `NaN` that survives a
+comparison-based guard is nulled by the wildcard, and a `NaN` the wildcard nulls first arrives at
+the bound as `None`.
+
+This is a pre-existing *class* rather than something the phase invented — `'NaN'::float8 > 0` is
+also true, so the depth columns were exposed the same way and for the same reason — but the phase
+adds five columns to it, and the stated invariant that no parsed value reaches a bounded column
+without passing the bound the column applies is exactly what `NaN` defeats. The lesson is narrower
+than "validate harder", and it is two things: **a one-sided float comparison is not a bound**, in
+either language, and a CHECK written as `>= 0` does not become one by being in the database — and
+**a rule that holds only where someone remembered to bound a field is not the rule**. The second is
+why this sits on the base class rather than on five validators.
+
+## Replacing an export clears its readings even when the new one can't be read
+
+`store_dive_file`'s replace path wrote the tech scalars under `if scalars is not None`, so an
+extraction that *failed* left the previous export's CNS and OTU on the dive — after the `DELETE`
+that removed the file they came from. The comment defended this as "couldn't read" ≠ "says nothing",
+which is right on the `noop` branch, where the file is unchanged and still attached and a later
+backfill can re-read it. On replace it is wrong: the file is gone, so those numbers are exactly the
+nothing-can-re-derive-or-check state `delete_dive_file` clears them to avoid, now attributed to an
+export the dive no longer has.
+
+The profile beside them already followed the correct rule — `delete_profile_for_dive` is
+unconditional there — so this is the scalars catching up, not a new policy. Nothing is lost by
+clearing: the new file is stored, and `backfill_tech_fields` re-reads every candidate on every run.
+
+Narrow enough to be worth naming: it needs the parse to fail at attach after having *succeeded* at
+`/dive/parse` on the same bytes. The asymmetry between the two branches is now deliberate and pinned
+from both sides — `test_an_unreadable_header_still_clears_the_previous_export` and
+`test_an_unreadable_header_leaves_the_dive_alone_on_this_branch`.
+
+## The backfill's batch boundary counts writes, not positions
+
+`if index % _BACKFILL_BATCH_SIZE == 0: await db.commit()` sat below several `continue`s, so a dive
+that failed on exactly index 50 skipped that commit and left up to two batches riding on the next
+one — an interrupted run losing twice what the batching promises. Counting dives actually written
+since the last commit (`pending`) is immune to where the failures fall.
+
+The same loop's `mixtures_skipped` had a smaller version of the same shape: `+= len(stored)` reports
+**0** for the dive whose cylinders were edited most, since "the diver deleted every cylinder" is a
+count mismatch with an empty `stored`. `max(len(stored), len(parsed.mixtures))` counts whichever
+side had rows. It matters because that field is the run's one interesting signal — it is the diver
+having edited their cylinders, which is a reason not to touch them rather than a failure — and a
+report reading "nothing skipped" for a skipped dive is worse than no report.
+
+## `load_dive_file` detaches the row it read, because the blob outlives the need for it
+
+`local_session` is built `expire_on_commit=False` (`core/db/database.py`), which is right for the
+request path — a committed ORM instance stays usable instead of triggering a fresh `SELECT` per
+attribute on the way out through a response model. The cost lands somewhere that path never sees.
+
+`load_dive_file` is the one query that pulls `dive_file.data`, via an explicit `undefer`. The
+instance it loads stays in the session's identity map with that blob materialized, and no commit
+expires it. In a request that is invisible: the session dies at the end of it. In
+`backfill_tech_fields` and `backfill_profiles`, which walk every stored export in one session and
+commit in batches of 50, it means every file the run has read is still resident — a few thousand
+dives at a few hundred KB is hundreds of MB of RSS in the `api` container, growing monotonically to
+the end of the run.
+
+`db.expunge(file)` before returning, because `LoadedDiveFile` has already copied out the four things
+any caller wants. Placed in `load_dive_file` rather than in the backfill loop so both scripts and
+the download route get it from the one place that knows a blob was loaded at all.
+
+## The tech scalars re-extract on the profile's version gate, not one of their own
+
+`store_dive_file`'s `noop` branch re-reads a file the dive already has when
+`PROFILE_EXTRACTOR_VERSION` says the stored profile is stale, and the scalars were folded into that
+same condition rather than given a version of their own. Two columns' worth of extra state to bump,
+review and get wrong, for a re-upload path that is already opportunistic.
+
+The consequence is worth stating because it is not visible from the branch: **a scalar-only parser
+fix does not reach existing dives through a re-upload.** Correcting a CNS or `SurfacePressure`
+reading without touching sample extraction leaves `should_extract` answering "current", and the
+stale numbers stay. `backfill_tech_fields` is the path for that — it re-reads every candidate on
+every run precisely so that it needs no version to bump — so a fix of that shape ships with a
+backfill run, not with instructions to re-upload.
+
+## `parse_all` exists so FIT decodes the file once, and `_extract_all` falls back when it can't
+
+`_extract_all` pairs the profile and the tech scalars into one `run_in_threadpool` hop. Both take
+the same bytes, and on FIT both used to reach `FitParser._scan` — `parse` and `parse_profile` each
+call it — so the file was decoded once per extraction. Measured on a 26 KB export from the corpus:
+55 ms + 58 ms, against 58 ms for a single scan feeding both, and it scales with `_MAX_FRAMES` up to
+the ~1.5 s the profile extraction is already budgeted at. So worst-case attach latency roughly
+doubled and one bounded threadpool worker was held for both passes. The two Suunto parsers are 2–11
+ms and were never the problem.
+
+`DiveParser.parse_all` is the seam. Its default implementation is `parse()` + `parse_profile()` —
+the honest answer for a format where sharing would be machinery for nothing, and what both Suunto
+parsers keep. `FitParser` overrides it to scan once. `_extract_all` measures 1.83× faster on FIT and
+returns output identical to the old pair on all 420 real files in the corpus.
+
+**The trade-off this was first written up as needing is smaller than it looked**, and the first
+version of this section overstated it. It said a single entry point had to preserve the two
+extractions' independent failure "or drop it on purpose, and the answer is not obvious". Splitting
+the independence into its two levels makes it obvious:
+
+- **At the decode.** `_scan` is a pure function of the bytes, so a file that fails it fails it for
+  both entry points anyway. FIT's independence *at this level was already notional* — both halves
+  returned `None`, just with two log lines. Sharing the scan gives up nothing real.
+- **At the interpretation.** `_parse_dive` raising where `_parse_samples` would not is a genuine
+  case, and it is preserved by guarding the two steps separately inside the override rather than
+  under one `try`. Verified alongside it: neither step consumes the scan, so the two orderings and
+  the un-shared calls all produce identical results.
+
+What is left over is that an override *can* still fail both halves together — the shared scan, or a
+bug in the override itself. `_extract_all` repairs that by falling back to the two independent
+extractions on any exception, so the property survives end to end: a file whose samples are
+malformed still yields its header scalars. The fallback re-decodes, which is the right trade, since
+it costs a second pass only on a file that was already failing and whose latency no longer matters.
+The bare `except` there is deliberate — an override is effectively third-party code from that
+function's point of view, and the fallback is correct for anything it might raise.
+
+`TestExtractAllSharesOneDecode` pins all of it, including a scan **count** rather than a wall-clock
+time: timing assertions are flaky on a loaded machine, and one-scan-not-two is the actual claim.
+Neutering the override makes it fail with `assert 2 == 1`.
 
 ## FIT fixtures are written, not committed as blobs
 

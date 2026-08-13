@@ -5,7 +5,12 @@ import random
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pydantic import BaseModel
 
+from src.app.models.dive import Dive
+from src.app.models.dive_mixture import DiveMixture
+from src.app.schemas.dive_mixture import GasRole
+from src.app.schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from src.app.services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file
 from src.app.services.dive_parsers.fit import _MAX_CYLINDERS, FitParser
 from src.app.services.dive_parsers.fit import _MAX_FRAMES as MAX_FRAMES
@@ -23,6 +28,21 @@ from tests.helpers.fit import (
 
 SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
 XSI_NS = "http://www.w3.org/2001/XMLSchema-instance"
+
+
+def _validated_fields(model: type[BaseModel]) -> set[str]:
+    """Field names some `field_validator` on this schema covers.
+
+    Read off Pydantic's own decorator registry rather than listed by hand, so the guard
+    in `test_every_bounded_column_this_phase_adds_has_a_parse_side_guard` cannot pass by
+    being updated alongside the thing it is checking.
+    """
+    return {
+        field
+        for decorator in model.__pydantic_decorators__.field_validators.values()
+        for field in decorator.info.fields
+    }
+
 
 VALID_SUUNTO_XML = f"""<?xml version="1.0" encoding="utf-8"?>
 <Dive xmlns="{SUUNTO_NS}" xmlns:i="{XSI_NS}">
@@ -363,10 +383,17 @@ class TestSuuntoXmlParserParse:
         assert mixture.start_pressure == 205.2
         assert mixture.end_pressure == 86.78
 
-    def test_leaves_a_zero_mixture_pressure_at_zero(self):
-        """Pre-transmitter exports write `0`, which must stay `0` rather than becoming a
-        tiny non-zero number - 255 of the 353 `StartPressure` values in the local corpus
-        are exactly this."""
+    def test_reads_a_zero_mixture_pressure_as_no_reading(self):
+        """Pre-transmitter exports write `0` - 255 of the 353 `StartPressure` values in
+        the local corpus - and `DiveMixtureSchema` nulls it: 0 bar is DM5's way of saying
+        no transmitter, not a cylinder that was breathed from empty. See that validator
+        for the corpus evidence, and `TestParsersInventNothing` for why this is not the
+        same as treating a recorded `Helium: 0` as missing.
+
+        This used to assert `0.0`, guarding the millibar conversion against turning an
+        exact zero into a tiny non-zero number. That guard survives the change: `None`
+        here still requires the conversion to land on exactly zero.
+        """
         xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <Dive xmlns="{SUUNTO_NS}">
   <DiveMixtures>
@@ -382,8 +409,8 @@ class TestSuuntoXmlParserParse:
 
         mixture = SuuntoXmlParser.parse(xml).mixtures[0]
 
-        assert mixture.start_pressure == 0.0
-        assert mixture.end_pressure == 0.0
+        assert mixture.start_pressure is None
+        assert mixture.end_pressure is None
 
     def test_raises_unsupported_for_xml_with_wrong_root_tag(self):
         with pytest.raises(UnsupportedDiveFileError):
@@ -1511,6 +1538,554 @@ class TestFitParserDiveSummary:
         assert FitParser.parse(content).max_depth == 27.5
 
 
+class TestTechScalars:
+    """CNS/OTU/surface pressure and the per-mixture ppO2, role and gas number.
+
+    The units are the whole story here - each format is internally consistent and
+    plausible on its own, and only a dive exported two ways shows that they disagree.
+    Every figure below is taken from a real cross-format pair in the corpus; see
+    DECISIONS.md for the table.
+    """
+
+    def test_xml_reads_cns_as_percent_and_surface_pressure_as_pascal(self):
+        """105700 is 1.057 bar, not 105.7. `SurfacePressure` is the one pressure in a
+        DM5 export that isn't millibar - read as millibar it would put a hundred metres
+        of seawater above a diver standing on a boat."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <CnsStart>0</CnsStart>
+  <CnsEnd>20</CnsEnd>
+  <OtuStart>0</OtuStart>
+  <OtuEnd>53</OtuEnd>
+  <SurfacePressure>105700</SurfacePressure>
+</Dive>
+""".encode()
+
+        parsed = SuuntoXmlParser.parse(content)
+
+        assert (parsed.cns_start, parsed.cns_end) == (0.0, 20.0)
+        assert (parsed.otu_start, parsed.otu_end) == (0.0, 53.0)
+        assert parsed.surface_pressure_bar == 1.057
+
+    def test_json_reads_cns_as_a_fraction_of_the_same_number(self):
+        """The same dive: `<CnsEnd>7</CnsEnd>` in the XML export is `EndTissue.CNS:
+        0.069` in the JSON one. Unconverted, a 69 % oxygen clock would read 0.069 %."""
+        content = json.dumps(
+            {
+                "DeviceLog": {
+                    "Header": {
+                        "Diving": {
+                            "SurfacePressure": 106100,
+                            "StartTissue": {"CNS": 0, "OTU": 0},
+                            "EndTissue": {"CNS": 0.069, "OTU": 17.89002799987793},
+                        }
+                    }
+                }
+            }
+        ).encode()
+
+        parsed = SuuntoJsonParser.parse(content)
+
+        assert parsed.cns_start == 0.0
+        assert parsed.cns_end == 6.9
+        # OTU needs no conversion - it is the same absolute count in both formats - but
+        # it is rounded, since no computer accounts exposure to a float32's last digit.
+        assert parsed.otu_end == 17.89
+        assert parsed.surface_pressure_bar == 1.061
+
+    @staticmethod
+    def _xml_with_pod_on(position: int, mixtures: int = 2) -> bytes:
+        """Two cylinders, `<TransmitterId>` on exactly one of them, and one pressure
+        sample. DM5 writes `0` pressures and `xsi:nil` on the untransmitted mixture."""
+        rows = "".join(
+            f"""    <DiveMixture>
+      <Oxygen>{21 if i == 1 else 50}</Oxygen><Helium>0</Helium>
+      <StartPressure>{200000 if i == position else 0}</StartPressure>
+      <EndPressure>{120000 if i == position else 0}</EndPressure>
+      {f"<TransmitterId>241110005{i}</TransmitterId>" if i == position else '<TransmitterId xsi:nil="true"/>'}
+    </DiveMixture>
+"""
+            for i in range(1, mixtures + 1)
+        )
+        return f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <DiveMixtures>
+{rows}  </DiveMixtures>
+  <DiveSamples>
+    <Dive.Sample><Time>60</Time><Depth>1200</Depth><Pressure>1900</Pressure></Dive.Sample>
+  </DiveSamples>
+</Dive>
+""".encode()
+
+    def test_the_xml_pressure_channel_is_labelled_from_the_transmitter_not_from_position(self):
+        """A transmitted deco bottle behind an untransmitted back gas. Hardcoding the
+        channel to 1 put the deco bottle's curve on the back gas - and the back gas is
+        exactly the cylinder whose own pressures `_drop_unpressurized` nulls, so nothing
+        downstream could have caught the mislabel. Unattested: all 11 two-mixture exports
+        in the corpus have the pod on mixture 1, which is why it survived."""
+        profile = SuuntoXmlParser.parse_profile(self._xml_with_pod_on(2))
+        parsed = SuuntoXmlParser.parse(self._xml_with_pod_on(2))
+
+        assert profile is not None
+        assert [series.gas_number for series in profile.pressure] == [2]
+        # And it is the mixture the pod was actually on - the join the label exists for.
+        transmitted = [mix for mix in parsed.mixtures if mix.start_pressure is not None]
+        assert [mix.gas_number for mix in transmitted] == [2]
+
+    def test_the_usual_shape_still_labels_the_channel_one(self):
+        """The corpus's only attested arrangement, and the fallback when the file names no
+        transmitter at all - there are no pressure samples to mislabel in that case."""
+        profile = SuuntoXmlParser.parse_profile(self._xml_with_pod_on(1))
+
+        assert profile is not None
+        assert [series.gas_number for series in profile.pressure] == [1]
+
+    def test_fit_reads_o2_toxicity_as_the_ending_total_not_the_dive_s_share(self):
+        """The 2025-03-06 08:29 dive exists as both a FIT and an XML export. The XML
+        records `OtuStart 22 -> OtuEnd 23`; the FIT writes `o2_toxicity = 23`. Read as
+        the dive's own increment it would have been 1, and every repetitive dive's OTU
+        would be understated by its own history."""
+        content = dive_fit_file(end_cns=9, o2_toxicity=23)
+
+        parsed = FitParser.parse(content)
+
+        assert parsed.cns_end == 9.0
+        assert parsed.otu_end == 23.0
+
+    def test_fit_leaves_otu_start_and_surface_pressure_null(self):
+        """Neither exists in the FIT profile. `record.absolute_pressure` is the ambient
+        pressure per sample, so the nearest stand-in would be a guess about when the
+        diver got in the water."""
+        parsed = FitParser.parse(dive_fit_file(end_cns=9, o2_toxicity=23))
+
+        assert parsed.otu_start is None
+        assert parsed.surface_pressure_bar is None
+
+    def test_an_out_of_band_surface_pressure_reads_as_no_reading(self):
+        """Unattested in the corpus - all 384 XML exports land in 1.031-1.067 bar - but
+        the band is the one `ck_dive_surface_pressure_range` enforces, and the column is
+        written inside `store_dive_file`'s transaction. A value the CHECK rejects would
+        therefore fail the *attach* of an otherwise importable file, reported to the diver
+        as a concurrent-upload conflict that no retry can clear. Nulled here instead."""
+        for reading in ("0", "105700000", "-105700"):
+            content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <SurfacePressure>{reading}</SurfacePressure>
+</Dive>
+""".encode()
+
+            assert SuuntoXmlParser.parse(content).surface_pressure_bar is None, reading
+
+    def test_the_bounds_are_the_ones_the_database_enforces(self):
+        """Not a looser sanity check that happens to sit inside the CHECK: the point is
+        that nothing can reach the column having passed a weaker test than the column's."""
+        constraint = next(
+            c for c in Dive.__table__.constraints if getattr(c, "name", None) == "ck_dive_surface_pressure_range"
+        )
+        sqltext = str(constraint.sqltext)
+
+        def parsed_with(pressure: float) -> float | None:
+            return ParsedDiveSchema(
+                avg_depth=None,
+                bottom_temperature=None,
+                dive_number=None,
+                duration=None,
+                max_depth=None,
+                start_time=None,
+                mixtures=[],
+                surface_pressure_bar=pressure,
+            ).surface_pressure_bar
+
+        assert "0.5" in sqltext and "1.2" in sqltext
+        # The bounds themselves are inclusive on both sides, as the CHECK's `>=`/`<=` are.
+        assert parsed_with(0.5) == 0.5
+        assert parsed_with(1.2) == 1.2
+        assert parsed_with(0.49) is None
+        assert parsed_with(1.21) is None
+
+    def test_a_negative_exposure_reading_reads_as_no_reading(self):
+        """Oxygen loading does not run backwards. Unguarded, a negative here violated
+        `ck_dive_cns_start_non_negative` *inside* `store_dive_file`'s transaction, so the
+        attach rolled back and the diver got a 409 telling them to retry an upload that
+        could never succeed."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <CnsStart>-4</CnsStart><CnsEnd>-1</CnsEnd><OtuStart>-9</OtuStart><OtuEnd>-0.5</OtuEnd>
+</Dive>
+""".encode()
+
+        parsed = SuuntoXmlParser.parse(content)
+
+        assert (parsed.cns_start, parsed.cns_end) == (None, None)
+        assert (parsed.otu_start, parsed.otu_end) == (None, None)
+
+    def test_a_nan_exposure_reading_reads_as_no_reading(self):
+        """`NaN` is caught by neither `value < 0` nor `cns_start >= 0` - it compares false
+        against every bound in Python and *true* against them in Postgres, which sorts it
+        above all numbers. Stored, it makes `GET /dives` 500 for the whole list, because
+        `JSONResponse` serializes with `allow_nan=False`. `backfill_tech_fields` is the
+        path that reaches the column without serializing anything on the way."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <CnsStart>NaN</CnsStart><CnsEnd>NaN</CnsEnd><OtuStart>NaN</OtuStart><OtuEnd>NaN</OtuEnd>
+</Dive>
+""".encode()
+
+        parsed = SuuntoXmlParser.parse(content)
+
+        assert (parsed.cns_start, parsed.cns_end) == (None, None)
+        assert (parsed.otu_start, parsed.otu_end) == (None, None)
+        # The point of nulling rather than passing through: the result is serializable.
+        json.dumps(parsed.model_dump(), allow_nan=False)
+
+    def test_no_non_finite_float_leaves_a_parser_on_any_field(self):
+        """The rule is on `_ParserOutput`, not on the bounds, because the bounds are
+        comparisons and `NaN` compares `False` against all of them. `avg_depth`,
+        `max_depth` and `bottom_temperature` carry no bound at all and are the proof -
+        under a per-field fix they would still have 500'd `POST /dive/parse`. `inf` counts
+        too: it passes `>= 0` honestly and is no more a reading than `NaN`."""
+        dive = ParsedDiveSchema(
+            avg_depth=float("nan"),
+            bottom_temperature=float("nan"),
+            dive_number=None,
+            duration=None,
+            max_depth=float("inf"),
+            start_time=None,
+            mixtures=[],
+            cns_start=float("nan"),
+            cns_end=float("inf"),
+            otu_start=float("-inf"),
+            otu_end=float("nan"),
+            surface_pressure_bar=float("nan"),
+        )
+        mixture = DiveMixtureSchema(
+            end_pressure=float("nan"),
+            gas_number=None,
+            helium=float("nan"),
+            name=None,
+            oxygen=float("inf"),
+            po2_limit=float("nan"),
+            role=None,
+            start_pressure=float("inf"),
+            volume=float("nan"),
+        )
+
+        assert all(value is None for value in dive.model_dump().values() if not isinstance(value, list))
+        assert all(value is None for value in mixture.model_dump().values())
+        # The point of nulling rather than passing through: both are serializable.
+        json.dumps(dive.model_dump(), allow_nan=False)
+        json.dumps(mixture.model_dump(), allow_nan=False)
+
+    def test_the_finite_guard_does_not_touch_anything_else(self):
+        """It runs for every field, including the ones it must leave alone - a wildcard
+        validator that nulled a `str`, an `int`, an enum or the mixtures list would be a
+        far worse bug than the one it fixes."""
+        mixture = DiveMixtureSchema(
+            end_pressure=120.0,
+            gas_number=0,
+            helium=0.0,
+            name="Air",
+            oxygen=21.0,
+            po2_limit=1.4,
+            role=GasRole.BOTTOM,
+            start_pressure=200.0,
+            volume=11.1,
+        )
+        dive = ParsedDiveSchema(
+            avg_depth=12.5,
+            bottom_temperature=8.0,
+            dive_number=41,
+            duration=2400,
+            max_depth=27.3,
+            start_time="2026-06-03T12:15:00",
+            mixtures=[mixture],
+            cns_start=0.0,
+            otu_end=53.0,
+        )
+
+        assert (mixture.name, mixture.gas_number, mixture.role) == ("Air", 0, GasRole.BOTTOM)
+        assert (dive.dive_number, dive.duration, dive.start_time) == (41, 2400, "2026-06-03T12:15:00")
+        assert (dive.avg_depth, dive.max_depth, dive.bottom_temperature) == (12.5, 27.3, 8.0)
+        # Zero is a reading, and the wildcard is not a truthiness test.
+        assert dive.cns_start == 0.0
+        assert dive.mixtures == [mixture]
+
+    def test_a_zero_or_negative_depth_reads_as_no_depth(self):
+        """`<= 0`, against `_drop_negative_exposure`'s `< 0` one method over - the two
+        constraints genuinely differ (`ck_dive_max_depth_positive` is `> 0`,
+        `ck_dive_cns_start_non_negative` is `>= 0`), because a dive that began with no
+        oxygen loading recorded a real 0 and a dive to 0 m did not happen."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <AvgDepth>0</AvgDepth><MaxDepth>-3.2</MaxDepth><CnsStart>0</CnsStart>
+</Dive>
+""".encode()
+
+        parsed = SuuntoXmlParser.parse(content)
+
+        assert (parsed.avg_depth, parsed.max_depth) == (None, None)
+        # The neighbouring rule is untouched: 0 is still a reading where the column says so.
+        assert parsed.cns_start == 0.0
+
+    def test_a_real_depth_survives_the_guard(self):
+        """The guard must not cost the corpus, where every recorded depth is positive."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <AvgDepth>12.3</AvgDepth><MaxDepth>25.5</MaxDepth>
+</Dive>
+""".encode()
+
+        parsed = SuuntoXmlParser.parse(content)
+
+        assert (parsed.avg_depth, parsed.max_depth) == (12.3, 25.5)
+
+    def test_a_recorded_zero_exposure_is_still_a_reading(self):
+        """`< 0`, not `<= 0`. A dive that began with no oxygen loading recorded a real 0,
+        and the four constraints are `>= 0` precisely to keep that apart from null."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <CnsStart>0</CnsStart><OtuStart>0</OtuStart>
+</Dive>
+""".encode()
+
+        parsed = SuuntoXmlParser.parse(content)
+
+        assert parsed.cns_start == 0.0
+        assert parsed.otu_start == 0.0
+
+    def test_a_negative_gas_number_reads_as_no_label(self):
+        """Only `_mixtures_from_cylinders` reads a number a file chose; the other three
+        paths synthesize it with `enumerate`. One path is enough to 422 a form field the
+        diver never chose."""
+        mixture = DiveMixtureSchema(
+            end_pressure=None,
+            gas_number=-7,
+            helium=None,
+            name=None,
+            oxygen=None,
+            po2_limit=None,
+            role=None,
+            start_pressure=None,
+            volume=None,
+        )
+
+        assert mixture.gas_number is None
+
+    def test_gas_number_zero_is_a_real_label(self):
+        """A Suunto Ocean numbers its cylinders from 0, which is why the constraint is
+        `>= 0` and not the 1-based check it started as."""
+        mixture = DiveMixtureSchema(
+            end_pressure=None,
+            gas_number=0,
+            helium=None,
+            name=None,
+            oxygen=None,
+            po2_limit=None,
+            role=None,
+            start_pressure=None,
+            volume=None,
+        )
+
+        assert mixture.gas_number == 0
+
+    def test_every_single_column_bound_a_parser_can_reach_has_a_parse_side_guard(self):
+        """The drift guard for the rule itself.
+
+        The rule was applied to two of seven columns and then written up as covering all
+        of them, which is how five stayed unguarded through two review rounds. Counted
+        here against the constraints rather than restated in prose, so the next column
+        with a `CHECK` either gets a validator or fails this.
+
+        Now counts the two depth columns as well. They are older than the phase that
+        guarded the rest, which is exactly why they were missed - the set worth checking
+        is "bounded and reachable from a parser", not "bounded and added recently".
+
+        **Single-column bounds only, and the rest is deliberate rather than forgotten.**
+        `ck_dive_mixture_oxygen_helium_sum` and `ck_dive_mixture_pressure_order` constrain
+        a *pair*, so there is no "the bad value" to null - honouring them on the parse side
+        means choosing which of two recorded readings to discard, which is a different
+        decision from "this number is not a reading" and is not made here. `duration`,
+        `volume`, `oxygen` and `helium` are single-column and still unguarded; they are
+        pre-existing and out of this phase's scope, and they are listed here so the gap is
+        recorded rather than implied.
+        """
+        bounded = {
+            (Dive, "avg_depth"),
+            (Dive, "max_depth"),
+            (Dive, "cns_start"),
+            (Dive, "cns_end"),
+            (Dive, "otu_start"),
+            (Dive, "otu_end"),
+            (Dive, "surface_pressure_bar"),
+            (DiveMixture, "po2_limit"),
+            (DiveMixture, "gas_number"),
+        }
+        # Every one of those really is constrained on the model side...
+        for model, column in bounded:
+            constraints = " ".join(str(getattr(c, "sqltext", "")) for c in model.__table__.constraints)
+            assert column in constraints, f"{model.__name__}.{column} has no CHECK"
+
+        # ...and every one is validated on the way in, on whichever schema carries it.
+        guarded = {
+            *((Dive, name) for name in _validated_fields(ParsedDiveSchema)),
+            *((DiveMixture, name) for name in _validated_fields(DiveMixtureSchema)),
+        }
+        assert bounded <= guarded, f"unguarded: {bounded - guarded}"
+
+    def test_an_out_of_band_po2_limit_reads_as_no_limit(self):
+        """The last bounded field a parsed value could reach unguarded. Unattested - the
+        corpus writes `<PO2>` as 1.4 or 1.6 and says "not recorded" with `i:nil` - but the
+        backfill writes this column through a Core `UPDATE` that never sees Pydantic, so
+        the schema is the only place a guard covers both the import and the backfill."""
+        for reading in ("0", "0.39", "2.01", "140000"):
+            content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <DiveMixtures><DiveMixture><Oxygen>21</Oxygen><Helium>0</Helium><PO2>{reading}</PO2></DiveMixture></DiveMixtures>
+</Dive>
+""".encode()
+
+            assert SuuntoXmlParser.parse(content).mixtures[0].po2_limit is None, reading
+
+    def test_a_recorded_po2_limit_inside_the_band_survives(self):
+        """The guard must not cost the 353 mixtures in the corpus that do record one."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <DiveMixtures>
+    <DiveMixture><Oxygen>21</Oxygen><Helium>0</Helium><PO2>1.4</PO2></DiveMixture>
+    <DiveMixture><Oxygen>50</Oxygen><Helium>0</Helium><PO2>1.6</PO2></DiveMixture>
+  </DiveMixtures>
+</Dive>
+""".encode()
+
+        assert [m.po2_limit for m in SuuntoXmlParser.parse(content).mixtures] == [1.4, 1.6]
+
+    def test_the_po2_bounds_are_the_ones_the_database_enforces(self):
+        constraint = next(
+            c
+            for c in DiveMixture.__table__.constraints
+            if getattr(c, "name", None) == "ck_dive_mixture_po2_limit_range"
+        )
+
+        assert "0.4" in str(constraint.sqltext) and "2.0" in str(constraint.sqltext)
+
+    def test_fit_prefers_the_dive_summary_over_the_session(self):
+        """The mirror of `_depth`'s preference, reversed on purpose: on a multi-dive file
+        the session totals cover the whole activity, while `_dive_summary` has already
+        picked the summary describing the dive being imported."""
+        content = fit_file(
+            message("file_id", type="activity", manufacturer="garmin"),
+            message("session", sport="diving", start_time=DIVE_START, total_elapsed_time=3600.0, end_cns=40),
+            message("dive_summary", reference_mesg="session", end_cns=12, o2_toxicity=29),
+        )
+
+        parsed = FitParser.parse(content)
+
+        assert parsed.cns_end == 12.0
+        assert parsed.otu_end == 29.0
+
+    def test_xml_reads_po2_per_mixture_in_bar(self):
+        """`<PO2>` is the only field separating the two cylinders of the corpus's one
+        two-gas dive: 1.4 on the 21/0 back gas, 1.6 on the 49/0 deco bottle."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <DiveMixtures>
+    <DiveMixture><Oxygen>21</Oxygen><Helium>0</Helium><PO2>1.4</PO2><Size>22</Size><Type>1</Type></DiveMixture>
+    <DiveMixture><Oxygen>49</Oxygen><Helium>0</Helium><PO2>1.6</PO2><Size>11</Size><Type>1</Type></DiveMixture>
+  </DiveMixtures>
+</Dive>
+""".encode()
+
+        mixtures = SuuntoXmlParser.parse(content).mixtures
+
+        assert [m.po2_limit for m in mixtures] == [1.4, 1.6]
+        assert [m.gas_number for m in mixtures] == [1, 2]
+
+    def test_xml_never_reads_type_as_a_role(self):
+        """`<Type>` is 1 for all 353 mixtures in the corpus *including both cylinders of
+        the two-gas dive*, where one is a 21/0 back gas and the other a 49/0 deco bottle.
+        Whatever it encodes it is not what the cylinder was carried for, and mapping it
+        would confidently label a deco bottle "bottom"."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <DiveMixtures>
+    <DiveMixture><Oxygen>21</Oxygen><Type>1</Type></DiveMixture>
+    <DiveMixture><Oxygen>49</Oxygen><Type>1</Type></DiveMixture>
+  </DiveMixtures>
+</Dive>
+""".encode()
+
+        assert [m.role for m in SuuntoXmlParser.parse(content).mixtures] == [None, None]
+
+    def test_json_reads_po2_in_pascal_and_maps_state_to_a_role(self):
+        mixtures = SuuntoJsonParser.parse(VALID_SUUNTO_JSON_WITH_GASES.encode()).mixtures
+
+        assert [m.po2_limit for m in mixtures] == [1.4, 1.6]
+        assert [m.role for m in mixtures] == [GasRole.BOTTOM, GasRole.BOTTOM]
+        assert [m.gas_number for m in mixtures] == [1, 2]
+
+    def test_json_leaves_an_unrecognized_state_null_rather_than_guessing(self):
+        """The vocabulary is Suunto's, so a value the table doesn't know has to come out
+        `None` - not raise, and not become a role we picked."""
+        content = json.dumps(
+            {"DeviceLog": {"Header": {"Diving": {"Gases": [{"Oxygen": 0.21, "State": "Something New"}]}}}}
+        ).encode()
+
+        assert SuuntoJsonParser.parse(content).mixtures[0].role is None
+
+    def test_ocean_json_keeps_the_gas_number_the_file_states(self):
+        """The one export shape that numbers its own cylinders. These are the numbers the
+        pressure channels are labelled with, so a mixture row and its curve on the chart
+        name the same tank."""
+        samples = [
+            {"TimeISO8601": "2026-04-17T11:49:23+02:00", "DiveEvents": [{"GasSwitch": {"GasNumber": 3}}]},
+            {"TimeISO8601": "2026-04-17T11:49:24+02:00", "Cylinders": [{"GasNumber": 3, "Pressure": 20000000}]},
+        ]
+
+        mixtures = SuuntoJsonParser.parse(_ocean_json(samples)).mixtures
+
+        assert [m.gas_number for m in mixtures] == [3]
+
+    def test_fit_reads_a_closed_circuit_diluent_as_one(self):
+        """`dive_gas.mode` is the only field on the message that speaks to role, and it
+        answers half the question: a diluent identifies itself."""
+        content = dive_fit_file(
+            message("dive_gas", message_index=0, status="enabled", mode="closed_circuit_diluent", oxygen_content=21)
+        )
+
+        assert FitParser.parse(content).mixtures[0].role == GasRole.DILUENT
+
+    def test_fit_reads_open_circuit_as_no_role_at_all(self):
+        """`open_circuit` covers a back gas and a stage bottle alike, so it says nothing
+        about what the cylinder was carried for."""
+        content = dive_fit_file(
+            message("dive_gas", message_index=0, status="enabled", mode="open_circuit", oxygen_content=21)
+        )
+
+        assert FitParser.parse(content).mixtures[0].role is None
+
+    def test_fit_never_reads_status_as_a_role(self):
+        """`status` is whether the gas was breathed - `_breathed_gases` already uses it
+        for that - and reading `backup_only` as a role would relabel a pony bottle as
+        though the file had described its purpose. (A `backup_only` gas is dropped
+        outright, so the surviving mixture is the enabled one, with no role.)"""
+        content = dive_fit_file(
+            message("dive_gas", message_index=0, status="enabled", oxygen_content=21),
+            message("dive_gas", message_index=1, status="backup_only", oxygen_content=32),
+        )
+
+        mixtures = FitParser.parse(content).mixtures
+
+        assert [(m.oxygen, m.role) for m in mixtures] == [(21.0, None)]
+
+    def test_fit_numbers_mixtures_from_one(self):
+        content = dive_fit_file(
+            message("dive_gas", message_index=0, status="enabled", oxygen_content=21),
+            message("dive_gas", message_index=1, status="enabled", oxygen_content=50),
+        )
+
+        assert [m.gas_number for m in FitParser.parse(content).mixtures] == [1, 2]
+
+
 class TestParsersInventNothing:
     """No parser substitutes a plausible value for gas data a file doesn't carry.
 
@@ -1553,6 +2128,47 @@ class TestParsersInventNothing:
         assert mixture.helium is None
         assert mixture.volume is None
 
+    def test_xml_leaves_omitted_tech_fields_null(self):
+        """Every pre-2013 export in the corpus predates half of these. A dive with no
+        `<CnsEnd>` has not recorded a CNS of 0 - it recorded nothing."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <DiveMixtures><DiveMixture><Oxygen>21</Oxygen></DiveMixture></DiveMixtures>
+</Dive>
+""".encode()
+
+        parsed = SuuntoXmlParser.parse(content)
+
+        assert (parsed.cns_start, parsed.cns_end) == (None, None)
+        assert (parsed.otu_start, parsed.otu_end) == (None, None)
+        assert parsed.surface_pressure_bar is None
+        assert parsed.mixtures[0].po2_limit is None
+        assert parsed.mixtures[0].role is None
+
+    def test_json_leaves_omitted_tech_fields_null(self):
+        content = json.dumps({"DeviceLog": {"Header": {"Diving": {"Gases": [{"Oxygen": 0.21}]}}}}).encode()
+
+        parsed = SuuntoJsonParser.parse(content)
+
+        assert (parsed.cns_start, parsed.cns_end) == (None, None)
+        assert (parsed.otu_start, parsed.otu_end) == (None, None)
+        assert parsed.surface_pressure_bar is None
+        assert parsed.mixtures[0].po2_limit is None
+        assert parsed.mixtures[0].role is None
+
+    def test_fit_leaves_omitted_tech_fields_null(self):
+        content = dive_fit_file(message("dive_gas", message_index=0, status="enabled"))
+
+        parsed = FitParser.parse(content)
+
+        assert (parsed.cns_start, parsed.cns_end) == (None, None)
+        assert (parsed.otu_start, parsed.otu_end) == (None, None)
+        assert parsed.surface_pressure_bar is None
+        # `dive_gas` has no ppO2 field at all; `dive_settings.po2_warn` is the device's
+        # threshold for the whole dive rather than this cylinder's plan, so reading it
+        # here would attribute a global setting to every gas.
+        assert parsed.mixtures[0].po2_limit is None
+
     def test_an_explicitly_recorded_zero_is_still_a_reading(self):
         """The rule is "don't invent", not "treat zero as missing" - a nitrox export
         that records `Helium: 0` has genuinely recorded 0 % helium."""
@@ -1562,6 +2178,46 @@ class TestParsersInventNothing:
 
         assert mixture.helium == 0.0
         assert mixture.oxygen == 32.0
+
+    def test_xml_zero_cylinder_pressures_are_not_a_fill(self):
+        """The one place a *pressure* zero is the exception to the rule above, and why
+        `DiveMixtureSchema` nulls it: DM5 writes `0` for a cylinder with no transmitter,
+        where the same dive's JSON omits the keys. The 49 % bottle here is the real one
+        from `Dive_2025-06-03-1215.xml`, whose `<TransmitterId>` is nil.
+
+        Both halves in one mixture: the pressures go, `Helium: 0` stays.
+        """
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <DiveMixtures><DiveMixture>
+    <EndPressure>0</EndPressure>
+    <Helium>0</Helium>
+    <Oxygen>49</Oxygen>
+    <Size>11</Size>
+    <StartPressure>0</StartPressure>
+  </DiveMixture></DiveMixtures>
+</Dive>
+""".encode()
+
+        mixture = SuuntoXmlParser.parse(content).mixtures[0]
+
+        assert mixture.start_pressure is None
+        assert mixture.end_pressure is None
+        assert mixture.helium == 0.0
+        assert (mixture.oxygen, mixture.volume) == (49.0, 11.0)
+
+    def test_json_zero_cylinder_pressures_are_not_a_fill(self):
+        """Unattested in the JSON corpus - which says "no transmitter" by omitting the
+        keys - but the rule lives on the schema, so the parsers cannot disagree about the
+        same cylinder depending on which export it arrived in."""
+        content = json.dumps(
+            {"DeviceLog": {"Header": {"Diving": {"Gases": [{"Oxygen": 0.49, "StartPressure": 0, "EndPressure": 0}]}}}}
+        ).encode()
+
+        mixture = SuuntoJsonParser.parse(content).mixtures[0]
+
+        assert (mixture.start_pressure, mixture.end_pressure) == (None, None)
+        assert mixture.oxygen == 49.0
 
 
 class TestParseDiveFile:

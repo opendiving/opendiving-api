@@ -43,6 +43,28 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     weight: Mapped[float | None] = mapped_column(Float, default=None)
     trip_id: Mapped[int | None] = mapped_column(ForeignKey("trip.id", ondelete="SET NULL"), default=None, index=True)
 
+    # Oxygen-exposure and surface-pressure readings, written **only** by the import path
+    # (`services/dive_files.py::store_dive_file`) and never through the dive form. They
+    # are the dive computer's own accounting - CNS and OTU depend on the algorithm the
+    # device ran and on the diver's exposure history, neither of which is reconstructable
+    # from a logged dive - so a hand-typed value would be a guess wearing a reading's
+    # clothes. See DECISIONS.md.
+    #
+    # Start *and* end for both, because the pair is what a diver reads: CNS 8 -> 9 on a
+    # repetitive dive says something an end value of 9 alone does not.
+    #
+    # `Float`, not `Integer`, for CNS: the Suunto DM5 XML export rounds it to whole
+    # percent but the JSON export of the same dive records 0.069 (a 0-1 fraction, i.e.
+    # 6.9 %), and storing the finer reading as 7 would throw away precision the file has.
+    cns_start: Mapped[float | None] = mapped_column(Float, default=None)
+    cns_end: Mapped[float | None] = mapped_column(Float, default=None)
+    otu_start: Mapped[float | None] = mapped_column(Float, default=None)
+    otu_end: Mapped[float | None] = mapped_column(Float, default=None)
+    # Ambient pressure at the surface, in bar - altitude and weather. Display-only:
+    # `services/dive_gas.py` deliberately assumes 1 bar at the surface, and that is a
+    # recorded choice rather than an oversight, so this column does not feed SAC/RMV.
+    surface_pressure_bar: Mapped[float | None] = mapped_column(Float, default=None)
+
     @declared_attr.directive
     @classmethod
     def __table_args__(cls) -> tuple:
@@ -57,6 +79,24 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
             # deliberate entry (a drysuit with a heavy undergarment, a freedive), and it's
             # worth being able to tell apart from "didn't record it" (NULL).
             CheckConstraint("weight IS NULL OR weight >= 0", name="ck_dive_weight_non_negative"),
+            # `>= 0` rather than `> 0` for the same reason as `weight`: a dive that began
+            # with no oxygen loading at all records a real 0, and that is worth telling
+            # apart from "didn't record it". No upper bound - CNS above 100 % is exactly
+            # the reading a diver most needs to see, and clamping it would hide it.
+            CheckConstraint("cns_start IS NULL OR cns_start >= 0", name="ck_dive_cns_start_non_negative"),
+            CheckConstraint("cns_end IS NULL OR cns_end >= 0", name="ck_dive_cns_end_non_negative"),
+            CheckConstraint("otu_start IS NULL OR otu_start >= 0", name="ck_dive_otu_start_non_negative"),
+            CheckConstraint("otu_end IS NULL OR otu_end >= 0", name="ck_dive_otu_end_non_negative"),
+            # Bounded on both sides, unlike everything above, because this one has real
+            # physical limits and the corpus sits well inside them (1.031-1.067 bar across
+            # 384 exports). The band spans roughly sea level in a deep low down to a 5 000 m
+            # altitude lake; anything outside it is a unit error - both Suunto exports write
+            # this field in Pascal, where an unconverted 105 700 is off by five orders of
+            # magnitude - rather than a dive somewhere unusual.
+            CheckConstraint(
+                "surface_pressure_bar IS NULL OR (surface_pressure_bar >= 0.5 AND surface_pressure_bar <= 1.2)",
+                name="ck_dive_surface_pressure_range",
+            ),
             # Serves `_cached_read_dives` (`GET /dives`, by far the hottest query on this
             # table): `WHERE user_id = ... AND is_deleted = false ORDER BY start_time DESC`.
             # `is_deleted` isn't a column here - the partial predicate already pins it to

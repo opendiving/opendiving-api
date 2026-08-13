@@ -60,9 +60,28 @@ constraints Postgres actually enforces. It is marked `skipif` on a connection at
 database reachable those tests **skip silently** rather than fail.
 
 That matters if you touch `models/` or add a `CheckConstraint`: your local run can be green because
-the tests that would have caught you never executed. Bring the stack up (`docker compose up`) and
-re-run, or use the containerised suite — note that `docker-compose.test.yml` is an *overlay*, so it
-has to be passed alongside the base file rather than on its own:
+the tests that would have caught you never executed.
+
+**Bringing the stack up is not enough on its own**, and this is the trap worth knowing. The skip is
+a connection attempt against `POSTGRES_SERVER`, which `src/.env` sets to `db` — the *compose*
+hostname, which does not resolve on the host. So `docker compose up` followed by `uv run pytest` on
+the host still skips all 44, no matter that Postgres is up and its port is published. Point the host
+run at the published port instead:
+
+```bash
+POSTGRES_SERVER=localhost ENVIRONMENT=local SECRET_KEY=testsecret uv run pytest -q
+```
+
+That is the difference between `705 passed, 70 skipped` and `775 passed`. The totals move with every
+test added and these two will drift; **`70 skipped` against no skip line at all is the part worth
+reading**, and it is the only thing on screen that tells you which of the two runs you just did. CI
+sets exactly that variable and fails the job if anything skips (see below), so this is about getting
+the answer before you push rather than after — but the skip is silent and a green local run looks
+identical either way, so it is easy to spend a review round believing those tests ran.
+
+Alternatively use the containerised suite, where `db` resolves and nothing needs overriding — note
+that `docker-compose.test.yml` is an *overlay*, so it has to be passed alongside the base file
+rather than on its own:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.test.yml up --build --abort-on-container-exit api
