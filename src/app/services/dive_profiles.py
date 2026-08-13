@@ -29,14 +29,17 @@ from uuid6 import uuid7
 
 from ..models.dive_profile import DiveProfile
 from ..schemas.dive_profile import (
+    CEILING_SCALE,
     DEPTH_SCALE,
     PRESSURE_SCALE,
     TEMPERATURE_SCALE,
+    DiveProfileEvent,
     DiveProfileInfo,
     DiveProfilePressureSeries,
     DiveProfileRead,
     DiveProfileSeries,
     ParsedProfileSchema,
+    ProfileEventType,
 )
 from .dive_parsers import DiveParseError, DiveParser
 
@@ -46,12 +49,22 @@ logger = logging.getLogger(__name__)
 # different samples from the same bytes. Stored on the row, so `should_extract` can tell
 # "already done" from "done by an older extractor", and so the backfill script has
 # something to select on.
-PROFILE_EXTRACTOR_VERSION = 1
+#
+# 2: the deco `ceiling` channel and `events`, which every parser had been dropping.
+PROFILE_EXTRACTOR_VERSION = 2
 
 # Per channel, applied server-side at extraction. A 2026 Suunto Ocean export carries
 # 3 933 temperature samples on one dive, which is already past this; depth (395) never
 # reaches it. See `downsample` for why the cap is enforced by min/max bucketing.
 MAX_POINTS_PER_CHANNEL = 1200
+
+# Events are capped by count and **not** by the bucketing below: min/max over a bucket is
+# meaningless for a marker, and a chart that showed "some of the gas switches" would be
+# worse than one that showed none. The cap exists for the reason `_MAX_CYLINDERS` does in
+# the parsers - nothing else bounds how many markers a file may claim, and every one of
+# them is a few dozen bytes in a payload that is fetched whole - not because any real dive
+# approaches it: the worst dive in the corpus produces 17.
+MAX_EVENTS = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,19 +83,39 @@ class ProfilePressureSeries(ProfileSeries):
 
 
 @dataclass(frozen=True, slots=True)
+class ProfileEvent:
+    """One stored marker: an integer second, a type from the closed vocabulary, and
+    whatever the device said about it."""
+
+    t: int
+    type: ProfileEventType
+    gas_number: int | None = None
+    label: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class NormalizedProfile:
     """A dive's channels, ready to store: rebased to zero, deduped, sorted, capped."""
 
     depth: ProfileSeries | None = None
+    ceiling: ProfileSeries | None = None
     temperature: ProfileSeries | None = None
     pressure: list[ProfilePressureSeries] = field(default_factory=list)
+    events: list[ProfileEvent] = field(default_factory=list)
 
     @property
     def channels(self) -> list[str]:
-        """Which curves a chart would draw, in the order the UI stacks them."""
+        """Which curves a chart would draw, in the order the UI stacks them.
+
+        `ceiling` sits next to `depth` because it is drawn on depth's axis rather than one
+        of its own - a ceiling of 3 m has to land at the same y as a depth of 3 m, or the
+        shaded no-ascent region wouldn't bound the curve it describes.
+        """
         present = []
         if self.depth is not None:
             present.append("depth")
+        if self.ceiling is not None:
+            present.append("ceiling")
         if self.temperature is not None:
             present.append("temperature")
         if self.pressure:
@@ -104,18 +137,35 @@ class NormalizedProfile:
         return len(self.depth.t) if self.depth is not None else 0
 
     def _all_series(self) -> list[ProfileSeries]:
-        return [series for series in (self.depth, self.temperature, *self.pressure) if series is not None]
+        return [series for series in (self.depth, self.ceiling, self.temperature, *self.pressure) if series is not None]
 
     def to_data(self) -> dict[str, Any]:
-        """The JSONB payload. Absent key, never null, for a channel this dive doesn't carry."""
+        """The JSONB payload. Absent key, never null, for a channel this dive doesn't carry.
+
+        Events follow the same rule as the channels: a dive whose file recorded none has no
+        `events` key rather than an empty array, so the payload never carries a shape that
+        means the same thing two ways.
+        """
         data: dict[str, Any] = {}
         if self.depth is not None:
             data["depth"] = {"t": self.depth.t, "v": self.depth.v}
+        if self.ceiling is not None:
+            data["ceiling"] = {"t": self.ceiling.t, "v": self.ceiling.v}
         if self.temperature is not None:
             data["temperature"] = {"t": self.temperature.t, "v": self.temperature.v}
         if self.pressure:
             data["pressure"] = [
                 {"gas_number": cylinder.gas_number, "t": cylinder.t, "v": cylinder.v} for cylinder in self.pressure
+            ]
+        if self.events:
+            data["events"] = [
+                # Keys a value was never established for are left out rather than written
+                # as null, the same way an absent channel is - so `gas_number` present and
+                # null can't come to mean something different from absent.
+                {"t": event.t, "type": event.type.value}
+                | ({"gas_number": event.gas_number} if event.gas_number is not None else {})
+                | ({"label": event.label} if event.label is not None else {})
+                for event in self.events
             ]
         return data
 
@@ -167,6 +217,40 @@ def _rebase(points: list[tuple[float, int]], origin: float) -> ProfileSeries:
     return ProfileSeries(t=ordered, v=[by_second[second] for second in ordered])
 
 
+def _rebase_events(parsed: ParsedProfileSchema, origin: float) -> list[ProfileEvent]:
+    """Put the file's markers on the same integer-second axis as the channels.
+
+    **Clamped at zero rather than dropped below it.** An event that precedes the first
+    sample is the ordinary case, not a corrupt one: a Suunto XML export numbers its samples
+    from `<Time>1</Time>` while recording the dive's opening gas selection at
+    `<GasChangeTime>0</GasChangeTime>`, so rebasing puts it at -1. Discarding it would lose
+    which gas a dive *started* on - the one marker a two-gas dive most needs, and the one
+    Phase 4's per-tank attribution has to begin from. There is nowhere else on a chart for
+    "before the first reading" to go, so it goes at the start.
+
+    The origin is the *sample* channels' - see `normalize`. Events are sorted here rather
+    than being required to arrive sorted, because unlike the sample channels there is only
+    one stream of them and nothing a parser knows that this doesn't: the XML export lists
+    gas changes nested inside each `<DiveMixture>`, so file order is cylinder order, not
+    time order. A stable sort, so two markers on the same second keep the order the file
+    listed them in.
+
+    Deduped on the whole event, keeping the first. Rounding onto integer seconds is what
+    makes this necessary: a device that records the same occurrence twice within a second -
+    a `Notify` and the matching `State` transition, in the Suunto JSON exports - would
+    otherwise stack two identical ticks on one pixel.
+    """
+    seen: set[tuple[int, ProfileEventType, int | None, str | None]] = set()
+    ordered: list[ProfileEvent] = []
+    for event in sorted(parsed.events, key=lambda event: event.t):
+        key = (max(0, round(event.t - origin)), event.type, event.gas_number, event.label)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(ProfileEvent(t=key[0], type=event.type, gas_number=event.gas_number, label=event.label))
+    return ordered
+
+
 def normalize(parsed: ParsedProfileSchema) -> NormalizedProfile | None:
     """Turn a parser's raw per-channel arrays into the stored shape, or `None` if empty.
 
@@ -178,16 +262,27 @@ def normalize(parsed: ParsedProfileSchema) -> NormalizedProfile | None:
     first sample: the channels share one x axis on the chart, so shifting them
     independently would slide the temperature curve off the depth curve it is meant to
     line up with.
+
+    **Events do not get a vote on the origin**, though they are rebased against it. They
+    are markers a device wrote alongside the samples rather than a stream with its own
+    cadence, and letting one of them be the earliest thing in the file would slide every
+    curve away from the axis the samples define. A file consisting only of events has no
+    profile to draw and returns `None` for the same reason a file of no readings does.
     """
     channels: list[list[tuple[float, int]]] = []
     depth_points = list(zip(parsed.depth.t, parsed.depth.v, strict=True)) if parsed.depth else []
+    ceiling_points = list(zip(parsed.ceiling.t, parsed.ceiling.v, strict=True)) if parsed.ceiling else []
     temperature_points = (
         list(zip(parsed.temperature.t, parsed.temperature.v, strict=True)) if parsed.temperature else []
     )
     pressure_points = [
         (cylinder.gas_number, list(zip(cylinder.t, cylinder.v, strict=True))) for cylinder in parsed.pressure
     ]
-    channels = [points for points in (depth_points, temperature_points, *(p for _, p in pressure_points)) if points]
+    channels = [
+        points
+        for points in (depth_points, ceiling_points, temperature_points, *(p for _, p in pressure_points))
+        if points
+    ]
 
     if not channels:
         return None
@@ -198,6 +293,7 @@ def normalize(parsed: ParsedProfileSchema) -> NormalizedProfile | None:
 
     return NormalizedProfile(
         depth=_rebase(depth_points, origin) if depth_points else None,
+        ceiling=_rebase(ceiling_points, origin) if ceiling_points else None,
         temperature=_rebase(temperature_points, origin) if temperature_points else None,
         pressure=[
             ProfilePressureSeries(gas_number=gas_number, t=series.t, v=series.v)
@@ -205,6 +301,7 @@ def normalize(parsed: ParsedProfileSchema) -> NormalizedProfile | None:
                 (number, _rebase(points, origin)) for number, points in pressure_points if points
             )
         ],
+        events=_rebase_events(parsed, origin),
     )
 
 
@@ -253,8 +350,17 @@ def _downsample_series(t: list[int], v: list[int], max_points: int) -> tuple[lis
     return [t[index] for index in picked], [v[index] for index in picked]
 
 
-def downsample(profile: NormalizedProfile, max_points: int = MAX_POINTS_PER_CHANNEL) -> NormalizedProfile:
-    """Cap every channel independently. A channel already under the cap is untouched."""
+def downsample(
+    profile: NormalizedProfile, max_points: int = MAX_POINTS_PER_CHANNEL, max_events: int = MAX_EVENTS
+) -> NormalizedProfile:
+    """Cap every channel independently. A channel already under the cap is untouched.
+
+    Events are truncated rather than bucketed. Min/max over a window of markers means
+    nothing - there is no "highest" gas switch - and thinning them would leave a chart
+    showing some of a dive's switches with no way to tell that it was showing some. So the
+    cap is a plain head-of-list, far above any real dive (see `MAX_EVENTS`), and hitting it
+    is logged rather than passed off as a complete set.
+    """
 
     def capped(series: ProfileSeries | None) -> ProfileSeries | None:
         if series is None:
@@ -262,8 +368,16 @@ def downsample(profile: NormalizedProfile, max_points: int = MAX_POINTS_PER_CHAN
         t, v = _downsample_series(series.t, series.v, max_points)
         return ProfileSeries(t=t, v=v)
 
+    if len(profile.events) > max_events:
+        logger.warning(
+            "Profile carries %d events, keeping the first %d - this is far past any real dive",
+            len(profile.events),
+            max_events,
+        )
+
     return NormalizedProfile(
         depth=capped(profile.depth),
+        ceiling=capped(profile.ceiling),
         temperature=capped(profile.temperature),
         pressure=[
             ProfilePressureSeries(gas_number=cylinder.gas_number, t=t, v=v)
@@ -271,6 +385,7 @@ def downsample(profile: NormalizedProfile, max_points: int = MAX_POINTS_PER_CHAN
                 (cylinder, _downsample_series(cylinder.t, cylinder.v, max_points)) for cylinder in profile.pressure
             )
         ],
+        events=profile.events[:max_events],
     )
 
 
@@ -361,6 +476,7 @@ async def store_profile(
     ordering, for the same reason, as `store_dive_file`.
     """
     depth_values = profile.depth.v if profile.depth else []
+    ceiling_values = profile.ceiling.v if profile.ceiling else []
     temperature_values = profile.temperature.v if profile.temperature else []
     pressure_values = [value for cylinder in profile.pressure for value in cylinder.v]
 
@@ -373,7 +489,12 @@ async def store_profile(
             extractor_version=PROFILE_EXTRACTOR_VERSION,
             duration_seconds=profile.duration_seconds,
             depth_sample_count=profile.depth_sample_count,
+            # A count rather than `None` when there are none: this extractor version looked
+            # and found nothing, which is a different fact from an older one never having
+            # looked - and the difference is what a later backfill selects on.
+            event_count=len(profile.events),
             max_depth_cm=max(depth_values) if depth_values else None,
+            max_ceiling_cm=max(ceiling_values) if ceiling_values else None,
             min_temperature_c10=min(temperature_values) if temperature_values else None,
             max_temperature_c10=max(temperature_values) if temperature_values else None,
             min_pressure_bar10=min(pressure_values) if pressure_values else None,
@@ -422,14 +543,28 @@ def to_read_schema(loaded: LoadedProfile) -> DiveProfileRead:
     """The stored payload as the wire shape, integers untouched."""
     data = loaded.data or {}
     depth = data.get("depth")
+    ceiling = data.get("ceiling")
     temperature = data.get("temperature")
     return DiveProfileRead(
         duration_seconds=loaded.duration_seconds,
         depth=DiveProfileSeries(t=depth["t"], v=depth["v"]) if depth else None,
+        ceiling=DiveProfileSeries(t=ceiling["t"], v=ceiling["v"]) if ceiling else None,
         temperature=DiveProfileSeries(t=temperature["t"], v=temperature["v"]) if temperature else None,
         pressure=[
             DiveProfilePressureSeries(gas_number=cylinder["gas_number"], t=cylinder["t"], v=cylinder["v"])
             for cylinder in data.get("pressure") or []
+        ],
+        events=[
+            # `.get` rather than `[...]` for the two optional keys, because `to_data` omits
+            # them rather than writing nulls - so a row written by any version of this
+            # module reads back without a `KeyError`.
+            DiveProfileEvent(
+                t=event["t"],
+                type=ProfileEventType(event["type"]),
+                gas_number=event.get("gas_number"),
+                label=event.get("label"),
+            )
+            for event in data.get("events") or []
         ],
     )
 
@@ -468,7 +603,9 @@ async def get_profile_infos_for_dives(db: AsyncSession, *, dive_ids: list[int]) 
         DiveProfile.uuid,
         DiveProfile.duration_seconds,
         DiveProfile.depth_sample_count,
+        DiveProfile.event_count,
         DiveProfile.max_depth_cm,
+        DiveProfile.max_ceiling_cm,
         DiveProfile.min_temperature_c10,
         DiveProfile.max_temperature_c10,
         DiveProfile.min_pressure_bar10,
@@ -481,6 +618,11 @@ async def get_profile_infos_for_dives(db: AsyncSession, *, dive_ids: list[int]) 
         channels: list[str] = []
         if row.depth_sample_count > 0:
             channels.append("depth")
+        # A dive that never owed a decompression stop has no ceiling column to draw, which
+        # is exactly what a NULL extreme means here - the same derivation as the others,
+        # and the reason a ceiling of zero is stored as no reading rather than as zero.
+        if row.max_ceiling_cm is not None:
+            channels.append("ceiling")
         if row.min_temperature_c10 is not None:
             channels.append("temperature")
         if row.min_pressure_bar10 is not None:
@@ -490,8 +632,13 @@ async def get_profile_infos_for_dives(db: AsyncSession, *, dive_ids: list[int]) 
             uuid=row.uuid,
             duration_seconds=row.duration_seconds,
             depth_sample_count=row.depth_sample_count,
+            # Deliberately not folded into `channels`: events aren't a curve, and a client
+            # deciding whether to offer a "markers" toggle wants the count, not membership
+            # of a list of axes.
+            event_count=row.event_count,
             channels=channels,
             max_depth=_scaled(row.max_depth_cm, DEPTH_SCALE),
+            max_ceiling=_scaled(row.max_ceiling_cm, CEILING_SCALE),
             min_temperature=_scaled(row.min_temperature_c10, TEMPERATURE_SCALE),
             max_temperature=_scaled(row.max_temperature_c10, TEMPERATURE_SCALE),
             min_pressure=_scaled(row.min_pressure_bar10, PRESSURE_SCALE),

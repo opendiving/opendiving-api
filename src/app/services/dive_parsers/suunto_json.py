@@ -5,10 +5,15 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from ...schemas.dive_mixture import GasRole
-from ...schemas.dive_profile import ParsedPressureSeries, ParsedProfileSchema
+from ...schemas.dive_profile import (
+    ParsedPressureSeries,
+    ParsedProfileEvent,
+    ParsedProfileSchema,
+    ProfileEventType,
+)
 from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from .base import DiveParser
-from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, scaled_int_or_none, series
+from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, ceiling_cm, scaled_int_or_none, series
 from .exceptions import EXTRACTION_ERRORS, DiveParseError
 
 logger = logging.getLogger(__name__)
@@ -110,6 +115,97 @@ _GAS_ROLE_BY_STATE = {"primary": GasRole.BOTTOM}
 
 def _role(state: Any) -> GasRole | None:
     return _GAS_ROLE_BY_STATE.get(state.strip().lower()) if isinstance(state, str) else None
+
+
+# The sample keys an event can arrive under. Both, because the export generations
+# disagree: the D5 shapes write `Events`, the 2026 Ocean writes `DiveEvents`, and the Ocean
+# uses `Events` for unrelated activity bookkeeping (`Lap`, `Pause`, `ArrayBegin`) at the
+# same time. Reading only one of them is how `_collect_gas_switch` came to miss every gas
+# switch in the D5 corpus - harmless there, since those exports carry a `Gases` block it
+# never needs to fall back from, and fixed here because a chart marker has no such backup.
+_EVENT_KEYS = ("Events", "DiveEvents")
+
+# `Notify[].Type` onto the two stop types, matched case-insensitively. A normalization
+# table rather than a cast, for the same reason `_GAS_ROLE_BY_STATE` is one: this
+# vocabulary is Suunto's, and a value not listed here must come out as something other than
+# a stop rather than being forced into the nearest one.
+#
+# Deliberately only the two the diver is being told to *do*. The corpus also carries
+# "Deep Stop Ahead", "Safety Stop Ahead" and "Stop done", which are the prompt before and
+# the confirmation after; marking all three would put three ticks on a chart for one stop.
+_STOP_TYPE_BY_NOTIFY = {
+    "deep stop": ProfileEventType.DEEP_STOP,
+    "safety stop": ProfileEventType.SAFETY_STOP,
+}
+
+# Event families that become an `OTHER` carrying the device's own wording. These are the
+# ceiling breaks, ppO2 alarms and ascent-rate alarms - the events a tech diver most wants
+# marked, and the ones no closed vocabulary of ours should be paraphrasing. Rare enough to
+# render: 69 across the 35-dive corpus.
+_ALERT_NAMES = ("Alarm", "Warning")
+
+
+def _sample_events(sample: dict[str, Any], elapsed: float) -> list[ParsedProfileEvent]:
+    """The markers one sample object carries, if any.
+
+    Three families are read and the rest are dropped, which is a decision about noise
+    rather than about trust. `GasSwitch` is the dive's gas history. `Notify` is the device
+    prompting the diver, and two of its values are stops. `Alarm`/`Warning` are the things
+    that went wrong. **Everything under `State` is dropped**: it is the computer narrating
+    its own mode - "Below Surface", "Wet Outside", "Surface Calculation", "Dive Active",
+    "Tank pressure available" - which is not an event on a dive, and five of them land on
+    t=0 of every single dive in the corpus. The 2026 Ocean's `DiveState`, `DiveStatus`,
+    `Lap`, `Pause` and `ArrayBegin` go the same way and for the same reason.
+
+    Only the `Active: true` edge is emitted. These arrive in pairs - `Deep Stop` true at
+    1 424 s and false at 1 454 s is one 30-second stop - and a chart tick has no way to show
+    which half of a pair it is, so the tick marks the start and the pair's other half would
+    only double it. A `GasSwitch` has no `Active` and is not a pair.
+    """
+    events: list[ParsedProfileEvent] = []
+    for key in _EVENT_KEYS:
+        raw = sample.get(key)
+        if raw is None:
+            continue
+        for entry in raw if isinstance(raw, list) else [raw]:
+            if not isinstance(entry, dict):
+                continue
+            for name, payload in entry.items():
+                event = _event(name, payload, elapsed)
+                if event is not None:
+                    events.append(event)
+    return events
+
+
+def _event(name: str, payload: Any, elapsed: float) -> ParsedProfileEvent | None:
+    """One `{name: payload}` pair as an event, or `None` for the ones not worth a marker."""
+    if name == "GasSwitch" and isinstance(payload, dict):
+        number = payload.get("GasNumber")
+        return ParsedProfileEvent(
+            t=elapsed,
+            type=ProfileEventType.GAS_SWITCH,
+            # The file's own number, the same one `_mixtures_from_cylinders` builds
+            # cylinders from and `_parse_samples` labels the pressure channels with - so a
+            # switch marker joins to the cylinder it switched to. An Ocean numbers from 0.
+            gas_number=int(number) if number is not None else None,
+            label=None,
+        )
+
+    if not isinstance(payload, dict) or payload.get("Active") is not True:
+        return None
+    reported = payload.get("Type")
+    if not isinstance(reported, str) or not reported.strip():
+        return None
+
+    if name == "Notify":
+        stop = _STOP_TYPE_BY_NOTIFY.get(reported.strip().lower())
+        return None if stop is None else ParsedProfileEvent(t=elapsed, type=stop, gas_number=None, label=None)
+    if name in _ALERT_NAMES:
+        # The device's wording verbatim, which is the whole point of `OTHER` - "Ceiling
+        # Broken" says more than any type we could map it onto, and re-spelling it here
+        # would be this module inventing a vocabulary for someone else's alarms.
+        return ParsedProfileEvent(t=elapsed, type=ProfileEventType.OTHER, gas_number=None, label=reported.strip())
+    return None
 
 
 def _parse_mixture(gas: dict[str, Any], gas_number: int) -> DiveMixtureSchema:
@@ -321,8 +417,9 @@ class SuuntoJsonParser(DiveParser):
 
     Extracts the fields with a direct equivalent on the `Dive`/`DiveMixture`
     backend models (`models/dive.py`, `models/dive_mixture.py`), plus -
-    separately, via `parse_profile` - the per-sample depth/temperature/tank-
-    pressure curves stored as `DiveProfile`. The export has plenty of other
+    separately, via `parse_profile` - the per-sample depth/ceiling/temperature/
+    tank-pressure curves and the sample stream's events, stored as
+    `DiveProfile`. The export has plenty of other
     fields (per-compartment tissue loading, algorithm metadata, GPS track,
     battery telemetry) with nowhere to persist them, so they aren't parsed at
     all. Gas mixtures come from
@@ -408,10 +505,12 @@ class SuuntoJsonParser(DiveParser):
         origin = datetime.fromisoformat(origin_text)
 
         depth: list[tuple[float, int]] = []
+        ceiling: list[tuple[float, int]] = []
         temperature: list[tuple[float, int]] = []
         # Insertion-ordered, so the cylinders come out in the order the device listed
         # them rather than sorted by a number that is only a label.
         pressure: dict[int, list[tuple[float, int]]] = {}
+        events: list[ParsedProfileEvent] = []
 
         for sample in samples:
             time_text = sample.get("TimeISO8601")
@@ -419,9 +518,18 @@ class SuuntoJsonParser(DiveParser):
                 continue
             elapsed = (datetime.fromisoformat(time_text) - origin).total_seconds()
 
+            events.extend(_sample_events(sample, elapsed))
+
             depth_cm = scaled_int_or_none(sample.get("Depth"), CENTIMETERS_PER_METER)
             if depth_cm is not None:
                 depth.append((elapsed, depth_cm))
+
+            # Unlike depth, a zero here is the *absence* of a reading: this export writes
+            # `"Ceiling": 0` on every no-deco sample where the DM5 XML of the same dive
+            # writes `xsi:nil`. See `ceiling_cm`, which is where the two are reconciled.
+            ceiling_value = ceiling_cm(sample.get("Ceiling"))
+            if ceiling_value is not None:
+                ceiling.append((elapsed, ceiling_value))
 
             temperature_c10 = _celsius_tenths(sample.get("Temperature"))
             if temperature_c10 is not None:
@@ -447,17 +555,19 @@ class SuuntoJsonParser(DiveParser):
                     continue
                 pressure.setdefault(gas_number, []).append((elapsed, cylinder_bar10))
 
-        if not depth and not temperature and not pressure:
+        if not depth and not temperature and not pressure and not ceiling:
             return None
 
         return ParsedProfileSchema(
             depth=series(depth),
+            ceiling=series(ceiling),
             temperature=series(temperature),
             pressure=[
                 ParsedPressureSeries(gas_number=gas_number, t=channel.t, v=channel.v)
                 for gas_number, channel in ((number, series(points)) for number, points in pressure.items())
                 if channel is not None
             ],
+            events=events,
         )
 
     @staticmethod

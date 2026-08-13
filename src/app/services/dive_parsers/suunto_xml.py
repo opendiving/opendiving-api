@@ -4,10 +4,16 @@ from decimal import Decimal
 import defusedxml.ElementTree as DET
 from defusedxml.common import DefusedXmlException
 
-from ...schemas.dive_profile import ParsedPressureSeries, ParsedProfileSchema, ParsedSeries
+from ...schemas.dive_profile import (
+    ParsedPressureSeries,
+    ParsedProfileEvent,
+    ParsedProfileSchema,
+    ParsedSeries,
+    ProfileEventType,
+)
 from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from .base import DiveParser
-from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, scaled_int_or_none
+from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, ceiling_cm, scaled_int_or_none
 from .exceptions import EXTRACTION_ERRORS, DiveParseError, UnsupportedDiveFileError
 
 _SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
@@ -99,6 +105,45 @@ def _transmitted_gas_number(root: ET.Element) -> int:
     return transmitted[0] if len(transmitted) == 1 else _XML_GAS_NUMBER
 
 
+def _gas_switches(root: ET.Element) -> list[ParsedProfileEvent]:
+    """When each cylinder became the one being breathed.
+
+    `<DiveGasChanges>` is nested *inside* each `<DiveMixture>` rather than being a list of
+    its own, which is what makes this the one gas-switch record in any of the three formats
+    that needs no join: the cylinder is the element the time was found in, so its
+    `gas_number` is its position in `<DiveMixtures>` - exactly what `_parse_mixture`
+    assigns. A marker on the chart and the row in the mixtures table therefore name the
+    same cylinder by construction rather than by agreement.
+
+    **A `<GasChangeTime>0</GasChangeTime>` is kept, and it is the common case** - 342 of the
+    corpus's 353 mixtures. On a single-gas dive it is the one marker saying the dive was
+    breathed on that gas throughout; on the two-gas dive it separates the 21/0 the diver
+    went down on from the 49/0 they came up on at 2 356 s. `normalize` is where it lands at
+    t=0 rather than at -1, since this format numbers samples from `<Time>1</Time>`.
+
+    **`<Marks>` is deliberately not read**, though it is the only other event-shaped block
+    in the format and the obvious candidate for bookmarks and stops. Its `<Type>` is an
+    undocumented numeric code, and the corpus says plainly that it cannot be guessed: 29
+    distinct values across 4 068 marks, of which the two most common (`257` and `19`) appear
+    in **all 384** exports at about 1.3 per dive, which is not what a diver-pressed bookmark
+    looks like. `<Heading>` is nil on 4 068 of them. Mapping `276`/`277` onto "deep stop
+    entered/left" would be the same mistake as reading `<Type>1</Type>` on a `<DiveMixture>`
+    as a gas role - a confident label over a number nobody has decoded. The JSON export of
+    these same dives spells its events out in words (`"Deep Stop"`, `"Ceiling Broken"`), so
+    a diver who wants them has a file that says so; this one does not.
+    """
+    switches: list[ParsedProfileEvent] = []
+    for gas_number, mix in enumerate(root.findall(f"{_tag('DiveMixtures')}/{_tag('DiveMixture')}"), start=1):
+        for change in mix.findall(f"{_tag('DiveGasChanges')}/{_tag('DiveGasChange')}"):
+            time = _float(change, "GasChangeTime")
+            if time is None:
+                continue
+            switches.append(
+                ParsedProfileEvent(t=time, type=ProfileEventType.GAS_SWITCH, gas_number=gas_number, label=None)
+            )
+    return switches
+
+
 def _float(element: ET.Element, tag: str) -> float | None:
     val = _text(element, tag)
     return float(val) if val is not None else None
@@ -146,9 +191,11 @@ class SuuntoXmlParser(DiveParser):
 
     Extracts the fields with a direct equivalent on the `Dive`/`DiveMixture` backend
     models (`models/dive.py`, `models/dive_mixture.py`), plus - separately, via
-    `parse_profile` - the per-sample depth/temperature/tank-pressure curves stored as
-    `DiveProfile`. The export has plenty of other fields (algorithm/tissue-loading stats,
-    deco stops, `<Marks>`) with nowhere to persist them, so they aren't parsed at all.
+    `parse_profile` - the per-sample depth/ceiling/temperature/tank-pressure curves and the
+    gas switches stored as `DiveProfile`. The export has plenty of other fields
+    (algorithm/tissue-loading stats, planned deco stops) with nowhere to persist them, so
+    they aren't parsed at all, and `<Marks>` is a refusal rather than an omission - see
+    `_gas_switches`.
     """
 
     key = "suunto_xml"
@@ -226,6 +273,8 @@ class SuuntoXmlParser(DiveParser):
         """
         depth_t: list[float] = []
         depth_v: list[int] = []
+        ceiling_t: list[float] = []
+        ceiling_v: list[int] = []
         temperature_t: list[float] = []
         temperature_v: list[int] = []
         pressure_t: list[float] = []
@@ -248,6 +297,15 @@ class SuuntoXmlParser(DiveParser):
                 depth_t.append(time)
                 depth_v.append(depth)
 
+            # `<Ceiling>` is nil on every sample of a no-deco dive, and this format never
+            # writes a zero: only 11 of the 384 exports carry a ceiling at all, and their
+            # 1 760 readings run 3.0-15.44 m. `ceiling_cm` treats the JSON export's `0`
+            # the same way, so the same dive gets the same channel from either file.
+            ceiling = ceiling_cm(_float(sample, "Ceiling"))
+            if ceiling is not None:
+                ceiling_t.append(time)
+                ceiling_v.append(ceiling)
+
             # `Temperature`, not `AveragedTemperature`: the raw reading is what the sensor
             # saw, and smoothing is a chart decision that shouldn't be baked into storage.
             temperature = scaled_int_or_none(_float(sample, "Temperature"), TENTHS_PER_UNIT)
@@ -260,17 +318,19 @@ class SuuntoXmlParser(DiveParser):
                 pressure_t.append(time)
                 pressure_v.append(pressure)
 
-        if not depth_t and not temperature_t and not pressure_t:
+        if not depth_t and not temperature_t and not pressure_t and not ceiling_t:
             return None
 
         return ParsedProfileSchema(
             depth=ParsedSeries(t=depth_t, v=depth_v) if depth_t else None,
+            ceiling=ParsedSeries(t=ceiling_t, v=ceiling_v) if ceiling_t else None,
             temperature=ParsedSeries(t=temperature_t, v=temperature_v) if temperature_t else None,
             pressure=(
                 [ParsedPressureSeries(gas_number=_transmitted_gas_number(root), t=pressure_t, v=pressure_v)]
                 if pressure_t
                 else []
             ),
+            events=_gas_switches(root),
         )
 
     @classmethod

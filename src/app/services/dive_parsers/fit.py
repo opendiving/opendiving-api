@@ -14,6 +14,7 @@ the format's one real trap, see `_native_value`.
 """
 
 import io
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from itertools import chain
@@ -23,10 +24,15 @@ import fitdecode
 from fitdecode.types import DevField, FieldData
 
 from ...schemas.dive_mixture import GasRole
-from ...schemas.dive_profile import ParsedPressureSeries, ParsedProfileSchema
+from ...schemas.dive_profile import (
+    ParsedPressureSeries,
+    ParsedProfileEvent,
+    ParsedProfileSchema,
+    ProfileEventType,
+)
 from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from .base import DiveParser
-from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, scaled_int, series
+from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, ceiling_cm, scaled_int, series
 from .exceptions import EXTRACTION_ERRORS, DiveParseError
 
 # Every FIT file carries the ASCII string `.FIT` at offset 8, immediately after the
@@ -80,6 +86,26 @@ _MAX_FRAMES = 100_000
 # reorders the mixtures and so misaligns `_tanks_for`'s positional pairing.
 _MESSAGE_INDEX_MASK = 0x0FFF
 
+# `event.event` values worth a marker on the chart, and what each becomes. A normalization
+# table rather than a cast, like the Suunto parsers': this is Garmin's vocabulary, and the
+# 30-odd members it does not list (`timer`, `battery_low`, `tank_pod_connected`, every
+# cycling and running alert the shared enum carries) must come out as nothing rather than
+# be forced into a type of ours.
+#
+# `timer` is the deliberate omission among them. It is the only `event` any file in the
+# corpus writes, and its `start`/`stop` pair is where the dive begins and ends - which the
+# profile's own axis already says, twice over.
+#
+# `dive_alert` is mapped to `OTHER` rather than being decoded further because its `data`
+# subfield is a 40-member enum (`deco_ceiling_broken`, `po2_crit_high`, `cns_warning`, ...)
+# that the profile spells out in words. Passing those words through as the label is the
+# same choice the JSON parser makes with `Alarm`/`Warning`, and for the same reason.
+_EVENT_TYPE_BY_NAME = {
+    "dive_gas_switched": ProfileEventType.GAS_SWITCH,
+    "user_marker": ProfileEventType.BOOKMARK,
+    "dive_alert": ProfileEventType.OTHER,
+}
+
 # How many cylinders one dive may describe, **in total**. No device pairs more than a
 # handful of transmitters - a Descent Mk3i tops out around five - so a file claiming
 # hundreds is describing something other than a dive.
@@ -90,6 +116,15 @@ _MESSAGE_INDEX_MASK = 0x0FFF
 # summaries, the telemetry sensors, and the merged result - rather than any one of them,
 # since capping the sources separately still let their union run to three times this.
 _MAX_CYLINDERS = 16
+
+# How many event markers one dive may describe. Bounded here as well as in
+# `services/dive_profiles.py` for the reason `_MAX_CYLINDERS` is: `_MAX_FRAMES` allows
+# 100 000 frames, and an `event` is a handful of bytes, so a small file can carry far more
+# of them than the extractor's own cap would ever store - and this parser would build every
+# one into a `ParsedProfileEvent` first. Deliberately the smaller of the two numbers, so
+# hitting it is a property of the file rather than of which cap ran first: the worst dive
+# in the corpus produces 17 markers.
+_MAX_EVENTS = 100
 
 
 def _native_value(frame: fitdecode.FitDataMessage, name: str) -> Any | None:
@@ -252,10 +287,14 @@ class _FitScan:
     tank_summaries: list[fitdecode.FitDataMessage] = field(default_factory=list)
 
     depth: list[tuple[datetime, float]] = field(default_factory=list)
+    ceiling: list[tuple[datetime, int]] = field(default_factory=list)
     temperature: list[tuple[datetime, int]] = field(default_factory=list)
     # Keyed by the transmitter's ANT id, insertion-ordered so cylinders come out in the
     # order the device first reported them.
     pressure: dict[int, list[tuple[datetime, float]]] = field(default_factory=dict)
+    # Kept as frames, unlike the sample channels: an `event` needs `_breathed_gases` to
+    # resolve the cylinder it names, and that list isn't complete until the scan is.
+    events: list[fitdecode.FitDataMessage] = field(default_factory=list)
 
 
 class FitParser(DiveParser):
@@ -263,10 +302,10 @@ class FitParser(DiveParser):
 
     Extracts the fields with a direct equivalent on the `Dive`/`DiveMixture` backend
     models (`models/dive.py`, `models/dive_mixture.py`), plus - separately, via
-    `parse_profile` - the per-sample depth/temperature/tank-pressure curves stored as
-    `DiveProfile`. FIT activity files carry a great deal more (GPS track, ascent rates,
-    deco ceilings, heart rate, battery telemetry) with nowhere to persist it, so none of
-    that is parsed.
+    `parse_profile` - the per-sample depth/ceiling/temperature/tank-pressure curves and
+    the file's dive events, stored as `DiveProfile`. FIT activity files carry a great deal
+    more (GPS track, ascent rates, heart rate, battery telemetry) with nowhere to persist
+    it, so none of that is parsed.
     """
 
     key = "fit"
@@ -435,6 +474,16 @@ class FitParser(DiveParser):
             cls._collect_record(scan, frame)
         elif frame.name == "tank_update":
             cls._collect_tank_update(scan, frame)
+        elif frame.name == "event" and _native_value(frame, "event") in _EVENT_TYPE_BY_NAME:
+            # Filtered at collection rather than at interpretation, which the cylinder
+            # paths above deliberately do the other way round. There the filter is on a
+            # field (`status`) that decides between real cylinders, so filtering early
+            # would let sixteen disabled entries crowd out the ones breathed. Here the
+            # filter *is* the vocabulary - a `timer` or a `battery_low` can never become an
+            # event - so keeping them would only let the shared cycling and running alerts
+            # in this enum consume the cap below.
+            if len(scan.events) < _MAX_EVENTS:
+                scan.events.append(frame)
 
     @staticmethod
     def _collect_record(scan: _FitScan, frame: fitdecode.FitDataMessage) -> None:
@@ -454,6 +503,16 @@ class FitParser(DiveParser):
         depth = _native_value(frame, "depth")
         if depth is not None:
             scan.depth.append((timestamp, depth))
+
+        # `next_stop_depth` is FIT's deco ceiling: the depth of the next required stop, in
+        # meters, scaled by the profile like `depth` beside it. **Not** `next_stop_time`,
+        # `time_to_surface` or `ndl_time`, which are the three neighbouring fields that
+        # measure durations rather than a depth. Unattested in this corpus - no file in it
+        # writes the field at all - which is the same position `tank_update` was in when it
+        # was implemented, and it is tested the same way, through `tests/helpers/fit.py`.
+        ceiling = ceiling_cm(_native_value(frame, "next_stop_depth"))
+        if ceiling is not None:
+            scan.ceiling.append((timestamp, ceiling))
 
         temperature = _native_value(frame, "temperature")
         if temperature is not None:
@@ -888,6 +947,56 @@ class FitParser(DiveParser):
             volume=None,
         )
 
+    @classmethod
+    def _events(cls, scan: _FitScan, elapsed: Callable[[datetime], float]) -> list[ParsedProfileEvent]:
+        """The `event` messages that describe the dive, as chart markers.
+
+        The one that needs work is `dive_gas_switched`, whose `data` field holds the
+        switched-to gas's **`message_index`** - the device's own key for a `dive_gas` entry,
+        which is not the `gas_number` anything downstream uses. Mixtures are numbered by
+        position in `_breathed_gases`, so the index is resolved through that same list and
+        a marker lands on the cylinder the dive form shows.
+
+        Where it cannot be resolved the marker is still emitted, with `gas_number` left
+        null. A switch to a gas whose `dive_gas` was `disabled` (so `_breathed_gases`
+        dropped it) or absent is a real switch that happened; saying "a gas switch, to
+        something this file doesn't describe" is honest, where guessing a position would be
+        the join-by-hope `_tanks_for` refuses two methods up.
+        """
+        positions = {
+            int(index) & _MESSAGE_INDEX_MASK: position
+            for position, index in enumerate(
+                (_native_raw(gas, "message_index") for gas in cls._breathed_gases(scan)), start=1
+            )
+            if index is not None
+        }
+
+        events: list[ParsedProfileEvent] = []
+        for frame in scan.events:
+            timestamp = _native_value(frame, "timestamp")
+            name = _native_value(frame, "event")
+            event_type = _EVENT_TYPE_BY_NAME.get(name) if isinstance(name, str) else None
+            if not isinstance(timestamp, datetime) or event_type is None:
+                continue
+            data = _native_value(frame, "data")
+            gas_number = positions.get(int(data) & _MESSAGE_INDEX_MASK) if isinstance(data, int) else None
+            events.append(
+                ParsedProfileEvent(
+                    t=elapsed(timestamp),
+                    type=event_type,
+                    gas_number=gas_number if event_type is ProfileEventType.GAS_SWITCH else None,
+                    # `data` renders through the profile's own `dive_alert` enum for that
+                    # event, so this is the device's wording - `deco_ceiling_broken`, not a
+                    # number. An alert whose code is outside the enum decodes to the bare
+                    # integer, which is still more than "something happened".
+                    label=str(data) if event_type is ProfileEventType.OTHER and data is not None else None,
+                )
+            )
+        # An `OTHER` with nothing to say is dropped rather than failing the extraction:
+        # `_validate_events` rejects it, and a file whose one unreadable alert took its
+        # depth curve down with it would be the opposite of what that rule is for.
+        return [event for event in events if event.type is not ProfileEventType.OTHER or event.label]
+
     @staticmethod
     def _earliest_sample(scan: _FitScan) -> datetime:
         """The first reading on any channel, for a file whose `session` has no start time.
@@ -901,6 +1010,7 @@ class FitParser(DiveParser):
         return min(
             chain(
                 (timestamp for timestamp, _ in scan.depth),
+                (timestamp for timestamp, _ in scan.ceiling),
                 (timestamp for timestamp, _ in scan.temperature),
                 *((timestamp for timestamp, _ in readings) for readings in scan.pressure.values()),
             )
@@ -915,7 +1025,7 @@ class FitParser(DiveParser):
         zero doesn't matter (`services/dive_profiles.py` rebases onto the earliest
         reading across all channels anyway), only that the channels agree on it.
         """
-        if not scan.depth and not scan.temperature and not scan.pressure:
+        if not scan.depth and not scan.temperature and not scan.pressure and not scan.ceiling:
             return None
 
         start_time = _native_value(scan.session, "start_time") if scan.session is not None else None
@@ -926,6 +1036,9 @@ class FitParser(DiveParser):
 
         return ParsedProfileSchema(
             depth=series([(elapsed(t), scaled_int(v, CENTIMETERS_PER_METER)) for t, v in scan.depth]),
+            # Already in centimeters: `ceiling_cm` scaled it at collection, since that is
+            # also where a zero was ruled out as "no ceiling".
+            ceiling=series([(elapsed(t), v) for t, v in scan.ceiling]),
             temperature=series([(elapsed(t), scaled_int(v, TENTHS_PER_UNIT)) for t, v in scan.temperature]),
             # Labelled 1, 2, ... in the order the device first reported each pod, never by
             # `sensor` - that is an ANT id (a serial, e.g. 2411100050), so it would read as
@@ -949,4 +1062,5 @@ class FitParser(DiveParser):
                 )
                 if channel is not None
             ],
+            events=cls._events(scan, elapsed),
         )
