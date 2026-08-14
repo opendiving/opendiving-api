@@ -4428,7 +4428,9 @@ stopped both Suunto parsers from filling it, and *"`DiveMixture.role` is a struc
 the gas-name synthesis that was rejected"* took the one fact `Gases[].State` really carried and gave
 it a typed column of its own. What was left was a column no importer wrote and nothing on the server
 read - only the web form, echoing back a string it had generated itself a moment earlier
-(`getDefaultMixtureName`, "Tank 1").
+(`getDefaultMixtureName`: "Back Gas" for the first cylinder, "Deco Gas 1" for the next). The dev
+corpus says the same thing: 535 of 1 361 rows carried a name, and 527 of those were exactly those
+two defaults.
 
 Keeping it had a cost beyond the dead weight. The label a diver actually recognizes is a pure
 function of the fractions - the web client derives it with `gasName(oxygen, helium)` and has never
@@ -4444,11 +4446,15 @@ collecting a label that no longer lands anywhere. The web client's matching chan
 `chore/remove-mixture-name` branch; iOS sends no mixtures yet.
 
 Per *"Schema changes have no migration tool"*, `create_all()` does not drop a column, so an existing
-database needs the statement by hand:
+database keeps it until it is dropped by hand:
 
 ```sql
 ALTER TABLE dive_mixture DROP COLUMN name;
 ```
+
+Unlike the `ADD COLUMN` cases in that section, this one is **not** urgent: the column was nullable,
+so a database that lags behind the code goes on working - SQLAlchemy simply stops naming it and
+every insert leaves it `NULL`. Run it to reclaim the strings, not to unbreak anything.
 
 No backfill and no `PROFILE_EXTRACTOR_VERSION` bump: nothing derived from this column, and the
 stored profiles never referenced it.

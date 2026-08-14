@@ -564,7 +564,7 @@ class TestSuuntoJsonParserParse:
 
     def test_cylinders_follow_the_order_they_were_breathed_in(self):
         """Switch order is chronological, so the back gas is first and deco gases follow -
-        matching how the form names the rows (`getDefaultMixtureName`)."""
+        which is the order the form labels its rows by position in ("Tank 1", "Tank 2")."""
         parsed = SuuntoJsonParser.parse(OCEAN_JSON_MULTI_GAS)
 
         assert [mixture.start_pressure is not None for mixture in parsed.mixtures] == [True, False]

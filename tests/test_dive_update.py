@@ -13,6 +13,10 @@ field being *omitted* and being sent as an explicit `null`:
 
 No database: `patch_dive`'s collaborators are stubbed and the assertions are on the
 `update_data` it hands to `crud_dives.update`, which is where both behaviours are decided.
+
+`TestMixtureFieldsAreClosed` is here for a related reason - it is about a body the schema
+must refuse rather than one it must interpret, and this is the only module that validates
+the dive request schemas directly.
 """
 
 import uuid as uuid_pkg
@@ -21,12 +25,13 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from uuid6 import uuid7
 
 from src.app.api.v1 import dives as dives_module
 from src.app.core.exceptions.http_exceptions import UnprocessableEntityException
-from src.app.schemas.dive import DiveUpdate, DiveUpdateRequest
+from src.app.schemas.dive import DiveCreateRequest, DiveUpdate, DiveUpdateRequest
+from src.app.schemas.dive_mixture import GasRole
 
 TRIP_UUID = uuid7()
 START_TIME = datetime(2026, 4, 4, 10, 4, 47, tzinfo=timezone(timedelta(hours=2)))
@@ -175,3 +180,42 @@ class TestNonNullableFields:
 
         assert "start_time" not in captured["update_data"]
         assert "utc_offset_minutes" not in captured["update_data"]
+
+
+class TestMixtureFieldsAreClosed:
+    """`DiveMixtureCreate` is `extra="forbid"`, so a field the API doesn't have is a 422
+    naming it rather than a value quietly dropped on the floor.
+
+    Pinned because the removal of `DiveMixture.name` (see DECISIONS.md) *relies* on this:
+    a client that keeps sending the old label has to be told, since a silent drop would
+    let a form go on collecting something that no longer lands anywhere. Loosening the
+    config would turn that into data loss with no failure to notice.
+    """
+
+    @pytest.mark.parametrize("request_schema", [DiveCreateRequest, DiveUpdateRequest])
+    def test_a_removed_mixture_field_is_refused_by_name(self, request_schema: type[BaseModel]) -> None:
+        body: dict[str, Any] = {
+            "mixtures": [{"volume": 12.0, "oxygen": 21.0, "helium": 0.0, "name": "Back Gas"}],
+        }
+        if request_schema is DiveCreateRequest:
+            body |= {
+                "user_uuid": str(uuid7()),
+                "dive_number": 1,
+                "start_time": START_TIME.isoformat(),
+                "duration": 2048,
+            }
+
+        with pytest.raises(ValidationError) as exc_info:
+            request_schema.model_validate(body)
+
+        message = str(exc_info.value)
+        assert "name" in message
+        assert "extra_forbidden" in message
+
+    def test_the_surviving_mixture_fields_still_validate(self) -> None:
+        values = DiveUpdateRequest.model_validate(
+            {"mixtures": [{"volume": 12.0, "oxygen": 32.0, "helium": 0.0, "po2_limit": 1.4, "role": "deco"}]}
+        )
+
+        assert values.mixtures is not None
+        assert values.mixtures[0].role is GasRole.DECO

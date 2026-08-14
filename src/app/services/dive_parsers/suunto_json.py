@@ -267,8 +267,8 @@ def _scan_samples(
     cylinders were on the dive, and it is keyed by the same gas number as `Cylinders[]` -
     which is what makes a transmitter reading attributable to a specific cylinder rather
     than to "whichever tank this was". Switch order is chronological, so the back gas
-    comes first and deco gases follow, matching how the form names rows
-    (`getDefaultMixtureName`).
+    comes first and deco gases follow - which is the order the form labels its rows by
+    position in ("Tank 1", "Tank 2"), so the two agree without either naming the other.
 
     Pressures are ordered by the sample's own timestamp rather than by position in the
     array: the *union* of an Ocean export's sample timestamps is not monotonic (adjacent
