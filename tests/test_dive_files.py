@@ -531,7 +531,6 @@ class TestMixtureFieldMerge:
             "end_pressure": None,
             "gas_number": 1,
             "helium": 0.0,
-            "name": None,
             "oxygen": 21.0,
             "po2_limit": 1.4,
             "role": None,

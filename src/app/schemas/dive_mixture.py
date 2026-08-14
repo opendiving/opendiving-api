@@ -13,10 +13,10 @@ class GasRole(StrEnum):
     on the ascent. Free text would let one diver's log spell the same role three ways.
 
     This is deliberately **not** the gas-name synthesis that was rejected (see
-    DECISIONS.md). That rejection was about `DiveMixture.name` - using a Suunto
-    `Gases[].State` of "Primary" as a *label a diver would recognize*, where the honest
-    label is "Air" or "EAN32". Role is the orthogonal fact, it has its own column, and
-    nothing derives a name from it: a dive detail page shows `gasName()`'s "EAN50"
+    DECISIONS.md). That rejection was about the since-removed `DiveMixture.name` - using
+    a Suunto `Gases[].State` of "Primary" as a *label a diver would recognize*, where the
+    honest label is "Air" or "EAN32". Role is the orthogonal fact, it has its own column,
+    and nothing derives a name from it: a dive detail page shows `gasName()`'s "EAN50"
     **and** a "deco" badge, not one standing in for the other.
 
     Members are ordered the way a diver lists cylinders - the gas breathed at depth
@@ -34,9 +34,6 @@ class GasRole(StrEnum):
 
 
 class DiveMixtureBase(BaseModel):
-    name: Annotated[
-        str | None, Field(default=None, max_length=50, examples=["Back Gas"], description="Mixture name/label")
-    ]
     volume: Annotated[float, Field(examples=[12.0], description="Cylinder volume in liters")]
     start_pressure: Annotated[
         float | None, Field(default=None, examples=[200.0], description="Starting pressure in bar")
@@ -91,7 +88,6 @@ class DiveMixtureRead(DiveMixtureBase):
 class DiveMixtureUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: Annotated[str | None, Field(default=None, max_length=50, description="Mixture name/label")]
     volume: Annotated[float | None, Field(default=None, description="Cylinder volume in liters")]
     start_pressure: Annotated[float | None, Field(default=None, description="Starting pressure in bar")]
     end_pressure: Annotated[float | None, Field(default=None, description="Ending pressure in bar")]

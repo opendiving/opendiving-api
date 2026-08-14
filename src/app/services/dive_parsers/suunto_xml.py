@@ -410,9 +410,6 @@ class SuuntoXmlParser(DiveParser):
             # latter, which held only while the pod was on the first cylinder.
             gas_number=gas_number,
             helium=_round2_or_none(_float(mix, "Helium")),
-            # Left for the user to fill in themselves rather than parsed - see
-            # DECISIONS.md.
-            name=None,
             oxygen=_round2_or_none(_float(mix, "Oxygen")),
             # Already bar here (`<PO2>1.4</PO2>`), unlike the JSON export's Pascal.
             po2_limit=_float(mix, "PO2"),

@@ -928,9 +928,6 @@ class FitParser(DiveParser):
             end_pressure=tank.end if tank is not None else None,
             gas_number=gas_number,
             helium=float(helium) if helium is not None else None,
-            # Left for the user to fill in themselves rather than parsed - see
-            # DECISIONS.md.
-            name=None,
             oxygen=float(oxygen) if oxygen is not None else None,
             # `dive_gas` has no ppO2 field in the FIT profile at all - the limits live on
             # `dive_settings` (`po2_warn`/`po2_critical`), which are the *device's*

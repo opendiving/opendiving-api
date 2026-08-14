@@ -68,7 +68,6 @@ class DiveMixtureSchema(_ParserOutput):
     end_pressure: float | None
     gas_number: int | None
     helium: float | None
-    name: str | None
     oxygen: float | None
     po2_limit: float | None
     role: GasRole | None

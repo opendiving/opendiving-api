@@ -31,7 +31,6 @@ def _mixture(
     """
     return DiveMixtureRead(
         id=1,
-        name="Back Gas",
         volume=volume,
         start_pressure=start_pressure,
         end_pressure=end_pressure,
