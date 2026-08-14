@@ -18,6 +18,7 @@ declaring at all.
 """
 
 import json
+import uuid as uuid_pkg
 from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any
@@ -68,20 +69,30 @@ def _mixture(mixture: DiveMixtureRead) -> DiveMixtureBase:
 def _user(bundle: ExportBundle) -> ExportUser:
     user = bundle.user
     return ExportUser(
-        uuid=user.uuid, name=user.name, username=user.username, email=user.email, created_at=user.created_at
+        uuid=user.uuid,
+        name=user.name,
+        username=user.username,
+        email=user.email,
+        gear_service_emails=user.gear_service_emails,
+        created_at=user.created_at,
     )
 
 
 def _dive(bundle: ExportBundle, dive: Dive, *, profile: LoadedProfile | None, paths: ArchivePaths | None) -> ExportDive:
     file_info = bundle.file_by_dive[dive.id]
+    # The metadata and the digest are two statements of the same read transaction, so a
+    # file deleted between them leaves one with a row and the other without a key. Narrow,
+    # but `archive._write_blobs` already handles the same race for the bytes, and a
+    # download that 500s because a file vanished mid-export is the wrong answer to it.
+    digest = bundle.dive_file_sha256.get(dive.id)
     source_file = None
-    if file_info is not None:
+    if file_info is not None and digest is not None:
         source_file = ExportDiveFile(
             uuid=file_info.uuid,
             original_filename=file_info.original_filename,
             content_type=file_info.content_type,
             byte_size=file_info.byte_size,
-            sha256=bundle.dive_file_sha256[dive.id],
+            sha256=digest,
             parser_key=file_info.parser_key,
             archive_path=None if paths is None else paths.dive_files.get(dive.id),
         )
@@ -127,12 +138,14 @@ def _certifications(bundle: ExportBundle, paths: ArchivePaths | None) -> list[Ex
                 original_filename=info.original_filename,
                 content_type=info.content_type,
                 byte_size=info.byte_size,
-                sha256=bundle.cert_file_sha256[(certification.id, info.side.value)],
+                sha256=digest,
                 archive_path=(
                     None if paths is None else paths.certification_files.get((certification.id, info.side.value))
                 ),
             )
             for info in bundle.cert_files_by_cert.get(certification.id, [])
+            # Same race as a dive's export - see `_dive`.
+            if (digest := bundle.cert_file_sha256.get((certification.id, info.side.value))) is not None
         ]
         exported.append(
             ExportCertification(
@@ -281,7 +294,7 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
     ]
 
 
-def _schedule_uuid(bundle: ExportBundle, schedule_id: int) -> Any:
+def _schedule_uuid(bundle: ExportBundle, schedule_id: int) -> uuid_pkg.UUID | None:
     """A record's schedule, or `None` when the rule it was logged against is gone.
 
     History outlives the rule by design (see `models/gear_service_record.py`), and the FK
@@ -304,8 +317,8 @@ async def write_export_json(
     """Stream the whole logbook as `export.json`.
 
     `paths` is the archive's member layout, which fills in each stored file's
-    `archive_path`. `None` - the standalone case - leaves those null, because there is no
-    zip for them to point into.
+    `archive_path`. `None` leaves those null; only `archive.py` passes a layout today, and
+    without one there is no zip for a path to point into.
     """
     yield b'{"format":' + _encode(EXPORT_FORMAT) + b',"version":' + _encode(EXPORT_VERSION) + b",\n"
     yield b'"exported_at":' + _encode(exported_at) + b",\n"

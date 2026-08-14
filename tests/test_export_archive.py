@@ -244,6 +244,18 @@ class TestMemberNames:
         paths = plan_archive_paths(bundle)
         assert paths.certification_files[(2, "front")] == "certifications/open-water-diver-front-2.jpg"
 
+    def test_a_very_long_filename_is_trimmed_to_fit_a_path_component(self):
+        """`original_filename` is `String(255)` before a dive number is prepended, and
+        ext4/APFS/NTFS all cap one component at 255 bytes - over it an extractor errors or
+        drops the member, which is the failure this module exists to prevent."""
+        bundle = build_bundle(
+            dives=[make_dive(1, UUIDS["dive-air"], dive_number=7)],
+            file_by_dive={1: _file_info("x" * 250 + ".xml")},
+        )
+        member = plan_archive_paths(bundle).dive_files[1]
+        assert len(member.removeprefix("files/")) <= 255
+        assert member.endswith(".xml")
+
     def test_dive_numbers_are_zero_padded_so_the_directory_sorts(self):
         bundle = build_bundle(
             dives=[

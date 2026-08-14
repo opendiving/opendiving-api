@@ -74,6 +74,16 @@ class ArchivePaths:
     certification_files: dict[tuple[int, str], str] = field(default_factory=dict)
 
 
+# ext4, APFS and NTFS all cap one path component at 255 bytes, and `original_filename` is
+# `String(255)` before this prepends a dive number and may append a collision counter. Over
+# the limit an extractor errors or silently drops the member - the same lost-file failure
+# this module exists to prevent, arrived at from the other direction.
+_MAX_COMPONENT = 255
+# Room for the `-99` a collision can add and for the extension, both appended after the
+# stem is trimmed.
+_STEM_BUDGET = _MAX_COMPONENT - 16
+
+
 def _claim(taken: set[str], directory: str, stem: str, suffix: str) -> str:
     """`<directory>/<stem><suffix>`, with a counter appended until it is unique.
 
@@ -81,6 +91,8 @@ def _claim(taken: set[str], directory: str, stem: str, suffix: str) -> str:
     as on Linux, and `Dive.XML` overwriting `dive.xml` there would be the same lost file
     as an exact duplicate here.
     """
+    stem = stem[:_STEM_BUDGET]
+    suffix = suffix[: _MAX_COMPONENT - _STEM_BUDGET]
     candidate = posixpath.join(directory, f"{stem}{suffix}")
     counter = 2
     while candidate.lower() in taken:

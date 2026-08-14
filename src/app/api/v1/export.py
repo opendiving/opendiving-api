@@ -23,8 +23,9 @@ layer because each is an HTTP concern:
   can draw a progress bar for the archive.
 """
 
+from collections.abc import Iterator
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import IO, Annotated
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -48,7 +49,7 @@ async def _enforce_export_limit(user_id: int) -> None:
     )
 
 
-def _download(buffer: Any, *, filename: str, media_type: str) -> StreamingResponse:
+def _download(buffer: IO[bytes], *, filename: str, media_type: str) -> StreamingResponse:
     """Stream a spooled temp file as a download, and delete it when the response ends.
 
     A `SpooledTemporaryFile` deletes itself when closed, so the generator's `finally` is
@@ -57,7 +58,7 @@ def _download(buffer: Any, *, filename: str, media_type: str) -> StreamingRespon
     Starlette closes the body iterator either way.
     """
 
-    def chunks() -> Any:
+    def chunks() -> Iterator[bytes]:
         try:
             while True:
                 chunk = buffer.read(64 * 1024)
@@ -79,7 +80,12 @@ def _download(buffer: Any, *, filename: str, media_type: str) -> StreamingRespon
             "Content-Disposition": f'attachment; filename="{filename}"',
             "Content-Length": str(size),
             "Cache-Control": "no-store",
+            # The same pair `read_dive_file` serves stored uploads with. These bodies are
+            # `attachment` and diver-supplied besides (the archive carries their own dive
+            # files; the UDDF is XML), so the browser must not be free to re-interpret one
+            # as something scriptable at this origin.
             "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
         },
     )
 

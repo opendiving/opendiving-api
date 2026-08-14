@@ -4503,6 +4503,15 @@ a new dependency: a chunked-zip library (MIT `stream-zip`, say) would let the ar
 temp file at all, but costs a runtime dependency *and* the `Content-Length`. Revisit if profiling
 ever says the temp file hurts; do not start there.
 
+**What is bounded is memory, not disk.** Past 32 MB the archive is a real file in the system temp
+directory, and nothing caps its size: 5 MB per stored dive export over an unbounded number of dives,
+plus up to 10 MB per certification card. A diver with a thousand imported dives can ask for a
+multi-gigabyte temp file, and the rate limit permits ten such requests an hour per user. On a
+single-user instance that is fine and on a shared one it is a disk-space consideration for whoever
+runs it, so: **size `/tmp` for the largest account you expect to host.** A hard ceiling would be the
+next step if that stops being enough, but a limit that refuses a legitimate export is worse than a
+documented requirement on a pre-launch product with no shared hosting yet.
+
 The writers are still generators, and that is not redundant. The spool bounds what is *resident*;
 the generators bound what is *constructed*. A thousand-dive logbook is a few million UDDF waypoints,
 and one `ElementTree` holding them all would be hundreds of megabytes before a single byte reached

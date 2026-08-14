@@ -104,6 +104,32 @@ class TestSchemaValidity:
         schema.validate(await _render(bundle, monkeypatch=monkeypatch))
 
     @pytest.mark.asyncio
+    async def test_control_characters_do_not_break_the_document(self, schema, monkeypatch):
+        """The failure mode metacharacter escaping does *not* cover.
+
+        `ElementTree` escapes `&`, `<` and `>` and passes the C0 controls straight
+        through, but XML 1.0 forbids them outright - so one `\x00` in a diver's notes
+        makes the entire download unparseable rather than one element wrong. Nothing
+        upstream filters them: notes are plain Pydantic strings, and `<setmarker>` carries
+        a device's own wording off an uploaded file.
+        """
+        bundle = build_bundle(dives=[make_dive(1, full_bundle().dives[0].uuid, notes="a\x00b\x0bc\x1fd\ne")])
+        document = await _render(bundle, monkeypatch=monkeypatch)
+        schema.validate(document)
+        # Tab, newline and carriage return are legal and kept; the rest are dropped
+        # rather than replaced, since they carry nothing a diver put there.
+        assert _text(_dive(_tree(document), 0), f"{UDDF}informationafterdive/{UDDF}notes/{UDDF}para") == "abcd\ne"
+
+    @pytest.mark.asyncio
+    async def test_a_control_character_in_an_attribute_is_scrubbed_too(self, schema, monkeypatch):
+        """Attributes go through the same scrub - a `<setmarker>` is element text, but a
+        device label could as easily land in one."""
+        profile = {**TRIMIX_PROFILE, "events": [{"t": 60, "type": "other", "label": "Ceiling\x00Broken"}]}
+        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        schema.validate(document)
+        assert b"\x00" not in document
+
+    @pytest.mark.asyncio
     async def test_notes_with_xml_metacharacters_survive(self, schema, monkeypatch):
         """A diver's notes are the one place arbitrary text reaches the document."""
         nasty = "Ampersand & <tag> \"quote\" 'apostrophe' ]]> ünïcode"

@@ -1,5 +1,9 @@
 # The export golden file is pinned byte for byte, CRLF line endings and UTF-8 BOM
-# included (see tests/fixtures/export/README.md). Marking it binary stops git from
-# normalizing either on checkout or commit, which would fail the test on any machine
-# configured with `core.autocrlf`.
-tests/fixtures/export/dives.csv binary
+# included (see tests/fixtures/export/README.md). `-text` stops git normalizing either on
+# checkout or commit, which would fail the test on any machine configured with
+# `core.autocrlf`.
+#
+# Deliberately *not* `binary`: that is a macro for `-diff -merge -text`, and killing the
+# diff would defeat the point of a golden file, which is that you read the change before
+# accepting it.
+tests/fixtures/export/dives.csv -text

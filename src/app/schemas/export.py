@@ -52,6 +52,9 @@ class ExportUser(PublicUUIDSchema):
     name: str
     username: str
     email: str
+    # A diver-set preference, and the only account-level setting there is. Here because
+    # `/export/archive` says nothing in the account is reachable only through the app.
+    gear_service_emails: bool
     created_at: datetime
 
 
@@ -62,8 +65,9 @@ class ExportStoredFile(PublicUUIDSchema):
     checking a extracted file against it verifies the whole round trip - database column
     to zip member - rather than just that the zip is internally consistent.
 
-    `archive_path` is null in the standalone `export.json` served outside an archive,
-    where there is no zip for it to point into.
+    `archive_path` is null when `export.json` is produced outside an archive - the writer
+    supports it, but only the archive endpoint uses it today, and there is no zip for the
+    path to point into otherwise.
     """
 
     original_filename: str
