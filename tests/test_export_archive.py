@@ -184,7 +184,9 @@ class TestMemberNames:
             ("/etc/passwd", "passwd"),
             (r"C:\Users\ada\dive.xml", "dive.xml"),
             ("....//....//x.json", "x.json"),
-            ("潜水.jpg", "jpg"),
+            # A wholly non-ASCII stem folds to nothing, but the extension is split off
+            # first so the member is still a JPEG to every tool downstream.
+            ("潜水.jpg", "fallback.jpg"),
             ("café.xml", "cafe.xml"),
             ("", "fallback"),
             ("   ", "fallback"),

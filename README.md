@@ -87,6 +87,7 @@ All endpoints are mounted under `/api/v1`; the live OpenAPI docs at `/docs` are 
 | Trips & sites  | `/trip(s)`, `/dive-site(s)`                                                                                    |
 | Gear           | `/gear-item(s)`, `/gear-set(s)`, `/gear-service-schedule(s)`, `/gear-service-record(s)`, `/gear-service-due`   |
 | Certifications | `/certification(s)`, `/certification/{uuid}/file/{side}`                                                       |
+| Export         | `/export/uddf`, `/export/csv`, `/export/archive` — the caller's whole logbook, owner-only, never cached        |
 | Contact        | `/contact` (unauthenticated, rate-limited; forwards to `CONTACT_FORM_EMAIL`)                                   |
 
 A typical import flow:

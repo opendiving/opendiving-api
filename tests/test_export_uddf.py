@@ -27,8 +27,17 @@ from unittest.mock import AsyncMock
 import pytest
 import xmlschema
 
+from src.app.schemas.gear_item import GearType
 from src.app.services.dive_profiles import LoadedProfile
-from src.app.services.export.uddf import UDDF_NAMESPACE, _num, _person_names, collect_mixes, write_uddf
+from src.app.services.export.uddf import (
+    _EQUIPMENT_ELEMENT,
+    _EQUIPMENT_ORDER,
+    UDDF_NAMESPACE,
+    _num,
+    _person_names,
+    collect_mixes,
+    write_uddf,
+)
 from tests.helpers.export import EXPORTED_AT, TRIMIX_PROFILE, build_bundle, full_bundle, make_dive, mixture
 
 UDDF = f"{{{UDDF_NAMESPACE}}}"
@@ -361,6 +370,19 @@ class TestDeterminism:
         first = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
         second = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
         assert first == second
+
+
+class TestEquipmentMapping:
+    def test_every_gear_type_has_a_uddf_element(self):
+        """`_EQUIPMENT_ELEMENT` is looked up unguarded, and `full_bundle` only exercises
+        three of the twenty categories - so an enum member added without a home here
+        would first surface as a 500 on a diver's download."""
+        assert set(_EQUIPMENT_ELEMENT) == set(GearType)
+
+    def test_every_mapped_element_has_a_slot_in_the_sequence(self):
+        """`equipmentType` is an `xs:sequence`, so an element `_EQUIPMENT_ORDER` does not
+        list would simply never be emitted."""
+        assert set(_EQUIPMENT_ELEMENT.values()) <= set(_EQUIPMENT_ORDER)
 
 
 class TestPersonNames:

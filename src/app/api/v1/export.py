@@ -26,7 +26,7 @@ layer because each is an HTTP concern:
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -85,7 +85,6 @@ def _download(buffer: Any, *, filename: str, media_type: str) -> StreamingRespon
 
 @router.get("/export/uddf")
 async def export_uddf(
-    request: Request,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> StreamingResponse:
@@ -110,7 +109,6 @@ async def export_uddf(
 
 @router.get("/export/csv")
 async def export_csv(
-    request: Request,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> StreamingResponse:
@@ -135,7 +133,6 @@ async def export_csv(
 
 @router.get("/export/archive")
 async def export_archive(
-    request: Request,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> StreamingResponse:

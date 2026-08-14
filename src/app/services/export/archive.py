@@ -105,9 +105,12 @@ def _member(name: str, exported_at: datetime, *, compress_type: int) -> zipfile.
     """
     info = zipfile.ZipInfo(name, date_time=exported_at.timetuple()[:6])
     info.compress_type = compress_type
-    # Regular file, rw-r--r--. `ZipInfo(...)` leaves this at 0, which some extractors
-    # read as "no permissions" and restore as an unreadable file.
-    info.external_attr = 0o644 << 16
+    # Regular file (`0o100000`), rw-r--r--. `ZipInfo(...)` leaves this at 0, which some
+    # extractors read as "no permissions" and restore as an unreadable file. The file-type
+    # bits matter as much as the mode: this is the whole `st_mode`, the way
+    # `ZipInfo.from_file` builds it, so an extractor reconstructing one gets a regular
+    # file rather than a type of 0.
+    info.external_attr = 0o100644 << 16
     return info
 
 

@@ -26,9 +26,14 @@ from src.app.core.db.database import Base, async_engine, local_session
 from src.app.models.certification import Certification
 from src.app.models.dive import Dive
 from src.app.models.dive_dive_site import DiveDiveSite
+from src.app.models.dive_gear_item import DiveGearItem
 from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_site import DiveSite
 from src.app.models.gear_item import GearItem
+from src.app.models.gear_service_record import GearServiceRecord
+from src.app.models.gear_service_schedule import GearServiceSchedule
+from src.app.models.gear_set import GearSet
+from src.app.models.gear_set_item import GearSetItem
 from src.app.models.trip import Trip
 from src.app.models.user import User
 from src.app.services.export.loader import ExportBundle, load_export_bundle
@@ -152,6 +157,126 @@ class TestScoping:
     async def test_a_missing_user_fails_loudly(self):
         with pytest.raises(LookupError):
             await _load(-1)
+
+
+class TestStillReferencedButDeleted:
+    """The rows that are soft-deleted and still shown, which the app has three of.
+
+    `erase_dive_site` leaves the site on the dives logged at it, `erase_gear_item` leaves
+    the item on its dives and sets, `erase_trip` leaves the trip on its dives, and the
+    service-record listing resolves a schedule uuid with no `is_deleted` filter. Reading
+    only the live rows made `sites_for`/`gear_for` a `KeyError` - a 500 on all three
+    export endpoints for any diver who had ever deleted a site - and would have left
+    `export.json` with uuids nothing in the file defined and UDDF with dangling
+    `xs:IDREF`s.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_deleted_site_and_gear_item_still_on_a_dive_come_back(self, db: Session, owner: User):
+        site = DiveSite(user_id=owner.id, name="Gone", notes="", is_deleted=True)
+        item = GearItem(user_id=owner.id, name="Gone", notes="", is_deleted=True)
+        db.add_all([site, item])
+        db.commit()
+        dive = _dive(db, owner, number=1)
+        db.add_all(
+            [
+                DiveDiveSite(dive_id=dive.id, dive_site_id=site.id, position=0),
+                DiveGearItem(dive_id=dive.id, gear_item_id=item.id, position=0),
+            ]
+        )
+        db.commit()
+
+        bundle = await _load(owner.id)
+        assert [s.name for s in bundle.sites_for(bundle.dives[0])] == ["Gone"]
+        assert [i.name for i in bundle.gear_for(bundle.dives[0])] == ["Gone"]
+        assert [s.is_deleted for s in bundle.dive_sites] == [True]
+
+    @pytest.mark.asyncio
+    async def test_a_deleted_trip_still_on_a_dive_comes_back(self, db: Session, owner: User):
+        trip = Trip(user_id=owner.id, name="Gone", start_date=date(2026, 6, 1), notes="", is_deleted=True)
+        db.add(trip)
+        db.commit()
+        dive = _dive(db, owner, number=1)
+        dive.trip_id = trip.id
+        db.commit()
+
+        bundle = await _load(owner.id)
+        exported = bundle.trip_for(bundle.dives[0])
+        assert exported is not None
+        assert exported.is_deleted is True
+
+    @pytest.mark.asyncio
+    async def test_a_deleted_gear_item_still_in_a_set_comes_back(self, db: Session, owner: User):
+        item = GearItem(user_id=owner.id, name="Gone", notes="", is_deleted=True)
+        gear_set = GearSet(user_id=owner.id, name="Tech")
+        db.add_all([item, gear_set])
+        db.commit()
+        db.add(GearSetItem(gear_set_id=gear_set.id, gear_item_id=item.id, position=0))
+        db.commit()
+
+        bundle = await _load(owner.id)
+        assert bundle.item_ids_by_set[gear_set.id] == [item.id]
+        assert item.id in bundle.gear_item_by_id
+
+    @pytest.mark.asyncio
+    async def test_a_deleted_schedule_still_on_a_record_comes_back(self, db: Session, owner: User):
+        item = GearItem(user_id=owner.id, name="Reg", notes="")
+        db.add(item)
+        db.commit()
+        schedule = GearServiceSchedule(
+            user_id=owner.id,
+            gear_item_id=item.id,
+            kind="service",
+            starts_on=date(2026, 1, 1),
+            interval_months=12,
+            is_deleted=True,
+        )
+        db.add(schedule)
+        db.commit()
+        db.add(
+            GearServiceRecord(
+                user_id=owner.id,
+                gear_item_id=item.id,
+                kind="service",
+                serviced_on=date(2026, 1, 1),
+                dive_count_at_service=0,
+                gear_service_schedule_id=schedule.id,
+            )
+        )
+        db.commit()
+
+        bundle = await _load(owner.id)
+        assert schedule.id in bundle.schedule_by_id
+
+    @pytest.mark.asyncio
+    async def test_a_deleted_row_nothing_references_stays_out(self, db: Session, owner: User):
+        """The exception is only for what the app still shows. An orphaned deleted site
+        is genuinely gone, and resurrecting it would be the surprise."""
+        db.add(DiveSite(user_id=owner.id, name="Orphan", notes="", is_deleted=True))
+        db.commit()
+
+        bundle = await _load(owner.id)
+        assert bundle.dive_sites == []
+
+    @pytest.mark.asyncio
+    async def test_a_deleted_row_belonging_to_someone_else_is_never_resurrected(
+        self, db: Session, owner: User, stranger: User
+    ):
+        """`still_referenced` widens the soft-delete filter and nothing else - the
+        `user_id` scope is not negotiable, and a stray id must not become a way in."""
+        theirs = DiveSite(user_id=stranger.id, name="Theirs", notes="", is_deleted=True)
+        db.add(theirs)
+        db.commit()
+        dive = _dive(db, owner, number=1)
+        db.add(DiveDiveSite(dive_id=dive.id, dive_site_id=theirs.id, position=0))
+        db.commit()
+
+        bundle = await _load(owner.id)
+        assert bundle.dive_sites == []
+        # And the export still builds: `sites_for` skips what it cannot resolve rather
+        # than raising, so a row that could only exist through hand-edited data does not
+        # take down the one endpoint a diver uses to leave with everything else.
+        assert bundle.sites_for(bundle.dives[0]) == []
 
 
 class TestOrdering:

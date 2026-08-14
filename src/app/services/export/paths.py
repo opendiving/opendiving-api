@@ -36,11 +36,22 @@ def archive_member_name(name: str, *, default: str) -> str:
     Non-ASCII is folded away too. Zip's UTF-8 filename flag is widely but not
     universally honoured, and a c-card scan named in Thai should still extract to
     *something* on a tool that reads the name as cp437.
+
+    **The extension is split off before the fold**, because a wholly non-ASCII name folds
+    to nothing and would otherwise take its suffix with it: `潜水.jpg` became `jpg`, which
+    then reads as a stem with no extension and lands in the archive as an extensionless
+    member no image viewer will open. Splitting first makes it `dive-file.jpg` - the
+    default stem, but still a JPEG as far as every tool downstream is concerned.
     """
-    stem = name.replace("\\", "/").rsplit("/", 1)[-1]
-    folded = unicodedata.normalize("NFKD", stem).encode("ascii", "ignore").decode("ascii")
-    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", folded).strip("-.")
-    return cleaned or default
+    stem, extension = posixpath.splitext(name.replace("\\", "/").rsplit("/", 1)[-1])
+    suffix = _fold(extension)
+    return f"{_fold(stem) or default}{'.' + suffix if suffix else ''}"
+
+
+def _fold(value: str) -> str:
+    """One name component as ASCII, safe as part of a path segment. May come back empty."""
+    folded = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", folded).strip("-.")
 
 
 def _slug(value: str, *, default: str) -> str:

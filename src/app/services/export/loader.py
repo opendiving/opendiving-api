@@ -12,17 +12,21 @@ than the round trips a lazier shape would need - and the archive walks all of it
 all. Those are fetched one row at a time by whoever actually needs them (`archive.py`
 for the blobs, `uddf.py`/`envelope.py` for the profile series), so peak memory is one
 file plus one profile rather than a diver's entire history of both. That is the one
-place this module accepts an N+1 on purpose - see `iter_dive_file_bytes`.
+place this module accepts an N+1 on purpose.
 
-Scoping matches the list endpoints exactly: the authenticated user's own rows, and
-`is_deleted = false` on every table that soft-deletes. A soft-deleted dive is one the
-diver cannot see in the app, and an export that resurrected it would be a surprise
-rather than a feature.
+**Scoping is "everything the caller can still see", which is not the same as "what the
+list endpoints return".** The `user_id` filter is absolute and never varies. The
+soft-delete filter does: four tables go on showing a deleted row wherever something else
+still references it - a dive site stays on its dives, a gear item on its dives and sets,
+a trip on its dives, a schedule on its records - so those rows are read back too, flagged
+`is_deleted` in `export.json`. See `_owned`, which is where that rule lives and where the
+consequence of getting it wrong is spelled out.
 """
 
 from dataclasses import dataclass, field
+from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...crud.crud_dive_mixtures import get_mixtures_for_dives
@@ -102,11 +106,20 @@ class ExportBundle:
 
     def sites_for(self, dive: Dive) -> list[DiveSite]:
         """A dive's sites in visit order; index 0 is the primary site."""
-        return [self.dive_site_by_id[site_id] for site_id in self.site_ids_by_dive[dive.id]]
+        return [site for site_id in self.site_ids_by_dive[dive.id] if (site := self.dive_site_by_id.get(site_id))]
 
     def gear_for(self, dive: Dive) -> list[GearItem]:
         """A dive's gear in the order the diver listed it."""
-        return [self.gear_item_by_id[item_id] for item_id in self.gear_ids_by_dive[dive.id]]
+        return [item for item_id in self.gear_ids_by_dive[dive.id] if (item := self.gear_item_by_id.get(item_id))]
+
+    # Both of the above resolve through `.get()` rather than indexing, and after `_owned`
+    # reads deleted-but-referenced rows back there is exactly one way left to hit the
+    # miss: a join row pointing at *another user's* site or item. That cannot be created
+    # through the API - every write validates ownership first (`resolve_dive_site_ids_for_user`,
+    # `resolve_gear_item_ids_for_user`) - so it would mean hand-edited data. Skipping is
+    # the only defensible answer either way: the row is not this caller's to export, and a
+    # 500 on the one endpoint that exists so a diver can leave with their data is the
+    # worst possible failure mode for a bad row nobody can see.
 
     def trip_for(self, dive: Dive) -> Trip | None:
         """The dive's trip, or `None` - including when the trip has since been deleted."""
@@ -147,12 +160,50 @@ async def _ordered_ids_by_dive(
     return sites, gear
 
 
+async def _owned(
+    db: AsyncSession,
+    model: Any,
+    *,
+    user_id: int,
+    order_by: Any,
+    still_referenced: set[int] | None = None,
+) -> list[Any]:
+    """One user's rows from a soft-deleting table: the live ones, plus any dead one that
+    something else in this export still points at.
+
+    The second half is not a nicety. A soft-deleted dive site **stays attached to the
+    dives logged at it** and goes on being shown by the app (`erase_dive_site`), and the
+    same is true of a gear item on its dives and gear sets (`erase_gear_item`), of a trip
+    on its dives (`erase_trip`), and of a service schedule on its records (which
+    `_schedule_uuids_by_id` resolves with no `is_deleted` filter). Leaving those out
+    would put a uuid in `export.json` that nothing in the file defines - and in UDDF,
+    where the same reference is an `xs:IDREF`, would produce a document that does not
+    validate.
+
+    So the rule is: **an export holds every record the caller can still see**, which for
+    these four tables is a superset of what their list endpoints return. The resurrected
+    rows carry `is_deleted: true` in `export.json`, so a reader can tell them from the
+    live ones rather than being handed a site the diver thought they had removed.
+
+    One query rather than a filtered read plus a patch-up, so the ordering stays the
+    database's and the `user_id` scope cannot be forgotten on the second pass.
+    """
+    live = model.is_deleted.is_(False)
+    visible = live if not still_referenced else or_(live, model.id.in_(still_referenced))
+    rows = await db.execute(select(model).where(model.user_id == user_id, visible).order_by(*order_by))
+    return list(rows.scalars().all())
+
+
 async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
     """Read one user's whole logbook.
 
     Raises `LookupError` if the user row is gone, which cannot happen through the
     endpoints (the caller is resolved from their own bearer token) but is worth failing
     loudly on rather than exporting an archive addressed to nobody.
+
+    The order of the reads below is load-bearing: everything that *references* a
+    soft-deleting table is read first, so `_owned` knows which dead rows have to come
+    back with the live ones.
     """
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if user is None:
@@ -161,66 +212,12 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
     # Chronological, which is the order a logbook is read in and the order UDDF's
     # repetition group implies. `dive_number` and `id` only break ties, so two dives
     # logged at the same instant still come out in a stable order run after run.
-    dives = list(
-        (
-            await db.execute(
-                select(Dive)
-                .where(Dive.user_id == user_id, Dive.is_deleted.is_(False))
-                .order_by(Dive.start_time, Dive.dive_number, Dive.id)
-            )
-        )
-        .scalars()
-        .all()
-    )
+    dives = await _owned(db, Dive, user_id=user_id, order_by=(Dive.start_time, Dive.dive_number, Dive.id))
     dive_ids = [dive.id for dive in dives]
 
     site_ids_by_dive, gear_ids_by_dive = await _ordered_ids_by_dive(db, dive_ids)
 
-    trips = list(
-        (
-            await db.execute(
-                select(Trip)
-                .where(Trip.user_id == user_id, Trip.is_deleted.is_(False))
-                .order_by(Trip.start_date, Trip.id)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    dive_sites = list(
-        (
-            await db.execute(
-                select(DiveSite)
-                .where(DiveSite.user_id == user_id, DiveSite.is_deleted.is_(False))
-                .order_by(DiveSite.name, DiveSite.id)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    gear_items = list(
-        (
-            await db.execute(
-                select(GearItem)
-                .where(GearItem.user_id == user_id, GearItem.is_deleted.is_(False))
-                .order_by(GearItem.name, GearItem.id)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    gear_sets = list(
-        (
-            await db.execute(
-                select(GearSet)
-                .where(GearSet.user_id == user_id, GearSet.is_deleted.is_(False))
-                .order_by(GearSet.name, GearSet.id)
-            )
-        )
-        .scalars()
-        .all()
-    )
-
+    gear_sets = await _owned(db, GearSet, user_id=user_id, order_by=(GearSet.name, GearSet.id))
     item_ids_by_set: dict[int, list[int]] = {gear_set.id: [] for gear_set in gear_sets}
     if gear_sets:
         set_rows = await db.execute(
@@ -231,38 +228,43 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
         for row in set_rows:
             item_ids_by_set[row.gear_set_id].append(row.gear_item_id)
 
-    schedules = list(
-        (
-            await db.execute(
-                select(GearServiceSchedule)
-                .where(GearServiceSchedule.user_id == user_id, GearServiceSchedule.is_deleted.is_(False))
-                .order_by(GearServiceSchedule.gear_item_id, GearServiceSchedule.id)
-            )
-        )
-        .scalars()
-        .all()
+    service_records = await _owned(
+        db, GearServiceRecord, user_id=user_id, order_by=(GearServiceRecord.serviced_on, GearServiceRecord.id)
     )
-    service_records = list(
-        (
-            await db.execute(
-                select(GearServiceRecord)
-                .where(GearServiceRecord.user_id == user_id, GearServiceRecord.is_deleted.is_(False))
-                .order_by(GearServiceRecord.serviced_on, GearServiceRecord.id)
-            )
-        )
-        .scalars()
-        .all()
+
+    trips = await _owned(
+        db,
+        Trip,
+        user_id=user_id,
+        order_by=(Trip.start_date, Trip.id),
+        still_referenced={dive.trip_id for dive in dives if dive.trip_id is not None},
     )
-    certifications = list(
-        (
-            await db.execute(
-                select(Certification)
-                .where(Certification.user_id == user_id, Certification.is_deleted.is_(False))
-                .order_by(Certification.certified_on, Certification.id)
-            )
-        )
-        .scalars()
-        .all()
+    dive_sites = await _owned(
+        db,
+        DiveSite,
+        user_id=user_id,
+        order_by=(DiveSite.name, DiveSite.id),
+        still_referenced={site_id for site_ids in site_ids_by_dive.values() for site_id in site_ids},
+    )
+    gear_items = await _owned(
+        db,
+        GearItem,
+        user_id=user_id,
+        order_by=(GearItem.name, GearItem.id),
+        still_referenced={item_id for item_ids in gear_ids_by_dive.values() for item_id in item_ids}
+        | {item_id for item_ids in item_ids_by_set.values() for item_id in item_ids},
+    )
+    schedules = await _owned(
+        db,
+        GearServiceSchedule,
+        user_id=user_id,
+        order_by=(GearServiceSchedule.gear_item_id, GearServiceSchedule.id),
+        still_referenced={
+            record.gear_service_schedule_id for record in service_records if record.gear_service_schedule_id is not None
+        },
+    )
+    certifications = await _owned(
+        db, Certification, user_id=user_id, order_by=(Certification.certified_on, Certification.id)
     )
 
     return ExportBundle(

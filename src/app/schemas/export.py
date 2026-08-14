@@ -120,6 +120,15 @@ class ExportTrip(PublicUUIDSchema):
     start_date: date
     end_date: date | None = None
     notes: str
+    is_deleted: Annotated[
+        bool,
+        Field(
+            default=False,
+            description="True for a record the diver deleted that something in this export still references - "
+            "the app goes on showing those too. Present so a reader can tell them apart rather than being handed "
+            "one back as if it were live.",
+        ),
+    ]
     created_at: datetime
 
 
@@ -127,6 +136,15 @@ class ExportDiveSite(PublicUUIDSchema):
     name: str
     location: str | None = None
     notes: str
+    is_deleted: Annotated[
+        bool,
+        Field(
+            default=False,
+            description="True for a record the diver deleted that something in this export still references - "
+            "the app goes on showing those too. Present so a reader can tell them apart rather than being handed "
+            "one back as if it were live.",
+        ),
+    ]
     created_at: datetime
 
 
@@ -139,6 +157,15 @@ class ExportGearItem(PublicUUIDSchema):
     is_archived: bool
     archived_at: datetime | None = None
     dive_count: int
+    is_deleted: Annotated[
+        bool,
+        Field(
+            default=False,
+            description="True for a record the diver deleted that something in this export still references - "
+            "the app goes on showing those too. Present so a reader can tell them apart rather than being handed "
+            "one back as if it were live.",
+        ),
+    ]
     created_at: datetime
 
 
@@ -161,6 +188,15 @@ class ExportGearServiceSchedule(PublicUUIDSchema):
     last_service_on: date | None = None
     next_due_on: date | None = None
     next_due_at_dive_count: int | None = None
+    is_deleted: Annotated[
+        bool,
+        Field(
+            default=False,
+            description="True for a record the diver deleted that something in this export still references - "
+            "the app goes on showing those too. Present so a reader can tell them apart rather than being handed "
+            "one back as if it were live.",
+        ),
+    ]
     created_at: datetime
 
 

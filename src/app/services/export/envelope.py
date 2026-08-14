@@ -164,6 +164,7 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     start_date=trip.start_date,
                     end_date=trip.end_date,
                     notes=trip.notes,
+                    is_deleted=trip.is_deleted,
                     created_at=trip.created_at,
                 )
                 for trip in bundle.trips
@@ -177,6 +178,7 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     name=site.name,
                     location=site.location,
                     notes=site.notes,
+                    is_deleted=site.is_deleted,
                     created_at=site.created_at,
                 )
                 for site in bundle.dive_sites
@@ -195,6 +197,7 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     is_archived=item.is_archived,
                     archived_at=item.archived_at,
                     dive_count=item.dive_count,
+                    is_deleted=item.is_deleted,
                     created_at=item.created_at,
                 )
                 for item in bundle.gear_items
@@ -231,13 +234,10 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     last_service_on=schedule.last_service_on,
                     next_due_on=schedule.next_due_on,
                     next_due_at_dive_count=schedule.next_due_at_dive_count,
+                    is_deleted=schedule.is_deleted,
                     created_at=schedule.created_at,
                 )
                 for schedule in bundle.schedules
-                # A schedule whose gear item has been deleted is unreachable in the app
-                # too - the item is what owns it - so it is left out rather than exported
-                # pointing at a uuid nothing else in the file mentions.
-                if schedule.gear_item_id in bundle.gear_item_by_id
             ],
         ),
         (
@@ -260,7 +260,6 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     created_at=record.created_at,
                 )
                 for record in bundle.service_records
-                if record.gear_item_id in bundle.gear_item_by_id
             ],
         ),
         ("certifications", _certifications(bundle, paths)),
@@ -270,10 +269,11 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
 def _schedule_uuid(bundle: ExportBundle, schedule_id: int) -> Any:
     """A record's schedule, or `None` when the rule it was logged against is gone.
 
-    History outlives the rule by design (see `models/gear_service_record.py`), and the
-    FK is `ON DELETE SET NULL` for exactly that - but a *soft*-deleted schedule leaves
-    the id in place while dropping out of this export, so the reference has to be
-    resolved rather than assumed.
+    History outlives the rule by design (see `models/gear_service_record.py`), and the FK
+    is `ON DELETE SET NULL` for exactly that. `loader._owned` reads back a *soft*-deleted
+    schedule a record still points at, so the usual answer here is a uuid the file also
+    defines - but a hard-deleted one leaves nothing to resolve, and `.get()` is what keeps
+    that a null rather than a `KeyError`.
     """
     schedule = bundle.schedule_by_id.get(schedule_id)
     return None if schedule is None else schedule.uuid

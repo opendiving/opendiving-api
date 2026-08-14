@@ -119,6 +119,13 @@ _EQUIPMENT_ORDER = (
 
 _SUIT_TYPE = {GearType.WETSUIT: "wet-suit", GearType.DRYSUIT: "dry-suit"}
 
+# `_EQUIPMENT_ELEMENT` is looked up unguarded, so a `GearType` added without a home here
+# would be a `KeyError` at export time rather than a mis-categorized item - and the one
+# place it would surface is a diver's download. Asserted at import, where it is a startup
+# failure in CI instead.
+assert set(_EQUIPMENT_ELEMENT) == set(GearType), "every GearType needs a UDDF equipment element"
+assert set(_EQUIPMENT_ELEMENT.values()) <= set(_EQUIPMENT_ORDER), "equipmentType is a sequence; every tag needs a slot"
+
 
 def _num(value: float) -> str:
     """Format a float for an `xs:float` element.
