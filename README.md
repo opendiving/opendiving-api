@@ -11,12 +11,15 @@ documented REST API — so your data is never more than one `curl` away.
 
 - **Dive log API** — dives with gas mixtures (O₂/He, pressures), multiple ordered dive sites per
   dive, trips, weights, and notes. Soft deletes throughout.
+- **Technical diving** — per-cylinder ppO₂ limits and gas roles, CNS/OTU and surface pressure
+  persisted from imports, and per-tank gas consumption derived from recorded gas switches on
+  multi-tank dives.
 - **Dive-computer file parsing** — upload a FIT file (Garmin Descent, Suunto Ocean/D5) or a Suunto
   XML/JSON export to `POST /dive/parse` and get structured dive data back to pre-fill a form. Attach
-  the file to the dive afterwards and the **per-sample profile** (depth, temperature, tank pressure)
-  is extracted server-side and served with ETag caching.
-- **Air consumption** — SAC and RMV derived automatically for single-tank dives, plus a gas-use
-  history endpoint powering the dashboard trend chart.
+  the file to the dive afterwards and the **per-sample profile** (depth, temperature, tank pressure,
+  **deco ceiling, dive events**) is extracted server-side and served with ETag caching.
+- **Air consumption** — SAC and RMV derived automatically, per tank on multi-tank dives, plus a
+  gas-use history endpoint powering the dashboard trend chart.
 - **Gear** — items, gear sets with default weights, service **schedules** (by months and/or dives),
   service history, a due-soon endpoint, and a scheduled email reminder digest.
 - **Certifications** — c-card records with front/back card images.
@@ -26,13 +29,16 @@ documented REST API — so your data is never more than one `curl` away.
 
 ## Planned
 
-- **More parsers** — UDDF and Subsurface formats; a pluggable importer layer so every supported
-  format is a migration path in.
-- **Full export** — everything out in open formats (UDDF, JSON, CSV) in one request.
-- **Public share links** — read-only dive/trip pages, e.g. for verifying experience.
+- **Full export** — everything out in open formats (UDDF, CSV, and a complete JSON + original-files
+  archive) in one request. The exit door ships first.
+- **More parsers** — Subsurface XML and UDDF (which also admits Apple Watch dives via Oceanic+'s
+  UDDF export), then Shearwater Cloud exports; a pluggable importer layer so every supported format
+  is a migration path in.
+- **Self-hosting hardening** — a single compose bundle including the web app and TLS, prebuilt
+  images, SMTP as an alternative to Resend, and Alembic migrations before 1.0 (schema changes are
+  currently applied manually during prototyping — see [DECISIONS.md](DECISIONS.md)).
+- **Public share links** — read-only dive/trip pages.
 - **Statistics endpoints** — records, per-year aggregates, site maps, species log.
-- **Alembic migrations** — schema changes are currently applied manually during prototyping (see
-  [DECISIONS.md](DECISIONS.md)); versioned migrations before 1.0.
 
 ## Quickstart
 
@@ -122,7 +128,7 @@ curl http://localhost:8000/api/v1/dive/{uuid}/profile -H "Authorization: Bearer 
 |                                                                |                                      |
 | -------------------------------------------------------------- | ------------------------------------ |
 | [opendiving-web](https://github.com/opendiving/opendiving-web) | Next.js frontend (screenshots there) |
-| [opendiving-ios](https://github.com/opendiving/opendiving-ios) | SwiftUI companion app (early stage)  |
+| [opendiving-ios](https://github.com/opendiving/opendiving-ios) | SwiftUI app (early scaffold, parked) |
 
 ## License
 
