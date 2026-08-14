@@ -676,6 +676,12 @@ async def read_dive(
 # already sweeps `user_{id}_dives:*` on every dive create, update and delete, which is
 # exactly that set of events, so this needed no invalidation change of its own.
 #
+# The default hour rather than the 60s its siblings under this prefix use, and for the
+# reason `_cached_read_dive` takes the default too: those are series a dashboard polls,
+# where a short TTL is a cheap second line behind the invalidation, while this is a
+# per-dive answer that only a dive write can change - and every one of those sweeps the
+# prefix.
+#
 # Same authorization caveat as every `@cache`d helper here: a hit skips the body, so this
 # must only ever be called after the route below has established the caller owns the dive.
 @cache(key_prefix="user_{user_id}_dives:neighbors", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
