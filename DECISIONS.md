@@ -4795,16 +4795,11 @@ profile, built from max depth and duration. It is in the `.ssrf`, so it is store
 exported. Anything reading Subsurface data back cannot tell those samples from recorded ones — worth
 remembering when the importer lands.
 
-**The one thing that is arguably ours to fix, and is not being fixed:** the temperature curve goes
-from 706 samples to 29. Subsurface creates a sample only where a `<waypoint>` carries a `<depth>`,
-and our waypoints sit at the *union* of every channel's timestamps (the deliberate choice in
-`uddf.py` — nothing is interpolated), so the 640 waypoints that carry a temperature and no depth are
-invisible to it. The 66 that coincide with a depth sample come through with exact values, and
-Subsurface keeps the 29 of those where the reading changed. Emitting an interpolated depth on every
-temperature waypoint would fix this for Subsurface specifically, at the cost of writing numbers no
-dive computer recorded into a file whose whole promise is that it holds what was recorded. The trade
-is not worth it: the full-resolution curve is in `export.json` and in the original file the archive
-carries, both of which are lossless.
+**The one thing that was ours, and is now fixed:** the temperature curve arrived as 29 samples out
+of 706. Subsurface creates a sample only where a `<waypoint>` carries a `<depth>`, and our waypoints
+sat at the union of every channel's timestamps, so the 640 waypoints carrying a temperature and no
+depth were invisible to it. It read as an acceptable cost until divelogs.de was tried, and it is not
+— see the next section.
 
 **Their exporter, for whoever writes the importer.** Subsurface's own UDDF fails the vendored 3.2.2
 XSD **48 times**: empty `<latitude/>`/`<longitude/>` elements, ids that are not NCNames (`mix(21/0)`
@@ -4818,3 +4813,87 @@ rather than as a number.
 Also worth knowing before reading its output: `sac`, `otu` and `cns` in the `.ssrf` are Subsurface's
 own computations, not round-tripped values. Every dive in the demo corpus stores `null` for CNS and
 OTU, and the file still says `otu='31' cns='11%'`.
+
+## Every UDDF waypoint carries a depth, because the alternative broke both importers
+
+Our profile channels are sampled independently — a Suunto Ocean logs depth every ten seconds and
+temperature roughly every five, on no shared axis. The first writer rendered that honestly:
+waypoints at the **union** of every channel's timestamps, each carrying only the readings actually
+taken at that instant, so a temperature sample taken between two depth samples became a waypoint
+with a `<temperature>` and no `<depth>`. Nothing interpolated, nothing invented. `<depth>` is
+optional in `waypointType`, the documents validated against the 3.2.2 XSD, and the rule was written
+down as a deliberate choice.
+
+Both importers that matter get it wrong, in opposite directions, and neither says so:
+
+- **Subsurface silently discards every depth-less waypoint.** The demo corpus went in with 706
+  temperature samples and 431 depth samples; its `.ssrf` came back with 431 samples and **29**
+  temperatures — only the 66 readings that happened to coincide with a depth sample were even
+  considered, and it stores a temperature only where the value changes.
+- **divelogs.de reads the missing depth as zero.** Its re-export has 660 waypoints at `depth 0`
+  interleaved with the real ones, and this is not an exporter artifact: the profile chart on its own
+  dive page is a comb of spikes from the seabed to the surface, one every other sample. It also
+  discards `<divetime>` entirely and re-grids the waypoints onto a fixed four-second interval, so a
+  66:41 dive is plotted over 72 minutes. A diver who exported to divelogs.de got a dive that looks
+  like instrument failure.
+
+Two consumers out of two. A file that validates and that neither program can read is not an exit
+door, and "the schema allows it" is not a defence when the schema is not the thing reading the file.
+
+**The rule now:** the depth channel alone sets the time axis, every waypoint carries a `<depth>`,
+and every other reading — temperature, tank pressure, gas switches, markers — snaps to the nearest
+depth sample. Where several land on one waypoint the closest wins, and a tie goes to the earlier
+sample, so two exports of one dive stay byte-identical. **No depth is ever invented and no reading
+is ever altered**; only a timestamp moves, by less than half a sampling interval. Interpolating a
+depth for each temperature sample would have fixed Subsurface too, and was rejected for the obvious
+reason: writing depths no computer recorded into the file whose promise is that it holds what was
+recorded. Snapping moves a reading in time; interpolating fabricates a measurement.
+
+What it costs is real and small: two temperature readings that fall between the same pair of depth
+samples become one, so the demo corpus goes from 706 temperature samples to 430. What it buys is
+that those 430 all arrive — against 29 before — and that the depth profile survives divelogs.de at
+all. The unsnapped channels, at full resolution on their own axes, remain in `export.json` and in
+the original dive-computer file the archive carries, both lossless.
+
+A profile with **no depth channel at all** now emits no `<samples>` element rather than a block of
+depth-less waypoints. That is the one case the old rule produced them for on its own, and a
+temperature-only samples block is exactly the input that makes divelogs.de draw a dive to the
+surface and back.
+
+`tests/helpers/export.py::OFF_GRID_PROFILE` exists for this and nothing else — every reading in it
+sits deliberately between depth samples, including one pair a second apart on either side of a
+waypoint (a last-wins bug emits 99.9 °C) and one exactly equidistant reading to pin the tie-break.
+
+## What divelogs.de does with our UDDF
+
+Same corpus, same day, imported into divelogs.de (its English front is divelogs.org) and exported
+back out: `tests/fixtures/roundtrip/divelogs.uddf`. The profile corruption it produced is in the
+section above, because it changed the writer. The rest, with the import checked against its own web
+UI rather than against its export — which matters, as below:
+
+**Exact:** all eight dives, dates, local times to the minute, cylinder volume and both pressures, O₂
+fractions, and `<diveduration>` carried through unrounded (4001 s, where Subsurface recomputed
+4010). It also keeps the dive site's **free-text location**, which Subsurface drops, and it does not
+fabricate a profile for the seven dives that have none.
+
+**Rounded away:** `<lowesttemperature>` to whole °C (295.5 K → 295.15 K), depths to 0.1 m, start
+times to the minute (11:49:23 → 11:49:00), and the UTC offset dropped as everywhere else.
+
+**Not imported:** dive numbers — the log is renumbered 1–8 from its own sequence — along with
+weights, gear, visibility and events. Trips are not imported either, but the loss is invisible at
+first glance because divelogs.de **derives** trips from gaps between dive dates: it produced two
+trips named after a site's location rather than our "Red Sea Liveaboard" and "Tenerife Week", and
+its date heuristic swept the Tenerife checkout dive of 17 April into the Red Sea trip that started
+two days later.
+
+**Their exporter, not their importer:** every string containing an ampersand comes back **empty**.
+All three in our file — the site name "Ras Mohammed - Shark & Yolanda", that dive's note, and a trip
+note — are blank in `divelogs.uddf`, which contains no `&amp;` anywhere. Both are present and
+correct on the site's own dive page, so the data imported fine and the export is what loses it. That
+is the second time in one afternoon that a re-export libelled an importer, after Subsurface's water
+temperature; it is why the UI was checked at all, and why anything concluded from a re-export alone
+should be treated as a hypothesis.
+
+Their file also fabricates coordinates: every site gets `<latitude>0.000000</latitude>` and the same
+longitude. Null Island is a place, and an importer that trusts it will pin a Red Sea wreck into the
+Atlantic — treat 0/0 from divelogs.de as "unknown", not as a fix.

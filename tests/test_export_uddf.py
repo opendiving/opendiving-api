@@ -45,6 +45,7 @@ from src.app.services.export.uddf import (
 )
 from tests.helpers.export import (
     EXPORTED_AT,
+    OFF_GRID_PROFILE,
     TRIMIX_PROFILE,
     UUIDS,
     build_bundle,
@@ -398,17 +399,69 @@ class TestDiveContent:
 
 
 class TestWaypoints:
+    """The depth channel alone sets the time axis, and every waypoint carries a depth.
+
+    Not a stylistic choice - the round-trips in `tests/fixtures/subsurface/` and
+    `DECISIONS.md` show both importers mangling depth-less waypoints, one by discarding
+    them and one by reading the absent depth as zero. These tests pin the rule that
+    replaced it.
+    """
+
     @pytest.mark.asyncio
-    async def test_channels_on_different_axes_become_one_waypoint_each(self, monkeypatch):
-        """Nothing is interpolated onto a neighbouring waypoint: a temperature sample
-        taken between two depth samples is its own waypoint carrying only a temperature."""
+    async def test_the_depth_channel_sets_the_time_axis(self, monkeypatch):
         document = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
         waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
         assert [_text(w, f"{UDDF}divetime") for w in waypoints] == ["0", "30", "60", "90"]
+        assert all(_text(w, f"{UDDF}depth") is not None for w in waypoints)
         # The 30 s waypoint has a depth but no temperature - temperature was sampled at
-        # 0 s and 60 s only.
+        # 0 s and 60 s only, and nothing off-axis is near enough to claim it.
         assert _text(waypoints[1], f"{UDDF}temperature") is None
         assert _text(waypoints[1], f"{UDDF}depth") == "18"
+
+    @pytest.mark.asyncio
+    async def test_readings_between_depth_samples_snap_to_the_nearest(self, schema, monkeypatch):
+        document = await _render(full_bundle(), {2: OFF_GRID_PROFILE}, monkeypatch)
+        schema.validate(document)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        assert [_text(w, f"{UDDF}divetime") for w in waypoints] == ["0", "10", "20", "30"]
+        assert [_text(w, f"{UDDF}depth") for w in waypoints] == ["0", "10", "20", "15"]
+        # 4 s -> 0 s and 27 s -> 30 s; 12 s beats 13 s for the 10 s waypoint by one
+        # second, so 99.9 C never appears; nothing is near enough to the 20 s waypoint.
+        assert [_text(w, f"{UDDF}temperature") for w in waypoints] == ["298.15", "297.15", None, "295.15"]
+
+    @pytest.mark.asyncio
+    async def test_a_reading_equidistant_from_two_samples_takes_the_earlier(self, monkeypatch):
+        """The 15 s pressure reading sits exactly between the 10 s and 20 s waypoints.
+
+        Either would be defensible; what matters is that it is decided rather than left to
+        dict ordering, because two exports of one dive have to be byte-identical.
+        """
+        document = await _render(full_bundle(), {2: OFF_GRID_PROFILE}, monkeypatch)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        assert [_text(w, f"{UDDF}tankpressure") for w in waypoints] == [None, "20000000", None, None]
+
+    @pytest.mark.asyncio
+    async def test_events_snap_too_and_still_join_on_arrival(self, monkeypatch):
+        """The 7 s and 8 s markers are not simultaneous in the profile; they become so
+        here, which is the case `waypointType`'s single `<setmarker>` cannot hold."""
+        document = await _render(full_bundle(), {2: OFF_GRID_PROFILE}, monkeypatch)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        assert [_text(w, f"{UDDF}setmarker") for w in waypoints] == [None, "safety_stop; Deco", None, None]
+        switches = [w.find(f"{UDDF}switchmix") for w in waypoints]
+        assert [s is not None for s in switches] == [False, False, True, False]
+
+    @pytest.mark.asyncio
+    async def test_a_profile_with_no_depth_channel_emits_no_samples(self, schema, monkeypatch):
+        """The one case the old union rule produced depth-less waypoints for on its own.
+
+        Emitting a `<samples>` block of temperatures with no depths would hand divelogs.de
+        a dive that plunges to the surface and back on every sample; the readings are in
+        `export.json` either way.
+        """
+        profile = {"temperature": {"t": [0, 60], "v": [249, 181]}, "events": [{"t": 30, "type": "safety_stop"}]}
+        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        schema.validate(document)
+        assert _dive(_tree(document), 1).find(f"{UDDF}samples") is None
 
     @pytest.mark.asyncio
     async def test_gas_switches_become_switchmix_links(self, monkeypatch):

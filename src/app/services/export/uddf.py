@@ -38,6 +38,7 @@ a time. That is also why the profile payloads are fetched per dive here rather t
 batched by `loader.py`.
 """
 
+import bisect
 import uuid as uuid_pkg
 import xml.etree.ElementTree as ET
 from collections.abc import AsyncIterator, Iterable
@@ -380,6 +381,30 @@ def _series_by_second(series: dict | None) -> dict[int, int]:
     return dict(zip(series["t"], series["v"], strict=True))
 
 
+def _nearest(seconds: list[int], second: int) -> int:
+    """The depth sample closest in time to `second`; the earlier one wins a tie."""
+    index = bisect.bisect_left(seconds, second)
+    if index == 0:
+        return seconds[0]
+    if index == len(seconds):
+        return seconds[-1]
+    before, after = seconds[index - 1], seconds[index]
+    return before if second - before <= after - second else after
+
+
+def _snapped(readings: dict[int, int], seconds: list[int]) -> dict[int, int]:
+    """Move each reading onto the nearest depth sample, the closest reading winning."""
+    snapped: dict[int, int] = {}
+    distance: dict[int, int] = {}
+    for second, reading in sorted(readings.items()):
+        target = _nearest(seconds, second)
+        gap = abs(second - target)
+        if target not in snapped or gap < distance[target]:
+            snapped[target] = reading
+            distance[target] = gap
+    return snapped
+
+
 def _waypoints(
     parent: ET.Element,
     data: dict,
@@ -388,15 +413,33 @@ def _waypoints(
 ) -> None:
     """Turn the stored per-channel series into UDDF's one-waypoint-per-instant shape.
 
-    Our channels are sampled independently - a device logs depth every second and
-    temperature every twenty - so there is no shared time axis to walk. The waypoints are
-    the **union** of every channel's timestamps, each carrying only the readings actually
-    taken at that instant. Nothing is interpolated onto a neighbouring waypoint: a
-    waypoint with a temperature and no depth is the honest rendering of a temperature
-    sample taken between two depth samples.
+    **Every waypoint carries a `<depth>`, and the depth channel alone sets the time
+    axis.** The schema permits a waypoint without one, and the honest rendering of our
+    independently-sampled channels would be the union of all their timestamps - a
+    temperature taken between two depth samples becoming its own depth-less waypoint. Both
+    importers that matter get that wrong, in opposite and equally fatal ways: Subsurface
+    silently discards every depth-less waypoint (a 706-sample temperature curve arrives as
+    29), and divelogs.de reads the missing depth as **zero**, producing a stored profile
+    that saws between the real depth and the surface on every other sample. A file that
+    validates and that neither consumer can read is not an exit door. See `DECISIONS.md`,
+    *"Every UDDF waypoint carries a depth, because the alternative broke both importers"*.
+
+    So readings on other channels snap to the nearest depth sample - the closest reading
+    wins where several land on one waypoint, and the earlier sample wins a tie. The
+    reading itself is never altered and no depth is ever invented; only the timestamp
+    moves, by less than half a sampling interval. Events snap the same way, and markers
+    that land together are joined rather than dropped.
+
+    A profile with no depth channel therefore emits **no `<samples>` at all** rather than
+    the depth-less waypoints that started this. Everything at full resolution, on its own
+    unsnapped time axis, is in `export.json`.
     """
     depth = _series_by_second(data.get("depth"))
-    temperature = _series_by_second(data.get("temperature"))
+    if not depth:
+        return
+    seconds = sorted(depth)
+
+    temperature = _snapped(_series_by_second(data.get("temperature")), seconds)
     pressure: list[tuple[str, dict[int, int]]] = []
     for cylinder in data.get("pressure") or []:
         mix_id = mix_id_by_gas_number.get(cylinder["gas_number"])
@@ -405,12 +448,12 @@ def _waypoints(
             # reading has nowhere valid to go. It survives in `export.json`, which keeps
             # the gas number itself.
             continue
-        pressure.append((mix_id, dict(zip(cylinder["t"], cylinder["v"], strict=True))))
+        pressure.append((mix_id, _snapped(dict(zip(cylinder["t"], cylinder["v"], strict=True)), seconds)))
 
     switch_at: dict[int, str] = {}
     markers_at: dict[int, list[str]] = {}
-    for event in data.get("events") or []:
-        second = event["t"]
+    for event in sorted(data.get("events") or [], key=lambda event: event["t"]):
+        second = _nearest(seconds, event["t"])
         if event["type"] == ProfileEventType.GAS_SWITCH:
             gas_number = event.get("gas_number")
             # A switch the file recorded without saying what to, or to a cylinder this
@@ -421,18 +464,11 @@ def _waypoints(
             continue
         markers_at.setdefault(second, []).append(event.get("label") or event["type"])
 
-    seconds = sorted(
-        set(depth) | set(temperature) | set(switch_at) | set(markers_at) | {t for _, series in pressure for t in series}
-    )
-    if not seconds:
-        return
-
     samples = _sub(parent, "samples")
     for second in seconds:
         # `waypointType` is an `xs:sequence`, so these have to go in exactly this order.
         waypoint = _sub(samples, "waypoint")
-        if second in depth:
-            _sub(waypoint, "depth", _num(depth[second] / DEPTH_SCALE))
+        _sub(waypoint, "depth", _num(depth[second] / DEPTH_SCALE))
         _sub(waypoint, "divetime", _num(second))
         if second in markers_at:
             # One `<setmarker>` per waypoint is all the schema allows, so simultaneous

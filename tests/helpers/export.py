@@ -367,9 +367,9 @@ def full_bundle() -> ExportBundle:
 
 
 # The profile the `trimix` dive carries, in the stored integer scales: depth in cm,
-# temperature in 0.1 C, pressure in 0.1 bar. Deliberately three channels on three
-# *different* time axes plus two events, because the union-of-timestamps rule in
-# `uddf.py::_waypoints` is only exercised when the axes disagree.
+# temperature in 0.1 C, pressure in 0.1 bar. Three channels and two events, every reading
+# landing on a depth sample - the ordinary case, where `uddf.py::_waypoints` has nothing
+# to snap. `OFF_GRID_PROFILE` below is the one that disagrees.
 TRIMIX_PROFILE: dict[str, Any] = {
     "depth": {"t": [0, 30, 60, 90], "v": [0, 1800, 5200, 300]},
     "ceiling": {"t": [60, 90], "v": [600, 300]},
@@ -386,5 +386,23 @@ TRIMIX_PROFILE: dict[str, Any] = {
         {"t": 90, "type": "gas_switch", "gas_number": 2},
         {"t": 60, "type": "safety_stop"},
         {"t": 60, "type": "other", "label": "Ceiling Broken"},
+    ],
+}
+
+# The same shape, with every non-depth reading deliberately *between* depth samples - what
+# a real device produces, and the only fixture that exercises the snapping in
+# `uddf.py::_waypoints`. The depth axis is 0/10/20/30 and the readings are placed to pin
+# each rule: 4 -> 0 and 27 -> 30 (plain nearest), 12 and 13 both -> 10 with the closer one
+# winning (13's 99.9 C is absurd on purpose - it is what a last-wins bug would emit), 15 ->
+# 10 on a tie the earlier sample takes, 7 and 8 -> 10 as two markers on one waypoint, and
+# the switch at 24 -> 20.
+OFF_GRID_PROFILE: dict[str, Any] = {
+    "depth": {"t": [0, 10, 20, 30], "v": [0, 1000, 2000, 1500]},
+    "temperature": {"t": [4, 12, 13, 27], "v": [250, 240, 999, 220]},
+    "pressure": [{"gas_number": 1, "t": [15], "v": [2000]}],
+    "events": [
+        {"t": 7, "type": "safety_stop"},
+        {"t": 8, "type": "other", "label": "Deco"},
+        {"t": 24, "type": "gas_switch", "gas_number": 1},
     ],
 }
