@@ -2642,10 +2642,24 @@ a wholly tied log to the end to pin that.
 
 Two queries rather than one pass over the log: Postgres derives a `start_time` bound from the row
 comparison on its own, so each is an index scan over `ix_dive_user_id_start_time` that stops a row
-or two past the pivot - both directions read 2 rows on a real 506-dive log. The pivot is bound with
-the columns' own types (`literal(start_time, Dive.start_time.type)`); an aware `datetime` left to
-infer binds as a plain `TIMESTAMP`, and comparing that against a `timestamptz` column is a cast
-waiting to be got wrong.
+or two past the pivot. `EXPLAIN ANALYZE` on a real 506-dive log reads 2 rows in both directions, and
+that is a measurement against the index as it stands rather than a structural guarantee: the index
+carries `(user_id, start_time DESC)` and no `id`, so the row comparison becomes a `start_time` index
+bound plus a recheck, and the `id` tie-break is resolved by an incremental sort within the tied
+`start_time` group rather than by the index itself. If either the index or that plan changes, the
+worst case is a scan proportional to the dive's position in the log - harmless at logbook scale, but
+the 2-row figure stops being true.
+
+The pivot is bound with the columns' own types (`literal(start_time, Dive.start_time.type)`); an
+aware `datetime` left to infer binds as a plain `TIMESTAMP`, and comparing that against a
+`timestamptz` column is a cast waiting to be got wrong.
+
+The filters `GET /dives` takes (`trip_uuid`, `dive_site_uuid`, `gear_item_uuid`) have no counterpart
+here, deliberately: prev/next means the whole log, so a dive opened out of a filtered list walks off
+that filter on the first step. The route docstring says so, since scope is the surprising half.
+Honouring them would mean resolving three more uuids and folding them into the cache key, on an
+endpoint whose whole point is that it is two index lookups - and the client already has the cheaper
+move available, which is to keep the filter in the URL it links to.
 
 The cache key is `user_{id}_dives:neighbors:{uuid}` - under the *list* prefix, not the
 `user_{id}_dive:` one a per-dive read would suggest, for the same reason as `gas_use_history` and
