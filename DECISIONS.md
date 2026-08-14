@@ -4852,15 +4852,19 @@ door, and "the schema allows it" is not a defence when the schema is not the thi
 and every other reading — temperature, tank pressure, gas switches, markers — snaps to the nearest
 depth sample. Where several land on one waypoint the closest wins, and a tie goes to the earlier
 sample, so two exports of one dive stay byte-identical. **No depth is ever invented and no reading
-is ever altered**; only a timestamp moves, and by less than half a sampling interval. Two rules keep
-that true rather than approximately true. A reading lying outside the depth channel's span
-altogether is **dropped rather than clamped** onto the boundary waypoint: a tank pressure logged
-three minutes into the surface interval would otherwise be emitted as the pressure at the last
-in-water waypoint, which is the one way snapping could invent a measurement instead of relocating
-one. And where two gas switches land on the same waypoint the **later** one wins — `<switchmix>` has
-room for exactly one, and that is the gas being breathed from there on, where keeping the earlier
-would have every importer computing the rest of the dive on a gas already left behind. Markers
-landing together are joined instead, since nothing downstream depends on which of them came first.
+is ever altered**; only a timestamp moves, and never by more than half the depth channel's typical
+interval, taken as the median of its gaps. A reading that cannot reach a waypoint within that is
+**dropped rather than clamped** onto the nearest one, because clamping is the one way snapping could
+invent a measurement instead of relocating one — a tank pressure logged three minutes into the
+surface interval emitted as the pressure at the last in-water waypoint. The tolerance is
+deliberately a property of the *channel* rather than of the two samples bracketing the reading:
+`suunto_xml` appends a depth sample only where `<Depth>` is non-nil, so mid-dive dropouts are a real
+feature of the corpus, and a bracket-relative bound would call an 1800-second hole "one interval"
+and emit a temperature taken in the middle of it as the temperature a quarter of an hour earlier.
+And where two gas switches land on the same waypoint the **later** one wins — `<switchmix>` has room
+for exactly one, and that is the gas being breathed from there on, where keeping the earlier would
+have every importer computing the rest of the dive on a gas already left behind. Markers landing
+together are joined instead, since nothing downstream depends on which of them came first.
 
 Interpolating a depth for each temperature sample would have fixed Subsurface too, and was rejected
 for the obvious reason: writing depths no computer recorded into the file whose promise is that it

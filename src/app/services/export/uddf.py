@@ -392,31 +392,39 @@ def _nearest(seconds: list[int], second: int) -> int:
     return before if second - before <= after - second else after
 
 
-def _snappable(seconds: list[int]) -> tuple[int, int]:
-    """The window a reading has to fall in to belong to a waypoint at all.
+def _snap_tolerance(seconds: list[int]) -> int:
+    """How far a reading may be moved to reach a waypoint: half the depth channel's
+    **typical** interval, taken as the median of its gaps.
 
-    The depth channel's own span, widened by half its first and last interval. Inside the
-    span the nearest depth sample is within half an interval by construction; outside it,
-    `_nearest` would clamp to the boundary waypoint from any distance at all - a tank
-    pressure logged three minutes into the surface interval would be emitted as the
-    pressure at the last in-water waypoint. Those readings are dropped instead, and are in
-    `export.json` on their own unsnapped axis like everything else this cannot carry.
+    Not half of whichever two samples happen to bracket the reading, which sounds like the
+    same rule and is not: the depth channel has interior holes. `suunto_xml` appends a
+    sample only where `<Depth>` is non-nil, and mid-dive dropouts are a documented feature
+    of the corpus, while temperature and pressure keep sampling straight through them. A
+    bracket-relative bound would call a 1800 s hole "one interval" and cheerfully emit a
+    temperature taken at 2000 s as the temperature at the 1200 s waypoint - 800 s away,
+    presented as measured there. Which is the thing snapping exists not to do: it moves a
+    reading in time, it does not invent a measurement.
+
+    So the tolerance is a property of the channel rather than of the neighbourhood, and
+    readings that cannot reach a waypoint within it - across a dropout, or beyond either
+    end of the dive - are dropped. They are in `export.json`, on their own unsnapped axis,
+    like everything else this format cannot carry honestly.
     """
-    half_first = (seconds[1] - seconds[0]) // 2 if len(seconds) > 1 else 0
-    half_last = (seconds[-1] - seconds[-2]) // 2 if len(seconds) > 1 else 0
-    return seconds[0] - half_first, seconds[-1] + half_last
+    if len(seconds) < 2:
+        return 0
+    gaps = sorted(later - earlier for earlier, later in zip(seconds, seconds[1:], strict=False))
+    return gaps[len(gaps) // 2] // 2
 
 
-def _snapped(readings: dict[int, int], seconds: list[int]) -> dict[int, int]:
+def _snapped(readings: dict[int, int], seconds: list[int], tolerance: int) -> dict[int, int]:
     """Move each reading onto the nearest depth sample, the closest reading winning."""
-    first, last = _snappable(seconds)
     snapped: dict[int, int] = {}
     distance: dict[int, int] = {}
     for second, reading in sorted(readings.items()):
-        if not first <= second <= last:
-            continue
         target = _nearest(seconds, second)
         gap = abs(second - target)
+        if gap > tolerance:
+            continue
         if target not in snapped or gap < distance[target]:
             snapped[target] = reading
             distance[target] = gap
@@ -445,9 +453,10 @@ def _waypoints(
     So readings on other channels snap to the nearest depth sample - the closest reading
     wins where several land on one waypoint, and the earlier sample wins a tie. The
     reading itself is never altered and no depth is ever invented; only the timestamp
-    moves, and by less than half a sampling interval, which is what `_snappable` is for:
-    a reading outside the depth channel's span would otherwise clamp onto a boundary
-    waypoint from any distance at all, so it is dropped rather than relocated.
+    moves, and never by more than `_snap_tolerance`, which is half the channel's typical
+    interval. Anything that cannot reach a waypoint within that - a reading inside a
+    dropout in the depth channel, or one taken after the diver surfaced - is dropped
+    rather than relocated onto a waypoint it was not measured anywhere near.
 
     Events snap the same way, with two rules the single-slot elements force: markers
     landing together are joined rather than dropped, and where two gas switches land
@@ -463,7 +472,8 @@ def _waypoints(
         return
     seconds = sorted(depth)
 
-    temperature = _snapped(_series_by_second(data.get("temperature")), seconds)
+    tolerance = _snap_tolerance(seconds)
+    temperature = _snapped(_series_by_second(data.get("temperature")), seconds, tolerance)
     pressure: list[tuple[str, dict[int, int]]] = []
     for cylinder in data.get("pressure") or []:
         mix_id = mix_id_by_gas_number.get(cylinder["gas_number"])
@@ -472,29 +482,34 @@ def _waypoints(
             # reading has nowhere valid to go. It survives in `export.json`, which keeps
             # the gas number itself.
             continue
-        pressure.append((mix_id, _snapped(dict(zip(cylinder["t"], cylinder["v"], strict=True)), seconds)))
+        readings = dict(zip(cylinder["t"], cylinder["v"], strict=True))
+        pressure.append((mix_id, _snapped(readings, seconds, tolerance)))
 
-    first, last = _snappable(seconds)
-    switch_at: dict[int, str] = {}
+    # Last switch wins where two land on one waypoint: `<switchmix>` is `maxOccurs="1"`,
+    # and the diver is breathing the *later* gas for everything that follows, so keeping
+    # the earlier one would have every importer computing the rest of the dive on a gas
+    # already left behind. The winner is picked before representability is considered -
+    # resolving first would let an unrepresentable later switch hand the waypoint back to
+    # the gas the diver had just left, which is the same failure by a quieter route.
+    switch_event_at: dict[int, dict] = {}
     markers_at: dict[int, list[str]] = {}
     for event in sorted(data.get("events") or [], key=lambda event: event["t"]):
-        if not first <= event["t"] <= last:
-            continue
         second = _nearest(seconds, event["t"])
+        if abs(event["t"] - second) > tolerance:
+            continue
         if event["type"] == ProfileEventType.GAS_SWITCH:
-            gas_number = event.get("gas_number")
-            # A switch the file recorded without saying what to, or to a cylinder this
-            # dive has no mixture for, has no `xs:IDREF` to point at. It stays in
-            # `export.json`, which carries the raw event list.
-            if gas_number is not None and gas_number in mix_id_by_gas_number:
-                # Last switch wins, not first: `<switchmix>` is `maxOccurs="1"`, and when
-                # two switches land on one waypoint the diver is breathing the *later*
-                # gas for everything that follows. Keeping the earlier one would have
-                # every importer computing the rest of the dive on a gas already left
-                # behind. Events are sorted by time, so this stays deterministic.
-                switch_at[second] = mix_id_by_gas_number[gas_number]
+            switch_event_at[second] = event
             continue
         markers_at.setdefault(second, []).append(event.get("label") or event["type"])
+
+    switch_at: dict[int, str] = {}
+    for second, event in switch_event_at.items():
+        gas_number = event.get("gas_number")
+        # A switch the file recorded without saying what to, or to a cylinder this dive
+        # has no mixture for, has no `xs:IDREF` to point at, so the waypoint gets no
+        # `<switchmix>` at all. It stays in `export.json`, which carries the raw events.
+        if gas_number is not None and gas_number in mix_id_by_gas_number:
+            switch_at[second] = mix_id_by_gas_number[gas_number]
 
     samples = _sub(parent, "samples")
     for second in seconds:

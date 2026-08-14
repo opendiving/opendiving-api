@@ -482,15 +482,39 @@ class TestWaypoints:
         assert mixes[switches[2].get("ref")] == "0.5"
 
     @pytest.mark.asyncio
-    async def test_a_reading_outside_the_depth_span_is_dropped_not_clamped(self, schema, monkeypatch):
+    @pytest.mark.parametrize("second", [-60, 230])
+    async def test_a_reading_too_far_from_any_sample_is_dropped_not_clamped(self, second, schema, monkeypatch):
         """`_nearest` alone would put a surface-interval reading on the last in-water
         waypoint, as if it had been taken there - the one way snapping could invent data
-        rather than merely move it. 200 s past a 10 s axis is not a boundary reading."""
-        profile = {**OFF_GRID_PROFILE, "temperature": {"t": [230], "v": [300]}}
+        rather than merely move it. Both ends clamp, so both ends are checked."""
+        profile = {**OFF_GRID_PROFILE, "temperature": {"t": [second], "v": [300]}}
         document = await _render(full_bundle(), {2: profile}, monkeypatch)
         schema.validate(document)
         waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
         assert [_text(w, f"{UDDF}temperature") for w in waypoints] == [None, None, None, None]
+
+    @pytest.mark.asyncio
+    async def test_a_reading_inside_a_dropout_is_dropped_too(self, schema, monkeypatch):
+        """The interior version of the same failure, and the reason the tolerance is a
+        property of the channel rather than of the two samples bracketing the reading.
+
+        `suunto_xml` appends a depth sample only where `<Depth>` is non-nil, so a
+        mid-dive dropout leaves a hole that temperature samples straight through. Judged
+        against its bracketing pair, a reading in the middle of a 1800 s hole has moved
+        "less than half an interval" and would be emitted as the temperature at a
+        waypoint a quarter of an hour away.
+        """
+        profile = {
+            "depth": {"t": [0, 10, 20, 1820, 1830], "v": [0, 1000, 2000, 800, 0]},
+            "temperature": {"t": [12, 900, 1825], "v": [240, 999, 220]},
+        }
+        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        schema.validate(document)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        # The 900 s reading has no waypoint within tolerance and is gone; the two either
+        # side of the hole are unaffected by it. 1825 s is equidistant from 1820 and
+        # 1830, so the tie-break puts it on the earlier one.
+        assert [_text(w, f"{UDDF}temperature") for w in waypoints] == [None, "297.15", None, "295.15", None]
 
     @pytest.mark.asyncio
     async def test_a_profile_with_no_depth_channel_emits_no_samples(self, schema, monkeypatch):
