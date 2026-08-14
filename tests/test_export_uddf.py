@@ -451,8 +451,10 @@ class TestWaypoints:
         document = await _render(full_bundle(), {2: OFF_GRID_PROFILE}, monkeypatch)
         waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
         assert [_text(w, f"{UDDF}setmarker") for w in waypoints] == [None, "safety_stop; Deco", None, None]
+        # The 24 s switch lands on 30, not on the nearer 20: a state change is never shown
+        # before it happened. See `test_a_gas_switch_is_never_shown_before_it_happened`.
         switches = [w.find(f"{UDDF}switchmix") for w in waypoints]
-        assert [s is not None for s in switches] == [False, False, True, False]
+        assert [s is not None for s in switches] == [False, False, False, True]
 
     @pytest.mark.asyncio
     async def test_the_later_of_two_switches_on_one_waypoint_wins(self, schema, monkeypatch):
@@ -475,11 +477,73 @@ class TestWaypoints:
         tree = _tree(document)
         waypoints = _dive(tree, 1).findall(f"{UDDF}samples/{UDDF}waypoint")
         switches = [w.find(f"{UDDF}switchmix") for w in waypoints]
-        assert [s is not None for s in switches] == [False, False, True, False]
+        assert [s is not None for s in switches] == [False, False, False, True]
         # Resolved through the mix rather than the id, so the assertion says which *gas*
         # won: cylinder 2 is the 50% deco mix, cylinder 1 the 21/35 bottom gas.
         mixes = {m.get("id"): _text(m, f"{UDDF}o2") for m in tree.findall(f"{UDDF}gasdefinitions/{UDDF}mix")}
-        assert mixes[switches[2].get("ref")] == "0.5"
+        assert mixes[switches[3].get("ref")] == "0.5"
+
+    @pytest.mark.asyncio
+    async def test_a_gas_switch_is_never_shown_before_it_happened(self, schema, monkeypatch):
+        """A switch is a state change, so the tolerance rule that governs readings does
+        not govern it.
+
+        Dropping one for being too far from a waypoint would not leave a hole - it would
+        tell every importer the diver stayed on the previous gas for the rest of the dive.
+        So it lands on the first waypoint at or after it, however far that is, and the
+        interval in between is attributed to the old gas rather than to the new one.
+        """
+        profile = {
+            "depth": {"t": [0, 10, 20, 1820, 1830], "v": [0, 1000, 2000, 800, 0]},
+            "events": [{"t": 900, "type": "gas_switch", "gas_number": 2}],
+        }
+        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        schema.validate(document)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        switches = [w.find(f"{UDDF}switchmix") for w in waypoints]
+        # 900 s is 880 s from the nearest waypoint - a temperature there would be dropped
+        # (`test_a_reading_inside_a_dropout_is_dropped_too`), and this survives instead.
+        assert [s is not None for s in switches] == [False, False, False, True, False]
+
+    @pytest.mark.asyncio
+    async def test_a_switch_after_the_last_sample_has_nowhere_to_go(self, schema, monkeypatch):
+        """The one case where dropping a switch is right: nothing follows it in the
+        profile, so no importer can compute anything on the wrong gas."""
+        profile = {**OFF_GRID_PROFILE, "events": [{"t": 40, "type": "gas_switch", "gas_number": 2}]}
+        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        schema.validate(document)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        assert [w.find(f"{UDDF}switchmix") for w in waypoints] == [None, None, None, None]
+
+    @pytest.mark.asyncio
+    async def test_the_closest_of_two_readings_wins_the_waypoint_not_the_earliest(self, schema, monkeypatch):
+        """`OFF_GRID_PROFILE`'s colliding pair has the earlier reading also the closer
+        one, so first-wins and closest-wins agree there and the documented rule goes
+        unpinned. Here 9 s is one second from the waypoint and 6 s is four, so only
+        closest-wins produces 22.0 C."""
+        profile = {
+            "depth": {"t": [0, 10, 20], "v": [0, 1000, 2000]},
+            "temperature": {"t": [6, 9], "v": [999, 220]},
+        }
+        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        schema.validate(document)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        assert [_text(w, f"{UDDF}temperature") for w in waypoints] == [None, "295.15", None]
+
+    @pytest.mark.asyncio
+    async def test_a_sparse_depth_channel_does_not_widen_the_tolerance(self, schema, monkeypatch):
+        """The median gap is only robust while dropouts are the minority.
+
+        Two usable depth samples half an hour apart - what `suunto_xml` produces from a
+        file whose `<Depth>` is nil for most of the dive - would otherwise licence a 900 s
+        move, which is the failure the tolerance exists to prevent rather than an
+        application of it.
+        """
+        profile = {"depth": {"t": [0, 1800], "v": [0, 3000]}, "temperature": {"t": [890], "v": [220]}}
+        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        schema.validate(document)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        assert [_text(w, f"{UDDF}temperature") for w in waypoints] == [None, None]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("second", [-60, 230])

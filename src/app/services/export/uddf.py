@@ -68,6 +68,8 @@ PASCAL_PER_BAR = 100_000.0
 # UDDF tank volumes are cubic meters; divers, cylinder stampings and our `volume` column
 # are all litres.
 LITRES_PER_CUBIC_METRE = 1000.0
+# The furthest a reading is ever moved to reach a waypoint - see `_snap_tolerance`.
+MAX_SNAP_SECONDS = 30
 
 _INDENT = "  "
 
@@ -413,7 +415,19 @@ def _snap_tolerance(seconds: list[int]) -> int:
     if len(seconds) < 2:
         return 0
     gaps = sorted(later - earlier for earlier, later in zip(seconds, seconds[1:], strict=False))
-    return gaps[len(gaps) // 2] // 2
+    # Capped, because the median is only robust while dropouts are the minority. A depth
+    # channel of two usable samples half an hour apart - which `suunto_xml` will produce
+    # from a file whose `<Depth>` is nil for most of the dive while temperature keeps
+    # sampling - has a median gap of 1800 s and would otherwise permit a 900 s move, the
+    # exact failure this bound exists to prevent. No dive computer in the corpus samples
+    # depth slower than every 20 s, so half a minute is generous as an outer limit.
+    return min(gaps[len(gaps) // 2] // 2, MAX_SNAP_SECONDS)
+
+
+def _at_or_after(seconds: list[int], second: int) -> int | None:
+    """The first depth sample not earlier than `second`; `None` past the end."""
+    index = bisect.bisect_left(seconds, second)
+    return None if index == len(seconds) else seconds[index]
 
 
 def _snapped(readings: dict[int, int], seconds: list[int], tolerance: int) -> dict[int, int]:
@@ -485,20 +499,35 @@ def _waypoints(
         readings = dict(zip(cylinder["t"], cylinder["v"], strict=True))
         pressure.append((mix_id, _snapped(readings, seconds, tolerance)))
 
-    # Last switch wins where two land on one waypoint: `<switchmix>` is `maxOccurs="1"`,
-    # and the diver is breathing the *later* gas for everything that follows, so keeping
-    # the earlier one would have every importer computing the rest of the dive on a gas
-    # already left behind. The winner is picked before representability is considered -
-    # resolving first would let an unrepresentable later switch hand the waypoint back to
-    # the gas the diver had just left, which is the same failure by a quieter route.
+    # A gas switch is a state change, not a reading, and that changes both rules it obeys.
+    #
+    # It is never *dropped* for being out of tolerance. A missing temperature leaves a
+    # hole; a missing switch tells every importer the diver stayed on the previous gas for
+    # the rest of the dive - wrong data rather than absent data, and the same failure the
+    # last-wins rule below exists to prevent. So it lands on the first waypoint at or
+    # after it happened however far that is, which also means it is never shown *earlier*
+    # than it happened: the interval in between is attributed to the old gas, which is the
+    # conservative direction and the one an importer recomputing deco can live with.
+    # `<divetime>` still tells a careful reader where the switch really fell. Past the end
+    # of the profile there is no such waypoint and nothing left to be wrong about.
+    #
+    # Where two land on one waypoint the last wins, because `<switchmix>` is
+    # `maxOccurs="1"` and the diver is breathing the later gas for everything that
+    # follows. The winner is picked before representability is considered - resolving
+    # first would let an unrepresentable later switch hand the waypoint back to the gas
+    # just left behind, which is the same failure by a quieter route.
     switch_event_at: dict[int, dict] = {}
     markers_at: dict[int, list[str]] = {}
     for event in sorted(data.get("events") or [], key=lambda event: event["t"]):
+        if event["type"] == ProfileEventType.GAS_SWITCH:
+            after = _at_or_after(seconds, event["t"])
+            if after is not None:
+                switch_event_at[after] = event
+            continue
+        # Markers are annotations: one that cannot reach a waypoint honestly is dropped
+        # like any other reading, since nothing downstream computes on its absence.
         second = _nearest(seconds, event["t"])
         if abs(event["t"] - second) > tolerance:
-            continue
-        if event["type"] == ProfileEventType.GAS_SWITCH:
-            switch_event_at[second] = event
             continue
         markers_at.setdefault(second, []).append(event.get("label") or event["type"])
 

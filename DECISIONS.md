@@ -4853,7 +4853,10 @@ and every other reading — temperature, tank pressure, gas switches, markers �
 depth sample. Where several land on one waypoint the closest wins, and a tie goes to the earlier
 sample, so two exports of one dive stay byte-identical. **No depth is ever invented and no reading
 is ever altered**; only a timestamp moves, and never by more than half the depth channel's typical
-interval, taken as the median of its gaps. A reading that cannot reach a waypoint within that is
+interval, taken as the median of its gaps and capped at 30 seconds — the cap matters because the
+median is only robust while dropouts are the minority, and a channel of two usable samples half an
+hour apart would otherwise licence a 900-second move, which is the failure this bound exists to
+prevent rather than an application of it. A reading that cannot reach a waypoint within that is
 **dropped rather than clamped** onto the nearest one, because clamping is the one way snapping could
 invent a measurement instead of relocating one — a tank pressure logged three minutes into the
 surface interval emitted as the pressure at the last in-water waypoint. The tolerance is
@@ -4861,10 +4864,18 @@ deliberately a property of the *channel* rather than of the two samples bracketi
 `suunto_xml` appends a depth sample only where `<Depth>` is non-nil, so mid-dive dropouts are a real
 feature of the corpus, and a bracket-relative bound would call an 1800-second hole "one interval"
 and emit a temperature taken in the middle of it as the temperature a quarter of an hour earlier.
-And where two gas switches land on the same waypoint the **later** one wins — `<switchmix>` has room
-for exactly one, and that is the gas being breathed from there on, where keeping the earlier would
-have every importer computing the rest of the dive on a gas already left behind. Markers landing
-together are joined instead, since nothing downstream depends on which of them came first.
+**A gas switch is exempt from all of that**, because it is a state change rather than a reading. A
+dropped temperature leaves a hole; a dropped switch tells every importer the diver stayed on the
+previous gas for the rest of the dive — wrong data rather than absent data. So a switch lands on the
+first waypoint at or *after* it happened, however far that is, which also means it is never shown
+earlier than it happened: the interval in between is attributed to the old gas, the conservative
+direction for anything recomputing deco, and `<divetime>` still says where the switch really fell.
+Past the last sample there is no such waypoint, and nothing left for an importer to get wrong. Where
+two switches land on one waypoint the **later** wins — `<switchmix>` has room for exactly one, and
+that is the gas being breathed from there on — and the winner is chosen before asking whether it can
+be represented, so an unrepresentable later switch cannot hand the waypoint back to the gas just
+left. Markers land under the reading rule and are joined where several arrive together, since
+nothing downstream computes on their absence.
 
 Interpolating a depth for each temperature sample would have fixed Subsurface too, and was rejected
 for the obvious reason: writing depths no computer recorded into the file whose promise is that it
