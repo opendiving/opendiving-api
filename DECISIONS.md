@@ -4635,8 +4635,9 @@ carry one. They are the join-them-yourself set, so their likely reader is a scri
 spreadsheet, and a leading `﻿` in a header name is a nuisance there.
 
 `tests/fixtures/export/dives.csv` pins the exact bytes of both, and `.gitattributes` marks it
-`binary` so git cannot normalize the line endings out from under the test on a machine configured
-with `core.autocrlf`.
+`-text` so git cannot normalize the line endings out from under the test on a machine configured
+with `core.autocrlf`. Deliberately `-text` rather than `binary`: the latter is a macro for
+`-diff -merge -text`, and a golden file you cannot read the diff of is not doing its job.
 
 ## An export holds every record the caller can still see, not every record still live
 

@@ -20,7 +20,11 @@ import pytest
 
 from src.app.services.export.tabular import (
     BOM,
+    DIVE_SITES_HEADER,
     DIVES_HEADER,
+    GEAR_ITEMS_HEADER,
+    GEAR_SERVICE_HEADER,
+    TRIPS_HEADER,
     _utc_offset,
     write_certifications_csv,
     write_dive_sites_csv,
@@ -30,7 +34,7 @@ from src.app.services.export.tabular import (
     write_mixtures_csv,
     write_trips_csv,
 )
-from tests.helpers.export import build_bundle, full_bundle, make_dive, mixture
+from tests.helpers.export import UUIDS, build_bundle, full_bundle, make_dive, mixture
 
 GOLDEN = Path(__file__).parent / "fixtures" / "export" / "dives.csv"
 
@@ -124,22 +128,50 @@ class TestTheNormalizedFiles:
     def test_trips_count_the_dives_that_reference_them(self):
         rows = _parse(_render(write_trips_csv(full_bundle())))
         assert rows[1][0] == "Red Sea 2026"
-        assert rows[1][4] == "2"
+        assert rows[1][TRIPS_HEADER.index("dives")] == "2"
 
     def test_dive_sites_count_visits_not_dives(self):
         """Yolanda is the second site of one dive and the only site of another."""
         rows = _parse(_render(write_dive_sites_csv(full_bundle())))
-        counts = {row[0]: row[2] for row in rows[1:]}
+        counts = {row[0]: row[DIVE_SITES_HEADER.index("dives")] for row in rows[1:]}
         assert counts == {"Shark Reef": "1", "Yolanda": "2"}
 
     def test_gear_items_carry_the_sets_they_belong_to(self):
         rows = _parse(_render(write_gear_items_csv(full_bundle())))
-        assert {row[0]: row[6] for row in rows[1:]} == {"XTX50": "Tech", "Fusion": "Tech", "Slate": ""}
+        sets = GEAR_ITEMS_HEADER.index("sets")
+        assert {row[0]: row[sets] for row in rows[1:]} == {"XTX50": "Tech", "Fusion": "Tech", "Slate": ""}
 
     def test_schedules_and_records_share_one_file_told_apart_by_row_type(self):
         rows = _parse(_render(write_gear_service_csv(full_bundle())))
-        assert [row[1] for row in rows[1:]] == ["schedule", "record"]
+        row_type = GEAR_SERVICE_HEADER.index("row_type")
+        assert [row[row_type] for row in rows[1:]] == ["schedule", "record"]
         assert rows[1][0] == rows[2][0] == "XTX50"
+
+    def test_gear_service_rows_join_by_uuid_not_by_display_name(self):
+        """A gear item's name is not unique, and after `loader._owned` resurrects a
+        deleted item it can name both a live and a deleted one."""
+        rows = _parse(_render(write_gear_service_csv(full_bundle())))
+        item_uuid = GEAR_SERVICE_HEADER.index("gear_item_uuid")
+        assert {row[item_uuid] for row in rows[1:]} == {str(UUIDS["gear-regulator"])}
+        assert all(row[GEAR_SERVICE_HEADER.index("row_uuid")] for row in rows[1:])
+
+    def test_the_resurrectable_files_all_flag_a_deleted_row(self):
+        """`loader._owned` reads deleted-but-referenced rows back and `export.json` flags
+        them, so the CSVs in the same archive must not list them as live."""
+        bundle = full_bundle()
+        bundle.trips[0].is_deleted = True
+        bundle.dive_sites[0].is_deleted = True
+        bundle.gear_items[0].is_deleted = True
+        bundle.schedules[0].is_deleted = True
+
+        for writer, header in (
+            (write_trips_csv, TRIPS_HEADER),
+            (write_dive_sites_csv, DIVE_SITES_HEADER),
+            (write_gear_items_csv, GEAR_ITEMS_HEADER),
+            (write_gear_service_csv, GEAR_SERVICE_HEADER),
+        ):
+            rows = _parse(_render(writer(bundle)))
+            assert rows[1][header.index("deleted")] == "True", writer.__name__
 
     def test_certifications_name_the_agency_the_diver_gave(self):
         rows = _parse(_render(write_certifications_csv(full_bundle())))

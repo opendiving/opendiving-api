@@ -11,7 +11,9 @@ out you did it.
 
 The line endings are CRLF (RFC 4180, and `csv.writer`'s default) and the file starts with
 a UTF-8 byte-order mark, so both are part of what is being pinned. Do not let an editor
-normalize either — `.gitattributes` marks this path binary to keep git out of it too.
+normalize either — `.gitattributes` marks this path `-text` to keep git out of it too.
+`-text`, not `binary`: the latter also implies `-diff`, and a golden file whose diff you
+cannot read is not doing its job.
 
 Regenerate **deliberately**, after reading the diff and agreeing with it:
 

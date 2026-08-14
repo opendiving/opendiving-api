@@ -22,6 +22,16 @@ Three things this is careful about:
 
 Numbers are written exactly as stored - meters, bar, degrees Celsius, seconds - with no
 rounding beyond what the derived SAC/RMV figures already carry.
+
+**Formula injection is knowingly not neutralized**, and that is a decision rather than an
+oversight. A cell beginning `=`, `+`, `-` or `@` is evaluated by Excel and LibreOffice, and
+notes, site names and filenames all reach cells verbatim. Every value here is the caller's
+own data handed back to the caller, so there is no cross-account vector; the only scenario
+left is a diver deliberately typing a formula into their own logbook and sharing the file.
+Against that, the usual mitigation - prefixing such cells with an apostrophe - would mangle
+a great many real rows, because dive notes beginning with a dash are ordinary
+("- 20 min at 30 m"). Corrupting the common case to guard the contrived one is the wrong
+trade. Revisit if the export ever carries data a *second* party supplied.
 """
 
 import csv
@@ -188,7 +198,11 @@ def write_mixtures_csv(bundle: ExportBundle) -> Iterator[str]:
     return _rows_to_csv(MIXTURES_HEADER, rows())
 
 
-TRIPS_HEADER = ("name", "location", "start_date", "end_date", "dives", "notes", "trip_uuid")
+# `deleted` is on the four files whose rows `loader._owned` can resurrect. Without it the
+# same archive would ship an `export.json` flagging a record as deleted and a CSV listing
+# it as live - and on `gear-items.csv`, which already has an `archived` column, the
+# omission would positively read as "not deleted".
+TRIPS_HEADER = ("name", "location", "start_date", "end_date", "dives", "deleted", "notes", "trip_uuid")
 
 
 def write_trips_csv(bundle: ExportBundle) -> Iterator[str]:
@@ -205,6 +219,7 @@ def write_trips_csv(bundle: ExportBundle) -> Iterator[str]:
                 trip.start_date.isoformat(),
                 None if trip.end_date is None else trip.end_date.isoformat(),
                 counts.get(trip.id, 0),
+                trip.is_deleted,
                 trip.notes,
                 str(trip.uuid),
             )
@@ -212,7 +227,7 @@ def write_trips_csv(bundle: ExportBundle) -> Iterator[str]:
     return _rows_to_csv(TRIPS_HEADER, rows())
 
 
-DIVE_SITES_HEADER = ("name", "location", "dives", "notes", "dive_site_uuid")
+DIVE_SITES_HEADER = ("name", "location", "dives", "deleted", "notes", "dive_site_uuid")
 
 
 def write_dive_sites_csv(bundle: ExportBundle) -> Iterator[str]:
@@ -223,12 +238,23 @@ def write_dive_sites_csv(bundle: ExportBundle) -> Iterator[str]:
 
     def rows() -> Iterator[tuple[Any, ...]]:
         for site in bundle.dive_sites:
-            yield (site.name, site.location, counts.get(site.id, 0), site.notes, str(site.uuid))
+            yield (site.name, site.location, counts.get(site.id, 0), site.is_deleted, site.notes, str(site.uuid))
 
     return _rows_to_csv(DIVE_SITES_HEADER, rows())
 
 
-GEAR_ITEMS_HEADER = ("name", "brand", "type", "rented", "archived", "dive_count", "sets", "notes", "gear_item_uuid")
+GEAR_ITEMS_HEADER = (
+    "name",
+    "brand",
+    "type",
+    "rented",
+    "archived",
+    "deleted",
+    "dive_count",
+    "sets",
+    "notes",
+    "gear_item_uuid",
+)
 
 
 def write_gear_items_csv(bundle: ExportBundle) -> Iterator[str]:
@@ -248,6 +274,7 @@ def write_gear_items_csv(bundle: ExportBundle) -> Iterator[str]:
                 item.type,
                 item.rented,
                 item.is_archived,
+                item.is_deleted,
                 item.dive_count,
                 "; ".join(sets_by_item.get(item.id, [])),
                 item.notes,
@@ -259,6 +286,7 @@ def write_gear_items_csv(bundle: ExportBundle) -> Iterator[str]:
 
 GEAR_SERVICE_HEADER = (
     "gear_item",
+    "gear_item_uuid",
     "row_type",
     "kind",
     "label",
@@ -270,7 +298,9 @@ GEAR_SERVICE_HEADER = (
     "next_due_on",
     "next_due_at_dive_count",
     "active",
+    "deleted",
     "notes",
+    "row_uuid",
 )
 
 
@@ -282,14 +312,17 @@ def write_gear_service_csv(bundle: ExportBundle) -> Iterator[str]:
     together. The columns each kind doesn't use are left empty.
     """
 
-    def item_name(gear_item_id: int) -> str:
+    def item_columns(gear_item_id: int) -> tuple[str, str]:
+        """Name *and* uuid: a name is not unique, and after the soft-delete resurrection
+        it can legitimately name both a live item and a deleted one. The uuid is what
+        actually joins this file to `gear-items.csv`."""
         item = bundle.gear_item_by_id.get(gear_item_id)
-        return "" if item is None else item.name
+        return ("", "") if item is None else (item.name, str(item.uuid))
 
     def rows() -> Iterator[tuple[Any, ...]]:
         for schedule in bundle.schedules:
             yield (
-                item_name(schedule.gear_item_id),
+                *item_columns(schedule.gear_item_id),
                 "schedule",
                 ServiceKind(schedule.kind).value,
                 schedule.label,
@@ -301,11 +334,13 @@ def write_gear_service_csv(bundle: ExportBundle) -> Iterator[str]:
                 None if schedule.next_due_on is None else schedule.next_due_on.isoformat(),
                 schedule.next_due_at_dive_count,
                 schedule.is_active,
+                schedule.is_deleted,
                 None,
+                str(schedule.uuid),
             )
         for record in bundle.service_records:
             yield (
-                item_name(record.gear_item_id),
+                *item_columns(record.gear_item_id),
                 "record",
                 ServiceKind(record.kind).value,
                 record.label,
@@ -317,7 +352,9 @@ def write_gear_service_csv(bundle: ExportBundle) -> Iterator[str]:
                 None,
                 None,
                 None,
+                None,
                 record.notes,
+                str(record.uuid),
             )
 
     return _rows_to_csv(GEAR_SERVICE_HEADER, rows())
