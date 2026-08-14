@@ -39,8 +39,9 @@ async def _get_owned_gear_item(
 ) -> GearItemReadInternal:
     """Fetch a gear item by public uuid and assert the caller owns it.
 
-    Thin wrapper over `fetch_owned_or_raise` - see there for the 404/403 split and, in
-    particular, why this must run before any `@cache`-wrapped read helper.
+    Thin wrapper over `fetch_owned_or_raise` - see there for why someone else's row reads
+    as a 404 and, in particular, why this must run before any `@cache`-wrapped read
+    helper.
     """
     return await fetch_owned_or_raise(
         db=db,
@@ -250,7 +251,8 @@ async def read_gear_item(
 ) -> GearItemRead:
     """Return a single gear item, with its service schedules attached.
 
-    404 when no such item exists, 403 when it belongs to another user.
+    404 when no such item exists - and the same 404 when it belongs to another user, so
+    someone else's uuid stays unprobeable.
     """
     # Authorize before the cached read: `@cache` replays a hit without re-checking.
     await _get_owned_gear_item(db, uuid, current_user)

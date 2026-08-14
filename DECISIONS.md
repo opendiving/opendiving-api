@@ -329,7 +329,8 @@ request. These were changed to flat routes that take the user id directly instea
 - `GET/PATCH/DELETE /dive/{id}`, `/trip/{id}`, `/dive-site/{id}`: no longer take a username at all.
   The handler fetches the object by `id` alone, then checks the fetched object's `user_id` against
   `current_user["id"]`, raising `404` if the object doesn't exist and `403` if it exists but belongs
-  to someone else.
+  to someone else. (That `403` is now a `404` as well — see *"Someone else's row is a 404, not a
+  403"* below.)
 
 This flattening also surfaced a pre-existing route collision: the superuser-only hard-delete
 `erase_db_dive` used to sit at the exact same `DELETE /{username}/dive/{id}` path/method as the
@@ -376,8 +377,8 @@ function, an unauthorized user could request the exact same cache key (e.g. `GET
 someone else's dive, or `GET /dives?user_id=<victim>`) and get served the cached victim's data
 straight from Redis without the check ever executing. `dives.py` avoids this by splitting each
 cached GET into a private `_cached_read_*` helper (pure data fetch, no auth) and a public route
-function that performs the `403` check *first* and only calls the cached helper once the request is
-already authorized. Do not put authorization logic inside a `@cache`-decorated function - always
+function that performs the ownership check *first* and only calls the cached helper once the request
+is already authorized. Do not put authorization logic inside a `@cache`-decorated function - always
 gate access in the (uncached) caller.
 
 ## Single-resource path params were renamed from `{resource}_uuid` to `{uuid}`
@@ -2795,10 +2796,9 @@ override kept for a resource that ever needs a different bound.
 
 ## Ownership checks go through one `fetch_owned_or_raise`
 
-The "fetch by public uuid, 404 if missing, 403 if it belongs to someone else" block existed in seven
-route files: three as differently-named private helpers (`_get_owned_dive`,
-`_get_owned_certification`, `_owned_gear_item`) and four inlined three times each. Roughly fifteen
-copies of six lines.
+The "fetch by public uuid, check the owner" block existed in seven route files: three as
+differently-named private helpers (`_get_owned_dive`, `_get_owned_certification`,
+`_owned_gear_item`) and four inlined three times each. Roughly fifteen copies of six lines.
 
 That matters more than ordinary duplication because of the invariant the copies each restated in a
 comment: **the check must run before any `@cache`-wrapped read**, since `@cache` serves a hit
@@ -2814,11 +2814,74 @@ Deliberately *not* converted, because they answer differently on purpose:
 
 - `gear_service._owned_gear_item` and `gear_sets._resolve_item_ids` answer **422** for both
   "missing" and "not yours". There the uuid is a reference inside a request body rather than the
-  resource being addressed, and one answer for both keeps someone else's uuids unprobeable.
+  resource being addressed, so a 404 would name the wrong thing as missing — the request, not the
+  route's resource.
 - `gear_service`'s schedule/record routes scope by `user_id` down in `resolve_schedule_for_user`, so
-  there is no separate 403 to make.
+  there is no separate ownership answer to make.
 
 `tests/test_ownership.py` asserts no route file reintroduces the inline form.
+
+### Someone else's row is a 404, not a 403
+
+Centralizing the check was what made this revisitable in one place, and this is the revisit.
+
+It used to answer **404** for a missing row and **403** for one belonging to another user. But a 403
+on an addressed resource is an oracle: it confirms that an opaque uuid names a real row belonging to
+*someone*. `fetch_owned_or_raise` now raises `NotFoundException` for both, with the same message, so
+the two are indistinguishable from outside.
+
+This brought the addressed-resource path in line with everywhere else the same question already came
+up, each of which had answered uniformly for exactly this reason — `_owned_gear_item` and
+`_resolve_item_ids` above, and `GET /dives`' `trip_uuid`/`dive_site_uuid`/`gear_item_uuid` filters,
+which return an empty page rather than an error for a uuid that isn't the caller's. It was the one
+place the principle hadn't been applied.
+
+Worth being clear about the size of the win: uuid7 leaves ~74 random bits, so nothing is enumerable
+and no attacker is going to find a uuid by guessing. The oracle only pays off for a uuid that
+already leaked some other way — out of an export, a screenshot, a log, a shared link. That makes
+this a consistency fix with a security dividend rather than a fix for a live vulnerability, which is
+why it was worth doing properly (as an announced contract change) rather than urgently.
+
+Two things it deliberately did *not* change:
+
+- **The `user_uuid` mismatch 403s stay** — `create_dive` and `read_dives` in `dives.py`, and the
+  equivalents in `dive_sites.py`, `trips.py`, `gear_items.py`, `gear_sets.py`, `certifications.py`
+  and `gear_service.py`. There the caller is naming *themselves* wrongly, not probing for someone
+  else's row, so saying so discloses nothing. Answering 404 there would also be actively unhelpful:
+  the resource in question is the caller's own account, which very much exists.
+
+- **The server log still distinguishes the two.** "Wrong owner" and "genuinely absent" produce
+  different lines in `api/dependencies` — the wrong-owner line names the owning `user_id` alongside
+  the caller's. Without it, "the client is getting a 404" becomes undebuggable, since the response
+  no longer carries the difference. `tests/test_ownership.py` asserts both the uniform response and
+  the distinct log lines.
+
+  The two levels are lopsided on purpose — wrong owner at **`warning`**, absent at **`debug`** — and
+  both halves of that are load-bearing.
+
+  `warning` for the wrong-owner line, because it has to survive the default level and nothing
+  guarantees a lower one will. The app configures no logging of its own — `core/logger.py` exists
+  but nothing imports it — so the level is whatever the server in front sets. `uvicorn`, which
+  `docker-compose.yml` runs, configures only its own `uvicorn*` loggers and leaves root at
+  `WARNING`; an `info` call is dropped on the floor. Worse, it is dropped *asymmetrically*:
+  gunicorn's `CONFIG_DEFAULTS` puts root at `INFO`, so the line would survive in production and
+  vanish in exactly the local `docker compose logs api` session where someone is working out why a
+  client sees a 404. `services/email_service.py` logs the magic link at `warning` for the same
+  reason, and `CLAUDE.md` documents that one as appearing in the logs.
+
+  `debug` for the absent line, because it carries nothing the 404 response doesn't, and because it
+  is *caller-paced*: at `warning` an authenticated client looping over random uuids emits one
+  `WARNING` per request, which is unbounded log volume on demand and dilutes anything real at that
+  level. Nothing is lost — at the default level a warning here means "wrong owner", and its absence
+  next to a 404 in the access log means "absent".
+
+  The test captures at `DEBUG` so both lines are visible and then asserts each one's level, rather
+  than filtering by level and inferring. Capturing at the threshold would also catch a downgrade —
+  the record would simply vanish — but it fails as "expected 2, got 1", naming neither the line nor
+  the level it ended up at.
+
+This is a breaking change for anything that branched on 403 — flagged for `opendiving-web` and
+`opendiving-ios` when it landed.
 
 ## `mypy` runs over `tests/`, with `call-arg` disabled there
 

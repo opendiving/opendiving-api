@@ -87,9 +87,12 @@ something to look up, not to restate it.
   objects. Raise the classes in `core/exceptions/http_exceptions.py` rather than building responses
   by hand. The frontend normalizes both shapes via `getApiErrorMessage`.
 - Status codes: 200 (success), 201 (created), 304 (ETag match on file/profile reads), 400 (bad
-  request), 401 (unauthenticated), 403 (authenticated but not the owner), 404 (not found), 409
-  (conflict, e.g. a dive file already linked to another dive), 413 (upload over the size limit), 415
-  (unrecognized dive-computer export), 422 (validation failure), 500 (server error)
+  request), 401 (unauthenticated), 403 (the caller named *themselves* wrongly — a body or query
+  `user_uuid` that isn't the token's; **not** "someone else's resource", which is a 404), 404 (not
+  found, *or* found but not the caller's — see *"Ownership checks go through one
+  `fetch_owned_or_raise`"* in `DECISIONS.md`), 409 (conflict, e.g. a dive file already linked to
+  another dive), 413 (upload over the size limit), 415 (unrecognized dive-computer export), 422
+  (validation failure), 500 (server error)
 - Paginated endpoints: FastCRUD's `PaginatedListResponse` —
   `{ data: [...], total_count: number, has_more: boolean, page: number, items_per_page: number }`.
   Page/size, not limit/offset; clamp the query params with `clamp_pagination` (see

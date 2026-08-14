@@ -40,8 +40,9 @@ async def _get_owned_gear_set(
 ) -> GearSetReadInternal:
     """Fetch a gear set by public uuid and assert the caller owns it.
 
-    Thin wrapper over `fetch_owned_or_raise` - see there for the 404/403 split and, in
-    particular, why this must run before any `@cache`-wrapped read helper.
+    Thin wrapper over `fetch_owned_or_raise` - see there for why someone else's row reads
+    as a 404 and, in particular, why this must run before any `@cache`-wrapped read
+    helper.
     """
     return await fetch_owned_or_raise(
         db=db,
@@ -90,9 +91,10 @@ async def write_gear_set(
     """Create a gear set - a named bundle of the caller's gear items, with an optional
     default weight the dive form can pre-fill.
 
-    `user_uuid` must be the caller's own and every uuid in `gear_item_uuids` must resolve
-    to a gear item the caller owns; either mismatch is a 403. Set names are unique per
-    user, so reusing one is a 422.
+    `user_uuid` must be the caller's own (403 otherwise). Every uuid in `gear_item_uuids`
+    must resolve to a gear item the caller owns; one that doesn't - or doesn't exist - is
+    a 422, since from the caller's side the two are the same thing. Set names are unique
+    per user, so reusing one is a 422.
     """
     if current_user["uuid"] != gear_set.user_uuid:
         raise ForbiddenException()
@@ -217,7 +219,8 @@ async def read_gear_set(
 ) -> GearSetRead:
     """Return a single gear set, with its gear items attached.
 
-    404 when no such set exists, 403 when it belongs to another user.
+    404 when no such set exists - and the same 404 when it belongs to another user, so
+    someone else's uuid stays unprobeable.
     """
     # Authorize before the cached read: `@cache` replays a hit without re-checking.
     await _get_owned_gear_set(db, uuid, current_user)
