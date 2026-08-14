@@ -4897,3 +4897,42 @@ should be treated as a hypothesis.
 Their file also fabricates coordinates: every site gets `<latitude>0.000000</latitude>` and the same
 longitude. Null Island is a place, and an importer that trusts it will pin a Red Sea wreck into the
 Atlantic — treat 0/0 from divelogs.de as "unknown", not as a fix.
+
+## Trips and gear cannot survive a UDDF round-trip, and it is not our encoding
+
+Both round-trips lost trips and gear, which looks like the kind of thing a writer gets wrong. It is
+not. Subsurface imports UDDF by running `xslt/uddf.xslt` over it — a single stylesheet in its own
+repository — and that file settles the question by inspection (read at
+`subsurface/subsurface@master` on 2026-08-14):
+
+- **Trips: zero references.** `tripmembership`, `divetrip` and `relateddives` appear nowhere in the
+  stylesheet. There is no encoding of a trip that Subsurface can read, so ours being
+  `<tripmembership ref>` on the dive plus `<divetrip><trip>` at the top is neither right nor wrong
+  to it. The schema also allows the opposite direction — `<trippart><relateddives><link ref>`, trip
+  pointing at its dives — and emitting it as well would be valid and free. It is not built, because
+  neither importer reads either form and a second encoding nobody consumes is just more surface.
+- **Gear: one path, and it is not gear.** The only equipment the stylesheet reads is
+  `owner/equipment/divecomputer`, for the device's model, serial number, battery and rebreather
+  details — it is identifying the *dive computer that recorded the dive*, not importing a kit list.
+  Our BCDs, regulators and suits, and the per-dive `<equipmentused><link>` that ties them to dives,
+  are never looked at.
+- **Weights: Subsurface's XPath points somewhere the schema forbids.** It reads
+  `u:informationafterdive/u:equipmentused/u:leadquantity`. The 3.2.2 XSD defines `equipmentused`
+  exactly once, inside `informationbeforediveType`, so a **valid** UDDF file can never put a lead
+  quantity where Subsurface looks for it. We could satisfy it by emitting a second, illegal
+  `<equipmentused>` under `informationafterdive` — trading the one property that makes this file
+  worth writing for one consumer's bug. Worth reporting upstream; not worth doing here.
+
+That last one is the useful shape of the whole exercise: a mapping can be correct against the schema
+and still land nowhere, and the only way to know is to run the file through the program.
+
+It also explains a cosmetic oddity in `tests/fixtures/roundtrip/subsurface.ssrf`: every dive arrives
+labelled `<divecomputer model='Open Diving'>`. The stylesheet prefers
+`owner/equipment/divecomputer/model` and falls back to `<generator><name>`, and `GearItem` has
+`name` and `brand` but no model designation — so there is nothing to put in `<model>` and the
+generator name wins. Inventing one from the item's name would make a diver's "Backup" computer a
+model number.
+
+divelogs.de is closed, so its behaviour is only observable: trips are not imported either, but the
+loss hides because it *derives* trips from gaps between dive dates (see its own section above), and
+neither gear nor weights appear anywhere in its UI.
