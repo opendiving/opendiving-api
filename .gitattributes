@@ -7,3 +7,9 @@
 # diff would defeat the point of a golden file, which is that you read the change before
 # accepting it.
 tests/fixtures/export/dives.csv -text
+
+# The UDDF corpus is a captured download, and the point of keeping it is that it is byte
+# for byte what the server sent. Nothing would notice git rewriting it: XML 1.0 normalizes
+# literal CRLF to LF before the parser sees it, so a wholesale line-ending rewrite still
+# validates against the XSD. Same `-text`, same reason for not saying `binary`.
+tests/fixtures/uddf/demo-account.uddf -text

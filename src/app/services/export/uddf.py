@@ -38,6 +38,7 @@ a time. That is also why the profile payloads are fetched per dive here rather t
 batched by `loader.py`.
 """
 
+import bisect
 import uuid as uuid_pkg
 import xml.etree.ElementTree as ET
 from collections.abc import AsyncIterator, Iterable
@@ -67,6 +68,8 @@ PASCAL_PER_BAR = 100_000.0
 # UDDF tank volumes are cubic meters; divers, cylinder stampings and our `volume` column
 # are all litres.
 LITRES_PER_CUBIC_METRE = 1000.0
+# The furthest a reading is ever moved to reach a waypoint - see `_snap_tolerance`.
+MAX_SNAP_SECONDS = 30
 
 _INDENT = "  "
 
@@ -380,6 +383,73 @@ def _series_by_second(series: dict | None) -> dict[int, int]:
     return dict(zip(series["t"], series["v"], strict=True))
 
 
+def _nearest(seconds: list[int], second: int) -> int:
+    """The depth sample closest in time to `second`; the earlier one wins a tie."""
+    index = bisect.bisect_left(seconds, second)
+    if index == 0:
+        return seconds[0]
+    if index == len(seconds):
+        return seconds[-1]
+    before, after = seconds[index - 1], seconds[index]
+    return before if second - before <= after - second else after
+
+
+def _snap_tolerance(seconds: list[int]) -> int:
+    """How far a reading may be moved to reach a waypoint: half the depth channel's
+    **typical** interval, taken as the median of its gaps.
+
+    Not half of whichever two samples happen to bracket the reading, which sounds like the
+    same rule and is not: the depth channel has interior holes. `suunto_xml` appends a
+    sample only where `<Depth>` is non-nil, and mid-dive dropouts are a documented feature
+    of the corpus, while temperature and pressure keep sampling straight through them. A
+    bracket-relative bound would call a 1800 s hole "one interval" and cheerfully emit a
+    temperature taken at 2000 s as the temperature at the 1200 s waypoint - 800 s away,
+    presented as measured there. Which is the thing snapping exists not to do: it moves a
+    reading in time, it does not invent a measurement.
+
+    So the tolerance is a property of the channel rather than of the neighbourhood, and
+    readings that cannot reach a waypoint within it - across a dropout, or beyond either
+    end of the dive - are dropped. They are in `export.json`, on their own unsnapped axis,
+    like everything else this format cannot carry honestly.
+
+    A 1 Hz depth channel yields a tolerance of zero, which is exact rather than strict:
+    `dive_profiles` stores whole-second timestamps, so a reading either coincides with a
+    depth sample or sits in a genuine dropout. Sub-second storage would turn that into
+    silent data loss, and would be the thing to revisit here.
+    """
+    if len(seconds) < 2:
+        return 0
+    gaps = sorted(later - earlier for earlier, later in zip(seconds, seconds[1:], strict=False))
+    # Capped, because the median is only robust while dropouts are the minority. A depth
+    # channel of two usable samples half an hour apart - which `suunto_xml` will produce
+    # from a file whose `<Depth>` is nil for most of the dive while temperature keeps
+    # sampling - has a median gap of 1800 s and would otherwise permit a 900 s move, the
+    # exact failure this bound exists to prevent. No dive computer in the corpus samples
+    # depth slower than every 20 s, so half a minute is generous as an outer limit.
+    return min(gaps[len(gaps) // 2] // 2, MAX_SNAP_SECONDS)
+
+
+def _at_or_after(seconds: list[int], second: int) -> int | None:
+    """The first depth sample not earlier than `second`; `None` past the end."""
+    index = bisect.bisect_left(seconds, second)
+    return None if index == len(seconds) else seconds[index]
+
+
+def _snapped(readings: dict[int, int], seconds: list[int], tolerance: int) -> dict[int, int]:
+    """Move each reading onto the nearest depth sample, the closest reading winning."""
+    snapped: dict[int, int] = {}
+    distance: dict[int, int] = {}
+    for second, reading in sorted(readings.items()):
+        target = _nearest(seconds, second)
+        gap = abs(second - target)
+        if gap > tolerance:
+            continue
+        if target not in snapped or gap < distance[target]:
+            snapped[target] = reading
+            distance[target] = gap
+    return snapped
+
+
 def _waypoints(
     parent: ET.Element,
     data: dict,
@@ -388,15 +458,42 @@ def _waypoints(
 ) -> None:
     """Turn the stored per-channel series into UDDF's one-waypoint-per-instant shape.
 
-    Our channels are sampled independently - a device logs depth every second and
-    temperature every twenty - so there is no shared time axis to walk. The waypoints are
-    the **union** of every channel's timestamps, each carrying only the readings actually
-    taken at that instant. Nothing is interpolated onto a neighbouring waypoint: a
-    waypoint with a temperature and no depth is the honest rendering of a temperature
-    sample taken between two depth samples.
+    **Every waypoint carries a `<depth>`, and the depth channel alone sets the time
+    axis.** The schema permits a waypoint without one, and the honest rendering of our
+    independently-sampled channels would be the union of all their timestamps - a
+    temperature taken between two depth samples becoming its own depth-less waypoint. Both
+    importers that matter get that wrong, in opposite and equally fatal ways: Subsurface
+    silently discards every depth-less waypoint (a 706-sample temperature curve arrives as
+    29), and divelogs.de reads the missing depth as **zero**, producing a stored profile
+    that saws between the real depth and the surface on every other sample. A file that
+    validates and that neither consumer can read is not an exit door. See `DECISIONS.md`,
+    *"Every UDDF waypoint carries a depth, because the alternative broke both importers"*.
+
+    So readings on other channels snap to the nearest depth sample - the closest reading
+    wins where several land on one waypoint, and the earlier sample wins a tie. The
+    reading itself is never altered and no depth is ever invented; only the timestamp
+    moves, and never by more than `_snap_tolerance`, which is half the channel's typical
+    interval. Anything that cannot reach a waypoint within that - a reading inside a
+    dropout in the depth channel, or one taken after the diver surfaced - is dropped
+    rather than relocated onto a waypoint it was not measured anywhere near.
+
+    Markers snap the same way, joined rather than dropped where several land together,
+    since `waypointType` has room for one `<setmarker>`. **Gas switches do not**: a switch
+    is a state change, so it is exempt from the tolerance and lands on the first waypoint
+    at or after it however far that is - dropping one would not leave a hole, it would
+    tell an importer the diver never switched. The body below says why in full.
+
+    A profile with no depth channel therefore emits **no `<samples>` at all** rather than
+    the depth-less waypoints that started this. Everything at full resolution, on its own
+    unsnapped time axis, is in `export.json`.
     """
     depth = _series_by_second(data.get("depth"))
-    temperature = _series_by_second(data.get("temperature"))
+    if not depth:
+        return
+    seconds = sorted(depth)
+
+    tolerance = _snap_tolerance(seconds)
+    temperature = _snapped(_series_by_second(data.get("temperature")), seconds, tolerance)
     pressure: list[tuple[str, dict[int, int]]] = []
     for cylinder in data.get("pressure") or []:
         mix_id = mix_id_by_gas_number.get(cylinder["gas_number"])
@@ -405,34 +502,55 @@ def _waypoints(
             # reading has nowhere valid to go. It survives in `export.json`, which keeps
             # the gas number itself.
             continue
-        pressure.append((mix_id, dict(zip(cylinder["t"], cylinder["v"], strict=True))))
+        readings = dict(zip(cylinder["t"], cylinder["v"], strict=True))
+        pressure.append((mix_id, _snapped(readings, seconds, tolerance)))
 
-    switch_at: dict[int, str] = {}
+    # A gas switch is a state change, not a reading, and that changes both rules it obeys.
+    #
+    # It is never *dropped* for being out of tolerance. A missing temperature leaves a
+    # hole; a missing switch tells every importer the diver stayed on the previous gas for
+    # the rest of the dive - wrong data rather than absent data, and the same failure the
+    # last-wins rule below exists to prevent. So it lands on the first waypoint at or
+    # after it happened however far that is, which also means it is never shown *earlier*
+    # than it happened: the interval in between is attributed to the old gas, which is the
+    # conservative direction and the one an importer recomputing deco can live with.
+    # `<divetime>` still tells a careful reader where the switch really fell. Past the end
+    # of the profile there is no such waypoint and nothing left to be wrong about.
+    #
+    # Where two land on one waypoint the last wins, because `<switchmix>` is
+    # `maxOccurs="1"` and the diver is breathing the later gas for everything that
+    # follows. The winner is picked before representability is considered - resolving
+    # first would let an unrepresentable later switch hand the waypoint back to the gas
+    # just left behind, which is the same failure by a quieter route.
+    switch_event_at: dict[int, dict] = {}
     markers_at: dict[int, list[str]] = {}
-    for event in data.get("events") or []:
-        second = event["t"]
+    for event in sorted(data.get("events") or [], key=lambda event: event["t"]):
         if event["type"] == ProfileEventType.GAS_SWITCH:
-            gas_number = event.get("gas_number")
-            # A switch the file recorded without saying what to, or to a cylinder this
-            # dive has no mixture for, has no `xs:IDREF` to point at. It stays in
-            # `export.json`, which carries the raw event list.
-            if gas_number is not None and gas_number in mix_id_by_gas_number:
-                switch_at.setdefault(second, mix_id_by_gas_number[gas_number])
+            after = _at_or_after(seconds, event["t"])
+            if after is not None:
+                switch_event_at[after] = event
+            continue
+        # Markers are annotations: one that cannot reach a waypoint honestly is dropped
+        # like any other reading, since nothing downstream computes on its absence.
+        second = _nearest(seconds, event["t"])
+        if abs(event["t"] - second) > tolerance:
             continue
         markers_at.setdefault(second, []).append(event.get("label") or event["type"])
 
-    seconds = sorted(
-        set(depth) | set(temperature) | set(switch_at) | set(markers_at) | {t for _, series in pressure for t in series}
-    )
-    if not seconds:
-        return
+    switch_at: dict[int, str] = {}
+    for second, event in switch_event_at.items():
+        gas_number = event.get("gas_number")
+        # A switch the file recorded without saying what to, or to a cylinder this dive
+        # has no mixture for, has no `xs:IDREF` to point at, so the waypoint gets no
+        # `<switchmix>` at all. It stays in `export.json`, which carries the raw events.
+        if gas_number is not None and gas_number in mix_id_by_gas_number:
+            switch_at[second] = mix_id_by_gas_number[gas_number]
 
     samples = _sub(parent, "samples")
     for second in seconds:
         # `waypointType` is an `xs:sequence`, so these have to go in exactly this order.
         waypoint = _sub(samples, "waypoint")
-        if second in depth:
-            _sub(waypoint, "depth", _num(depth[second] / DEPTH_SCALE))
+        _sub(waypoint, "depth", _num(depth[second] / DEPTH_SCALE))
         _sub(waypoint, "divetime", _num(second))
         if second in markers_at:
             # One `<setmarker>` per waypoint is all the schema allows, so simultaneous

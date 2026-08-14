@@ -23,14 +23,14 @@ documented REST API — so your data is never more than one `curl` away.
 - **Gear** — items, gear sets with default weights, service **schedules** (by months and/or dives),
   service history, a due-soon endpoint, and a scheduled email reminder digest.
 - **Certifications** — c-card records with front/back card images.
+- **Full export** — everything out in open formats (UDDF, CSV, and a complete JSON + original-files
+  archive) in one request. Owner-only, never cached; the UDDF validates against the 3.2.2 schema.
 - **Passwordless auth** — email magic links (via Resend) and Google Sign-In, with automatic account
   linking, short-lived access tokens, and httpOnly refresh cookies. No password storage at all. The
   full design, with sequence diagrams, is in [docs/authentication.md](docs/authentication.md).
 
 ## Planned
 
-- **Full export** — everything out in open formats (UDDF, CSV, and a complete JSON + original-files
-  archive) in one request. The exit door ships first.
 - **More parsers** — Subsurface XML and UDDF (which also admits Apple Watch dives via Oceanic+'s
   UDDF export), then Shearwater Cloud exports; a pluggable importer layer so every supported format
   is a migration path in.

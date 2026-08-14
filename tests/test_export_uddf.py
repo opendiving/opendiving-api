@@ -18,9 +18,14 @@ Three kinds of assertion, and they are not interchangeable:
 The bundle under test is `tests/helpers/export.py::full_bundle`, hand-built precisely
 because the dev corpus has no trimix, no gas switches and one profile between five
 hundred dives.
+
+`TestCheckedInCorpus` is the exception to all three: it validates a document that was
+downloaded rather than rendered here, and its job is to notice that file rotting, not to
+say anything about the writer.
 """
 
 import xml.etree.ElementTree as ET
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -40,6 +45,7 @@ from src.app.services.export.uddf import (
 )
 from tests.helpers.export import (
     EXPORTED_AT,
+    OFF_GRID_PROFILE,
     TRIMIX_PROFILE,
     UUIDS,
     build_bundle,
@@ -50,6 +56,7 @@ from tests.helpers.export import (
 
 UDDF = f"{{{UDDF_NAMESPACE}}}"
 SCHEMA_PATH = "tests/fixtures/uddf/uddf_3.2.2.xsd"
+CORPUS_PATH = Path(__file__).parent / "fixtures" / "uddf" / "demo-account.uddf"
 
 
 @pytest.fixture(scope="module")
@@ -145,6 +152,31 @@ class TestSchemaValidity:
         document = await _render(bundle, monkeypatch=monkeypatch)
         schema.validate(document)
         assert _text(_dive(_tree(document), 0), f"{UDDF}informationafterdive/{UDDF}notes/{UDDF}para") == nasty
+
+
+class TestCheckedInCorpus:
+    """`tests/fixtures/uddf/demo-account.uddf` is a real download, not a rendering.
+
+    It is checked in for the future UDDF *import* work and for the manual round-trips
+    through Subsurface and divelogs.de, which need a file this app produced. Validating it
+    here costs one schema run and catches a truncated file and a regeneration whose diff
+    nobody read - it does *not* catch a line-ending rewrite, since XML normalizes CRLF to
+    LF before the parser sees it, which is what `.gitattributes` is for. It deliberately
+    asserts nothing about the writer: the tests above own that, against bundles the demo
+    account cannot express.
+    """
+
+    def test_the_demo_account_export_validates(self, schema):
+        document = CORPUS_PATH.read_bytes()
+        schema.validate(document)
+        # Facts about the capture rather than about the writer. The owner is the one that
+        # actually identifies it: a regeneration against another login would validate
+        # happily, and a dive count alone would wave through any account that happens to
+        # have eight. Both are quoted in the fixture's README, so both rot together.
+        tree = _tree(document)
+        owner = tree.find(f"{UDDF}diver/{UDDF}owner/{UDDF}personal")
+        assert (_text(owner, f"{UDDF}firstname"), _text(owner, f"{UDDF}lastname")) == ("Sam", "Reef")
+        assert len(tree.findall(f".//{UDDF}dive")) == 8
 
 
 class TestUnitConversions:
@@ -371,17 +403,217 @@ class TestDiveContent:
 
 
 class TestWaypoints:
+    """The depth channel alone sets the time axis, and every waypoint carries a depth.
+
+    Not a stylistic choice - the round-trips recorded in
+    `DECISIONS.md` show both importers mangling depth-less waypoints, one by discarding
+    them and one by reading the absent depth as zero. These tests pin the rule that
+    replaced it.
+    """
+
     @pytest.mark.asyncio
-    async def test_channels_on_different_axes_become_one_waypoint_each(self, monkeypatch):
-        """Nothing is interpolated onto a neighbouring waypoint: a temperature sample
-        taken between two depth samples is its own waypoint carrying only a temperature."""
+    async def test_the_depth_channel_sets_the_time_axis(self, monkeypatch):
         document = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
         waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
         assert [_text(w, f"{UDDF}divetime") for w in waypoints] == ["0", "30", "60", "90"]
+        assert all(_text(w, f"{UDDF}depth") is not None for w in waypoints)
         # The 30 s waypoint has a depth but no temperature - temperature was sampled at
-        # 0 s and 60 s only.
+        # 0 s and 60 s only, and nothing off-axis is near enough to claim it.
         assert _text(waypoints[1], f"{UDDF}temperature") is None
         assert _text(waypoints[1], f"{UDDF}depth") == "18"
+
+    @pytest.mark.asyncio
+    async def test_readings_between_depth_samples_snap_to_the_nearest(self, schema, monkeypatch):
+        document = await _render(full_bundle(), {2: OFF_GRID_PROFILE}, monkeypatch)
+        schema.validate(document)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        assert [_text(w, f"{UDDF}divetime") for w in waypoints] == ["0", "10", "20", "30"]
+        assert [_text(w, f"{UDDF}depth") for w in waypoints] == ["0", "10", "20", "15"]
+        # 4 s -> 0 s and 27 s -> 30 s; 12 s beats 13 s for the 10 s waypoint by one
+        # second, so 99.9 C never appears; nothing is near enough to the 20 s waypoint.
+        assert [_text(w, f"{UDDF}temperature") for w in waypoints] == ["298.15", "297.15", None, "295.15"]
+
+    @pytest.mark.asyncio
+    async def test_a_reading_equidistant_from_two_samples_takes_the_earlier(self, monkeypatch):
+        """The 15 s pressure reading sits exactly between the 10 s and 20 s waypoints.
+
+        Either would be defensible; what matters is that it is decided rather than left to
+        dict ordering, because two exports of one dive have to be byte-identical.
+        """
+        document = await _render(full_bundle(), {2: OFF_GRID_PROFILE}, monkeypatch)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        assert [_text(w, f"{UDDF}tankpressure") for w in waypoints] == [None, "20000000", None, None]
+
+    @pytest.mark.asyncio
+    async def test_events_snap_too_and_still_join_on_arrival(self, monkeypatch):
+        """The 7 s and 8 s markers are not simultaneous in the profile; they become so
+        here, which is the case `waypointType`'s single `<setmarker>` cannot hold."""
+        document = await _render(full_bundle(), {2: OFF_GRID_PROFILE}, monkeypatch)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        assert [_text(w, f"{UDDF}setmarker") for w in waypoints] == [None, "safety_stop; Deco", None, None]
+        # The 24 s switch lands on 30, not on the nearer 20: a state change is never shown
+        # before it happened. See `test_a_gas_switch_is_never_shown_before_it_happened`.
+        switches = [w.find(f"{UDDF}switchmix") for w in waypoints]
+        assert [s is not None for s in switches] == [False, False, False, True]
+
+    @pytest.mark.asyncio
+    async def test_the_later_of_two_switches_on_one_waypoint_wins(self, schema, monkeypatch):
+        """`<switchmix>` is `maxOccurs="1"`, so one of them has to lose.
+
+        Snapping is what makes this reachable: two switches inside a single sampling
+        interval were previously two separate waypoints. Keeping the earlier one would
+        leave every importer computing the rest of the dive on a gas the diver had
+        already left, which is the one wrong answer available here.
+        """
+        profile = {
+            **OFF_GRID_PROFILE,
+            "events": [
+                {"t": 21, "type": "gas_switch", "gas_number": 1},
+                {"t": 23, "type": "gas_switch", "gas_number": 2},
+            ],
+        }
+        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        schema.validate(document)
+        tree = _tree(document)
+        waypoints = _dive(tree, 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        switches = [w.find(f"{UDDF}switchmix") for w in waypoints]
+        assert [s is not None for s in switches] == [False, False, False, True]
+        # Resolved through the mix rather than the id, so the assertion says which *gas*
+        # won: cylinder 2 is the 50% deco mix, cylinder 1 the 21/35 bottom gas.
+        mixes = {m.get("id"): _text(m, f"{UDDF}o2") for m in tree.findall(f"{UDDF}gasdefinitions/{UDDF}mix")}
+        assert mixes[switches[3].get("ref")] == "0.5"
+
+    @pytest.mark.asyncio
+    async def test_an_unrepresentable_later_switch_does_not_restore_the_earlier_one(self, schema, monkeypatch):
+        """The counter-intuitive half of last-wins: the winner is chosen before asking
+        whether it can be written.
+
+        Cylinder 9 has no mixture on this dive, so its switch has no `xs:IDREF` to point
+        at. Resolving before choosing would quietly hand the waypoint back to cylinder 1 -
+        the gas the diver had just left - which is the failure last-wins exists to
+        prevent, reached from the other side. No `<switchmix>` at all is the honest answer.
+        """
+        profile = {
+            **OFF_GRID_PROFILE,
+            "events": [
+                {"t": 21, "type": "gas_switch", "gas_number": 1},
+                {"t": 23, "type": "gas_switch", "gas_number": 9},
+            ],
+        }
+        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        schema.validate(document)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        assert [w.find(f"{UDDF}switchmix") for w in waypoints] == [None, None, None, None]
+
+    @pytest.mark.asyncio
+    async def test_a_gas_switch_is_never_shown_before_it_happened(self, schema, monkeypatch):
+        """A switch is a state change, so the tolerance rule that governs readings does
+        not govern it.
+
+        Dropping one for being too far from a waypoint would not leave a hole - it would
+        tell every importer the diver stayed on the previous gas for the rest of the dive.
+        So it lands on the first waypoint at or after it, however far that is, and the
+        interval in between is attributed to the old gas rather than to the new one.
+        """
+        profile = {
+            "depth": {"t": [0, 10, 20, 1820, 1830], "v": [0, 1000, 2000, 800, 0]},
+            "events": [{"t": 900, "type": "gas_switch", "gas_number": 2}],
+        }
+        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        schema.validate(document)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        switches = [w.find(f"{UDDF}switchmix") for w in waypoints]
+        # 900 s is 880 s from the nearest waypoint - a temperature there would be dropped
+        # (`test_a_reading_inside_a_dropout_is_dropped_too`), and this survives instead.
+        assert [s is not None for s in switches] == [False, False, False, True, False]
+
+    @pytest.mark.asyncio
+    async def test_a_switch_after_the_last_sample_has_nowhere_to_go(self, schema, monkeypatch):
+        """The one case where dropping a switch is right: nothing follows it in the
+        profile, so no importer can compute anything on the wrong gas."""
+        profile = {**OFF_GRID_PROFILE, "events": [{"t": 40, "type": "gas_switch", "gas_number": 2}]}
+        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        schema.validate(document)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        assert [w.find(f"{UDDF}switchmix") for w in waypoints] == [None, None, None, None]
+
+    @pytest.mark.asyncio
+    async def test_the_closest_of_two_readings_wins_the_waypoint_not_the_earliest(self, schema, monkeypatch):
+        """`OFF_GRID_PROFILE`'s colliding pair has the earlier reading also the closer
+        one, so first-wins and closest-wins agree there and the documented rule goes
+        unpinned. Here 9 s is one second from the waypoint and 6 s is four, so only
+        closest-wins produces 22.0 C."""
+        profile = {
+            "depth": {"t": [0, 10, 20], "v": [0, 1000, 2000]},
+            "temperature": {"t": [6, 9], "v": [999, 220]},
+        }
+        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        schema.validate(document)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        assert [_text(w, f"{UDDF}temperature") for w in waypoints] == [None, "295.15", None]
+
+    @pytest.mark.asyncio
+    async def test_a_sparse_depth_channel_does_not_widen_the_tolerance(self, schema, monkeypatch):
+        """The median gap is only robust while dropouts are the minority.
+
+        Two usable depth samples half an hour apart - what `suunto_xml` produces from a
+        file whose `<Depth>` is nil for most of the dive - would otherwise licence a 900 s
+        move, which is the failure the tolerance exists to prevent rather than an
+        application of it.
+        """
+        profile = {"depth": {"t": [0, 1800], "v": [0, 3000]}, "temperature": {"t": [890], "v": [220]}}
+        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        schema.validate(document)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        assert [_text(w, f"{UDDF}temperature") for w in waypoints] == [None, None]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("second", [-60, 230])
+    async def test_a_reading_too_far_from_any_sample_is_dropped_not_clamped(self, second, schema, monkeypatch):
+        """`_nearest` alone would put a surface-interval reading on the last in-water
+        waypoint, as if it had been taken there - the one way snapping could invent data
+        rather than merely move it. Both ends clamp, so both ends are checked."""
+        profile = {**OFF_GRID_PROFILE, "temperature": {"t": [second], "v": [300]}}
+        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        schema.validate(document)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        assert [_text(w, f"{UDDF}temperature") for w in waypoints] == [None, None, None, None]
+
+    @pytest.mark.asyncio
+    async def test_a_reading_inside_a_dropout_is_dropped_too(self, schema, monkeypatch):
+        """The interior version of the same failure, and the reason the tolerance is a
+        property of the channel rather than of the two samples bracketing the reading.
+
+        `suunto_xml` appends a depth sample only where `<Depth>` is non-nil, so a
+        mid-dive dropout leaves a hole that temperature samples straight through. Judged
+        against its bracketing pair, a reading in the middle of a 1800 s hole has moved
+        "less than half an interval" and would be emitted as the temperature at a
+        waypoint a quarter of an hour away.
+        """
+        profile = {
+            "depth": {"t": [0, 10, 20, 1820, 1830], "v": [0, 1000, 2000, 800, 0]},
+            "temperature": {"t": [12, 900, 1825], "v": [240, 999, 220]},
+        }
+        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        schema.validate(document)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        # The 900 s reading has no waypoint within tolerance and is gone; the two either
+        # side of the hole are unaffected by it. 1825 s is equidistant from 1820 and
+        # 1830, so the tie-break puts it on the earlier one.
+        assert [_text(w, f"{UDDF}temperature") for w in waypoints] == [None, "297.15", None, "295.15", None]
+
+    @pytest.mark.asyncio
+    async def test_a_profile_with_no_depth_channel_emits_no_samples(self, schema, monkeypatch):
+        """The one case the old union rule produced depth-less waypoints for on its own.
+
+        Emitting a `<samples>` block of temperatures with no depths would hand divelogs.de
+        a dive that plunges to the surface and back on every sample; the readings are in
+        `export.json` either way.
+        """
+        profile = {"temperature": {"t": [0, 60], "v": [249, 181]}, "events": [{"t": 30, "type": "safety_stop"}]}
+        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        schema.validate(document)
+        assert _dive(_tree(document), 1).find(f"{UDDF}samples") is None
 
     @pytest.mark.asyncio
     async def test_gas_switches_become_switchmix_links(self, monkeypatch):

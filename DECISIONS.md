@@ -4726,3 +4726,280 @@ unauthenticated `/export/csv` returns, and asserts that status too, since an all
 header on a 404 just as readily and the test would otherwise survive the route being renamed away.
 (One status genuinely escapes: `ServerErrorMiddleware` sits *outside* `CORSMiddleware`, so an
 unhandled 500 goes out with no CORS headers at all.)
+
+## A real download is checked in as a fixture, and it is not a golden file
+
+`tests/fixtures/uddf/demo-account.uddf` is what `GET /export/uddf` served for the demo account on
+2026-08-14, bytes unchanged. It is in the repo for two consumers that do not exist in this test
+suite: the planned UDDF *importer*, which needs a document this app produced to develop against, and
+the manual round-trips through Subsurface and divelogs.de, whose importers are the only conformance
+tests that matter to a diver and which are far easier to feed from a file in the tree than from a
+live stack and a fresh token.
+
+The distinction from `tests/fixtures/export/dives.csv` is worth being precise about, because both
+are "a file checked in next to the code that produces it" and they are governed by opposite rules.
+The CSV is a **golden file**: the test regenerates it in-process and compares byte for byte, so it
+fails the moment the writer changes and the diff is the review. This UDDF is a **snapshot**: it was
+produced by a running server against a database, nothing in CI can reproduce it, and the writer is
+free to move away from it. `TestCheckedInCorpus` therefore validates it against the XSD and asserts
+nothing else - enough to catch a truncated file or a regeneration nobody read the diff of, and not
+enough to make an ordinary writer change look like a failure.
+
+The one thing that validation provably cannot catch is the one `.gitattributes` already guards for
+the CSV: XML 1.0 §2.11 has the processor normalize literal CRLF to `#xA` before the parser ever sees
+it, so a `core.autocrlf=true` clone that rewrote every line ending in the corpus still validates,
+and a file kept precisely because it is byte for byte what the server sent would have stopped being
+that with nothing to say so. Hence a second `-text` line, for a different reason than the CSV's: the
+CSV's test *would* fail, loudly and confusingly; this one would not fail at all.
+
+It is the demo account rather than the developer's own 500-dive log for the obvious reason - every
+site, trip, note and diver name in it is seeded fiction, so it can be attached to a bug report or
+uploaded to a third-party validator without a moment's thought. The cost is coverage: the demo
+account is single-tank air and nitrox with one profile between eight dives, so the trimix, gas
+switch and multi-tank paths live only in the synthetic bundles in `tests/helpers/export.py`. That is
+the same gap the screenshots have, and the reason the writer's own tests do not use this file.
+
+## What Subsurface does with our UDDF, and what its own file does not
+
+The export was round-tripped through Subsurface 6.0.5576 on 2026-08-14: import
+`tests/fixtures/uddf/demo-account.uddf`, then save both ways — Subsurface's native `.ssrf`, and its
+own UDDF export. Neither is checked in - see the note at the end of this section. Reading only the
+UDDF it writes back would have produced a wrong answer in at least one place, which is why both were
+captured.
+
+**Survives the import exactly:** all eight dives and their numbers, notes (`&` included), the
+dive-site link and site name on every dive, the date and the local wall-clock time, cylinder size
+and start/end pressures (`0.012 m³` → `12.0 l`, `20000000 Pa` → `200.0 bar` — the SI conversions are
+right), the O₂ fraction as `o2='32.0%'` with air left implicit, max and mean depth, and all 431
+depth samples of the one dive that has a profile. Our `<generator><name>` becomes the dive-computer
+label, so the dives read as "Open Diving" in the UI.
+
+**Survives the import but not Subsurface's own export:** `<lowesttemperature>`. It lands as
+`<temperature water='24.0 C'>` on all eight dives, including the seven with no profile for it to be
+recomputed from, and every value matches ours to the tenth of a degree. Its UDDF exporter then omits
+it. This is the entry that would have been recorded as an import failure had only the re-export been
+looked at.
+
+**Lost on import — not in the `.ssrf` at all:** trips (zero `<trip>` elements, both of ours gone),
+gear other than cylinders, weights (6 kg and 8 kg → no `weightsystem`), the dive site's free-text
+location (`Sha'ab Ali, Red Sea` — no gps, no description), the `NoDecoTime` `<setmarker>`, and the
+UTC offsets, which are dropped rather than applied: `11:49:23+02:00` is stored as `11:49:23` local,
+so the wall clock is right and the instant is unrecoverable.
+
+**Mangled:** visibility. Subsurface models it as a five-star rating, so 12 m, 20 m and 35 m all
+arrive as `visibility='5'` and no amount of care on our side would help. And duration on the dive
+with a profile is recomputed from the samples (4001 s → 4010 s), while the other seven keep ours,
+flagged `last-manual-time`.
+
+**Invented on import:** each of the seven profile-less dives gains a fabricated six-point depth
+profile, built from max depth and duration. It is in the `.ssrf`, so it is stored, not merely
+exported. Anything reading Subsurface data back cannot tell those samples from recorded ones — worth
+remembering when the importer lands.
+
+**The one thing that was ours, and is now fixed:** the temperature curve arrived as 29 samples out
+of 706. Subsurface creates a sample only where a `<waypoint>` carries a `<depth>`, and our waypoints
+sat at the union of every channel's timestamps, so the 640 waypoints carrying a temperature and no
+depth were invisible to it. It read as an acceptable cost until divelogs.de was tried, and it is not
+— see the next section.
+
+**Their exporter, for whoever writes the importer.** Subsurface's own UDDF fails the vendored 3.2.2
+XSD **48 times**: empty `<latitude/>`/`<longitude/>` elements, ids that are not NCNames (`mix(21/0)`
+has parentheses, `2bbb3390` starts with a digit, and one site id is `" ff47210"` — with a leading
+space, which is also what its `.ssrf` stores as the site uuid), the same id used on a
+`<repetitiongroup>` and on the `<dive>` inside it, and an empty `<divetrip/>`. So the importer
+**must not gate on schema validation**: the single most important file it will ever be handed does
+not validate. Parse leniently, strip whitespace from ids and refs, and treat `<latitude/>` as absent
+rather than as a number.
+
+Also worth knowing before reading its output: `sac`, `otu` and `cns` in the `.ssrf` are Subsurface's
+own computations, not round-tripped values. Every dive in the demo corpus stores `null` for CNS and
+OTU, and the file still says `otu='31' cns='11%'`.
+
+**None of these captures are in the repo**, deliberately. They ran to a third of a megabyte, and
+every fact worth having off them is in this section and the two that follow. More to the point they
+were taken *before* the depth fix below, so their profiles are re-renderings of a shape this app no
+longer emits: as a corpus for the planned importer they would teach the wrong lesson. Redo the
+round-trip when that work starts — the current export is a ten-minute trip through both programs and
+yields better samples than these did.
+
+## Every UDDF waypoint carries a depth, because the alternative broke both importers
+
+Our profile channels are sampled independently — a Suunto Ocean logs depth every ten seconds and
+temperature roughly every five, on no shared axis. The first writer rendered that honestly:
+waypoints at the **union** of every channel's timestamps, each carrying only the readings actually
+taken at that instant, so a temperature sample taken between two depth samples became a waypoint
+with a `<temperature>` and no `<depth>`. Nothing interpolated, nothing invented. `<depth>` is
+optional in `waypointType`, the documents validated against the 3.2.2 XSD, and the rule was written
+down as a deliberate choice.
+
+Both importers that matter get it wrong, in opposite directions, and neither says so:
+
+- **Subsurface silently discards every depth-less waypoint.** The demo corpus went in with 706
+  temperature samples and 431 depth samples; its `.ssrf` came back with 431 samples and **29**
+  temperatures — only the 66 readings that happened to coincide with a depth sample were even
+  considered, and it stores a temperature only where the value changes.
+- **divelogs.de reads the missing depth as zero.** Its re-export has 660 waypoints at `depth 0`
+  interleaved with the real ones, and this is not an exporter artifact: the profile chart on its own
+  dive page is a comb of spikes from the seabed to the surface, one every other sample. It also
+  discards `<divetime>` entirely and re-grids the waypoints onto a fixed four-second interval, so a
+  66:41 dive is plotted over 72 minutes. A diver who exported to divelogs.de got a dive that looks
+  like instrument failure.
+
+Two consumers out of two. A file that validates and that neither program can read is not an exit
+door, and "the schema allows it" is not a defence when the schema is not the thing reading the file.
+
+**The rule now:** the depth channel alone sets the time axis, every waypoint carries a `<depth>`,
+and every other reading — temperature, tank pressure, gas switches, markers — snaps to the nearest
+depth sample. Where several land on one waypoint the closest wins, and a tie goes to the earlier
+sample, so two exports of one dive stay byte-identical. **No depth is ever invented and no reading
+is ever altered**; only a timestamp moves, and never by more than half the depth channel's typical
+interval, taken as the median of its gaps and capped at 30 seconds — the cap matters because the
+median is only robust while dropouts are the minority, and a channel of two usable samples half an
+hour apart would otherwise licence a 900-second move, which is the failure this bound exists to
+prevent rather than an application of it. A reading that cannot reach a waypoint within that is
+**dropped rather than clamped** onto the nearest one, because clamping is the one way snapping could
+invent a measurement instead of relocating one — a tank pressure logged three minutes into the
+surface interval emitted as the pressure at the last in-water waypoint. The tolerance is
+deliberately a property of the *channel* rather than of the two samples bracketing the reading:
+`suunto_xml` appends a depth sample only where `<Depth>` is non-nil, so mid-dive dropouts are a real
+feature of the corpus, and a bracket-relative bound would call an 1800-second hole "one interval"
+and emit a temperature taken in the middle of it as the temperature a quarter of an hour earlier.
+**A gas switch is exempt from all of that**, because it is a state change rather than a reading. A
+dropped temperature leaves a hole; a dropped switch tells every importer the diver stayed on the
+previous gas for the rest of the dive — wrong data rather than absent data. So a switch lands on the
+first waypoint at or *after* it happened, however far that is, which also means it is never shown
+earlier than it happened: the interval in between is attributed to the old gas, the conservative
+direction for anything recomputing deco, and `<divetime>` still says where the switch really fell.
+Past the last sample there is no such waypoint, and nothing left for an importer to get wrong. Where
+two switches land on one waypoint the **later** wins — `<switchmix>` has room for exactly one, and
+that is the gas being breathed from there on — and the winner is chosen before asking whether it can
+be represented, so an unrepresentable later switch cannot hand the waypoint back to the gas just
+left. Markers land under the reading rule and are joined where several arrive together, since
+nothing downstream computes on their absence.
+
+Interpolating a depth for each temperature sample would have fixed Subsurface too, and was rejected
+for the obvious reason: writing depths no computer recorded into the file whose promise is that it
+holds what was recorded. Snapping moves a reading in time; interpolating fabricates a measurement.
+
+What it costs is real and small: two temperature readings that fall between the same pair of depth
+samples become one, so the demo corpus goes from 706 temperature samples to 430. What it buys is
+that those 430 all arrive — against 29 before — and that the depth profile survives divelogs.de at
+all. The unsnapped channels, at full resolution on their own axes, remain in `export.json` and in
+the original dive-computer file the archive carries, both lossless.
+
+A profile with **no depth channel at all** now emits no `<samples>` element rather than a block of
+depth-less waypoints. That is the one case the old rule produced them for on its own, and a
+temperature-only samples block is exactly the input that makes divelogs.de draw a dive to the
+surface and back.
+
+`tests/helpers/export.py::OFF_GRID_PROFILE` exists for this and nothing else — every reading in it
+sits deliberately between depth samples, including one pair a second apart on either side of a
+waypoint (a last-wins bug emits 99.9 °C) and one exactly equidistant reading to pin the tie-break.
+
+## What divelogs.de does with our UDDF
+
+Same corpus, same day, imported into divelogs.de (its English front is divelogs.org) and exported
+back out. The profile corruption it produced is in the section above, because it changed the writer.
+The rest, with the import checked against its own web UI rather than against its export — which
+matters, as below:
+
+**Exact:** all eight dives, dates, local times to the minute, cylinder volume and both pressures, O₂
+fractions, and `<diveduration>` carried through unrounded (4001 s, where Subsurface recomputed
+4010). It also keeps the dive site's **free-text location**, which Subsurface drops, and it does not
+fabricate a profile for the seven dives that have none.
+
+**Rounded away:** `<lowesttemperature>` to whole °C (295.5 K → 295.15 K), depths to 0.1 m, start
+times to the minute (11:49:23 → 11:49:00), and the UTC offset dropped as everywhere else.
+
+**Not imported:** dive numbers — the log is renumbered 1–8 from its own sequence — along with
+weights, gear, visibility and events. Trips are not imported either, but the loss is invisible at
+first glance because divelogs.de **derives** trips from gaps between dive dates: it produced two
+trips named after a site's location rather than our "Red Sea Liveaboard" and "Tenerife Week", and
+its date heuristic swept the Tenerife checkout dive of 17 April into the Red Sea trip that started
+two days later.
+
+**Re-imported after the fix, and measured rather than eyeballed.** The account was emptied and the
+regenerated corpus imported again, then their own UDDF export read back through their session. The
+depth comb is gone: 432 waypoints against 1073, and **19 zero-depth samples against 660** — 18 of
+those 19 are the surface samples our own file ends with, and the last is a terminal waypoint they
+append themselves. Their dive page now draws the profile correctly, temperature curve included.
+
+What did not change is that **they never read `<divetime>`**. They assume a uniform sample interval
+and compute it as `round(duration / sample count)`: 4001 s over 1073 waypoints gave 4 s before, and
+4001 s over 431 gives 9 s now, so their axis runs 0, 9, 18 … 3879 where ours runs 0, 10, 20 … 4300.
+The difference is that a uniform depth channel makes their assumption nearly right — the dive plays
+back about 3% short instead of being scattered. Closing that last gap would mean resampling our
+profiles to whatever interval a particular consumer guesses, which is their bug to fix, not ours.
+
+**Their exporter, not their importer:** every string containing an ampersand comes back **empty**.
+All three in our file — the site name "Ras Mohammed - Shark & Yolanda", that dive's note, and a trip
+note — are blank in `divelogs.uddf`, which contains no `&amp;` anywhere. Both are present and
+correct on the site's own dive page, so the data imported fine and the export is what loses it. That
+is the second time in one afternoon that a re-export libelled an importer, after Subsurface's water
+temperature; it is why the UI was checked at all, and why anything concluded from a re-export alone
+should be treated as a hypothesis.
+
+Their file also fabricates coordinates: every site gets `<latitude>0.000000</latitude>` and the same
+longitude. Null Island is a place, and an importer that trusts it will pin a Red Sea wreck into the
+Atlantic — treat 0/0 from divelogs.de as "unknown", not as a fix.
+
+## Trips and gear cannot survive a UDDF round-trip, and it is not our encoding
+
+Both round-trips lost trips and gear, which looks like the kind of thing a writer gets wrong. It is
+not. Subsurface imports UDDF by running `xslt/uddf.xslt` over it — a single stylesheet in its own
+repository — and that file settles the question by inspection (read at
+`subsurface/subsurface@master` on 2026-08-14):
+
+- **Trips: zero references.** `tripmembership`, `divetrip` and `relateddives` appear nowhere in the
+  stylesheet. There is no encoding of a trip that Subsurface can read, so ours being
+  `<tripmembership ref>` on the dive plus `<divetrip><trip>` at the top is neither right nor wrong
+  to it. The schema also allows the opposite direction — `<trippart><relateddives><link ref>`, trip
+  pointing at its dives — and emitting it as well would be valid and free. It is not built, because
+  neither importer reads either form and a second encoding nobody consumes is just more surface.
+- **Gear: one path, and it is not gear.** The only equipment the stylesheet reads is
+  `owner/equipment/divecomputer`, for the device's model, serial number, battery and rebreather
+  details — it is identifying the *dive computer that recorded the dive*, not importing a kit list.
+  Our BCDs, regulators and suits, and the per-dive `<equipmentused><link>` that ties them to dives,
+  are never looked at.
+- **Weights: Subsurface's XPath points somewhere the schema forbids.** It reads
+  `u:informationafterdive/u:equipmentused/u:leadquantity`. The 3.2.2 XSD defines `equipmentused`
+  exactly once, inside `informationbeforediveType`, so a **valid** UDDF file can never put a lead
+  quantity where Subsurface looks for it. We could satisfy it by emitting a second, illegal
+  `<equipmentused>` under `informationafterdive` — trading the one property that makes this file
+  worth writing for one consumer's bug. Worth reporting upstream; not worth doing here.
+
+That last one is the useful shape of the whole exercise: a mapping can be correct against the schema
+and still land nowhere, and the only way to know is to run the file through the program.
+
+It also explains a cosmetic oddity in the `.ssrf`: every dive arrives labelled
+`<divecomputer model='Open Diving'>`. The stylesheet prefers `owner/equipment/divecomputer/model`
+and falls back to `<generator><name>`, and `GearItem` has `name` and `brand` but no model
+designation — so there is nothing to put in `<model>` and the generator name wins. Inventing one
+from the item's name would make a diver's "Backup" computer a model number.
+
+divelogs.de is closed, so its behaviour is only observable, and it draws the line in a different
+place: **dive data imports, diver data does not**. The cylinder arrives in full — 12 L, 200 → 80
+bar, the gas — because it rides in `<tankdata>` on the dive itself. The kit list, which lives on
+`<diver><owner><equipment>`, does not: after a clean re-import its gear page still says *"Noch keine
+Ausrüstung erfasst"*, and the per-dive `<equipmentused>` links go with it. Weights are the sharpest
+version of the same thing — their dive page has a **Weight** row and their table editor a **Weight
+(Kg)** column, both present and both left empty by the import, so this is a gap in their UDDF
+mapping rather than a missing feature.
+
+Their exporter was then tested directly rather than inferred from an empty result — an export with
+no equipment in it proves nothing when the account has no equipment. A BCD ("Scubapro Hydros Pro")
+was created in their own gear manager, flagged as standard kit and attached to dive 1, and that dive
+was given 6 kg of lead; both show on their dive page, so the data is unquestionably in their
+database. Their UDDF export then still contains **zero** `<equipment>`, `<equipmentused>`,
+`<leadquantity>` and `<buoyancycontroldevice>` elements, no occurrence of the item's name, and an
+owner reduced to `<owner id="aleskiontherun"/>` with no `<personal>` block at all. The equipment
+branch is outside their UDDF mapping in **both** directions, and that is now established rather than
+assumed: their upload page documents no field list, so there is nothing to read here the way
+Subsurface's stylesheet can be read.
+
+The consequence lands on the importer rather than the writer: a UDDF file exported from divelogs.de
+will never carry gear or weights, however carefully its owner recorded them there. Worth stating in
+whatever migration guide ships with the importer, because the file will look complete.
+
+Trips are not imported either, but that loss hides because they *derive* trips from gaps between
+dive dates (see their own section above).
