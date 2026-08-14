@@ -118,6 +118,10 @@ class TestReferences:
         assert "id" not in document["dives"][0]
         assert "user_id" not in document["user"]
         assert "gear_item_id" not in document["gear_service_records"][0]
+        # Cylinders too: `DiveMixtureRead` carries the row `id` and the API serves it,
+        # but nothing in this file references a cylinder, so it would be the one integer
+        # key in the document.
+        assert "id" not in document["dives"][1]["mixtures"][0]
 
     @pytest.mark.asyncio
     async def test_a_record_whose_schedule_was_deleted_keeps_its_history(self, monkeypatch):
@@ -133,6 +137,30 @@ class TestReferences:
     async def test_the_start_time_is_the_combined_offset_aware_string(self, monkeypatch):
         document = await _render(full_bundle(), monkeypatch)
         assert document["dives"][0]["start_time"] == "2026-06-01T08:15:00+02:00"
+
+
+class TestUnresolvableReferences:
+    """`loader._owned` reads deleted-but-referenced rows back, so these are unreachable
+    through the API - but the export's stated policy is that a row nobody can see must
+    never cost a diver their download, and only a test keeps that true."""
+
+    @pytest.mark.asyncio
+    async def test_a_schedule_and_record_whose_gear_item_is_missing_are_skipped(self, monkeypatch):
+        bundle = full_bundle()
+        bundle.gear_items.clear()
+        bundle.gear_item_by_id.clear()
+        document = await _render(bundle, monkeypatch)
+        assert document["gear_items"] == []
+        assert document["gear_service_schedules"] == []
+        assert document["gear_service_records"] == []
+
+    @pytest.mark.asyncio
+    async def test_a_gear_set_drops_members_it_cannot_resolve(self, monkeypatch):
+        bundle = full_bundle()
+        bundle.gear_items.clear()
+        bundle.gear_item_by_id.clear()
+        document = await _render(bundle, monkeypatch)
+        assert document["gear_sets"][0]["gear_item_uuids"] == []
 
 
 class TestStoredFiles:

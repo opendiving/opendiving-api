@@ -51,9 +51,10 @@ async def _enforce_export_limit(user_id: int) -> None:
 def _download(buffer: Any, *, filename: str, media_type: str) -> StreamingResponse:
     """Stream a spooled temp file as a download, and delete it when the response ends.
 
-    `SpooledTemporaryFile` is iterable in fixed-size chunks and deletes itself on close,
-    so `StreamingResponse` over `iter(...)` plus a closing background step is the whole
-    lifecycle - there is no path where a spilled file is left on disk.
+    A `SpooledTemporaryFile` deletes itself when closed, so the generator's `finally` is
+    the whole lifecycle: whether it runs to the end, the client disconnects mid-download
+    or the server unwinds, the spill file goes with it. No `BackgroundTask` is involved -
+    Starlette closes the body iterator either way.
     """
 
     def chunks() -> Any:

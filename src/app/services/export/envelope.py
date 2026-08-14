@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...core.config import settings
 from ...core.utils.datetime_offset import combine_start_time
 from ...models.dive import Dive
+from ...schemas.dive_mixture import DiveMixtureBase, DiveMixtureRead
 from ...schemas.export import (
     EXPORT_FORMAT,
     EXPORT_VERSION,
@@ -58,6 +59,10 @@ def _encode(value: Any) -> bytes:
     for no reader's benefit.
     """
     return json.dumps(jsonable_encoder(value), ensure_ascii=False).encode("utf-8")
+
+
+def _mixture(mixture: DiveMixtureRead) -> DiveMixtureBase:
+    return DiveMixtureBase(**mixture.model_dump(exclude={"id"}))
 
 
 def _user(bundle: ExportBundle) -> ExportUser:
@@ -103,7 +108,9 @@ def _dive(bundle: ExportBundle, dive: Dive, *, profile: LoadedProfile | None, pa
         trip_uuid=None if trip is None else trip.uuid,
         dive_site_uuids=[site.uuid for site in bundle.sites_for(dive)],
         gear_item_uuids=[item.uuid for item in bundle.gear_for(dive)],
-        mixtures=bundle.mixtures_by_dive[dive.id],
+        # `DiveMixtureBase`, not `DiveMixtureRead`: the latter carries the internal row
+        # `id`, and nothing in this file references a cylinder by anything.
+        mixtures=[_mixture(mixture) for mixture in bundle.mixtures_by_dive[dive.id]],
         source_file=source_file,
         profile=None if profile is None else to_read_schema(profile),
         created_at=dive.created_at,
@@ -211,7 +218,9 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     name=gear_set.name,
                     weight=gear_set.weight,
                     gear_item_uuids=[
-                        bundle.gear_item_by_id[item_id].uuid for item_id in bundle.item_ids_by_set[gear_set.id]
+                        item.uuid
+                        for item_id in bundle.item_ids_by_set[gear_set.id]
+                        if (item := bundle.gear_item_by_id.get(item_id))
                     ],
                     created_at=gear_set.created_at,
                 )
@@ -223,7 +232,7 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
             [
                 ExportGearServiceSchedule(
                     uuid=schedule.uuid,
-                    gear_item_uuid=bundle.gear_item_by_id[schedule.gear_item_id].uuid,
+                    gear_item_uuid=item.uuid,
                     kind=schedule.kind,
                     label=schedule.label,
                     starts_on=schedule.starts_on,
@@ -238,6 +247,11 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     created_at=schedule.created_at,
                 )
                 for schedule in bundle.schedules
+                # `.get()`-and-skip rather than indexing, for the reason spelled out on
+                # `ExportBundle.gear_for`: after `_owned` reads deleted-but-referenced
+                # items back, a miss here can only be hand-edited data, and a 500 on the
+                # export is the worst answer to a row nobody can see.
+                if (item := bundle.gear_item_by_id.get(schedule.gear_item_id))
             ],
         ),
         (
@@ -245,7 +259,7 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
             [
                 ExportGearServiceRecord(
                     uuid=record.uuid,
-                    gear_item_uuid=bundle.gear_item_by_id[record.gear_item_id].uuid,
+                    gear_item_uuid=item.uuid,
                     gear_service_schedule_uuid=(
                         None
                         if record.gear_service_schedule_id is None
@@ -260,6 +274,7 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     created_at=record.created_at,
                 )
                 for record in bundle.service_records
+                if (item := bundle.gear_item_by_id.get(record.gear_item_id))
             ],
         ),
         ("certifications", _certifications(bundle, paths)),

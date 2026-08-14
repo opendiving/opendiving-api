@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field
 from ..core.schemas import PublicUUIDSchema
 from .certification import CertificationAgency, CertificationSide
 from .dive import DiveStartTime
-from .dive_mixture import DiveMixtureRead
+from .dive_mixture import DiveMixtureBase
 from .dive_profile import DiveProfileRead
 from .gear_item import GearType
 from .gear_service import ServiceKind
@@ -108,7 +108,10 @@ class ExportDive(PublicUUIDSchema):
     trip_uuid: uuid_pkg.UUID | None = None
     dive_site_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In visit order")]
     gear_item_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In the diver's own order")]
-    mixtures: Annotated[list[DiveMixtureRead], Field(default_factory=list)]
+    # `DiveMixtureBase` rather than the API's `DiveMixtureRead`, which carries the
+    # internal row `id`. Nothing here references a cylinder, so that id would be the
+    # one integer key in the file - see this module's docstring.
+    mixtures: Annotated[list[DiveMixtureBase], Field(default_factory=list)]
     source_file: ExportDiveFile | None = None
     profile: DiveProfileRead | None = None
     created_at: datetime

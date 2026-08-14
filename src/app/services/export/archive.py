@@ -18,6 +18,13 @@ stream without a temp file at all but costs a runtime dependency and a `Content-
 (browsers show no progress bar without one). Revisit if profiling ever says the temp file
 hurts; do not start there.
 
+**The profiles are read twice.** `export.json` and `dives.uddf` both embed every dive's
+samples, and each writer does its own per-dive `load_profile` with `undefer(data)` - so a
+thousand-dive log issues two thousand of the export's most expensive query. Loading them
+once and holding them would defeat the whole memory argument above, and interleaving the
+two members is not possible (`ZipFile` allows one open member at a time). So it is
+accepted rather than solved, and named here so nobody rediscovers it as a mystery.
+
 The blobs are the reason the bound matters, and they are read **one row at a time** -
 `dive_file.data` and `certification_file.data` are `deferred`, and the loop below never
 holds more than the file it is currently writing. `ZIP_STORED`, not `ZIP_DEFLATED`, for

@@ -2,8 +2,8 @@
 
 Every writer in this package (UDDF, CSV, `export.json`) needs the same graph, so it is
 read once into an `ExportBundle` and handed to all three rather than each of them
-issuing its own queries. The read is deliberately flat: thirteen `SELECT`s over whole
-tables scoped to one `user_id`, with no per-dive query anywhere. A logbook is a few
+issuing its own queries. The read is deliberately flat: a fixed nineteen `SELECT`s over
+whole tables scoped to one `user_id`, with no per-dive query anywhere. A logbook is a few
 hundred dives and a handful of sites, trips and gear items, so "load the lot" costs less
 than the round trips a lazier shape would need - and the archive walks all of it anyway.
 
@@ -232,6 +232,20 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
         db, GearServiceRecord, user_id=user_id, order_by=(GearServiceRecord.serviced_on, GearServiceRecord.id)
     )
 
+    # Schedules before gear items, because a schedule is itself a referrer. Deleting a
+    # gear item soft-deletes its schedules and deliberately *keeps* its service records
+    # (`soft_delete_schedules_for_gear_item`), so a live record drags back a dead schedule
+    # which is then the only thing still naming a dead item.
+    schedules = await _owned(
+        db,
+        GearServiceSchedule,
+        user_id=user_id,
+        order_by=(GearServiceSchedule.gear_item_id, GearServiceSchedule.id),
+        still_referenced={
+            record.gear_service_schedule_id for record in service_records if record.gear_service_schedule_id is not None
+        },
+    )
+
     trips = await _owned(
         db,
         Trip,
@@ -251,17 +265,14 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
         GearItem,
         user_id=user_id,
         order_by=(GearItem.name, GearItem.id),
+        # Four referrers, and the last two are the ones easy to miss: an item stays in the
+        # export because a dive used it, a set contains it, a service *record* logs work on
+        # it, or a *schedule* is still measured against it. Deleting an item that was never
+        # dived and never in a set but had one service logged reaches only the last two.
         still_referenced={item_id for item_ids in gear_ids_by_dive.values() for item_id in item_ids}
-        | {item_id for item_ids in item_ids_by_set.values() for item_id in item_ids},
-    )
-    schedules = await _owned(
-        db,
-        GearServiceSchedule,
-        user_id=user_id,
-        order_by=(GearServiceSchedule.gear_item_id, GearServiceSchedule.id),
-        still_referenced={
-            record.gear_service_schedule_id for record in service_records if record.gear_service_schedule_id is not None
-        },
+        | {item_id for item_ids in item_ids_by_set.values() for item_id in item_ids}
+        | {record.gear_item_id for record in service_records}
+        | {schedule.gear_item_id for schedule in schedules},
     )
     certifications = await _owned(
         db, Certification, user_id=user_id, order_by=(Certification.certified_on, Certification.id)

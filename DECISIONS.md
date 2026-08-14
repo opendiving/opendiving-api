@@ -4628,3 +4628,49 @@ spreadsheet, and a leading `﻿` in a header name is a nuisance there.
 `tests/fixtures/export/dives.csv` pins the exact bytes of both, and `.gitattributes` marks it
 `binary` so git cannot normalize the line endings out from under the test on a machine configured
 with `core.autocrlf`.
+
+## An export holds every record the caller can still see, not every record still live
+
+`loader._owned` reads a soft-deleted row back into the export whenever something else in the same
+export still points at it. That is a deliberate departure from what the list endpoints return, and
+it is the subtlest choice on the export branch — it was got wrong twice before it was got right, so
+it is worth stating in full.
+
+**The app already shows these rows.** `erase_dive_site` says so outright ("The site stays attached
+to the dives logged at it"), `erase_gear_item` likewise ("Dives and gear sets that already reference
+it keep their join rows"), `erase_trip` keeps a dive's `trip_id`, and the service-record listing
+resolves a schedule's uuid through a query with no `is_deleted` filter. So a diver looking at a dive
+in the app sees a site they deleted, and an export that dropped it would be exporting less than the
+screen in front of them.
+
+**Two failure modes, and neither is subtle once it happens.** The join tables carry no `is_deleted`
+of their own, so `site_ids_by_dive` names ids that a `is_deleted = false` read never returned — an
+unguarded lookup is a `KeyError`, i.e. a **500 on all three export endpoints for any diver who has
+ever deleted a dive site**. And where the lookup was guarded, the result was worse in a quieter way:
+a uuid in `export.json` that nothing in the file defines, and in UDDF the same reference is an
+`xs:IDREF`, so the document would not validate at all.
+
+**The referrer graph is deeper than it first looks**, which is how the second round missed it. A
+gear item survives because a dive used it, *or* a set contains it, *or* a service record logs work
+on it, *or* a schedule is measured against it. Deleting an item soft-deletes its schedules and
+deliberately keeps its records (`soft_delete_schedules_for_gear_item`), so an item that was never
+dived and never in a set is reachable only through record → schedule → item. That is why `_owned`
+reads schedules *before* gear items: the order of the calls in `load_export_bundle` is load-bearing.
+
+**Three things this rule is not:**
+
+- It is not a widening of the `user_id` scope. `still_referenced` relaxes the soft-delete predicate
+  and nothing else; the owner filter is unconditional in every call, and a join row pointing at
+  another account's site resurrects nothing.
+- It is not a resurrection of orphans. A deleted row nothing references stays out, because nothing
+  can see it either.
+- It is not silent. The rows come back flagged `is_deleted: true` in `export.json`, so a reader
+  importing the file can tell them from the live ones rather than being handed back a site the diver
+  thought they had removed. UDDF has no such flag, and they are simply present there — which is the
+  right trade for a format whose job is "here are the dives I did".
+
+Everywhere a reference still cannot be resolved after all that — which now means only hand-edited
+data — the export **skips the row rather than raising**. `sites_for`/`gear_for`, `_schedule_uuid`,
+the gear-service CSV and the two `_collections` comprehensions all agree on that, because a 500 on
+the one endpoint that exists so a diver can leave with their data is the worst possible answer to a
+row nobody can see.

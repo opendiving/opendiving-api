@@ -249,6 +249,46 @@ class TestStillReferencedButDeleted:
         assert schedule.id in bundle.schedule_by_id
 
     @pytest.mark.asyncio
+    async def test_a_deleted_gear_item_whose_only_referrer_is_a_service_record_comes_back(
+        self, db: Session, owner: User
+    ):
+        """The longest referrer chain there is, and the one the first fix missed.
+
+        `erase_gear_item` soft-deletes the item *and* its schedules while deliberately
+        keeping the records. So a live record drags back a dead schedule, and the schedule
+        is then the only thing still naming a dead item - an item that was never dived and
+        never in a set is reachable by no other path.
+        """
+        item = GearItem(user_id=owner.id, name="Retired reg", notes="", is_deleted=True)
+        db.add(item)
+        db.commit()
+        schedule = GearServiceSchedule(
+            user_id=owner.id,
+            gear_item_id=item.id,
+            kind="service",
+            starts_on=date(2026, 1, 1),
+            interval_months=12,
+            is_deleted=True,
+        )
+        db.add(schedule)
+        db.commit()
+        db.add(
+            GearServiceRecord(
+                user_id=owner.id,
+                gear_item_id=item.id,
+                kind="service",
+                serviced_on=date(2026, 1, 1),
+                dive_count_at_service=0,
+                gear_service_schedule_id=schedule.id,
+            )
+        )
+        db.commit()
+
+        bundle = await _load(owner.id)
+        assert item.id in bundle.gear_item_by_id
+        assert schedule.id in bundle.schedule_by_id
+
+    @pytest.mark.asyncio
     async def test_a_deleted_row_nothing_references_stays_out(self, db: Session, owner: User):
         """The exception is only for what the app still shows. An orphaned deleted site
         is genuinely gone, and resurrecting it would be the surprise."""
