@@ -66,8 +66,9 @@ class ArchivePaths:
     """Every stored binary's path inside the archive, keyed the way it is addressed.
 
     A dive has at most one export and a certification at most one image per side, so
-    these two maps between them name every member the archive carries beyond the four
-    generated documents.
+    these two maps between them name every member the archive carries beyond the
+    generated documents (`export.json`, `dives.uddf` and the seven files in
+    `tabular.CSV_WRITERS`).
     """
 
     dive_files: dict[int, str] = field(default_factory=dict)

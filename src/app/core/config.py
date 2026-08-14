@@ -169,7 +169,10 @@ class ContactSettings(BaseSettings):
 
 class ExportSettings(BaseSettings):
     # Fixed-window rate limit (see `core.utils.rate_limit`) on the three `/export/*`
-    # endpoints, keyed per user. Authenticated and owner-only, so this is not an abuse
+    # endpoints, keyed per user and shared between them - the budget bounds total export
+    # work, so the cheap CSV download draws on the same allowance as the archive.
+    #
+    # Authenticated and owner-only, so this is not an abuse
     # boundary the way the contact form's is - it is there because one archive request
     # reads every blob the caller owns, and nothing else in the API does that. The bound
     # is deliberately generous: this is a button a diver presses once, and someone
