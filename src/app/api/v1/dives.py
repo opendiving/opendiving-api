@@ -657,9 +657,9 @@ async def read_dive(
     """Return a single dive with its mixtures, sites, gear, source file and profile summary.
 
     404 when no such dive exists - and the same 404 when it belongs to another user, so
-    someone else's uuid stays unprobeable. The profile's
-    samples are not included - `GET /dive/{uuid}/profile` serves those separately, since
-    they are far larger than the rest of the dive put together.
+    someone else's uuid stays unprobeable. The profile's samples are not included -
+    `GET /dive/{uuid}/profile` serves those separately, since they are far larger than the
+    rest of the dive put together.
     """
     await _get_owned_dive(db, uuid, current_user)
 
@@ -683,8 +683,8 @@ async def patch_dive(
     wholesale when present rather than merged, so sending a shorter list removes the
     difference and omitting the key entirely leaves it alone. Passing `null` for
     `trip_uuid` detaches the dive from its trip, which is distinct from omitting the key.
-    Referencing anything the caller doesn't own is a
-    422, as are the DB's domain constraints.
+    Referencing anything the caller doesn't own is a 422, as are the DB's domain
+    constraints.
     """
     db_dive = await _get_owned_dive(db, uuid, current_user)
     owner_id = db_dive.user_id
@@ -780,10 +780,9 @@ async def erase_dive(
     """Soft-delete a dive, and hard-delete the dive-computer export stored against it.
 
     404 unless the caller owns it, exactly as for a dive that doesn't exist. The dive row
-    is only flagged, but its source file is
-    genuinely removed: leaving it would strand the bytes behind a dive nobody can open and
-    hold the file's slot in the unique indexes, blocking a re-import of that same export
-    into a fresh dive.
+    is only flagged, but its source file is genuinely removed: leaving it would strand the
+    bytes behind a dive nobody can open and hold the file's slot in the unique indexes,
+    blocking a re-import of that same export into a fresh dive.
     """
     db_dive = await _get_owned_dive(db, uuid, current_user)
     owner_id = db_dive.user_id

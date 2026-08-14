@@ -173,9 +173,9 @@ async def patch_dive_site(
     """Partially update a dive site; omitted fields are left untouched.
 
     404 unless the caller owns it, exactly as for a site that doesn't exist. Uniqueness
-    is re-checked against the *resulting* name
-    and location, so moving a site to a location where that name is already taken is a
-    422. Because dive reads embed this site's name and location, a successful change also
+    is re-checked against the *resulting* name and location, so moving a site to a
+    location where that name is already taken is a 422. Because dive reads embed this
+    site's name and location, a successful change also
     invalidates every cached dive logged here.
     """
     db_dive_site = await _get_owned_dive_site(db, uuid, current_user)

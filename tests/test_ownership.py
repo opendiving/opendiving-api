@@ -264,26 +264,35 @@ class TestSomeoneElsesRowIsIndistinguishableOverHTTP:
     `detail` would be the same oracle wearing a 404.
     """
 
+    @pytest.mark.parametrize("method", ("GET", "PATCH", "DELETE"))
     @pytest.mark.parametrize(("path", "module", "crud_name", "detail"), OWNED_ROUTES)
     def test_a_row_owned_by_someone_else_reads_as_a_missing_one(
         self,
         signed_in_client: TestClient,
         monkeypatch: Any,
+        method: str,
         path: str,
         module: str,
         crud_name: str,
         detail: str,
     ):
+        """All three methods, not just the read.
+
+        The mutating routes are the ones most likely to grow a bespoke pre-check later,
+        and an empty `PATCH` body is enough: every update schema is all-optional, and the
+        ownership check runs before any field is looked at.
+        """
         import importlib
 
         crud = getattr(importlib.import_module(module), crud_name)
         url = path.format(uuid=uuid_pkg.uuid4())
+        body: dict[str, Any] | None = {} if method == "PATCH" else None
 
         monkeypatch.setattr(crud, "get", AsyncMock(return_value=None))
-        absent = signed_in_client.get(url)
+        absent = signed_in_client.request(method, url, json=body)
 
         monkeypatch.setattr(crud, "get", AsyncMock(return_value=_Row(id=1, user_id=SOMEONE_ELSE_ID)))
-        someone_elses = signed_in_client.get(url)
+        someone_elses = signed_in_client.request(method, url, json=body)
 
         assert absent.status_code == 404
         assert someone_elses.status_code == absent.status_code
