@@ -1,0 +1,5 @@
+# The export golden file is pinned byte for byte, CRLF line endings and UTF-8 BOM
+# included (see tests/fixtures/export/README.md). Marking it binary stops git from
+# normalizing either on checkout or commit, which would fail the test on any machine
+# configured with `core.autocrlf`.
+tests/fixtures/export/dives.csv binary

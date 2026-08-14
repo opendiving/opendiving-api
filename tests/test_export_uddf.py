@@ -1,0 +1,379 @@
+"""Tests for the UDDF writer (`services/export/uddf.py`).
+
+Three kinds of assertion, and they are not interchangeable:
+
+1. **Schema validity.** Every document produced here is validated against the vendored
+   UDDF 3.2.2 XSD (`tests/fixtures/uddf/`). That is the only check that catches an
+   element in the wrong order or a mandatory child left out, and it is why the schema is
+   in the repo at all.
+2. **Unit conversions, against hand-computed values.** UDDF is SI and our storage is
+   not, so every factor is spelled out in the expectation rather than recomputed from the
+   constant it is testing - `24.9 C` is asserted to be `298.05 K`, not
+   `24.9 + KELVIN_OFFSET`. A test that reuses the implementation's arithmetic proves
+   nothing about the arithmetic.
+3. **What is deliberately absent.** The ceiling, CNS and OTU have no honest slot in this
+   format (see the module docstring in `uddf.py`), so their absence is asserted rather
+   than left to be quietly reintroduced by someone reading the mapping table.
+
+The bundle under test is `tests/helpers/export.py::full_bundle`, hand-built precisely
+because the dev corpus has no trimix, no gas switches and one profile between five
+hundred dives.
+"""
+
+import xml.etree.ElementTree as ET
+from typing import Any
+from unittest.mock import AsyncMock
+
+import pytest
+import xmlschema
+
+from src.app.services.dive_profiles import LoadedProfile
+from src.app.services.export.uddf import UDDF_NAMESPACE, _num, _person_names, collect_mixes, write_uddf
+from tests.helpers.export import EXPORTED_AT, TRIMIX_PROFILE, build_bundle, full_bundle, make_dive, mixture
+
+UDDF = f"{{{UDDF_NAMESPACE}}}"
+SCHEMA_PATH = "tests/fixtures/uddf/uddf_3.2.2.xsd"
+
+
+@pytest.fixture(scope="module")
+def schema() -> xmlschema.XMLSchema:
+    """Compiled once - `xmlschema` takes appreciably longer to build this than to run
+    any single validation against it."""
+    return xmlschema.XMLSchema(SCHEMA_PATH)
+
+
+async def _render(bundle: Any, profiles: dict[int, dict[str, Any]] | None = None, monkeypatch: Any = None) -> bytes:
+    payloads = profiles or {}
+
+    async def fake_load_profile(db: Any, *, dive_id: int) -> LoadedProfile | None:
+        data = payloads.get(dive_id)
+        return None if data is None else LoadedProfile(duration_seconds=data.get("duration", 0), data=data)
+
+    monkeypatch.setattr("src.app.services.export.uddf.load_profile", fake_load_profile)
+    chunks = [chunk async for chunk in write_uddf(AsyncMock(), bundle, exported_at=EXPORTED_AT)]
+    return b"".join(chunks)
+
+
+def _tree(document: bytes) -> ET.Element:
+    return ET.fromstring(document)
+
+
+def _dive(tree: ET.Element, index: int) -> ET.Element:
+    return tree.findall(f".//{UDDF}dive")[index]
+
+
+def _text(element: ET.Element, path: str) -> str | None:
+    found = element.find(path)
+    return None if found is None else found.text
+
+
+class TestSchemaValidity:
+    @pytest.mark.asyncio
+    async def test_the_full_logbook_validates(self, schema, monkeypatch):
+        document = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
+        schema.validate(document)
+
+    @pytest.mark.asyncio
+    async def test_an_empty_logbook_validates(self, schema, monkeypatch):
+        """A diver who has logged nothing still gets a well-formed, valid file.
+
+        Not a curiosity: `profiledata` needs at least one `<repetitiongroup>`, a group at
+        least one `<dive>`, `divetrip` at least one `<trip>` and `gasdefinitions` at least
+        one `<mix>`, so every one of those sections has to be omitted rather than emitted
+        empty. Four chances to produce an invalid document out of an account with no data.
+        """
+        document = await _render(build_bundle(), monkeypatch=monkeypatch)
+        schema.validate(document)
+        tree = _tree(document)
+        assert tree.find(f"{UDDF}profiledata") is None
+        assert tree.find(f"{UDDF}divetrip") is None
+        assert tree.find(f"{UDDF}gasdefinitions") is None
+
+    @pytest.mark.asyncio
+    async def test_a_dive_with_nothing_but_the_mandatory_fields_validates(self, schema, monkeypatch):
+        bundle = build_bundle(dives=[make_dive(1, full_bundle().dives[2].uuid, notes="")])
+        schema.validate(await _render(bundle, monkeypatch=monkeypatch))
+
+    @pytest.mark.asyncio
+    async def test_notes_with_xml_metacharacters_survive(self, schema, monkeypatch):
+        """A diver's notes are the one place arbitrary text reaches the document."""
+        nasty = "Ampersand & <tag> \"quote\" 'apostrophe' ]]> ünïcode"
+        bundle = build_bundle(dives=[make_dive(1, full_bundle().dives[0].uuid, notes=nasty)])
+        document = await _render(bundle, monkeypatch=monkeypatch)
+        schema.validate(document)
+        assert _text(_dive(_tree(document), 0), f"{UDDF}informationafterdive/{UDDF}notes/{UDDF}para") == nasty
+
+
+class TestUnitConversions:
+    """Hand-computed expectations. See the module docstring for why they are literals."""
+
+    @pytest.mark.asyncio
+    async def test_temperatures_are_kelvin(self, monkeypatch):
+        document = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
+        # 24.9 C stored on the dive -> 24.9 + 273.15
+        assert _text(_dive(_tree(document), 0), f"{UDDF}informationafterdive/{UDDF}lowesttemperature") == "298.05"
+        # 181 tenths of a degree in the profile = 18.1 C -> 291.25 K
+        temperatures = [e.text for e in _tree(document).iter(f"{UDDF}temperature")]
+        assert temperatures == ["298.05", "291.25"]
+
+    @pytest.mark.asyncio
+    async def test_pressures_are_pascal(self, monkeypatch):
+        document = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
+        trimix = _dive(_tree(document), 1)
+        tanks = trimix.findall(f"{UDDF}tankdata")
+        # 232 bar -> 23 200 000 Pa; 90 bar -> 9 000 000 Pa.
+        assert _text(tanks[0], f"{UDDF}tankpressurebegin") == "23200000"
+        assert _text(tanks[0], f"{UDDF}tankpressureend") == "9000000"
+        # 2320 tenths of a bar in the profile = 232 bar -> the same 23 200 000 Pa.
+        assert [e.text for e in trimix.iter(f"{UDDF}tankpressure")][0] == "23200000"
+
+    @pytest.mark.asyncio
+    async def test_surface_pressure_is_pascal(self, monkeypatch):
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        # 1.013 bar -> 101 300 Pa.
+        assert _text(_dive(_tree(document), 0), f"{UDDF}informationbeforedive/{UDDF}surfacepressure") == "101300"
+
+    @pytest.mark.asyncio
+    async def test_tank_volumes_are_cubic_metres(self, monkeypatch):
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        tanks = _dive(_tree(document), 1).findall(f"{UDDF}tankdata")
+        # 24 L -> 0.024 m3, 11.1 L -> 0.0111 m3.
+        assert [_text(tank, f"{UDDF}tankvolume") for tank in tanks] == ["0.024", "0.0111"]
+
+    @pytest.mark.asyncio
+    async def test_depths_are_metres(self, monkeypatch):
+        document = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
+        # 5200 cm in the profile -> 52 m; the dive's own scalars are already metres.
+        assert [e.text for e in _dive(_tree(document), 1).iter(f"{UDDF}depth")] == ["0", "18", "52", "3"]
+        assert _text(_dive(_tree(document), 0), f"{UDDF}informationafterdive/{UDDF}greatestdepth") == "28.4"
+
+    @pytest.mark.asyncio
+    async def test_gas_fractions_are_zero_to_one(self, monkeypatch):
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        mixes = _tree(document).findall(f"{UDDF}gasdefinitions/{UDDF}mix")
+        assert [(_text(m, f"{UDDF}o2"), _text(m, f"{UDDF}he")) for m in mixes] == [
+            ("0.21", "0.35"),
+            ("0.32", "0"),
+            ("0.5", "0"),
+        ]
+
+    def test_scientific_notation_is_never_emitted(self):
+        """`%g` would render a tank pressure as `2.32e+07`. Legal XML, unreadable file."""
+        assert _num(23_200_000.0) == "23200000"
+        assert _num(0.0111) == "0.0111"
+        assert _num(0.0) == "0"
+
+
+class TestMixDefinitions:
+    def test_the_same_gas_at_two_ppo2_limits_is_two_mixes(self):
+        """`<maximumpo2>` is per-mix, so collapsing them would drop one of the limits."""
+        bundle = build_bundle(
+            dives=[make_dive(1, full_bundle().dives[0].uuid)],
+            mixtures_by_dive={
+                1: [mixture(oxygen=32.0, po2_limit=1.4), mixture(id=2, oxygen=32.0, po2_limit=1.6)],
+            },
+        )
+        assert len(collect_mixes(bundle)) == 2
+
+    def test_float_noise_does_not_split_one_gas_in_two(self):
+        """Straight from the dev corpus, which holds `28.000000000000004` beside `28`.
+
+        Before the key was rounded these produced two `<mix>` entries whose `<o2>`
+        printed the same number, because the writer already rounds on the way out.
+        """
+        bundle = build_bundle(
+            dives=[make_dive(1, full_bundle().dives[0].uuid)],
+            mixtures_by_dive={1: [mixture(oxygen=28.0), mixture(id=2, oxygen=28.000000000000004)]},
+        )
+        assert len(collect_mixes(bundle)) == 1
+
+    @pytest.mark.asyncio
+    async def test_mixes_are_named_the_way_a_diver_would(self, monkeypatch):
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        names = [e.text for e in _tree(document).iter(f"{UDDF}name") if e.text in ("21/35", "EAN32", "EAN50")]
+        assert names == ["21/35", "EAN32", "EAN50"]
+
+    @pytest.mark.asyncio
+    async def test_the_planned_ppo2_lands_in_maximumpo2(self, monkeypatch):
+        """The plan's mapping table said `po2_limit` had no UDDF slot. The XSD disagrees."""
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        mixes = _tree(document).findall(f"{UDDF}gasdefinitions/{UDDF}mix")
+        assert [_text(m, f"{UDDF}maximumpo2") for m in mixes] == ["1.4", None, "1.6"]
+
+    @pytest.mark.asyncio
+    async def test_the_mix_list_is_sorted_by_fraction_not_by_encounter(self, monkeypatch):
+        """So deleting the oldest dive doesn't renumber every mix in the file."""
+        bundle = full_bundle()
+        reversed_bundle = build_bundle(
+            dives=list(reversed(bundle.dives)),
+            mixtures_by_dive=bundle.mixtures_by_dive,
+            dive_sites=bundle.dive_sites,
+        )
+        assert list(collect_mixes(bundle).values()) == list(collect_mixes(reversed_bundle).values())
+
+
+class TestDiveContent:
+    @pytest.mark.asyncio
+    async def test_the_datetime_carries_the_dive_s_own_offset(self, monkeypatch):
+        """The API's rule everywhere: one combined offset-aware string, never the stored
+        UTC instant. 06:15 UTC at +02:00 is 08:15 local."""
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        assert (
+            _text(_dive(_tree(document), 0), f"{UDDF}informationbeforedive/{UDDF}datetime")
+            == "2026-06-01T08:15:00+02:00"
+        )
+
+    @pytest.mark.asyncio
+    async def test_every_site_is_linked_in_visit_order(self, monkeypatch):
+        """`informationbeforedive/link` is `maxOccurs="unbounded"`, so a multi-site dive
+        keeps its whole itinerary - and an importer that reads only the first still gets
+        the primary site."""
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        links = _dive(_tree(document), 0).findall(f"{UDDF}informationbeforedive/{UDDF}link")
+        sites = _tree(document).findall(f"{UDDF}divesite/{UDDF}site")
+        assert [link.get("ref") for link in links] == [site.get("id") for site in sites]
+
+    @pytest.mark.asyncio
+    async def test_a_dive_with_no_recorded_depth_still_gets_the_mandatory_element(self, monkeypatch):
+        """`<greatestdepth>` is `minOccurs="1"` and `Dive.max_depth` is nullable."""
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        assert _text(_dive(_tree(document), 2), f"{UDDF}informationafterdive/{UDDF}greatestdepth") == "0"
+
+    @pytest.mark.asyncio
+    async def test_the_profile_s_max_depth_stands_in_before_zero_does(self, monkeypatch):
+        """The trimix dive has no `max_depth` of its own here - only a profile summary."""
+        bundle = full_bundle()
+        bundle.dives[1].max_depth = None
+        document = await _render(bundle, monkeypatch=monkeypatch)
+        assert _text(_dive(_tree(document), 1), f"{UDDF}informationafterdive/{UDDF}greatestdepth") == "52"
+
+    @pytest.mark.asyncio
+    async def test_a_cylinder_with_no_starting_pressure_is_not_a_tankdata(self, monkeypatch):
+        """`<tankpressurebegin>` is mandatory, so there is no valid `<tankdata>` to emit -
+        the gas still reaches `<gasdefinitions>` and the cylinder still reaches the JSON."""
+        bundle = build_bundle(
+            dives=[make_dive(1, full_bundle().dives[0].uuid)],
+            mixtures_by_dive={1: [mixture(oxygen=32.0, start_pressure=None)]},
+        )
+        document = await _render(bundle, monkeypatch=monkeypatch)
+        assert _dive(_tree(document), 0).findall(f"{UDDF}tankdata") == []
+        assert len(_tree(document).findall(f"{UDDF}gasdefinitions/{UDDF}mix")) == 1
+
+    @pytest.mark.asyncio
+    async def test_gear_and_lead_ride_in_equipmentused(self, monkeypatch):
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        used = _dive(_tree(document), 0).find(f"{UDDF}informationbeforedive/{UDDF}equipmentused")
+        assert _text(used, f"{UDDF}leadquantity") == "6.5"
+        assert len(used.findall(f"{UDDF}link")) == 3
+
+    @pytest.mark.asyncio
+    async def test_an_untyped_gear_item_is_not_dropped(self, monkeypatch):
+        """`GearItem.type` is nullable, and every item has to land somewhere in
+        `equipmentType` - `<variouspieces>` is the catch-all."""
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        various = _tree(document).findall(f".//{UDDF}variouspieces/{UDDF}name")
+        assert [e.text for e in various] == ["Slate"]
+
+    @pytest.mark.asyncio
+    async def test_the_trip_is_linked_and_dated(self, monkeypatch):
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        trip = _tree(document).find(f"{UDDF}divetrip/{UDDF}trip")
+        assert _dive(_tree(document), 0).find(f"{UDDF}informationbeforedive/{UDDF}tripmembership").get(
+            "ref"
+        ) == trip.get("id")
+        dates = trip.find(f"{UDDF}trippart/{UDDF}dateoftrip")
+        assert (dates.get("startdate"), dates.get("enddate")) == ("2026-05-30T00:00:00", "2026-06-06T00:00:00")
+
+
+class TestWaypoints:
+    @pytest.mark.asyncio
+    async def test_channels_on_different_axes_become_one_waypoint_each(self, monkeypatch):
+        """Nothing is interpolated onto a neighbouring waypoint: a temperature sample
+        taken between two depth samples is its own waypoint carrying only a temperature."""
+        document = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        assert [_text(w, f"{UDDF}divetime") for w in waypoints] == ["0", "30", "60", "90"]
+        # The 30 s waypoint has a depth but no temperature - temperature was sampled at
+        # 0 s and 60 s only.
+        assert _text(waypoints[1], f"{UDDF}temperature") is None
+        assert _text(waypoints[1], f"{UDDF}depth") == "18"
+
+    @pytest.mark.asyncio
+    async def test_gas_switches_become_switchmix_links(self, monkeypatch):
+        document = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        mixes = {m.get("id") for m in _tree(document).findall(f"{UDDF}gasdefinitions/{UDDF}mix")}
+        switches = [w.find(f"{UDDF}switchmix") for w in waypoints]
+        assert [s is not None for s in switches] == [True, False, False, True]
+        assert {s.get("ref") for s in switches if s is not None} <= mixes
+
+    @pytest.mark.asyncio
+    async def test_simultaneous_markers_are_joined_rather_than_dropped(self, monkeypatch):
+        """`waypointType` allows one `<setmarker>`, and the fixture puts two events at 60s."""
+        document = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        assert _text(waypoints[2], f"{UDDF}setmarker") == "safety_stop; Ceiling Broken"
+
+    @pytest.mark.asyncio
+    async def test_a_pressure_channel_with_no_matching_cylinder_is_dropped(self, schema, monkeypatch):
+        """`<tankpressure ref>` is an `xs:IDREF`; a dangling one would fail validation.
+
+        The fixture's `gas_number: 9` channel has no mixture, which is what a device that
+        reports five cylinder slots for a two-cylinder dive produces.
+        """
+        document = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
+        schema.validate(document)
+        assert [e.text for e in _dive(_tree(document), 1).iter(f"{UDDF}tankpressure")] == [
+            "23200000",
+            "14000000",
+            "20000000",
+        ]
+
+
+class TestWhatUddfCannotHold:
+    """Absences that are decisions, not omissions - see `uddf.py`'s module docstring."""
+
+    @pytest.mark.asyncio
+    async def test_the_deco_ceiling_is_not_emitted(self, monkeypatch):
+        """`<decostop>` requires a `duration` attribute, and a ceiling sample says how
+        deep the obligation was, never how long the stop should last."""
+        document = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
+        assert list(_tree(document).iter(f"{UDDF}decostop")) == []
+
+    @pytest.mark.asyncio
+    async def test_cns_and_otu_are_not_emitted(self, monkeypatch):
+        """`informationafterdiveType` has no oxygen-exposure element; the only `<cns>`/
+        `<otu>` in the schema are per-waypoint, and we store end-of-dive scalars."""
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        assert list(_tree(document).iter(f"{UDDF}cns")) == []
+        assert list(_tree(document).iter(f"{UDDF}otu")) == []
+
+    @pytest.mark.asyncio
+    async def test_the_owner_s_email_is_not_in_the_file(self, monkeypatch):
+        """The schema has a slot. A UDDF file is what a diver hands to a dive shop."""
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        assert b"ada@example.com" not in document
+
+
+class TestDeterminism:
+    @pytest.mark.asyncio
+    async def test_two_exports_of_an_unchanged_logbook_are_byte_identical(self, monkeypatch):
+        first = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
+        second = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
+        assert first == second
+
+
+class TestPersonNames:
+    @pytest.mark.parametrize(
+        ("full_name", "expected"),
+        [
+            ("Ada Lovelace", ("Ada", "Lovelace")),
+            ("Jean Luc Picard", ("Jean", "Luc Picard")),
+            # `<lastname>` is mandatory but an empty `xs:string` is valid, which says
+            # "we don't hold this" rather than asserting a surname nobody gave.
+            ("Cher", ("Cher", "")),
+            ("   ", ("ada", "")),
+        ],
+    )
+    def test_a_single_stored_name_splits_into_the_two_uddf_wants(self, full_name, expected):
+        assert _person_names(full_name, "ada") == expected
