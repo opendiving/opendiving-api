@@ -484,6 +484,28 @@ class TestWaypoints:
         assert mixes[switches[3].get("ref")] == "0.5"
 
     @pytest.mark.asyncio
+    async def test_an_unrepresentable_later_switch_does_not_restore_the_earlier_one(self, schema, monkeypatch):
+        """The counter-intuitive half of last-wins: the winner is chosen before asking
+        whether it can be written.
+
+        Cylinder 9 has no mixture on this dive, so its switch has no `xs:IDREF` to point
+        at. Resolving before choosing would quietly hand the waypoint back to cylinder 1 -
+        the gas the diver had just left - which is the failure last-wins exists to
+        prevent, reached from the other side. No `<switchmix>` at all is the honest answer.
+        """
+        profile = {
+            **OFF_GRID_PROFILE,
+            "events": [
+                {"t": 21, "type": "gas_switch", "gas_number": 1},
+                {"t": 23, "type": "gas_switch", "gas_number": 9},
+            ],
+        }
+        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        schema.validate(document)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        assert [w.find(f"{UDDF}switchmix") for w in waypoints] == [None, None, None, None]
+
+    @pytest.mark.asyncio
     async def test_a_gas_switch_is_never_shown_before_it_happened(self, schema, monkeypatch):
         """A switch is a state change, so the tolerance rule that governs readings does
         not govern it.

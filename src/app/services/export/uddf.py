@@ -411,6 +411,11 @@ def _snap_tolerance(seconds: list[int]) -> int:
     readings that cannot reach a waypoint within it - across a dropout, or beyond either
     end of the dive - are dropped. They are in `export.json`, on their own unsnapped axis,
     like everything else this format cannot carry honestly.
+
+    A 1 Hz depth channel yields a tolerance of zero, which is exact rather than strict:
+    `dive_profiles` stores whole-second timestamps, so a reading either coincides with a
+    depth sample or sits in a genuine dropout. Sub-second storage would turn that into
+    silent data loss, and would be the thing to revisit here.
     """
     if len(seconds) < 2:
         return 0
@@ -472,10 +477,11 @@ def _waypoints(
     dropout in the depth channel, or one taken after the diver surfaced - is dropped
     rather than relocated onto a waypoint it was not measured anywhere near.
 
-    Events snap the same way, with two rules the single-slot elements force: markers
-    landing together are joined rather than dropped, and where two gas switches land
-    together the **later** one wins, because that is the gas being breathed from that
-    waypoint on.
+    Markers snap the same way, joined rather than dropped where several land together,
+    since `waypointType` has room for one `<setmarker>`. **Gas switches do not**: a switch
+    is a state change, so it is exempt from the tolerance and lands on the first waypoint
+    at or after it however far that is - dropping one would not leave a hole, it would
+    tell an importer the diver never switched. The body below says why in full.
 
     A profile with no depth channel therefore emits **no `<samples>` at all** rather than
     the depth-less waypoints that started this. Everything at full resolution, on its own

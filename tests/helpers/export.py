@@ -395,7 +395,7 @@ TRIMIX_PROFILE: dict[str, Any] = {
 # each rule: 4 -> 0 and 27 -> 30 (plain nearest), 12 and 13 both -> 10 with the closer one
 # winning (13's 99.9 C is absurd on purpose - it is what a last-wins bug would emit), 15 ->
 # 10 on a tie the earlier sample takes, 7 and 8 -> 10 as two markers on one waypoint, and
-# the switch at 24 -> 20.
+# and the switch at 24 -> 30, because a switch is never moved backwards.
 OFF_GRID_PROFILE: dict[str, Any] = {
     "depth": {"t": [0, 10, 20, 30], "v": [0, 1000, 2000, 1500]},
     "temperature": {"t": [4, 12, 13, 27], "v": [250, 240, 999, 220]},
