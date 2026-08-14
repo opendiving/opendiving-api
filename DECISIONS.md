@@ -4946,6 +4946,17 @@ labelled `<divecomputer model='Open Diving'>`. The stylesheet prefers
 generator name wins. Inventing one from the item's name would make a diver's "Backup" computer a
 model number.
 
-divelogs.de is closed, so its behaviour is only observable: trips are not imported either, but the
-loss hides because it *derives* trips from gaps between dive dates (see its own section above), and
-neither gear nor weights appear anywhere in its UI.
+divelogs.de is closed, so its behaviour is only observable, and it draws the line in a different
+place: **dive data imports, diver data does not**. The cylinder arrives in full — 12 L, 200 → 80
+bar, the gas — because it rides in `<tankdata>` on the dive itself. The kit list, which lives on
+`<diver><owner><equipment>`, does not: after a clean re-import its gear page still says *"Noch keine
+Ausrüstung erfasst"*, and the per-dive `<equipmentused>` links go with it. Weights are the sharpest
+version of the same thing — their dive page has a **Weight** row and their table editor a **Weight
+(Kg)** column, both present and both left empty by the import, so this is a gap in their UDDF
+mapping rather than a missing feature. Their own UDDF export contains no `<equipment>`,
+`<equipmentused>` or `<leadquantity>` element at all, which is consistent with the whole equipment
+branch being outside their mapping in both directions. Their upload page documents no field list, so
+there is nothing to read here the way Subsurface's stylesheet can be read.
+
+Trips are not imported either, but that loss hides because they *derive* trips from gaps between
+dive dates (see their own section above).
