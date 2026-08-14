@@ -5154,12 +5154,25 @@ body alone is not enough:
   `{"latitude": null, "longitude": null}` is how a position is removed. Guessing that they meant
   both would be a mutation the caller did not ask for.
 
+The check is **gated on the caller having named a coordinate at all**, unlike the effective-*name*
+check next to it, which is gated for a different reason (avoiding a query). There is no `CHECK`
+constraint behind the rule, so a half pair can reach the table another way — the admin panel writes
+through `DiveSiteUpdate`, which deliberately carries no validator — and a rule enforced on every
+PATCH would leave the owner of such a row unable to so much as rename it until they guessed which
+unrelated field to send.
+
 The validator lives on the **write** schemas only (`DiveSiteCreate`, `DiveSiteCreateInternal`), not
 on `DiveSiteBase`. There is no `CHECK` constraint behind the rule, so the table can still hold a
 half pair — put the validator on the shared base and a row like that turns every read of it into a
 500, which is a worse outcome than a read that shows the half. `latitude`/`longitude` are also kept
 off `DiveSiteInfo` (`schemas/dive.py`), the summary embedded in dive reads: adding them there
 enlarges every cached dive payload for a map view that does not exist yet.
+
+That last point also narrowed `patch_dive_site`'s **cache invalidation**, which used to drop every
+cached dive for the user on any successful edit. `DiveSiteInfo` is `uuid`, `name` and `location`, so
+only a change to one of those can leave a cached dive stale — and dragging a marker is about to
+become the most common one-field edit there is. The site's own list cache is still invalidated
+unconditionally, because the list does carry coordinates.
 
 **In UDDF, `<geography>` is emitted for a site that has a location *or* a position.** It used to be
 location-only, because `geographyType` makes `<location>` `minOccurs="1"` and a name-only site has

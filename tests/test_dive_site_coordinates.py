@@ -114,7 +114,8 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(dive_sites_module, "dive_site_name_exists", AsyncMock(return_value=False))
     monkeypatch.setattr(dive_sites_module.crud_dive_sites, "update", fake_update)
     monkeypatch.setattr(dive_sites_module._dive_site_cache, "invalidate_list", AsyncMock())
-    monkeypatch.setattr(dive_sites_module, "invalidate_dive_caches", AsyncMock())
+    seen["invalidate_dive_caches"] = AsyncMock()
+    monkeypatch.setattr(dive_sites_module, "invalidate_dive_caches", seen["invalidate_dive_caches"])
 
     return seen
 
@@ -194,3 +195,39 @@ class TestPatchKeepsThePairWhole:
         await _patch({"name": "Blue Hole (Dahab)"}, mock_redis)
 
         assert captured["update_data"] == {"name": "Blue Hole (Dahab)"}
+
+    @pytest.mark.asyncio
+    async def test_an_edit_touching_no_coordinate_survives_a_half_pair_already_in_the_row(
+        self, captured: dict[str, Any], mock_redis: Any
+    ) -> None:
+        """The rule has no `CHECK` behind it, so a half pair can reach the table another
+        way - the admin panel writes through `DiveSiteUpdate`, which carries no validator.
+        Enforcing it on a PATCH that named neither coordinate would leave the owner unable
+        to so much as rename the site until they guessed which field to send."""
+        captured["db_dive_site"].latitude = BLUE_HOLE[0]
+
+        await _patch({"notes": "Deep, dark, and busier than it looks"}, mock_redis)
+
+        assert captured["update_data"] == {"notes": "Deep, dark, and busier than it looks"}
+
+
+class TestDiveCacheInvalidation:
+    """`DiveSiteInfo` - the site summary embedded in every dive read - is `uuid`, `name`
+    and `location`. Only a change to one of those can make a cached dive stale, and
+    dropping a diver's whole cached logbook because they dragged a marker would be a real
+    cost for no staleness avoided.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_coordinate_edit_leaves_the_cached_dives_alone(
+        self, captured: dict[str, Any], mock_redis: Any
+    ) -> None:
+        await _patch({"latitude": BLUE_HOLE[0], "longitude": BLUE_HOLE[1]}, mock_redis)
+
+        captured["invalidate_dive_caches"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_rename_still_drops_them(self, captured: dict[str, Any], mock_redis: Any) -> None:
+        await _patch({"name": "Blue Hole (Dahab)"}, mock_redis)
+
+        captured["invalidate_dive_caches"].assert_awaited_once_with(1)

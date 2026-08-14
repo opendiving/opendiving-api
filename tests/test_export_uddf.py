@@ -433,7 +433,7 @@ class TestDiveSiteGeography:
         schema.validate(document)
         geography = self._site(_tree(document), 0).find(f"{UDDF}geography")
         assert _text(geography, f"{UDDF}location") == "Yolanda"
-        assert _text(geography, f"{UDDF}latitude") == "27.7"
+        assert (_text(geography, f"{UDDF}latitude"), _text(geography, f"{UDDF}longitude")) == ("27.7", "34.2")
 
     @pytest.mark.asyncio
     async def test_a_site_with_neither_gets_no_geography_at_all(self, monkeypatch):

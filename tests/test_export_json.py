@@ -111,6 +111,14 @@ class TestReferences:
         assert document["gear_service_records"][0]["gear_service_schedule_uuid"] == str(UUIDS["schedule"])
 
     @pytest.mark.asyncio
+    async def test_a_dive_site_carries_its_coordinates(self, monkeypatch):
+        """`ExportEnvelope` defaults both to `None`, so dropping the mapping in
+        `envelope.py` would leave every other assertion here green."""
+        document = await _render(full_bundle(), monkeypatch)
+        site = document["dive_sites"][0]
+        assert (site["latitude"], site["longitude"]) == (27.7278, 34.2564)
+
+    @pytest.mark.asyncio
     async def test_no_internal_integer_id_leaks(self, monkeypatch):
         """They are an implementation detail of this database and actively misleading in
         a file meant to outlive it."""

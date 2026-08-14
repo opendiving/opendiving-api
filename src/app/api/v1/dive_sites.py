@@ -183,20 +183,27 @@ async def patch_dive_site(
     location where that name is already taken is a 422. Coordinates are checked the same
     way: it is the *resulting* pair that has to be whole or empty, so nudging one
     coordinate of an existing pair is fine while half-setting or half-clearing one is a
-    422. Because dive reads embed this site's name and location, a successful change also
+    422. Because dive reads embed this site's name and location, a change to either also
     invalidates every cached dive logged here.
     """
     db_dive_site = await _get_owned_dive_site(db, uuid, current_user)
 
+    names_location = values.name is not None or "location" in values.model_fields_set
     effective_name = values.name if values.name is not None else db_dive_site.name
     effective_location = values.location if "location" in values.model_fields_set else db_dive_site.location
-    effective_latitude = values.latitude if "latitude" in values.model_fields_set else db_dive_site.latitude
-    effective_longitude = values.longitude if "longitude" in values.model_fields_set else db_dive_site.longitude
 
-    if (effective_latitude is None) != (effective_longitude is None):
-        raise UnprocessableEntityException(COORDINATE_PAIR_MESSAGE)
+    # Only when the caller touched a coordinate. The rule has no `CHECK` behind it, so a
+    # half pair can reach the table another way (the admin panel writes through
+    # `DiveSiteUpdate`, which has no validator) - and enforcing it unconditionally would
+    # make renaming such a site impossible until they guessed which unrelated field to
+    # send.
+    if "latitude" in values.model_fields_set or "longitude" in values.model_fields_set:
+        effective_latitude = values.latitude if "latitude" in values.model_fields_set else db_dive_site.latitude
+        effective_longitude = values.longitude if "longitude" in values.model_fields_set else db_dive_site.longitude
+        if (effective_latitude is None) != (effective_longitude is None):
+            raise UnprocessableEntityException(COORDINATE_PAIR_MESSAGE)
 
-    if (values.name is not None or "location" in values.model_fields_set) and await dive_site_name_exists(
+    if names_location and await dive_site_name_exists(
         db=db,
         user_id=db_dive_site.user_id,
         name=effective_name,
@@ -211,8 +218,12 @@ async def patch_dive_site(
         await _dive_site_cache.invalidate_list(db_dive_site.user_id)
         # Dive reads embed this site's name/location, so a rename makes every cached
         # dive logged here stale - the bug that used to be documented as a known
-        # limitation, fixable now that the single-dive cache key is user-scoped.
-        await invalidate_dive_caches(db_dive_site.user_id)
+        # limitation, fixable now that the single-dive cache key is user-scoped. Those
+        # two fields and nothing else: `DiveSiteInfo` carries no coordinates and no
+        # notes, and dropping every cached dive a diver has because they nudged a marker
+        # would be a real cost for no staleness avoided.
+        if names_location:
+            await invalidate_dive_caches(db_dive_site.user_id)
 
     return {"message": "Dive site updated"}
 
