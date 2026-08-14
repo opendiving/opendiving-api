@@ -47,7 +47,8 @@ screenshots, not for the technical-diving paths.
 Regenerate deliberately, with the stack up and a token for the demo account:
 
 ```bash
-curl -sH "Authorization: Bearer $TOKEN" \
+# -f matters: without it an expired token writes the JSON error body over the fixture
+curl -fsS -H "Authorization: Bearer $TOKEN" \
   http://localhost:8000/api/v1/export/uddf -o tests/fixtures/uddf/demo-account.uddf
 ```
 

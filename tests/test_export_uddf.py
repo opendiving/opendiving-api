@@ -166,7 +166,12 @@ class TestCheckedInCorpus:
     """
 
     def test_the_demo_account_export_validates(self, schema):
-        schema.validate(CORPUS_PATH.read_bytes())
+        document = CORPUS_PATH.read_bytes()
+        schema.validate(document)
+        # The one fact about the capture rather than the writer: which account it came
+        # from. A regeneration against a different login would validate happily and
+        # silently rot every count in the fixture's README.
+        assert len(_tree(document).findall(f".//{UDDF}dive")) == 8
 
 
 class TestUnitConversions:
