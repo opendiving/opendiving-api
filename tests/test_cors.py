@@ -1,10 +1,14 @@
-"""Regression test for CORS preflight handling (`core/setup.py`).
+"""Regression tests for CORS handling (`core/setup.py`), on both axes.
 
 The web app is served from a different origin than the API and sends requests
 with an `Authorization` header and/or JSON bodies plus cookies, all of which make
 the browser preflight with `OPTIONS` before the real request. Without
 `CORSMiddleware` configured, FastAPI has no `OPTIONS` handler for any route, so
 every preflight - and therefore every real cross-origin request - 405s.
+
+The other axis is what comes back: a cross-origin response exposes only the
+CORS-safelisted headers unless `expose_headers` names more, which is why the
+download filename needs a test of its own.
 
 Builds its own app via `create_application` (rather than importing `src.app.main`'s
 `app`/using the `client` fixture from `conftest.py`) with `create_tables_on_start=
