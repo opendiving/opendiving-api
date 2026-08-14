@@ -4763,8 +4763,10 @@ the same gap the screenshots have, and the reason the writer's own tests do not 
 
 The export was round-tripped through Subsurface 6.0.5576 on 2026-08-14: import
 `tests/fixtures/uddf/demo-account.uddf`, then save both ways — Subsurface's native `.ssrf`, and its
-own UDDF export. Both are in `tests/fixtures/subsurface/`. Reading only the UDDF it writes back
-would have produced a wrong answer in at least one place, which is why both were captured.
+own UDDF export. The native file is `tests/fixtures/roundtrip/subsurface.ssrf`; the UDDF re-export
+was read and dropped rather than checked in (see that directory's README). Reading only the UDDF it
+writes back would have produced a wrong answer in at least one place, which is why both were
+captured.
 
 **Survives the import exactly:** all eight dives and their numbers, notes (`&` included), the
 dive-site link and site name on every dive, the date and the local wall-clock time, cylinder size
@@ -4867,9 +4869,9 @@ waypoint (a last-wins bug emits 99.9 °C) and one exactly equidistant reading to
 ## What divelogs.de does with our UDDF
 
 Same corpus, same day, imported into divelogs.de (its English front is divelogs.org) and exported
-back out: `tests/fixtures/roundtrip/divelogs.uddf`. The profile corruption it produced is in the
-section above, because it changed the writer. The rest, with the import checked against its own web
-UI rather than against its export — which matters, as below:
+back out. The profile corruption it produced is in the section above, because it changed the writer.
+The rest, with the import checked against its own web UI rather than against its export — which
+matters, as below:
 
 **Exact:** all eight dives, dates, local times to the minute, cylinder volume and both pressures, O₂
 fractions, and `<diveduration>` carried through unrounded (4001 s, where Subsurface recomputed
