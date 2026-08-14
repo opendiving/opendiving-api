@@ -61,5 +61,8 @@ def test_content_disposition_is_exposed_to_the_browser(cors_client: TestClient) 
     filename the file and `/export/*` endpoints send unless it's named here."""
     response = cors_client.get("/api/v1/export/csv", headers={"Origin": settings.FRONTEND_URL})
 
+    # An allowed origin gets the header on any response the app returns, so without this
+    # the test would keep passing off a 404 if the route were ever renamed away.
+    assert response.status_code == 401
     exposed = [header.strip().lower() for header in response.headers["access-control-expose-headers"].split(",")]
     assert "content-disposition" in exposed
