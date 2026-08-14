@@ -25,14 +25,13 @@ in `src/app/services/export/uddf.py` is built against exactly this revision.
 ## `demo-account.uddf` — the corpus
 
 `GET /api/v1/export/uddf` for the demo account (`demo@opendiving.example`, `samreef`), captured on
-2026-08-14 against the dev database: 8 dives, 5 sites, 2 trips, 4 mixes, 1072 waypoints, one piece
-of gear. Every name in it is seeded demo data, so it is safe to attach to a bug report or hand to an
-external validator.
+2026-08-14 against the dev database: 8 dives, 5 sites, 2 trips, 4 mixes, 1072 waypoints, and four
+pieces of gear (BCD, computer, regulator, suit). Every name in it is seeded demo data, so it is safe
+to attach to a bug report or hand to an external validator.
 
 It is here for the **UDDF import** work, which needs a document this app produced to develop
-against, and for the manual round-trips through Subsurface and divelogs.de recorded in
-`plans/full-export.md` — feeding those importers a file from the repo beats regenerating one against
-a live stack every time.
+against, and for the manual round-trips through Subsurface and divelogs.de — feeding those importers
+a file from the repo beats regenerating one against a live stack every time.
 
 `test_export_uddf.py::TestCheckedInCorpus` validates it against the XSD above. That is a cheap
 guard, not a golden-file comparison: the writer's output is pinned by the tests that build documents
@@ -54,3 +53,7 @@ curl -sH "Authorization: Bearer $TOKEN" \
 
 The `<generator><datetime>` stamp is the export time, so a regenerated file always differs from the
 checked-in one by at least that line — update the capture date above when you replace it.
+
+`.gitattributes` marks this path `-text`, because the schema run would not notice git rewriting the
+line endings: XML normalizes CRLF to LF before the parser sees it, and a file kept for being byte
+for byte what the server sent would quietly stop being that. See `DECISIONS.md`.

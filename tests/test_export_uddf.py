@@ -158,10 +158,11 @@ class TestCheckedInCorpus:
 
     It is checked in for the future UDDF *import* work and for the manual round-trips
     through Subsurface and divelogs.de, which need a file this app produced. Validating it
-    here costs one schema run and catches the two ways a checked-in document rots: an
-    editor or a `core.autocrlf` checkout rewriting the bytes, and a regeneration whose
-    diff nobody read. It deliberately asserts nothing about the writer - the tests above
-    own that, against bundles the demo account cannot express.
+    here costs one schema run and catches a truncated file and a regeneration whose diff
+    nobody read - it does *not* catch a line-ending rewrite, since XML normalizes CRLF to
+    LF before the parser sees it, which is what `.gitattributes` is for. It deliberately
+    asserts nothing about the writer: the tests above own that, against bundles the demo
+    account cannot express.
     """
 
     def test_the_demo_account_export_validates(self, schema):

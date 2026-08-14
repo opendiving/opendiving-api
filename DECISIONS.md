@@ -4742,8 +4742,15 @@ The CSV is a **golden file**: the test regenerates it in-process and compares by
 fails the moment the writer changes and the diff is the review. This UDDF is a **snapshot**: it was
 produced by a running server against a database, nothing in CI can reproduce it, and the writer is
 free to move away from it. `TestCheckedInCorpus` therefore validates it against the XSD and asserts
-nothing else - enough to catch the file being corrupted, line-ending-normalized or replaced by an
-unread regeneration, and not enough to make an ordinary writer change look like a failure.
+nothing else - enough to catch a truncated file or a regeneration nobody read the diff of, and not
+enough to make an ordinary writer change look like a failure.
+
+The one thing that validation provably cannot catch is the one `.gitattributes` already guards for
+the CSV: XML 1.0 §2.11 has the processor normalize literal CRLF to `#xA` before the parser ever sees
+it, so a `core.autocrlf=true` clone that rewrote every line ending in the corpus still validates,
+and a file kept precisely because it is byte for byte what the server sent would have stopped being
+that with nothing to say so. Hence a second `-text` line, for a different reason than the CSV's: the
+CSV's test *would* fail, loudly and confusingly; this one would not fail at all.
 
 It is the demo account rather than the developer's own 500-dive log for the obvious reason - every
 site, trip, note and diver name in it is seeded fiction, so it can be attached to a bug report or
