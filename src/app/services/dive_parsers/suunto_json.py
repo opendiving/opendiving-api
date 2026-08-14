@@ -224,9 +224,6 @@ def _parse_mixture(gas: dict[str, Any], gas_number: int) -> DiveMixtureSchema:
         # has no `Gases` block at all and never reaches here.
         gas_number=gas_number,
         helium=_round2_or_none(_fraction_to_percent(gas.get("Helium"))),
-        # Left for the user to fill in themselves rather than parsed - see
-        # DECISIONS.md.
-        name=None,
         oxygen=_round2_or_none(_fraction_to_percent(gas.get("Oxygen"))),
         # Pascal here, unlike the XML export's plain bar: 140000 is 1.4 bar. Same
         # conversion as the cylinder pressures beside it.
@@ -270,8 +267,8 @@ def _scan_samples(
     cylinders were on the dive, and it is keyed by the same gas number as `Cylinders[]` -
     which is what makes a transmitter reading attributable to a specific cylinder rather
     than to "whichever tank this was". Switch order is chronological, so the back gas
-    comes first and deco gases follow, matching how the form names rows
-    (`getDefaultMixtureName`).
+    comes first and deco gases follow - which is the order the form labels its rows by
+    position in ("Tank 1", "Tank 2"), so the two agree without either naming the other.
 
     Pressures are ordered by the sample's own timestamp rather than by position in the
     array: the *union* of an Ocean export's sample timestamps is not monotonic (adjacent
@@ -399,7 +396,6 @@ def _mixtures_from_cylinders(samples: list[dict[str, Any]], dive_end: datetime |
             # chart refer to the same cylinder by the same name.
             gas_number=number,
             helium=None,
-            name=None,
             oxygen=None,
             # This shape records neither, for the same reason it records no gas fraction:
             # there is no `Gases` block anywhere in it.

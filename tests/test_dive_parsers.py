@@ -327,7 +327,6 @@ class TestSuuntoXmlParserParse:
 
         assert len(parsed.mixtures) == 1
         mixture = parsed.mixtures[0]
-        assert mixture.name is None
         assert mixture.oxygen == 21
         assert mixture.helium == 0
         assert mixture.volume == 12
@@ -565,7 +564,7 @@ class TestSuuntoJsonParserParse:
 
     def test_cylinders_follow_the_order_they_were_breathed_in(self):
         """Switch order is chronological, so the back gas is first and deco gases follow -
-        matching how the form names the rows (`getDefaultMixtureName`)."""
+        which is the order the form labels its rows by position in ("Tank 1", "Tank 2")."""
         parsed = SuuntoJsonParser.parse(OCEAN_JSON_MULTI_GAS)
 
         assert [mixture.start_pressure is not None for mixture in parsed.mixtures] == [True, False]
@@ -737,7 +736,6 @@ class TestSuuntoJsonParserParse:
         # Rounded from 207.14062/122.4375 bar to 2 decimal places.
         assert primary.start_pressure == 207.14
         assert primary.end_pressure == 122.44
-        assert primary.name is None
 
     def test_defaults_missing_mixture_pressures_to_none(self):
         """The second gas in the fixture has no `StartPressure`/`EndPressure`
@@ -940,7 +938,6 @@ class TestFitParserParse:
         # FIT has nowhere to record cylinder size at all, so it comes back null rather
         # than as a cylinder of no volume.
         assert mixture.volume is None
-        assert mixture.name is None
 
     def test_skips_gases_the_diver_did_not_breathe(self):
         """A computer stores its whole configured gas list. Importing the disabled ones
@@ -1762,7 +1759,6 @@ class TestTechScalars:
             end_pressure=float("nan"),
             gas_number=None,
             helium=float("nan"),
-            name=None,
             oxygen=float("inf"),
             po2_limit=float("nan"),
             role=None,
@@ -1779,12 +1775,12 @@ class TestTechScalars:
     def test_the_finite_guard_does_not_touch_anything_else(self):
         """It runs for every field, including the ones it must leave alone - a wildcard
         validator that nulled a `str`, an `int`, an enum or the mixtures list would be a
-        far worse bug than the one it fixes."""
+        far worse bug than the one it fixes. `start_time` is the `str` here; the mixtures
+        carry none since `name` was removed."""
         mixture = DiveMixtureSchema(
             end_pressure=120.0,
             gas_number=0,
             helium=0.0,
-            name="Air",
             oxygen=21.0,
             po2_limit=1.4,
             role=GasRole.BOTTOM,
@@ -1803,7 +1799,7 @@ class TestTechScalars:
             otu_end=53.0,
         )
 
-        assert (mixture.name, mixture.gas_number, mixture.role) == ("Air", 0, GasRole.BOTTOM)
+        assert (mixture.gas_number, mixture.role) == (0, GasRole.BOTTOM)
         assert (dive.dive_number, dive.duration, dive.start_time) == (41, 2400, "2026-06-03T12:15:00")
         assert (dive.avg_depth, dive.max_depth, dive.bottom_temperature) == (12.5, 27.3, 8.0)
         # Zero is a reading, and the wildcard is not a truthiness test.
@@ -1861,7 +1857,6 @@ class TestTechScalars:
             end_pressure=None,
             gas_number=-7,
             helium=None,
-            name=None,
             oxygen=None,
             po2_limit=None,
             role=None,
@@ -1878,7 +1873,6 @@ class TestTechScalars:
             end_pressure=None,
             gas_number=0,
             helium=None,
-            name=None,
             oxygen=None,
             po2_limit=None,
             role=None,

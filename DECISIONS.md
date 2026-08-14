@@ -1053,13 +1053,14 @@ the removed fields, rather than extracting them and having the schema discard th
 the catch-all `[key: string]: unknown` index signature was kept for forward compatibility, but the
 concrete fields shouldn't claim to exist if the backend no longer sends them).
 
-`DiveMixtureSchema.name` was kept in the schema (it does have a `DiveMixture. name` column), but
-both parsers now always set it to `None` rather than guessing at it - `SuuntoXmlParser` no longer
-reads the XML export's `<Name>` tag (e.g. `<Name>Air</Name>`), and `SuuntoJsonParser` no longer uses
-`Gases[]. State` (e.g. "Primary") as a stand-in name. `State` in particular was a poor proxy - it
-describes a gas's *role* (primary/deco/bailout), not an actual gas label a diver would recognize -
-and even the XML export's real `<Name>` tag is left for the diver to fill in/edit themselves on the
-create/edit form instead of being pre-filled from a guess.
+`DiveMixtureSchema.name` was kept in the schema at the time (it then had a `DiveMixture. name`
+column; both are gone now, see *"`DiveMixture.name` is gone"*), but both parsers now always set it
+to `None` rather than guessing at it - `SuuntoXmlParser` no longer reads the XML export's `<Name>`
+tag (e.g. `<Name>Air</Name>`), and `SuuntoJsonParser` no longer uses `Gases[]. State` (e.g.
+"Primary") as a stand-in name. `State` in particular was a poor proxy - it describes a gas's *role*
+(primary/deco/bailout), not an actual gas label a diver would recognize - and even the XML export's
+real `<Name>` tag is left for the diver to fill in/edit themselves on the create/edit form instead
+of being pre-filled from a guess.
 
 `DiveMixtureSchema.start_pressure`/`end_pressure`/`oxygen`/`helium` are now rounded to 2 decimal
 places in both parsers (a `_round2_or_none` helper duplicated in each file - not a shared module,
@@ -2141,8 +2142,8 @@ to catch the second one being read as the first.
 *"`ParsedDiveSchema`/`DiveMixtureSchema` trimmed to fields the backend models actually support"*
 above rejects Suunto's `Gases[].State` ("Primary") as a source for `DiveMixture.name`, on the
 grounds that it "describes a gas's *role* (primary/deco/bailout), not an actual gas label a diver
-would recognize". That rejection is about `name`, and it stands: nothing here pre-fills `name`, and
-both parsers still leave it null.
+would recognize". That rejection is about `name`, and it stood so completely that the column was
+later dropped outright - see *"`DiveMixture.name` is gone"* below. Role is what survived it.
 
 Role is the fact that sentence identifies and then has nowhere to put. It gets its own nullable
 `VARCHAR(20)` column, typed by `GasRole` (`schemas/dive_mixture.py`) - a `StrEnum`, the same shape
@@ -2480,9 +2481,10 @@ three formats inherit it - the same discipline as `ceiling_cm`. 120 is far past 
 wording: the longest in the corpus is `Mandatory Safety Stop Broken`, at 28.
 
 Worth flagging to the clients: this is the first parser-derived free-text string to reach a response
-body at all. `DiveMixture.name` is deliberately `None` from every parser (see *"Parsers report what
-a file recorded"*), so until now everything a client rendered from an import was a number or a value
-from a closed vocabulary. `label` is file-controlled text.
+body at all. `DiveMixture.name` was deliberately `None` from every parser (see *"Parsers report what
+a file recorded"*, and *"`DiveMixture.name` is gone"* for its removal), so until now everything a
+client rendered from an import was a number or a value from a closed vocabulary. `label` is
+file-controlled text.
 
 ## `PROFILE_EXTRACTOR_VERSION` 2, and the manual DDL for the two summary columns
 
@@ -4036,7 +4038,7 @@ def _drop_non_finite(cls, value: object) -> object:
 
 `isfinite` rather than an `isnan` check, because `inf` passes `>= 0` honestly and is no more a
 reading. Typed `object` because it runs for the `str`, `int`, enum and `list` fields too, and
-passing those through untouched is load-bearing — a wildcard that nulled `name`, `gas_number`,
+passing those through untouched is load-bearing — a wildcard that nulled `start_time`, `gas_number`,
 `role` or `mixtures` would be a far worse bug than the one it fixes.
 `test_the_finite_guard_does_not_touch_anything_else` pins that half specifically.
 
@@ -4414,3 +4416,45 @@ warning rather than to a 500 on the dive detail page.
 dive detail response, which is exactly the case the deferred payload exists to keep off that path.
 It is fetched by its own narrow query rather than by `get_profile_infos_for_dives`, because
 `gas_use_history` needs this column and none of the other ten over a user's whole log.
+
+## `DiveMixture.name` is gone
+
+The free-text cylinder label is removed from the model, from `DiveMixtureBase`/`DiveMixtureUpdate`,
+from `DiveMixtureSchema`, and from the four parser call sites that were passing `name=None` into it.
+
+It is the last piece of a decision this file already reached twice.
+*"`ParsedDiveSchema`/`DiveMixtureSchema` trimmed to fields the backend models actually support"*
+stopped both Suunto parsers from filling it, and *"`DiveMixture.role` is a structured column, not
+the gas-name synthesis that was rejected"* took the one fact `Gases[].State` really carried and gave
+it a typed column of its own. What was left was a column no importer wrote and nothing on the server
+read - only the web form, echoing back a string it had generated itself a moment earlier
+(`getDefaultMixtureName`: "Back Gas" for the first cylinder, "Deco Gas 1" for the next). The dev
+corpus says the same thing: 535 of 1 361 rows carried a name, and 527 of those were exactly those
+two defaults.
+
+Keeping it had a cost beyond the dead weight. The label a diver actually recognizes is a pure
+function of the fractions - the web client derives it with `gasName(oxygen, helium)` and has never
+read this column for it - so a stored string sitting next to `oxygen`/`helium` is a second source of
+truth for one fact, free to disagree with the numbers beside it. Nothing stopped a row spelling
+"EAN32" at 21 % O₂, and nothing would have caught it. The two things a name was ever asked to encode
+both have better homes now: the mix is computed, and what the cylinder was *for* is `role`.
+
+**Breaking, and it fails loudly rather than quietly.** `DiveMixtureCreate` and `DiveMixtureUpdate`
+are `extra="forbid"`, so a client still sending `name` gets a 422 naming the field instead of having
+it silently dropped - which is the outcome to want here, since a silent drop would let a form go on
+collecting a label that no longer lands anywhere. The web client's matching change is its
+`chore/remove-mixture-name` branch; iOS sends no mixtures yet.
+
+Per *"Schema changes have no migration tool"*, `create_all()` does not drop a column, so an existing
+database keeps it until it is dropped by hand:
+
+```sql
+ALTER TABLE dive_mixture DROP COLUMN name;
+```
+
+Unlike the `ADD COLUMN` cases in that section, this one is **not** urgent: the column was nullable,
+so a database that lags behind the code goes on working - SQLAlchemy simply stops naming it and
+every insert leaves it `NULL`. Run it to reclaim the strings, not to unbreak anything.
+
+No backfill and no `PROFILE_EXTRACTOR_VERSION` bump: nothing derived from this column, and the
+stored profiles never referenced it.

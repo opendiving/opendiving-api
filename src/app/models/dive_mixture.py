@@ -15,7 +15,6 @@ class DiveMixture(Base):
     end_pressure: Mapped[float | None] = mapped_column(Float, default=None)
     oxygen: Mapped[float] = mapped_column(Float, default=21.0)
     helium: Mapped[float] = mapped_column(Float, default=0.0)
-    name: Mapped[str | None] = mapped_column(String(50), default=None)
 
     # The ppO2 this gas was planned to (bar) - a dive computer's own exposure limit for
     # the cylinder, which is what its MOD is actually derived from. Not a revival of the
