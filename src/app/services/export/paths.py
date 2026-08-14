@@ -79,9 +79,14 @@ class ArchivePaths:
 # the limit an extractor errors or silently drops the member - the same lost-file failure
 # this module exists to prevent, arrived at from the other direction.
 _MAX_COMPONENT = 255
-# Room for the `-99` a collision can add and for the extension, both appended after the
-# stem is trimmed.
-_STEM_BUDGET = _MAX_COMPONENT - 16
+# The two things appended *after* the stem is trimmed, each with its own reserve so they
+# cannot both spend the same bytes: an extension, and the `-2`.. `-99` a collision adds.
+# Budgeting them together is an off-by-one waiting to happen - a stem trimmed to
+# `255 - 16` plus a 16-character extension is already exactly 255, and the counter then
+# takes it over.
+_MAX_SUFFIX = 16
+_MAX_COUNTER = 4
+_STEM_BUDGET = _MAX_COMPONENT - _MAX_SUFFIX - _MAX_COUNTER
 
 
 def _claim(taken: set[str], directory: str, stem: str, suffix: str) -> str:
@@ -92,7 +97,7 @@ def _claim(taken: set[str], directory: str, stem: str, suffix: str) -> str:
     as an exact duplicate here.
     """
     stem = stem[:_STEM_BUDGET]
-    suffix = suffix[: _MAX_COMPONENT - _STEM_BUDGET]
+    suffix = suffix[:_MAX_SUFFIX]
     candidate = posixpath.join(directory, f"{stem}{suffix}")
     counter = 2
     while candidate.lower() in taken:

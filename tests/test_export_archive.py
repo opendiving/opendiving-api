@@ -256,6 +256,23 @@ class TestMemberNames:
         assert len(member.removeprefix("files/")) <= 255
         assert member.endswith(".xml")
 
+    def test_a_long_name_stays_under_the_cap_after_a_collision_counter_is_added(self):
+        """The counter is appended after the stem is trimmed, so its bytes have to be
+        reserved separately from the extension's - budgeting them together lets a maximal
+        stem plus a maximal extension reach 255 before the `-2` is even added."""
+        long_name = "x" * 250 + "." + "y" * 20
+        bundle = build_bundle(
+            dives=[
+                make_dive(1, UUIDS["dive-air"], dive_number=7),
+                make_dive(2, UUIDS["dive-trimix"], dive_number=7),
+            ],
+            file_by_dive={1: _file_info(long_name), 2: _file_info(long_name)},
+        )
+        paths = plan_archive_paths(bundle)
+        assert paths.dive_files[1] != paths.dive_files[2]
+        for member in paths.dive_files.values():
+            assert len(member.removeprefix("files/")) <= 255, member
+
     def test_dive_numbers_are_zero_padded_so_the_directory_sorts(self):
         bundle = build_bundle(
             dives=[
