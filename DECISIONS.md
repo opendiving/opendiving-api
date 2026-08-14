@@ -4758,3 +4758,63 @@ uploaded to a third-party validator without a moment's thought. The cost is cove
 account is single-tank air and nitrox with one profile between eight dives, so the trimix, gas
 switch and multi-tank paths live only in the synthetic bundles in `tests/helpers/export.py`. That is
 the same gap the screenshots have, and the reason the writer's own tests do not use this file.
+
+## What Subsurface does with our UDDF, and what its own file does not
+
+The export was round-tripped through Subsurface 6.0.5576 on 2026-08-14: import
+`tests/fixtures/uddf/demo-account.uddf`, then save both ways — Subsurface's native `.ssrf`, and its
+own UDDF export. Both are in `tests/fixtures/subsurface/`. Reading only the UDDF it writes back
+would have produced a wrong answer in at least one place, which is why both were captured.
+
+**Survives the import exactly:** all eight dives and their numbers, notes (`&` included), the
+dive-site link and site name on every dive, the date and the local wall-clock time, cylinder size
+and start/end pressures (`0.012 m³` → `12.0 l`, `20000000 Pa` → `200.0 bar` — the SI conversions are
+right), the O₂ fraction as `o2='32.0%'` with air left implicit, max and mean depth, and all 431
+depth samples of the one dive that has a profile. Our `<generator><name>` becomes the dive-computer
+label, so the dives read as "Open Diving" in the UI.
+
+**Survives the import but not Subsurface's own export:** `<lowesttemperature>`. It lands as
+`<temperature water='24.0 C'>` on all eight dives, including the seven with no profile for it to be
+recomputed from, and every value matches ours to the tenth of a degree. Its UDDF exporter then omits
+it. This is the entry that would have been recorded as an import failure had only the re-export been
+looked at.
+
+**Lost on import — not in the `.ssrf` at all:** trips (zero `<trip>` elements, both of ours gone),
+gear other than cylinders, weights (6 kg and 8 kg → no `weightsystem`), the dive site's free-text
+location (`Sha'ab Ali, Red Sea` — no gps, no description), the `NoDecoTime` `<setmarker>`, and the
+UTC offsets, which are dropped rather than applied: `11:49:23+02:00` is stored as `11:49:23` local,
+so the wall clock is right and the instant is unrecoverable.
+
+**Mangled:** visibility. Subsurface models it as a five-star rating, so 12 m, 20 m and 35 m all
+arrive as `visibility='5'` and no amount of care on our side would help. And duration on the dive
+with a profile is recomputed from the samples (4001 s → 4010 s), while the other seven keep ours,
+flagged `last-manual-time`.
+
+**Invented on import:** each of the seven profile-less dives gains a fabricated six-point depth
+profile, built from max depth and duration. It is in the `.ssrf`, so it is stored, not merely
+exported. Anything reading Subsurface data back cannot tell those samples from recorded ones — worth
+remembering when the importer lands.
+
+**The one thing that is arguably ours to fix, and is not being fixed:** the temperature curve goes
+from 706 samples to 29. Subsurface creates a sample only where a `<waypoint>` carries a `<depth>`,
+and our waypoints sit at the *union* of every channel's timestamps (the deliberate choice in
+`uddf.py` — nothing is interpolated), so the 640 waypoints that carry a temperature and no depth are
+invisible to it. The 66 that coincide with a depth sample come through with exact values, and
+Subsurface keeps the 29 of those where the reading changed. Emitting an interpolated depth on every
+temperature waypoint would fix this for Subsurface specifically, at the cost of writing numbers no
+dive computer recorded into a file whose whole promise is that it holds what was recorded. The trade
+is not worth it: the full-resolution curve is in `export.json` and in the original file the archive
+carries, both of which are lossless.
+
+**Their exporter, for whoever writes the importer.** Subsurface's own UDDF fails the vendored 3.2.2
+XSD **48 times**: empty `<latitude/>`/`<longitude/>` elements, ids that are not NCNames (`mix(21/0)`
+has parentheses, `2bbb3390` starts with a digit, and one site id is `" ff47210"` — with a leading
+space, which is also what its `.ssrf` stores as the site uuid), the same id used on a
+`<repetitiongroup>` and on the `<dive>` inside it, and an empty `<divetrip/>`. So the importer
+**must not gate on schema validation**: the single most important file it will ever be handed does
+not validate. Parse leniently, strip whitespace from ids and refs, and treat `<latitude/>` as absent
+rather than as a number.
+
+Also worth knowing before reading its output: `sac`, `otu` and `cns` in the `.ssrf` are Subsurface's
+own computations, not round-tripped values. Every dive in the demo corpus stores `null` for CNS and
+OTU, and the file still says `otu='31' cns='11%'`.
