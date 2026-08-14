@@ -13,10 +13,15 @@ Three things this is careful about:
 - **Quoting.** Notes hold commas, quotes and newlines, and every one of those is a way to
   produce a file that opens wrong. `csv.writer` handles all of it; nothing here builds a
   row by joining strings.
-- **The byte-order mark.** `dives.csv` is written UTF-8 **with** a BOM, because the
-  overwhelmingly likely consumer is Excel, which reads a BOM-less UTF-8 CSV as the local
-  ANSI codepage and turns every accented site name into mojibake. Python's `csv`,
-  pandas and every other programmatic reader either strip it or ignore it.
+- **The byte-order mark.** Every file here is written UTF-8 **with** a BOM, because the
+  likely consumer is Excel, which reads a BOM-less UTF-8 CSV as the local ANSI codepage
+  and turns every accented site name into mojibake. Python's `csv`, pandas and every other
+  programmatic reader either strip it (`encoding="utf-8-sig"`) or tolerate it in the first
+  header cell. It used to be on `dives.csv` alone, on the theory that the normalized files
+  are read by scripts rather than spreadsheets - but `dive-sites.csv`, `trips.csv` and
+  `certifications.csv` carry exactly the same free text, and a diver double-clicking one
+  out of the archive hits precisely the failure the BOM exists to prevent. A mangled site
+  name is a worse outcome than a `utf-8-sig` a script author has to pass.
 - **`\\r\\n`.** RFC 4180's line ending, and what `csv.writer` emits by default. Left
   alone rather than normalized to `\\n`, since the spreadsheet is the audience.
 
@@ -76,7 +81,7 @@ DIVES_HEADER = (
 )
 
 
-def _rows_to_csv(header: tuple[str, ...], rows: Iterable[tuple[Any, ...]], *, bom: bool = False) -> Iterator[str]:
+def _rows_to_csv(header: tuple[str, ...], rows: Iterable[tuple[Any, ...]]) -> Iterator[str]:
     """Serialize a header and rows with `csv.writer`, one chunk per row.
 
     The buffer is truncated after every row so this stays O(1) in memory over a log of
@@ -85,8 +90,7 @@ def _rows_to_csv(header: tuple[str, ...], rows: Iterable[tuple[Any, ...]], *, bo
     """
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    if bom:
-        yield BOM
+    yield BOM
     for row in (header, *rows):
         writer.writerow(row)
         yield buffer.getvalue()
@@ -157,7 +161,7 @@ def _dive_row(bundle: ExportBundle, dive: Dive) -> tuple[Any, ...]:
 
 def write_dives_csv(bundle: ExportBundle) -> Iterator[str]:
     """The flat, human view: one row per dive, oldest first."""
-    return _rows_to_csv(DIVES_HEADER, (_dive_row(bundle, dive) for dive in bundle.dives), bom=True)
+    return _rows_to_csv(DIVES_HEADER, (_dive_row(bundle, dive) for dive in bundle.dives))
 
 
 MIXTURES_HEADER = (

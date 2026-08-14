@@ -252,7 +252,7 @@ def _uddf_id(prefix: str, uuid: uuid_pkg.UUID) -> str:
     return f"{prefix}-{uuid}"
 
 
-def _equipment_element(bundle: ExportBundle, manufacturer_ids: dict[str, str]) -> ET.Element | None:
+def _equipment_element(bundle: ExportBundle) -> ET.Element | None:
     """The owner's whole gear list, grouped into UDDF's typed equipment elements."""
     if not bundle.gear_items:
         return None
@@ -268,20 +268,21 @@ def _equipment_element(bundle: ExportBundle, manufacturer_ids: dict[str, str]) -
             piece = _sub(equipment, tag, id=_uddf_id("gear", item.uuid))
             _sub(piece, "name", item.name)
             if item.brand:
-                manufacturer = _sub(piece, "manufacturer", id=manufacturer_ids[item.brand])
+                # `manufacturerType` extends `namedType` -> `ID_TYPE`, so the id is
+                # mandatory, and `<manufacturer>` is an inline child of each piece rather
+                # than a shared definition anything links to. So the id has to be unique
+                # **per occurrence**, not per brand: an earlier version keyed it on the
+                # brand and emitted `mfr-1` twice the moment a diver owned two Apeks
+                # items, which duplicates an `xs:ID` and makes the whole document invalid.
+                # Derived from the owning item's uuid because nothing references it, so
+                # the only requirement is uniqueness.
+                manufacturer = _sub(piece, "manufacturer", id=_uddf_id("mfr", item.uuid))
                 _sub(manufacturer, "name", item.brand)
             if item.notes:
                 _sub(_sub(piece, "notes"), "para", item.notes)
             if tag == "suit" and gear_type in _SUIT_TYPE:
                 _sub(piece, "suittype", _SUIT_TYPE[gear_type])
     return equipment
-
-
-def _manufacturer_ids(bundle: ExportBundle) -> dict[str, str]:
-    """One `xs:ID` per distinct brand. `manufacturerType` extends `namedType`, so every
-    `<manufacturer>` needs an id whether anything references it or not."""
-    brands = sorted({item.brand for item in bundle.gear_items if item.brand})
-    return {brand: f"mfr-{index}" for index, brand in enumerate(brands, start=1)}
 
 
 def _diver_element(bundle: ExportBundle) -> ET.Element:
@@ -295,7 +296,7 @@ def _diver_element(bundle: ExportBundle) -> ET.Element:
     # No `<contact><email>`, although the schema has the slot: a UDDF file is the thing a
     # diver hands to a dive shop or uploads to divelogs.de, and their address riding along
     # in it would be a surprise. It is in `export.json`, which is the diver's own copy.
-    equipment = _equipment_element(bundle, _manufacturer_ids(bundle))
+    equipment = _equipment_element(bundle)
     if equipment is not None:
         owner.append(equipment)
     return diver

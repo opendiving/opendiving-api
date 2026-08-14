@@ -18,6 +18,14 @@ stream without a temp file at all but costs a runtime dependency and a `Content-
 (browsers show no progress bar without one). Revisit if profiling ever says the temp file
 hurts; do not start there.
 
+**The CSV members are written on the event loop.** `_write_text_stream` drains a whole
+synchronous generator with no await in it, so each of the seven is an uninterrupted
+stretch of CPU - about 7 ms for the largest (`dives.csv`) over a 500-dive corpus, and
+proportional from there. Unlike `/export/csv`, which hands its drain to a thread, this one
+sits inside the open `ZipFile` and cannot simply be moved off; the two document writers
+above do interleave, because each awaits `load_profile` per dive. Small enough to leave,
+large enough to name.
+
 **The profiles are read twice.** `export.json` and `dives.uddf` both embed every dive's
 samples, and each writer does its own per-dive `load_profile` with `undefer(data)` - so a
 thousand-dive log issues two thousand of the export's most expensive query. Loading them

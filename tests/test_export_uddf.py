@@ -302,6 +302,21 @@ class TestDiveContent:
         assert len(used.findall(f"{UDDF}link")) == 3
 
     @pytest.mark.asyncio
+    async def test_two_items_of_one_brand_get_distinct_manufacturer_ids(self, schema, monkeypatch):
+        """`<manufacturer>` is an inline child of each piece and its `id` is `xs:ID`, which
+        must be unique across the whole document - so the id has to be per *occurrence*,
+        not per brand. Keying it on the brand emitted `mfr-1` twice for a diver who owned
+        two Apeks items, which is the ordinary case rather than a corner one, and made the
+        whole file fail validation."""
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        schema.validate(document)
+        manufacturers = list(_tree(document).iter(f"{UDDF}manufacturer"))
+        names = [_text(m, f"{UDDF}name") for m in manufacturers]
+        ids = [m.get("id") for m in manufacturers]
+        assert names.count("Apeks") == 2
+        assert len(ids) == len(set(ids))
+
+    @pytest.mark.asyncio
     async def test_an_untyped_gear_item_is_not_dropped(self, monkeypatch):
         """`GearItem.type` is nullable, and every item has to land somewhere in
         `equipmentType` - `<variouspieces>` is the catch-all."""

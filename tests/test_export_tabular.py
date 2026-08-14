@@ -20,6 +20,7 @@ import pytest
 
 from src.app.services.export.tabular import (
     BOM,
+    CSV_WRITERS,
     DIVE_SITES_HEADER,
     DIVES_HEADER,
     GEAR_ITEMS_HEADER,
@@ -37,6 +38,15 @@ from src.app.services.export.tabular import (
 from tests.helpers.export import UUIDS, build_bundle, full_bundle, make_dive, mixture
 
 GOLDEN = Path(__file__).parent / "fixtures" / "export" / "dives.csv"
+
+_NORMALIZED_WRITERS = (
+    write_mixtures_csv,
+    write_trips_csv,
+    write_dive_sites_csv,
+    write_gear_items_csv,
+    write_gear_service_csv,
+    write_certifications_csv,
+)
 
 
 def _render(chunks) -> str:
@@ -139,7 +149,12 @@ class TestTheNormalizedFiles:
     def test_gear_items_carry_the_sets_they_belong_to(self):
         rows = _parse(_render(write_gear_items_csv(full_bundle())))
         sets = GEAR_ITEMS_HEADER.index("sets")
-        assert {row[0]: row[sets] for row in rows[1:]} == {"XTX50": "Tech", "Fusion": "Tech", "Slate": ""}
+        assert {row[0]: row[sets] for row in rows[1:]} == {
+            "XTX50": "Tech",
+            "XTX200": "",
+            "Fusion": "Tech",
+            "Slate": "",
+        }
 
     def test_schedules_and_records_share_one_file_told_apart_by_row_type(self):
         rows = _parse(_render(write_gear_service_csv(full_bundle())))
@@ -186,12 +201,15 @@ class TestTheNormalizedFiles:
 
     def test_every_normalized_file_is_headed_even_when_empty(self):
         empty = build_bundle()
-        for writer in (
-            write_mixtures_csv,
-            write_trips_csv,
-            write_dive_sites_csv,
-            write_gear_items_csv,
-            write_gear_service_csv,
-            write_certifications_csv,
-        ):
+        for writer in _NORMALIZED_WRITERS:
             assert len(_parse(_render(writer(empty)))) == 1, writer.__name__
+
+    def test_every_file_carries_the_byte_order_mark_not_just_dives(self):
+        """`dive-sites.csv`, `trips.csv` and `certifications.csv` hold the same free text
+        as `dives.csv`, and a diver who unzips the archive and double-clicks one hits the
+        same Excel mojibake. Pinned across all seven so a file added later cannot quietly
+        be the exception."""
+        bundle = full_bundle()
+        assert len(CSV_WRITERS) == 7
+        for filename, writer in CSV_WRITERS:
+            assert _render(writer(bundle)).startswith(BOM), filename

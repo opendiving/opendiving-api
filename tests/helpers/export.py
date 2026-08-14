@@ -47,6 +47,7 @@ UUIDS = {
             "site-wall",
             "trip",
             "gear-regulator",
+            "gear-regulator-2",
             "gear-suit",
             "gear-other",
             "gear-set",
@@ -204,6 +205,21 @@ def full_bundle() -> ExportBundle:
         ),
         2,
     )
+    # A second item of the *same brand*, which is the ordinary case for a diver who buys a
+    # matched set - and the one that catches a `<manufacturer>` id keyed on the brand
+    # instead of on the occurrence, since `xs:ID` has to be unique across the document.
+    # Same `type` too, so it also covers two pieces inside one `equipmentType` element.
+    second_regulator = _with_id(
+        GearItem(
+            user_id=1,
+            name="XTX200",
+            brand="Apeks",
+            type="regulator",
+            uuid=UUIDS["gear-regulator-2"],
+            created_at=CREATED_AT,
+        ),
+        4,
+    )
     # No `type` at all - the column is nullable, and it has to land somewhere in
     # `equipmentType` rather than being dropped.
     untyped = _with_id(GearItem(user_id=1, name="Slate", uuid=UUIDS["gear-other"], created_at=CREATED_AT), 3)
@@ -306,7 +322,7 @@ def full_bundle() -> ExportBundle:
         },
         trips=[trip],
         dive_sites=[reef, wall],
-        gear_items=[regulator, suit, untyped],
+        gear_items=[regulator, second_regulator, suit, untyped],
         gear_sets=[gear_set],
         item_ids_by_set={1: [1, 2]},
         schedules=[schedule],

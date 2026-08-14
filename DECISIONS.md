@@ -4630,9 +4630,13 @@ likely destination for this file, and the BOM is the only in-band way to tell it
 `csv`, pandas, R and every other programmatic reader either strip it (`encoding="utf-8-sig"`) or
 tolerate it in the first header cell.
 
-The normalized files inside the archive (`csv/mixtures.csv` and the rest) deliberately do *not*
-carry one. They are the join-them-yourself set, so their likely reader is a script rather than a
-spreadsheet, and a leading `﻿` in a header name is a nuisance there.
+**All seven carry it, including the normalized set inside the archive.** The first version put it on
+`dives.csv` alone, reasoning that `csv/mixtures.csv` and its neighbours are joined by a script
+rather than opened in a spreadsheet, where a leading `﻿` in a header name is a nuisance. That did
+not survive review: `dive-sites.csv`, `trips.csv` and `certifications.csv` carry the same free text
+as `dives.csv`, a diver who unzips the archive and double-clicks one is an ordinary thing to do, and
+a mangled site name is a worse outcome than a `utf-8-sig` a script author passes once. Consistency
+also means there is no rule to remember when a file is added.
 
 `tests/fixtures/export/dives.csv` pins the exact bytes of both, and `.gitattributes` marks it
 `-text` so git cannot normalize the line endings out from under the test on a machine configured
