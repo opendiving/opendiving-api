@@ -236,8 +236,14 @@ def _mix_key(mixture: DiveMixtureRead) -> _MixKey:
 def collect_mixes(bundle: ExportBundle) -> dict[_MixKey, str]:
     """Every distinct gas in the log, mapped to the `xs:ID` its `<mix>` will carry.
 
-    Sorted by the fractions rather than by first encounter, so re-exporting a log after
-    deleting its oldest dive doesn't renumber every mix in the file.
+    Sorted by the fractions rather than by first encounter, so an id is a function of the
+    *set* of gases and of nothing else - not of how many dives used each, nor of the order
+    they were logged in. Two exports of the same logbook therefore agree, and logging
+    another dive on a gas already in the file changes no ids.
+
+    It does **not** follow that an id survives a gas disappearing: dropping a middle gas
+    shifts every one after it, and only persisting the numbers would prevent that. They
+    are document-local labels, which is all `xs:ID` has to be.
     """
     keys = {_mix_key(mixture) for mixtures in bundle.mixtures_by_dive.values() for mixture in mixtures}
     return {key: f"mix-{index}" for index, key in enumerate(sorted(keys, key=lambda k: k.sort_key), start=1)}

@@ -16,6 +16,7 @@ import hashlib
 import io
 import json
 import zipfile
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -24,7 +25,7 @@ import pytest
 from src.app.models.certification import Certification
 from src.app.schemas.certification import CertificationFileInfo, CertificationSide
 from src.app.schemas.dive import DiveFileInfo
-from src.app.services.certification_files import LoadedCardFile
+from src.app.services.certification_files import LoadedCardFile, get_file_infos_for_certifications
 from src.app.services.dive_files import LoadedDiveFile
 from src.app.services.export.archive import write_archive
 from src.app.services.export.paths import archive_member_name, plan_archive_paths
@@ -176,6 +177,48 @@ def _file_info(original_filename: str) -> DiveFileInfo:
     )
 
 
+class TestCertificationFileOrder:
+    """Pinned because three separate reviews read `get_file_infos_for_certifications`,
+    saw no `ORDER BY`, and concluded the archive's member order varies run to run.
+
+    It does not: the function sorts front-then-back in Python after the query, and a
+    certification has at most one row per side (`ux_certification_file_certification_id_side`),
+    so there are no ties for a stable sort to leave in database order. That is easy to
+    miss three lines below a long row loop, so it is asserted here rather than argued
+    about again - and if the sort is ever removed, this fails instead of the archive
+    quietly becoming non-reproducible.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_front_comes_first_whatever_order_the_database_returns(self):
+        rows = [
+            SimpleNamespace(
+                certification_id=1,
+                uuid=UUIDS["card-back"],
+                side="back",
+                content_type="image/png",
+                byte_size=1,
+                original_filename="b.png",
+                updated_at=None,
+            ),
+            SimpleNamespace(
+                certification_id=1,
+                uuid=UUIDS["card-front"],
+                side="front",
+                content_type="image/jpeg",
+                byte_size=1,
+                original_filename="f.jpg",
+                updated_at=None,
+            ),
+        ]
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=rows)
+
+        infos = await get_file_infos_for_certifications(db=db, certification_ids=[1])
+
+        assert [info.side.value for info in infos[1]] == ["front", "back"]
+
+
 class TestMemberNames:
     @pytest.mark.parametrize(
         ("stored", "expected"),
@@ -241,6 +284,7 @@ class TestMemberNames:
                 original_filename="card front.jpg",
             )
         ]
+        bundle.cert_file_sha256[(2, "front")] = "d" * 64
         paths = plan_archive_paths(bundle)
         assert paths.certification_files[(2, "front")] == "certifications/open-water-diver-front-2.jpg"
 

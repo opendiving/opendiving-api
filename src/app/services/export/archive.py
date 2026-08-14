@@ -135,13 +135,18 @@ async def _write_stream(archive: zipfile.ZipFile, info: zipfile.ZipInfo, chunks:
     `ZipFile.open(..., "w")` gives a writable member handle, so the generator's chunks go
     straight through the compressor into the archive's own spool file.
     """
-    with archive.open(info, "w") as member:
+    # `force_zip64` because the size is not known when the header is written: `zipfile`
+    # would emit a non-ZIP64 local header and then raise at member close if the generator
+    # produced more than 2 GiB - after writing all of it. `export.json` embeds every
+    # dive's samples, so that ceiling is reachable by a large enough logbook. The blob
+    # members go through `writestr`, which knows its length and sizes the header itself.
+    with archive.open(info, "w", force_zip64=True) as member:
         async for chunk in chunks:
             member.write(chunk)
 
 
 def _write_text_stream(archive: zipfile.ZipFile, info: zipfile.ZipInfo, chunks: Iterator[str]) -> None:
-    with archive.open(info, "w") as member:
+    with archive.open(info, "w", force_zip64=True) as member:
         for chunk in chunks:
             member.write(chunk.encode("utf-8"))
 

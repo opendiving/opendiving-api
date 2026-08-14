@@ -38,7 +38,15 @@ from src.app.services.export.uddf import (
     collect_mixes,
     write_uddf,
 )
-from tests.helpers.export import EXPORTED_AT, TRIMIX_PROFILE, build_bundle, full_bundle, make_dive, mixture
+from tests.helpers.export import (
+    EXPORTED_AT,
+    TRIMIX_PROFILE,
+    UUIDS,
+    build_bundle,
+    full_bundle,
+    make_dive,
+    mixture,
+)
 
 UDDF = f"{{{UDDF_NAMESPACE}}}"
 SCHEMA_PATH = "tests/fixtures/uddf/uddf_3.2.2.xsd"
@@ -235,16 +243,43 @@ class TestMixDefinitions:
         mixes = _tree(document).findall(f"{UDDF}gasdefinitions/{UDDF}mix")
         assert [_text(m, f"{UDDF}maximumpo2") for m in mixes] == ["1.4", None, "1.6"]
 
-    @pytest.mark.asyncio
-    async def test_the_mix_list_is_sorted_by_fraction_not_by_encounter(self, monkeypatch):
-        """So deleting the oldest dive doesn't renumber every mix in the file."""
+    def test_the_mix_list_is_sorted_by_fraction_not_by_encounter(self):
+        """Reordering the dives must not reorder the mixes.
+
+        Compares the **mappings**, not their values: `collect_mixes` numbers whatever it
+        produces `mix-1..n`, so comparing `.values()` alone is `["mix-1", "mix-2"] ==
+        ["mix-1", "mix-2"]` for a sorted, an encounter-ordered or a shuffled
+        implementation alike. It has to be each gas's own id that is asserted stable.
+        """
         bundle = full_bundle()
         reversed_bundle = build_bundle(
             dives=list(reversed(bundle.dives)),
             mixtures_by_dive=bundle.mixtures_by_dive,
-            dive_sites=bundle.dive_sites,
         )
-        assert list(collect_mixes(bundle).values()) == list(collect_mixes(reversed_bundle).values())
+        assert collect_mixes(bundle) == collect_mixes(reversed_bundle)
+
+    def test_logging_another_dive_on_a_gas_already_used_changes_no_ids(self):
+        """What sorting by fraction actually buys, stated precisely.
+
+        The ids are a function of the *set* of gases and of nothing else - not of how many
+        dives used each, nor of the order they were logged in. So the common edit (another
+        dive on gas you already own) leaves `<gasdefinitions>` untouched.
+
+        It is deliberately **not** claimed that ids survive a gas disappearing: they
+        cannot, since removing a middle gas shifts everything after it, and only
+        persisting the numbers would fix that. An earlier version of this docstring said
+        otherwise and the test written from it failed, which is how the overclaim was
+        found.
+        """
+        bundle = full_bundle()
+        before = collect_mixes(bundle)
+
+        extra = make_dive(4, UUIDS["dive-bare"], dive_number=4)
+        with_more = build_bundle(
+            dives=[*bundle.dives, extra],
+            mixtures_by_dive={**bundle.mixtures_by_dive, 4: [mixture(id=9, oxygen=32.0)]},
+        )
+        assert collect_mixes(with_more) == before
 
 
 class TestDiveContent:

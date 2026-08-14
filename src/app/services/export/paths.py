@@ -114,7 +114,11 @@ def plan_archive_paths(bundle: ExportBundle) -> ArchivePaths:
 
     for dive in bundle.dives:
         info = bundle.file_by_dive[dive.id]
-        if info is None:
+        # The digest gate is the same one `envelope._dive` applies, and it is here so the
+        # two cannot disagree: a file whose row vanished between the metadata read and the
+        # digest read is left out of `export.json`, and without this the zip would still
+        # carry a member nothing in the manifest named.
+        if info is None or dive.id not in bundle.dive_file_sha256:
             continue
         name = archive_member_name(info.original_filename, default="dive-file")
         stem, extension = posixpath.splitext(name)
@@ -122,6 +126,8 @@ def plan_archive_paths(bundle: ExportBundle) -> ArchivePaths:
 
     for certification in bundle.certifications:
         for file_info in bundle.cert_files_by_cert.get(certification.id, []):
+            if (certification.id, file_info.side.value) not in bundle.cert_file_sha256:
+                continue
             name = archive_member_name(file_info.original_filename, default="card")
             _, extension = posixpath.splitext(name)
             stem = f"{_slug(certification.name, default='certification')}-{file_info.side.value}"

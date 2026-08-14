@@ -124,9 +124,24 @@ def build_bundle(
     dive_file_sha256: dict[int, str] | None = None,
     cert_file_sha256: dict[tuple[int, str], str] | None = None,
 ) -> ExportBundle:
-    """An `ExportBundle` with every per-dive map defaulted to "nothing for any dive"."""
+    """An `ExportBundle` with every per-dive map defaulted to "nothing for any dive".
+
+    A stored file always has a digest in the database (`sha256` is `NOT NULL`), so
+    supplying `file_by_dive` without `dive_file_sha256` fills in a placeholder rather than
+    producing a bundle that cannot exist - the export treats a missing digest as "the row
+    vanished mid-read" and skips the file, which would silently empty half these tests.
+    Pass both explicitly to exercise that path.
+    """
     dives = dives or []
     dive_ids = [dive.id for dive in dives]
+    files = file_by_dive or {}
+    certificate_files = cert_files_by_cert or {}
+    if dive_file_sha256 is None:
+        dive_file_sha256 = {dive_id: "0" * 64 for dive_id, info in files.items() if info is not None}
+    if cert_file_sha256 is None:
+        cert_file_sha256 = {
+            (cert_id, info.side.value): "0" * 64 for cert_id, infos in certificate_files.items() for info in infos
+        }
     return ExportBundle(
         user=make_user(),
         dives=dives,
@@ -145,8 +160,8 @@ def build_bundle(
         service_records=service_records or [],
         certifications=certifications or [],
         cert_files_by_cert=cert_files_by_cert or {},
-        dive_file_sha256=dive_file_sha256 or {},
-        cert_file_sha256=cert_file_sha256 or {},
+        dive_file_sha256=dive_file_sha256,
+        cert_file_sha256=cert_file_sha256,
     )
 
 

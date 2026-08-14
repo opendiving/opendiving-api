@@ -107,12 +107,11 @@ async def export_uddf(
     await _enforce_export_limit(current_user["id"])
     bundle = await load_export_bundle(db, user_id=current_user["id"])
     exported_at = datetime.now(UTC)
+    # Named before the spool exists, so nothing can raise between creating the temp file
+    # and handing it to the response that owns closing it.
+    filename = export_filename(current_user["username"], exported_at.date(), "uddf")
     buffer = await spool(write_uddf(db, bundle, exported_at=exported_at))
-    return _download(
-        buffer,
-        filename=export_filename(current_user["username"], exported_at.date(), "uddf"),
-        media_type="application/xml",
-    )
+    return _download(buffer, filename=filename, media_type="application/xml")
 
 
 @router.get("/export/csv")
@@ -129,20 +128,23 @@ async def export_csv(
     await _enforce_export_limit(current_user["id"])
     bundle = await load_export_bundle(db, user_id=current_user["id"])
     exported_at = datetime.now(UTC)
+    filename = export_filename(current_user["username"], exported_at.date(), "csv")
     # Off the event loop, unlike the other two: `write_dives_csv` is a plain generator
     # with no await anywhere, so draining it is one uninterrupted stretch of CPU inside an
     # `async def`. The UDDF and JSON writers avoid that incidentally, by awaiting
     # `load_profile` once per dive. Measured at 14 us per dive against the dev corpus - so
     # 7 ms for 500 dives and ~0.14 s for ten thousand, which is small but is a whole
     # worker stalling rather than one request being slow.
+    #
+    # **The constraint this buys:** the generator reads attributes off ORM instances that
+    # are still attached to the request's `AsyncSession`, from a thread that is not the
+    # event loop. Safe because every attribute `_dive_row` touches is an eagerly-loaded
+    # column - add a `deferred` one or a relationship and it becomes lazy IO off-loop,
+    # which fails with `MissingGreenlet` rather than blocking.
     buffer = await run_in_threadpool(spool_text, write_dives_csv(bundle))
-    return _download(
-        buffer,
-        filename=export_filename(current_user["username"], exported_at.date(), "csv"),
-        # `charset=utf-8` alongside the byte-order mark `tabular.py` writes: between them
-        # every consumer that has an opinion about a CSV's encoding gets told the truth.
-        media_type="text/csv; charset=utf-8",
-    )
+    # `charset=utf-8` alongside the byte-order mark `tabular.py` writes: between them
+    # every consumer that has an opinion about a CSV's encoding gets told the truth.
+    return _download(buffer, filename=filename, media_type="text/csv; charset=utf-8")
 
 
 @router.get("/export/archive")
@@ -160,9 +162,6 @@ async def export_archive(
     await _enforce_export_limit(current_user["id"])
     bundle = await load_export_bundle(db, user_id=current_user["id"])
     exported_at = datetime.now(UTC)
+    filename = export_filename(current_user["username"], exported_at.date(), "zip")
     buffer = await write_archive(db, bundle, exported_at=exported_at)
-    return _download(
-        buffer,
-        filename=export_filename(current_user["username"], exported_at.date(), "zip"),
-        media_type="application/zip",
-    )
+    return _download(buffer, filename=filename, media_type="application/zip")
