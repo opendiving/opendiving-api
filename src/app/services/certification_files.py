@@ -173,6 +173,12 @@ async def load_certification_file(
     if file is None:
         return None
 
+    # Detached before returning, for the same reason as `load_dive_file`: everything worth
+    # having is copied out below and what stays behind is megabytes. The full export walks
+    # every card a diver holds in one session (`services/export/archive.py`), which is the
+    # run that makes this matter rather than merely tidy.
+    db.expunge(file)
+
     return LoadedCardFile(
         data=file.data,
         content_type=file.content_type,

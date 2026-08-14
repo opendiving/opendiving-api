@@ -167,6 +167,20 @@ class ContactSettings(BaseSettings):
     CONTACT_FORM_RATE_LIMIT_PER_IP: int = config("CONTACT_FORM_RATE_LIMIT_PER_IP", default=10)
 
 
+class ExportSettings(BaseSettings):
+    # Fixed-window rate limit (see `core.utils.rate_limit`) on the three `/export/*`
+    # endpoints, keyed per user and shared between them - the budget bounds total export
+    # work, so the cheap CSV download draws on the same allowance as the archive.
+    #
+    # Authenticated and owner-only, so this is not an abuse
+    # boundary the way the contact form's is - it is there because one archive request
+    # reads every blob the caller owns, and nothing else in the API does that. The bound
+    # is deliberately generous: this is a button a diver presses once, and someone
+    # scripting a nightly backup of their own account should not hit it.
+    EXPORT_RATE_LIMIT_WINDOW_SECONDS: int = config("EXPORT_RATE_LIMIT_WINDOW_SECONDS", default=3600)
+    EXPORT_RATE_LIMIT_PER_USER: int = config("EXPORT_RATE_LIMIT_PER_USER", default=10)
+
+
 class ProxySettings(BaseSettings):
     # Addresses (or CIDR blocks) of reverse proxies whose `X-Forwarded-For` header may be
     # believed - see `core.utils.client_ip`. Every per-IP rate limit depends on this:
@@ -275,6 +289,7 @@ class Settings(
     MagicLinkSettings,
     EmailSettings,
     ContactSettings,
+    ExportSettings,
     ProxySettings,
     FrontendSettings,
     GearServiceSettings,

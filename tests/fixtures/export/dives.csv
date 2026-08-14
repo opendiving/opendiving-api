@@ -1,0 +1,5 @@
+﻿dive_number,date,time,utc_offset,duration_seconds,max_depth_m,avg_depth_m,bottom_temperature_c,visibility_m,weight_kg,trip,dive_sites,cylinders,gas_used_l,rmv_l_per_min,sac_bar_per_min,cns_end,otu_end,surface_pressure_bar,source_file,notes,dive_uuid
+1,2026-06-01,08:15:00,+02:00,2700,28.4,16.2,24.9,20,6.5,Red Sea 2026,Shark Reef; Yolanda,EAN32 12L 200->70bar,1560.0,13.23,1.1,8.0,21.0,1.013,,"Strong current, ""the wall"" was worth it.
+Saw a thresher.",019f0000-0000-7000-8000-000000000001
+2,2026-06-01,08:15:00,+02:00,2700,52.0,30.0,,,,Red Sea 2026,Yolanda,21/35 24L 232->90bar (bottom); EAN50 11.1L 200bar (deco),,,,,,,Suunto Ocean 2026-06-01.json,Deco 20 min,019f0000-0000-7000-8000-000000000002
+3,2026-06-01,08:15:00,+02:00,1200,,,,,,,,,,,,,,,,,019f0000-0000-7000-8000-000000000003

@@ -4458,3 +4458,233 @@ every insert leaves it `NULL`. Run it to reclaim the strings, not to unbreak any
 
 No backfill and no `PROFILE_EXTRACTOR_VERSION` bump: nothing derived from this column, and the
 stored profiles never referenced it.
+
+## The export endpoints are never cached, and say `no-store`
+
+`GET /api/v1/export/{uddf,csv,archive}` carry no `@cache` decorator and answer with
+`Cache-Control: no-store`. Every other read in this API is Redis-cached; these three are the
+deliberate exception, for three separate reasons that happen to point the same way.
+
+**Redis holds serialized API responses.** An archive of a real logbook is megabytes — the dev
+account's is 3.5 MB with two stored files, and an account that has imported every dive would be
+tens. Parking that in the cache would evict everything the cache exists for, which is the same
+argument already made for the dive-file and profile downloads (*"Deliberately not `@cache`d"* on
+`read_dive_file`). The difference is only of degree, and the degree is large.
+
+**There is nothing to invalidate it on.** A cached export goes stale on a dive edit, a site rename,
+a gear archive, a new certification, a service record — that is, on essentially every write in the
+app. `invalidate_dive_caches` would have to grow a sibling for each, and the payoff would be a hit
+rate near zero on an endpoint a diver touches a few times a year.
+
+**And it is the worst possible thing to get wrong.** *"`@cache` and per-request authorization don't
+mix directly"* is about a cached response outliving the check that authorized it. A cached *whole
+account* is that failure at maximum blast radius: one key, one user's entire logbook, including
+their certification-card scans.
+
+`no-store` rather than `private` for the client-side half of the same point. `private` permits the
+browser to keep a copy on disk; a zip holding ID-like card images should not sit in a cache
+directory after the diver has saved it where they meant to.
+
+## The export spools to a temp file rather than streaming live
+
+Each export endpoint builds its whole response into a `tempfile.SpooledTemporaryFile` (in memory up
+to 32 MB, on disk past it) and streams the response *from that file*, rather than handing its
+generator straight to `StreamingResponse`.
+
+The reason is not performance, it is lifetime. FastAPI closes the request's database session when
+the endpoint returns, and a `StreamingResponse` body is consumed *after* that — so a generator that
+reads rows while it yields would fail on its first query, and the writers here read a profile per
+dive and a blob per file. The spool drains the generator while the session is still open, which is
+the only ordering that works without holding a session open past the handler by hand.
+
+Two things fall out of it for free. The response carries a real `Content-Length`, so a browser draws
+a progress bar for an archive instead of an indeterminate spinner. And memory stays bounded without
+a new dependency: a chunked-zip library (MIT `stream-zip`, say) would let the archive stream with no
+temp file at all, but costs a runtime dependency *and* the `Content-Length`. Revisit if profiling
+ever says the temp file hurts; do not start there.
+
+**What is bounded is memory, not disk.** Past 32 MB the archive is a real file in the system temp
+directory, and nothing caps its size: 5 MB per stored dive export over an unbounded number of dives,
+plus up to 10 MB per certification card. A diver with a thousand imported dives can ask for a
+multi-gigabyte temp file, and the rate limit permits ten such requests an hour per user. On a
+single-user instance that is fine and on a shared one it is a disk-space consideration for whoever
+runs it, so: **size `/tmp` for the largest account you expect to host.** A hard ceiling would be the
+next step if that stops being enough, but a limit that refuses a legitimate export is worse than a
+documented requirement on a pre-launch product with no shared hosting yet.
+
+The writers are still generators, and that is not redundant. The spool bounds what is *resident*;
+the generators bound what is *constructed*. A thousand-dive logbook is a few million UDDF waypoints,
+and one `ElementTree` holding them all would be hundreds of megabytes before a single byte reached
+the spool. So `uddf.py` writes the envelope by hand and serializes one `<dive>` at a time,
+`envelope.py` encodes one record at a time, and `loader.py` deliberately leaves `dive_profile.data`,
+`dive_file.data` and `certification_file.data` out of its batched read for the same reason — those
+are fetched one row at a time by whoever needs them. It is the one N+1 in the package and it is on
+purpose.
+
+## What UDDF 3.2.2 has no slot for, and what the plan got wrong about it
+
+The mapping from our columns to UDDF elements was settled against the vendored XSD
+(`tests/fixtures/uddf/uddf_3.2.2.xsd`), not from memory, and the schema contradicted the plan in
+both directions.
+
+**Three things genuinely have nowhere to go, and are exported in `export.json`/CSV instead:**
+
+- **The deco ceiling.** The only per-waypoint slot is `<decostop>`, whose `duration` attribute is
+  `use="required"`. A ceiling sample says how deep the obligation was; it says nothing about how
+  long the stop should last. Emitting one means inventing precisely the number a reader would act
+  on, so the channel is dropped — the same rule as *"Parsers report what a file recorded"*, applied
+  on the way out.
+- **CNS and OTU.** `informationafterdiveType` has no oxygen-exposure element at all. The only
+  `<cns>`/`<otu>` in the schema are children of `<waypoint>`, and what we store is a pair of
+  end-of-dive scalars, not a per-sample series.
+- **Gas `role`, gear sets, service schedules and history, c-card records.** No elements exist.
+
+**Two the plan expected to lose, and the schema allows after all:**
+
+- **`po2_limit` maps to `<mix><maximumpo2>`.** Which is why `_MixKey` includes it: a diver carrying
+  the same EAN32 planned to 1.4 on the bottom and 1.6 on the ascent has defined two mixes as far as
+  UDDF is concerned, and collapsing them would mean picking one limit and silently dropping the
+  other.
+- **A dive links *every* site, in visit order, not just the primary one.**
+  `informationbeforedive/link` is `maxOccurs="unbounded"`, so a drift dive's whole itinerary fits.
+  An importer that reads only the first link still gets the primary site, because it is first. The
+  ordered list is in `export.json` regardless.
+
+**And two the format forces a choice on:**
+
+- **`<greatestdepth>` is mandatory (`minOccurs` defaults to 1) and `Dive.max_depth` is not.** A dive
+  with no recorded depth falls back to the profile's deepest sample, then to `0`. Zero here means
+  "the log never recorded one"; the format has no way to say that, and omitting the element would
+  make the document invalid.
+- **`<tankpressurebegin>` is mandatory inside `tankdataType`.** A cylinder with no recorded starting
+  pressure therefore cannot be a `<tankdata>` at all and is skipped. Its gas still reaches
+  `<gasdefinitions>` and the cylinder itself still reaches `export.json`.
+
+Separately, the owner's **email is left out** although `contactType` has the slot. A UDDF file is
+what a diver hands to a dive shop or uploads to divelogs.de; their address riding along in it would
+be a surprise. It is in `export.json`, which is the diver's own copy.
+
+## Gas mixes dedupe on a rounded key, because the corpus carries float noise
+
+`collect_mixes` rounds `oxygen`/`helium`/`po2_limit` to three decimal places before using them as a
+dictionary key. That is a thousandth of a percent — a hundred times finer than any analyzer reads —
+and it is there because the dev database holds `28.000000000000004` beside `28`, and
+`28.999999999999996` beside `29`.
+
+Found by exporting the real corpus rather than by reasoning: the first run produced 17 `<mix>`
+entries where 15 gases exist, including two `EAN28` and two `EAN29` whose `<o2>` printed *the same
+number*. The writer already rounds on the way out (`_num` formats to six decimals), so the defect
+was that the dedup key and the rendered value disagreed. Rounding the key is what makes them agree.
+
+A UDDF file with duplicate mixes is valid and importable; it is just wrong in the way that makes an
+importer show a diver two cylinders of the same gas. Worth catching, and it is exactly what the
+"validate against the XSD" tests could not have caught on their own.
+
+## Archive member paths are planned for the whole zip at once
+
+`plan_archive_paths` assigns every stored file its path in one pass over the bundle, before anything
+is written, and `envelope.py` records the result in `export.json`. Two writers agreeing on a name is
+the obvious reason; uniqueness is the real one.
+
+Nothing upstream guarantees a unique member name. Dive numbers legitimately repeat — that is what
+`DiveNumberingSummary.duplicate_count` counts — two certifications can share a name, and
+`original_filename` is whatever the diver's dive computer wrote. A zip with two entries of the same
+name is a *valid* archive that most extractors silently resolve to one file, which is the worst
+available failure mode: no error, one file quietly missing from a backup nobody checks until they
+need it. So collisions get a `-2`, `-3` suffix, and the comparison is case-insensitive because the
+archive is extracted on macOS and Windows as often as on Linux, where `DIVE.XML` overwriting
+`dive.xml` loses a file just as surely.
+
+`archive_member_name` is the other half, and unlike `core/utils/uploads.py::safe_filename` it *is*
+path-traversal defence: that one only has an HTTP header to protect, while this one names an entry
+an extractor will write to disk, and `../../.bashrc` is a real archive that real tools have
+honoured. It also folds non-ASCII away, because zip's UTF-8 filename flag is widely but not
+universally honoured and a card scan named in Thai should still extract to *something*.
+
+Member timestamps come from the export's own `exported_at` rather than `datetime.now()`, so two
+exports of an unchanged logbook are byte-identical — which is what makes a regression in the archive
+diffable at all.
+
+## The archive includes certification card images, and that is worth saying out loud
+
+`certifications/` in the export zip holds both sides of every stored c-card: scans of ID-like
+documents carrying the diver's name, their certification number and often a photograph.
+
+Nothing new leaves the account owner's hands — the endpoint is owner-only over a bearer token, there
+is no user parameter to point at anyone else, and the response is `no-store`. But "export" now means
+a file that, once saved, is a folder of identity documents sitting in a downloads directory. That is
+a change in what the word implies for a user, not just in what the API serves, so it is stated in
+the endpoint's own docstring (which `/openapi.json` publishes) as well as here.
+
+The same reasoning is why the CSV and UDDF downloads carry no images at all: the two files a diver
+is likely to *share* contain none of this, and the one that does is the one explicitly labelled
+"everything".
+
+## `dives.csv` is written with a byte-order mark
+
+The flat CSV starts with `﻿`, and its line endings are RFC 4180's `\r\n`.
+
+Excel reads a BOM-less UTF-8 CSV as the local ANSI codepage, which turns every accented site name,
+every umlaut in a diver's notes and every non-Latin script into mojibake. It is the single most
+likely destination for this file, and the BOM is the only in-band way to tell it otherwise. Python's
+`csv`, pandas, R and every other programmatic reader either strip it (`encoding="utf-8-sig"`) or
+tolerate it in the first header cell.
+
+**All seven carry it, including the normalized set inside the archive.** The first version put it on
+`dives.csv` alone, reasoning that `csv/mixtures.csv` and its neighbours are joined by a script
+rather than opened in a spreadsheet, where a leading `﻿` in a header name is a nuisance. That did
+not survive review: `dive-sites.csv`, `trips.csv` and `certifications.csv` carry the same free text
+as `dives.csv`, a diver who unzips the archive and double-clicks one is an ordinary thing to do, and
+a mangled site name is a worse outcome than a `utf-8-sig` a script author passes once. Consistency
+also means there is no rule to remember when a file is added.
+
+`tests/fixtures/export/dives.csv` pins the exact bytes of both, and `.gitattributes` marks it
+`-text` so git cannot normalize the line endings out from under the test on a machine configured
+with `core.autocrlf`. Deliberately `-text` rather than `binary`: the latter is a macro for
+`-diff -merge -text`, and a golden file you cannot read the diff of is not doing its job.
+
+## An export holds every record the caller can still see, not every record still live
+
+`loader._owned` reads a soft-deleted row back into the export whenever something else in the same
+export still points at it. That is a deliberate departure from what the list endpoints return, and
+it is the subtlest choice on the export branch — it was got wrong twice before it was got right, so
+it is worth stating in full.
+
+**The app already shows these rows.** `erase_dive_site` says so outright ("The site stays attached
+to the dives logged at it"), `erase_gear_item` likewise ("Dives and gear sets that already reference
+it keep their join rows"), `erase_trip` keeps a dive's `trip_id`, and the service-record listing
+resolves a schedule's uuid through a query with no `is_deleted` filter. So a diver looking at a dive
+in the app sees a site they deleted, and an export that dropped it would be exporting less than the
+screen in front of them.
+
+**Two failure modes, and neither is subtle once it happens.** The join tables carry no `is_deleted`
+of their own, so `site_ids_by_dive` names ids that a `is_deleted = false` read never returned — an
+unguarded lookup is a `KeyError`, i.e. a **500 on all three export endpoints for any diver who has
+ever deleted a dive site**. And where the lookup was guarded, the result was worse in a quieter way:
+a uuid in `export.json` that nothing in the file defines, and in UDDF the same reference is an
+`xs:IDREF`, so the document would not validate at all.
+
+**The referrer graph is deeper than it first looks**, which is how the second round missed it. A
+gear item survives because a dive used it, *or* a set contains it, *or* a service record logs work
+on it, *or* a schedule is measured against it. Deleting an item soft-deletes its schedules and
+deliberately keeps its records (`soft_delete_schedules_for_gear_item`), so an item that was never
+dived and never in a set is reachable only through record → schedule → item. That is why `_owned`
+reads schedules *before* gear items: the order of the calls in `load_export_bundle` is load-bearing.
+
+**Three things this rule is not:**
+
+- It is not a widening of the `user_id` scope. `still_referenced` relaxes the soft-delete predicate
+  and nothing else; the owner filter is unconditional in every call, and a join row pointing at
+  another account's site resurrects nothing.
+- It is not a resurrection of orphans. A deleted row nothing references stays out, because nothing
+  can see it either.
+- It is not silent. The rows come back flagged `is_deleted: true` in `export.json`, so a reader
+  importing the file can tell them from the live ones rather than being handed back a site the diver
+  thought they had removed. UDDF has no such flag, and they are simply present there — which is the
+  right trade for a format whose job is "here are the dives I did".
+
+Everywhere a reference still cannot be resolved after all that — which now means only hand-edited
+data — the export **skips the row rather than raising**. `sites_for`/`gear_for`, `_schedule_uuid`,
+the gear-service CSV and the two `_collections` comprehensions all agree on that, because a 500 on
+the one endpoint that exists so a diver can leave with their data is the worst possible answer to a
+row nobody can see.

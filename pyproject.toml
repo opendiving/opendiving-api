@@ -47,6 +47,10 @@ dev = [
     # as paragraphs. Settings live in `.mdformat.toml`.
     "mdformat>=1.0.0",
     "mdformat-gfm>=1.0.0",
+    # Validates generated UDDF exports against the vendored schema
+    # (tests/fixtures/uddf/) in tests only - the runtime writer builds its XML with the
+    # stdlib and never validates.
+    "xmlschema>=3.0.0",
 ]
 
 [build-system]
