@@ -4953,10 +4953,22 @@ bar, the gas — because it rides in `<tankdata>` on the dive itself. The kit li
 Ausrüstung erfasst"*, and the per-dive `<equipmentused>` links go with it. Weights are the sharpest
 version of the same thing — their dive page has a **Weight** row and their table editor a **Weight
 (Kg)** column, both present and both left empty by the import, so this is a gap in their UDDF
-mapping rather than a missing feature. Their own UDDF export contains no `<equipment>`,
-`<equipmentused>` or `<leadquantity>` element at all, which is consistent with the whole equipment
-branch being outside their mapping in both directions. Their upload page documents no field list, so
-there is nothing to read here the way Subsurface's stylesheet can be read.
+mapping rather than a missing feature.
+
+Their exporter was then tested directly rather than inferred from an empty result — an export with
+no equipment in it proves nothing when the account has no equipment. A BCD ("Scubapro Hydros Pro")
+was created in their own gear manager, flagged as standard kit and attached to dive 1, and that dive
+was given 6 kg of lead; both show on their dive page, so the data is unquestionably in their
+database. Their UDDF export then still contains **zero** `<equipment>`, `<equipmentused>`,
+`<leadquantity>` and `<buoyancycontroldevice>` elements, no occurrence of the item's name, and an
+owner reduced to `<owner id="aleskiontherun"/>` with no `<personal>` block at all. The equipment
+branch is outside their UDDF mapping in **both** directions, and that is now established rather than
+assumed: their upload page documents no field list, so there is nothing to read here the way
+Subsurface's stylesheet can be read.
+
+The consequence lands on the importer rather than the writer: a UDDF file exported from divelogs.de
+will never carry gear or weights, however carefully its owner recorded them there. Worth stating in
+whatever migration guide ships with the importer, because the file will look complete.
 
 Trips are not imported either, but that loss hides because they *derive* trips from gaps between
 dive dates (see their own section above).
