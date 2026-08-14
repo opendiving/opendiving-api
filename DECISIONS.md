@@ -4763,9 +4763,8 @@ the same gap the screenshots have, and the reason the writer's own tests do not 
 
 The export was round-tripped through Subsurface 6.0.5576 on 2026-08-14: import
 `tests/fixtures/uddf/demo-account.uddf`, then save both ways — Subsurface's native `.ssrf`, and its
-own UDDF export. The native file is `tests/fixtures/roundtrip/subsurface.ssrf`; the UDDF re-export
-was read and dropped rather than checked in (see that directory's README). Reading only the UDDF it
-writes back would have produced a wrong answer in at least one place, which is why both were
+own UDDF export. Neither is checked in - see the note at the end of this section. Reading only the
+UDDF it writes back would have produced a wrong answer in at least one place, which is why both were
 captured.
 
 **Survives the import exactly:** all eight dives and their numbers, notes (`&` included), the
@@ -4815,6 +4814,13 @@ rather than as a number.
 Also worth knowing before reading its output: `sac`, `otu` and `cns` in the `.ssrf` are Subsurface's
 own computations, not round-tripped values. Every dive in the demo corpus stores `null` for CNS and
 OTU, and the file still says `otu='31' cns='11%'`.
+
+**None of these captures are in the repo**, deliberately. They ran to a third of a megabyte, and
+every fact worth having off them is in this section and the two that follow. More to the point they
+were taken *before* the depth fix below, so their profiles are re-renderings of a shape this app no
+longer emits: as a corpus for the planned importer they would teach the wrong lesson. Redo the
+round-trip when that work starts — the current export is a ten-minute trip through both programs and
+yields better samples than these did.
 
 ## Every UDDF waypoint carries a depth, because the alternative broke both importers
 
@@ -4941,12 +4947,11 @@ repository — and that file settles the question by inspection (read at
 That last one is the useful shape of the whole exercise: a mapping can be correct against the schema
 and still land nowhere, and the only way to know is to run the file through the program.
 
-It also explains a cosmetic oddity in `tests/fixtures/roundtrip/subsurface.ssrf`: every dive arrives
-labelled `<divecomputer model='Open Diving'>`. The stylesheet prefers
-`owner/equipment/divecomputer/model` and falls back to `<generator><name>`, and `GearItem` has
-`name` and `brand` but no model designation — so there is nothing to put in `<model>` and the
-generator name wins. Inventing one from the item's name would make a diver's "Backup" computer a
-model number.
+It also explains a cosmetic oddity in the `.ssrf`: every dive arrives labelled
+`<divecomputer model='Open Diving'>`. The stylesheet prefers `owner/equipment/divecomputer/model`
+and falls back to `<generator><name>`, and `GearItem` has `name` and `brand` but no model
+designation — so there is nothing to put in `<model>` and the generator name wins. Inventing one
+from the item's name would make a diver's "Backup" computer a model number.
 
 divelogs.de is closed, so its behaviour is only observable, and it draws the line in a different
 place: **dive data imports, diver data does not**. The cylinder arrives in full — 12 L, 200 → 80

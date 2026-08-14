@@ -401,7 +401,7 @@ class TestDiveContent:
 class TestWaypoints:
     """The depth channel alone sets the time axis, and every waypoint carries a depth.
 
-    Not a stylistic choice - the round-trips recorded in `tests/fixtures/roundtrip/` and
+    Not a stylistic choice - the round-trips recorded in
     `DECISIONS.md` show both importers mangling depth-less waypoints, one by discarding
     them and one by reading the absent depth as zero. These tests pin the rule that
     replaced it.

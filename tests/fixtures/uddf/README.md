@@ -32,8 +32,8 @@ to attach to a bug report or hand to an external validator.
 It is here for the **UDDF import** work, which needs a document this app produced to develop
 against, and for the manual round-trips through Subsurface and divelogs.de — feeding those importers
 a file from the repo beats regenerating one against a live stack every time. What those two made of
-it is in `tests/fixtures/roundtrip/`; the first capture had 1072 waypoints, and what happened to it
-is why the writer now gives every waypoint a depth.
+it is in `DECISIONS.md`; the first capture had 1072 waypoints, and what happened to it is why the
+writer now gives every waypoint a depth.
 
 `test_export_uddf.py::TestCheckedInCorpus` validates it against the XSD above. That is a cheap
 guard, not a golden-file comparison: the writer's output is pinned by the tests that build documents
