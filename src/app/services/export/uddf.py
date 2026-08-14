@@ -392,11 +392,29 @@ def _nearest(seconds: list[int], second: int) -> int:
     return before if second - before <= after - second else after
 
 
+def _snappable(seconds: list[int]) -> tuple[int, int]:
+    """The window a reading has to fall in to belong to a waypoint at all.
+
+    The depth channel's own span, widened by half its first and last interval. Inside the
+    span the nearest depth sample is within half an interval by construction; outside it,
+    `_nearest` would clamp to the boundary waypoint from any distance at all - a tank
+    pressure logged three minutes into the surface interval would be emitted as the
+    pressure at the last in-water waypoint. Those readings are dropped instead, and are in
+    `export.json` on their own unsnapped axis like everything else this cannot carry.
+    """
+    half_first = (seconds[1] - seconds[0]) // 2 if len(seconds) > 1 else 0
+    half_last = (seconds[-1] - seconds[-2]) // 2 if len(seconds) > 1 else 0
+    return seconds[0] - half_first, seconds[-1] + half_last
+
+
 def _snapped(readings: dict[int, int], seconds: list[int]) -> dict[int, int]:
     """Move each reading onto the nearest depth sample, the closest reading winning."""
+    first, last = _snappable(seconds)
     snapped: dict[int, int] = {}
     distance: dict[int, int] = {}
     for second, reading in sorted(readings.items()):
+        if not first <= second <= last:
+            continue
         target = _nearest(seconds, second)
         gap = abs(second - target)
         if target not in snapped or gap < distance[target]:
@@ -427,8 +445,14 @@ def _waypoints(
     So readings on other channels snap to the nearest depth sample - the closest reading
     wins where several land on one waypoint, and the earlier sample wins a tie. The
     reading itself is never altered and no depth is ever invented; only the timestamp
-    moves, by less than half a sampling interval. Events snap the same way, and markers
-    that land together are joined rather than dropped.
+    moves, and by less than half a sampling interval, which is what `_snappable` is for:
+    a reading outside the depth channel's span would otherwise clamp onto a boundary
+    waypoint from any distance at all, so it is dropped rather than relocated.
+
+    Events snap the same way, with two rules the single-slot elements force: markers
+    landing together are joined rather than dropped, and where two gas switches land
+    together the **later** one wins, because that is the gas being breathed from that
+    waypoint on.
 
     A profile with no depth channel therefore emits **no `<samples>` at all** rather than
     the depth-less waypoints that started this. Everything at full resolution, on its own
@@ -450,9 +474,12 @@ def _waypoints(
             continue
         pressure.append((mix_id, _snapped(dict(zip(cylinder["t"], cylinder["v"], strict=True)), seconds)))
 
+    first, last = _snappable(seconds)
     switch_at: dict[int, str] = {}
     markers_at: dict[int, list[str]] = {}
     for event in sorted(data.get("events") or [], key=lambda event: event["t"]):
+        if not first <= event["t"] <= last:
+            continue
         second = _nearest(seconds, event["t"])
         if event["type"] == ProfileEventType.GAS_SWITCH:
             gas_number = event.get("gas_number")
@@ -460,7 +487,12 @@ def _waypoints(
             # dive has no mixture for, has no `xs:IDREF` to point at. It stays in
             # `export.json`, which carries the raw event list.
             if gas_number is not None and gas_number in mix_id_by_gas_number:
-                switch_at.setdefault(second, mix_id_by_gas_number[gas_number])
+                # Last switch wins, not first: `<switchmix>` is `maxOccurs="1"`, and when
+                # two switches land on one waypoint the diver is breathing the *later*
+                # gas for everything that follows. Keeping the earlier one would have
+                # every importer computing the rest of the dive on a gas already left
+                # behind. Events are sorted by time, so this stays deterministic.
+                switch_at[second] = mix_id_by_gas_number[gas_number]
             continue
         markers_at.setdefault(second, []).append(event.get("label") or event["type"])
 

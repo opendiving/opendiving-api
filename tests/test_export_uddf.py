@@ -169,10 +169,14 @@ class TestCheckedInCorpus:
     def test_the_demo_account_export_validates(self, schema):
         document = CORPUS_PATH.read_bytes()
         schema.validate(document)
-        # The one fact about the capture rather than the writer: which account it came
-        # from. A regeneration against a different login would validate happily and
-        # silently rot every count in the fixture's README.
-        assert len(_tree(document).findall(f".//{UDDF}dive")) == 8
+        # Facts about the capture rather than about the writer. The owner is the one that
+        # actually identifies it: a regeneration against another login would validate
+        # happily, and a dive count alone would wave through any account that happens to
+        # have eight. Both are quoted in the fixture's README, so both rot together.
+        tree = _tree(document)
+        owner = tree.find(f"{UDDF}diver/{UDDF}owner/{UDDF}personal")
+        assert (_text(owner, f"{UDDF}firstname"), _text(owner, f"{UDDF}lastname")) == ("Sam", "Reef")
+        assert len(tree.findall(f".//{UDDF}dive")) == 8
 
 
 class TestUnitConversions:
@@ -449,6 +453,44 @@ class TestWaypoints:
         assert [_text(w, f"{UDDF}setmarker") for w in waypoints] == [None, "safety_stop; Deco", None, None]
         switches = [w.find(f"{UDDF}switchmix") for w in waypoints]
         assert [s is not None for s in switches] == [False, False, True, False]
+
+    @pytest.mark.asyncio
+    async def test_the_later_of_two_switches_on_one_waypoint_wins(self, schema, monkeypatch):
+        """`<switchmix>` is `maxOccurs="1"`, so one of them has to lose.
+
+        Snapping is what makes this reachable: two switches inside a single sampling
+        interval were previously two separate waypoints. Keeping the earlier one would
+        leave every importer computing the rest of the dive on a gas the diver had
+        already left, which is the one wrong answer available here.
+        """
+        profile = {
+            **OFF_GRID_PROFILE,
+            "events": [
+                {"t": 21, "type": "gas_switch", "gas_number": 1},
+                {"t": 23, "type": "gas_switch", "gas_number": 2},
+            ],
+        }
+        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        schema.validate(document)
+        tree = _tree(document)
+        waypoints = _dive(tree, 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        switches = [w.find(f"{UDDF}switchmix") for w in waypoints]
+        assert [s is not None for s in switches] == [False, False, True, False]
+        # Resolved through the mix rather than the id, so the assertion says which *gas*
+        # won: cylinder 2 is the 50% deco mix, cylinder 1 the 21/35 bottom gas.
+        mixes = {m.get("id"): _text(m, f"{UDDF}o2") for m in tree.findall(f"{UDDF}gasdefinitions/{UDDF}mix")}
+        assert mixes[switches[2].get("ref")] == "0.5"
+
+    @pytest.mark.asyncio
+    async def test_a_reading_outside_the_depth_span_is_dropped_not_clamped(self, schema, monkeypatch):
+        """`_nearest` alone would put a surface-interval reading on the last in-water
+        waypoint, as if it had been taken there - the one way snapping could invent data
+        rather than merely move it. 200 s past a 10 s axis is not a boundary reading."""
+        profile = {**OFF_GRID_PROFILE, "temperature": {"t": [230], "v": [300]}}
+        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        schema.validate(document)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        assert [_text(w, f"{UDDF}temperature") for w in waypoints] == [None, None, None, None]
 
     @pytest.mark.asyncio
     async def test_a_profile_with_no_depth_channel_emits_no_samples(self, schema, monkeypatch):

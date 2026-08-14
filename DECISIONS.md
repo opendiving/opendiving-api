@@ -4852,10 +4852,19 @@ door, and "the schema allows it" is not a defence when the schema is not the thi
 and every other reading — temperature, tank pressure, gas switches, markers — snaps to the nearest
 depth sample. Where several land on one waypoint the closest wins, and a tie goes to the earlier
 sample, so two exports of one dive stay byte-identical. **No depth is ever invented and no reading
-is ever altered**; only a timestamp moves, by less than half a sampling interval. Interpolating a
-depth for each temperature sample would have fixed Subsurface too, and was rejected for the obvious
-reason: writing depths no computer recorded into the file whose promise is that it holds what was
-recorded. Snapping moves a reading in time; interpolating fabricates a measurement.
+is ever altered**; only a timestamp moves, and by less than half a sampling interval. Two rules keep
+that true rather than approximately true. A reading lying outside the depth channel's span
+altogether is **dropped rather than clamped** onto the boundary waypoint: a tank pressure logged
+three minutes into the surface interval would otherwise be emitted as the pressure at the last
+in-water waypoint, which is the one way snapping could invent a measurement instead of relocating
+one. And where two gas switches land on the same waypoint the **later** one wins — `<switchmix>` has
+room for exactly one, and that is the gas being breathed from there on, where keeping the earlier
+would have every importer computing the rest of the dive on a gas already left behind. Markers
+landing together are joined instead, since nothing downstream depends on which of them came first.
+
+Interpolating a depth for each temperature sample would have fixed Subsurface too, and was rejected
+for the obvious reason: writing depths no computer recorded into the file whose promise is that it
+holds what was recorded. Snapping moves a reading in time; interpolating fabricates a measurement.
 
 What it costs is real and small: two temperature readings that fall between the same pair of depth
 samples become one, so the demo corpus goes from 706 temperature samples to 430. What it buys is
