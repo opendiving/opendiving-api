@@ -1,5 +1,6 @@
 import hashlib
 import uuid as uuid_pkg
+from datetime import datetime
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
@@ -42,6 +43,7 @@ from ...schemas.dive import (
     DiveCreateInternal,
     DiveCreateRequest,
     DiveFileInfo,
+    DiveNeighbors,
     DiveNumberingSummary,
     DiveNumberSuggestion,
     DiveRead,
@@ -71,6 +73,7 @@ from ...services.dive_files import (
     store_dive_file,
 )
 from ...services.dive_gas import resolve_gas_use
+from ...services.dive_neighbors import find_dive_neighbors
 from ...services.dive_numbering import renumber_dives, suggest_dive_number, summarize_numbering
 from ...services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file_with_parser
 from ...services.dive_profiles import (
@@ -663,6 +666,61 @@ async def read_dive(
 
     return await _cached_read_dive(
         request, user_id=current_user["id"], uuid=uuid, owner_uuid=current_user["uuid"], db=db
+    )
+
+
+# Keyed `user_{id}_dives:neighbors:{uuid}` - under the *list* prefix rather than the
+# `user_{id}_dive:` one a per-dive read would suggest, and for the reason `_cached_dive_activity`
+# gives: this answer is about a dive's place among the others, so it goes stale when any
+# of the owner's dives moves, not when this one changes. `invalidate_dive_caches()`
+# already sweeps `user_{id}_dives:*` on every dive create, update and delete, which is
+# exactly that set of events, so this needed no invalidation change of its own.
+#
+# The default hour rather than the 60s its siblings under this prefix use, and for the
+# reason `_cached_read_dive` takes the default too: those are series a dashboard polls,
+# where a short TTL is a cheap second line behind the invalidation, while this is a
+# per-dive answer that only a dive write can change - and every one of those sweeps the
+# prefix.
+#
+# Same authorization caveat as every `@cache`d helper here: a hit skips the body, so this
+# must only ever be called after the route below has established the caller owns the dive.
+@cache(key_prefix="user_{user_id}_dives:neighbors", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
+async def _cached_read_dive_neighbors(
+    request: Request, user_id: int, uuid: uuid_pkg.UUID, start_time: datetime, dive_id: int, db: AsyncSession
+) -> DiveNeighbors:
+    """Fetches (and caches) one dive's chronological neighbours. `uuid` is here to key the
+    cache - the query itself runs off the `(start_time, dive_id)` position the route
+    already resolved.
+    """
+    return await find_dive_neighbors(db=db, user_id=user_id, start_time=start_time, dive_id=dive_id)
+
+
+@router.get("/dive/{uuid}/neighbors", response_model=DiveNeighbors)
+async def read_dive_neighbors(
+    request: Request,
+    uuid: uuid_pkg.UUID,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> DiveNeighbors:
+    """Return the dives immediately before and after this one in the caller's own log.
+
+    Just enough of each to link to it - uuid, number and start time - so a dive page can
+    offer prev/next without fetching either dive. `previous` is the one logged earlier and
+    `next` the one logged later, which is the reverse of `GET /dives`, where the list runs
+    newest first. Either is null at the ends of the log.
+
+    Always the whole log: the `trip_uuid`/`dive_site_uuid`/`gear_item_uuid` filters on
+    `GET /dives` have no counterpart here, so walking prev/next from a dive opened out of a
+    filtered list leaves that filter behind at the first step.
+
+    Chronology is `start_time`, never `dive_number` (see `services/dive_numbering.py`), and
+    only the caller's own dives are ever neighbours. 404 when no such dive exists, 403 when
+    it belongs to another user - exactly as `GET /dive/{uuid}`.
+    """
+    dive = await _get_owned_dive(db, uuid, current_user)
+
+    return await _cached_read_dive_neighbors(
+        request, user_id=current_user["id"], uuid=uuid, start_time=dive.start_time, dive_id=dive.id, db=db
     )
 
 

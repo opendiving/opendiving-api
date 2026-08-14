@@ -2618,6 +2618,57 @@ backend models actually support" rule above: it has a direct `Dive` column, and 
 carries a real lifetime dive number (Subsurface's XML does) can populate it. It is simply always
 null for the two Suunto parsers.
 
+## `GET /dive/{uuid}/neighbors` is two one-row queries, ordered by `(start_time, id)`
+
+A dive page offers prev/next, and the client can't derive either from what it has: after a deep link
+or a reload it isn't holding the `GET /dives` page that dive sits on, and a dive on a page boundary
+needs the neighbouring page as well. So the answer comes from the server, as the two dives either
+side and nothing more - `uuid`, `dive_number`, `start_time`, which is what a link needs. A
+`DiveRead` per side would drag in the per-dive site/gear/trip lookups `_cached_read_dives` does, for
+a control that renders two labels.
+
+`next` means *later in time*, which is the opposite end of `GET /dives` - that list is newest first,
+so a dive's `next` is the row above it there. Worth stating in the schema, because "next" reads as
+"further down the list" to anyone holding the list.
+
+The ordering is `(start_time, id)`, the same composite `dive_numbering.py` uses, and here the
+tie-break isn't a tidiness matter. Two dives can share a `start_time` (a computer that records to
+the minute, a repetitive dive entered twice by hand). With `start_time` alone, a strict `<`/`>`
+skips past a tied dive entirely, and the `<=`/`>=` that would catch it returns *this* dive as its
+own neighbour - which a client walking prev/next follows in a circle. Comparing `(start_time, id)`
+as a row makes both queries answer about one total order, so every dive has exactly one predecessor
+and one successor and neither is itself. `tests/test_dive_neighbors.py::TestSharedStartTimes` walks
+a wholly tied log to the end to pin that.
+
+Two queries rather than one pass over the log: Postgres derives a `start_time` bound from the row
+comparison on its own, so each is an index scan over `ix_dive_user_id_start_time` that stops a row
+or two past the pivot. `EXPLAIN ANALYZE` on a real 506-dive log reads 2 rows in both directions, and
+that is a measurement against the index as it stands rather than a structural guarantee: the index
+carries `(user_id, start_time DESC)` and no `id`, so the row comparison becomes a `start_time` index
+bound plus a recheck, and the `id` tie-break is resolved by an incremental sort within the tied
+`start_time` group rather than by the index itself. If either the index or that plan changes, the
+worst case is a scan proportional to the dive's position in the log - harmless at logbook scale, but
+the 2-row figure stops being true.
+
+The pivot is bound with the columns' own types (`literal(start_time, Dive.start_time.type)`); an
+aware `datetime` left to infer binds as a plain `TIMESTAMP`, and comparing that against a
+`timestamptz` column is a cast waiting to be got wrong.
+
+The filters `GET /dives` takes (`trip_uuid`, `dive_site_uuid`, `gear_item_uuid`) have no counterpart
+here, deliberately: prev/next means the whole log, so a dive opened out of a filtered list walks off
+that filter on the first step. The route docstring says so, since scope is the surprising half.
+Honouring them would mean resolving three more uuids and folding them into the cache key, on an
+endpoint whose whole point is that it is two index lookups - and the client already has the cheaper
+move available, which is to keep the filter in the URL it links to.
+
+The cache key is `user_{id}_dives:neighbors:{uuid}` - under the *list* prefix, not the
+`user_{id}_dive:` one a per-dive read would suggest, for the same reason as `gas_use_history` and
+`dive_activity` above. This answer is about a dive's place among the others, so it goes stale when
+any of the owner's dives moves, not when this one changes; `invalidate_dive_caches()` already sweeps
+`user_{id}_dives:*` after every dive create, update and delete, which is exactly that set of events,
+so it needed no change. The usual `@cache` caveat applies and is why the route calls
+`_get_owned_dive` first: a hit skips the body, so the ownership check cannot live inside it.
+
 ## The admin panel is off by default, and refuses to boot insecurely in production
 
 `CRUD_ADMIN_ENABLED` used to default to `True` and `ADMIN_PASSWORD` to the literal

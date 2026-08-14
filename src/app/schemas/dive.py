@@ -334,6 +334,33 @@ class DiveReadWithMixtures(DiveRead):
     ]
 
 
+class DiveNeighbor(PublicUUIDSchema):
+    """The bare minimum to link to an adjacent dive: its uuid, and enough to label the
+    link. Not a `DiveRead` - the caller renders a prev/next control, not a dive, and the
+    full shape would cost the enrichment queries `_cached_read_dives` does per dive.
+    """
+
+    dive_number: Annotated[int, Field(examples=[5])]
+    start_time: Annotated[DiveStartTime, Field(examples=[_START_TIME_EXAMPLE])]
+
+
+class DiveNeighbors(BaseModel):
+    """The two dives sitting either side of one dive in its owner's log, chronologically.
+
+    `next` means *later in time*, which is the opposite end of `GET /dives`: that list is
+    newest first, so this dive's `next` is the row above it there.
+    """
+
+    previous: Annotated[
+        DiveNeighbor | None,
+        Field(default=None, description="The dive logged immediately before this one, or null if it's the oldest"),
+    ]
+    next: Annotated[
+        DiveNeighbor | None,
+        Field(default=None, description="The dive logged immediately after this one, or null if it's the newest"),
+    ]
+
+
 class DiveNumberSuggestion(BaseModel):
     """What to prefill the dive number with when logging a dive at a given start time.
 
