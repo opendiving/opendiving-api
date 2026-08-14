@@ -1,10 +1,14 @@
-"""Regression test for CORS preflight handling (`core/setup.py`).
+"""Regression tests for CORS handling (`core/setup.py`), on both axes.
 
 The web app is served from a different origin than the API and sends requests
 with an `Authorization` header and/or JSON bodies plus cookies, all of which make
 the browser preflight with `OPTIONS` before the real request. Without
 `CORSMiddleware` configured, FastAPI has no `OPTIONS` handler for any route, so
 every preflight - and therefore every real cross-origin request - 405s.
+
+The other axis is what comes back: a cross-origin response exposes only the
+CORS-safelisted headers unless `expose_headers` names more, which is why the
+download filename needs a test of its own.
 
 Builds its own app via `create_application` (rather than importing `src.app.main`'s
 `app`/using the `client` fixture from `conftest.py`) with `create_tables_on_start=
@@ -50,3 +54,15 @@ def test_preflight_request_is_rejected_for_unrecognized_origin(cors_client: Test
     )
 
     assert "access-control-allow-origin" not in response.headers
+
+
+def test_content_disposition_is_exposed_to_the_browser(cors_client: TestClient) -> None:
+    """`Content-Disposition` is not CORS-safelisted, so JS can't read the download
+    filename the file and `/export/*` endpoints send unless it's named here."""
+    response = cors_client.get("/api/v1/export/csv", headers={"Origin": settings.FRONTEND_URL})
+
+    # An allowed origin gets the header on any response the app returns, so without this
+    # the test would keep passing off a 404 if the route were ever renamed away.
+    assert response.status_code == 401
+    exposed = [header.strip().lower() for header in response.headers["access-control-expose-headers"].split(",")]
+    assert "content-disposition" in exposed
