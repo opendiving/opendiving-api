@@ -679,11 +679,11 @@ async def patch_dive(
     """Partially update a dive; omitted fields are left untouched.
 
     404 unless the caller owns it, exactly as for a dive that doesn't exist. The
-    list-valued fields - `mixtures`,
-    `dive_site_uuids`, `gear_item_uuids` - are replaced wholesale when present rather than
-    merged, so sending a shorter list removes the difference and omitting the key entirely
-    leaves it alone. Passing `null` for `trip_uuid` detaches the dive from its trip, which
-    is distinct from omitting the key. Referencing anything the caller doesn't own is a
+    list-valued fields - `mixtures`, `dive_site_uuids`, `gear_item_uuids` - are replaced
+    wholesale when present rather than merged, so sending a shorter list removes the
+    difference and omitting the key entirely leaves it alone. Passing `null` for
+    `trip_uuid` detaches the dive from its trip, which is distinct from omitting the key.
+    Referencing anything the caller doesn't own is a
     422, as are the DB's domain constraints.
     """
     db_dive = await _get_owned_dive(db, uuid, current_user)

@@ -75,13 +75,23 @@ async def fetch_owned_or_raise[OwnedRowT: OwnedRow](
        and `_resolve_item_ids` below, and as `GET /dives`' filters, which return an
        empty page rather than an error for a uuid that isn't the caller's.
 
-    The distinction is kept in the log line, where it is worth having when debugging a
-    client and costs the caller nothing. `warning`, not `info`, and deliberately so: the
-    app configures no logging of its own, so under `uvicorn` (what `docker compose` runs)
-    the root logger sits at `WARNING` and an `info` call here is silently dropped - in
-    exactly the local-dev session where someone would be trying to find out why a client
-    is seeing a 404. Same reason `services.email_service` logs the magic link at
-    `warning`.
+    The distinction is kept in the log, where it is worth having when debugging a client
+    and costs the caller nothing. The levels are lopsided on purpose: **wrong owner** is a
+    `warning`, **genuinely absent** is a `debug`.
+
+    Only the wrong-owner case lost information when the response stopped distinguishing
+    them, so only it has to survive the default level - and it has to be `warning` to do
+    that, because the app configures no logging of its own and `uvicorn` (what
+    `docker compose` runs) configures only its own loggers, leaving root at `WARNING`. An
+    `info` call here would be dropped on the floor in exactly the local session where
+    someone is working out why a client sees a 404. `services.email_service` logs the
+    magic link at `warning` for the same reason.
+
+    The absent case stays quiet because it carries nothing the 404 doesn't, and because
+    it is caller-paced: an authenticated client looping over random uuids would otherwise
+    emit one `WARNING` per request. At the default level, a warning here means "wrong
+    owner" and its absence beside a 404 in the access log means "absent" - the same
+    distinction, without the volume. Raise the level to see both.
 
     `include_deleted` exists for the routes that legitimately act on a soft-deleted row
     (restoring a certification, say) - everything else wants the default.
@@ -103,7 +113,7 @@ async def fetch_owned_or_raise[OwnedRowT: OwnedRow](
 
     row = await crud.get(db=db, schema_to_select=schema, return_as_model=True, **filters)
     if row is None:
-        logger.warning("Owned-row lookup: no %s with uuid %s exists", schema.__name__, uuid)
+        logger.debug("Owned-row lookup: no %s with uuid %s exists", schema.__name__, uuid)
         raise NotFoundException(not_found_message)
 
     row = cast(OwnedRowT, row)

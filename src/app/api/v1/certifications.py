@@ -244,9 +244,9 @@ async def patch_certification(
     """Partially update a certification; omitted fields are left untouched.
 
     404 unless the caller owns it, exactly as for a certification that doesn't exist.
-    `agency` and `agency_other` are validated as a pair
-    against the resulting values, so clearing one while the other still requires it is a
-    422 rather than a half-updated row.
+    `agency` and `agency_other` are validated as a pair against the resulting values, so
+    clearing one while the other still requires it is a 422 rather than a half-updated
+    row.
     """
     db_certification = await _get_owned_certification(db, uuid, current_user)
 

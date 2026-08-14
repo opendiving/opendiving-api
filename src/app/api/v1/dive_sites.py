@@ -215,9 +215,8 @@ async def erase_dive_site(
     """Soft-delete a dive site.
 
     404 unless the caller owns it, exactly as for a site that doesn't exist. Idempotent
-    otherwise: deleting an already-deleted site succeeds
-    rather than 404ing. The site stays attached to the dives logged at it, so their
-    cached reads are invalidated too.
+    otherwise: deleting an already-deleted site succeeds rather than 404ing. The site
+    stays attached to the dives logged at it, so their cached reads are invalidated too.
     """
     # `include_deleted`: deleting an already-soft-deleted site is a no-op, not a 404.
     owner_id = (await _get_owned_dive_site(db, uuid, current_user, include_deleted=True)).user_id

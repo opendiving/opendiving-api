@@ -2805,19 +2805,29 @@ Two things it deliberately did *not* change:
   no longer carries the difference. `tests/test_ownership.py` asserts both the uniform response and
   the distinct log lines.
 
-  They log at **`warning`**, which looks like the wrong level for a routine 404 and isn't. The app
-  configures no logging of its own — `core/logger.py` exists but nothing imports it — so the level
-  is whatever the server in front sets. `uvicorn`, which `docker-compose.yml` runs, configures only
-  its own `uvicorn*` loggers and leaves root at `WARNING`; an `info` call here is dropped on the
-  floor. Worse, it is dropped *asymmetrically*: gunicorn's `CONFIG_DEFAULTS` puts root at `INFO`, so
-  the lines would survive in production and vanish in exactly the local `docker compose logs api`
-  session where someone is trying to work out why a client sees a 404. `services/email_service.py`
-  logs the magic link at `warning` for the same reason, and that one is documented in `CLAUDE.md` as
-  appearing in the logs.
+  The two levels are lopsided on purpose — wrong owner at **`warning`**, absent at **`debug`** — and
+  both halves of that are load-bearing.
 
-  The test that covers this captures at `DEBUG` and asserts `>= WARNING`, not the other way round:
-  `caplog.at_level` *raises* the logger's level, so capturing at the level under test would pass
-  whatever the app actually emits — including a line the server never surfaces.
+  `warning` for the wrong-owner line, because it has to survive the default level and nothing
+  guarantees a lower one will. The app configures no logging of its own — `core/logger.py` exists
+  but nothing imports it — so the level is whatever the server in front sets. `uvicorn`, which
+  `docker-compose.yml` runs, configures only its own `uvicorn*` loggers and leaves root at
+  `WARNING`; an `info` call is dropped on the floor. Worse, it is dropped *asymmetrically*:
+  gunicorn's `CONFIG_DEFAULTS` puts root at `INFO`, so the line would survive in production and
+  vanish in exactly the local `docker compose logs api` session where someone is working out why a
+  client sees a 404. `services/email_service.py` logs the magic link at `warning` for the same
+  reason, and `CLAUDE.md` documents that one as appearing in the logs.
+
+  `debug` for the absent line, because it carries nothing the 404 response doesn't, and because it
+  is *caller-paced*: at `warning` an authenticated client looping over random uuids emits one
+  `WARNING` per request, which is unbounded log volume on demand and dilutes anything real at that
+  level. Nothing is lost — at the default level a warning here means "wrong owner", and its absence
+  next to a 404 in the access log means "absent".
+
+  The test captures at `DEBUG` so both lines are visible and then asserts each one's level, rather
+  than filtering by level and inferring. Capturing at the threshold would also catch a downgrade —
+  the record would simply vanish — but it fails as "expected 2, got 1", naming neither the line nor
+  the level it ended up at.
 
 This is a breaking change for anything that branched on 403 — flagged for `opendiving-web` and
 `opendiving-ios` when it landed.

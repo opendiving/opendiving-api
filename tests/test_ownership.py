@@ -91,11 +91,13 @@ class TestFetchOwnedOrRaise:
         """The client is told nothing, but the server log keeps the distinction - it is
         what makes "the client says 404" debuggable.
 
-        Captured at `DEBUG` and asserted at `WARNING` rather than the other way round.
-        `caplog.at_level` *raises* the logger's level, so capturing at the level under
-        test would make the assertion vacuous: the records would appear whatever level
-        the app actually emits them at, including one `uvicorn` drops on the floor. See
-        the note in `fetch_owned_or_raise`.
+        Captures at `DEBUG` so both lines are visible, then asserts each one's level
+        rather than filtering by it. Capturing at the level under test would also catch a
+        downgrade - the record would vanish - but it fails as "expected 2, got 1", which
+        names neither the line nor the level. This says what is required and, when it
+        breaks, says what the level actually is. The wrong-owner threshold is the load-
+        bearing half; see the note in `fetch_owned_or_raise` for why it must clear
+        `WARNING` specifically.
         """
         uuid = uuid_pkg.uuid4()
 
@@ -124,11 +126,15 @@ class TestFetchOwnedOrRaise:
         records = [record for record in caplog.records if record.name.endswith("api.dependencies")]
 
         assert len(records) == 2
-        assert all(record.levelno >= logging.WARNING for record in records)
+        absent, wrong_owner = records
 
-        absent, wrong_owner = (record.getMessage() for record in records)
-        assert "no _Row with uuid" in absent
-        assert "belongs to user_id 8, caller is user_id 7" in wrong_owner
+        # Deliberately lopsided: only the wrong-owner line has to survive the default
+        # level, and only it is not caller-paced.
+        assert wrong_owner.levelno >= logging.WARNING
+        assert absent.levelno < logging.WARNING
+
+        assert "no _Row with uuid" in absent.getMessage()
+        assert "belongs to user_id 8, caller is user_id 7" in wrong_owner.getMessage()
 
     @pytest.mark.asyncio
     async def test_soft_deleted_rows_are_excluded_by_default(self):
@@ -241,9 +247,13 @@ def owned_app() -> Any:
 @pytest.fixture
 def signed_in_client(owned_app: Any) -> Generator[TestClient]:
     owned_app.dependency_overrides[get_current_user] = lambda: OWNER
-    with TestClient(owned_app) as test_client:
-        yield test_client
-    owned_app.dependency_overrides = {}
+    try:
+        with TestClient(owned_app) as test_client:
+            yield test_client
+    finally:
+        # The app is module-scoped, so a failing test would otherwise leak the override
+        # into the next one.
+        owned_app.dependency_overrides = {}
 
 
 class TestSomeoneElsesRowIsIndistinguishableOverHTTP:

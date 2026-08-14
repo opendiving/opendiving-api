@@ -190,8 +190,8 @@ async def erase_trip(
     """Soft-delete a trip.
 
     404 unless the caller owns it, exactly as for a trip that doesn't exist. The row is
-    flagged rather than removed, so dives that
-    referenced this trip keep their `trip_id` - the trip simply stops appearing in reads.
+    flagged rather than removed, so dives that referenced this trip keep their `trip_id` -
+    the trip simply stops appearing in reads.
     """
     owner_id = (await _get_owned_trip(db, uuid, current_user)).user_id
 
