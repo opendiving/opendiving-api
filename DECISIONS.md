@@ -4886,6 +4886,19 @@ trips named after a site's location rather than our "Red Sea Liveaboard" and "Te
 its date heuristic swept the Tenerife checkout dive of 17 April into the Red Sea trip that started
 two days later.
 
+**Re-imported after the fix, and measured rather than eyeballed.** The account was emptied and the
+regenerated corpus imported again, then their own UDDF export read back through their session. The
+depth comb is gone: 432 waypoints against 1073, and **19 zero-depth samples against 660** — 18 of
+those 19 are the surface samples our own file ends with, and the last is a terminal waypoint they
+append themselves. Their dive page now draws the profile correctly, temperature curve included.
+
+What did not change is that **they never read `<divetime>`**. They assume a uniform sample interval
+and compute it as `round(duration / sample count)`: 4001 s over 1073 waypoints gave 4 s before, and
+4001 s over 431 gives 9 s now, so their axis runs 0, 9, 18 … 3879 where ours runs 0, 10, 20 … 4300.
+The difference is that a uniform depth channel makes their assumption nearly right — the dive plays
+back about 3% short instead of being scattered. Closing that last gap would mean resampling our
+profiles to whatever interval a particular consumer guesses, which is their bug to fix, not ours.
+
 **Their exporter, not their importer:** every string containing an ampersand comes back **empty**.
 All three in our file — the site name "Ras Mohammed - Shark & Yolanda", that dive's note, and a trip
 note — are blank in `divelogs.uddf`, which contains no `&amp;` anywhere. Both are present and
