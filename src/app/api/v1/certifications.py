@@ -83,8 +83,9 @@ async def _get_owned_certification(
 ) -> CertificationReadInternal:
     """Fetch a certification by public uuid and assert the caller owns it.
 
-    Thin wrapper over `fetch_owned_or_raise` - see there for the 404/403 split and, in
-    particular, why this must run before any `@cache`-wrapped read helper.
+    Thin wrapper over `fetch_owned_or_raise` - see there for why someone else's row reads
+    as a 404 and, in particular, why this must run before any `@cache`-wrapped read
+    helper.
     """
     return await fetch_owned_or_raise(
         db=db,
@@ -222,8 +223,9 @@ async def read_certification(
 ) -> CertificationRead:
     """Return a single certification, with metadata for any stored card images.
 
-    404 when no such certification exists, 403 when it belongs to another user. The image
-    bytes themselves are served by `GET /certification/{uuid}/file/{side}`.
+    404 when no such certification exists - and the same 404 when it belongs to another
+    user, so someone else's uuid stays unprobeable. The image bytes themselves are served
+    by `GET /certification/{uuid}/file/{side}`.
     """
     await _get_owned_certification(db, uuid, current_user)
     return await _cached_read_certification(
@@ -241,7 +243,8 @@ async def patch_certification(
 ) -> dict[str, str]:
     """Partially update a certification; omitted fields are left untouched.
 
-    403 unless the caller owns it. `agency` and `agency_other` are validated as a pair
+    404 unless the caller owns it, exactly as for a certification that doesn't exist.
+    `agency` and `agency_other` are validated as a pair
     against the resulting values, so clearing one while the other still requires it is a
     422 rather than a half-updated row.
     """
@@ -390,8 +393,9 @@ async def erase_certification_file(
 ) -> dict[str, str]:
     """Delete one side's card image from a certification, leaving the certification itself.
 
-    403 unless the caller owns it; 404 when that side has no image stored, so this is not
-    idempotent - a repeat delete reports the absence rather than succeeding quietly.
+    404 unless the caller owns it, exactly as for a certification that doesn't exist, and
+    404 again when that side has no image stored - so this is not idempotent: a repeat
+    delete reports the absence rather than succeeding quietly.
     """
     db_certification = await _get_owned_certification(db, uuid, current_user)
 

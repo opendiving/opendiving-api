@@ -152,8 +152,9 @@ def _mixture_error_detail(exc: IntegrityError) -> str:
 async def _get_owned_dive(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> DiveReadInternal:
     """Fetch a dive by public uuid and assert the caller owns it.
 
-    Thin wrapper over `fetch_owned_or_raise` - see there for the 404/403 split and, in
-    particular, why this must run before any `@cache`-wrapped read helper.
+    Thin wrapper over `fetch_owned_or_raise` - see there for why someone else's row reads
+    as a 404 and, in particular, why this must run before any `@cache`-wrapped read
+    helper.
     """
     return await fetch_owned_or_raise(
         db=db,
@@ -655,7 +656,8 @@ async def read_dive(
 ) -> DiveReadWithMixtures:
     """Return a single dive with its mixtures, sites, gear, source file and profile summary.
 
-    404 when no such dive exists, 403 when it belongs to another user. The profile's
+    404 when no such dive exists - and the same 404 when it belongs to another user, so
+    someone else's uuid stays unprobeable. The profile's
     samples are not included - `GET /dive/{uuid}/profile` serves those separately, since
     they are far larger than the rest of the dive put together.
     """
@@ -676,7 +678,8 @@ async def patch_dive(
 ) -> dict[str, str]:
     """Partially update a dive; omitted fields are left untouched.
 
-    403 unless the caller owns it. The list-valued fields - `mixtures`,
+    404 unless the caller owns it, exactly as for a dive that doesn't exist. The
+    list-valued fields - `mixtures`,
     `dive_site_uuids`, `gear_item_uuids` - are replaced wholesale when present rather than
     merged, so sending a shorter list removes the difference and omitting the key entirely
     leaves it alone. Passing `null` for `trip_uuid` detaches the dive from its trip, which
@@ -776,7 +779,8 @@ async def erase_dive(
 ) -> dict[str, str]:
     """Soft-delete a dive, and hard-delete the dive-computer export stored against it.
 
-    403 unless the caller owns it. The dive row is only flagged, but its source file is
+    404 unless the caller owns it, exactly as for a dive that doesn't exist. The dive row
+    is only flagged, but its source file is
     genuinely removed: leaving it would strand the bytes behind a dive nobody can open and
     hold the file's slot in the unique indexes, blocking a re-import of that same export
     into a fresh dive.
@@ -967,8 +971,9 @@ async def erase_dive_file(
 ) -> dict[str, str]:
     """Delete the stored dive-computer export from a dive, leaving the dive itself.
 
-    403 unless the caller owns it; 404 when the dive has no source file, so this is not
-    idempotent - a repeat delete reports the absence rather than succeeding quietly.
+    404 unless the caller owns it, exactly as for a dive that doesn't exist, and 404
+    again when the dive has no source file - so this is not idempotent: a repeat delete
+    reports the absence rather than succeeding quietly.
 
     The dive keeps everything that went through the form, its cylinders included. What
     goes with the file is what was only ever read *off* it: the extracted profile, and the

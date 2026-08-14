@@ -29,8 +29,9 @@ async def _get_owned_dive_site(
 ) -> DiveSiteReadInternal:
     """Fetch a dive site by public uuid and assert the caller owns it.
 
-    Thin wrapper over `fetch_owned_or_raise` - see there for the 404/403 split and, in
-    particular, why this must run before any `@cache`-wrapped read helper.
+    Thin wrapper over `fetch_owned_or_raise` - see there for why someone else's row reads
+    as a 404 and, in particular, why this must run before any `@cache`-wrapped read
+    helper.
     """
     return await fetch_owned_or_raise(
         db=db,
@@ -151,7 +152,8 @@ async def read_dive_site(
 ) -> DiveSiteRead:
     """Return a single dive site by its public uuid.
 
-    404 when no such site exists, 403 when it belongs to another user.
+    404 when no such site exists - and the same 404 when it belongs to another user, so
+    someone else's uuid stays unprobeable.
     """
     # Authorize before the cached read: `@cache` replays a hit without re-checking.
     await _get_owned_dive_site(db, uuid, current_user)
@@ -170,7 +172,8 @@ async def patch_dive_site(
 ) -> dict[str, str]:
     """Partially update a dive site; omitted fields are left untouched.
 
-    403 unless the caller owns it. Uniqueness is re-checked against the *resulting* name
+    404 unless the caller owns it, exactly as for a site that doesn't exist. Uniqueness
+    is re-checked against the *resulting* name
     and location, so moving a site to a location where that name is already taken is a
     422. Because dive reads embed this site's name and location, a successful change also
     invalidates every cached dive logged here.
@@ -211,7 +214,8 @@ async def erase_dive_site(
 ) -> dict[str, str]:
     """Soft-delete a dive site.
 
-    403 unless the caller owns it. Idempotent: deleting an already-deleted site succeeds
+    404 unless the caller owns it, exactly as for a site that doesn't exist. Idempotent
+    otherwise: deleting an already-deleted site succeeds
     rather than 404ing. The site stays attached to the dives logged at it, so their
     cached reads are invalidated too.
     """

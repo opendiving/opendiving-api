@@ -22,8 +22,9 @@ async def _get_owned_trip(
 ) -> TripReadInternal:
     """Fetch a trip by public uuid and assert the caller owns it.
 
-    Thin wrapper over `fetch_owned_or_raise` - see there for the 404/403 split and, in
-    particular, why this must run before any `@cache`-wrapped read helper.
+    Thin wrapper over `fetch_owned_or_raise` - see there for why someone else's row reads
+    as a 404 and, in particular, why this must run before any `@cache`-wrapped read
+    helper.
     """
     return await fetch_owned_or_raise(
         db=db,
@@ -140,7 +141,8 @@ async def read_trip(
 ) -> TripRead:
     """Return a single trip by its public uuid.
 
-    404 when no such trip exists, 403 when it belongs to another user.
+    404 when no such trip exists - and the same 404 when it belongs to another user, so
+    someone else's uuid stays unprobeable.
     """
     # Authorize before the cached read: `@cache` replays a hit without re-checking.
     await _get_owned_trip(db, uuid, current_user)
@@ -159,8 +161,8 @@ async def patch_trip(
 ) -> dict[str, str]:
     """Partially update a trip; omitted fields are left untouched.
 
-    403 unless the caller owns it. Renaming to a name the caller already has on another
-    trip is a 422.
+    404 unless the caller owns it, exactly as for a trip that doesn't exist. Renaming to
+    a name the caller already has on another trip is a 422.
     """
     db_trip = await _get_owned_trip(db, uuid, current_user)
 
@@ -187,7 +189,8 @@ async def erase_trip(
 ) -> dict[str, str]:
     """Soft-delete a trip.
 
-    403 unless the caller owns it. The row is flagged rather than removed, so dives that
+    404 unless the caller owns it, exactly as for a trip that doesn't exist. The row is
+    flagged rather than removed, so dives that
     referenced this trip keep their `trip_id` - the trip simply stops appearing in reads.
     """
     owner_id = (await _get_owned_trip(db, uuid, current_user)).user_id
