@@ -4726,3 +4726,28 @@ unauthenticated `/export/csv` returns, and asserts that status too, since an all
 header on a 404 just as readily and the test would otherwise survive the route being renamed away.
 (One status genuinely escapes: `ServerErrorMiddleware` sits *outside* `CORSMiddleware`, so an
 unhandled 500 goes out with no CORS headers at all.)
+
+## A real download is checked in as a fixture, and it is not a golden file
+
+`tests/fixtures/uddf/demo-account.uddf` is what `GET /export/uddf` served for the demo account on
+2026-08-14, bytes unchanged. It is in the repo for two consumers that do not exist in this test
+suite: the planned UDDF *importer*, which needs a document this app produced to develop against, and
+the manual round-trips through Subsurface and divelogs.de, whose importers are the only conformance
+tests that matter to a diver and which are far easier to feed from a file in the tree than from a
+live stack and a fresh token.
+
+The distinction from `tests/fixtures/export/dives.csv` is worth being precise about, because both
+are "a file checked in next to the code that produces it" and they are governed by opposite rules.
+The CSV is a **golden file**: the test regenerates it in-process and compares byte for byte, so it
+fails the moment the writer changes and the diff is the review. This UDDF is a **snapshot**: it was
+produced by a running server against a database, nothing in CI can reproduce it, and the writer is
+free to move away from it. `TestCheckedInCorpus` therefore validates it against the XSD and asserts
+nothing else - enough to catch the file being corrupted, line-ending-normalized or replaced by an
+unread regeneration, and not enough to make an ordinary writer change look like a failure.
+
+It is the demo account rather than the developer's own 500-dive log for the obvious reason - every
+site, trip, note and diver name in it is seeded fiction, so it can be attached to a bug report or
+uploaded to a third-party validator without a moment's thought. The cost is coverage: the demo
+account is single-tank air and nitrox with one profile between eight dives, so the trimix, gas
+switch and multi-tank paths live only in the synthetic bundles in `tests/helpers/export.py`. That is
+the same gap the screenshots have, and the reason the writer's own tests do not use this file.

@@ -18,9 +18,14 @@ Three kinds of assertion, and they are not interchangeable:
 The bundle under test is `tests/helpers/export.py::full_bundle`, hand-built precisely
 because the dev corpus has no trimix, no gas switches and one profile between five
 hundred dives.
+
+`TestCheckedInCorpus` is the exception to all three: it validates a document that was
+downloaded rather than rendered here, and its job is to notice that file rotting, not to
+say anything about the writer.
 """
 
 import xml.etree.ElementTree as ET
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -50,6 +55,7 @@ from tests.helpers.export import (
 
 UDDF = f"{{{UDDF_NAMESPACE}}}"
 SCHEMA_PATH = "tests/fixtures/uddf/uddf_3.2.2.xsd"
+CORPUS_PATH = Path(__file__).parent / "fixtures" / "uddf" / "demo-account.uddf"
 
 
 @pytest.fixture(scope="module")
@@ -145,6 +151,21 @@ class TestSchemaValidity:
         document = await _render(bundle, monkeypatch=monkeypatch)
         schema.validate(document)
         assert _text(_dive(_tree(document), 0), f"{UDDF}informationafterdive/{UDDF}notes/{UDDF}para") == nasty
+
+
+class TestCheckedInCorpus:
+    """`tests/fixtures/uddf/demo-account.uddf` is a real download, not a rendering.
+
+    It is checked in for the future UDDF *import* work and for the manual round-trips
+    through Subsurface and divelogs.de, which need a file this app produced. Validating it
+    here costs one schema run and catches the two ways a checked-in document rots: an
+    editor or a `core.autocrlf` checkout rewriting the bytes, and a regeneration whose
+    diff nobody read. It deliberately asserts nothing about the writer - the tests above
+    own that, against bundles the demo account cannot express.
+    """
+
+    def test_the_demo_account_export_validates(self, schema):
+        schema.validate(CORPUS_PATH.read_bytes())
 
 
 class TestUnitConversions:
