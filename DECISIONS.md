@@ -4688,3 +4688,32 @@ data — the export **skips the row rather than raising**. `sites_for`/`gear_for
 the gear-service CSV and the two `_collections` comprehensions all agree on that, because a 500 on
 the one endpoint that exists so a diver can leave with their data is the worst possible answer to a
 row nobody can see.
+
+## `Content-Disposition` has to be named in `expose_headers` or the browser hides it
+
+`CORSMiddleware` in `core/setup.py` had `allow_methods`/`allow_headers` wildcarded but no
+`expose_headers`, which is a different axis: the first two govern what the *request* may carry, the
+third what JS may *read off the response*. Absent it, a cross-origin response exposes only the seven
+CORS-safelisted headers, and `Content-Disposition` is not one of them - measured against the running
+app, the only readable headers on an `/export/*` response were `cache-control`, `content-length` and
+`content-type`. The header is sent, and `fetch` simply refuses to hand it over.
+
+The visible cost was in `opendiving-web`, which carried `exportFilename` - a hand-maintained
+TypeScript mirror of `services/export/naming.py` (the same scrub, the same `"export"` substitute for
+a username that scrubs to nothing, the same UTC stamp) plus its own tests, because the header it
+would rather use was invisible. The web code already read the header first and fell back, so naming
+it here changes nothing on that side except which branch runs: the server's name becomes
+authoritative and the mirror becomes a genuine fallback, i.e. one naming rule in one language.
+
+Wildcarding it (`expose_headers=["*"]`) is not an option here - the Fetch spec ignores the wildcard
+when `allow_credentials=True`, exactly as it does for `allow_origins`, so it would silently expose
+nothing. Listing the header explicitly is the only form that works with credentialed requests.
+
+The three `/export/*` endpoints are the reason it came up, but the fix is not export-specific:
+`GET /dive/{uuid}/file` and `GET /certification/{uuid}/file/{side}` build a `Content-Disposition`
+through `content_disposition_attachment` and were equally unreadable.
+
+`tests/test_cors.py` asserts it on a real (401) `GET` rather than on the preflight, because
+`Access-Control-Expose-Headers` is only sent on actual responses - a preflight would pass whatever
+was configured. Any status works: the middleware decorates the response for an allowed origin before
+the route's outcome matters, so the assertion needs no auth and no database.

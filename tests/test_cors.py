@@ -50,3 +50,12 @@ def test_preflight_request_is_rejected_for_unrecognized_origin(cors_client: Test
     )
 
     assert "access-control-allow-origin" not in response.headers
+
+
+def test_content_disposition_is_exposed_to_the_browser(cors_client: TestClient) -> None:
+    """`Content-Disposition` is not CORS-safelisted, so JS can't read the download
+    filename the file and `/export/*` endpoints send unless it's named here."""
+    response = cors_client.get("/api/v1/export/csv", headers={"Origin": settings.FRONTEND_URL})
+
+    exposed = [header.strip().lower() for header in response.headers["access-control-expose-headers"].split(",")]
+    assert "content-disposition" in exposed
