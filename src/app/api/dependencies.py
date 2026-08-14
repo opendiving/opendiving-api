@@ -76,7 +76,12 @@ async def fetch_owned_or_raise[OwnedRowT: OwnedRow](
        empty page rather than an error for a uuid that isn't the caller's.
 
     The distinction is kept in the log line, where it is worth having when debugging a
-    client and costs the caller nothing.
+    client and costs the caller nothing. `warning`, not `info`, and deliberately so: the
+    app configures no logging of its own, so under `uvicorn` (what `docker compose` runs)
+    the root logger sits at `WARNING` and an `info` call here is silently dropped - in
+    exactly the local-dev session where someone would be trying to find out why a client
+    is seeing a 404. Same reason `services.email_service` logs the magic link at
+    `warning`.
 
     `include_deleted` exists for the routes that legitimately act on a soft-deleted row
     (restoring a certification, say) - everything else wants the default.
@@ -98,12 +103,12 @@ async def fetch_owned_or_raise[OwnedRowT: OwnedRow](
 
     row = await crud.get(db=db, schema_to_select=schema, return_as_model=True, **filters)
     if row is None:
-        logger.info("Owned-row lookup: no %s with uuid %s exists", schema.__name__, uuid)
+        logger.warning("Owned-row lookup: no %s with uuid %s exists", schema.__name__, uuid)
         raise NotFoundException(not_found_message)
 
     row = cast(OwnedRowT, row)
     if row.user_id != current_user["id"]:
-        logger.info(
+        logger.warning(
             "Owned-row lookup: %s with uuid %s belongs to user_id %s, caller is user_id %s",
             schema.__name__,
             uuid,

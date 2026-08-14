@@ -2798,11 +2798,26 @@ Two things it deliberately did *not* change:
   and `gear_service.py`. There the caller is naming *themselves* wrongly, not probing for someone
   else's row, so saying so discloses nothing. Answering 404 there would also be actively unhelpful:
   the resource in question is the caller's own account, which very much exists.
+
 - **The server log still distinguishes the two.** "Wrong owner" and "genuinely absent" produce
-  different `INFO` lines in `api/dependencies` — the wrong-owner line names the owning `user_id`
-  alongside the caller's. Without it, "the client is getting a 404" becomes undebuggable, since the
-  response no longer carries the difference. `tests/test_ownership.py` asserts both the uniform
-  response and the distinct log lines.
+  different lines in `api/dependencies` — the wrong-owner line names the owning `user_id` alongside
+  the caller's. Without it, "the client is getting a 404" becomes undebuggable, since the response
+  no longer carries the difference. `tests/test_ownership.py` asserts both the uniform response and
+  the distinct log lines.
+
+  They log at **`warning`**, which looks like the wrong level for a routine 404 and isn't. The app
+  configures no logging of its own — `core/logger.py` exists but nothing imports it — so the level
+  is whatever the server in front sets. `uvicorn`, which `docker-compose.yml` runs, configures only
+  its own `uvicorn*` loggers and leaves root at `WARNING`; an `info` call here is dropped on the
+  floor. Worse, it is dropped *asymmetrically*: gunicorn's `CONFIG_DEFAULTS` puts root at `INFO`, so
+  the lines would survive in production and vanish in exactly the local `docker compose logs api`
+  session where someone is trying to work out why a client sees a 404. `services/email_service.py`
+  logs the magic link at `warning` for the same reason, and that one is documented in `CLAUDE.md` as
+  appearing in the logs.
+
+  The test that covers this captures at `DEBUG` and asserts `>= WARNING`, not the other way round:
+  `caplog.at_level` *raises* the logger's level, so capturing at the level under test would pass
+  whatever the app actually emits — including a line the server never surfaces.
 
 This is a breaking change for anything that branched on 403 — flagged for `opendiving-web` and
 `opendiving-ios` when it landed.
