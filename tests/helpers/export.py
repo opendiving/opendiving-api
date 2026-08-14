@@ -98,6 +98,12 @@ def make_dive(row_id: int, uuid: uuid_pkg.UUID, **overrides: Any) -> Dive:
     return _with_id(Dive(**defaults, uuid=uuid, created_at=CREATED_AT), row_id)
 
 
+def make_dive_site(row_id: int, uuid: uuid_pkg.UUID, **overrides: Any) -> DiveSite:
+    defaults: dict[str, Any] = {"user_id": 1, "name": "Yolanda"}
+    defaults.update(overrides)
+    return _with_id(DiveSite(**defaults, uuid=uuid, created_at=CREATED_AT), row_id)
+
+
 def mixture(**overrides: Any) -> DiveMixtureRead:
     defaults: dict[str, Any] = {"id": 1, "volume": 12.0, "oxygen": 21.0, "helium": 0.0}
     defaults.update(overrides)
@@ -177,18 +183,16 @@ def full_bundle() -> ExportBundle:
     - **bare** - no depth, no cylinders, no site, no trip, empty notes: the dive that
       makes UDDF's *mandatory* `<greatestdepth>` a decision rather than a copy.
     """
-    reef = _with_id(
-        DiveSite(
-            user_id=1,
-            name="Shark Reef",
-            location="Ras Mohammed",
-            notes="Current picks up after slack.",
-            uuid=UUIDS["site-reef"],
-            created_at=CREATED_AT,
-        ),
+    reef = make_dive_site(
         1,
+        UUIDS["site-reef"],
+        name="Shark Reef",
+        location="Ras Mohammed",
+        latitude=27.7278,
+        longitude=34.2564,
+        notes="Current picks up after slack.",
     )
-    wall = _with_id(DiveSite(user_id=1, name="Yolanda", uuid=UUIDS["site-wall"], created_at=CREATED_AT), 2)
+    wall = make_dive_site(2, UUIDS["site-wall"])
     trip = _with_id(
         Trip(
             user_id=1,

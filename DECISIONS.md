@@ -5117,3 +5117,59 @@ whatever migration guide ships with the importer, because the file will look com
 
 Trips are not imported either, but that loss hides because they *derive* trips from gaps between
 dive dates (see their own section above).
+
+## Dive site coordinates are two `Float` columns, and half a pair is not a position
+
+`dive_site` grew `latitude`/`longitude` as two plain `Float` columns rather than a PostGIS
+`geography(Point)`. A dive site is a point, and the only two questions ever asked of it are "show
+it" and "list them" — neither needs an index that understands distance. PostGIS would mean a new
+Postgres image and an extension install for every self-hoster, which is a real cost against a
+feature that is two numbers on a form. Revisit if "sites near me" ever ships; until then the
+rejection is the reusable part.
+
+Both are `Mapped[float | None]` for the reason in *"`Mapped[X]` vs `Mapped[X | None]` on
+`MappedAsDataclass`"* above, and the schema change needed the usual manual DDL:
+
+```sql
+ALTER TABLE dive_site ADD COLUMN latitude DOUBLE PRECISION, ADD COLUMN longitude DOUBLE PRECISION;
+```
+
+They deliberately stay **out of `ux_dive_site_user_id_name_location_lower`**. Two sites sharing a
+name and a location are duplicates whatever their coordinates say, and folding a float into a
+uniqueness key would make "the same site, pinned two metres apart" a second row.
+
+**The pair is one value, and the rule is enforced against the *effective* pair.** A latitude with no
+longitude is not a partial position, it is a meaningless one — a site accidentally pinned to the
+equator or the prime meridian. On create, `WholeCoordinatePair`'s `model_validator` decides it from
+the body, which is all there is. On PATCH the body carries only what changed, so the check runs on
+what the row will hold *afterwards* —
+`values.latitude if "latitude" in values.model_fields_set else db_dive_site.latitude`, mirroring the
+`effective_location` computation right above it. Three consequences, and the middle one is why the
+body alone is not enough:
+
+- half-setting a coordinate on a site with no position is a 422
+- nudging one coordinate of a pair that is already whole is fine, and is exactly what dragging a
+  marker produces
+- an explicit `null` on one half is a 422 as well, not a silent clearing of both —
+  `{"latitude": null, "longitude": null}` is how a position is removed. Guessing that they meant
+  both would be a mutation the caller did not ask for.
+
+The validator lives on the **write** schemas only (`DiveSiteCreate`, `DiveSiteCreateInternal`), not
+on `DiveSiteBase`. There is no `CHECK` constraint behind the rule, so the table can still hold a
+half pair — put the validator on the shared base and a row like that turns every read of it into a
+500, which is a worse outcome than a read that shows the half. `latitude`/`longitude` are also kept
+off `DiveSiteInfo` (`schemas/dive.py`), the summary embedded in dive reads: adding them there
+enlarges every cached dive payload for a map view that does not exist yet.
+
+**In UDDF, `<geography>` is emitted for a site that has a location *or* a position.** It used to be
+location-only, because `geographyType` makes `<location>` `minOccurs="1"` and a name-only site has
+nothing valid to put there. A coordinates-only site has the same problem and the coordinates are the
+more useful half, so it repeats its **name** as the `<location>` rather than losing them.
+`geographyType` is an `xs:all`, so `<latitude>`/`<longitude>` need no particular order — but the
+mandatory child does need to be there, which is why the two tests for this validate against the XSD
+rather than asserting on the elements alone. Decimal degrees in both formats: this is the one pair
+of numbers in that writer that needs no unit conversion.
+
+`dive-sites.csv` gets `latitude`/`longitude` columns next to `location`, written as stored and left
+empty where there is no position — an empty cell rather than a `0` a reader would take for Null
+Island, which is the same trap recorded in *"What divelogs.de does with our UDDF"*.

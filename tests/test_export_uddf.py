@@ -51,6 +51,7 @@ from tests.helpers.export import (
     build_bundle,
     full_bundle,
     make_dive,
+    make_dive_site,
     mixture,
 )
 
@@ -400,6 +401,46 @@ class TestDiveContent:
         ) == trip.get("id")
         dates = trip.find(f"{UDDF}trippart/{UDDF}dateoftrip")
         assert (dates.get("startdate"), dates.get("enddate")) == ("2026-05-30T00:00:00", "2026-06-06T00:00:00")
+
+
+class TestDiveSiteGeography:
+    """`geographyType` is where a site's position goes, and its `<location>` is
+    `minOccurs="1"` - so what a site does *not* have decides whether the element can be
+    emitted at all. Three cases, and the schema is the referee for each.
+    """
+
+    @staticmethod
+    def _site(tree: ET.Element, index: int) -> ET.Element:
+        return tree.findall(f"{UDDF}divesite/{UDDF}site")[index]
+
+    @pytest.mark.asyncio
+    async def test_a_position_reaches_geography(self, schema, monkeypatch):
+        """Decimal degrees in both formats - the one pair of numbers on this element that
+        needs no conversion, which is exactly why a test says so."""
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        schema.validate(document)
+        geography = self._site(_tree(document), 0).find(f"{UDDF}geography")
+        assert _text(geography, f"{UDDF}location") == "Ras Mohammed"
+        assert (_text(geography, f"{UDDF}latitude"), _text(geography, f"{UDDF}longitude")) == ("27.7278", "34.2564")
+
+    @pytest.mark.asyncio
+    async def test_a_site_with_only_a_position_borrows_its_name_as_the_location(self, schema, monkeypatch):
+        """`<location>` is mandatory inside `<geography>`, so a site with coordinates and
+        no free-text location would otherwise have to lose the coordinates to stay
+        valid."""
+        site = make_dive_site(2, UUIDS["site-wall"], latitude=27.7, longitude=34.2)
+        document = await _render(build_bundle(dive_sites=[site]), monkeypatch=monkeypatch)
+        schema.validate(document)
+        geography = self._site(_tree(document), 0).find(f"{UDDF}geography")
+        assert _text(geography, f"{UDDF}location") == "Yolanda"
+        assert _text(geography, f"{UDDF}latitude") == "27.7"
+
+    @pytest.mark.asyncio
+    async def test_a_site_with_neither_gets_no_geography_at_all(self, monkeypatch):
+        """The empty `<geography>` that would be invalid. `full_bundle`'s second site is
+        a bare name."""
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        assert self._site(_tree(document), 1).find(f"{UDDF}geography") is None
 
 
 class TestWaypoints:

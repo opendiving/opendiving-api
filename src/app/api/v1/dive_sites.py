@@ -7,12 +7,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
-from ...core.exceptions.http_exceptions import DuplicateValueException, ForbiddenException, NotFoundException
+from ...core.exceptions.http_exceptions import (
+    DuplicateValueException,
+    ForbiddenException,
+    NotFoundException,
+    UnprocessableEntityException,
+)
 from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
 from ...crud.crud_dive_sites import crud_dive_sites, dive_site_name_exists
 from ...schemas.dive_site import (
+    COORDINATE_PAIR_MESSAGE,
     DiveSiteCreate,
     DiveSiteCreateInternal,
     DiveSiteRead,
@@ -174,14 +180,21 @@ async def patch_dive_site(
 
     404 unless the caller owns it, exactly as for a site that doesn't exist. Uniqueness
     is re-checked against the *resulting* name and location, so moving a site to a
-    location where that name is already taken is a 422. Because dive reads embed this
-    site's name and location, a successful change also
+    location where that name is already taken is a 422. Coordinates are checked the same
+    way: it is the *resulting* pair that has to be whole or empty, so nudging one
+    coordinate of an existing pair is fine while half-setting or half-clearing one is a
+    422. Because dive reads embed this site's name and location, a successful change also
     invalidates every cached dive logged here.
     """
     db_dive_site = await _get_owned_dive_site(db, uuid, current_user)
 
     effective_name = values.name if values.name is not None else db_dive_site.name
     effective_location = values.location if "location" in values.model_fields_set else db_dive_site.location
+    effective_latitude = values.latitude if "latitude" in values.model_fields_set else db_dive_site.latitude
+    effective_longitude = values.longitude if "longitude" in values.model_fields_set else db_dive_site.longitude
+
+    if (effective_latitude is None) != (effective_longitude is None):
+        raise UnprocessableEntityException(COORDINATE_PAIR_MESSAGE)
 
     if (values.name is not None or "location" in values.model_fields_set) and await dive_site_name_exists(
         db=db,

@@ -142,6 +142,8 @@ class ExportTrip(PublicUUIDSchema):
 class ExportDiveSite(PublicUUIDSchema):
     name: str
     location: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
     notes: str
     is_deleted: Annotated[
         bool,
