@@ -192,18 +192,24 @@ class GeocodingSettings(BaseSettings):
         "GEOCODER_USER_AGENT", default="OpenDiving (+https://github.com/opendiving/opendiving-api)"
     )
 
-    # What one account may spend. Authenticated and owner-agnostic, so this isn't an abuse
-    # boundary the way the contact form's is - it is here because every miss costs someone
-    # else's server a request, and a runaway client polling a search box shouldn't be the
-    # reason this instance gets blocked. Generous enough that filling in a trip's worth of
-    # sites in one sitting never hits it.
+    # What one account may spend, and the only limit on these endpoints that can produce a
+    # 429 - the provider cap below degrades instead. So this is purely an abuse bound, not
+    # a pacing mechanism, and it is sized for the worst *legitimate* pattern rather than the
+    # typical one: `/geocode/search` backs a type-ahead, which fires once per debounced
+    # keystroke, and a diver adding sites for a week's trip can produce hundreds of calls in
+    # an evening without doing anything unreasonable. It counts cache hits too, which
+    # overstates the real cost - another reason to leave it loose.
     GEOCODER_RATE_LIMIT_WINDOW_SECONDS: int = config("GEOCODER_RATE_LIMIT_WINDOW_SECONDS", default=3600)
-    GEOCODER_RATE_LIMIT_PER_USER: int = config("GEOCODER_RATE_LIMIT_PER_USER", default=60)
+    GEOCODER_RATE_LIMIT_PER_USER: int = config("GEOCODER_RATE_LIMIT_PER_USER", default=600)
 
     # What the *instance* may spend on the provider, counted across all users and applied
     # only to calls that actually leave (a cache hit costs nothing). The default is
     # Nominatim's published cap of one request per second. A self-hoster running their own
     # Nominatim has no such cap and should raise it rather than throttle themselves.
+    #
+    # Exceeding it is *not* a 429: the counter is global, so raising would mean one diver's
+    # search rejecting another's. The call is skipped and logged, and the caller gets the
+    # same "no suggestion" these endpoints already answer with when the provider is down.
     GEOCODER_PROVIDER_RATE_LIMIT_WINDOW_SECONDS: int = config("GEOCODER_PROVIDER_RATE_LIMIT_WINDOW_SECONDS", default=1)
     GEOCODER_PROVIDER_RATE_LIMIT_REQUESTS: int = config("GEOCODER_PROVIDER_RATE_LIMIT_REQUESTS", default=1)
 

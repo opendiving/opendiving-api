@@ -61,6 +61,15 @@ async def enforce_rate_limit(key: str, max_requests: int, window_seconds: int) -
         current = await cache.client.incr(key)
         if current == 1:
             await cache.client.expire(key, window_seconds)
+        elif current > max_requests and await cache.client.ttl(key) < 0:
+            # Self-heal a counter that lost its window. `incr` and `expire` are two round
+            # trips, so a Redis blip between them leaves a key that counts up forever and
+            # never expires - and from then on this limit rejects every request, for good,
+            # until someone deletes the key by hand. The check is on the *rejecting* path
+            # only, so the happy path still costs one round trip; the window restarts from
+            # here, which loses at most one window's worth of accounting and is plainly
+            # better than a limiter that has to be repaired manually.
+            await cache.client.expire(key, window_seconds)
     except RedisError as exc:
         _enter_degraded(f"Redis is unreachable ({type(exc).__name__})")
         return

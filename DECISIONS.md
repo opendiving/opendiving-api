@@ -5275,6 +5275,12 @@ expiring. The prefix carries a version (`geocode:v1:…`) because what is cached
 change to the normalizer has to invalidate the old entries, and a new prefix does that without a
 flush.
 
+**`{"error": ...}` is two different things wearing one shape, and only one of them is an answer.**
+Nominatim returns it both for "unable to geocode" — a real fact about a real position — and for
+bandwidth or abuse complaints. Treating the whole shape as "no result" would cache a refusal under
+the miss TTL and pin a genuine place as empty for an hour, so the message is matched:
+`unable to geocode` is an answer, anything else is a failure, logged and uncached.
+
 **"The provider had nothing" and "we could not ask" are different, and only the first is cached.**
 `_request` returns `[]` for the former and `None` for the latter, which is the single distinction
 that function exists to preserve: caching a timeout would turn a thirty-second outage into a month
@@ -5282,15 +5288,28 @@ of empty answers. A miss is still cached, or a retrying client re-asks on every 
 with the shorter TTL, since an empty answer is far more likely to be provider weirdness than a
 permanent fact about the world.
 
-**Two rate limits, and they count different things.** The per-user one (`geocode:user:{id}`, in the
-route) bounds what one account can make this instance do. The provider one (`geocode:provider`, in
-the service) bounds what this instance does to a third party, and is spent **only on calls that
-actually leave** — a cache hit costs the provider nothing, and charging it would 429 a page full of
-already-cached sites for no reason. `enforce_rate_limit` sits outside the `try` in `_request` on
-purpose: exceeding the provider cap has to surface as a 429, not be swallowed as a geocoding
-failure, or the operator never learns the instance is over its cap. Both fail open on a Redis
-outage, which is the right trade here too — a stripped-down instance with no Redis should still
-geocode.
+**Two rate limits, and the interesting part is that they fail differently.** The per-user one
+(`geocode:user:{id}`, in the route) bounds what one account can make this instance do, and rejects
+with a 429 — the account that spent the budget is the one told about it, which is the whole shape of
+every other limit in this app.
+
+The provider one (`geocode:provider`, in the service) is the opposite, and the reason is that it is
+**global**. It bounds what this instance does to a third party, so its counter is shared by
+everybody; raising there would mean one diver's search rejecting another diver's, a 429 the caller
+did nothing to earn and cannot act on. So exceeding it **skips the call and returns "no result"** —
+the same answer a provider outage already gives — and logs a warning, because an instance repeatedly
+over its cap is an operator problem rather than a user-facing one. It is also spent **only on calls
+that actually leave**: a cache hit costs the provider nothing, and charging it would throttle a page
+of already-cached sites for no reason.
+
+Both fail open on a Redis outage, which is the right trade here too — a stripped-down instance with
+no Redis should still geocode. That fail-open exposed a hazard in `enforce_rate_limit` itself worth
+recording next to *"Rate limiting fails open on a Redis outage"*: `incr` and `expire` are two round
+trips, so a blip between them leaves a key that counts up forever and never expires, and from then
+on that limit rejects **every** request until someone deletes the key by hand. The lowest-limit
+caller is the most exposed, and `geocode:provider` at 1-per-1-second is now the lowest in the app.
+The helper therefore re-arms the window when it finds a counter over its limit with no TTL — on the
+rejecting path only, so the happy path still costs one round trip.
 
 **Everything else degrades to "no result" rather than raising**, following `services.email_service`:
 a timeout, a 5xx, a non-JSON body, or `GEOCODER_URL` set to `""` all produce `null`/`[]` and a
@@ -5340,3 +5359,23 @@ incompatible with persisting a coordinate on the row, which is the whole point; 
 whose free tier caps response caching at 48 h and so conflicts with caching-by-policy; and
 **self-hosted Nominatim**, the only fully independent option but a ~1 TB planet import, which is not
 something to put in front of a self-hoster. Keyless has to stay the default.
+
+## `except ValueError, TypeError:` is valid, and `ruff format` writes it that way
+
+It reads exactly like the Python 2 syntax that has been a `SyntaxError` since 2008, and it is
+neither. PEP 758 (Python 3.14) allows an unparenthesized tuple in an `except` clause as long as
+there is no `as` binding, and `ruff format` — with `target-version = "py314"`, which
+`requires-python = "~=3.14.0"` earns — actively **removes** the parentheses. Putting them back fails
+`ruff format --check` in CI, so this is not a style choice anyone here gets to make.
+
+Worth writing down because it does not fail quietly in review: a fresh reader who has not clocked
+the Python version reports it as a blocking syntax error that stops the app importing, complete with
+a confident claim that the tests cannot have run. The check that settles it in one line, before
+anyone rewrites working code:
+
+```bash
+uv run python -c "import ast; ast.parse(open('src/app/services/geocoding_service.py').read())"
+```
+
+`src/app/core/security.py`, `services/dive_files.py` and `dive_parsers/suunto_xml.py` all carry the
+same form.

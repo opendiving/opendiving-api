@@ -26,11 +26,13 @@ router = APIRouter(tags=["geocoding"])
 
 
 async def _enforce_geocode_limit(user_id: int) -> None:
-    """Per-user budget, shared by both endpoints.
+    """Per-user budget, shared by both endpoints, and the only thing here that can 429.
 
     Distinct from the provider's own one-per-second cap enforced inside the service: that
-    one bounds what this instance does to a third party, this one bounds what a single
-    account can make this instance do.
+    one bounds what this instance does to a third party and *degrades* when it is hit,
+    since it is global and one diver's search must not reject another's. This one bounds
+    what a single account can make this instance do, so rejecting the account that spent it
+    is exactly right.
     """
     await enforce_rate_limit(
         f"geocode:user:{user_id}",

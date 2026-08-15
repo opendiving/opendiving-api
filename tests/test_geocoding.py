@@ -271,6 +271,19 @@ class TestDegradation:
         assert response.status_code == 200
         assert response.json() is None
 
+    def test_a_refusal_is_not_mistaken_for_an_empty_answer(self, client: TestClient, fake_redis: FakeRedis):
+        """Nominatim wears the same `{"error": ...}` shape for a bandwidth or abuse
+        complaint as for "unable to geocode". Cached as a miss, one bad minute would pin a
+        genuine place as "no result" for an hour."""
+        with _responds({"error": "Bandwidth limit exceeded"}) as provider:
+            first = client.get("/api/v1/geocode/reverse", params={"lat": 28.5717, "lon": 34.5372})
+            client.get("/api/v1/geocode/reverse", params={"lat": 28.5717, "lon": 34.5372})
+
+        assert first.status_code == 200
+        assert first.json() is None
+        assert fake_redis.store == {}
+        assert len(provider.requests) == 2
+
     def test_survives_a_provider_error_status(self, client: TestClient, no_redis: None):
         with _responds({"message": "over capacity"}, status_code=503):
             response = client.get("/api/v1/geocode/search", params={"q": "dahab"})
@@ -407,18 +420,22 @@ class TestThrottling:
         assert response.status_code == 429
         assert patched.requests == []
 
-    def test_exceeding_the_provider_cap_surfaces_as_429(self, client: TestClient, no_redis: None):
-        """Raised from inside the service and deliberately not swallowed as a geocoding
-        failure - an empty result would hide the fact that this instance is over its cap."""
+    def test_exceeding_the_provider_cap_degrades_instead_of_rejecting(self, client: TestClient, fake_redis: FakeRedis):
+        """The provider counter is global, so raising would mean one diver's search
+        rejecting another's. The call is skipped, nothing is cached, and the caller gets the
+        same "no suggestion" a provider outage produces."""
         with (
-            _responds(REVERSE_PAYLOAD),
+            _responds(REVERSE_PAYLOAD) as provider,
             patch("src.app.services.geocoding_service.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
         ):
             provider_limit.side_effect = RateLimitException("Too many requests. Please try again later.")
 
             response = client.get("/api/v1/geocode/search", params={"q": "dahab"})
 
-        assert response.status_code == 429
+        assert response.status_code == 200
+        assert response.json() == []
+        assert provider.requests == []
+        assert fake_redis.store == {}
 
 
 class TestShortLocation:

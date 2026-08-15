@@ -18,6 +18,7 @@ all three of the things this module does: an identifying `User-Agent`
 through `enforce_rate_limit`.
 """
 
+import hashlib
 import json
 import logging
 from typing import Any
@@ -27,6 +28,7 @@ from pydantic import ValidationError
 from redis.exceptions import RedisError
 
 from ..core.config import settings
+from ..core.exceptions.http_exceptions import RateLimitException
 from ..core.utils import cache
 from ..core.utils.rate_limit import enforce_rate_limit
 from ..schemas.geocoding import GeocodeResult
@@ -64,6 +66,11 @@ _LOCATION_MAX_LENGTH = 255
 # Used when the provider sends no `licence` of its own. The default provider is OSM-backed,
 # and attribution is a condition of using the data - never let a result go out without one.
 _DEFAULT_ATTRIBUTION = "Data © OpenStreetMap contributors, ODbL 1.0. https://osm.org/copyright"
+
+# What Nominatim says when a position resolves to nothing - the *only* `error` payload that
+# means "this is the answer" rather than "we are not answering you". Matched on the message
+# because the shape is shared with bandwidth and abuse complaints.
+_NO_RESULT_ERROR = "unable to geocode"
 
 # Most specific populated place first: Nominatim fills whichever of these the point falls
 # in, and a diver names the town, not the administrative district it belongs to.
@@ -135,21 +142,28 @@ async def _request(path: str, params: dict[str, Any]) -> list[dict[str, Any]] | 
     answered, and had nothing" is a fact worth caching; "the provider timed out" is not,
     and caching it would turn a thirty-second outage into a month of empty answers.
 
-    `enforce_rate_limit` is called before the request and deliberately outside the `try`:
-    it is the *provider's* one-request-per-second cap, so exceeding it must surface to the
-    caller as a 429 rather than be swallowed as a geocoding failure. It fails open on a
-    Redis outage, which is the right trade here too - a self-hosted instance with no Redis
-    should still geocode.
+    Being over the *provider's* cap is one of the ways we "could not ask", not a 429. That
+    counter is global - it has to be, since the cap belongs to the instance rather than to
+    any caller - so raising would mean one diver's search rejecting another diver's, which
+    is both baffling from the outside and a contract this endpoint doesn't make. It is
+    logged instead, because an instance that keeps hitting its cap is an operator problem.
+
+    The limiter fails open on a Redis outage, which is the right trade here too: a
+    stripped-down instance with no Redis should still geocode.
     """
     if not settings.GEOCODER_URL:
         logger.warning("GEOCODER_URL is not configured; geocoding is unavailable.")
         return None
 
-    await enforce_rate_limit(
-        "geocode:provider",
-        settings.GEOCODER_PROVIDER_RATE_LIMIT_REQUESTS,
-        settings.GEOCODER_PROVIDER_RATE_LIMIT_WINDOW_SECONDS,
-    )
+    try:
+        await enforce_rate_limit(
+            "geocode:provider",
+            settings.GEOCODER_PROVIDER_RATE_LIMIT_REQUESTS,
+            settings.GEOCODER_PROVIDER_RATE_LIMIT_WINDOW_SECONDS,
+        )
+    except RateLimitException:
+        logger.warning("Skipping a geocoder call to %s: this instance is over its provider rate limit.", path)
+        return None
 
     # `accept-language` is not optional politeness: without it Nominatim answers in the
     # local script, and "دهب, مصر" is not what a diver wants written into their logbook.
@@ -166,6 +180,10 @@ async def _request(path: str, params: dict[str, Any]) -> list[dict[str, Any]] | 
 
     url = f"{settings.GEOCODER_URL.rstrip('/')}{path}"
     try:
+        # A client per call, deliberately: the provider cap above holds this to roughly one
+        # request a second, so a pooled connection would sit idle far longer than any
+        # keep-alive, and a module-level client would need lifespan wiring to be closed.
+        # An integration with real throughput should not copy this.
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             response = await client.get(url, params=query, headers={"User-Agent": settings.GEOCODER_USER_AGENT})
             response.raise_for_status()
@@ -180,12 +198,26 @@ async def _request(path: str, params: dict[str, Any]) -> list[dict[str, Any]] | 
         return None
 
     if isinstance(payload, dict):
-        # `/reverse` answers with a bare object, and with `{"error": ...}` for a point that
-        # resolves to nothing - which is an answer, not a failure.
-        return [] if "error" in payload else [payload]
+        # `/reverse` answers with a bare object - and with `{"error": ...}` for two very
+        # different things. "Unable to geocode" is a real answer about a real position and
+        # belongs in the cache; a bandwidth or abuse complaint wears the same shape and
+        # must not be, or one bad minute pins a genuine place as "no result" for an hour.
+        error = payload.get("error")
+        if error is not None:
+            if _NO_RESULT_ERROR in str(error).casefold():
+                return []
+            logger.warning("Geocoder refused %s: %s", path, error)
+            return None
+        return [payload]
     if isinstance(payload, list):
         return [row for row in payload if isinstance(row, dict)]
     return []
+
+
+def _text(value: Any) -> str | None:
+    """A trimmed string, or `None` for anything blank or not a string. The provider's JSON
+    is untyped, so every field it hands over is a maybe-string."""
+    return value.strip() or None if isinstance(value, str) else None
 
 
 def _first_present(address: dict[str, Any], keys: tuple[str, ...]) -> str | None:
@@ -214,8 +246,7 @@ def _short_location(row: dict[str, Any]) -> str:
         place = _first_present(address, _PLACE_KEYS) or _first_present(address, _REGION_KEYS)
         parts = [part for part in (place, _first_present(address, ("country",))) if part]
 
-    display_name = str(row.get("display_name") or "").strip()
-    return (", ".join(parts) or display_name)[:_LOCATION_MAX_LENGTH]
+    return (", ".join(parts) or _text(row.get("display_name")) or "")[:_LOCATION_MAX_LENGTH]
 
 
 def _normalize(row: dict[str, Any]) -> GeocodeResult | None:
@@ -234,15 +265,13 @@ def _normalize(row: dict[str, Any]) -> GeocodeResult | None:
     if not location:
         return None
 
-    name = row.get("name")
-    licence = row.get("licence")
     return GeocodeResult(
         latitude=latitude,
         longitude=longitude,
         location=location,
-        display_name=str(row.get("display_name") or "").strip() or location,
-        name=name.strip() or None if isinstance(name, str) else None,
-        attribution=licence.strip() if isinstance(licence, str) and licence.strip() else _DEFAULT_ATTRIBUTION,
+        display_name=_text(row.get("display_name")) or location,
+        name=_text(row.get("name")),
+        attribution=_text(row.get("licence")) or _DEFAULT_ATTRIBUTION,
     )
 
 
@@ -277,12 +306,19 @@ async def search_places(query: str) -> list[GeocodeResult]:
     outbound call, so trivially different spellings of the same search share one cached
     answer instead of each costing a provider slot. Nominatim matches case-insensitively,
     so nothing is lost by asking in lower case.
+
+    The key holds a digest of that text rather than the text itself. Unlike every other key
+    in this app the discriminator here is free-form input - up to 200 characters of
+    whatever a diver typed, in any script - and a fixed-width digest keeps key length off
+    the caller entirely. It costs the ability to read the query out of `redis-cli --scan`,
+    which is a fair trade for the same reason the coordinate keys are rounded: these are a
+    cache, not a log of what people searched for.
     """
     normalized = " ".join(query.split()).lower()
     if not normalized:
         return []
 
-    key = _cache_key("search", normalized)
+    key = _cache_key("search", hashlib.sha256(normalized.encode()).hexdigest()[:32])
     cached = await _cached(key)
     if cached is not None:
         return cached
