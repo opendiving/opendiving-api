@@ -15,5 +15,6 @@ from .gear_service_schedule import GearServiceSchedule
 from .gear_set import GearSet
 from .gear_set_item import GearSetItem
 from .trip import Trip
+from .trip_location import TripLocation
 from .user import User
 from .user_dive_stats import UserDiveStats
