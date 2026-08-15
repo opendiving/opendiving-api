@@ -5264,6 +5264,16 @@ primary function is geocoding. A dive log that geocodes when a site is created i
 result is persisted onto `dive_site.location`, so the provider is hit once per site rather than once
 per page view.
 
+**What leaves the instance, said plainly:** on a cache miss, a pinned coordinate or a typed search
+string goes to `nominatim.openstreetmap.org` — a third party the operator has no agreement with —
+along with the `User-Agent` identifying this app. Not the diver: no account, dive, or token is sent,
+and the caller's IP is this server's. That is inherent to a keyless default rather than a bug, and
+caching means it happens once per place rather than once per view, but it is user data leaving, and
+an operator with a privacy policy needs to know. `GEOCODER_URL=""` switches it off entirely and the
+endpoints answer "no suggestion"; pointing it at a self-hosted Nominatim removes the third party
+without removing the feature. Both are documented in `.env.example` next to the setting itself,
+which is where someone auditing this will actually look.
+
 **The geocoding cache keys are the one deliberate exception to "cache keys stay user-scoped."**
 "What is at 28.572, 34.537" has the same answer for everybody, and the whole reason those terms
 tolerate this feature is that one lookup serves every diver who ever pins that spot; keying it per

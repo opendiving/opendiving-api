@@ -11,6 +11,7 @@ off must produce "no result", never a 5xx - a diver can always type the location
 """
 
 import json
+import logging
 from collections.abc import Callable, Generator
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -191,6 +192,14 @@ class TestSearchRoute:
         assert response.status_code == 200
         assert response.json() == []
 
+    def test_bounds_the_number_of_results_itself(self, client: TestClient, no_redis: None):
+        """`limit` is asked for, not relied on: a mirror that caps differently would
+        otherwise have every row it sent normalized, cached for a month and returned."""
+        with _responds([REVERSE_PAYLOAD] * 20):
+            response = client.get("/api/v1/geocode/search", params={"q": "dahab"})
+
+        assert len(response.json()) == geocoding_service._SEARCH_RESULT_LIMIT
+
     def test_rejects_a_one_character_query(self, client: TestClient, no_redis: None):
         with _responds([]) as patched:
             response = client.get("/api/v1/geocode/search", params={"q": "d"})
@@ -250,6 +259,20 @@ class TestProviderContract:
             client.get("/api/v1/geocode/reverse", params={"lat": 1, "lon": 2})
 
         assert dict(patched.requests[0].url.params)["key"] == "secret-key"
+
+    def test_the_api_key_never_reaches_the_log(self, client: TestClient, no_redis: None, monkeypatch: Any, caplog):
+        """The key rides in the query string because that is where Nominatim-compatible
+        mirrors want it - and httpx logs the *full URL* of every request it makes at INFO.
+        `core.setup` pins that logger to WARNING for exactly this reason; this asserts it,
+        at INFO, so nobody removes the line and finds out from a log aggregator.
+        """
+        monkeypatch.setattr(settings, "GEOCODER_API_KEY", "super-secret-key")
+
+        with caplog.at_level(logging.INFO), _responds({"error": "Bandwidth limit exceeded"}):
+            client.get("/api/v1/geocode/reverse", params={"lat": 1, "lon": 2})
+
+        assert caplog.records, "expected the refusal to be logged at all"
+        assert "super-secret-key" not in caplog.text
 
     def test_lowercases_and_collapses_the_search_query(self, client: TestClient, no_redis: None):
         with _responds([]) as patched:
@@ -420,12 +443,13 @@ class TestThrottling:
         assert response.status_code == 429
         assert patched.requests == []
 
-    def test_exceeding_the_provider_cap_degrades_instead_of_rejecting(self, client: TestClient, fake_redis: FakeRedis):
+    def test_a_sustained_provider_cap_degrades_instead_of_rejecting(self, client: TestClient, fake_redis: FakeRedis):
         """The provider counter is global, so raising would mean one diver's search
         rejecting another's. The call is skipped, nothing is cached, and the caller gets the
         same "no suggestion" a provider outage produces."""
         with (
             _responds(REVERSE_PAYLOAD) as provider,
+            patch("src.app.services.geocoding_service.anyio.sleep", new_callable=AsyncMock),
             patch("src.app.services.geocoding_service.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
         ):
             provider_limit.side_effect = RateLimitException("Too many requests. Please try again later.")
@@ -436,6 +460,40 @@ class TestThrottling:
         assert response.json() == []
         assert provider.requests == []
         assert fake_redis.store == {}
+
+    def test_waits_out_the_provider_cap_once_before_giving_up(self, client: TestClient, no_redis: None):
+        """`[]` is byte-identical to "nothing matched", so a diver told a place doesn't exist
+        has no way to know they were merely unlucky with the window. One wait turns the
+        common collision - two type-ahead queries in the same second - into a slow right
+        answer rather than a confidently wrong one."""
+        with (
+            _responds([REVERSE_PAYLOAD]) as provider,
+            patch("src.app.services.geocoding_service.anyio.sleep", new_callable=AsyncMock) as slept,
+            patch("src.app.services.geocoding_service.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
+        ):
+            provider_limit.side_effect = [RateLimitException("Too many requests."), None]
+
+            response = client.get("/api/v1/geocode/search", params={"q": "dahab"})
+
+        assert [row["name"] for row in response.json()] == ["Blue Hole"]
+        assert len(provider.requests) == 1
+        slept.assert_awaited_once()
+
+    def test_never_waits_longer_than_a_second(self, client: TestClient, no_redis: None, monkeypatch: Any):
+        """Capped independently of the window, so an operator who throttles their own
+        Nominatim gently can't turn that into a request held open for a minute."""
+        monkeypatch.setattr(settings, "GEOCODER_PROVIDER_RATE_LIMIT_WINDOW_SECONDS", 60)
+
+        with (
+            _responds([]),
+            patch("src.app.services.geocoding_service.anyio.sleep", new_callable=AsyncMock) as slept,
+            patch("src.app.services.geocoding_service.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
+        ):
+            provider_limit.side_effect = RateLimitException("Too many requests.")
+
+            client.get("/api/v1/geocode/search", params={"q": "dahab"})
+
+        assert [call.args[0] for call in slept.await_args_list] == [1.0]
 
 
 class TestShortLocation:

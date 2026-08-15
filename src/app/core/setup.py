@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncGenerator, Callable
 from contextlib import _AsyncGeneratorContextManager, asynccontextmanager
 from typing import Any
@@ -27,6 +28,18 @@ from .config import (
 from .db.database import Base
 from .db.database import async_engine as engine
 from .utils import cache
+
+# -------------- logging --------------
+# httpx logs every request it makes at INFO as `HTTP Request: GET <full url> "..."`, and
+# `services.geocoding_service` - the app's only outbound HTTP client - sends
+# `GEOCODER_API_KEY` as a query parameter, which is where Nominatim-compatible mirrors want
+# it. So at INFO the key is written into whatever collects this app's logs, defeating the
+# care that service takes to log the request *path* and never the built URL.
+#
+# Applied here rather than in `core.logger`, which is where it belongs on paper but which
+# nothing currently imports; a hazard guarded only in dead configuration is not guarded.
+# WARNING rather than off, so a genuine httpx problem is still visible.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # -------------- database --------------
 # Arbitrary constant; the only thing that matters is that every process runs `create_tables`

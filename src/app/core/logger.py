@@ -18,3 +18,10 @@ file_handler.setLevel(LOGGING_LEVEL)
 file_handler.setFormatter(logging.Formatter(LOGGING_FORMAT))
 
 logging.getLogger("").addHandler(file_handler)
+
+# NOTE: nothing imports this module. It is the app's logging configuration on paper only -
+# `app.log` in this directory is a leftover from whenever it last was imported. Anything
+# that has to actually hold, therefore, cannot live here: `core.setup` pins the httpx logger
+# to WARNING so that `GEOCODER_API_KEY` never reaches a log, precisely because putting that
+# line in this file would have guarded nothing. Wire this module up or delete it, but don't
+# add safety-critical configuration to it while it is neither.

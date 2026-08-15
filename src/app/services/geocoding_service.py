@@ -23,6 +23,7 @@ import json
 import logging
 from typing import Any
 
+import anyio
 import httpx
 from pydantic import ValidationError
 from redis.exceptions import RedisError
@@ -41,6 +42,12 @@ logger = logging.getLogger(__name__)
 _TIMEOUT = httpx.Timeout(5.0)
 
 _SEARCH_RESULT_LIMIT = 5
+
+# How long a request will wait for the instance's provider cap to free up before giving up
+# and answering "no suggestion". Capped independently of the configured window so that
+# raising that window (a self-hoster throttling their own Nominatim more gently) can never
+# turn into a request held open for a minute.
+_MAX_PROVIDER_WAIT_SECONDS = 1.0
 
 # ~110 m. Reverse lookups are rounded to this before both the cache key and the outbound
 # query, so every pin inside one cell shares one answer - which is the point, since the
@@ -135,6 +142,23 @@ async def _store(key: str, results: list[GeocodeResult]) -> None:
         logger.warning("Geocoding cache write failed (%s).", type(exc).__name__)
 
 
+async def _claim_provider_slot() -> bool:
+    """Take one slot against the instance-wide provider cap, or report that there is none.
+
+    A boolean rather than the exception `enforce_rate_limit` raises, because here being over
+    the cap is an ordinary branch to wait on - not an error to propagate.
+    """
+    try:
+        await enforce_rate_limit(
+            "geocode:provider",
+            settings.GEOCODER_PROVIDER_RATE_LIMIT_REQUESTS,
+            settings.GEOCODER_PROVIDER_RATE_LIMIT_WINDOW_SECONDS,
+        )
+    except RateLimitException:
+        return False
+    return True
+
+
 async def _request(path: str, params: dict[str, Any]) -> list[dict[str, Any]] | None:
     """Ask the provider, returning its rows - or `None` when we could not ask at all.
 
@@ -145,8 +169,15 @@ async def _request(path: str, params: dict[str, Any]) -> list[dict[str, Any]] | 
     Being over the *provider's* cap is one of the ways we "could not ask", not a 429. That
     counter is global - it has to be, since the cap belongs to the instance rather than to
     any caller - so raising would mean one diver's search rejecting another diver's, which
-    is both baffling from the outside and a contract this endpoint doesn't make. It is
-    logged instead, because an instance that keeps hitting its cap is an operator problem.
+    is both baffling from the outside and a contract this endpoint doesn't make.
+
+    But skipping straight to "no result" is its own trap, because `[]` is byte-identical to
+    "nothing matched": the diver is told a place doesn't exist when it does, and retrying
+    looks like confirmation. So the cap is *waited on* once before it is given up on. At the
+    default of one request per second that turns the common collision - two type-ahead
+    queries from one diver landing in the same window - into a slightly slow right answer
+    instead of a confidently wrong one. Only once, and bounded, so a genuinely saturated
+    instance sheds load rather than queueing behind itself.
 
     The limiter fails open on a Redis outage, which is the right trade here too: a
     stripped-down instance with no Redis should still geocode.
@@ -155,15 +186,11 @@ async def _request(path: str, params: dict[str, Any]) -> list[dict[str, Any]] | 
         logger.warning("GEOCODER_URL is not configured; geocoding is unavailable.")
         return None
 
-    try:
-        await enforce_rate_limit(
-            "geocode:provider",
-            settings.GEOCODER_PROVIDER_RATE_LIMIT_REQUESTS,
-            settings.GEOCODER_PROVIDER_RATE_LIMIT_WINDOW_SECONDS,
-        )
-    except RateLimitException:
-        logger.warning("Skipping a geocoder call to %s: this instance is over its provider rate limit.", path)
-        return None
+    if not await _claim_provider_slot():
+        await anyio.sleep(min(settings.GEOCODER_PROVIDER_RATE_LIMIT_WINDOW_SECONDS, _MAX_PROVIDER_WAIT_SECONDS))
+        if not await _claim_provider_slot():
+            logger.warning("Skipping a geocoder call to %s: this instance is over its provider rate limit.", path)
+            return None
 
     # `accept-language` is not optional politeness: without it Nominatim answers in the
     # local script, and "دهب, مصر" is not what a diver wants written into their logbook.
@@ -190,7 +217,8 @@ async def _request(path: str, params: dict[str, Any]) -> list[dict[str, Any]] | 
             payload = response.json()
     except httpx.HTTPError as exc:
         # `path`, never the built URL: that one carries GEOCODER_API_KEY as a query
-        # parameter, and `core.logger` writes to a file on disk.
+        # parameter, and logs get collected, shipped and kept. httpx would log the whole URL
+        # itself at INFO, which is why `core.setup` pins its logger to WARNING.
         logger.warning("Geocoder request to %s failed (%s).", path, type(exc).__name__)
         return None
     except ValueError:
@@ -327,6 +355,9 @@ async def search_places(query: str) -> list[GeocodeResult]:
     if rows is None:
         return []
 
-    results = [result for result in (_normalize(row) for row in rows) if result is not None]
+    # Sliced here, not only asked for via `limit`: a mirror that caps differently, or
+    # ignores the parameter, would otherwise have every row it sent normalized, cached for
+    # a month and returned. The bound on the response belongs to this app.
+    results = [result for result in (_normalize(row) for row in rows) if result is not None][:_SEARCH_RESULT_LIMIT]
     await _store(key, results)
     return results
