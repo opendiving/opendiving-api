@@ -17,6 +17,7 @@ The source is public domain (Natural Earth), which is the reason it can be vendo
 """
 
 import json
+import os
 import sys
 import urllib.request
 from datetime import date
@@ -33,6 +34,8 @@ _OUTPUT = Path(__file__).resolve().parent.parent / "src" / "app" / "data" / "mar
 # of existence entirely, which is a bad trade for a tenth of a megabyte.
 _PRECISION = 4
 
+_DOWNLOAD_TIMEOUT_SECONDS = 60
+
 
 def _name(properties: dict[str, Any]) -> str | None:
     """Natural Earth shouts two of the ocean names - `SOUTHERN OCEAN`, `INDIAN OCEAN` - while
@@ -47,9 +50,10 @@ def _name(properties: dict[str, Any]) -> str | None:
 
 def _ring(coordinates: list[Any]) -> list[list[float]] | None:
     """A rounded ring, or `None` if rounding collapsed it into something that is no longer a
-    polygon. Consecutive duplicates are dropped: at four decimals a handful of vertices in
-    the densest coastlines round onto each other, and a repeated vertex is a zero-length
-    edge that the ray-casting crossing test would count twice."""
+    polygon. Consecutive duplicates are dropped because at four decimals a handful of vertices
+    in the densest coastlines round onto each other, and a ring carrying its own vertices
+    twice is just a bigger file - the crossing test ignores a zero-length edge either way,
+    since both its endpoints sit on the same side of any ray."""
     rounded: list[list[float]] = []
     for point in coordinates:
         vertex = [round(float(point[0]), _PRECISION), round(float(point[1]), _PRECISION)]
@@ -113,7 +117,7 @@ def _antimeridian_is_already_handled(features: list[dict[str, Any]]) -> bool:
 
 
 def main() -> int:
-    with urllib.request.urlopen(SOURCE_URL) as response:
+    with urllib.request.urlopen(SOURCE_URL, timeout=_DOWNLOAD_TIMEOUT_SECONDS) as response:
         source = json.loads(response.read())
 
     features = []
@@ -135,7 +139,13 @@ def main() -> int:
         "generated_by": "scripts/build_marine_areas.py",
         "features": features,
     }
-    _OUTPUT.write_text(json.dumps(document, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+    # Written beside the target and moved into place, because `docker-compose.yml` bind-mounts
+    # `./src/app` straight into the running container: a plain in-place write means a request
+    # arriving mid-regeneration reads a half-written file. `os.replace` is atomic within a
+    # filesystem, so a reader sees either the old file or the new one.
+    staged = _OUTPUT.with_suffix(".geojson.tmp")
+    staged.write_text(json.dumps(document, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+    os.replace(staged, _OUTPUT)
     print(f"{_OUTPUT}: {len(features)} features, {_OUTPUT.stat().st_size / 1024:.0f} KiB")
     return 0
 

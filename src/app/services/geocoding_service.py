@@ -39,7 +39,7 @@ from ..core.exceptions.http_exceptions import RateLimitException
 from ..core.utils import cache
 from ..core.utils.rate_limit import enforce_rate_limit
 from ..schemas.geocoding import GeocodeResult
-from .marine_areas import sea_name
+from .marine_areas import water_name
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +103,7 @@ _DEFAULT_ATTRIBUTION = "Data © OpenStreetMap contributors, ODbL 1.0. https://os
 # The offshore fallback's credit. Natural Earth asks for nothing, but the clients render
 # this string verbatim under the suggestion, and "where did this name come from" is a fair
 # question when it did not come from the provider named everywhere else.
-_MARINE_ATTRIBUTION = "Sea names from Natural Earth, public domain. https://www.naturalearthdata.com"
+_MARINE_ATTRIBUTION = "Water body names from Natural Earth, public domain. https://www.naturalearthdata.com"
 
 # What Nominatim says when a position resolves to nothing - the *only* `error` payload that
 # means "this is the answer" rather than "we are not answering you". Matched on the message
@@ -168,11 +168,20 @@ async def _cached(key: str) -> list[GeocodeResult] | None:
         return None
 
 
-async def _store(key: str, results: list[GeocodeResult]) -> None:
+async def _store(key: str, results: list[GeocodeResult], *, settled: bool = False) -> None:
+    """`settled` promotes an *empty* answer to the long TTL.
+
+    The short one exists because an empty answer is usually provider weirdness rather than a
+    fact about the world - but for a position the local polygons place in open water, it is
+    exactly a fact about the world, and one Nominatim will not change its mind about. Left at
+    an hour, every popular offshore cell would re-ask the provider hourly, forever, for a
+    question it has already answered - the opposite of what its terms ask of us. The cost is
+    that a newly mapped feature out there takes a month to surface instead of an hour.
+    """
     if cache.client is None:
         return
 
-    ttl = _HIT_TTL_SECONDS if results else _MISS_TTL_SECONDS
+    ttl = _HIT_TTL_SECONDS if results or settled else _MISS_TTL_SECONDS
     try:
         await cache.client.set(key, json.dumps([result.model_dump() for result in results]), ex=ttl)
     except RedisError as exc:
@@ -394,9 +403,16 @@ def _offshore(lat: float, lon: float) -> GeocodeResult | None:
     """The sea at a position, for a point the provider had no row for - or `None`.
 
     Coastal water is *not* this: territorial waters fall inside an admin boundary, so a pin
-    off Bali already reverse-geocodes to "Bali, Indonesia", which beats "Bali Sea". This runs
-    only where the provider answered and left us with nothing usable - "unable to geocode",
-    which is genuinely open water, or the rarer case of a row `_normalize` had to drop.
+    off Bali already reverse-geocodes to "Bali, Indonesia", which beats "Bali Sea".
+
+    This runs where the provider answered and left us with nothing usable. Nearly always that
+    means "unable to geocode", which is genuinely open water; it also covers the rarer case of
+    a row `_normalize` had to drop - one with no coordinates or nothing displayable - which is
+    strictly a provider answer and could in principle be excluded. It isn't, because the cache
+    cannot tell the two apart: both are stored as `[]`, so gating the fresh call on
+    `rows == []` would have the first request answer `None` and the second "Red Sea". A
+    coherent answer beats a marginally more principled one on a branch a `/reverse` row has
+    to be malformed to reach.
 
     `latitude`/`longitude` echo the position that was asked about rather than the polygon's
     centroid - the caller is about to drop a pin at what comes back, and the centre of the
@@ -410,7 +426,7 @@ def _offshore(lat: float, lon: float) -> GeocodeResult | None:
     if not settings.GEOCODER_URL:
         return None
 
-    name = sea_name(lat, lon)
+    name = water_name(lat, lon)
     if name is None:
         return None
 
@@ -437,11 +453,14 @@ async def reverse_geocode(latitude: float, longitude: float) -> GeocodeResult | 
 
     The offshore fallback runs **outside the cache**, on both branches below. What is stored
     stays an honest record of what the provider said, so refreshing the polygons takes effect
-    immediately instead of waiting out an hour of cached `[]`; the lookup is local and costs
-    a fraction of a millisecond, so there is nothing to save by caching it. It is deliberately
-    not reached when `_request` returns `None` - "we could not ask" is not the provider
-    telling us the position is open water, and answering "Bali Sea" during an outage where
-    the answer is "Bali, Indonesia" would write the worse string into a dive site for good.
+    immediately instead of waiting out a cached `[]`; the lookup is local and costs a fraction
+    of a millisecond, so there is nothing to save by caching it. What the fallback *does*
+    change is how long the provider's `[]` is kept - see `_store`.
+
+    It is deliberately not reached when `_request` returns `None` - "we could not ask" is not
+    the provider telling us the position is open water, and answering "Bali Sea" during an
+    outage where the answer is "Bali, Indonesia" would write the worse string into a dive site
+    for good.
     """
     lat = round(latitude, _COORDINATE_PRECISION)
     lon = round(longitude, _COORDINATE_PRECISION)
@@ -456,8 +475,9 @@ async def reverse_geocode(latitude: float, longitude: float) -> GeocodeResult | 
         return None
 
     results = [result for result in (_normalize(row) for row in rows) if result is not None][:1]
-    await _store(key, results)
-    return results[0] if results else _offshore(lat, lon)
+    offshore = _offshore(lat, lon) if not results else None
+    await _store(key, results, settled=offshore is not None)
+    return results[0] if results else offshore
 
 
 async def search_places(query: str) -> list[GeocodeResult]:

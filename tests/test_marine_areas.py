@@ -8,14 +8,15 @@ across the antimeridian - fails here rather than in production.
 """
 
 import json
-import logging
 from collections.abc import Generator
 from pathlib import Path
 
 import pytest
 
 from src.app.services import marine_areas
-from src.app.services.marine_areas import Ring, sea_name
+from src.app.services.marine_areas import Ring, water_name
+
+_REAL_DATA = marine_areas._DATA_PATH
 
 
 def _ring_of(low: float, high: float) -> Ring:
@@ -48,7 +49,7 @@ class TestKnownPositions:
         ],
     )
     def test_names_the_sea(self, latitude: float, longitude: float, expected: str):
-        assert sea_name(latitude, longitude) == expected
+        assert water_name(latitude, longitude) == expected
 
     @pytest.mark.parametrize(
         "latitude,longitude",
@@ -58,16 +59,16 @@ class TestKnownPositions:
             (-24.0, 133.0),  # central Australia
         ],
     )
-    def test_land_has_no_sea_name(self, latitude: float, longitude: float):
+    def test_land_has_no_water_name(self, latitude: float, longitude: float):
         """The dataset holds water, not coastlines, so "not in any polygon" is the only thing
         this can know - and it is the right answer for a point on land."""
-        assert sea_name(latitude, longitude) is None
+        assert water_name(latitude, longitude) is None
 
     def test_an_island_inside_a_sea_is_not_the_sea(self):
         """Islands arrive as holes in the surrounding polygon, and a hole that went unread
         would name every Greek island "Aegean Sea"."""
-        assert sea_name(37.0, 25.2) == "Aegean Sea"
-        assert sea_name(37.1, 25.5) is None  # Naxos, a hole in that same polygon
+        assert water_name(37.0, 25.2) == "Aegean Sea"
+        assert water_name(37.1, 25.5) is None  # Naxos, a hole in that same polygon
 
     def test_a_hole_ends_the_search_rather_than_deferring_to_a_bigger_sea(self, monkeypatch: pytest.MonkeyPatch):
         """The failure guarded against is not "the hole was ignored" but "the hole was
@@ -85,16 +86,16 @@ class TestKnownPositions:
         ocean_that_missed_it = _square("Big Ocean", -10, 10)
         monkeypatch.setattr(marine_areas, "_parts", lambda: (island_in_a_bay, ocean_that_missed_it))
 
-        assert sea_name(0.9, 0.9) == "Small Bay"
-        assert sea_name(5.0, 5.0) == "Big Ocean"
-        assert sea_name(0.0, 0.0) is None
+        assert water_name(0.9, 0.9) == "Small Bay"
+        assert water_name(5.0, 5.0) == "Big Ocean"
+        assert water_name(0.0, 0.0) is None
 
     def test_decides_a_boundary_rather_than_smearing_it(self):
         """Two positions 0.1° apart across the Red Sea's eastern shore. The pair matters more
         than either point: a ray-casting bug usually reads as "everything is inside" or
         "nothing is", and one assertion alone catches neither."""
-        assert sea_name(20.0, 40.4) == "Red Sea"
-        assert sea_name(20.0, 40.5) is None
+        assert water_name(20.0, 40.4) == "Red Sea"
+        assert water_name(20.0, 40.5) is None
 
 
 class TestOverlappingAreas:
@@ -104,12 +105,12 @@ class TestOverlappingAreas:
     def test_the_smaller_area_wins(self):
         """A diver wants "Red Sea"; "Indian Ocean", which also contains this point, is
         technically true and useless."""
-        assert sea_name(20.0, 38.5) == "Red Sea"
+        assert water_name(20.0, 38.5) == "Red Sea"
 
     def test_open_ocean_still_gets_its_ocean(self):
         """The flip side: nothing smaller contains this point, so the coarse name is not a
         fallback failure but the whole answer."""
-        assert sea_name(30.0, -40.0) == "North Atlantic Ocean"
+        assert water_name(30.0, -40.0) == "North Atlantic Ocean"
 
 
 class TestTheAntimeridian:
@@ -119,10 +120,10 @@ class TestTheAntimeridian:
     answer correctly on one side."""
 
     def test_east_of_the_meridian(self):
-        assert sea_name(58.0, 170.0) == "Bering Sea"
+        assert water_name(58.0, 170.0) == "Bering Sea"
 
     def test_west_of_the_meridian(self):
-        assert sea_name(60.0, -170.0) == "Bering Sea"
+        assert water_name(60.0, -170.0) == "Bering Sea"
 
     def test_no_polygon_part_wraps_the_meridian(self):
         """A part whose longitudes span more than half the globe would be a ring stitched
@@ -144,38 +145,37 @@ class TestDegradation:
     truncated data file must not turn the dive-site form into a 500."""
 
     @pytest.fixture(autouse=True)
-    def uncached(self) -> Generator[None]:
-        """`_parts` memoizes, so a test that swaps the path has to clear it on both sides -
-        or it either reads the real file or leaves an empty one behind for everything after."""
-        marine_areas._parts.cache_clear()
+    def unloaded(self) -> Generator[None]:
+        """`_parts` remembers a successful read, so a test that swaps the path has to reset it
+        on both sides - or it reads the real file instead of the broken one."""
+        marine_areas._loaded = None
         yield
-        marine_areas._parts.cache_clear()
+        marine_areas._loaded = None
 
     @pytest.mark.parametrize("contents", ["", "{ truncated", '{"features": [{"properties": {}}]}'])
-    def test_an_unusable_file_means_no_sea_name(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contents: str):
+    def test_an_unusable_file_means_no_water_name(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contents: str):
         broken = tmp_path / "marine_areas.geojson"
         broken.write_text(contents, encoding="utf-8")
         monkeypatch.setattr(marine_areas, "_DATA_PATH", broken)
 
-        assert sea_name(27.0, 35.0) is None
+        assert water_name(27.0, 35.0) is None
 
-    def test_a_missing_file_means_no_sea_name(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    def test_a_missing_file_means_no_water_name(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(marine_areas, "_DATA_PATH", tmp_path / "not-here.geojson")
 
-        assert sea_name(27.0, 35.0) is None
+        assert water_name(27.0, 35.0) is None
 
-    def test_the_failure_is_read_once_rather_than_per_request(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
-    ):
-        """An empty answer is memoized like any other, so a broken file costs one read per
-        process - not one per lookup, on a path already reached only after a provider miss."""
-        monkeypatch.setattr(marine_areas, "_DATA_PATH", tmp_path / "not-here.geojson")
+    def test_a_repaired_file_recovers_without_a_restart(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """Only a successful read is remembered. Memoizing the failure would leave one bad
+        read to disable the fallback for the life of the process, on evidence no stronger than
+        a single `OSError` - and this is exactly what a mid-regeneration read looks like."""
+        path = tmp_path / "marine_areas.geojson"
+        monkeypatch.setattr(marine_areas, "_DATA_PATH", path)
+        assert water_name(27.0, 35.0) is None
 
-        with caplog.at_level(logging.WARNING):
-            sea_name(27.0, 35.0)
-            sea_name(30.0, -40.0)
+        path.write_text(_REAL_DATA.read_text(encoding="utf-8"), encoding="utf-8")
 
-        assert len([record for record in caplog.records if "Could not read" in record.message]) == 1
+        assert water_name(27.0, 35.0) == "Red Sea"
 
 
 class TestTheVendoredFile:

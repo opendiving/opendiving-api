@@ -5416,8 +5416,13 @@ rather than at import so the arq worker and most of the test suite never pay it 
 **A polygon that will not load answers "no sea", not a 500.** Reading the file is the only step in
 that module that touches the world, and the whole geocoding path promises to degrade to "no
 suggestion" rather than raise — a truncated data file breaking the dive-site form would be a poor
-trade for a convenience. The empty result is memoized like any other, so a broken file costs one
-read per process rather than one per request.
+trade for a convenience. **Only a successful read is remembered**, though — memoizing the failure is
+cheaper and is the wrong trade, since it turns one bad read into a fallback that is dead for the
+life of the process on evidence no stronger than a single `OSError`. The realistic trigger ships in
+this same change: `docker-compose.yml` bind-mounts `./src/app` into the running container, so a
+request landing mid-regeneration reads a half-written file. `scripts/build_marine_areas.py`
+therefore stages its output and `os.replace`s it into position, and the loader retries rather than
+latching.
 
 **It is a fallback, never a replacement, and that is the part most likely to be got wrong.** Coastal
 water already works: `-8.9, 115.5` off Bali returns "Bali, Indonesia", because territorial waters
@@ -5429,11 +5434,20 @@ written onto a dive site permanently. `GEOCODER_URL=""` is refused for the same 
 other end: an operator who switched geocoding off should not find half of it still running.
 
 **It is applied after the cache and is not in it.** What Redis holds stays an honest record of what
-the provider said — `[]` under the one-hour miss TTL — and the sea name is composed on the way out,
-on the cache-hit branch as well as the fresh one. Caching it would buy nothing (the lookup is local
-and free) and would cost something real: refreshed polygons would wait out an hour of stale misses.
-`_cache_key` carries a `_CACHE_VERSION`, which is the escape hatch if the fallback ever does end up
-cached.
+the provider said — `[]` — and the sea name is composed on the way out, on the cache-hit branch as
+well as the fresh one. Caching it would buy nothing (the lookup is local and free) and would cost
+something real: refreshed polygons would wait out a cached miss. `_cache_key` carries a
+`_CACHE_VERSION`, which is the escape hatch if the fallback ever does end up cached.
+
+**What it does change is how long that `[]` is kept.** The miss TTL is an hour because an empty
+answer is usually provider weirdness rather than a fact about the world — but that reasoning is
+exactly what the polygons disprove for these cells: a position in open water is a fact, and not one
+Nominatim will change its mind about. Left at an hour, every popular offshore cell would re-ask the
+provider hourly, forever, for a question already answered, which is the opposite of what its terms
+ask of us. So an empty answer the polygons corroborate is stored under the month-long *hit* TTL
+instead, and one over land keeps the short one. The cost is that a newly mapped OSM feature out
+there takes a month to surface rather than an hour; polygon refreshes are unaffected either way,
+since the name is composed outside the cache.
 
 **Filling `GeocodeResult`:** `latitude`/`longitude` echo the position that was asked about, already
 rounded to ~110 m like every other reverse answer — the caller is about to drop a pin at what comes
@@ -5480,11 +5494,16 @@ two shouted names (`SOUTHERN OCEAN`, `INDIAN OCEAN`) are title-cased, because th
 for `dive_site.location`. The source URL, retrieval date and public-domain status live as top-level
 members *inside* `marine_areas.geojson`, where they cannot drift away from the data.
 
-Two things worth knowing before trusting a coordinate to it. The dataset holds water, not
-coastlines, so "not in any polygon" is all it can say about a point — the Sahara and Lake Baikal are
-equally absent. And its coverage is coarse: the Gulf of Aqaba, narrow and dived constantly, is
-simply not in it, and answers `None`. Neither matters in practice, because both are places Nominatim
-names anyway.
+Three things worth knowing before trusting a coordinate to it. The dataset holds water, not
+coastlines, so "not in any polygon" is all it can say about a point — the Sahara and Lake Baikal,
+which is not in the file, are equally absent. Its coverage is coarse: the Gulf of Aqaba, narrow and
+dived constantly, is simply not in it and answers `None`. And it is wider than "seas" — gulfs,
+straits, sounds, fjords, a handful of estuarine rivers ("Amazon River"), a few named lakes ("Lake
+Pontchartrain") and two reefs, of which "Great Barrier Reef" is a far better answer for a pin there
+than "Coral Sea". That last one is why the function is `water_name` and the attribution reads "Water
+body names from Natural Earth": a client rendering "Sea names from Natural Earth" under "Amazon
+River" is the kind of small wrongness nobody ever gets round to fixing. None of the three matters
+much in practice, because all are places Nominatim names anyway.
 
 ## `except ValueError, TypeError:` is valid, and `ruff format` writes it that way
 

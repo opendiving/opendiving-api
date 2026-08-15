@@ -1,4 +1,7 @@
-"""Name the sea at a position, from polygons vendored in the repo.
+"""Name the water at a position, from polygons vendored in the repo.
+
+Mostly seas and oceans, hence the module name, but the dataset also carries gulfs, straits,
+fjords, a few estuarine rivers and two reefs - see `water_name`.
 
 This exists because a pin in genuinely open water reverse-geocodes to nothing. Nominatim
 does not consult sea polygons on `/reverse` at all - `27.0, 35.0` in the Red Sea and
@@ -27,7 +30,6 @@ the source URL, the retrieval date and the licence inside the file itself.
 import json
 import logging
 from dataclasses import dataclass
-from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +64,10 @@ class _Part:
         return (self.max_lon - self.min_lon) * (self.max_lat - self.min_lat)
 
 
+# Set by `_parts` on the first successful read, and only then - see its docstring.
+_loaded: tuple[_Part, ...] | None = None
+
+
 def _ring(coordinates: list[Any]) -> Ring:
     return tuple((float(point[0]), float(point[1])) for point in coordinates)
 
@@ -87,9 +93,14 @@ def _parts_of(name: str, geometry: dict[str, Any]) -> list[_Part]:
     return parts
 
 
-@cache
-def _parts() -> tuple[_Part, ...]:
-    """Every polygon part, **smallest bounding box first**, so the first hit wins.
+def _load() -> tuple[_Part, ...] | None:
+    """Every polygon part, **smallest bounding box first**, so the first hit wins - or `None`
+    if the file could not be read.
+
+    Reading it is the only step in this module that touches the world, and
+    `services.geocoding_service` promises the whole path degrades to "no suggestion" rather
+    than raising: a 500 from a truncated data file would break the dive-site form over a
+    convenience.
 
     Overlap is the norm rather than the exception in this dataset - a point in the Red Sea
     is also inside "Indian Ocean", and one in the Coral Sea is inside "South Pacific Ocean".
@@ -99,22 +110,6 @@ def _parts() -> tuple[_Part, ...]:
 
     Comparing *bounding box* area rather than true polygon area is deliberate: it needs no
     geometry library and is not a close call for any pair this has to separate.
-
-    Loaded on first use, not at import: the arq worker imports this package and never
-    geocodes, and neither does most of the test suite. The cost is ~26 ms of JSON parsing and
-    tuple building, once per process, and it is spent synchronously inside whichever request
-    happens to be first - including one served entirely from cache. That is accepted rather
-    than overlooked: it is a single event per worker, well inside the deadline this endpoint
-    already budgets for the provider, and moving it to a thread or to app startup would buy
-    one request ~26 ms at the cost of wiring a lifespan hook into a module the worker does
-    not use. Revisit it if the dataset ever grows by an order of magnitude.
-
-    A file that has gone missing or unreadable answers "no parts", not an exception. This is
-    the only step in the module that touches the world, and `services.geocoding_service`
-    promises the whole path degrades to "no suggestion" rather than raising - a 500 from a
-    truncated data file would break the site form over a convenience. The empty tuple is
-    cached like any other result, so a broken file costs one read rather than one per
-    request.
     """
     try:
         document = json.loads(_DATA_PATH.read_text(encoding="utf-8"))
@@ -125,11 +120,36 @@ def _parts() -> tuple[_Part, ...]:
         ]
     except (OSError, ValueError, TypeError, KeyError, IndexError) as exc:
         logger.warning("Could not read %s (%s); offshore positions will go unnamed.", _DATA_PATH.name, exc)
-        return ()
+        return None
 
     parts.sort(key=lambda part: part.box_area)
     logger.debug("Loaded %d marine polygon parts from %s.", len(parts), _DATA_PATH.name)
     return tuple(parts)
+
+
+def _parts() -> tuple[_Part, ...]:
+    """The loaded polygons, reading the file the first time it is asked for.
+
+    Not at import: the arq worker imports this package and never geocodes, and neither does
+    most of the test suite. The cost is ~26 ms of JSON parsing and tuple building, once per
+    process, spent synchronously inside whichever request happens to be first - including one
+    served entirely from cache. That is accepted rather than overlooked: a single event per
+    worker, well inside the deadline this endpoint already budgets for the provider, where
+    moving it to a thread or to app startup would buy one request ~26 ms at the cost of wiring
+    a lifespan hook into a module the worker does not use. Revisit it if the dataset ever
+    grows by an order of magnitude.
+
+    **Only a successful read is remembered.** Memoizing the failure would be cheaper and is
+    the wrong trade: it turns one bad read into a fallback that is dead for the life of the
+    process, recoverable only by restarting, on evidence no stronger than a single `OSError`.
+    Retrying costs a file read on a path already reached only after a provider miss, and the
+    repeated warning is the point - an operator whose data file is broken should keep hearing
+    about it.
+    """
+    global _loaded
+    if _loaded is None:
+        _loaded = _load()
+    return _loaded or ()
 
 
 def _ring_contains(ring: Ring, longitude: float, latitude: float) -> bool:
@@ -161,12 +181,17 @@ def _outer_contains(part: _Part, longitude: float, latitude: float) -> bool:
     return _ring_contains(part.rings[0], longitude, latitude)
 
 
-def sea_name(latitude: float, longitude: float) -> str | None:
-    """The name of the sea, ocean, gulf or strait at a position - `None` over land.
+def water_name(latitude: float, longitude: float) -> str | None:
+    """The name of the water at a position - `None` for anywhere the dataset holds no water.
 
-    "Over land" here means "outside every marine polygon", which is the only thing this can
-    know: the dataset holds water, not coastlines, so a point in the Sahara and a point in
-    Lake Baikal are both simply absent from it.
+    Usually a sea or an ocean, but the dataset is wider than that and deliberately kept so:
+    gulfs, straits, sounds, channels, fjords, a handful of estuarine rivers ("Amazon River"),
+    a few named lakes ("Lake Pontchartrain") and two reefs, of which "Great Barrier Reef" is
+    a far better answer for a pin there than "Coral Sea".
+
+    It holds water, not coastlines, so "no polygon contains this" is the only thing it can
+    say about a position - a point in the Sahara and a point in Lake Baikal, which is not in
+    the file, are equally absent.
 
     **The first part whose outline contains the point decides, including deciding that the
     point is land.** Parts are ordered smallest-first, so that part is the most detailed
