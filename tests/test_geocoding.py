@@ -200,6 +200,15 @@ class TestSearchRoute:
 
         assert len(response.json()) == geocoding_service._SEARCH_RESULT_LIMIT
 
+    def test_counts_usable_rows_towards_the_bound_not_raw_ones(self, client: TestClient, no_redis: None):
+        """Unusable leading rows must not eat the budget - a search with five junk rows in
+        front of fifteen good ones is not an empty search."""
+        junk = [{"display_name": "no coordinates here"}] * 5
+        with _responds([*junk, *([REVERSE_PAYLOAD] * 15)]):
+            response = client.get("/api/v1/geocode/search", params={"q": "dahab"})
+
+        assert len(response.json()) == geocoding_service._SEARCH_RESULT_LIMIT
+
     def test_rejects_a_one_character_query(self, client: TestClient, no_redis: None):
         with _responds([]) as patched:
             response = client.get("/api/v1/geocode/search", params={"q": "d"})
@@ -234,6 +243,19 @@ class TestProviderContract:
             client.get("/api/v1/geocode/reverse", params={"lat": 1, "lon": 2})
 
         assert dict(provider.requests[0].url.params)["accept-language"] == settings.GEOCODER_LANGUAGE
+
+    def test_a_provider_change_does_not_serve_the_old_answer(
+        self, client: TestClient, fake_redis: FakeRedis, monkeypatch: Any
+    ):
+        """`attribution` is read from whoever answered and is a licence condition of their
+        data, so cached rows must not outlive the provider that produced them - and swapping
+        `GEOCODER_URL` is a `.env` edit, which `_CACHE_VERSION` cannot catch."""
+        with _responds(REVERSE_PAYLOAD) as provider:
+            client.get("/api/v1/geocode/reverse", params={"lat": 28.5717, "lon": 34.5372})
+            monkeypatch.setattr(settings, "GEOCODER_URL", "https://geocoder.example")
+            client.get("/api/v1/geocode/reverse", params={"lat": 28.5717, "lon": 34.5372})
+
+        assert len(provider.requests) == 2
 
     def test_a_language_change_does_not_serve_the_old_answer(
         self, client: TestClient, fake_redis: FakeRedis, monkeypatch: Any
@@ -341,6 +363,30 @@ class TestDegradation:
 
         assert len(body["display_name"]) == 512
         assert len(body["attribution"]) == 255
+
+    def test_survives_an_oversized_body(self, client: TestClient, fake_redis: FakeRedis):
+        """The per-read timeout bounds each read, not the response - so the size cap is what
+        stops a host making this process buffer without limit. Never cached: a truncated
+        read is a failure, not "no such place"."""
+        huge = [{**REVERSE_PAYLOAD, "display_name": "x" * 1000} for _ in range(2000)]
+
+        with _responds(huge):
+            response = client.get("/api/v1/geocode/search", params={"q": "dahab"})
+
+        assert response.status_code == 200
+        assert response.json() == []
+        assert fake_redis.store == {}
+
+    def test_survives_a_malformed_geocoder_url(self, client: TestClient, no_redis: None, monkeypatch: Any):
+        """`httpx.InvalidURL` descends from `Exception`, not `HTTPError`, so a typo'd port in
+        an operator's `.env` used to escape as a 500."""
+        monkeypatch.setattr(settings, "GEOCODER_URL", "http://nominatim.example:8O80")
+
+        with _responds(REVERSE_PAYLOAD):
+            response = client.get("/api/v1/geocode/reverse", params={"lat": 1, "lon": 2})
+
+        assert response.status_code == 200
+        assert response.json() is None
 
     def test_makes_no_call_at_all_when_the_geocoder_is_switched_off(
         self, client: TestClient, no_redis: None, monkeypatch: Any

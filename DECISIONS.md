@@ -5326,6 +5326,16 @@ it through is the same fail-open trade this module already documents for an unre
 path no caller can provoke. The check runs on the rejecting path only, so the happy path still costs
 one round trip.
 
+**The response is bounded twice, because `httpx.Timeout` does not bound what you think.** Its read
+timeout applies to each socket read, not to the call — a host that answers with one byte every few
+seconds never trips it, holds the request open indefinitely, and grows the buffer the whole time. So
+the outbound call carries an `anyio.fail_after` deadline *and* a byte cap, and going over either is
+a failure (uncached), not an empty answer. Both are far above anything an honest Nominatim sends —
+five results are a few kilobytes — which is the point: they bound a provider that has stopped
+behaving, and that is exactly the provider the timeout was assumed to cover. `httpx.InvalidURL` is
+caught alongside `httpx.HTTPError` for the same reason: it descends from `Exception` rather than
+`HTTPError`, so a typo'd port in an operator's `.env` escaped as a 500.
+
 **Everything else degrades to "no result" rather than raising**, following `services.email_service`:
 a timeout, a 5xx, a non-JSON body, or `GEOCODER_URL` set to `""` all produce `null`/`[]` and a
 logged warning. A diver can always type the location in, and a 502 would make the site form look

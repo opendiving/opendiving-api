@@ -21,6 +21,7 @@ through `enforce_rate_limit`.
 import hashlib
 import json
 import logging
+from itertools import islice
 from typing import Any
 
 import anyio
@@ -40,6 +41,12 @@ logger = logging.getLogger(__name__)
 # attempt would spend the caller's remaining patience *and* a second slot against the
 # provider's rate limit, for an endpoint whose failure mode is already "type it yourself".
 _TIMEOUT = httpx.Timeout(5.0)
+
+# The bounds that actually hold, because `_TIMEOUT` is per socket read: a host that answers
+# slowly enough, or endlessly enough, is bounded by these two and by nothing else. Both are
+# far above any honest Nominatim answer - five geocoding results are a few kilobytes.
+_DEADLINE_SECONDS = 10.0
+_MAX_RESPONSE_BYTES = 512 * 1024
 
 _SEARCH_RESULT_LIMIT = 5
 
@@ -95,8 +102,13 @@ def _cache_key(kind: str, discriminator: str) -> str:
     """Geocoding cache keys are deliberately **not** user-scoped, unlike every other key in
     this app.
 
-    The configured language is part of the key: it changes the answer, so entries written
-    under one must not be served after an operator changes it.
+    The configured language *and provider* are part of the key, for the same reason: both
+    change the answer, so entries written under one must not be served after an operator
+    changes it. The provider matters most for `attribution`, which is read from whatever
+    answered and is a licence condition of that data - without this, a month of cached rows
+    would keep crediting OpenStreetMap for results now coming from somewhere else. Swapping
+    `GEOCODER_URL` is a `.env` edit, so it cannot rely on `_CACHE_VERSION`, which is a code
+    change.
 
     "What is at 28.572, 34.537" has the same answer for everybody, and the whole reason the
     provider's terms tolerate this feature is that one lookup serves every user who ever
@@ -106,7 +118,8 @@ def _cache_key(kind: str, discriminator: str) -> str:
     `services.cache_invalidation` sweeps by pattern, so nothing here is ever collateral
     damage of a mutation elsewhere - and nothing here needs invalidating, only expiring.
     """
-    return f"geocode:{_CACHE_VERSION}:{settings.GEOCODER_LANGUAGE}:{kind}:{discriminator}"
+    provider = hashlib.sha256(settings.GEOCODER_URL.encode()).hexdigest()[:8]
+    return f"geocode:{_CACHE_VERSION}:{provider}:{settings.GEOCODER_LANGUAGE}:{kind}:{discriminator}"
 
 
 async def _cached(key: str) -> list[GeocodeResult] | None:
@@ -213,19 +226,40 @@ async def _request(path: str, params: dict[str, Any]) -> list[dict[str, Any]] | 
 
     url = f"{settings.GEOCODER_URL.rstrip('/')}{path}"
     try:
-        # A client per call, deliberately: the provider cap above holds this to roughly one
-        # request a second, so a pooled connection would sit idle far longer than any
-        # keep-alive, and a module-level client would need lifespan wiring to be closed.
-        # An integration with real throughput should not copy this.
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            response = await client.get(url, params=query, headers={"User-Agent": settings.GEOCODER_USER_AGENT})
-            response.raise_for_status()
-            payload = response.json()
-    except httpx.HTTPError as exc:
+        # `_TIMEOUT` bounds each socket read, which is not the same as bounding the call: a
+        # host that dribbles one byte every few seconds never trips it and holds the request
+        # open forever. `fail_after` is the actual deadline; the byte cap below is the
+        # matching bound on how much such a host can make this process buffer.
+        with anyio.fail_after(_DEADLINE_SECONDS):
+            # A client per call, deliberately: the provider cap above holds this to roughly
+            # one request a second, so a pooled connection would sit idle far longer than
+            # any keep-alive, and a module-level client would need lifespan wiring to be
+            # closed. An integration with real throughput should not copy this.
+            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                headers = {"User-Agent": settings.GEOCODER_USER_AGENT}
+                async with client.stream("GET", url, params=query, headers=headers) as response:
+                    response.raise_for_status()
+
+                    body = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        body.extend(chunk)
+                        if len(body) > _MAX_RESPONSE_BYTES:
+                            logger.warning("Geocoder response for %s exceeded %d bytes.", path, _MAX_RESPONSE_BYTES)
+                            return None
+
+        payload = json.loads(body)
+    except (httpx.HTTPError, httpx.InvalidURL) as exc:
+        # `InvalidURL` is listed separately because it descends from `Exception` rather than
+        # `HTTPError`, so a merely malformed `GEOCODER_URL` - a typo'd port, say - would
+        # otherwise escape as a 500 and break this module's one promise.
+        #
         # `path`, never the built URL: that one carries GEOCODER_API_KEY as a query
         # parameter, and logs get collected, shipped and kept. httpx would log the whole URL
         # itself at INFO, which is why `core.setup` pins its logger to WARNING.
         logger.warning("Geocoder request to %s failed (%s).", path, type(exc).__name__)
+        return None
+    except TimeoutError:
+        logger.warning("Geocoder request to %s exceeded its %ss deadline.", path, _DEADLINE_SECONDS)
         return None
     except ValueError:
         logger.warning("Geocoder response for %s was not JSON.", path)
@@ -368,11 +402,15 @@ async def search_places(query: str) -> list[GeocodeResult]:
     if rows is None:
         return []
 
-    # Sliced here, not only asked for via `limit`: a mirror that caps differently, or
-    # ignores the parameter, would otherwise have every row it sent normalized, cached for
-    # a month and returned. The bound on the response belongs to this app. Cut before
-    # normalizing rather than after, so 50,000 rows cost 5 normalizations and not 50,000 -
-    # the rows are already in the provider's own relevance order.
-    results = [result for result in (_normalize(row) for row in rows[:_SEARCH_RESULT_LIMIT]) if result is not None]
+    # Bounded here, not only asked for via `limit`: a mirror that caps differently, or
+    # ignores the parameter, would otherwise have every row it sent normalized, cached for a
+    # month and returned. The bound on the response belongs to this app.
+    #
+    # Lazily, and counting only the rows that *survive* normalization. Slicing the raw rows
+    # first is cheaper to read but silently shrinks the answer - five unusable leading rows
+    # would empty a search that had fifteen good ones behind them - while normalizing all of
+    # them first makes 50,000 junk rows cost 50,000 normalizations. `islice` over a generator
+    # is both: it stops at five successes and never touches the rest.
+    results = list(islice((result for result in map(_normalize, rows) if result is not None), _SEARCH_RESULT_LIMIT))
     await _store(key, results)
     return results
