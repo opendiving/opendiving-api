@@ -414,12 +414,16 @@ def _offshore(lat: float, lon: float) -> GeocodeResult | None:
     if name is None:
         return None
 
+    # Bounded like every provider string, for the same reason and despite the data being
+    # ours: the longest name in the file is a few dozen characters, so this only ever fires
+    # for a refresh that pulled in something strange - and a `ValidationError` here would be
+    # a 500 from the one branch that exists to avoid answering nothing.
     return GeocodeResult(
         latitude=lat,
         longitude=lon,
-        location=name,
-        display_name=name,
-        name=name,
+        location=name[:_LOCATION_MAX_LENGTH],
+        display_name=name[:_DISPLAY_NAME_MAX_LENGTH],
+        name=name[:_NAME_MAX_LENGTH],
         attribution=_MARINE_ATTRIBUTION,
     )
 

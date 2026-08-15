@@ -8,11 +8,30 @@ across the antimeridian - fails here rather than in production.
 """
 
 import json
+import logging
+from collections.abc import Generator
+from pathlib import Path
 
 import pytest
 
 from src.app.services import marine_areas
-from src.app.services.marine_areas import sea_name
+from src.app.services.marine_areas import Ring, sea_name
+
+
+def _ring_of(low: float, high: float) -> Ring:
+    """A closed square ring, corners at the two coordinates."""
+    return ((low, low), (high, low), (high, high), (low, high), (low, low))
+
+
+def _square(name: str, low: float, high: float, holes: list[Ring] | None = None) -> marine_areas._Part:
+    return marine_areas._Part(
+        name=name,
+        min_lon=low,
+        min_lat=low,
+        max_lon=high,
+        max_lat=high,
+        rings=(_ring_of(low, high), *(holes or ())),
+    )
 
 
 class TestKnownPositions:
@@ -49,6 +68,26 @@ class TestKnownPositions:
         would name every Greek island "Aegean Sea"."""
         assert sea_name(37.0, 25.2) == "Aegean Sea"
         assert sea_name(37.1, 25.5) is None  # Naxos, a hole in that same polygon
+
+    def test_a_hole_ends_the_search_rather_than_deferring_to_a_bigger_sea(self, monkeypatch: pytest.MonkeyPatch):
+        """The failure guarded against is not "the hole was ignored" but "the hole was
+        honoured and then stepped over": the next candidate is always coarser, so if it does
+        not carry the same island, falling through returns a plausible-looking wrong answer -
+        a rock in the Red Sea coming back "Indian Ocean".
+
+        Built from two synthetic polygons rather than a real island, because the shipped data
+        does not currently contain the case: comparing the two rules over 515,520 grid points
+        found no position where they disagree, since Natural Earth's oceans carry the same
+        island holes their seas do. The rule is asserted anyway - it is a decision about what
+        happens when they don't, and a refresh could introduce that at any time.
+        """
+        island_in_a_bay = _square("Small Bay", -1, 1, holes=[_ring_of(-0.5, 0.5)])
+        ocean_that_missed_it = _square("Big Ocean", -10, 10)
+        monkeypatch.setattr(marine_areas, "_parts", lambda: (island_in_a_bay, ocean_that_missed_it))
+
+        assert sea_name(0.9, 0.9) == "Small Bay"
+        assert sea_name(5.0, 5.0) == "Big Ocean"
+        assert sea_name(0.0, 0.0) is None
 
     def test_decides_a_boundary_rather_than_smearing_it(self):
         """Two positions 0.1° apart across the Red Sea's eastern shore. The pair matters more
@@ -97,6 +136,46 @@ class TestTheAntimeridian:
         ]
 
         assert wrapping == []
+
+
+class TestDegradation:
+    """Reading the file is the only thing in this module that touches the world, and the
+    geocoding path it hangs off promises to answer "no suggestion" rather than raise. A
+    truncated data file must not turn the dive-site form into a 500."""
+
+    @pytest.fixture(autouse=True)
+    def uncached(self) -> Generator[None]:
+        """`_parts` memoizes, so a test that swaps the path has to clear it on both sides -
+        or it either reads the real file or leaves an empty one behind for everything after."""
+        marine_areas._parts.cache_clear()
+        yield
+        marine_areas._parts.cache_clear()
+
+    @pytest.mark.parametrize("contents", ["", "{ truncated", '{"features": [{"properties": {}}]}'])
+    def test_an_unusable_file_means_no_sea_name(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contents: str):
+        broken = tmp_path / "marine_areas.geojson"
+        broken.write_text(contents, encoding="utf-8")
+        monkeypatch.setattr(marine_areas, "_DATA_PATH", broken)
+
+        assert sea_name(27.0, 35.0) is None
+
+    def test_a_missing_file_means_no_sea_name(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(marine_areas, "_DATA_PATH", tmp_path / "not-here.geojson")
+
+        assert sea_name(27.0, 35.0) is None
+
+    def test_the_failure_is_read_once_rather_than_per_request(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+    ):
+        """An empty answer is memoized like any other, so a broken file costs one read per
+        process - not one per lookup, on a path already reached only after a provider miss."""
+        monkeypatch.setattr(marine_areas, "_DATA_PATH", tmp_path / "not-here.geojson")
+
+        with caplog.at_level(logging.WARNING):
+            sea_name(27.0, 35.0)
+            sea_name(30.0, -40.0)
+
+        assert len([record for record in caplog.records if "Could not read" in record.message]) == 1
 
 
 class TestTheVendoredFile:

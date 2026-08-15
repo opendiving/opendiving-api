@@ -5406,8 +5406,18 @@ every self-hoster, and the same one the geocoding proxy itself makes. Take Marin
 only if carrying the file turns out to be the objectionable half.
 
 **No geometry library either.** `shapely` would pull GEOS into the image to do arithmetic that is a
-few dozen lines: a bounding-box reject followed by ray casting, over ~320 polygon parts, answering
-in well under a millisecond. `services/marine_areas.py` is the whole implementation.
+few dozen lines: a bounding-box reject followed by ray casting, over 324 polygon parts.
+`services/marine_areas.py` is the whole implementation. Measured over a 10,680-point global grid —
+which exercises the branch that *cannot* return early, since a land point bounding-box tests every
+part — the worst lookup is 0.26 ms and the median 0.06 ms. The one cost worth knowing about is the
+first call in a process, which parses the file synchronously and takes ~26 ms; it is loaded lazily
+rather than at import so the arq worker and most of the test suite never pay it at all.
+
+**A polygon that will not load answers "no sea", not a 500.** Reading the file is the only step in
+that module that touches the world, and the whole geocoding path promises to degrade to "no
+suggestion" rather than raise — a truncated data file breaking the dive-site form would be a poor
+trade for a convenience. The empty result is memoized like any other, so a broken file costs one
+read per process rather than one per request.
 
 **It is a fallback, never a replacement, and that is the part most likely to be got wrong.** Coastal
 water already works: `-8.9, 115.5` off Bali returns "Bali, Indonesia", because territorial waters
@@ -5438,6 +5448,18 @@ already works through Nominatim.
 "Indian Ocean"; one in the Coral Sea is also inside "South Pacific Ocean". Bounding-box area is the
 comparison — it needs no geometry library and is not a close call for any pair this has to separate
 — and sorting by it once at load turns "smallest match wins" into "return on the first match".
+
+**That first match decides everything, including that the point is land.** Islands arrive as holes,
+and the tempting implementation — treat a hole as "not a match" and carry on down the list — is
+wrong in a way that looks entirely plausible from the outside: the next candidate is a coarser
+polygon that does not carry the same island, so a rock in the Red Sea comes back "Indian Ocean". The
+smallest polygon covering a position is the most detailed description of it the dataset holds, so
+its islands are the ones to trust, and a hole there means `None`.
+
+The shipped data does not currently contain a position where the two rules disagree — comparing them
+over 515,520 grid points found none, because Natural Earth's oceans carry the same island holes
+their seas do. So this is written down, and tested against synthetic polygons, precisely because
+nothing in the file would catch it going wrong after a refresh.
 
 **The antimeridian is decided rather than discovered.** Every sea that genuinely straddles ±180
 arrives from Natural Earth already split into separate polygons at the meridian, so each part is an

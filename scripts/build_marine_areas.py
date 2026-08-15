@@ -11,7 +11,7 @@ columns, `wikidataid`, label placement hints and full cartographic precision, no
 this app reads. Coordinates are rounded to `_PRECISION` decimals because these are
 generalised polygons used as a *coarse* fallback - a sea boundary is a cartographer's
 convention, not a survey line, so a metre either way is noise, and the rounding is what
-takes the file from 1.7 MB to a third of that.
+takes the file from 1.7 MB to 1.1 MB.
 
 The source is public domain (Natural Earth), which is the reason it can be vendored at all.
 """
@@ -28,8 +28,9 @@ SOURCE_URL = f"{_SOURCE_BASE}/ne_10m_geography_marine_polys.geojson"
 
 _OUTPUT = Path(__file__).resolve().parent.parent / "src" / "app" / "data" / "marine_areas.geojson"
 
-# ~11 m at the equator. Far finer than the data deserves, and still cuts the file by two
-# thirds; going coarser would start moving coastlines visibly for no gain we can use.
+# ~11 m at the equator. Far finer than the data deserves, and still takes about a third
+# off the file. Three decimals saves a further 110 KiB and collapses one small feature out
+# of existence entirely, which is a bad trade for a tenth of a megabyte.
 _PRECISION = 4
 
 
