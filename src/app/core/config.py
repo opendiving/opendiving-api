@@ -167,6 +167,47 @@ class ContactSettings(BaseSettings):
     CONTACT_FORM_RATE_LIMIT_PER_IP: int = config("CONTACT_FORM_RATE_LIMIT_PER_IP", default=10)
 
 
+class GeocodingSettings(BaseSettings):
+    # Forward/reverse geocoding for dive sites, proxied server-side (see
+    # `services.geocoding_service`). The wire format is Nominatim's, so `GEOCODER_URL` has
+    # to name a Nominatim-compatible host; the keyless public instance is the default so a
+    # self-hoster gets a working feature with no third-party account. Set it to an empty
+    # string to turn geocoding off entirely - the endpoints then answer "no result" rather
+    # than failing, exactly as they do when the provider is unreachable.
+    GEOCODER_URL: str = config("GEOCODER_URL", default="https://nominatim.openstreetmap.org")
+    GEOCODER_API_KEY: str | None = config("GEOCODER_API_KEY", default=None)
+
+    # Asked for explicitly, because the alternative is not "no preference" - it is the
+    # *local* script. Left unset, a reverse lookup of the Blue Hole answers "دهب, مصر",
+    # which then lands in `dive_site.location` and is neither readable nor typeable for
+    # most of the divers who log that site. One instance-wide value rather than the
+    # caller's `Accept-Language`: it is part of the cache key, and per-caller languages
+    # would multiply both the cache and the outbound calls by the number of locales.
+    GEOCODER_LANGUAGE: str = config("GEOCODER_LANGUAGE", default="en")
+
+    # Nominatim's policy requires a `User-Agent` that identifies the application, and
+    # blocks generic ones. A public deployment that isn't this project's own should say so
+    # here, since the address in it is where the provider's operators will complain.
+    GEOCODER_USER_AGENT: str = config(
+        "GEOCODER_USER_AGENT", default="OpenDiving (+https://github.com/opendiving/opendiving-api)"
+    )
+
+    # What one account may spend. Authenticated and owner-agnostic, so this isn't an abuse
+    # boundary the way the contact form's is - it is here because every miss costs someone
+    # else's server a request, and a runaway client polling a search box shouldn't be the
+    # reason this instance gets blocked. Generous enough that filling in a trip's worth of
+    # sites in one sitting never hits it.
+    GEOCODER_RATE_LIMIT_WINDOW_SECONDS: int = config("GEOCODER_RATE_LIMIT_WINDOW_SECONDS", default=3600)
+    GEOCODER_RATE_LIMIT_PER_USER: int = config("GEOCODER_RATE_LIMIT_PER_USER", default=60)
+
+    # What the *instance* may spend on the provider, counted across all users and applied
+    # only to calls that actually leave (a cache hit costs nothing). The default is
+    # Nominatim's published cap of one request per second. A self-hoster running their own
+    # Nominatim has no such cap and should raise it rather than throttle themselves.
+    GEOCODER_PROVIDER_RATE_LIMIT_WINDOW_SECONDS: int = config("GEOCODER_PROVIDER_RATE_LIMIT_WINDOW_SECONDS", default=1)
+    GEOCODER_PROVIDER_RATE_LIMIT_REQUESTS: int = config("GEOCODER_PROVIDER_RATE_LIMIT_REQUESTS", default=1)
+
+
 class ExportSettings(BaseSettings):
     # Fixed-window rate limit (see `core.utils.rate_limit`) on the three `/export/*`
     # endpoints, keyed per user and shared between them - the budget bounds total export
@@ -289,6 +330,7 @@ class Settings(
     MagicLinkSettings,
     EmailSettings,
     ContactSettings,
+    GeocodingSettings,
     ExportSettings,
     ProxySettings,
     FrontendSettings,

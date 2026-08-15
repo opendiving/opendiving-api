@@ -5242,3 +5242,101 @@ of numbers in that writer that needs no unit conversion.
 `dive-sites.csv` gets `latitude`/`longitude` columns next to `location`, written as stored and left
 empty where there is no position — an empty cell rather than a `0` a reader would take for Null
 Island, which is the same trap recorded in *"What divelogs.de does with our UDDF"*.
+
+## Geocoding is a server-side proxy, and Nominatim's terms are three concrete obligations
+
+`GET /api/v1/geocode/reverse` and `GET /api/v1/geocode/search` are the API's first outbound HTTP
+calls. They exist as a proxy rather than a browser fetch for two reasons that both outlive the
+current provider: `GEOCODER_API_KEY` never reaches a client, and the web app's strict-nonce CSP
+needs no new `connect-src` host.
+
+The default is **keyless** (`https://nominatim.openstreetmap.org`), so a self-hoster gets a working
+feature with no third-party account. That is only defensible because the provider's usage policy is
+actually honoured, and it is worth naming what "honoured" means, because two of the three are code:
+
+- **An identifying `User-Agent`.** `GEOCODER_USER_AGENT` — Nominatim blocks generic ones outright.
+- **Every answer cached.** Redis, a month for a hit and an hour for a miss.
+- **The outbound call throttled**, through the existing `enforce_rate_limit`, at the published cap
+  of one request per second.
+
+The third obligation is one we satisfy by what this app *is*: Nominatim bars applications whose
+primary function is geocoding. A dive log that geocodes when a site is created is not that, and the
+result is persisted onto `dive_site.location`, so the provider is hit once per site rather than once
+per page view.
+
+**The geocoding cache keys are the one deliberate exception to "cache keys stay user-scoped."**
+"What is at 28.572, 34.537" has the same answer for everybody, and the whole reason those terms
+tolerate this feature is that one lookup serves every diver who ever pins that spot; keying it per
+user would multiply outbound calls by the number of accounts. They are prefixed `geocode:` so they
+stay clear of the `user_{id}_*` namespace `services.cache_invalidation` sweeps by pattern — nothing
+here is ever collateral damage of a mutation elsewhere, and nothing here needs invalidating, only
+expiring. The prefix carries a version (`geocode:v1:…`) because what is cached is the *normalized*
+`GeocodeResult`, not the raw provider payload: re-normalizing on every hit is wasted work, so a
+change to the normalizer has to invalidate the old entries, and a new prefix does that without a
+flush.
+
+**"The provider had nothing" and "we could not ask" are different, and only the first is cached.**
+`_request` returns `[]` for the former and `None` for the latter, which is the single distinction
+that function exists to preserve: caching a timeout would turn a thirty-second outage into a month
+of empty answers. A miss is still cached, or a retrying client re-asks on every keystroke — just
+with the shorter TTL, since an empty answer is far more likely to be provider weirdness than a
+permanent fact about the world.
+
+**Two rate limits, and they count different things.** The per-user one (`geocode:user:{id}`, in the
+route) bounds what one account can make this instance do. The provider one (`geocode:provider`, in
+the service) bounds what this instance does to a third party, and is spent **only on calls that
+actually leave** — a cache hit costs the provider nothing, and charging it would 429 a page full of
+already-cached sites for no reason. `enforce_rate_limit` sits outside the `try` in `_request` on
+purpose: exceeding the provider cap has to surface as a 429, not be swallowed as a geocoding
+failure, or the operator never learns the instance is over its cap. Both fail open on a Redis
+outage, which is the right trade here too — a stripped-down instance with no Redis should still
+geocode.
+
+**Everything else degrades to "no result" rather than raising**, following `services.email_service`:
+a timeout, a 5xx, a non-JSON body, or `GEOCODER_URL` set to `""` all produce `null`/`[]` and a
+logged warning. A diver can always type the location in, and a 502 would make the site form look
+broken over an optional convenience. Unlike `email_service` there is no
+`_refuse_to_log_credential_in_production` equivalent, because nothing here is a credential — but for
+the same underlying reason (`core.logger` writes to a file on disk) the failure log names the
+request *path* and never the built URL, which carries `GEOCODER_API_KEY` as a query parameter.
+
+**`location` is composed from the provider's structured `address`, not trimmed out of
+`display_name`.** Place plus country — "Dahab, Egypt" — is what dive logs actually contain, where
+`display_name` is a seven-part postal address; the region stands in only when the point is too
+remote to fall inside a named settlement, and the full `display_name` is the fallback for a row with
+no structured address at all — a named bay or reef, where the feature's own name is the best answer
+available. (A point in genuinely open ocean gets no row back and reverse-geocodes to `null`, which
+is a normal outcome and not an error: open water is a legitimate place to dive.) Both are returned,
+because they answer different questions: `location` is what gets persisted, `display_name` is what
+makes two otherwise identical rows in a picker distinguishable. Composing from `address` also means
+the result barely moves if the provider changes how verbose that label is, which is what "swapping
+providers is a config change" has to mean in practice. It is truncated to 255 characters, the width
+of the column it is headed for.
+
+**Attribution rides on each result rather than in an envelope.** It is a licence condition of the
+data, so it travels with the row it describes and is read from the provider's own `licence` field —
+which means it stays correct across a provider swap, and falls back to the OSM/ODbL credit rather
+than ever going out empty. An envelope would have been the other option and would have broken the
+"response is the resource schema directly" convention for one string.
+
+**`accept-language` is sent explicitly, because the alternative is not "no preference" — it is the
+local script.** Unasked, a reverse lookup of the Blue Hole answers `دهب, مصر`, and that is the
+string that would be written into `dive_site.location`. This was not caught by any unit test; it
+turned up the first time the endpoint was pointed at the real provider, which is the argument for
+doing that before calling a proxy finished. `GEOCODER_LANGUAGE` is one value for the whole instance
+rather than the caller's `Accept-Language`, because it is part of the cache key and per-caller
+locales would multiply both the cache and the outbound calls — the opposite of what the provider's
+terms ask for.
+
+**Reverse lookups are rounded to three decimals (~110 m) before *both* the cache key and the
+outbound query**, so the two always agree — everyone pinning the same cell gets the identical cached
+answer instead of the first caller's exact position. The answer is a locality name; that is the
+resolution at which it stops changing.
+
+If the terms ever stop fitting, Geoapify's are the most permissive of the free tiers (cache, store,
+redistribute; attribution only) and drop in via `GEOCODER_URL` + `GEOCODER_API_KEY`. Rejected for
+now, along with: **Google/Mapbox**, which forbid storing lat/lon at all (Google) or are keyed and
+incompatible with persisting a coordinate on the row, which is the whole point; **LocationIQ**,
+whose free tier caps response caching at 48 h and so conflicts with caching-by-policy; and
+**self-hosted Nominatim**, the only fully independent option but a ~1 TB planet import, which is not
+something to put in front of a self-hoster. Keyless has to stay the default.

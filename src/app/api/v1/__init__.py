@@ -9,6 +9,7 @@ from .export import router as export_router
 from .gear_items import router as gear_items_router
 from .gear_service import router as gear_service_router
 from .gear_sets import router as gear_sets_router
+from .geocoding import router as geocoding_router
 from .health import router as health_router
 from .trips import router as trips_router
 from .users import router as users_router
@@ -19,6 +20,7 @@ router.include_router(auth_router)
 router.include_router(users_router)
 router.include_router(trips_router)
 router.include_router(dive_sites_router)
+router.include_router(geocoding_router)
 router.include_router(gear_items_router)
 router.include_router(gear_sets_router)
 router.include_router(gear_service_router)
