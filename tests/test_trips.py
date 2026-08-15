@@ -20,12 +20,14 @@ Mostly without a database: the route's collaborators are stubbed and the asserti
 on what it hands them (the `test_dive_update.py` style), and the search clause is asserted
 as compiled SQL like `test_picker_search.py` does for the others.
 
-`TestReplaceLocations` is the exception and runs against a live Postgres, for the reason
-`test_dive_neighbors.py` gives for its own split: replacing a list wholesale is a `DELETE`
-followed by re-numbered inserts, so what it has to get right is what the *table* holds
-afterwards - a mocked session would only assert that we called the calls we called. Those
-tests skip themselves when no database is reachable; see CONTRIBUTING.md for why a run on
-the host needs `POSTGRES_SERVER=localhost` to make them execute.
+The last two classes are the exception and run against a live Postgres, for the reason
+`test_dive_neighbors.py` gives for its own split - what they have to get right is what the
+*database* does, and a mocked session would only assert that we called the calls we called.
+`TestReplaceLocations` covers a wholesale replace, which is a `DELETE` plus re-numbered
+inserts; `TestSearchAgainstPostgres` covers the correlated EXISTS, which compiles to the
+same text whether or not it correlates. Both skip themselves when no database is
+reachable; see CONTRIBUTING.md for why a run on the host needs `POSTGRES_SERVER=localhost`
+to make them execute.
 """
 
 import uuid as uuid_pkg
@@ -593,6 +595,13 @@ def diver(db: Session) -> User:
 
 
 @pytest.fixture
+def other_diver(db: Session) -> User:
+    """A second logbook in the same tables - `user_id` is the only thing keeping one
+    diver's trips out of another's search results."""
+    return create_user(db)
+
+
+@pytest.fixture
 def trip(db: Session, diver: User) -> Trip:
     row = Trip(user_id=diver.id, name=f"Visayas {uuid7().hex[-8:]}", start_date=date(2026, 6, 1), notes="")
     db.add(row)
@@ -685,3 +694,66 @@ class TestReplaceLocations:
 
         (read_back,) = await get_locations_for_trip(db=async_db, trip_id=trip.id)
         assert read_back.model_dump() == written.model_dump()
+
+
+@pytest.mark.skipif(not _db_available(), reason="No database connection available")
+class TestSearchAgainstPostgres:
+    """`_search_conditions` executed rather than compiled.
+
+    The compiled-SQL assertions above cannot settle the one failure that matters here:
+    an EXISTS that does not correlate to the row being matched renders the same
+    `trip_location.trip_id = trip.id` text and matches *every* trip as soon as any trip
+    in the table has a location with the term in it. Only running it against rows tells
+    the two apart - and getting it wrong would show one diver a page of trips they have
+    no business seeing named after a place they never went.
+    """
+
+    @staticmethod
+    async def _matching_names(db: AsyncSession, user_id: int, term: str) -> list[str]:
+        rows = await db.execute(select(Trip.name).where(*trips_module._search_conditions(user_id=user_id, term=term)))
+        return sorted(name for (name,) in rows)
+
+    @pytest_asyncio.fixture
+    async def _seeded(self, db: Session, async_db: AsyncSession, diver: User) -> tuple[str, str]:
+        """Two trips, one of which went to Moalboal - and neither of which is named it."""
+        tag = uuid7().hex[-8:]
+        went, stayed = (
+            Trip(user_id=diver.id, name=f"Cebu {tag}", start_date=date(2026, 6, 1), notes=""),
+            Trip(user_id=diver.id, name=f"Elsewhere {tag}", start_date=date(2026, 7, 1), notes=""),
+        )
+        db.add_all([went, stayed])
+        db.commit()
+        await replace_locations_for_trip(
+            db=async_db,
+            trip_id=went.id,
+            locations=[TripLocationInput(name=f"Moalboal {tag}", display_name=f"Moalboal, Cebu, Philippines {tag}")],
+        )
+        return went.name, stayed.name
+
+    @pytest.mark.asyncio
+    async def test_only_the_trip_that_went_there_matches(
+        self, async_db: AsyncSession, diver: User, _seeded: tuple[str, str]
+    ) -> None:
+        went, _ = _seeded
+        tag = went.rsplit(" ", 1)[-1]
+
+        assert await self._matching_names(async_db, diver.id, f"moalboal {tag}") == [went]
+
+    @pytest.mark.asyncio
+    async def test_the_display_name_matches_too(
+        self, async_db: AsyncSession, diver: User, _seeded: tuple[str, str]
+    ) -> None:
+        """ "philippines" has to find a trip whose places are all named after towns."""
+        went, _ = _seeded
+        tag = went.rsplit(" ", 1)[-1]
+
+        assert await self._matching_names(async_db, diver.id, f"philippines {tag}") == [went]
+
+    @pytest.mark.asyncio
+    async def test_another_divers_trips_are_never_matched(
+        self, async_db: AsyncSession, other_diver: User, _seeded: tuple[str, str]
+    ) -> None:
+        went, _ = _seeded
+        tag = went.rsplit(" ", 1)[-1]
+
+        assert await self._matching_names(async_db, other_diver.id, f"moalboal {tag}") == []
