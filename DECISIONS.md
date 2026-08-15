@@ -5584,3 +5584,114 @@ uv run python -c "import ast; ast.parse(open('src/app/services/geocoding_service
 
 `src/app/core/security.py`, `services/dive_files.py` and `dive_parsers/suunto_xml.py` all carry the
 same form.
+
+## Trip locations are a value-object child table, and `trip.location` is gone
+
+A trip used to record where it went in one free-text `trip.location` column. Divers do not travel to
+one place: a Philippines trip is Moalboal *and* Bohol *and* the house reef nobody has mapped, and
+"Moalboal, Bohol +1" typed into a text field is a string, not somewhere a map can be drawn around.
+`trip_location` replaces it with ordered rows — name, the geocoder's `display_name`, an optional
+position, an optional bounding box — and the column is dropped rather than kept in step.
+
+**The rows are value objects, not entities.** No `uuid`, no `PublicUUIDMixin`, no ownership of their
+own, no global gazetteer behind them: a row means "this is what the geocoder said when the diver
+picked this place", and if OSM later renames or moves it, the trip keeps the name the diver saw.
+Duplicate names are legal — two stays in the same town on one trip — so there is no unique
+constraint either, which is the one way this differs from `dive_dive_site`, whose shape it otherwise
+mirrors (surrogate int PK, `position`, no `relationship()`).
+
+**Writes replace the whole list.** `replace_locations_for_trip` deletes and re-inserts with
+`position` = the index in the list the client sent; there is nothing stable to diff against. So
+`PATCH /trip/{uuid}` has three answers, not two, and only `model_fields_set` separates the first
+from the second: an **omitted** `locations` leaves them alone, `[]` clears them, a list replaces
+them. That is why the body type is `TripUpdateRequest(TripUpdate)` and not a field on `TripUpdate`
+itself — `TripUpdate` is CRUDAdmin's Trip form schema and the shape
+`tests/test_update_explicit_nulls.py` sweeps against the `trip` table's columns, and `locations` is
+neither a column nor something an admin form could render (`DiveUpdateRequest` set the precedent).
+
+**A locations-only PATCH still has to invalidate the list cache.** Its `update_data` is empty, so
+the route skips `crud_trips.update` entirely — and the `@cache` decorator on the route only drops
+`trip_cache:{uuid}`. Without the explicit `if update_data or values.locations is not None` the trips
+list goes on showing the old places for the remaining life of the entry, which reads as "my edit
+didn't save" rather than as a cache.
+
+**Trips left `OwnedResourceCache.read_list`/`read_item`** and joined the `dives.py` opt-outs its own
+docstring lists: a trip read zips a second query's rows into the response, which is the one step the
+factory has no room for. `_trip_cache` survives for `list_cache_key_prefix` and `invalidate_list`,
+and the hand-rolled `_cached_read_trips`/`_cached_read_trip` **reproduce its key shapes exactly** —
+`user_{id}_trips:page_{page}:items_per_page:{items_per_page}:search:{search}` and
+`trip_cache:{uuid}` — so invalidation needed no change at all. Two consequences worth knowing:
+`search_columns` has to stay non-empty (it is what keeps the `:search:{search}` segment in the key,
+even though `search_clause` is no longer what searches), and the kwarg names on the cached helpers
+are load-bearing, since they fill the placeholders.
+
+**Search became name OR an EXISTS over the child table** (`trips.py::_search_conditions`).
+`OwnedResourceCache.search_conditions` can only OR columns of one table, and a trip is as often
+remembered by where it went as by what it was called — typing "moalboal" has to find the trip named
+"Cebu 2026". The EXISTS is correlated on `trip_location.trip_id = trip.id`, matches `name` and
+`display_name`, and both sides go through `escape_like`. `tests/test_picker_search.py` used to pin
+Trip to `("name", "location")`; it now pins `("name",)` and the OR-semantics assertion moved to
+`tests/test_trips.py`, which asserts the compiled SQL.
+
+**`TripRead.locations` has a `default_factory`, and that is load-bearing.** `trip_cache:{uuid}`
+entries live an hour and replay through the schema on a hit. Declared required, every warm read
+would have 500'd until the last pre-deploy entry expired. The mirror-image leftover — a stale
+entry's `"location"` key — is simply ignored, because `TripRead` is not `extra="forbid"`.
+
+**Everything that consumed the column** was the export path, and all of it now composes from the
+rows: `services/export/envelope.py` carries a structured `locations` list (`ExportTripLocation`),
+`loader.py` loads the child rows by collected trip id, and `uddf.py`'s `<geography><location>` and
+`tabular.py`'s `location` CSV column take a joined-names string from one shared helper. There is no
+archive import and no seed script, so nothing else had to move.
+
+**Create is not atomic**, and that is the accepted semantics rather than an oversight: the trip row
+commits before its locations do, so a failure inserting them leaves the trip behind without them —
+exactly what `POST /dive` does with its mixtures. Both write paths wrap the child insert in the
+`except IntegrityError → rollback → UnprocessableEntityException` pattern from `patch_dive`, because
+the alternative is a 500 raised out of a session already in a failed state.
+
+**The manual DDL**, since `create_all` never alters an existing table. `trip_location` itself needs
+nothing — it is new, so a restart creates it — but the column drop is by hand:
+
+```bash
+docker compose exec -T db psql -U postgres -d opendive -c "ALTER TABLE trip DROP COLUMN IF EXISTS location;"
+```
+
+A dev database with real trips in it does not have to lose what the column said. Carrying each
+string over as a coordinate-less first location keeps search working immediately, and the picker can
+refine it later:
+
+```bash
+docker compose exec -T db psql -U postgres -d opendive -c "INSERT INTO trip_location (trip_id, name, position) SELECT id, left(location, 255), 0 FROM trip WHERE location IS NOT NULL AND btrim(location) <> '' AND NOT EXISTS (SELECT 1 FROM trip_location tl WHERE tl.trip_id = trip.id);"
+```
+
+## A bounding box is optional twice over, and west > east is a real box
+
+`GeocodeResult` and `TripLocationInput` both carry `bbox_south/north/west/east` as four named floats
+— not a nested object, not a list — because a client that picks a search result writes it straight
+back onto a trip location, and a shape change in between would be a mapping nobody needs. Nominatim
+sends `boundingbox` as four strings ordered south, north, west, east, and `_bounding_box` checks
+every assumption in that sentence rather than trusting it.
+
+**A box it cannot use costs the row nothing.** A missing, short, unparseable or impossible box
+leaves all four fields `None` and the result otherwise intact: the box is a nicety a map uses, and
+dropping the row would lose a place the diver searched for over it. The bounds check is written as a
+chain (`-90 <= south <= north <= 90`) so a `nan` corner — which compares false against everything —
+is rejected along with the rest instead of sailing through as a number.
+
+**`bbox_west > bbox_east` is valid and deliberately not "corrected".** That box crosses the
+antimeridian, and Nominatim returns those for real places: Fiji, the Chukchi Sea. Swapping the pair
+to make it read left-to-right would frame the map on the whole planet instead of on the country.
+South > north has no such reading, so it is the one ordering both the schema and the parser refuse.
+
+**Only forward search gets a box** (`_normalize(..., with_bounding_box=True)`). A reverse lookup
+answers "what is this position called" for a caller already holding the position, and the marine
+fallback names the sea a pin sits in — framing either on a country-sized extent would be actively
+wrong. `TripLocationInput` additionally refuses a box with no coordinates behind it, since a box
+alone is not a place.
+
+**`_CACHE_VERSION` went `v1` → `v2`.** Cache entries hold normalized `GeocodeResult`s, not raw
+provider rows, and search answers are kept for a month — so without the bump every previously
+searched query would have handed back a boxless result well into next month. That is precisely what
+the constant is for, and it is the step easiest to forget because nothing fails, locally or in CI,
+when it is skipped.
