@@ -38,9 +38,45 @@ class TestEnforceRateLimit:
     async def test_raises_once_the_limit_is_exceeded(self):
         with patch("src.app.core.utils.rate_limit.cache") as mock_cache:
             mock_cache.client.incr = AsyncMock(return_value=4)
+            mock_cache.client.ttl = AsyncMock(return_value=42)
+            mock_cache.client.expire = AsyncMock(return_value=None)
 
             with pytest.raises(RateLimitException):
                 await enforce_rate_limit("key", max_requests=3, window_seconds=60)
+
+            # The window is intact, so nothing is repaired.
+            mock_cache.client.expire.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_repairs_a_counter_that_lost_its_window(self):
+        """`incr` and `expire` are two round trips, so a Redis blip between them leaves a
+        key that counts up forever and never expires - and from then on this limit rejects
+        every request until someone deletes the key by hand. The lowest-limit callers are
+        the most exposed: `geocode:provider` is 1 request per 1 second.
+        """
+        with patch("src.app.core.utils.rate_limit.cache") as mock_cache:
+            mock_cache.client.incr = AsyncMock(return_value=4)
+            mock_cache.client.ttl = AsyncMock(return_value=-1)
+            mock_cache.client.set = AsyncMock(return_value=None)
+
+            # The count starts over rather than merely regaining a TTL: a counter that has
+            # been accumulating for an unknown time measures nothing, so keeping the caller
+            # blocked for one more window would be punishing them for a meaningless number.
+            await enforce_rate_limit("key", max_requests=3, window_seconds=60)
+
+            mock_cache.client.set.assert_called_once_with("key", 1, ex=60)
+
+    @pytest.mark.asyncio
+    async def test_does_not_check_the_window_on_the_happy_path(self):
+        """The repair costs a round trip, so it only happens where the damage shows."""
+        with patch("src.app.core.utils.rate_limit.cache") as mock_cache:
+            mock_cache.client.incr = AsyncMock(return_value=2)
+            mock_cache.client.ttl = AsyncMock(return_value=-1)
+            mock_cache.client.expire = AsyncMock(return_value=None)
+
+            await enforce_rate_limit("key", max_requests=3, window_seconds=60)
+
+            mock_cache.client.ttl.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_does_not_raise_right_at_the_limit(self):
@@ -151,6 +187,7 @@ class TestRedisIsDown:
         with patch("src.app.core.utils.rate_limit.cache") as mock_cache:
             mock_cache.client.incr = AsyncMock(return_value=99)
             mock_cache.client.expire = AsyncMock(return_value=None)
+            mock_cache.client.ttl = AsyncMock(return_value=42)
 
             with pytest.raises(RateLimitException):
                 await enforce_rate_limit("key", max_requests=3, window_seconds=60)
