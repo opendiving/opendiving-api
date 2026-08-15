@@ -31,9 +31,10 @@ class WholeCoordinatePair(BaseModel):
     route ever reading the stored one - which also means two concurrent PATCHes cannot
     interleave into a half pair the way a read-then-compare check would allow.
 
-    The rule lives on the *write* schemas only. There is no CHECK constraint behind it, so
-    the table can still hold a half pair, and a read that 500s on one would be worse than
-    a read that shows it.
+    The rule lives on the *write* schemas only - every application path in, the admin
+    panel included, goes through one of them, so only raw SQL can put a half pair in the
+    table. That is reason enough to keep it off the read schemas: a row like that should
+    read back as half a position rather than turn every read of it into a 500.
     """
 
     latitude: Latitude

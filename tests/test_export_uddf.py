@@ -436,6 +436,17 @@ class TestDiveSiteGeography:
         assert (_text(geography, f"{UDDF}latitude"), _text(geography, f"{UDDF}longitude")) == ("27.7", "34.2")
 
     @pytest.mark.asyncio
+    async def test_a_lone_coordinate_is_not_a_position(self, schema, monkeypatch):
+        """The write schemas refuse half a pair, but nothing at the database level does,
+        so a restored dump or a hand-run `UPDATE` can hand one to the writer. `<latitude>`
+        without `<longitude>` is valid UDDF and a lie, so the pair is dropped - and with
+        no location either, that leaves no `<geography>` to emit."""
+        site = make_dive_site(2, UUIDS["site-wall"], latitude=27.7)
+        document = await _render(build_bundle(dive_sites=[site]), monkeypatch=monkeypatch)
+        schema.validate(document)
+        assert self._site(_tree(document), 0).find(f"{UDDF}geography") is None
+
+    @pytest.mark.asyncio
     async def test_a_site_with_neither_gets_no_geography_at_all(self, monkeypatch):
         """The empty `<geography>` that would be invalid. `full_bundle`'s second site is
         a bare name."""

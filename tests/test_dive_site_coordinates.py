@@ -200,10 +200,10 @@ class TestWhatReachesTheColumns:
     async def test_an_unrelated_edit_survives_a_half_pair_already_in_the_row(
         self, captured: dict[str, Any], mock_redis: Any
     ) -> None:
-        """There is no CHECK constraint behind the rule, so a half pair can reach the
-        table another way. Because the rule reads the body and never the row, such a site
-        can still be renamed - the version of this check that compared against the stored
-        row had to special-case exactly this."""
+        """Nothing at the database level enforces the rule, so a half pair can be in the
+        table (raw SQL, a restored dump). Because the rule reads the body and never the
+        row, such a site can still be edited - the version of this check that compared
+        against the stored row had to special-case exactly this."""
         captured["db_dive_site"].latitude = BLUE_HOLE[0]
 
         await _patch({"notes": "Deep, dark, and busier than it looks"}, mock_redis)

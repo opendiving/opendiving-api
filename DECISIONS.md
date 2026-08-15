@@ -5157,10 +5157,10 @@ anyway, so the ergonomic loss is theoretical.
 row, mirroring the `effective_location` computation next to it. It buys one thing,
 `{"latitude": 27.7}` nudging one coordinate of a pair that is already whole, and costs three:
 
-- It has to be **gated** on the caller having named a coordinate at all. There is no `CHECK`
-  constraint behind the rule, so a half pair can reach the table another way; enforced on every
-  PATCH, the owner of such a row could not so much as rename it until they guessed which unrelated
-  field to send.
+- It has to be **gated** on the caller having named a coordinate at all. Nothing at the database
+  level enforces the rule, so a half pair can be in the table (raw SQL, a restored dump); enforced
+  on every PATCH, the owner of such a row could not so much as rename it until they guessed which
+  unrelated field to send.
 - It is **read-then-write**, so two PATCHes racing on one site — one clearing the pair, one nudging
   a coordinate — both pass against the pre-update row and leave a half pair behind. The body rule
   has no such window: whichever request wins, it carried a whole pair or none.
@@ -5171,11 +5171,13 @@ The body rule is the smaller thing to hold and the stronger guarantee, which is 
 worth remembering: a validation that needs the current state to decide is usually a validation
 asking the wrong question.
 
-The validator lives on the **write** schemas only, not on `DiveSiteBase`. The table can still hold a
-half pair — put the validator on the shared base and a row like that turns every read of it into a
-500, which is a worse outcome than a read that shows the half. `latitude`/`longitude` are also kept
-off `DiveSiteInfo` (`schemas/dive.py`), the summary embedded in dive reads: adding them there
-enlarges every cached dive payload for a map view that does not exist yet.
+The validator lives on the **write** schemas only, not on `DiveSiteBase`. Every application path in
+goes through one of them — the admin panel registers `DiveSiteCreateInternal`/`DiveSiteUpdate`
+(`admin/views.py`), so it is covered too, and only raw SQL can produce a half pair. Put the
+validator on the shared base instead and such a row turns every read of it into a 500, which is a
+worse outcome than a read that shows the half. `latitude`/`longitude` are also kept off
+`DiveSiteInfo` (`schemas/dive.py`), the summary embedded in dive reads: adding them there enlarges
+every cached dive payload for a map view that does not exist yet.
 
 That last point also narrowed `patch_dive_site`'s **cache invalidation**, which used to drop every
 cached dive for the user on any successful edit. `DiveSiteInfo` is `uuid`, `name` and `location`, so
