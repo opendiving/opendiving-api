@@ -174,9 +174,14 @@ class TestReverseRoute:
         assert body["name"] == "Blue Hole"
         assert body["attribution"] == "Data © OpenStreetMap contributors, ODbL 1.0."
 
-    def test_answers_null_when_the_point_resolves_to_nothing(self, client: TestClient, no_redis: None):
+    def test_answers_204_when_the_point_resolves_to_nothing(self, client: TestClient, no_redis: None):
         """Nominatim's "unable to geocode" shape is an answer, not a failure - and having no
         suggestion is a normal outcome, not a 404.
+
+        A 204 rather than a `null` body because the client has genuinely learned something:
+        this position has no name, so a location field carrying the previous pin's name can
+        be cleared. See `TestCouldNotAsk` for the outcomes that look identical from here and
+        must not be acted on the same way.
 
         Deep in the Sahara rather than mid-ocean, deliberately: open water now gets the sea's
         name instead (see `TestOffshoreFallback`), so a position out at sea would no longer
@@ -184,8 +189,30 @@ class TestReverseRoute:
         with _responds({"error": "Unable to geocode"}):
             response = client.get("/api/v1/geocode/reverse", params={"lat": 23.4, "lon": 25.0})
 
-        assert response.status_code == 200
-        assert response.json() is None
+        assert response.status_code == 204
+        assert response.content == b""
+
+    def test_a_cached_empty_answer_is_still_a_204(self, client: TestClient, fake_redis: FakeRedis):
+        """The branch easiest to get wrong. A cached `[]` is the provider having answered, so
+        the second lookup must not degrade to "could not ask" - otherwise whether a field is
+        safe to clear depends on whether Redis happens to be warm."""
+        with _responds({"error": "Unable to geocode"}) as provider:
+            first = client.get("/api/v1/geocode/reverse", params={"lat": 23.4, "lon": 25.0})
+            second = client.get("/api/v1/geocode/reverse", params={"lat": 23.4, "lon": 25.0})
+
+        assert len(provider.requests) == 1
+        assert (first.status_code, second.status_code) == (204, 204)
+        assert second.content == b""
+
+    def test_the_schema_records_both_outcomes(self, client: TestClient):
+        """FastAPI will not infer the 204 from an explicit `Response`, so it is declared - and
+        asserted here, since a client generated from the schema is how the web app learns the
+        two answers apart."""
+        outcomes = client.get("/openapi.json").json()["paths"]["/api/v1/geocode/reverse"]["get"]["responses"]
+
+        assert "204" in outcomes
+        assert "content" not in outcomes["204"]
+        assert "application/json" in outcomes["200"]["content"]
 
     @pytest.mark.parametrize("params", [{"lat": 91, "lon": 0}, {"lat": 0, "lon": 181}, {"lat": "north", "lon": 0}])
     def test_rejects_impossible_coordinates(self, client: TestClient, no_redis: None, params: dict):
@@ -197,6 +224,53 @@ class TestReverseRoute:
 
     def test_requires_authentication(self, anonymous_client: TestClient):
         assert anonymous_client.get("/api/v1/geocode/reverse", params={"lat": 1, "lon": 2}).status_code == 401
+
+
+class TestCouldNotAsk:
+    """The three ways this instance fails to put the question to the provider. All three
+    answer `200` with `null` - a success, because the diver types the location in either way
+    and a 5xx would make the site form look broken over an optional convenience.
+
+    What none of them may do is answer `204`. That would tell the client this position has no
+    name, and the client acts on that by clearing a field the diver may have typed into. Each
+    case uses coordinates in the Red Sea, where a genuine lookup produces a name, so a test
+    that goes wrong here fails rather than passing on an accidentally nameless position."""
+
+    def test_a_disabled_geocoder(self, client: TestClient, no_redis: None, monkeypatch: Any):
+        monkeypatch.setattr(settings, "GEOCODER_URL", "")
+
+        with _responds(REVERSE_PAYLOAD):
+            response = client.get("/api/v1/geocode/reverse", params={"lat": 27.0, "lon": 35.0})
+
+        assert response.status_code == 200
+        assert response.json() is None
+
+    def test_the_instance_being_over_its_provider_cap(self, client: TestClient, fake_redis: FakeRedis):
+        """The case that forced this change. That counter is global, so a diver who nudges a
+        pin twice inside a second hits it through no fault of their own - and a `204` there
+        would erase a location typed by hand a round trip later."""
+        with (
+            _responds(REVERSE_PAYLOAD),
+            patch("src.app.services.geocoding_service.anyio.sleep", new_callable=AsyncMock),
+            patch("src.app.services.geocoding_service.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
+        ):
+            provider_limit.side_effect = RateLimitException("Too many requests. Please try again later.")
+
+            response = client.get("/api/v1/geocode/reverse", params={"lat": 27.0, "lon": 35.0})
+
+        assert response.status_code == 200
+        assert response.json() is None
+        assert fake_redis.store == {}
+
+    def test_an_unreachable_provider(self, client: TestClient, no_redis: None):
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ReadTimeout("too slow", request=request)
+
+        with _transport(handler):
+            response = client.get("/api/v1/geocode/reverse", params={"lat": 27.0, "lon": 35.0})
+
+        assert response.status_code == 200
+        assert response.json() is None
 
 
 class TestOffshoreFallback:
@@ -240,7 +314,7 @@ class TestOffshoreFallback:
         with _responds({"error": "Unable to geocode"}):
             response = client.get("/api/v1/geocode/reverse", params={"lat": 23.4, "lon": 25.0})
 
-        assert response.json() is None
+        assert response.status_code == 204
 
     def test_a_disabled_geocoder_means_disabled(self, client: TestClient, no_redis: None, monkeypatch: Any):
         """Half a feature is worse than none: an operator who set `GEOCODER_URL=""` to stop

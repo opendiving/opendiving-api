@@ -27,7 +27,7 @@ import hashlib
 import json
 import logging
 from itertools import islice
-from typing import Any
+from typing import Any, NamedTuple
 
 import anyio
 import httpx
@@ -405,6 +405,15 @@ def _offshore(lat: float, lon: float) -> GeocodeResult | None:
     coherent answer beats a marginally more principled one on a branch a `/reverse` row has
     to be malformed to reach.
 
+    That trade was struck when the cost of getting it wrong was "Red Sea" instead of `None`,
+    and it is worth restating now that it is dearer: a dropped row leaves the caller with an
+    `asked` outcome and no result, which the route answers `204` - "this position has no
+    name" - and the web app acts on by clearing a location the diver may have typed. A mirror
+    that omitted `lat`/`lon` from `/reverse` would do that for every pin in the cell for the
+    hour the `[]` is cached. Still not worth splitting, for the reason above, but a fix here
+    has to keep the cached and fresh branches agreeing or it trades one intermittent for a
+    worse one.
+
     `latitude`/`longitude` echo the position that was asked about rather than the polygon's
     centroid - the caller is about to drop a pin at what comes back, and the centre of the
     Red Sea is not where they were looking.
@@ -435,12 +444,41 @@ def _offshore(lat: float, lon: float) -> GeocodeResult | None:
     )
 
 
-async def reverse_geocode(latitude: float, longitude: float) -> GeocodeResult | None:
-    """The place at a position, or `None` when there isn't one to be had.
+class ReverseGeocode(NamedTuple):
+    """A reverse lookup's outcome, kept as two values because "no name here" and "we never
+    got to ask" are different facts and the caller has to act differently on each.
+
+    Flattening them into one `GeocodeResult | None` is what this type exists to stop. The
+    web app writes a named answer straight into a dive site's `location` field, and a
+    no-name answer has to *clear* it - otherwise the previous pin's name silently follows the
+    pin to a new position. Doing that on "we could not ask" would wipe a location the diver
+    typed, a round trip after they moved a pin twice inside the provider's one-per-second
+    window.
+
+    `result` is `None` on both sorts of empty outcome; `asked` is the one that separates them.
+    """
+
+    result: GeocodeResult | None
+    # True only when the provider returned a usable verdict about this position - including
+    # the verdict "nothing here". Everything else is False: geocoding off, over the provider
+    # cap, unreachable, and equally a refusal, an error status or a body that did not parse,
+    # since none of those told us anything about the position either. Read it as "was
+    # anything learned", not as "did a packet leave"; a reader who flips one of those
+    # branches turns a provider outage into a stream of cleared location fields.
+    asked: bool
+
+
+async def reverse_geocode(latitude: float, longitude: float) -> ReverseGeocode:
+    """The place at a position, and whether the question was actually put to the provider.
 
     The coordinates are rounded before both the cache key and the outbound query so the two
     always agree: everyone who pins the same ~110 m cell gets the identical cached answer
     rather than the first caller's exact position.
+
+    A cache hit is an `asked` outcome, including a cached `[]` - that entry is the provider
+    having answered "nothing here", written under a TTL and re-asked when it expires. Reading
+    it as "could not ask" would make the outcome depend on whether Redis happens to be warm,
+    which is the worst kind of intermittent.
 
     The offshore fallback runs **outside the cache**, on both branches below, and changes
     nothing about what is stored or for how long. What is stored stays an honest record of
@@ -460,15 +498,15 @@ async def reverse_geocode(latitude: float, longitude: float) -> GeocodeResult | 
     key = _cache_key("reverse", f"{lat}:{lon}")
     cached = await _cached(key)
     if cached is not None:
-        return cached[0] if cached else _offshore(lat, lon)
+        return ReverseGeocode(cached[0] if cached else _offshore(lat, lon), asked=True)
 
     rows = await _request("/reverse", {"lat": lat, "lon": lon})
     if rows is None:
-        return None
+        return ReverseGeocode(None, asked=False)
 
     results = [result for result in (_normalize(row) for row in rows) if result is not None][:1]
     await _store(key, results)
-    return results[0] if results else _offshore(lat, lon)
+    return ReverseGeocode(results[0] if results else _offshore(lat, lon), asked=True)
 
 
 async def search_places(query: str) -> list[GeocodeResult]:
