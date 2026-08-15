@@ -80,7 +80,13 @@ def _parts_of(name: str, geometry: dict[str, Any]) -> list[_Part]:
 
     parts: list[_Part] = []
     for polygon in polygons:
-        rings = tuple(_ring(ring) for ring in polygon)
+        # Empty rings are dropped here rather than guarded against in `_ring_contains`: a
+        # ringless hole is meaningless, and the alternative is a file that loads cleanly and
+        # then raises at lookup time - the one shape of failure this module promises not to
+        # have. `_geometry` in the generator cannot emit one, but a hand-edited or foreign
+        # file can, which is what the rest of `_load`'s defensiveness is for. An empty
+        # *outer* ring still fails the load, via `min()` below.
+        rings = tuple(ring for ring in (_ring(ring) for ring in polygon) if ring)
         longitudes = [longitude for longitude, _ in rings[0]]
         latitudes = [latitude for _, latitude in rings[0]]
         parts.append(
@@ -165,7 +171,7 @@ def _parts() -> tuple[_Part, ...]:
     global _loaded
     if _loaded is None:
         _loaded = _load()
-    return _loaded or ()
+    return _loaded if _loaded is not None else ()
 
 
 def _ring_contains(ring: Ring, longitude: float, latitude: float) -> bool:

@@ -160,6 +160,29 @@ class TestDegradation:
 
         assert water_name(27.0, 35.0) is None
 
+    def test_a_ringless_hole_does_not_survive_to_be_raised_on(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """The nastiest shape a hand-edited file could take: valid enough to load, and then an
+        `IndexError` from the ray caster on the first lookup that reaches it - a 500 from the
+        one module that promises never to produce one. The empty ring is dropped at load."""
+        broken = tmp_path / "marine_areas.geojson"
+        square = [[0, 0], [10, 0], [10, 10], [0, 10], [0, 0]]
+        broken.write_text(
+            json.dumps(
+                {
+                    "features": [
+                        {
+                            "properties": {"name": "Somewhere"},
+                            "geometry": {"type": "Polygon", "coordinates": [square, []]},
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(marine_areas, "_DATA_PATH", broken)
+
+        assert water_name(5.0, 5.0) == "Somewhere"
+
     def test_a_missing_file_means_no_water_name(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(marine_areas, "_DATA_PATH", tmp_path / "not-here.geojson")
 

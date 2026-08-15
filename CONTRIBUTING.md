@@ -96,8 +96,9 @@ resolves to — your dev database, by default — and the `create_user` helper c
 that nothing cleans up afterwards, so expect a scattering of faker-named users to accumulate.
 
 Ruff is configured with `fix = true`, so `uv run ruff check src tests scripts` will repair what it
-can on its own, and `uv run ruff format src tests` handles the rest. Line length is 120. Everything
-under `app.*` is type-checked with `disallow_untyped_defs` — new functions need annotations.
+can on its own, and `uv run ruff format src tests scripts` handles the rest. Line length is 120.
+Everything under `app.*` is type-checked with `disallow_untyped_defs` — new functions need
+annotations.
 
 The markdown docs are formatted too — drop the `--check` to rewrite them:
 
