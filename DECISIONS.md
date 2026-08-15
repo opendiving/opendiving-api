@@ -5418,11 +5418,13 @@ that module that touches the world, and the whole geocoding path promises to deg
 suggestion" rather than raise — a truncated data file breaking the dive-site form would be a poor
 trade for a convenience. **Only a successful read is remembered**, though — memoizing the failure is
 cheaper and is the wrong trade, since it turns one bad read into a fallback that is dead for the
-life of the process on evidence no stronger than a single `OSError`. The realistic trigger ships in
-this same change: `docker-compose.yml` bind-mounts `./src/app` into the running container, so a
-request landing mid-regeneration reads a half-written file. `scripts/build_marine_areas.py`
-therefore stages its output and `os.replace`s it into position, and the loader retries rather than
-latching.
+life of the process on evidence no stronger than a single `OSError`. The one routine thing that
+could have produced that is closed off rather than tolerated: `docker-compose.yml` bind-mounts
+`./src/app` into the running container, so a regeneration would otherwise be read half-written, and
+`scripts/build_marine_areas.py` therefore stages its output and `os.replace`s it into position. What
+is left is a genuinely broken deploy, where retrying costs a re-read per lookup on a path already
+reached only after a provider miss — so the failure is logged at WARNING once and at DEBUG
+afterwards, since `core.logger` writes to a file on disk.
 
 **It is a fallback, never a replacement, and that is the part most likely to be got wrong.** Coastal
 water already works: `-8.9, 115.5` off Bali returns "Bali, Indonesia", because territorial waters
@@ -5439,15 +5441,21 @@ well as the fresh one. Caching it would buy nothing (the lookup is local and fre
 something real: refreshed polygons would wait out a cached miss. `_cache_key` carries a
 `_CACHE_VERSION`, which is the escape hatch if the fallback ever does end up cached.
 
-**What it does change is how long that `[]` is kept.** The miss TTL is an hour because an empty
-answer is usually provider weirdness rather than a fact about the world — but that reasoning is
-exactly what the polygons disprove for these cells: a position in open water is a fact, and not one
-Nominatim will change its mind about. Left at an hour, every popular offshore cell would re-ask the
-provider hourly, forever, for a question already answered, which is the opposite of what its terms
-ask of us. So an empty answer the polygons corroborate is stored under the month-long *hit* TTL
-instead, and one over land keeps the short one. The cost is that a newly mapped OSM feature out
-there takes a month to surface rather than an hour; polygon refreshes are unaffected either way,
-since the name is composed outside the cache.
+**Keeping a corroborated `[]` for a month was tried and rejected**, and it is worth recording
+because the argument for it is genuinely appealing. The miss TTL is an hour because an empty answer
+is usually provider weirdness rather than a fact about the world; for a pin in the middle of the Red
+Sea the polygons say it *is* a fact, and one Nominatim will not change its mind about, so re-asking
+every hour forever is waste against a provider whose goodwill this feature leans on.
+
+It does not work because the condition available at that point is not "open ocean" but "inside any
+polygon in the file" — and the file carries Chesapeake Bay, Long Island Sound, the Gulf of Aqaba and
+the Amazon River, every one of them somewhere Nominatim answers well. One bad provider hour over a
+coastal cell would pin "Chesapeake Bay" for thirty days where the right answer is "Annapolis,
+Maryland": exactly the failure the short TTL exists to bound, on the very field this section
+stresses is written onto a dive site permanently. Keeping `featurecla` and promoting only oceans and
+seas would fix that, at the cost of a second concept in both the data and `_offshore` — worth
+revisiting if the hourly re-asks ever show up as real load, which for a handful of offshore pins
+they will not.
 
 **Filling `GeocodeResult`:** `latitude`/`longitude` echo the position that was asked about, already
 rounded to ~110 m like every other reverse answer — the caller is about to drop a pin at what comes
@@ -5496,8 +5504,10 @@ members *inside* `marine_areas.geojson`, where they cannot drift away from the d
 
 Three things worth knowing before trusting a coordinate to it. The dataset holds water, not
 coastlines, so "not in any polygon" is all it can say about a point — the Sahara and Lake Baikal,
-which is not in the file, are equally absent. Its coverage is coarse: the Gulf of Aqaba, narrow and
-dived constantly, is simply not in it and answers `None`. And it is wider than "seas" — gulfs,
+which is not in the file, are equally absent. Its coverage is coarse in a way that does not follow
+the coastline: "Gulf of Aqaba" is a polygon in the file and `29.0, 34.7` answers with it, but the
+outline stops well north of Dahab, so `28.57, 34.54` — the Blue Hole, this repo's own example
+coordinate — falls outside every polygon and answers `None`. And it is wider than "seas" — gulfs,
 straits, sounds, fjords, a handful of estuarine rivers ("Amazon River"), a few named lakes ("Lake
 Pontchartrain") and two reefs, of which "Great Barrier Reef" is a far better answer for a pin there
 than "Coral Sea". That last one is why the function is `water_name` and the attribution reads "Water

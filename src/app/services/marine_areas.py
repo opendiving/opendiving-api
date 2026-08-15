@@ -67,6 +67,9 @@ class _Part:
 # Set by `_parts` on the first successful read, and only then - see its docstring.
 _loaded: tuple[_Part, ...] | None = None
 
+# Whether a failed read has already been reported at WARNING - see `_load`.
+_warned = False
+
 
 def _ring(coordinates: list[Any]) -> Ring:
     return tuple((float(point[0]), float(point[1])) for point in coordinates)
@@ -119,7 +122,17 @@ def _load() -> tuple[_Part, ...] | None:
             for part in _parts_of(feature["properties"]["name"], feature["geometry"])
         ]
     except (OSError, ValueError, TypeError, KeyError, IndexError) as exc:
-        logger.warning("Could not read %s (%s); offshore positions will go unnamed.", _DATA_PATH.name, exc)
+        # Loud once, then quiet. `_parts` retries on every lookup, so a genuinely broken
+        # deploy would otherwise write this line for every offshore pin for as long as it
+        # stayed broken - and `core.logger` writes to a file on disk.
+        global _warned
+        logger.log(
+            logging.DEBUG if _warned else logging.WARNING,
+            "Could not read %s (%s); offshore positions will go unnamed.",
+            _DATA_PATH.name,
+            exc,
+        )
+        _warned = True
         return None
 
     parts.sort(key=lambda part: part.box_area)
@@ -142,9 +155,12 @@ def _parts() -> tuple[_Part, ...]:
     **Only a successful read is remembered.** Memoizing the failure would be cheaper and is
     the wrong trade: it turns one bad read into a fallback that is dead for the life of the
     process, recoverable only by restarting, on evidence no stronger than a single `OSError`.
-    Retrying costs a file read on a path already reached only after a provider miss, and the
-    repeated warning is the point - an operator whose data file is broken should keep hearing
-    about it.
+    Nothing routine is expected to produce that - `scripts/build_marine_areas.py` stages its
+    output and `os.replace`s it, so even a regeneration against the dev bind-mount is atomic
+    - which is precisely why latching on one is the wrong response to it. The cost of
+    retrying is a re-read and re-parse per lookup while the file stays broken, on a path
+    already reached only after a provider miss, and `_load` reports the failure loudly once
+    and at DEBUG thereafter rather than filling the log with it.
     """
     global _loaded
     if _loaded is None:

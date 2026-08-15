@@ -168,20 +168,11 @@ async def _cached(key: str) -> list[GeocodeResult] | None:
         return None
 
 
-async def _store(key: str, results: list[GeocodeResult], *, settled: bool = False) -> None:
-    """`settled` promotes an *empty* answer to the long TTL.
-
-    The short one exists because an empty answer is usually provider weirdness rather than a
-    fact about the world - but for a position the local polygons place in open water, it is
-    exactly a fact about the world, and one Nominatim will not change its mind about. Left at
-    an hour, every popular offshore cell would re-ask the provider hourly, forever, for a
-    question it has already answered - the opposite of what its terms ask of us. The cost is
-    that a newly mapped feature out there takes a month to surface instead of an hour.
-    """
+async def _store(key: str, results: list[GeocodeResult]) -> None:
     if cache.client is None:
         return
 
-    ttl = _HIT_TTL_SECONDS if results or settled else _MISS_TTL_SECONDS
+    ttl = _HIT_TTL_SECONDS if results else _MISS_TTL_SECONDS
     try:
         await cache.client.set(key, json.dumps([result.model_dump() for result in results]), ex=ttl)
     except RedisError as exc:
@@ -451,11 +442,12 @@ async def reverse_geocode(latitude: float, longitude: float) -> GeocodeResult | 
     always agree: everyone who pins the same ~110 m cell gets the identical cached answer
     rather than the first caller's exact position.
 
-    The offshore fallback runs **outside the cache**, on both branches below. What is stored
-    stays an honest record of what the provider said, so refreshing the polygons takes effect
-    immediately instead of waiting out a cached `[]`; the lookup is local and costs a fraction
-    of a millisecond, so there is nothing to save by caching it. What the fallback *does*
-    change is how long the provider's `[]` is kept - see `_store`.
+    The offshore fallback runs **outside the cache**, on both branches below, and changes
+    nothing about what is stored or for how long. What is stored stays an honest record of
+    what the provider said, so refreshing the polygons takes effect immediately instead of
+    waiting out a cached `[]`; the lookup is local and costs a fraction of a millisecond, so
+    there is nothing to save by caching it. Keeping a corroborated `[]` for a month rather
+    than an hour was tried and rejected - see `DECISIONS.md`.
 
     It is deliberately not reached when `_request` returns `None` - "we could not ask" is not
     the provider telling us the position is open water, and answering "Bali Sea" during an
@@ -475,9 +467,8 @@ async def reverse_geocode(latitude: float, longitude: float) -> GeocodeResult | 
         return None
 
     results = [result for result in (_normalize(row) for row in rows) if result is not None][:1]
-    offshore = _offshore(lat, lon) if not results else None
-    await _store(key, results, settled=offshore is not None)
-    return results[0] if results else offshore
+    await _store(key, results)
+    return results[0] if results else _offshore(lat, lon)
 
 
 async def search_places(query: str) -> list[GeocodeResult]:

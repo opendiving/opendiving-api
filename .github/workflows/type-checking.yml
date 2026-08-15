@@ -34,3 +34,9 @@ jobs:
         env:
           ENVIRONMENT: local
           SECRET_KEY: test-secret-key-for-testing-only
+
+      # `scripts/` imports nothing from the app, so it needs neither the env nor its own
+      # invocation for the module-name reason above - it is separate only because it is not
+      # under either root.
+      - name: Run mypy on scripts
+        run: uv run mypy scripts --config-file pyproject.toml

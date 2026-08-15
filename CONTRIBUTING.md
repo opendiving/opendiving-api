@@ -37,18 +37,19 @@ uv sync --extra dev
 Three workflows run on every pull request, and all must be green. Run them locally first:
 
 ```bash
-uv run ruff check src tests
-uv run ruff format --check src tests
+uv run ruff check src tests scripts
+uv run ruff format --check src tests scripts
 uv run mdformat --check *.md docs
 uv run mypy src --config-file pyproject.toml
 uv run mypy tests --config-file pyproject.toml
+uv run mypy scripts --config-file pyproject.toml
 uv run pytest --cov=src/app --cov-report=term-missing
 ```
 
-Note that lint and type-checking cover `tests/` as well as `src/`. mypy runs as two separate
-invocations on purpose: the app is importable as both `app.*` (via `mypy_path`) and `src.app.*` (how
-the tests import it), and asking it to check both roots at once fails with "source file found twice
-under different module names".
+Note that lint and type-checking cover `tests/` and the build-time `scripts/` as well as `src/`.
+mypy runs as three separate invocations on purpose: the app is importable as both `app.*` (via
+`mypy_path`) and `src.app.*` (how the tests import it), and asking it to check both roots at once
+fails with "source file found twice under different module names".
 
 mypy and pytest need `ENVIRONMENT=local` and a `SECRET_KEY` in the environment (any value — CI uses
 a throwaway one).
@@ -94,9 +95,9 @@ Two things to know when you do run them against a live database: they write to w
 resolves to — your dev database, by default — and the `create_user` helper commits a row per test
 that nothing cleans up afterwards, so expect a scattering of faker-named users to accumulate.
 
-Ruff is configured with `fix = true`, so `uv run ruff check src tests` will repair what it can on
-its own, and `uv run ruff format src tests` handles the rest. Line length is 120. Everything under
-`app.*` is type-checked with `disallow_untyped_defs` — new functions need annotations.
+Ruff is configured with `fix = true`, so `uv run ruff check src tests scripts` will repair what it
+can on its own, and `uv run ruff format src tests` handles the rest. Line length is 120. Everything
+under `app.*` is type-checked with `disallow_untyped_defs` — new functions need annotations.
 
 The markdown docs are formatted too — drop the `--check` to rewrite them:
 
@@ -127,7 +128,8 @@ src/app/
   models/      SQLAlchemy models
   schemas/     Pydantic request/response schemas
   core/        config, security, exceptions, worker, db setup
-src/scripts/   one-shot maintenance scripts
+src/scripts/   one-shot maintenance scripts, run inside the container
+scripts/       build-time tooling, run by hand and never shipped
 tests/
 ```
 

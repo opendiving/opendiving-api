@@ -289,24 +289,17 @@ class TestOffshoreFallback:
         (stored,) = fake_redis.store.values()
         assert json.loads(stored) == []
 
-    def test_an_empty_answer_over_water_is_kept_for_a_month_not_an_hour(
-        self, client: TestClient, fake_redis: FakeRedis
+    @pytest.mark.parametrize("latitude,longitude", [(27.0, 35.0), (23.4, 25.0), (38.8, -76.4)])
+    def test_a_named_sea_does_not_extend_how_long_the_miss_is_kept(
+        self, client: TestClient, fake_redis: FakeRedis, latitude: float, longitude: float
     ):
-        """The miss TTL exists because an empty answer is usually provider weirdness rather
-        than a fact about the world. Out here the polygons say otherwise, and it is not a
-        question Nominatim will change its mind about - so keeping it for an hour would
-        re-ask the provider hourly, forever, for every popular offshore cell."""
+        """Promoting a corroborated `[]` to the month-long hit TTL was tried and rejected: the
+        polygons cannot tell open ocean from Chesapeake Bay, so one bad provider hour over a
+        coastal cell would pin "Chesapeake Bay" for a month in place of "Annapolis, Maryland".
+        Open water, land and coastal water are all asserted, because the whole objection was
+        that the third behaves like the first while mattering like the second."""
         with _responds({"error": "Unable to geocode"}):
-            client.get("/api/v1/geocode/reverse", params={"lat": 27.0, "lon": 35.0})
-
-        (key,) = fake_redis.expiries
-        assert fake_redis.expiries[key] == geocoding_service._HIT_TTL_SECONDS
-
-    def test_an_empty_answer_over_land_keeps_the_short_ttl(self, client: TestClient, fake_redis: FakeRedis):
-        """The other half of the same decision: nothing local corroborates this one, so it
-        stays the cheap-to-be-wrong-about answer it was before."""
-        with _responds({"error": "Unable to geocode"}):
-            client.get("/api/v1/geocode/reverse", params={"lat": 23.4, "lon": 25.0})
+            client.get("/api/v1/geocode/reverse", params={"lat": latitude, "lon": longitude})
 
         (key,) = fake_redis.expiries
         assert fake_redis.expiries[key] == geocoding_service._MISS_TTL_SECONDS

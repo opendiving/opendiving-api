@@ -189,6 +189,18 @@ class TestTheVendoredFile:
         assert "public domain" in document["licence"].casefold()
         assert document["retrieved"]
 
+    def test_holds_the_dataset_it_is_documented_to_hold(self):
+        """The one assertion that makes a bad refresh loud. Everything upstream drops quietly
+        by design - unnamed features, rings that rounding collapsed, parts with no outer ring -
+        so a source that changed shape could shed a hundred features and leave every other test
+        here still passing on the handful of coordinates they name. These numbers are quoted in
+        `DECISIONS.md` and in both modules' docstrings; if a refresh moves them, that is a
+        decision to take rather than a diff to accept."""
+        document = json.loads(_REAL_DATA.read_text(encoding="utf-8"))
+
+        assert len(document["features"]) == 293
+        assert len(marine_areas._parts()) == 324
+
     def test_every_part_carries_a_name(self):
         """Natural Earth ships eleven unnamed features; `scripts/build_marine_areas.py` drops
         them, because an unnamed polygon can only ever produce a blank suggestion."""
