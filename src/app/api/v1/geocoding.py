@@ -10,11 +10,16 @@ than about the caller.
 Both degrade to "no result" rather than an error when the provider is unreachable. A diver
 filling in a dive site can always type the location themselves, and a 502 here would make a
 form look broken over an optional convenience.
+
+Which is why `/geocode/reverse` spends a second status code on the difference: a successful
+`null` means "we could not ask", and `204` means "we asked, and this position has no name".
+Both are still successes, and the client decides from that whether it has learned enough
+about the position to clear a field the diver may have typed into.
 """
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 
 from ...api.dependencies import get_current_user
 from ...core.config import settings
@@ -41,16 +46,27 @@ async def _enforce_geocode_limit(user_id: int) -> None:
     )
 
 
-@router.get("/geocode/reverse", response_model=GeocodeResult | None)
+@router.get(
+    "/geocode/reverse",
+    response_model=GeocodeResult | None,
+    responses={204: {"description": "The position was looked up and has no name."}},
+)
 async def read_reverse_geocode(
     current_user: Annotated[dict, Depends(get_current_user)],
     lat: Annotated[float, Query(ge=-90, le=90, description="Latitude in decimal degrees.")],
     lon: Annotated[float, Query(ge=-180, le=180, description="Longitude in decimal degrees.")],
-) -> GeocodeResult | None:
+) -> GeocodeResult | Response | None:
     """Name the place at a position, so a dive site pinned on a map can offer a `location`.
 
-    Answers `null` - not a 404 - when the position resolves to nothing or the provider
-    cannot be reached: "we have no suggestion for you" is a normal outcome here.
+    Three outcomes, and the difference between the last two is the point: `200` with a
+    result; `204` when the position was looked up and simply has no name; `200` with `null`
+    when this instance could not ask at all - geocoding switched off, over the provider's
+    instance-wide one-per-second cap, or the provider unreachable.
+
+    Never a 404 and never a 5xx. "We have no suggestion for you" is a normal outcome, and a
+    client is expected to treat `null` as "nothing was learned about this position" - only
+    `204` says the position really is nameless, which is what makes it safe to clear a
+    location a diver may have typed.
 
     A pin in genuinely open water is answered with the sea's name ("Red Sea"), from polygons
     carried in this repo rather than from the provider, which has no row for such a point.
@@ -59,7 +75,14 @@ async def read_reverse_geocode(
     locality name and that is the resolution at which it stops changing.
     """
     await _enforce_geocode_limit(current_user["id"])
-    return await reverse_geocode(lat, lon)
+    result, asked = await reverse_geocode(lat, lon)
+
+    if result is None and asked:
+        # Explicit, because `response_model=GeocodeResult | None` would otherwise serialise a
+        # perfectly valid `null` body under the 200 the decorator declares. A 204 carries no
+        # body at all - not `null` - so this returns the `Response` rather than a value.
+        return Response(status_code=204)
+    return result
 
 
 @router.get("/geocode/search", response_model=list[GeocodeResult])

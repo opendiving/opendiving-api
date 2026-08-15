@@ -5349,13 +5349,13 @@ request *path* and never the built URL, which carries `GEOCODER_API_KEY` as a qu
 `display_name` is a seven-part postal address; the region stands in only when the point is too
 remote to fall inside a named settlement, and the full `display_name` is the fallback for a row with
 no structured address at all — a named bay or reef, where the feature's own name is the best answer
-available. (A point in genuinely open ocean gets no row back and reverse-geocodes to `null`, which
-is a normal outcome and not an error: open water is a legitimate place to dive.) Both are returned,
-because they answer different questions: `location` is what gets persisted, `display_name` is what
-makes two otherwise identical rows in a picker distinguishable. Composing from `address` also means
-the result barely moves if the provider changes how verbose that label is, which is what "swapping
-providers is a config change" has to mean in practice. It is truncated to 255 characters, the width
-of the column it is headed for.
+available. (A point in genuinely open ocean gets no row back and is named from the vendored polygons
+instead; a position with no name from either answers `204`, which is a normal outcome and not an
+error — see the two sections below.) Both are returned, because they answer different questions:
+`location` is what gets persisted, `display_name` is what makes two otherwise identical rows in a
+picker distinguishable. Composing from `address` also means the result barely moves if the provider
+changes how verbose that label is, which is what "swapping providers is a config change" has to mean
+in practice. It is truncated to 255 characters, the width of the column it is headed for.
 
 **Attribution rides on each result rather than in an envelope.** It is a licence condition of the
 data, so it travels with the row it describes and is read from the provider's own `licence` field —
@@ -5514,6 +5514,56 @@ than "Coral Sea". That last one is why the function is `water_name` and the attr
 body names from Natural Earth": a client rendering "Sea names from Natural Earth" under "Amazon
 River" is the kind of small wrongness nobody ever gets round to fixing. None of the three matters
 much in practice, because all are places Nominatim names anyway.
+
+## "No name here" is a 204, and "we could not ask" stays a successful `null`
+
+`GET /api/v1/geocode/reverse` used to answer `200` with `null` for four unrelated situations: the
+position genuinely has no name, geocoding is switched off, this instance is over the provider's
+one-per-second cap, or the provider timed out. Only the first is a fact about the position; the
+other three are facts about us, and the client cannot act on them the same way.
+
+It matters because of what the web app does with the answer. It places a pin, reverse-geocodes it,
+and writes the result into the dive site's `location` field — so a nameless position has to *clear*
+that field, or the previous pin's name silently follows the pin somewhere it was never true. Doing
+the same on "we could not ask" would erase a location the diver typed. The failure that forced the
+change: nudge a pin twice inside a second, hit the **global** provider cap — which one diver can
+spend on another's behalf, by design — get `null` back, and watch a hand-typed location vanish a
+round trip later, by which point they have scrolled on to Notes. So the client did the safe thing
+and never cleared, which meant the stale-name bug instead.
+
+**The distinction already existed inside the service and was only lost at the boundary.** `_request`
+has always separated `[]` ("the provider answered, and had nothing") from `None` ("we could not
+ask") — the cache depends on it — and `reverse_geocode` has always refused to reach `_offshore` on
+the `None` branch. `reverse_geocode` now returns a `ReverseGeocode(result, asked)` instead of
+flattening both into `GeocodeResult | None`, and the route turns that into a status code: a result
+is `200`, `asked` with no result is `204`, and everything else is `200` with `null`, unchanged.
+
+**The cached branch is an *asked* outcome**, and it is the one easiest to get wrong. A cached `[]`
+is the provider having answered; reading it as "could not ask" would make a field safe to clear or
+not depending on whether Redis happens to be warm — the worst kind of intermittent, and invisible in
+any test that runs without a cache.
+
+**"Could not ask" deliberately stays a success rather than becoming a 503.** That is the same call
+this module's docstring already makes for everything else here: a diver can always type the location
+in, and a 5xx would make the site form look broken over an optional convenience. Being over the
+provider cap in particular is not something the caller did or can act on — see the two-rate-limits
+note above — so it is neither a 429 nor a 502.
+
+**A `{"result": …, "available": true|false}` envelope was the alternative**, and it is the more
+explicit design. It was rejected because it changes the shape every client already parses, for a
+distinction HTTP has a status code for, and because it would have broken the "response is the
+resource schema directly" convention the rest of `api/v1` keeps. Two things the 204 needs that the
+envelope would not: FastAPI will not emit a bare 204 from a route declared
+`response_model=GeocodeResult | None`, so the handler returns an explicit
+`Response(status_code=204)` and declares `responses={204: …}` for the schema; and the response
+carries no body at all, not a body of `null`. A client's own layers can undo that — axios gives a
+204 a `data` of `""`, so `response.data ?? null` turns "no name" into the empty string and keeps the
+bug — which is why `tests/test_geocoding.py` asserts the empty body and the generated schema rather
+than only the code.
+
+**`search_places` still conflates the two** — `[]` means both "nothing matched" and "provider
+unavailable" — and is deliberately left alone. An empty suggestion list is a far less destructive
+answer than a wrongly-cleared field, and fixing it is a separate call.
 
 ## `except ValueError, TypeError:` is valid, and `ruff format` writes it that way
 
