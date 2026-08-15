@@ -3111,12 +3111,12 @@ which is the kind of false alarm that gets ignored.
 `truncated` defaults to `False` so an older client - or a cached response written before the field
 existed - doesn't read as "the list is partial".
 
-## `DiveUpdate` refuses an explicit null for a `NOT NULL` column
+## Update schemas refuse an explicit null for a `NOT NULL` column
 
-Every field on `DiveUpdate` is typed `T | None`, because that is how "omit it to leave it alone" is
-spelled in a PATCH body. But four of them - `dive_number`, `start_time`, `duration`, `notes` - map
-to `NOT NULL` columns, so an explicit `null` is a different thing entirely and the database refuses
-it.
+Every field on an update schema is typed `T | None`, because that is how "omit it to leave it alone"
+is spelled in a PATCH body. But the ones that map to `NOT NULL` columns - `DiveUpdate`'s
+`dive_number`, `start_time`, `duration`, `notes`, and their equivalents on every other resource -
+mean something entirely different when sent as an explicit `null`, and the database refuses it.
 
 It used to be refused all the way down at the driver. The null survived `exclude_unset`, reached
 Postgres, and the `IntegrityError` came back through `_fk_error_detail` as a 422 reading **"Invalid
@@ -3128,14 +3128,59 @@ so an explicit null *skipped* the `split_start_time` branch, still reached the d
 `model_dump`, and left `utc_offset_minutes` describing the previous start time - a
 wrong-but-plausible offset on a dive, not an error.
 
-A `model_validator` on `DiveUpdate` now rejects those four with a message naming the field, and
-`patch_dive`'s `start_time` branch is keyed off `model_fields_set` to match the `trip_uuid` branch
-beside it. The nullable fields are untouched: clearing `max_depth` back to "not recorded" is a real
-operation, and `trip_uuid: null` is the *only* way to detach a dive from its trip.
+A `model_validator` now rejects them with a message naming the field, and `patch_dive`'s
+`start_time` branch is keyed off `model_fields_set` to match the `trip_uuid` branch beside it. The
+nullable fields are untouched: clearing `max_depth` back to "not recorded" is a real operation, and
+`trip_uuid: null` is the *only* way to detach a dive from its trip.
 
 No client was sending these nulls, so this was latent - but the contract advertised them, and the
 web client has since learned that "explicit null clears a field" from the `trip_uuid` fix. That is
 exactly the assumption that would have walked into it.
+
+### Why it lives on a shared base rather than per schema
+
+`DiveUpdate` got the validator first and the other resources didn't, which left the same hole
+everywhere else - and worse-shaped, because only the dive routes map `IntegrityError` to a 422 at
+all. `PATCH /dive-site/{uuid}` with `{"name": null}` was a plain **500**: `patch_dive_site` read the
+null as "unchanged" when computing `effective_name` for the uniqueness check, `exclude_unset` passed
+it through to the UPDATE anyway, Postgres refused it, and because the write raised, the dive caches
+that embed the site's name were never invalidated either.
+
+So the rule lives on `RejectsExplicitNulls` in `core/schemas.py`, and each update schema declares
+its own columns in `NON_NULLABLE_FIELDS`: `DiveUpdate`, `DiveSiteUpdate`, `TripUpdate`,
+`GearItemUpdate`, `GearSetUpdate`, `CertificationUpdate`, `GearServiceScheduleUpdate`,
+`GearServiceRecordUpdate` and `UserUpdate`/`UserAdminUpdate`. The list is per schema rather than
+derived from the model at import: a field is not always a column (`DiveUpdate.trip_uuid` writes
+`trip_id`), and the point of the guard is to be readable next to the fields it governs.
+
+Hand-written lists drift, so `tests/test_update_explicit_nulls.py` reads each one back off the
+SQLAlchemy table and asserts they match - a new `NOT NULL` column reopens the hole otherwise, and
+silently. It needs no database: `Table.columns` is metadata, populated at import.
+
+`DiveSiteUpdate` is where this rule meets `WholeCoordinatePair`, and the two must not overlap.
+`latitude`/`longitude` are nullable columns governed by that other rule instead: clearing a position
+means sending **both** as null, so listing them in `NON_NULLABLE_FIELDS` would refuse the one edit
+that corrects a mistyped marker. The drift test would not have caught that - nullable columns are
+exactly what it expects to be absent - so the exemption is named explicitly in
+`CLEARED_ONLY_IN_PAIRS`, with a test that the pair still clears.
+
+Seven update schemas are left out, for two different reasons. `DiveMixtureUpdate`,
+`UserDiveStatsUpdate` and the three join-table ones are admin-panel-only, and CRUDAdmin's form
+handler already can't produce the failing body: it forwards only non-empty strings and coerces
+checkboxes to real bools, so a `None` never reaches the schema in the first place.
+`AuthenticationProviderUpdate` and `AuthenticationRequestUpdate` are never a request body at all -
+`api/v1/auth.py` and `api/v1/users.py` construct them server-side to stamp
+`used_at`/`invalidated_at`, so there is no caller to reject.
+
+`UserAdminUpdate` is on the guarded list despite being admin-only for the opposite reason: it
+extends `UserUpdate`, so it inherits the guard whether or not it declares anything, and naming
+`email` alongside the four fields it already covers costs one line.
+
+Both exemption reasons are conditions that can stop being true, so they are named in
+`UNGUARDED_UPDATE_SCHEMAS` rather than left implicit. A companion test walks `app/schemas` and fails
+on any `*Update` class that is in neither that tuple nor the guarded list - the drift one level up
+from the columns, and the one that let `DiveUpdate` be the only guarded schema for as long as it
+was.
 
 ## The `trip_uuid` detach path has a test now
 

@@ -1,11 +1,11 @@
 import uuid as uuid_pkg
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema
+from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls
 from .gear_service import GearServiceScheduleInfo
 
 
@@ -116,12 +116,17 @@ class GearItemCreateInternal(GearItemBase):
     user_id: int
 
 
-class GearItemUpdate(BaseModel):
+class GearItemUpdate(RejectsExplicitNulls):
     """Partial update. `is_archived` doubles as the archive/unarchive control - the API
     derives `archived_at` from it rather than letting callers set the timestamp directly.
     """
 
     model_config = ConfigDict(extra="forbid")
+
+    # `brand` and `type` are genuinely nullable, so clearing either is a real edit -
+    # `patch_gear_item` reads an explicit `brand` null through `model_fields_set` when it
+    # re-checks (brand, name) uniqueness.
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "notes", "rented", "is_archived")
 
     name: Annotated[str | None, Field(min_length=1, max_length=255, default=None)]
     brand: Annotated[str | None, Field(default=None, max_length=255)]

@@ -1,9 +1,9 @@
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
-from ..core.schemas import PublicUUIDSchema
+from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls
 
 
 class UserBase(BaseModel):
@@ -46,7 +46,7 @@ class UserCreateInternal(UserBase):
     profile_image_url: str = "https://profileimageurl.com"
 
 
-class UserUpdate(BaseModel):
+class UserUpdate(RejectsExplicitNulls):
     """`PATCH /user`'s body. Deliberately has no `email` field - changing an
     account's email requires proving ownership of the new address first (see
     `POST /user/email-change/request` / `POST /user/email-change/verify`),
@@ -55,6 +55,10 @@ class UserUpdate(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid")
+
+    # Every field here maps to a `NOT NULL` column - `profile_image_url` included, which
+    # carries a placeholder URL rather than a null when a user has no picture.
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "username", "profile_image_url", "gear_service_emails")
 
     name: Annotated[str | None, Field(min_length=2, max_length=30, examples=["User Userberg"], default=None)]
     username: Annotated[
@@ -83,6 +87,8 @@ class UserAdminUpdate(UserUpdate):
     may need to fix up an account without going through the verified email-change
     flow. Never used by the public API.
     """
+
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = (*UserUpdate.NON_NULLABLE_FIELDS, "email")
 
     email: Annotated[EmailStr | None, Field(examples=["user.userberg@example.com"], default=None)]
 

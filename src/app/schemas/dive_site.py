@@ -1,10 +1,10 @@
 import uuid as uuid_pkg
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema
+from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls
 
 Latitude = Annotated[float | None, Field(default=None, ge=-90, le=90, examples=[27.8506])]
 Longitude = Annotated[float | None, Field(default=None, ge=-180, le=180, examples=[34.3136])]
@@ -80,8 +80,18 @@ class DiveSiteCreateInternal(DiveSiteBase, WholeCoordinatePair):
     user_id: int
 
 
-class DiveSiteUpdate(WholeCoordinatePair):
+class DiveSiteUpdate(WholeCoordinatePair, RejectsExplicitNulls):
     model_config = ConfigDict(extra="forbid")
+
+    # `location` is genuinely nullable and stays off this list: clearing it is how a site
+    # entered with the wrong location gets corrected back to "not recorded", and
+    # `patch_dive_site` reads that explicit null through `model_fields_set`.
+    #
+    # So are the coordinates, but they answer to `WholeCoordinatePair` above instead:
+    # both columns are nullable, and clearing the position means sending *both* as null.
+    # Listing them here would refuse that - a site whose position was mistyped could
+    # never be corrected back to "not recorded".
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "notes")
 
     name: Annotated[str | None, Field(min_length=1, max_length=255, default=None)]
     location: Annotated[str | None, Field(default=None, max_length=255, examples=["Koh Tao, Thailand"])]

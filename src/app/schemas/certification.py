@@ -1,11 +1,11 @@
 import uuid as uuid_pkg
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Annotated, Self
+from typing import Annotated, ClassVar, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema
+from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls
 
 
 class CertificationAgency(StrEnum):
@@ -147,7 +147,7 @@ class CertificationCreateInternal(CertificationBase):
     user_id: int
 
 
-class CertificationUpdate(BaseModel):
+class CertificationUpdate(RejectsExplicitNulls):
     """Partial update.
 
     Unlike `CertificationBase` this does *not* validate `agency`/`agency_other` against
@@ -157,6 +157,11 @@ class CertificationUpdate(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid")
+
+    # `agency_other` is nullable and stays off this list - clearing it is half of moving
+    # a certification off `agency="other"`, and `patch_certification` validates the pair
+    # against the merged result.
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("agency", "name", "notes")
 
     agency: Annotated[CertificationAgency | None, Field(default=None)]
     agency_other: Annotated[str | None, Field(default=None, max_length=64)]
