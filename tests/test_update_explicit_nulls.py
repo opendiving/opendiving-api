@@ -17,6 +17,8 @@ The dive-specific half of this behaviour (including the `start_time`/`utc_offset
 pairing it protects) stays in `test_dive_update.py`.
 """
 
+import importlib
+import pkgutil
 import uuid as uuid_pkg
 from collections.abc import Generator, Sequence
 from typing import Any
@@ -24,8 +26,9 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
+from src.app import schemas as schemas_pkg
 from src.app.api import router
 from src.app.api.dependencies import get_current_user
 from src.app.api.v1 import dive_sites as dive_sites_module
@@ -74,6 +77,24 @@ SCHEMAS_AND_TABLES: list[tuple[type[RejectsExplicitNulls], Any]] = [
 # position is meaningless, so clearing one means clearing both. Driving them singly here
 # would assert the opposite of what that schema promises - see the paired test below.
 CLEARED_ONLY_IN_PAIRS = {(DiveSiteUpdate, "latitude"), (DiveSiteUpdate, "longitude")}
+
+# The update schemas that deliberately go unguarded, each for a reason that has to keep
+# being true. `test_every_update_schema_is_accounted_for` fails if a new one appears in
+# neither this tuple nor `SCHEMAS_AND_TABLES` - the drift one level up from the columns,
+# and the one that let `DiveUpdate` be the only guarded schema for as long as it was.
+UNGUARDED_UPDATE_SCHEMAS = (
+    # Admin-panel-only. CRUDAdmin's form handler forwards non-empty strings and coerced
+    # bools, so a `None` never reaches them.
+    "DiveMixtureUpdate",
+    "UserDiveStatsUpdate",
+    "DiveDiveSiteUpdate",
+    "DiveGearItemUpdate",
+    "GearSetItemUpdate",
+    # Server-constructed only - never a request body. The routes build these themselves
+    # (`api/v1/auth.py`, `api/v1/users.py`) to stamp `used_at`/`invalidated_at`.
+    "AuthenticationProviderUpdate",
+    "AuthenticationRequestUpdate",
+)
 
 NULLABLE_CASES = [
     (schema, name)
@@ -136,6 +157,37 @@ def test_an_omitted_field_is_still_fine(schema: type[RejectsExplicitNulls], _mod
     values = schema.model_validate({})
 
     assert values.model_fields_set == set()
+
+
+def test_every_update_schema_is_accounted_for() -> None:
+    """The drift guard one level up from `test_the_declared_fields_match_the_table`.
+
+    That one catches a new `NOT NULL` column on a schema already listed here. This one
+    catches a whole new schema: a `FooUpdate` that never inherits `RejectsExplicitNulls`,
+    or one that does but is left out of `SCHEMAS_AND_TABLES`, is otherwise covered by
+    nothing at all - which is precisely how `DiveUpdate` stayed the only guarded schema
+    while every sibling shipped the same 500.
+
+    Walks the package rather than importing a list, because a list is the thing being
+    checked. `*UpdateInternal`/`*UpdateRequest` fall out on their own: neither name ends
+    in `Update`, and both inherit whatever their base declares.
+    """
+    discovered = set()
+    for module_info in pkgutil.iter_modules(schemas_pkg.__path__):
+        module = importlib.import_module(f"{schemas_pkg.__name__}.{module_info.name}")
+        for name in dir(module):
+            attribute = getattr(module, name)
+            if (
+                isinstance(attribute, type)
+                and issubclass(attribute, BaseModel)
+                and attribute.__module__ == module.__name__
+                and name.endswith("Update")
+            ):
+                discovered.add(name)
+
+    covered = {schema.__name__ for schema, _ in SCHEMAS_AND_TABLES}
+
+    assert discovered == covered | set(UNGUARDED_UPDATE_SCHEMAS)
 
 
 def test_a_dive_site_position_can_still_be_cleared_as_a_pair() -> None:

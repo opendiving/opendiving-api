@@ -3164,12 +3164,23 @@ that corrects a mistyped marker. The drift test would not have caught that - nul
 exactly what it expects to be absent - so the exemption is named explicitly in
 `CLEARED_ONLY_IN_PAIRS`, with a test that the pair still clears.
 
-`DiveMixtureUpdate`, `UserDiveStatsUpdate` and the join-table schemas are left out. Nothing outside
-the admin panel can PATCH them, and CRUDAdmin's form handler already can't produce the failing body:
-it forwards only non-empty strings and coerces checkboxes to real bools, so a `None` never reaches
-the schema in the first place. `UserAdminUpdate` is on the list despite being admin-only for the
-opposite reason - it extends `UserUpdate`, so it inherits the guard whether or not it declares
-anything, and naming `email` alongside the four fields it already covers costs one line.
+Seven update schemas are left out, for two different reasons. `DiveMixtureUpdate`,
+`UserDiveStatsUpdate` and the three join-table ones are admin-panel-only, and CRUDAdmin's form
+handler already can't produce the failing body: it forwards only non-empty strings and coerces
+checkboxes to real bools, so a `None` never reaches the schema in the first place.
+`AuthenticationProviderUpdate` and `AuthenticationRequestUpdate` are never a request body at all -
+`api/v1/auth.py` and `api/v1/users.py` construct them server-side to stamp
+`used_at`/`invalidated_at`, so there is no caller to reject.
+
+`UserAdminUpdate` is on the guarded list despite being admin-only for the opposite reason: it
+extends `UserUpdate`, so it inherits the guard whether or not it declares anything, and naming
+`email` alongside the four fields it already covers costs one line.
+
+Both exemption reasons are conditions that can stop being true, so they are named in
+`UNGUARDED_UPDATE_SCHEMAS` rather than left implicit. A companion test walks `app/schemas` and fails
+on any `*Update` class that is in neither that tuple nor the guarded list - the drift one level up
+from the columns, and the one that let `DiveUpdate` be the only guarded schema for as long as it
+was.
 
 ## The `trip_uuid` detach path has a test now
 
