@@ -5385,6 +5385,85 @@ whose free tier caps response caching at 48 h and so conflicts with caching-by-p
 **self-hosted Nominatim**, the only fully independent option but a ~1 TB planet import, which is not
 something to put in front of a self-hoster. Keyless has to stay the default.
 
+## A pin in open water is named from polygons in the repo, not from a second provider
+
+Reverse-geocoding a point in genuinely open ocean returns nothing, and open water is where a great
+deal of diving happens. The `null` is the provider, not our code: `/reverse` answers
+`{"error": "Unable to geocode"}` for `27.0, 35.0` in the Red Sea and `30.0, -40.0` in the
+mid-Atlantic, and no parameter fixes it — `zoom=3`, `zoom=5`, `zoom=8` and `layer=natural` all give
+the same thing. Nominatim does not consult sea polygons when reverse geocoding at all. The data is
+in OSM ("Red Sea" is relation `9323456`, `place=sea`, with real geometry) but only reachable by
+forward search, so a second source is required either way.
+
+**Marine Regions' REST API was rejected in favour of vendoring Natural Earth's
+`ne_10m_geography_marine_polys`.** Both were tested end to end and both give the right names; the
+difference is what they cost. Marine Regions means a second outbound host, a second licence (CC-BY
+4.0), a second set of terms and a second failure mode — for a feature whose whole selling point is
+that a self-hoster gets it working with no account. Natural Earth is 293 public-domain polygons that
+do not change, checked in at about a megabyte. This is the same call
+`plans/dive-site-coordinates-and-maps.md` made when it rejected PostGIS to keep an install step off
+every self-hoster, and the same one the geocoding proxy itself makes. Take Marine Regions instead
+only if carrying the file turns out to be the objectionable half.
+
+**No geometry library either.** `shapely` would pull GEOS into the image to do arithmetic that is a
+few dozen lines: a bounding-box reject followed by ray casting, over ~320 polygon parts, answering
+in well under a millisecond. `services/marine_areas.py` is the whole implementation.
+
+**It is a fallback, never a replacement, and that is the part most likely to be got wrong.** Coastal
+water already works: `-8.9, 115.5` off Bali returns "Bali, Indonesia", because territorial waters
+fall inside the admin boundary — a better answer than "Bali Sea". So the fallback runs only where
+the provider *answered* and had no row. It deliberately does **not** run when `_request` returns
+`None`: "we could not ask" is not the provider telling us this is open water, and during an outage a
+coastal pin would be answered "Bali Sea" instead of "Bali, Indonesia" — a string that is then
+written onto a dive site permanently. `GEOCODER_URL=""` is refused for the same reason from the
+other end: an operator who switched geocoding off should not find half of it still running.
+
+**It is applied after the cache and is not in it.** What Redis holds stays an honest record of what
+the provider said — `[]` under the one-hour miss TTL — and the sea name is composed on the way out,
+on the cache-hit branch as well as the fresh one. Caching it would buy nothing (the lookup is local
+and free) and would cost something real: refreshed polygons would wait out an hour of stale misses.
+`_cache_key` carries a `_CACHE_VERSION`, which is the escape hatch if the fallback ever does end up
+cached.
+
+**Filling `GeocodeResult`:** `latitude`/`longitude` echo the position that was asked about, already
+rounded to ~110 m like every other reverse answer — the caller is about to drop a pin at what comes
+back, and the polygon's centroid is hundreds of kilometres from where they were looking. `location`,
+`display_name` and `name` are all the sea's name. `attribution` names Natural Earth and says it is
+public domain: nothing requires the credit, but the clients render that string verbatim under the
+suggestion, and "where did this name come from" is a fair question when it did not come from the
+provider credited everywhere else. `search_places` is untouched — forward search for "Red Sea"
+already works through Nominatim.
+
+**Overlap is the norm, and the smallest polygon wins.** A point in the Red Sea is also inside
+"Indian Ocean"; one in the Coral Sea is also inside "South Pacific Ocean". Bounding-box area is the
+comparison — it needs no geometry library and is not a close call for any pair this has to separate
+— and sorting by it once at load turns "smallest match wins" into "return on the first match".
+
+**The antimeridian is decided rather than discovered.** Every sea that genuinely straddles ±180
+arrives from Natural Earth already split into separate polygons at the meridian, so each part is an
+ordinary lon/lat rectangle and the arithmetic stays flat-plane with no wrap-around case. That is why
+`marine_areas` indexes *parts* rather than features: a feature-level bounding box for the Bering Sea
+would span the entire globe and reject nothing. Two circumpolar features legitimately span 360° —
+the Arctic and Southern Oceans encircle a pole, and Natural Earth draws them as single rings whose
+crossing edge runs along the top or bottom of the map. `scripts/build_marine_areas.py` refuses to
+write a file containing any *other* meridian-crossing edge, and `tests/test_marine_areas.py` asserts
+the same thing from the other side.
+
+**The vendored file is trimmed, and records its own provenance.** The source carries 30-odd
+translated `name_*` columns, `wikidataid` and label-placement hints, none of which this app reads;
+coordinates are rounded to four decimals, since these are generalised cartographic polygons used as
+a coarse fallback and a metre either way is noise. That takes 1.7 MB to about 1.1 MB. Eleven unnamed
+features are dropped — an unnamed polygon can only produce a blank suggestion — and Natural Earth's
+two shouted names (`SOUTHERN OCEAN`, `INDIAN OCEAN`) are title-cased, because this value is headed
+for `dive_site.location`. The source URL, retrieval date and public-domain status live as top-level
+members *inside* `marine_areas.geojson`, where they cannot drift away from the data.
+
+Two things worth knowing before trusting a coordinate to it. The dataset holds water, not
+coastlines, so "not in any polygon" is all it can say about a point — the Sahara and Lake Baikal are
+equally absent. And its coverage is coarse: the Gulf of Aqaba, narrow and dived constantly, is
+simply not in it, and answers `None`. Neither matters in practice, because both are places Nominatim
+names anyway.
+
 ## `except ValueError, TypeError:` is valid, and `ruff format` writes it that way
 
 It reads exactly like the Python 2 syntax that has been a `SyntaxError` since 2008, and it is
