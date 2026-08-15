@@ -405,6 +405,15 @@ def _offshore(lat: float, lon: float) -> GeocodeResult | None:
     coherent answer beats a marginally more principled one on a branch a `/reverse` row has
     to be malformed to reach.
 
+    That trade was struck when the cost of getting it wrong was "Red Sea" instead of `None`,
+    and it is worth restating now that it is dearer: a dropped row leaves the caller with an
+    `asked` outcome and no result, which the route answers `204` - "this position has no
+    name" - and the web app acts on by clearing a location the diver may have typed. A mirror
+    that omitted `lat`/`lon` from `/reverse` would do that for every pin in the cell for the
+    hour the `[]` is cached. Still not worth splitting, for the reason above, but a fix here
+    has to keep the cached and fresh branches agreeing or it trades one intermittent for a
+    worse one.
+
     `latitude`/`longitude` echo the position that was asked about rather than the polygon's
     centroid - the caller is about to drop a pin at what comes back, and the centre of the
     Red Sea is not where they were looking.
@@ -450,9 +459,12 @@ class ReverseGeocode(NamedTuple):
     """
 
     result: GeocodeResult | None
-    # False only when we never got to ask - geocoding off, over the provider cap, or the
-    # provider unreachable. A position the provider answered about is `True` even when the
-    # answer was nothing.
+    # True only when the provider returned a usable verdict about this position - including
+    # the verdict "nothing here". Everything else is False: geocoding off, over the provider
+    # cap, unreachable, and equally a refusal, an error status or a body that did not parse,
+    # since none of those told us anything about the position either. Read it as "was
+    # anything learned", not as "did a packet leave"; a reader who flips one of those
+    # branches turns a provider outage into a stream of cleared location fields.
     asked: bool
 
 
