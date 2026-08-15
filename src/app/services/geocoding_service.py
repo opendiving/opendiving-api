@@ -10,6 +10,11 @@ and returns nothing rather than raising - a diver typing a site name into the fo
 be blocked because a geocoder is down. That is also why the return types are "no result"
 shapes (`None`, `[]`) instead of exceptions.
 
+The one thing here that does *not* need the provider is the offshore fallback: a pin the
+provider has no row for is answered from vendored sea polygons (`services.marine_areas`),
+because Nominatim does not consult them and open water is where a lot of diving happens.
+See `_offshore`.
+
 **Nominatim's usage policy is load-bearing, not paperwork.** It caps callers at one request
 a second, requires that results be cached, and bars applications whose primary purpose is
 geocoding. A dive log that geocodes when a site is created fits comfortably, but only with
@@ -34,6 +39,7 @@ from ..core.exceptions.http_exceptions import RateLimitException
 from ..core.utils import cache
 from ..core.utils.rate_limit import enforce_rate_limit
 from ..schemas.geocoding import GeocodeResult
+from .marine_areas import water_name
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +99,11 @@ _LOGGED_VALUE_MAX_LENGTH = 200
 # Used when the provider sends no `licence` of its own. The default provider is OSM-backed,
 # and attribution is a condition of using the data - never let a result go out without one.
 _DEFAULT_ATTRIBUTION = "Data © OpenStreetMap contributors, ODbL 1.0. https://osm.org/copyright"
+
+# The offshore fallback's credit. Natural Earth asks for nothing, but the clients render
+# this string verbatim under the suggestion, and "where did this name come from" is a fair
+# question when it did not come from the provider named everywhere else.
+_MARINE_ATTRIBUTION = "Water body names from Natural Earth, public domain. https://www.naturalearthdata.com"
 
 # What Nominatim says when a position resolves to nothing - the *only* `error` payload that
 # means "this is the answer" rather than "we are not answering you". Matched on the message
@@ -330,7 +341,7 @@ def _short_location(row: dict[str, Any]) -> str:
 
     Falls back to the full `display_name` for a row carrying no structured address - a
     named bay or reef, where the feature's own name is the best answer available. A point
-    in genuinely open ocean gets no row at all and reverse-geocodes to `None`.
+    in genuinely open ocean gets no row at all, and is answered by `_offshore` instead.
     """
     address = row.get("address")
     parts: list[str] = []
@@ -379,12 +390,69 @@ def _normalize(row: dict[str, Any]) -> GeocodeResult | None:
     )
 
 
+def _offshore(lat: float, lon: float) -> GeocodeResult | None:
+    """The sea at a position, for a point the provider had no row for - or `None`.
+
+    Coastal water is *not* this: territorial waters fall inside an admin boundary, so a pin
+    off Bali already reverse-geocodes to "Bali, Indonesia", which beats "Bali Sea".
+
+    This runs where the provider answered and left us with nothing usable. Nearly always that
+    means "unable to geocode", which is genuinely open water; it also covers the rarer case of
+    a row `_normalize` had to drop - one with no coordinates or nothing displayable - which is
+    strictly a provider answer and could in principle be excluded. It isn't, because the cache
+    cannot tell the two apart: both are stored as `[]`, so gating the fresh call on
+    `rows == []` would have the first request answer `None` and the second "Red Sea". A
+    coherent answer beats a marginally more principled one on a branch a `/reverse` row has
+    to be malformed to reach.
+
+    `latitude`/`longitude` echo the position that was asked about rather than the polygon's
+    centroid - the caller is about to drop a pin at what comes back, and the centre of the
+    Red Sea is not where they were looking.
+
+    A disabled geocoder means disabled: with `GEOCODER_URL` empty the endpoint answers
+    nothing at all, rather than half a feature that only works over water. That check is
+    belt and braces - `_request` already refuses to ask - but it is also the line that says
+    which behaviour was chosen, since the opposite one is perfectly defensible.
+    """
+    if not settings.GEOCODER_URL:
+        return None
+
+    name = water_name(lat, lon)
+    if name is None:
+        return None
+
+    # Bounded like every provider string, for the same reason and despite the data being
+    # ours: the longest name in the file is a few dozen characters, so this only ever fires
+    # for a refresh that pulled in something strange - and a `ValidationError` here would be
+    # a 500 from the one branch that exists to avoid answering nothing.
+    return GeocodeResult(
+        latitude=lat,
+        longitude=lon,
+        location=name[:_LOCATION_MAX_LENGTH],
+        display_name=name[:_DISPLAY_NAME_MAX_LENGTH],
+        name=name[:_NAME_MAX_LENGTH],
+        attribution=_MARINE_ATTRIBUTION,
+    )
+
+
 async def reverse_geocode(latitude: float, longitude: float) -> GeocodeResult | None:
     """The place at a position, or `None` when there isn't one to be had.
 
     The coordinates are rounded before both the cache key and the outbound query so the two
     always agree: everyone who pins the same ~110 m cell gets the identical cached answer
     rather than the first caller's exact position.
+
+    The offshore fallback runs **outside the cache**, on both branches below, and changes
+    nothing about what is stored or for how long. What is stored stays an honest record of
+    what the provider said, so refreshing the polygons takes effect immediately instead of
+    waiting out a cached `[]`; the lookup is local and costs a fraction of a millisecond, so
+    there is nothing to save by caching it. Keeping a corroborated `[]` for a month rather
+    than an hour was tried and rejected - see `DECISIONS.md`.
+
+    It is deliberately not reached when `_request` returns `None` - "we could not ask" is not
+    the provider telling us the position is open water, and answering "Bali Sea" during an
+    outage where the answer is "Bali, Indonesia" would write the worse string into a dive site
+    for good.
     """
     lat = round(latitude, _COORDINATE_PRECISION)
     lon = round(longitude, _COORDINATE_PRECISION)
@@ -392,7 +460,7 @@ async def reverse_geocode(latitude: float, longitude: float) -> GeocodeResult | 
     key = _cache_key("reverse", f"{lat}:{lon}")
     cached = await _cached(key)
     if cached is not None:
-        return cached[0] if cached else None
+        return cached[0] if cached else _offshore(lat, lon)
 
     rows = await _request("/reverse", {"lat": lat, "lon": lon})
     if rows is None:
@@ -400,7 +468,7 @@ async def reverse_geocode(latitude: float, longitude: float) -> GeocodeResult | 
 
     results = [result for result in (_normalize(row) for row in rows) if result is not None][:1]
     await _store(key, results)
-    return results[0] if results else None
+    return results[0] if results else _offshore(lat, lon)
 
 
 async def search_places(query: str) -> list[GeocodeResult]:

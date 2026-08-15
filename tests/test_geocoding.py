@@ -175,10 +175,14 @@ class TestReverseRoute:
         assert body["attribution"] == "Data © OpenStreetMap contributors, ODbL 1.0."
 
     def test_answers_null_when_the_point_resolves_to_nothing(self, client: TestClient, no_redis: None):
-        """Nominatim's "unable to geocode" shape is an answer, not a failure - and open
-        water is a legitimate place to dive."""
+        """Nominatim's "unable to geocode" shape is an answer, not a failure - and having no
+        suggestion is a normal outcome, not a 404.
+
+        Deep in the Sahara rather than mid-ocean, deliberately: open water now gets the sea's
+        name instead (see `TestOffshoreFallback`), so a position out at sea would no longer
+        be testing this."""
         with _responds({"error": "Unable to geocode"}):
-            response = client.get("/api/v1/geocode/reverse", params={"lat": 0.5, "lon": -30.25})
+            response = client.get("/api/v1/geocode/reverse", params={"lat": 23.4, "lon": 25.0})
 
         assert response.status_code == 200
         assert response.json() is None
@@ -193,6 +197,112 @@ class TestReverseRoute:
 
     def test_requires_authentication(self, anonymous_client: TestClient):
         assert anonymous_client.get("/api/v1/geocode/reverse", params={"lat": 1, "lon": 2}).status_code == 401
+
+
+class TestOffshoreFallback:
+    """A pin in genuinely open water gets the sea's name from the vendored polygons
+    (`services.marine_areas`), because the provider has no row for such a position at all.
+
+    The wiring is the part worth testing here rather than the geometry, which
+    `test_marine_areas.py` covers: *when* it runs, and - more to the point - when it does
+    not."""
+
+    def test_open_water_is_named(self, client: TestClient, no_redis: None):
+        with _responds({"error": "Unable to geocode"}):
+            body = client.get("/api/v1/geocode/reverse", params={"lat": 27.0, "lon": 35.0}).json()
+
+        assert body["location"] == "Red Sea"
+        assert body["display_name"] == "Red Sea"
+        assert body["name"] == "Red Sea"
+        assert "Natural Earth" in body["attribution"]
+
+    def test_echoes_the_position_that_was_asked_about(self, client: TestClient, no_redis: None):
+        """Not the polygon's centroid, which would move the caller's pin several hundred
+        kilometres out to sea. Rounded, like every other reverse answer."""
+        with _responds({"error": "Unable to geocode"}):
+            body = client.get("/api/v1/geocode/reverse", params={"lat": 27.00049, "lon": 35.0}).json()
+
+        assert (body["latitude"], body["longitude"]) == (27.0, 35.0)
+
+    def test_a_provider_answer_is_never_replaced(self, client: TestClient, no_redis: None):
+        """The regression that matters most. Territorial waters fall inside an admin
+        boundary, so a pin off Bali already reverse-geocodes to "Bali, Indonesia" - which is
+        a better answer than "Bali Sea", and this must stay a fallback rather than become a
+        replacement."""
+        bali = {**REVERSE_PAYLOAD, "address": {"state": "Bali", "country": "Indonesia"}}
+
+        with _responds(bali):
+            body = client.get("/api/v1/geocode/reverse", params={"lat": -8.9, "lon": 115.5}).json()
+
+        assert body["location"] == "Bali, Indonesia"
+
+    def test_land_the_provider_could_not_name_stays_unnamed(self, client: TestClient, no_redis: None):
+        with _responds({"error": "Unable to geocode"}):
+            response = client.get("/api/v1/geocode/reverse", params={"lat": 23.4, "lon": 25.0})
+
+        assert response.json() is None
+
+    def test_a_disabled_geocoder_means_disabled(self, client: TestClient, no_redis: None, monkeypatch: Any):
+        """Half a feature is worse than none: an operator who set `GEOCODER_URL=""` to stop
+        this instance naming places should not find it still naming some of them."""
+        monkeypatch.setattr(settings, "GEOCODER_URL", "")
+
+        with _responds(REVERSE_PAYLOAD):
+            response = client.get("/api/v1/geocode/reverse", params={"lat": 27.0, "lon": 35.0})
+
+        assert response.json() is None
+
+    def test_the_disabled_check_is_asserted_where_it_lives(self, monkeypatch: Any):
+        """Through the endpoint, the test above passes with the guard deleted: `_request`
+        refuses to call an unset `GEOCODER_URL` and `reverse_geocode` returns before the
+        fallback is reached. The guard is belt and braces on a path production cannot take -
+        cache entries are keyed by provider, so nothing written under a real one is read back
+        under `""` - which is exactly why it needs asserting directly or not at all."""
+        monkeypatch.setattr(settings, "GEOCODER_URL", "")
+
+        assert geocoding_service._offshore(27.0, 35.0) is None
+
+    def test_an_unreachable_provider_does_not_produce_a_sea_name(self, client: TestClient, no_redis: None):
+        """A provider we could not reach has not told us this is open water. During an outage
+        a coastal pin would otherwise be answered "Bali Sea" instead of "Bali, Indonesia",
+        and that string is about to be written onto a dive site for good."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ReadTimeout("too slow", request=request)
+
+        with _transport(handler):
+            response = client.get("/api/v1/geocode/reverse", params={"lat": 27.0, "lon": 35.0})
+
+        assert response.json() is None
+
+    def test_runs_on_a_cache_hit_without_being_cached(self, client: TestClient, fake_redis: FakeRedis):
+        """The provider's `[]` stays in Redis as an honest record of what it said, and the
+        sea name is composed after the read. A local lookup costs a fraction of a
+        millisecond, so caching it would buy nothing and would mean refreshed polygons
+        waiting out an hour of stale misses."""
+        with _responds({"error": "Unable to geocode"}) as provider:
+            first = client.get("/api/v1/geocode/reverse", params={"lat": 27.0, "lon": 35.0})
+            second = client.get("/api/v1/geocode/reverse", params={"lat": 27.0, "lon": 35.0})
+
+        assert len(provider.requests) == 1
+        assert first.json() == second.json() == {**first.json(), "location": "Red Sea"}
+        (stored,) = fake_redis.store.values()
+        assert json.loads(stored) == []
+
+    @pytest.mark.parametrize("latitude,longitude", [(27.0, 35.0), (23.4, 25.0), (38.8, -76.4)])
+    def test_a_named_sea_does_not_extend_how_long_the_miss_is_kept(
+        self, client: TestClient, fake_redis: FakeRedis, latitude: float, longitude: float
+    ):
+        """Promoting a corroborated `[]` to the month-long hit TTL was tried and rejected: the
+        polygons cannot tell open ocean from Chesapeake Bay, so one bad provider hour over a
+        coastal cell would pin "Chesapeake Bay" for a month in place of "Annapolis, Maryland".
+        Open water, land and coastal water are all asserted, because the whole objection was
+        that the third behaves like the first while mattering like the second."""
+        with _responds({"error": "Unable to geocode"}):
+            client.get("/api/v1/geocode/reverse", params={"lat": latitude, "lon": longitude})
+
+        (key,) = fake_redis.expiries
+        assert fake_redis.expiries[key] == geocoding_service._MISS_TTL_SECONDS
 
 
 class TestSearchRoute:

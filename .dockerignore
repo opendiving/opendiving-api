@@ -41,10 +41,13 @@ crudadmin_data
 .idea
 .vscode
 
-# ---- docs: not needed at runtime ----
+# ---- docs and build-time tooling: not needed at runtime ----
 docs
 *.md
 !README.md
+# Regenerates `src/app/data/`, by hand and over the network. The generated file ships; the
+# generator has no business in a runtime image.
+scripts
 
 # Claude Code working directory - agent worktrees, easily hundreds of MB, and
 # every byte would be uploaded as part of the build context.

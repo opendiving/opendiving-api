@@ -50,8 +50,10 @@ async def read_reverse_geocode(
     """Name the place at a position, so a dive site pinned on a map can offer a `location`.
 
     Answers `null` - not a 404 - when the position resolves to nothing or the provider
-    cannot be reached: "we have no suggestion for you" is a normal outcome here, and a
-    coordinate in open water is a perfectly valid place to dive.
+    cannot be reached: "we have no suggestion for you" is a normal outcome here.
+
+    A pin in genuinely open water is answered with the sea's name ("Red Sea"), from polygons
+    carried in this repo rather than from the provider, which has no row for such a point.
 
     The position is rounded to roughly 110 m before being looked up, since the answer is a
     locality name and that is the resolution at which it stops changing.
