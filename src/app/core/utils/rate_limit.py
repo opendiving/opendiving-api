@@ -65,11 +65,19 @@ async def enforce_rate_limit(key: str, max_requests: int, window_seconds: int) -
             # Self-heal a counter that lost its window. `incr` and `expire` are two round
             # trips, so a Redis blip between them leaves a key that counts up forever and
             # never expires - and from then on this limit rejects every request, for good,
-            # until someone deletes the key by hand. The check is on the *rejecting* path
-            # only, so the happy path still costs one round trip; the window restarts from
-            # here, which loses at most one window's worth of accounting and is plainly
-            # better than a limiter that has to be repaired manually.
-            await cache.client.expire(key, window_seconds)
+            # until someone deletes the key by hand.
+            #
+            # The count is *started over*, not just given a TTL back: a counter with no
+            # window has been accumulating for an unknown length of time, so its value
+            # measures nothing, and re-arming the expiry alone would keep the caller
+            # blocked for one more full window on the strength of a number that means
+            # nothing. Starting fresh costs at most one window of accounting on a path no
+            # caller can provoke, which is the same fail-open trade the docstring above
+            # makes for an unreachable Redis. The check runs on the *rejecting* path only,
+            # so the happy path still costs one round trip.
+            logger.warning("Restarting the rate-limit window for %s: its counter had no expiry.", key)
+            await cache.client.set(key, 1, ex=window_seconds)
+            current = 1
     except RedisError as exc:
         _enter_degraded(f"Redis is unreachable ({type(exc).__name__})")
         return

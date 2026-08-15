@@ -324,6 +324,24 @@ class TestDegradation:
         assert response.status_code == 200
         assert response.json() == []
 
+    def test_a_body_that_is_neither_object_nor_array_is_a_failure(self, client: TestClient, fake_redis: FakeRedis):
+        """Valid JSON that isn't a Nominatim shape means a proxy or the wrong host answered,
+        not "no such place" - so it must not be cached as one."""
+        with _responds("service unavailable"):
+            response = client.get("/api/v1/geocode/search", params={"q": "dahab"})
+
+        assert response.json() == []
+        assert fake_redis.store == {}
+
+    def test_truncates_provider_strings_rather_than_dropping_the_row(self, client: TestClient, no_redis: None):
+        """An over-long `display_name` would otherwise raise inside the normalizer and turn
+        one verbose row into a failed lookup."""
+        with _responds({**REVERSE_PAYLOAD, "display_name": "x" * 2000, "licence": "y" * 2000}):
+            body = client.get("/api/v1/geocode/reverse", params={"lat": 1, "lon": 2}).json()
+
+        assert len(body["display_name"]) == 512
+        assert len(body["attribution"]) == 255
+
     def test_makes_no_call_at_all_when_the_geocoder_is_switched_off(
         self, client: TestClient, no_redis: None, monkeypatch: Any
     ):

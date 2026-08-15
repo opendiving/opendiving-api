@@ -5318,8 +5318,13 @@ recording next to *"Rate limiting fails open on a Redis outage"*: `incr` and `ex
 trips, so a blip between them leaves a key that counts up forever and never expires, and from then
 on that limit rejects **every** request until someone deletes the key by hand. The lowest-limit
 caller is the most exposed, and `geocode:provider` at 1-per-1-second is now the lowest in the app.
-The helper therefore re-arms the window when it finds a counter over its limit with no TTL — on the
-rejecting path only, so the happy path still costs one round trip.
+The helper therefore **starts the count over** when it finds a counter over its limit with no TTL,
+and lets that request through. Re-arming the expiry alone was the first attempt and is the subtler
+bug: a counter that has been accumulating for an unknown length of time measures nothing, so the
+caller would stay blocked for one more full window on the strength of a meaningless number. Letting
+it through is the same fail-open trade this module already documents for an unreachable Redis, on a
+path no caller can provoke. The check runs on the rejecting path only, so the happy path still costs
+one round trip.
 
 **Everything else degrades to "no result" rather than raising**, following `services.email_service`:
 a timeout, a 5xx, a non-JSON body, or `GEOCODER_URL` set to `""` all produce `null`/`[]` and a

@@ -57,12 +57,14 @@ class TestEnforceRateLimit:
         with patch("src.app.core.utils.rate_limit.cache") as mock_cache:
             mock_cache.client.incr = AsyncMock(return_value=4)
             mock_cache.client.ttl = AsyncMock(return_value=-1)
-            mock_cache.client.expire = AsyncMock(return_value=None)
+            mock_cache.client.set = AsyncMock(return_value=None)
 
-            with pytest.raises(RateLimitException):
-                await enforce_rate_limit("key", max_requests=3, window_seconds=60)
+            # The count starts over rather than merely regaining a TTL: a counter that has
+            # been accumulating for an unknown time measures nothing, so keeping the caller
+            # blocked for one more window would be punishing them for a meaningless number.
+            await enforce_rate_limit("key", max_requests=3, window_seconds=60)
 
-            mock_cache.client.expire.assert_called_once_with("key", 60)
+            mock_cache.client.set.assert_called_once_with("key", 1, ex=60)
 
     @pytest.mark.asyncio
     async def test_does_not_check_the_window_on_the_happy_path(self):

@@ -67,8 +67,14 @@ _MISS_TTL_SECONDS = 60 * 60
 # that without a flush.
 _CACHE_VERSION = "v1"
 
-# Width of `dive_site.location`, which is where `location` is headed.
+# Mirror `schemas.geocoding.GeocodeResult`'s bounds. Applied by truncating here rather than
+# by letting an over-long provider string raise a ValidationError inside `_normalize`, which
+# would turn one verbose row into a failed lookup. `_LOCATION_MAX_LENGTH` is the width of
+# `dive_site.location`, which is where that field is headed.
 _LOCATION_MAX_LENGTH = 255
+_DISPLAY_NAME_MAX_LENGTH = 512
+_NAME_MAX_LENGTH = 255
+_ATTRIBUTION_MAX_LENGTH = 255
 
 # Used when the provider sends no `licence` of its own. The default provider is OSM-backed,
 # and attribution is a condition of using the data - never let a result go out without one.
@@ -239,7 +245,13 @@ async def _request(path: str, params: dict[str, Any]) -> list[dict[str, Any]] | 
         return [payload]
     if isinstance(payload, list):
         return [row for row in payload if isinstance(row, dict)]
-    return []
+
+    # Valid JSON that is neither an object nor an array is not this provider answering -
+    # it's a proxy, a CDN error page rendered as JSON, or a host that isn't Nominatim at
+    # all. Same treatment as a body that didn't parse: a failure, not an empty answer, so
+    # it is never cached as "no such place".
+    logger.warning("Geocoder response for %s was not an object or an array.", path)
+    return None
 
 
 def _text(value: Any) -> str | None:
@@ -293,13 +305,14 @@ def _normalize(row: dict[str, Any]) -> GeocodeResult | None:
     if not location:
         return None
 
+    name = _text(row.get("name"))
     return GeocodeResult(
         latitude=latitude,
         longitude=longitude,
         location=location,
-        display_name=_text(row.get("display_name")) or location,
-        name=_text(row.get("name")),
-        attribution=_text(row.get("licence")) or _DEFAULT_ATTRIBUTION,
+        display_name=(_text(row.get("display_name")) or location)[:_DISPLAY_NAME_MAX_LENGTH],
+        name=name[:_NAME_MAX_LENGTH] if name else None,
+        attribution=(_text(row.get("licence")) or _DEFAULT_ATTRIBUTION)[:_ATTRIBUTION_MAX_LENGTH],
     )
 
 
@@ -357,7 +370,9 @@ async def search_places(query: str) -> list[GeocodeResult]:
 
     # Sliced here, not only asked for via `limit`: a mirror that caps differently, or
     # ignores the parameter, would otherwise have every row it sent normalized, cached for
-    # a month and returned. The bound on the response belongs to this app.
-    results = [result for result in (_normalize(row) for row in rows) if result is not None][:_SEARCH_RESULT_LIMIT]
+    # a month and returned. The bound on the response belongs to this app. Cut before
+    # normalizing rather than after, so 50,000 rows cost 5 normalizations and not 50,000 -
+    # the rows are already in the provider's own relevance order.
+    results = [result for result in (_normalize(row) for row in rows[:_SEARCH_RESULT_LIMIT]) if result is not None]
     await _store(key, results)
     return results

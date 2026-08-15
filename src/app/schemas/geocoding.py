@@ -18,13 +18,17 @@ class GeocodeResult(BaseModel):
 
     latitude: Annotated[float, Field(ge=-90, le=90, examples=[28.5717])]
     longitude: Annotated[float, Field(ge=-180, le=180, examples=[34.5372])]
-    # Bounded to the width of `dive_site.location`, since that is where it is headed.
+    # Every string below is bounded, because every one of them is written by a third party,
+    # cached for a month and handed to every client. The provider is trusted to be honest,
+    # not to be terse. `location`'s bound is the width of `dive_site.location`, since that
+    # is where it is headed; the others are simply sane ceilings. `services.geocoding_service`
+    # truncates to these rather than letting an over-long value raise inside the normalizer.
     location: Annotated[str, Field(max_length=255, examples=["Dahab, Egypt"])]
-    display_name: Annotated[str, Field(examples=["Blue Hole, Dahab, South Sinai, Egypt"])]
+    display_name: Annotated[str, Field(max_length=512, examples=["Blue Hole, Dahab, South Sinai, Egypt"])]
     # The place's own name, where it has one. Absent for a result that is only an address.
-    name: str | None = None
+    name: Annotated[str | None, Field(max_length=255, default=None)]
     # Carried per-result rather than in an envelope: attribution is a licence condition of
     # the data itself, so it travels with the row it describes and survives a provider
     # swap (it is the provider's own `licence` string when it sends one). The client is
     # expected to render it wherever it shows these results.
-    attribution: Annotated[str, Field(examples=["Data © OpenStreetMap contributors, ODbL 1.0."])]
+    attribution: Annotated[str, Field(max_length=255, examples=["Data © OpenStreetMap contributors, ODbL 1.0."])]
