@@ -99,8 +99,13 @@ def _parts() -> tuple[_Part, ...]:
     geometry library and is not a close call for any pair this has to separate.
 
     Loaded on first use, not at import: the arq worker imports this package and never
-    geocodes, and neither does most of the test suite. The ~20 ms JSON parse then lands once
-    inside the first offshore lookup, which has already spent a provider round trip.
+    geocodes, and neither does most of the test suite. The cost is ~30 ms of JSON parsing and
+    tuple building, once per process, and it is spent synchronously inside whichever request
+    happens to be first - including one served entirely from cache. That is accepted rather
+    than overlooked: it is a single event per worker, well inside the deadline this endpoint
+    already budgets for the provider, and moving it to a thread or to app startup would buy
+    one request ~30 ms at the cost of wiring a lifespan hook into a module the worker does
+    not use. Revisit it if the dataset ever grows by an order of magnitude.
     """
     document = json.loads(_DATA_PATH.read_text(encoding="utf-8"))
 

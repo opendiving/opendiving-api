@@ -55,6 +55,8 @@ def _ring(coordinates: list[Any]) -> list[list[float]] | None:
         if not rounded or rounded[-1] != vertex:
             rounded.append(vertex)
 
+    if not rounded:
+        return None
     if rounded[0] != rounded[-1]:
         rounded.append(rounded[0])
     return rounded if len(rounded) >= 4 else None
@@ -65,12 +67,16 @@ def _geometry(geometry: dict[str, Any]) -> dict[str, Any] | None:
 
     kept: list[list[list[list[float]]]] = []
     for part in parts:
-        rings = [ring for ring in (_ring(ring) for ring in part) if ring is not None]
-        # The outer ring surviving is what makes a part usable; a hole that collapsed is a
-        # rounding artefact of an island a few metres across, and dropping it only means the
-        # island reads as sea.
-        if rings:
-            kept.append(rings)
+        # The outer ring is taken separately rather than filtered alongside the holes: a
+        # collapsed hole is a rounding artefact of an island a few metres across, and
+        # dropping it only means the island reads as sea - but a collapsed *outer* ring
+        # would promote the first surviving hole into its place, and `marine_areas` would
+        # read that hole as the sea's own boundary.
+        outer = _ring(part[0])
+        if outer is None:
+            continue
+        holes = [hole for hole in (_ring(ring) for ring in part[1:]) if hole is not None]
+        kept.append([outer, *holes])
 
     if not kept:
         return None

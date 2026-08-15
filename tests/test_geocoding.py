@@ -252,6 +252,16 @@ class TestOffshoreFallback:
 
         assert response.json() is None
 
+    def test_the_disabled_check_is_asserted_where_it_lives(self, monkeypatch: Any):
+        """Through the endpoint, the test above passes with the guard deleted: `_request`
+        refuses to call an unset `GEOCODER_URL` and `reverse_geocode` returns before the
+        fallback is reached. The guard is belt and braces on a path production cannot take -
+        cache entries are keyed by provider, so nothing written under a real one is read back
+        under `""` - which is exactly why it needs asserting directly or not at all."""
+        monkeypatch.setattr(settings, "GEOCODER_URL", "")
+
+        assert geocoding_service._offshore(27.0, 35.0) is None
+
     def test_an_unreachable_provider_does_not_produce_a_sea_name(self, client: TestClient, no_redis: None):
         """A provider we could not reach has not told us this is open water. During an outage
         a coastal pin would otherwise be answered "Bali Sea" instead of "Bali, Indonesia",

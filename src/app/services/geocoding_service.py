@@ -394,8 +394,9 @@ def _offshore(lat: float, lon: float) -> GeocodeResult | None:
     """The sea at a position, for a point the provider had no row for - or `None`.
 
     Coastal water is *not* this: territorial waters fall inside an admin boundary, so a pin
-    off Bali already reverse-geocodes to "Bali, Indonesia", which beats "Bali Sea". This only
-    ever runs where Nominatim answered "unable to geocode", which is genuinely open water.
+    off Bali already reverse-geocodes to "Bali, Indonesia", which beats "Bali Sea". This runs
+    only where the provider answered and left us with nothing usable - "unable to geocode",
+    which is genuinely open water, or the rarer case of a row `_normalize` had to drop.
 
     `latitude`/`longitude` echo the position that was asked about rather than the polygon's
     centroid - the caller is about to drop a pin at what comes back, and the centre of the
