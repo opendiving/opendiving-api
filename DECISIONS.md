@@ -5138,34 +5138,40 @@ They deliberately stay **out of `ux_dive_site_user_id_name_location_lower`**. Tw
 name and a location are duplicates whatever their coordinates say, and folding a float into a
 uniqueness key would make "the same site, pinned two metres apart" a second row.
 
-**The pair is one value, and the rule is enforced against the *effective* pair.** A latitude with no
-longitude is not a partial position, it is a meaningless one — a site accidentally pinned to the
-equator or the prime meridian. On create, `WholeCoordinatePair`'s `model_validator` decides it from
-the body, which is all there is. On PATCH the body carries only what changed, so the check runs on
-what the row will hold *afterwards* —
-`values.latitude if "latitude" in values.model_fields_set else db_dive_site.latitude`, mirroring the
-`effective_location` computation right above it. Three consequences, and the middle one is why the
-body alone is not enough:
+**The pair is one value, and the rule is about the request body: name both coordinates or neither.**
+A latitude with no longitude is not a partial position, it is a meaningless one — a site
+accidentally pinned to the equator or the prime meridian. `WholeCoordinatePair` carries the whole
+rule, and both write schemas (`DiveSiteCreate`, `DiveSiteUpdate`) inherit it. It takes two
+conditions, because a PATCH can produce a half pair two ways:
 
-- half-setting a coordinate on a site with no position is a 422
-- nudging one coordinate of a pair that is already whole is fine, and is exactly what dragging a
-  marker produces
-- an explicit `null` on one half is a 422 as well, not a silent clearing of both —
-  `{"latitude": null, "longitude": null}` is how a position is removed. Guessing that they meant
-  both would be a mutation the caller did not ask for.
+- **naming one key.** `{"latitude": 27.7}` writes one column and leaves whatever the other already
+  held → `len({"latitude", "longitude"} & model_fields_set) == 1` is a 422.
+- **naming both with one value.** `{"latitude": 27.7, "longitude": null}` passes the key check and
+  still half-sets the row → `(latitude is None) != (longitude is None)` is a 422.
 
-The check is **gated on the caller having named a coordinate at all**, unlike the effective-*name*
-check next to it, which is gated for a different reason (avoiding a query). There is no `CHECK`
-constraint behind the rule, so a half pair can reach the table another way — the admin panel writes
-through `DiveSiteUpdate`, which deliberately carries no validator — and a rule enforced on every
-PATCH would leave the owner of such a row unable to so much as rename it until they guessed which
-unrelated field to send. The API is the second, narrower way in: the check is read-then-write, so
-two PATCHes racing on the same site — one clearing the pair, one nudging a coordinate — can both
-pass against the pre-update row. One diver editing one site from two tabs is not a scenario worth a
-constraint, but it is worth knowing that the rule is a validation and not an invariant.
+So `{"latitude": null, "longitude": null}` is how a position is cleared, and moving a site means
+sending both numbers even if only one changed. The web form and the map picker submit the pair
+anyway, so the ergonomic loss is theoretical.
 
-The validator lives on the **write** schemas only (`DiveSiteCreate`, `DiveSiteCreateInternal`), not
-on `DiveSiteBase`. There is no `CHECK` constraint behind the rule, so the table can still hold a
+**The rejected alternative was checking the *effective* pair** — the body merged over the stored
+row, mirroring the `effective_location` computation next to it. It buys one thing,
+`{"latitude": 27.7}` nudging one coordinate of a pair that is already whole, and costs three:
+
+- It has to be **gated** on the caller having named a coordinate at all. There is no `CHECK`
+  constraint behind the rule, so a half pair can reach the table another way; enforced on every
+  PATCH, the owner of such a row could not so much as rename it until they guessed which unrelated
+  field to send.
+- It is **read-then-write**, so two PATCHes racing on one site — one clearing the pair, one nudging
+  a coordinate — both pass against the pre-update row and leave a half pair behind. The body rule
+  has no such window: whichever request wins, it carried a whole pair or none.
+- It puts the rule in **two places**, the schema for POST and the route for PATCH, for one
+  invariant.
+
+The body rule is the smaller thing to hold and the stronger guarantee, which is the general shape
+worth remembering: a validation that needs the current state to decide is usually a validation
+asking the wrong question.
+
+The validator lives on the **write** schemas only, not on `DiveSiteBase`. The table can still hold a
 half pair — put the validator on the shared base and a row like that turns every read of it into a
 500, which is a worse outcome than a read that shows the half. `latitude`/`longitude` are also kept
 off `DiveSiteInfo` (`schemas/dive.py`), the summary embedded in dive reads: adding them there

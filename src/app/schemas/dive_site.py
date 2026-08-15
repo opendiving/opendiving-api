@@ -21,14 +21,19 @@ class DiveSiteBase(BaseModel):
 
 
 class WholeCoordinatePair(BaseModel):
-    """Rejects half a position on the way in.
+    """Rejects half a position on the way in - a latitude without a longitude is not a
+    partial position, it is a meaningless one.
 
-    A latitude without a longitude is not a partial position, it is a meaningless one. The
-    rule lives on the *write* schemas only: nothing but this API writes the columns, but
-    the database can still hold a half pair (there is no CHECK constraint behind this),
-    and a read that 500s on one would be worse than a read that shows it. `patch_dive_site`
-    enforces the same rule against the *effective* pair, since a PATCH body only carries
-    the half that changed.
+    Two conditions, because a PATCH can produce a half pair two ways: **naming** one
+    coordinate and not the other (`{"latitude": 27.7}` writes one column and leaves the
+    stale other), or naming both with only one **value** (`{"latitude": 27.7,
+    "longitude": null}`). Sending the pair or nothing keeps a whole row whole without the
+    route ever reading the stored one - which also means two concurrent PATCHes cannot
+    interleave into a half pair the way a read-then-compare check would allow.
+
+    The rule lives on the *write* schemas only. There is no CHECK constraint behind it, so
+    the table can still hold a half pair, and a read that 500s on one would be worse than
+    a read that shows it.
     """
 
     latitude: Latitude
@@ -36,6 +41,8 @@ class WholeCoordinatePair(BaseModel):
 
     @model_validator(mode="after")
     def _coordinates_are_a_pair(self) -> WholeCoordinatePair:
+        if len({"latitude", "longitude"} & self.model_fields_set) == 1:
+            raise ValueError(COORDINATE_PAIR_MESSAGE)
         if (self.latitude is None) != (self.longitude is None):
             raise ValueError(COORDINATE_PAIR_MESSAGE)
         return self
@@ -72,16 +79,11 @@ class DiveSiteCreateInternal(DiveSiteBase, WholeCoordinatePair):
     user_id: int
 
 
-class DiveSiteUpdate(BaseModel):
+class DiveSiteUpdate(WholeCoordinatePair):
     model_config = ConfigDict(extra="forbid")
 
     name: Annotated[str | None, Field(min_length=1, max_length=255, default=None)]
     location: Annotated[str | None, Field(default=None, max_length=255, examples=["Koh Tao, Thailand"])]
-    # No pair validator here: an omitted coordinate means "unchanged", so whether the
-    # result is a whole pair can only be decided against the stored row - `patch_dive_site`
-    # does that.
-    latitude: Latitude
-    longitude: Longitude
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
 
 

@@ -5,14 +5,18 @@ One rule is worth this much test: **latitude and longitude are one value**. Half
 not a partial position, it is a meaningless one - a site pinned on the equator or the prime
 meridian by accident rather than by a diver.
 
-Where the rule is enforced differs by verb, and that is the whole of what is covered here:
+The rule is enforced in exactly one place, `WholeCoordinatePair`, and it is a rule about
+the **body**: name both coordinates or neither. That is why there are two conditions rather
+than one - a PATCH can produce a half pair by naming one key (`{"latitude": 27.7}` writes
+one column over a row that has neither) or by naming both with one value
+(`{"latitude": 27.7, "longitude": null}`). Together they keep a whole row whole without the
+route ever reading the stored one.
 
-* On the way *in* (`DiveSiteCreate`) the body is all there is, so a model validator decides
-  it.
-* On a PATCH the body carries only what changed, so the rule has to be applied to the
-  **effective** pair - what the row will hold afterwards - exactly as the neighbouring
-  `effective_location` check already does for uniqueness. Applying it to the body alone
-  would refuse a diver nudging one coordinate of a pair that is already whole.
+The rejected alternative was checking the *effective* pair in the route - body merged over
+the stored row - which would have allowed nudging one coordinate of a pair that is already
+whole. It cost more than it bought: an unrelated edit to a row that already held a half
+pair had to be special-cased, and two concurrent PATCHes could still interleave into one.
+See DECISIONS.md.
 
 No database: `patch_dive_site`'s collaborators are stubbed and the assertions are on the
 `update_data` it hands to `crud_dive_sites.update`.
@@ -27,45 +31,70 @@ from pydantic import ValidationError
 from uuid6 import uuid7
 
 from src.app.api.v1 import dive_sites as dive_sites_module
-from src.app.core.exceptions.http_exceptions import UnprocessableEntityException
 from src.app.core.utils import cache as cache_module
-from src.app.schemas.dive_site import DiveSiteCreate, DiveSiteUpdate
+from src.app.schemas.dive_site import DiveSiteCreate, DiveSiteUpdate, WholeCoordinatePair
 
 USER_UUID = uuid7()
 # The Blue Hole, Dahab - a real pair, so a transposed lat/lon is visible in a diff.
 BLUE_HOLE = (28.5721, 34.5372)
 
+# Both write schemas carry the same rule, and both are worth running every case through:
+# `DiveSiteCreate` is the one with no stored row behind it, `DiveSiteUpdate` the one where
+# an omitted key means "unchanged" and could quietly write half a position.
+WRITE_SCHEMAS: list[type[WholeCoordinatePair]] = [DiveSiteCreate, DiveSiteUpdate]
 
-def _create_body(**overrides: Any) -> dict[str, Any]:
-    return {"name": "Blue Hole", "user_uuid": str(USER_UUID), **overrides}
+
+def _body(schema: type[WholeCoordinatePair], **overrides: Any) -> dict[str, Any]:
+    """A minimal valid body for either schema - `DiveSiteCreate` needs a name and an
+    owner, `DiveSiteUpdate` needs nothing at all."""
+    if schema is DiveSiteCreate:
+        return {"name": "Blue Hole", "user_uuid": str(USER_UUID), **overrides}
+    return dict(overrides)
 
 
-class TestCreateSchema:
-    def test_a_whole_pair_is_accepted(self) -> None:
-        site = DiveSiteCreate.model_validate(_create_body(latitude=BLUE_HOLE[0], longitude=BLUE_HOLE[1]))
+@pytest.mark.parametrize("schema", WRITE_SCHEMAS)
+class TestTheCoordinatePairRule:
+    def test_a_whole_pair_is_accepted(self, schema: type[WholeCoordinatePair]) -> None:
+        site = schema.model_validate(_body(schema, latitude=BLUE_HOLE[0], longitude=BLUE_HOLE[1]))
 
         assert (site.latitude, site.longitude) == BLUE_HOLE
 
-    def test_no_coordinates_at_all_is_accepted(self) -> None:
-        """The overwhelmingly common case: a site is a name and maybe a location."""
-        site = DiveSiteCreate.model_validate(_create_body())
+    def test_naming_neither_is_accepted(self, schema: type[WholeCoordinatePair]) -> None:
+        """The overwhelmingly common case both ways: a site is a name and maybe a
+        location, and an edit to one usually says nothing about the other."""
+        site = schema.model_validate(_body(schema))
 
         assert (site.latitude, site.longitude) == (None, None)
 
     @pytest.mark.parametrize("half", ["latitude", "longitude"])
-    def test_half_a_pair_is_refused(self, half: str) -> None:
+    def test_naming_one_coordinate_alone_is_refused(self, schema: type[WholeCoordinatePair], half: str) -> None:
+        """On a create this is half a position. On a PATCH it is worse: it would write one
+        column and leave whatever the other already held."""
         with pytest.raises(ValidationError, match="must be set together"):
-            DiveSiteCreate.model_validate(_create_body(**{half: 12.5}))
+            schema.model_validate(_body(schema, **{half: 12.5}))
 
-    @pytest.mark.parametrize(
-        ("latitude", "longitude"),
-        [
-            (90.0, 180.0),
-            (-90.0, -180.0),
-        ],
-    )
-    def test_the_extremes_of_the_globe_are_inside_the_range(self, latitude: float, longitude: float) -> None:
-        site = DiveSiteCreate.model_validate(_create_body(latitude=latitude, longitude=longitude))
+    @pytest.mark.parametrize("half", ["latitude", "longitude"])
+    def test_naming_both_with_one_value_is_refused(self, schema: type[WholeCoordinatePair], half: str) -> None:
+        """The second way to spell the same mistake, and the one the key check alone
+        misses."""
+        pair = {"latitude": BLUE_HOLE[0], "longitude": BLUE_HOLE[1], half: None}
+
+        with pytest.raises(ValidationError, match="must be set together"):
+            schema.model_validate(_body(schema, **pair))
+
+    def test_two_explicit_nulls_clear_the_position(self, schema: type[WholeCoordinatePair]) -> None:
+        """How a position is removed - and on `DiveSiteUpdate` the pair has to survive
+        `exclude_unset`, which is what distinguishes it from an omitted key."""
+        site = schema.model_validate(_body(schema, latitude=None, longitude=None))
+
+        assert (site.latitude, site.longitude) == (None, None)
+        assert {"latitude", "longitude"} <= site.model_fields_set
+
+    @pytest.mark.parametrize(("latitude", "longitude"), [(90.0, 180.0), (-90.0, -180.0)])
+    def test_the_extremes_of_the_globe_are_inside_the_range(
+        self, schema: type[WholeCoordinatePair], latitude: float, longitude: float
+    ) -> None:
+        site = schema.model_validate(_body(schema, latitude=latitude, longitude=longitude))
 
         assert (site.latitude, site.longitude) == (latitude, longitude)
 
@@ -80,22 +109,23 @@ class TestCreateSchema:
             (34.5372, 190.0),
         ],
     )
-    def test_a_coordinate_off_the_globe_is_refused(self, latitude: float, longitude: float) -> None:
+    def test_a_coordinate_off_the_globe_is_refused(
+        self, schema: type[WholeCoordinatePair], latitude: float, longitude: float
+    ) -> None:
         with pytest.raises(ValidationError):
-            DiveSiteCreate.model_validate(_create_body(latitude=latitude, longitude=longitude))
+            schema.model_validate(_body(schema, latitude=latitude, longitude=longitude))
 
-    def test_not_a_number_is_refused(self) -> None:
+    def test_not_a_number_is_refused(self, schema: type[WholeCoordinatePair]) -> None:
         """`NaN` is a float and would sail through a bare `float | None`; it fails the
         range check instead, since no comparison against it is ever true."""
         with pytest.raises(ValidationError):
-            DiveSiteCreate.model_validate(_create_body(latitude=float("nan"), longitude=float("nan")))
+            schema.model_validate(_body(schema, latitude=float("nan"), longitude=float("nan")))
 
 
 @pytest.fixture
 def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Stubs out everything `patch_dive_site` touches and records the `update_data` it
-    builds. The stored row starts with no coordinates; tests that need one set them on
-    `captured["db_dive_site"]` before patching."""
+    builds."""
     seen: dict[str, Any] = {}
 
     db_dive_site = MagicMock()
@@ -135,34 +165,16 @@ async def _patch(values: dict[str, Any], mock_redis: Any) -> None:
         )
 
 
-class TestPatchKeepsThePairWhole:
+class TestWhatReachesTheColumns:
+    """The schema has already refused every half pair by the time the route runs, so what
+    is left to pin is that a whole one survives `exclude_unset` and an absent one stays
+    absent."""
+
     @pytest.mark.asyncio
     async def test_a_whole_pair_is_stored(self, captured: dict[str, Any], mock_redis: Any) -> None:
         await _patch({"latitude": BLUE_HOLE[0], "longitude": BLUE_HOLE[1]}, mock_redis)
 
-        assert (captured["update_data"]["latitude"], captured["update_data"]["longitude"]) == BLUE_HOLE
-
-    @pytest.mark.asyncio
-    async def test_half_a_pair_on_a_site_with_no_position_is_refused(
-        self, captured: dict[str, Any], mock_redis: Any
-    ) -> None:
-        """The half-set row the effective-pair check exists to prevent."""
-        with pytest.raises(UnprocessableEntityException, match="must be set together"):
-            await _patch({"latitude": BLUE_HOLE[0]}, mock_redis)
-
-        assert "update_data" not in captured
-
-    @pytest.mark.asyncio
-    async def test_one_coordinate_of_an_existing_pair_can_be_nudged(
-        self, captured: dict[str, Any], mock_redis: Any
-    ) -> None:
-        """Moving a marker a hundred metres north is a one-field edit, and the row it
-        lands on is still a whole pair - so the rule has nothing to say about it."""
-        captured["db_dive_site"].latitude, captured["db_dive_site"].longitude = BLUE_HOLE
-
-        await _patch({"latitude": 28.58}, mock_redis)
-
-        assert captured["update_data"] == {"latitude": 28.58}
+        assert captured["update_data"] == {"latitude": BLUE_HOLE[0], "longitude": BLUE_HOLE[1]}
 
     @pytest.mark.asyncio
     async def test_clearing_both_halves_removes_the_position(self, captured: dict[str, Any], mock_redis: Any) -> None:
@@ -175,18 +187,6 @@ class TestPatchKeepsThePairWhole:
         assert captured["update_data"] == {"latitude": None, "longitude": None}
 
     @pytest.mark.asyncio
-    async def test_clearing_only_one_half_is_refused(self, captured: dict[str, Any], mock_redis: Any) -> None:
-        """Not silently cleared for them: a null on one half asks for a row this API
-        refuses to write, and guessing that they meant both would be a mutation they
-        didn't ask for."""
-        captured["db_dive_site"].latitude, captured["db_dive_site"].longitude = BLUE_HOLE
-
-        with pytest.raises(UnprocessableEntityException, match="must be set together"):
-            await _patch({"latitude": None}, mock_redis)
-
-        assert "update_data" not in captured
-
-    @pytest.mark.asyncio
     async def test_an_unrelated_edit_leaves_the_coordinates_alone(
         self, captured: dict[str, Any], mock_redis: Any
     ) -> None:
@@ -197,13 +197,13 @@ class TestPatchKeepsThePairWhole:
         assert captured["update_data"] == {"name": "Blue Hole (Dahab)"}
 
     @pytest.mark.asyncio
-    async def test_an_edit_touching_no_coordinate_survives_a_half_pair_already_in_the_row(
+    async def test_an_unrelated_edit_survives_a_half_pair_already_in_the_row(
         self, captured: dict[str, Any], mock_redis: Any
     ) -> None:
-        """The rule has no `CHECK` behind it, so a half pair can reach the table another
-        way - the admin panel writes through `DiveSiteUpdate`, which carries no validator.
-        Enforcing it on a PATCH that named neither coordinate would leave the owner unable
-        to so much as rename the site until they guessed which field to send."""
+        """There is no CHECK constraint behind the rule, so a half pair can reach the
+        table another way. Because the rule reads the body and never the row, such a site
+        can still be renamed - the version of this check that compared against the stored
+        row had to special-case exactly this."""
         captured["db_dive_site"].latitude = BLUE_HOLE[0]
 
         await _patch({"notes": "Deep, dark, and busier than it looks"}, mock_redis)
