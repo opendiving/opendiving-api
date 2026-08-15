@@ -88,6 +88,7 @@ UNGUARDED_UPDATE_SCHEMAS = (
     "DiveMixtureUpdate",
     "UserDiveStatsUpdate",
     "DiveDiveSiteUpdate",
+    "TripLocationUpdate",
     "DiveGearItemUpdate",
     "GearSetItemUpdate",
     # Server-constructed only - never a request body. The routes build these themselves

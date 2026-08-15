@@ -402,6 +402,28 @@ class TestDiveContent:
         dates = trip.find(f"{UDDF}trippart/{UDDF}dateoftrip")
         assert (dates.get("startdate"), dates.get("enddate")) == ("2026-05-30T00:00:00", "2026-06-06T00:00:00")
 
+    @pytest.mark.asyncio
+    async def test_the_trips_places_are_joined_into_its_one_location_slot(self, schema, monkeypatch):
+        """`geographyType` has a single `<location>` string and a trip has a list, so they
+        are joined in the order the diver listed them - the free-text one included, since
+        nothing here needs coordinates."""
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        schema.validate(document)
+        trip = _tree(document).find(f"{UDDF}divetrip/{UDDF}trip")
+        location = trip.find(f"{UDDF}trippart/{UDDF}geography/{UDDF}location")
+        assert location.text == "Sharm el-Sheikh, Ras Mohammed"
+
+    @pytest.mark.asyncio
+    async def test_a_trip_nobody_named_a_place_for_gets_no_geography(self, schema, monkeypatch):
+        """`<location>` is mandatory inside `<geography>`, so an empty join has to mean no
+        element rather than an empty one."""
+        bundle = full_bundle()
+        bundle.locations_by_trip[1] = []
+        document = await _render(bundle, monkeypatch=monkeypatch)
+        schema.validate(document)
+        trip = _tree(document).find(f"{UDDF}divetrip/{UDDF}trip")
+        assert trip.find(f"{UDDF}trippart/{UDDF}geography") is None
+
 
 class TestDiveSiteGeography:
     """`geographyType` is where a site's position goes, and its `<location>` is

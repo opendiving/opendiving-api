@@ -12,6 +12,7 @@ from ..models.gear_service_schedule import GearServiceSchedule
 from ..models.gear_set import GearSet
 from ..models.gear_set_item import GearSetItem
 from ..models.trip import Trip
+from ..models.trip_location import TripLocation
 from ..models.user import User
 from ..models.user_dive_stats import UserDiveStats
 from ..schemas.certification import CertificationCreateInternal, CertificationUpdate
@@ -30,6 +31,7 @@ from ..schemas.gear_service import (
 from ..schemas.gear_set import GearSetCreateInternal, GearSetUpdate
 from ..schemas.gear_set_item import GearSetItemCreate, GearSetItemUpdate
 from ..schemas.trip import TripCreateInternal, TripUpdate
+from ..schemas.trip_location import TripLocationCreate, TripLocationUpdate
 from ..schemas.user import UserAdminUpdate, UserCreateInternal
 from ..schemas.user_dive_stats import UserDiveStatsUpdate
 
@@ -92,6 +94,15 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         model=DiveDiveSite,
         create_schema=DiveDiveSiteCreate,
         update_schema=DiveDiveSiteUpdate,
+        allowed_actions={"view", "create", "update", "delete"},
+    )
+
+    # Rows here are replaced wholesale by every trip write, so an edit made in this panel
+    # only sticks until the owner next saves the trip.
+    admin.add_view(
+        model=TripLocation,
+        create_schema=TripLocationCreate,
+        update_schema=TripLocationUpdate,
         allowed_actions={"view", "create", "update", "delete"},
     )
 

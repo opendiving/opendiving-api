@@ -65,7 +65,6 @@ class TestSearchClause:
         ("model", "columns", "table"),
         [
             (DiveSite, ("name", "location"), "dive_site"),
-            (Trip, ("name", "location"), "trip"),
             (GearItem, GEAR_ITEM_SEARCH_COLUMNS, "gear_item"),
         ],
     )
@@ -74,8 +73,10 @@ class TestSearchClause:
     ) -> None:
         sql = _as_sql(search_clause(model, columns, "dahab"), model=model)
 
-        # OR'd, not AND'd: a trip called "Dahab 2026" and one merely *located* in Dahab
-        # both have to match, and neither has the term in both columns.
+        # OR'd, not AND'd: a site called "Dahab Canyon" and one merely *located* in Dahab
+        # both have to match, and neither has the term in both columns. Trips are not here
+        # any more - they search one column and an EXISTS over `trip_location`, which is
+        # `trips.py::_search_conditions` rather than `search_clause`.
         assert " OR " in sql
         for column in columns:
             assert f"{table}.{column} ILIKE '%dahab%'" in sql
@@ -198,7 +199,7 @@ class TestPageSizeCaps:
     ("model", "columns"),
     [
         (DiveSite, ("name", "location")),
-        (Trip, ("name", "location")),
+        (Trip, ("name",)),
         (GearItem, GEAR_ITEM_SEARCH_COLUMNS),
     ],
 )

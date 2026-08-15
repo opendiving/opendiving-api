@@ -2,7 +2,7 @@
 
 Every writer in this package (UDDF, CSV, `export.json`) needs the same graph, so it is
 read once into an `ExportBundle` and handed to all three rather than each of them
-issuing its own queries. The read is deliberately flat: a fixed nineteen `SELECT`s over
+issuing its own queries. The read is deliberately flat: a fixed twenty `SELECT`s over
 whole tables scoped to one `user_id`, with no per-dive query anywhere. A logbook is a few
 hundred dives and a handful of sites, trips and gear items, so "load the lot" costs less
 than the round trips a lazier shape would need - and the archive walks all of it anyway.
@@ -30,6 +30,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...crud.crud_dive_mixtures import get_mixtures_for_dives
+from ...crud.crud_trip_locations import get_locations_for_trips
 from ...models.certification import Certification
 from ...models.certification_file import CertificationFile
 from ...models.dive import Dive
@@ -48,6 +49,7 @@ from ...schemas.certification import CertificationFileInfo
 from ...schemas.dive import DiveFileInfo
 from ...schemas.dive_mixture import DiveMixtureRead
 from ...schemas.dive_profile import DiveProfileInfo
+from ...schemas.trip import TripLocationRead
 from ..certification_files import get_file_infos_for_certifications
 from ..dive_files import get_file_infos_for_dives
 from ..dive_profiles import ProfileGasAttribution, get_gas_attribution_for_dives, get_profile_infos_for_dives
@@ -75,6 +77,9 @@ class ExportBundle:
     profile_by_dive: dict[int, DiveProfileInfo | None]
     attribution_by_dive: dict[int, ProfileGasAttribution]
     trips: list[Trip]
+    # Keyed for every trip in `trips`, so a trip nobody named a place for reads as an empty
+    # list rather than a `KeyError` in a writer - same contract as the `*_by_dive` maps.
+    locations_by_trip: dict[int, list[TripLocationRead]]
     dive_sites: list[DiveSite]
     gear_items: list[GearItem]
     gear_sets: list[GearSet]
@@ -288,6 +293,10 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
         profile_by_dive=await get_profile_infos_for_dives(db=db, dive_ids=dive_ids),
         attribution_by_dive=await get_gas_attribution_for_dives(db=db, dive_ids=dive_ids),
         trips=trips,
+        # After `_owned`, so a soft-deleted trip that a dive still points at keeps its
+        # places too - the export shows that trip, and a trip without its locations would
+        # read as one the diver never said anything about.
+        locations_by_trip=await get_locations_for_trips(db=db, trip_ids=[trip.id for trip in trips]),
         dive_sites=dive_sites,
         gear_items=gear_items,
         gear_sets=gear_sets,

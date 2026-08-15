@@ -15,7 +15,6 @@ class Trip(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     name: Mapped[str] = mapped_column(String(255))
     start_date: Mapped[date] = mapped_column(Date)
     notes: Mapped[str] = mapped_column(Text, default="")
-    location: Mapped[str | None] = mapped_column(String(255), default=None)
     end_date: Mapped[date | None] = mapped_column(Date, default=None)
 
     @declared_attr.directive

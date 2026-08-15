@@ -82,7 +82,7 @@ _MISS_TTL_SECONDS = 60 * 60
 # hold `GeocodeResult`s, not raw provider payloads - re-normalizing on every hit is wasted
 # work - so a change to the normalizer has to invalidate them, and a new key prefix does
 # that without a flush.
-_CACHE_VERSION = "v1"
+_CACHE_VERSION = "v2"
 
 # Mirror `schemas.geocoding.GeocodeResult`'s bounds. Applied by truncating here rather than
 # by letting an over-long provider string raise a ValidationError inside `_normalize`, which
@@ -352,9 +352,43 @@ def _short_location(row: dict[str, Any]) -> str:
     return (", ".join(parts) or _text(row.get("display_name")) or "")[:_LOCATION_MAX_LENGTH]
 
 
-def _normalize(row: dict[str, Any]) -> GeocodeResult | None:
+def _bounding_box(row: dict[str, Any]) -> tuple[float, float, float, float] | None:
+    """The row's extent as `(south, north, west, east)`, or `None` for anything unusable.
+
+    Nominatim sends `boundingbox` as four strings in exactly that order. Everything about
+    the shape is checked rather than assumed, because a box is optional to the caller and a
+    mirror that sends three corners, or numbers as numbers, or nonsense, must cost the
+    result its box and nothing more - a dropped row would lose a place a diver searched for
+    over a detail only a map uses.
+
+    West > east passes: that box crosses the antimeridian, and Nominatim returns those for
+    real places. South > north does not - it is the one ordering that carries no meaning.
+    """
+    box = row.get("boundingbox")
+    if not isinstance(box, list) or len(box) != 4:
+        return None
+
+    try:
+        south, north, west, east = (float(corner) for corner in box)
+    except TypeError, ValueError:
+        return None
+
+    # Chained on purpose: this also rejects a `nan` corner, which compares false against
+    # everything and would otherwise sail through as a number.
+    if not (-90 <= south <= north <= 90 and -180 <= west <= 180 and -180 <= east <= 180):
+        return None
+
+    return south, north, west, east
+
+
+def _normalize(row: dict[str, Any], *, with_bounding_box: bool = False) -> GeocodeResult | None:
     """`None` for a row this app can do nothing with - no coordinates, or nothing to show a
-    human. Dropping it beats surfacing a blank entry in a picker."""
+    human. Dropping it beats surfacing a blank entry in a picker.
+
+    `with_bounding_box` is off by default because only forward search wants one: a trip
+    location picked from a search list is framed on a map by its extent, while a reverse
+    lookup answers "what is this position called" for a caller already holding the position.
+    """
     try:
         latitude = float(row["lat"])
         longitude = float(row["lon"])
@@ -380,6 +414,9 @@ def _normalize(row: dict[str, Any]) -> GeocodeResult | None:
         logger.warning("Geocoder sent a %d-character licence; falling back to the default credit.", len(licence))
         licence = None
 
+    box = _bounding_box(row) if with_bounding_box else None
+    south, north, west, east = box if box is not None else (None, None, None, None)
+
     return GeocodeResult(
         latitude=latitude,
         longitude=longitude,
@@ -387,6 +424,10 @@ def _normalize(row: dict[str, Any]) -> GeocodeResult | None:
         display_name=(_text(row.get("display_name")) or location)[:_DISPLAY_NAME_MAX_LENGTH],
         name=name[:_NAME_MAX_LENGTH] if name else None,
         attribution=licence or _DEFAULT_ATTRIBUTION,
+        bbox_south=south,
+        bbox_north=north,
+        bbox_west=west,
+        bbox_east=east,
     )
 
 
@@ -441,6 +482,14 @@ def _offshore(lat: float, lon: float) -> GeocodeResult | None:
         display_name=name[:_DISPLAY_NAME_MAX_LENGTH],
         name=name[:_NAME_MAX_LENGTH],
         attribution=_MARINE_ATTRIBUTION,
+        # A sea's polygon has an extent, but this answer is about the pin rather than the
+        # sea: it echoes the position asked about, and framing a map on the whole Red Sea
+        # is not what the caller is looking at. Spelled out because mypy cannot see the
+        # schema's default through `Annotated[..., Field(default=None)]` (CONTRIBUTING.md).
+        bbox_south=None,
+        bbox_north=None,
+        bbox_west=None,
+        bbox_east=None,
     )
 
 
@@ -546,6 +595,7 @@ async def search_places(query: str) -> list[GeocodeResult]:
     # would empty a search that had fifteen good ones behind them - while normalizing all of
     # them first makes 50,000 junk rows cost 50,000 normalizations. `islice` over a generator
     # is both: it stops at five successes and never touches the rest.
-    results = list(islice((result for result in map(_normalize, rows) if result is not None), _SEARCH_RESULT_LIMIT))
+    candidates = (_normalize(row, with_bounding_box=True) for row in rows)
+    results = list(islice((result for result in candidates if result is not None), _SEARCH_RESULT_LIMIT))
     await _store(key, results)
     return results

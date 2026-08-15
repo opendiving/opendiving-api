@@ -119,6 +119,17 @@ class TestReferences:
         assert (site["latitude"], site["longitude"]) == (27.7278, 34.2564)
 
     @pytest.mark.asyncio
+    async def test_a_trip_carries_its_places_structured_and_in_order(self, monkeypatch):
+        """The flat formats join these into a string; this is the file that keeps what the
+        geocoder actually said, box included, so a reader can redraw the trip's map."""
+        document = await _render(full_bundle(), monkeypatch)
+        locations = document["trips"][0]["locations"]
+        assert [location["name"] for location in locations] == ["Sharm el-Sheikh", "Ras Mohammed"]
+        assert (locations[0]["latitude"], locations[0]["bbox_north"]) == (27.9158, 28.0)
+        # The free-text one: a place the geocoder had no answer for is still a place.
+        assert (locations[1]["display_name"], locations[1]["latitude"]) == (None, None)
+
+    @pytest.mark.asyncio
     async def test_no_internal_integer_id_leaks(self, monkeypatch):
         """They are an implementation detail of this database and actively misleading in
         a file meant to outlive it."""

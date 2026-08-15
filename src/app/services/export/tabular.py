@@ -50,7 +50,7 @@ from ...schemas.dive_mixture import DiveMixtureRead
 from ...schemas.gear_service import ServiceKind
 from ..dive_gas import resolve_gas_use
 from .loader import ExportBundle
-from .naming import gas_name
+from .naming import gas_name, trip_location_names
 
 # Excel's cue that the file is UTF-8. See the module docstring.
 BOM = "\ufeff"
@@ -219,7 +219,10 @@ def write_trips_csv(bundle: ExportBundle) -> Iterator[str]:
         for trip in bundle.trips:
             yield (
                 trip.name,
-                trip.location,
+                # One cell where the trip has a list of places, joined the way the app
+                # shows them. A spreadsheet column is not a place to put a nested shape,
+                # and `export.json` is where the structured locations are.
+                trip_location_names(bundle.locations_by_trip[trip.id]),
                 trip.start_date.isoformat(),
                 None if trip.end_date is None else trip.end_date.isoformat(),
                 counts.get(trip.id, 0),
