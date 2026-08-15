@@ -140,6 +140,12 @@ class TestTheNormalizedFiles:
         assert rows[1][0] == "Red Sea 2026"
         assert rows[1][TRIPS_HEADER.index("dives")] == "2"
 
+    def test_a_trips_places_are_joined_into_one_location_cell(self):
+        """A spreadsheet column is no place for a nested shape, so the list is rendered the
+        way the app shows it and the structured version stays in `export.json`."""
+        rows = _parse(_render(write_trips_csv(full_bundle())))
+        assert rows[1][TRIPS_HEADER.index("location")] == "Sharm el-Sheikh, Ras Mohammed"
+
     def test_dive_sites_count_visits_not_dives(self):
         """Yolanda is the second site of one dive and the only site of another."""
         rows = _parse(_render(write_dive_sites_csv(full_bundle())))

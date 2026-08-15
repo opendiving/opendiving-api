@@ -44,6 +44,7 @@ from ...schemas.export import (
     ExportGearSet,
     ExportGenerator,
     ExportTrip,
+    ExportTripLocation,
     ExportUser,
 )
 from ..dive_profiles import LoadedProfile, load_profile, to_read_schema
@@ -180,7 +181,9 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                 ExportTrip(
                     uuid=trip.uuid,
                     name=trip.name,
-                    location=trip.location,
+                    locations=[
+                        ExportTripLocation(**location.model_dump()) for location in bundle.locations_by_trip[trip.id]
+                    ],
                     start_date=trip.start_date,
                     end_date=trip.end_date,
                     notes=trip.notes,

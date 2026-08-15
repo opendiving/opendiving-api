@@ -56,7 +56,7 @@ from ...schemas.dive_profile import DEPTH_SCALE, PRESSURE_SCALE, TEMPERATURE_SCA
 from ...schemas.gear_item import GearType
 from ..dive_profiles import load_profile
 from .loader import ExportBundle
-from .naming import gas_name
+from .naming import gas_name, trip_location_names
 
 UDDF_NAMESPACE = "http://www.streit.cc/uddf/3.2/"
 UDDF_VERSION = "3.2.2"
@@ -351,8 +351,13 @@ def _divetrip_element(bundle: ExportBundle) -> ET.Element | None:
         # is widened to midnight. A one-day trip with no end date ends the day it began.
         end_date = trip.end_date or trip.start_date
         _sub(part, "dateoftrip", startdate=f"{trip.start_date}T00:00:00", enddate=f"{end_date}T00:00:00")
-        if trip.location:
-            _sub(_sub(part, "geography"), "location", trip.location)
+        # UDDF has one string here where a trip now has a list, so the places are joined
+        # into the line a diver would write themselves. The coordinates stay behind in
+        # `export.json`: `geographyType` allows a single lat/lon pair, and a trip that went
+        # to three of them has no one position to put there.
+        location = trip_location_names(bundle.locations_by_trip[trip.id])
+        if location:
+            _sub(_sub(part, "geography"), "location", location)
         if trip.notes:
             _sub(_sub(part, "notes"), "para", trip.notes)
     return divetrip

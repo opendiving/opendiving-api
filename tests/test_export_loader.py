@@ -35,6 +35,7 @@ from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.gear_set import GearSet
 from src.app.models.gear_set_item import GearSetItem
 from src.app.models.trip import Trip
+from src.app.models.trip_location import TripLocation
 from src.app.models.user import User
 from src.app.services.export.loader import ExportBundle, load_export_bundle
 from tests.conftest import sync_engine
@@ -365,3 +366,25 @@ class TestOrdering:
 
         bundle = await _load(owner.id)
         assert [m.oxygen for m in bundle.mixtures_by_dive[dive.id]] == [32.0, 50.0]
+
+    @pytest.mark.asyncio
+    async def test_a_trips_places_keep_the_order_they_were_listed_in(self, db: Session, owner: User):
+        """The only thing that orders them - duplicate names are legal here, so `position`
+        is the whole answer - and it is what both flat formats join on."""
+        trip = Trip(user_id=owner.id, name="Visayas 2026", start_date=date(2026, 6, 1), notes="")
+        empty = Trip(user_id=owner.id, name="Somewhere", start_date=date(2026, 7, 1), notes="")
+        db.add_all([trip, empty])
+        db.commit()
+        # Added last-first, so only `position` can produce the expected answer.
+        db.add_all(
+            [
+                TripLocation(trip_id=trip.id, name="Bohol", position=1),
+                TripLocation(trip_id=trip.id, name="Moalboal", position=0),
+            ]
+        )
+        db.commit()
+
+        bundle = await _load(owner.id)
+        assert [location.name for location in bundle.locations_by_trip[trip.id]] == ["Moalboal", "Bohol"]
+        # Keyed for every trip, so a writer can index it without asking first.
+        assert bundle.locations_by_trip[empty.id] == []

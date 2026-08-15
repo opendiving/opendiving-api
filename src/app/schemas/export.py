@@ -37,6 +37,9 @@ from .gear_item import GearType
 from .gear_service import ServiceKind
 
 EXPORT_FORMAT = "opendiving-export"
+# Still 1 after a trip's free-text `location` became the structured `locations` list below,
+# which the rule above would otherwise increment for: the app is pre-launch and nothing has
+# ever read a version-1 file, so there is no reader for the bump to tell anything.
 EXPORT_VERSION = 1
 
 
@@ -121,9 +124,32 @@ class ExportDive(PublicUUIDSchema):
     created_at: datetime
 
 
+class ExportTripLocation(BaseModel):
+    """One place a trip went, as the geocoder described it when the diver picked it.
+
+    A value object with no `uuid`, because it has none to export: trip locations are per-trip
+    rows replaced wholesale with the trip, so nothing in this file - or in the database -
+    references one. The bounding box travels with the point because it is what the geocoder
+    said the place *covers*, and a reader redrawing the trip's map wants the region rather
+    than a pin in the middle of a country.
+    """
+
+    name: str
+    display_name: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    bbox_south: float | None = None
+    bbox_north: float | None = None
+    bbox_west: float | None = None
+    bbox_east: float | None = None
+
+
 class ExportTrip(PublicUUIDSchema):
     name: str
-    location: str | None = None
+    locations: Annotated[
+        list[ExportTripLocation],
+        Field(default_factory=list, description="Places this trip went to, in the order the diver listed them"),
+    ]
     start_date: date
     end_date: date | None = None
     notes: str
