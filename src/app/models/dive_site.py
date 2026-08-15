@@ -1,4 +1,4 @@
-from sqlalchemy import ForeignKey, Index, String, Text, func
+from sqlalchemy import Float, ForeignKey, Index, String, Text, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -13,6 +13,10 @@ class DiveSite(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     name: Mapped[str] = mapped_column(String(255))
     notes: Mapped[str] = mapped_column(Text, default="")
     location: Mapped[str | None] = mapped_column(String(255), default=None)
+    # Two plain floats rather than PostGIS: a dive site is a point, and the only questions
+    # asked of it are "show it" and "list them" - see DECISIONS.md.
+    latitude: Mapped[float | None] = mapped_column(Float, default=None)
+    longitude: Mapped[float | None] = mapped_column(Float, default=None)
 
     @declared_attr.directive
     @classmethod

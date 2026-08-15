@@ -318,10 +318,19 @@ def _divesite_element(bundle: ExportBundle) -> ET.Element | None:
     for site in bundle.dive_sites:
         element = _sub(divesite, "site", id=_uddf_id("site", site.uuid))
         _sub(element, "name", site.name)
-        if site.location:
-            # `geographyType` makes `<location>` mandatory, so a site with nothing but a
-            # name gets no `<geography>` at all rather than an empty one.
-            _sub(_sub(element, "geography"), "location", site.location)
+        # A lone coordinate is not a position and the write side won't store one, so a
+        # pair is all or nothing here too.
+        position = (site.latitude, site.longitude) if site.latitude is not None and site.longitude is not None else None
+        if site.location or position is not None:
+            # `geographyType` makes `<location>` mandatory, so a site with nothing to put
+            # in a `<geography>` gets none at all rather than an empty one - and a site
+            # that has only coordinates repeats its name there, since dropping the
+            # position to stay silent about the location would lose the more useful half.
+            geography = _sub(element, "geography")
+            _sub(geography, "location", site.location or site.name)
+            if position is not None:
+                _sub(geography, "latitude", _num(position[0]))
+                _sub(geography, "longitude", _num(position[1]))
         if site.notes:
             _sub(_sub(element, "notes"), "para", site.notes)
     return divesite

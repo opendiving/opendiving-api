@@ -197,6 +197,8 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     uuid=site.uuid,
                     name=site.name,
                     location=site.location,
+                    latitude=site.latitude,
+                    longitude=site.longitude,
                     notes=site.notes,
                     is_deleted=site.is_deleted,
                     created_at=site.created_at,

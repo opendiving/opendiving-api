@@ -81,7 +81,8 @@ async def write_dive_site(
 
     `user_uuid` in the body must be the caller's own (403 otherwise). Uniqueness is on
     name *and* location together, so the same site name at a different location is
-    allowed; a genuine repeat is a 422.
+    allowed; a genuine repeat is a 422. `latitude` and `longitude` are one value: send
+    both or neither, since half a pair is a 422 as well.
     """
     if current_user["uuid"] != dive_site.user_uuid:
         raise ForbiddenException()
@@ -174,16 +175,21 @@ async def patch_dive_site(
 
     404 unless the caller owns it, exactly as for a site that doesn't exist. Uniqueness
     is re-checked against the *resulting* name and location, so moving a site to a
-    location where that name is already taken is a 422. Because dive reads embed this
-    site's name and location, a successful change also
-    invalidates every cached dive logged here.
+    location where that name is already taken is a 422. `latitude` and `longitude` are
+    one value: a body naming one without the other is a 422, so moving a site means
+    sending both and clearing it means sending both as null. Because dive reads embed
+    this site's name and location, a change to either also invalidates every cached dive
+    logged here.
     """
     db_dive_site = await _get_owned_dive_site(db, uuid, current_user)
 
+    # The two fields `DiveSiteInfo` embeds, and so the two that decide both the
+    # uniqueness re-check and whether any cached dive can have gone stale.
+    touches_dive_summary = values.name is not None or "location" in values.model_fields_set
     effective_name = values.name if values.name is not None else db_dive_site.name
     effective_location = values.location if "location" in values.model_fields_set else db_dive_site.location
 
-    if (values.name is not None or "location" in values.model_fields_set) and await dive_site_name_exists(
+    if touches_dive_summary and await dive_site_name_exists(
         db=db,
         user_id=db_dive_site.user_id,
         name=effective_name,
@@ -198,8 +204,12 @@ async def patch_dive_site(
         await _dive_site_cache.invalidate_list(db_dive_site.user_id)
         # Dive reads embed this site's name/location, so a rename makes every cached
         # dive logged here stale - the bug that used to be documented as a known
-        # limitation, fixable now that the single-dive cache key is user-scoped.
-        await invalidate_dive_caches(db_dive_site.user_id)
+        # limitation, fixable now that the single-dive cache key is user-scoped. Those
+        # two fields and nothing else: `DiveSiteInfo` carries no coordinates and no
+        # notes, and dropping every cached dive a diver has because they nudged a marker
+        # would be a real cost for no staleness avoided.
+        if touches_dive_summary:
+            await invalidate_dive_caches(db_dive_site.user_id)
 
     return {"message": "Dive site updated"}
 

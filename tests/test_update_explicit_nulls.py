@@ -69,11 +69,19 @@ SCHEMAS_AND_TABLES: list[tuple[type[RejectsExplicitNulls], Any]] = [
     (UserAdminUpdate, User),
 ]
 
+# Nullable columns that still can't be cleared on their own, because a *different* rule
+# governs them. `DiveSiteUpdate`'s coordinates answer to `WholeCoordinatePair`: half a
+# position is meaningless, so clearing one means clearing both. Driving them singly here
+# would assert the opposite of what that schema promises - see the paired test below.
+CLEARED_ONLY_IN_PAIRS = {(DiveSiteUpdate, "latitude"), (DiveSiteUpdate, "longitude")}
+
 NULLABLE_CASES = [
     (schema, name)
     for schema, model in SCHEMAS_AND_TABLES
     for name in schema.model_fields
-    if name in model.__table__.columns and model.__table__.columns[name].nullable
+    if name in model.__table__.columns
+    and model.__table__.columns[name].nullable
+    and (schema, name) not in CLEARED_ONLY_IN_PAIRS
 ]
 
 NON_NULLABLE_CASES = [(schema, name) for schema, _ in SCHEMAS_AND_TABLES for name in schema.NON_NULLABLE_FIELDS]
@@ -128,6 +136,20 @@ def test_an_omitted_field_is_still_fine(schema: type[RejectsExplicitNulls], _mod
     values = schema.model_validate({})
 
     assert values.model_fields_set == set()
+
+
+def test_a_dive_site_position_can_still_be_cleared_as_a_pair() -> None:
+    """The half of the coordinates `CLEARED_ONLY_IN_PAIRS` exempts from the sweep.
+
+    Both columns are nullable, so a mistyped position has to be correctable back to "not
+    recorded" - listing them in `NON_NULLABLE_FIELDS` would have made that impossible,
+    and the two rules would have contradicted each other.
+    """
+    values = DiveSiteUpdate.model_validate({"latitude": None, "longitude": None})
+
+    assert values.latitude is None
+    assert values.longitude is None
+    assert values.model_dump(exclude_unset=True) == {"latitude": None, "longitude": None}
 
 
 def test_names_every_offending_field_at_once() -> None:

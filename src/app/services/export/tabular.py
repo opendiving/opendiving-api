@@ -231,7 +231,7 @@ def write_trips_csv(bundle: ExportBundle) -> Iterator[str]:
     return _rows_to_csv(TRIPS_HEADER, rows())
 
 
-DIVE_SITES_HEADER = ("name", "location", "dives", "deleted", "notes", "dive_site_uuid")
+DIVE_SITES_HEADER = ("name", "location", "latitude", "longitude", "dives", "deleted", "notes", "dive_site_uuid")
 
 
 def write_dive_sites_csv(bundle: ExportBundle) -> Iterator[str]:
@@ -242,7 +242,16 @@ def write_dive_sites_csv(bundle: ExportBundle) -> Iterator[str]:
 
     def rows() -> Iterator[tuple[Any, ...]]:
         for site in bundle.dive_sites:
-            yield (site.name, site.location, counts.get(site.id, 0), site.is_deleted, site.notes, str(site.uuid))
+            yield (
+                site.name,
+                site.location,
+                site.latitude,
+                site.longitude,
+                counts.get(site.id, 0),
+                site.is_deleted,
+                site.notes,
+                str(site.uuid),
+            )
 
     return _rows_to_csv(DIVE_SITES_HEADER, rows())
 
