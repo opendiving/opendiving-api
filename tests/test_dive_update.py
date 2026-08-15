@@ -126,44 +126,22 @@ class TestNonNullableFields:
     """`dive_number`, `start_time`, `duration` and `notes` map to `NOT NULL` columns, so
     an explicit null is refused by the schema with a message naming the field - rather
     than surviving into the UPDATE and coming back as a foreign-key error.
+
+    Only the dive-specific half is here. The rule itself now lives on
+    `RejectsExplicitNulls` and is exercised against every update schema (`DiveUpdate`
+    included) in `test_update_explicit_nulls.py`; what that generic sweep *can't* reach
+    is below - `trip_uuid`, which is a field with no column of its own, and the
+    `start_time`/`utc_offset_minutes` pairing the guard exists to protect.
     """
 
-    @pytest.mark.parametrize("field", ["dive_number", "start_time", "duration", "notes"])
-    def test_rejects_an_explicit_null(self, field: str) -> None:
-        with pytest.raises(ValidationError) as exc_info:
-            DiveUpdate.model_validate({field: None})
+    def test_still_accepts_a_null_for_trip_uuid(self) -> None:
+        # The one nullable field on this schema that isn't a column, so the generic
+        # nullable-column sweep can't see it - and the one whose explicit null is load
+        # bearing: it is how the web client detaches a dive from its trip.
+        values = DiveUpdate.model_validate({"trip_uuid": None})
 
-        message = str(exc_info.value)
-        assert field in message
-        assert "cannot be null" in message
-        # The old failure mode: a not-null violation described as a missing relation.
-        assert "related record" not in message
-
-    def test_names_every_offending_field_at_once(self) -> None:
-        with pytest.raises(ValidationError) as exc_info:
-            DiveUpdate.model_validate({"duration": None, "notes": None})
-
-        message = str(exc_info.value)
-        assert "duration" in message
-        assert "notes" in message
-
-    @pytest.mark.parametrize(
-        "field",
-        ["max_depth", "avg_depth", "bottom_temperature", "visibility", "weight", "trip_uuid"],
-    )
-    def test_still_accepts_a_null_for_a_genuinely_nullable_field(self, field: str) -> None:
-        # Clearing these is a real operation - a diver correcting a mistyped max depth
-        # back to "not recorded" - so the guard must not overreach.
-        values = DiveUpdate.model_validate({field: None})
-
-        assert field in values.model_fields_set
-        assert getattr(values, field) is None
-
-    def test_an_omitted_field_is_still_fine(self) -> None:
-        values = DiveUpdate.model_validate({})
-
-        assert values.model_fields_set == set()
-        assert values.duration is None
+        assert "trip_uuid" in values.model_fields_set
+        assert values.trip_uuid is None
 
     @pytest.mark.asyncio
     async def test_a_real_start_time_still_splits_into_instant_and_offset(self, captured: dict[str, Any]) -> None:

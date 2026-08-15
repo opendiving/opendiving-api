@@ -52,9 +52,10 @@ from src.app.schemas.trip import TripUpdate
 from src.app.schemas.user import UserAdminUpdate, UserUpdate
 
 # Every update schema the public API accepts a PATCH body into, paired with the table it
-# writes to. The admin-panel-only ones (`DiveMixtureUpdate`, `UserDiveStatsUpdate`, the
-# join-table schemas) are deliberately absent - they are reachable only through
-# CRUDAdmin's own forms, which submit a rendered field set rather than arbitrary JSON.
+# writes to - plus `UserAdminUpdate`, which is admin-only but inherits the guard from
+# `UserUpdate` anyway. `DiveMixtureUpdate`, `UserDiveStatsUpdate` and the join-table
+# schemas are deliberately absent: nothing outside the admin panel can PATCH them, and
+# CRUDAdmin's form handler drops blank fields rather than sending nulls.
 SCHEMAS_AND_TABLES: list[tuple[type[RejectsExplicitNulls], Any]] = [
     (DiveUpdate, Dive),
     (DiveSiteUpdate, DiveSite),

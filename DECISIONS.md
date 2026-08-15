@@ -3157,9 +3157,12 @@ Hand-written lists drift, so `tests/test_update_explicit_nulls.py` reads each on
 SQLAlchemy table and asserts they match - a new `NOT NULL` column reopens the hole otherwise, and
 silently. It needs no database: `Table.columns` is metadata, populated at import.
 
-The admin-panel-only update schemas (`DiveMixtureUpdate`, `UserDiveStatsUpdate`, the join-table
-ones) are deliberately left out. They are reachable only through CRUDAdmin's own forms, which submit
-a rendered field set rather than arbitrary JSON, so there is no caller to give a better error to.
+`DiveMixtureUpdate`, `UserDiveStatsUpdate` and the join-table schemas are left out. Nothing outside
+the admin panel can PATCH them, and CRUDAdmin's form handler already can't produce the failing body:
+it forwards only non-empty strings and coerces checkboxes to real bools, so a `None` never reaches
+the schema in the first place. `UserAdminUpdate` is on the list despite being admin-only for the
+opposite reason - it extends `UserUpdate`, so it inherits the guard whether or not it declares
+anything, and naming `email` alongside the four fields it already covers costs one line.
 
 ## The `trip_uuid` detach path has a test now
 
