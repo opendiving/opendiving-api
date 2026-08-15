@@ -146,6 +146,17 @@ class TestTheNormalizedFiles:
         counts = {row[0]: row[DIVE_SITES_HEADER.index("dives")] for row in rows[1:]}
         assert counts == {"Shark Reef": "1", "Yolanda": "2"}
 
+    def test_dive_site_coordinates_are_written_as_stored(self):
+        """Decimal degrees in their own two columns, so a spreadsheet can sort on them and
+        a mapping tool can read them - and an empty cell where a site has no position,
+        rather than a `0` a reader would take for Null Island."""
+        rows = _parse(_render(write_dive_sites_csv(full_bundle())))
+        latitude, longitude = DIVE_SITES_HEADER.index("latitude"), DIVE_SITES_HEADER.index("longitude")
+        assert {row[0]: (row[latitude], row[longitude]) for row in rows[1:]} == {
+            "Shark Reef": ("27.7278", "34.2564"),
+            "Yolanda": ("", ""),
+        }
+
     def test_gear_items_carry_the_sets_they_belong_to(self):
         rows = _parse(_render(write_gear_items_csv(full_bundle())))
         sets = GEAR_ITEMS_HEADER.index("sets")

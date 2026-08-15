@@ -5117,3 +5117,83 @@ whatever migration guide ships with the importer, because the file will look com
 
 Trips are not imported either, but that loss hides because they *derive* trips from gaps between
 dive dates (see their own section above).
+
+## Dive site coordinates are two `Float` columns, and half a pair is not a position
+
+`dive_site` grew `latitude`/`longitude` as two plain `Float` columns rather than a PostGIS
+`geography(Point)`. A dive site is a point, and the only two questions ever asked of it are "show
+it" and "list them" — neither needs an index that understands distance. PostGIS would mean a new
+Postgres image and an extension install for every self-hoster, which is a real cost against a
+feature that is two numbers on a form. Revisit if "sites near me" ever ships; until then the
+rejection is the reusable part.
+
+Both are `Mapped[float | None]` for the reason in *"`Mapped[X]` vs `Mapped[X | None]` on
+`MappedAsDataclass`"* above, and the schema change needed the usual manual DDL:
+
+```sql
+ALTER TABLE dive_site ADD COLUMN latitude DOUBLE PRECISION, ADD COLUMN longitude DOUBLE PRECISION;
+```
+
+They deliberately stay **out of `ux_dive_site_user_id_name_location_lower`**. Two sites sharing a
+name and a location are duplicates whatever their coordinates say, and folding a float into a
+uniqueness key would make "the same site, pinned two metres apart" a second row.
+
+**The pair is one value, and the rule is about the request body: name both coordinates or neither.**
+A latitude with no longitude is not a partial position, it is a meaningless one — a site
+accidentally pinned to the equator or the prime meridian. `WholeCoordinatePair` carries the whole
+rule, and both write schemas (`DiveSiteCreate`, `DiveSiteUpdate`) inherit it. It takes two
+conditions, because a PATCH can produce a half pair two ways:
+
+- **naming one key.** `{"latitude": 27.7}` writes one column and leaves whatever the other already
+  held → `len({"latitude", "longitude"} & model_fields_set) == 1` is a 422.
+- **naming both with one value.** `{"latitude": 27.7, "longitude": null}` passes the key check and
+  still half-sets the row → `(latitude is None) != (longitude is None)` is a 422.
+
+So `{"latitude": null, "longitude": null}` is how a position is cleared, and moving a site means
+sending both numbers even if only one changed. The web form and the map picker submit the pair
+anyway, so the ergonomic loss is theoretical.
+
+**The rejected alternative was checking the *effective* pair** — the body merged over the stored
+row, mirroring the `effective_location` computation next to it. It buys one thing,
+`{"latitude": 27.7}` nudging one coordinate of a pair that is already whole, and costs three:
+
+- It has to be **gated** on the caller having named a coordinate at all. Nothing at the database
+  level enforces the rule, so a half pair can be in the table (raw SQL, a restored dump); enforced
+  on every PATCH, the owner of such a row could not so much as rename it until they guessed which
+  unrelated field to send.
+- It is **read-then-write**, so two PATCHes racing on one site — one clearing the pair, one nudging
+  a coordinate — both pass against the pre-update row and leave a half pair behind. The body rule
+  has no such window: whichever request wins, it carried a whole pair or none.
+- It puts the rule in **two places**, the schema for POST and the route for PATCH, for one
+  invariant.
+
+The body rule is the smaller thing to hold and the stronger guarantee, which is the general shape
+worth remembering: a validation that needs the current state to decide is usually a validation
+asking the wrong question.
+
+The validator lives on the **write** schemas only, not on `DiveSiteBase`. Every application path in
+goes through one of them — the admin panel registers `DiveSiteCreateInternal`/`DiveSiteUpdate`
+(`admin/views.py`), so it is covered too, and only raw SQL can produce a half pair. Put the
+validator on the shared base instead and such a row turns every read of it into a 500, which is a
+worse outcome than a read that shows the half. `latitude`/`longitude` are also kept off
+`DiveSiteInfo` (`schemas/dive.py`), the summary embedded in dive reads: adding them there enlarges
+every cached dive payload for a map view that does not exist yet.
+
+That last point also narrowed `patch_dive_site`'s **cache invalidation**, which used to drop every
+cached dive for the user on any successful edit. `DiveSiteInfo` is `uuid`, `name` and `location`, so
+only a change to one of those can leave a cached dive stale — and dragging a marker is about to
+become the most common one-field edit there is. The site's own list cache is still invalidated
+unconditionally, because the list does carry coordinates.
+
+**In UDDF, `<geography>` is emitted for a site that has a location *or* a position.** It used to be
+location-only, because `geographyType` makes `<location>` `minOccurs="1"` and a name-only site has
+nothing valid to put there. A coordinates-only site has the same problem and the coordinates are the
+more useful half, so it repeats its **name** as the `<location>` rather than losing them.
+`geographyType` is an `xs:all`, so `<latitude>`/`<longitude>` need no particular order — but the
+mandatory child does need to be there, which is why the two tests for this validate against the XSD
+rather than asserting on the elements alone. Decimal degrees in both formats: this is the one pair
+of numbers in that writer that needs no unit conversion.
+
+`dive-sites.csv` gets `latitude`/`longitude` columns next to `location`, written as stored and left
+empty where there is no position — an empty cell rather than a `0` a reader would take for Null
+Island, which is the same trap recorded in *"What divelogs.de does with our UDDF"*.
