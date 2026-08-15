@@ -422,6 +422,75 @@ class TestSearchRoute:
         assert anonymous_client.get("/api/v1/geocode/search", params={"q": "dahab"}).status_code == 401
 
 
+class TestBoundingBox:
+    """Nominatim sends a search result's extent as `boundingbox`, four strings ordered
+    south, north, west, east. It rides through to the client as four named floats so a
+    trip location can store it 1:1 and a map can frame the place it describes.
+
+    The theme is that a box is a nicety: nothing here may cost a result. A row whose box
+    is missing, short, unparseable or impossible keeps its name and coordinates and
+    simply arrives without one.
+    """
+
+    BOX = {"boundingbox": ["9.89", "9.98", "123.35", "123.44"]}
+
+    def _corners(self, row: dict, client: TestClient) -> tuple:
+        with _responds([{**REVERSE_PAYLOAD, **row}]):
+            body = client.get("/api/v1/geocode/search", params={"q": "moalboal"}).json()
+
+        assert len(body) == 1, "the row must survive whatever its box looked like"
+        return tuple(body[0][f"bbox_{corner}"] for corner in ("south", "north", "west", "east"))
+
+    def test_a_search_result_carries_the_extent(self, client: TestClient, no_redis: None):
+        assert self._corners(self.BOX, client) == (9.89, 9.98, 123.35, 123.44)
+
+    def test_a_box_that_crosses_the_antimeridian_is_kept_as_sent(self, client: TestClient, no_redis: None):
+        """West > east is what an antimeridian-crossing box looks like, and swapping the
+        pair to "fix" it would frame the map on the whole planet instead of on Fiji."""
+        box = {"boundingbox": ["-18.3", "-16.1", "177.0", "-179.8"]}
+
+        assert self._corners(box, client) == (-18.3, -16.1, 177.0, -179.8)
+
+    @pytest.mark.parametrize(
+        "box",
+        [
+            {},
+            {"boundingbox": ["9.89", "9.98", "123.35"]},
+            {"boundingbox": ["9.89", "9.98", "123.35", "east"]},
+            {"boundingbox": "9.89,9.98,123.35,123.44"},
+            {"boundingbox": ["9.98", "9.89", "123.35", "123.44"]},
+            {"boundingbox": ["9.89", "9.98", "123.35", "1234.4"]},
+            {"boundingbox": ["nan", "nan", "nan", "nan"]},
+        ],
+    )
+    def test_a_box_it_cannot_use_costs_the_row_nothing(self, client: TestClient, no_redis: None, box: dict):
+        """South > north is the one ordering that carries no meaning, `nan` compares false
+        against every bound it would have to satisfy, and a mirror is free to send the
+        field in a shape of its own - none of which is a reason to drop the place."""
+        assert self._corners(box, client) == (None, None, None, None)
+
+    def test_a_reverse_answer_has_no_extent(self, client: TestClient, no_redis: None):
+        """A pin's answer is a name for a position the caller is already holding, so
+        there is nothing to frame - and a country-sized box would be actively wrong for
+        one."""
+        with _responds({**REVERSE_PAYLOAD, **self.BOX}):
+            body = client.get("/api/v1/geocode/reverse", params={"lat": 28.5717, "lon": 34.5372}).json()
+
+        assert body["bbox_south"] is None
+
+    def test_the_answers_cached_before_it_existed_are_not_served(self, client: TestClient, fake_redis: FakeRedis):
+        """A hit replays a stored `GeocodeResult` rather than re-normalizing the provider
+        row, and search answers are kept for a month - so entries written before this
+        field existed would hand back boxless results well into next month. The version
+        segment in the key is what retires them, and it only works if it is *in* the key.
+        """
+        with _responds([{**REVERSE_PAYLOAD, **self.BOX}]):
+            client.get("/api/v1/geocode/search", params={"q": "moalboal"})
+
+        (key,) = fake_redis.store
+        assert f":{geocoding_service._CACHE_VERSION}:" in key
+
+
 class TestProviderContract:
     def test_sends_the_configured_user_agent(self, client: TestClient, no_redis: None):
         """Nominatim's policy blocks generic User-Agents outright."""
