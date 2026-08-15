@@ -32,3 +32,17 @@ class GeocodeResult(BaseModel):
     # swap (it is the provider's own `licence` string when it sends one). The client is
     # expected to render it wherever it shows these results.
     attribution: Annotated[str, Field(max_length=255, examples=["Data © OpenStreetMap contributors, ODbL 1.0."])]
+    # The place's extent, when the provider sends one. Four named floats rather than a
+    # nested object or a list, because that is how a trip location stores them
+    # (`schemas.trip.TripLocationInput`) and a client that picks a result writes it
+    # straight back - a shape change in between would be a mapping nobody needs.
+    #
+    # All four or none of them: a partial box is not a box. They are absent for a result
+    # the provider sent no box for, for one whose box did not parse, and for every
+    # reverse lookup - a pin's answer is a name for a position the caller already has,
+    # and framing a map around a country is a search-side concern. West > east is legal
+    # and means the box crosses the antimeridian.
+    bbox_south: Annotated[float | None, Field(default=None, ge=-90, le=90, examples=[9.89])]
+    bbox_north: Annotated[float | None, Field(default=None, ge=-90, le=90, examples=[9.98])]
+    bbox_west: Annotated[float | None, Field(default=None, ge=-180, le=180, examples=[123.35])]
+    bbox_east: Annotated[float | None, Field(default=None, ge=-180, le=180, examples=[123.44])]
