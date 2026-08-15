@@ -58,6 +58,9 @@ something to look up, not to restate it.
   `services/cache_invalidation.py`
 - **New per-user owned resource → `OwnedResourceCache`**; hand-roll only for reads that enrich rows
   with a second query. → its class docstring, which names the three that opt out
+- **New update schema → `RejectsExplicitNulls`**, listing the fields whose columns are `NOT NULL`.
+  Every PATCH field is typed `T | None`, so without it an explicit `null` reaches the UPDATE and
+  comes back as a 500. → *"Update schemas refuse an explicit null for a `NOT NULL` column"*
 - **List endpoints clamp pagination.** → `clamp_pagination`
 - **Binary reads use `ETag`/`If-None-Match` → 304.**
 

@@ -1,10 +1,10 @@
 import uuid as uuid_pkg
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema
+from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls
 
 
 class DiveSiteBase(BaseModel):
@@ -44,8 +44,13 @@ class DiveSiteCreateInternal(DiveSiteBase):
     user_id: int
 
 
-class DiveSiteUpdate(BaseModel):
+class DiveSiteUpdate(RejectsExplicitNulls):
     model_config = ConfigDict(extra="forbid")
+
+    # `location` is genuinely nullable and stays off this list: clearing it is how a site
+    # entered with the wrong location gets corrected back to "not recorded", and
+    # `patch_dive_site` reads that explicit null through `model_fields_set`.
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "notes")
 
     name: Annotated[str | None, Field(min_length=1, max_length=255, default=None)]
     location: Annotated[str | None, Field(default=None, max_length=255, examples=["Koh Tao, Thailand"])]

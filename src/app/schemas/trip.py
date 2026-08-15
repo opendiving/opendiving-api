@@ -1,10 +1,10 @@
 import uuid as uuid_pkg
 from datetime import date, datetime
-from typing import Annotated
+from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema
+from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls
 
 
 def _validate_date_range(start_date: date | None, end_date: date | None) -> None:
@@ -57,8 +57,13 @@ class TripCreateInternal(TripBase):
     user_id: int
 
 
-class TripUpdate(BaseModel):
+class TripUpdate(RejectsExplicitNulls):
     model_config = ConfigDict(extra="forbid")
+
+    # `end_date` stays off this list on purpose: an open-ended trip is a real state, so
+    # clearing it back to null is a legitimate edit. `start_date` is not - a trip without
+    # one has nothing to sort the list by.
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "start_date", "notes")
 
     name: Annotated[str | None, Field(min_length=1, max_length=255, default=None)]
     location: Annotated[str | None, Field(default=None, max_length=255, examples=["Koh Tao, Thailand"])]

@@ -1,11 +1,11 @@
 import uuid as uuid_pkg
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Annotated, Self
+from typing import Annotated, ClassVar, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema
+from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls
 
 
 class ServiceKind(StrEnum):
@@ -160,7 +160,7 @@ class GearServiceScheduleCreateInternal(GearServiceScheduleBase):
     is_active: bool = True
 
 
-class GearServiceScheduleUpdate(BaseModel):
+class GearServiceScheduleUpdate(RejectsExplicitNulls):
     """Partial update. Interval and `starts_on` changes move the due date, so the route
     re-runs `recalculate_service_schedule` afterwards (which also re-arms the reminder).
 
@@ -170,6 +170,11 @@ class GearServiceScheduleUpdate(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid")
+
+    # The intervals stay off this list: dropping one is how a rule goes from "every 12
+    # months or 100 dives" to just one of the two, and the route checks the merged result
+    # still has at least one (which the DB's own `CheckConstraint` also enforces).
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("kind", "starts_on", "is_active")
 
     kind: Annotated[ServiceKind | None, Field(default=None)]
     label: Annotated[str | None, Field(default=None, max_length=LABEL_MAX_LENGTH)]
@@ -255,7 +260,7 @@ class GearServiceRecordCreateInternal(GearServiceRecordBase):
     dive_count_at_service: int = 0
 
 
-class GearServiceRecordUpdate(BaseModel):
+class GearServiceRecordUpdate(RejectsExplicitNulls):
     """Partial update. Changing `serviced_on` moves the schedule's due date, so the
     route re-runs `recalculate_service_schedule` for the affected schedule.
 
@@ -264,6 +269,8 @@ class GearServiceRecordUpdate(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid")
+
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("kind", "serviced_on", "notes")
 
     kind: Annotated[ServiceKind | None, Field(default=None)]
     serviced_on: Annotated[date | None, Field(default=None)]

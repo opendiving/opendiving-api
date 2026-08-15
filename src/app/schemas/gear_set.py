@@ -1,10 +1,10 @@
 import uuid as uuid_pkg
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..core.schemas import PublicUUIDSchema
+from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls
 from .gear_item import GearItemInfo
 
 
@@ -59,8 +59,12 @@ class GearSetCreateRequest(GearSetBase):
     ]
 
 
-class GearSetUpdate(BaseModel):
+class GearSetUpdate(RejectsExplicitNulls):
     model_config = ConfigDict(extra="forbid")
+
+    # `weight` is nullable - a set that no longer prefills a ballast figure is a real
+    # state, so clearing it stays allowed.
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name",)
 
     name: Annotated[str | None, Field(min_length=1, max_length=255, default=None)]
     weight: Annotated[
