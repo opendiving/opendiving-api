@@ -26,20 +26,24 @@ class OwnedResourceCache[InternalT, PublicT]:
 
     Resources whose read/list logic does more than a straight `get_multi`/`get` plus a shape
     conversion don't fit this shape and should keep their own hand-written cache helpers
-    instead of forcing themselves through this factory. The three that opt out, and why:
+    instead of forcing themselves through this factory. The four that opt out, and why:
 
     - `dives.py` - enriches each row with related trips/dive sites/gear and supports several
       extra filters.
     - `gear_items.py` - carries an extra `include_archived` dimension in the cache key *and*
       batches a service-schedule lookup across the page for the service badge.
     - `certifications.py` - batches a card-file lookup across the page.
+    - `trips.py` - batches a `trip_location` lookup across the page and embeds the rows, and
+      searches an EXISTS over that child table rather than columns of its own. It still
+      constructs one of these for `list_cache_key_prefix` and `invalidate_list`, so its
+      hand-rolled helpers keep the key shapes this factory defines.
 
     In each case the enrichment is a second query whose results have to be zipped back into
     the page before conversion, which is precisely the step this factory has no room for.
-    Adding a generic hook for it would complicate the factory for its three straightforward
-    users (trips, dive sites, gear sets) to serve three callers that each need something
-    different; the duplication is the cheaper side of that trade. Revisit if a fourth
-    resource wants the same enrichment shape.
+    Adding a generic hook for it would complicate the factory for its two remaining
+    straightforward users (dive sites, gear sets) to serve four callers that each need
+    something different; the duplication is the cheaper side of that trade. Revisit if the
+    enrichment shape ever converges.
     """
 
     def __init__(

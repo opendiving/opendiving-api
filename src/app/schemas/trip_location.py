@@ -24,9 +24,13 @@ class TripLocationBase(BaseModel):
 
 
 class TripLocationReadInternal(TripLocationBase):
-    """Mirrors the actual `trip_location` table columns (integer PK/FK), for the admin
-    panel and server-side lookups only - the public shape is `TripLocationRead` in
-    `schemas/trip.py`, which is a bare value object with no ids on it at all.
+    """Mirrors the actual `trip_location` table columns (integer PK/FK).
+
+    Nothing reads it today - `admin/views.py` registers only the create and update
+    schemas, and every server-side read goes through `TripLocationRead` in
+    `schemas/trip.py`, the bare value object with no ids on it at all. Kept for the same
+    reason `DiveDiveSiteRead` is: a table's schema module carries the full set, so the
+    next thing that needs the internal shape finds it rather than inventing a second one.
     """
 
     id: int

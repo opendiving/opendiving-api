@@ -5651,18 +5651,22 @@ exactly what `POST /dive` does with its mixtures. Both write paths wrap the chil
 the alternative is a 500 raised out of a session already in a failed state.
 
 **The manual DDL**, since `create_all` never alters an existing table. `trip_location` itself needs
-nothing — it is new, so a restart creates it — but the column drop is by hand:
-
-```bash
-docker compose exec -T db psql -U postgres -d opendive -c "ALTER TABLE trip DROP COLUMN IF EXISTS location;"
-```
+nothing — it is new, so a restart creates it — but the column drop is by hand, and **the order of
+the two statements below is the whole point**: the second one destroys what the first one reads, and
+there is no way back once it has run.
 
 A dev database with real trips in it does not have to lose what the column said. Carrying each
 string over as a coordinate-less first location keeps search working immediately, and the picker can
-refine it later:
+refine it later. Run this **first**:
 
 ```bash
 docker compose exec -T db psql -U postgres -d opendive -c "INSERT INTO trip_location (trip_id, name, position) SELECT id, left(location, 255), 0 FROM trip WHERE location IS NOT NULL AND btrim(location) <> '' AND NOT EXISTS (SELECT 1 FROM trip_location tl WHERE tl.trip_id = trip.id);"
+```
+
+Then, and only then, drop the column:
+
+```bash
+docker compose exec -T db psql -U postgres -d opendive -c "ALTER TABLE trip DROP COLUMN IF EXISTS location;"
 ```
 
 ## A bounding box is optional twice over, and west > east is a real box

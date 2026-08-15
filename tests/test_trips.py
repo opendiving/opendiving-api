@@ -16,28 +16,44 @@ Those places used to be one free-text `trip.location` column and are now ordered
 * search moved from two columns of one table to a name-OR-EXISTS over the child table,
   which is why `test_picker_search.py` no longer has Trip in it.
 
-No database: the route's collaborators are stubbed and the assertions are on what it
-hands them (the `test_dive_update.py` style). The search clause is asserted as compiled
-SQL, like `test_picker_search.py` does for the others.
+Mostly without a database: the route's collaborators are stubbed and the assertions are
+on what it hands them (the `test_dive_update.py` style), and the search clause is asserted
+as compiled SQL like `test_picker_search.py` does for the others.
+
+`TestReplaceLocations` is the exception and runs against a live Postgres, for the reason
+`test_dive_neighbors.py` gives for its own split: replacing a list wholesale is a `DELETE`
+followed by re-numbered inserts, so what it has to get right is what the *table* holds
+afterwards - a mocked session would only assert that we called the calls we called. Those
+tests skip themselves when no database is reachable; see CONTRIBUTING.md for why a run on
+the host needs `POSTGRES_SERVER=localhost` to make them execute.
 """
 
 import uuid as uuid_pkg
+from collections.abc import AsyncGenerator
 from datetime import UTC, date, datetime
 from fnmatch import fnmatch
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
 from src.app.api.v1 import trips as trips_module
+from src.app.core.config import settings
+from src.app.core.db.database import Base
 from src.app.core.exceptions.http_exceptions import NotFoundException, UnprocessableEntityException
 from src.app.core.utils import cache as cache_module
+from src.app.crud.crud_trip_locations import get_locations_for_trip, replace_locations_for_trip
 from src.app.models.trip import Trip
+from src.app.models.trip_location import TripLocation
+from src.app.models.user import User
 from src.app.schemas.dive_site import COORDINATE_PAIR_MESSAGE
 from src.app.schemas.trip import (
     BBOX_MESSAGE,
@@ -50,6 +66,8 @@ from src.app.schemas.trip import (
     TripReadInternal,
     TripUpdateRequest,
 )
+from tests.conftest import sync_engine
+from tests.helpers.generators import create_user
 
 USER_ID = 1
 USER_UUID = uuid7()
@@ -541,3 +559,129 @@ class TestSearchConditions:
         # The rendered literal doubles each backslash; what matters is that the `%` the
         # diver typed arrives escaped rather than as a live wildcard, under an `ESCAPE`.
         assert sql.count(f"'%50{'\\' * 2}%%' ESCAPE") == 3
+
+
+def _db_available() -> bool:
+    try:
+        with sync_engine.connect():
+            return True
+    except OperationalError:
+        return False
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _ensure_tables() -> None:
+    """Create any missing tables (idempotent), as in `test_dive_neighbors.py`."""
+    if _db_available():
+        Base.metadata.create_all(sync_engine)
+
+
+@pytest_asyncio.fixture
+async def async_db() -> AsyncGenerator[AsyncSession]:
+    """An `AsyncSession` on its own engine - the crud under test is async, while the `db`
+    fixture used to seed the trip rows is the sync one the rest of the suite shares."""
+    engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
+    session_factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    async with session_factory() as session:
+        yield session
+    await engine.dispose()
+
+
+@pytest.fixture
+def diver(db: Session) -> User:
+    return create_user(db)
+
+
+@pytest.fixture
+def trip(db: Session, diver: User) -> Trip:
+    row = Trip(user_id=diver.id, name=f"Visayas {uuid7().hex[-8:]}", start_date=date(2026, 6, 1), notes="")
+    db.add(row)
+    db.commit()
+    return row
+
+
+@pytest.mark.skipif(not _db_available(), reason="No database connection available")
+class TestReplaceLocations:
+    """`replace_locations_for_trip` against a live Postgres - what the table holds after
+    a write, which is the half a stubbed session cannot answer.
+
+    A trip's locations are replaced wholesale rather than diffed, so every edit is a
+    `DELETE` plus inserts numbered from the *new* list. Both halves fail quietly if they
+    regress: a lost `DELETE` leaves the surplus rows of the previous, longer list behind,
+    and positions carried over from it re-order the page the next time it is read. Either
+    one looks correct until a trip is edited twice.
+    """
+
+    @staticmethod
+    def _inputs(*names: str) -> list[TripLocationInput]:
+        return [TripLocationInput(name=name) for name in names]
+
+    @staticmethod
+    def _rows(db: Session, trip: Trip) -> list[tuple[str, int]]:
+        rows = db.query(TripLocation).filter(TripLocation.trip_id == trip.id).order_by(TripLocation.id).all()
+        return [(row.name, row.position) for row in rows]
+
+    @pytest.mark.asyncio
+    async def test_position_is_the_index_in_the_list_that_was_sent(
+        self, db: Session, async_db: AsyncSession, trip: Trip
+    ) -> None:
+        await replace_locations_for_trip(db=async_db, trip_id=trip.id, locations=self._inputs("Moalboal", "Bohol"))
+
+        assert self._rows(db, trip) == [("Moalboal", 0), ("Bohol", 1)]
+
+    @pytest.mark.asyncio
+    async def test_a_shorter_list_leaves_none_of_the_longer_one_behind(
+        self, db: Session, async_db: AsyncSession, trip: Trip
+    ) -> None:
+        """The surplus rows have to go, and the survivor has to be re-numbered from the
+        new list - a "Bohol" still sitting at position 1 would read back as a second
+        place the diver deleted."""
+        await replace_locations_for_trip(
+            db=async_db, trip_id=trip.id, locations=self._inputs("Moalboal", "Bohol", "Anilao")
+        )
+
+        await replace_locations_for_trip(db=async_db, trip_id=trip.id, locations=self._inputs("Bohol"))
+
+        assert self._rows(db, trip) == [("Bohol", 0)]
+
+    @pytest.mark.asyncio
+    async def test_an_empty_list_clears_them(self, db: Session, async_db: AsyncSession, trip: Trip) -> None:
+        await replace_locations_for_trip(db=async_db, trip_id=trip.id, locations=self._inputs("Moalboal"))
+
+        await replace_locations_for_trip(db=async_db, trip_id=trip.id, locations=[])
+
+        assert self._rows(db, trip) == []
+
+    @pytest.mark.asyncio
+    async def test_duplicate_names_are_legal(self, db: Session, async_db: AsyncSession, trip: Trip) -> None:
+        """Two stays in the same town on one trip. There is no unique constraint, and
+        `position` is the only thing telling the rows apart - which is why the read is
+        ordered by it and nothing dedupes."""
+        await replace_locations_for_trip(db=async_db, trip_id=trip.id, locations=self._inputs("Dahab", "Dahab"))
+
+        assert self._rows(db, trip) == [("Dahab", 0), ("Dahab", 1)]
+
+    @pytest.mark.asyncio
+    async def test_another_trips_places_are_left_alone(
+        self, db: Session, async_db: AsyncSession, diver: User, trip: Trip
+    ) -> None:
+        """The `DELETE` is scoped by `trip_id`, and a suite with one trip in it cannot
+        notice when that stops being true."""
+        neighbour = Trip(user_id=diver.id, name=f"Elsewhere {uuid7().hex[-8:]}", start_date=date(2026, 7, 1), notes="")
+        db.add(neighbour)
+        db.commit()
+        await replace_locations_for_trip(db=async_db, trip_id=neighbour.id, locations=self._inputs("Koh Tao"))
+
+        await replace_locations_for_trip(db=async_db, trip_id=trip.id, locations=self._inputs("Moalboal"))
+
+        assert self._rows(db, neighbour) == [("Koh Tao", 0)]
+
+    @pytest.mark.asyncio
+    async def test_what_was_written_is_what_reads_back(self, db: Session, async_db: AsyncSession, trip: Trip) -> None:
+        """Round-trips every column, including the antimeridian-legal `west > east`."""
+        written = TripLocationInput(**{**MOALBOAL, "bbox_west": 179.9, "bbox_east": -179.9})
+
+        await replace_locations_for_trip(db=async_db, trip_id=trip.id, locations=[written])
+
+        (read_back,) = await get_locations_for_trip(db=async_db, trip_id=trip.id)
+        assert read_back.model_dump() == written.model_dump()

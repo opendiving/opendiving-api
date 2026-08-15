@@ -42,7 +42,20 @@ router = APIRouter(tags=["trips"])
 # between the write and the insert (a concurrent hard delete): lengths and ranges are
 # already bounded by `TripLocationInput`, and there is no unique constraint to violate.
 # 422 rather than a raw 500, matching how `patch_dive` treats its child-row writes.
+#
+# Both routes raise before invalidating anything, so this path knowingly leaves the trip's
+# caches as they were - including any column update `patch_trip` already committed. Same
+# as `patch_dive`, and the trade is deliberate: the trigger needs a hard delete, which no
+# route offers, and invalidating on the way out of a failed write would mean doing it in
+# two places for a case that cannot currently happen.
 _LOCATION_ERROR_DETAIL = "Trip locations could not be saved."
+
+# The list is ordered by most recent start date, in one place: `_trip_cache` no longer
+# reads it (its `read_list` is unused), but it still takes it, and `_cached_read_trips`
+# has two branches of its own. Three copies means changing the one that does nothing and
+# seeing no change.
+_SORT_COLUMN = "start_date"
+_SORT_ORDER = "desc"
 
 
 async def _get_owned_trip(
@@ -97,8 +110,8 @@ _trip_cache: OwnedResourceCache[TripReadInternal, TripRead] = OwnedResourceCache
     crud=crud_trips,
     schema_to_select=TripReadInternal,
     to_public=lambda db_trip, user_uuid: _to_public_trip(db_trip, user_uuid=user_uuid),
-    sort_columns="start_date",
-    sort_orders="desc",
+    sort_columns=_SORT_COLUMN,
+    sort_orders=_SORT_ORDER,
     search_columns=("name",),
 )
 
@@ -212,8 +225,8 @@ async def _cached_read_trips(
             db=db,
             model=Trip,
             conditions=_search_conditions(user_id=user_id, term=term),
-            sort_column="start_date",
-            sort_order="desc",
+            sort_column=_SORT_COLUMN,
+            sort_order=_SORT_ORDER,
             offset=offset,
             limit=items_per_page,
         )
@@ -226,8 +239,8 @@ async def _cached_read_trips(
                 limit=items_per_page,
                 user_id=user_id,
                 is_deleted=False,
-                sort_columns="start_date",
-                sort_orders="desc",
+                sort_columns=_SORT_COLUMN,
+                sort_orders=_SORT_ORDER,
             ),
         )
 
