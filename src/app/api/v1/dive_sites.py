@@ -87,7 +87,8 @@ async def write_dive_site(
 
     `user_uuid` in the body must be the caller's own (403 otherwise). Uniqueness is on
     name *and* location together, so the same site name at a different location is
-    allowed; a genuine repeat is a 422.
+    allowed; a genuine repeat is a 422. `latitude` and `longitude` are one value: send
+    both or neither, since half a pair is a 422 as well.
     """
     if current_user["uuid"] != dive_site.user_uuid:
         raise ForbiddenException()

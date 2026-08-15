@@ -5159,7 +5159,10 @@ check next to it, which is gated for a different reason (avoiding a query). Ther
 constraint behind the rule, so a half pair can reach the table another way — the admin panel writes
 through `DiveSiteUpdate`, which deliberately carries no validator — and a rule enforced on every
 PATCH would leave the owner of such a row unable to so much as rename it until they guessed which
-unrelated field to send.
+unrelated field to send. The API is the second, narrower way in: the check is read-then-write, so
+two PATCHes racing on the same site — one clearing the pair, one nudging a coordinate — can both
+pass against the pre-update row. One diver editing one site from two tabs is not a scenario worth a
+constraint, but it is worth knowing that the rule is a validation and not an invariant.
 
 The validator lives on the **write** schemas only (`DiveSiteCreate`, `DiveSiteCreateInternal`), not
 on `DiveSiteBase`. There is no `CHECK` constraint behind the rule, so the table can still hold a
