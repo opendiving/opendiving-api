@@ -45,6 +45,10 @@ _TIMEOUT = httpx.Timeout(5.0)
 # The bounds that actually hold, because `_TIMEOUT` is per socket read: a host that answers
 # slowly enough, or endlessly enough, is bounded by these two and by nothing else. Both are
 # far above any honest Nominatim answer - five geocoding results are a few kilobytes.
+#
+# Note for anyone sizing a client-side timeout against this: the worst case for the whole
+# handler is this plus `_MAX_PROVIDER_WAIT_SECONDS`, which is spent before the deadline
+# scope opens. Eleven seconds, not ten.
 _DEADLINE_SECONDS = 10.0
 _MAX_RESPONSE_BYTES = 512 * 1024
 
@@ -82,6 +86,9 @@ _LOCATION_MAX_LENGTH = 255
 _DISPLAY_NAME_MAX_LENGTH = 512
 _NAME_MAX_LENGTH = 255
 _ATTRIBUTION_MAX_LENGTH = 255
+
+# Bound on a provider string quoted into a log line - see `_log_safe`.
+_LOGGED_VALUE_MAX_LENGTH = 200
 
 # Used when the provider sends no `licence` of its own. The default provider is OSM-backed,
 # and attribution is a condition of using the data - never let a result go out without one.
@@ -159,6 +166,17 @@ async def _store(key: str, results: list[GeocodeResult]) -> None:
         await cache.client.set(key, json.dumps([result.model_dump() for result in results]), ex=ttl)
     except RedisError as exc:
         logger.warning("Geocoding cache write failed (%s).", type(exc).__name__)
+
+
+def _log_safe(value: Any) -> str:
+    """Make a provider-supplied string safe to hand to `logger`.
+
+    It is the only such string that reaches a log rather than going through `_normalize`'s
+    truncation, and it arrives from a body bounded at half a megabyte. Newlines are
+    collapsed first: a log line is one line, and a value that can contain `\\n` can forge
+    entries around itself in anything that parses the file afterwards.
+    """
+    return " ".join(str(value).split())[:_LOGGED_VALUE_MAX_LENGTH]
 
 
 async def _claim_provider_slot() -> bool:
@@ -274,7 +292,7 @@ async def _request(path: str, params: dict[str, Any]) -> list[dict[str, Any]] | 
         if error is not None:
             if _NO_RESULT_ERROR in str(error).casefold():
                 return []
-            logger.warning("Geocoder refused %s: %s", path, error)
+            logger.warning("Geocoder refused %s: %s", path, _log_safe(error))
             return None
         return [payload]
     if isinstance(payload, list):
@@ -340,13 +358,24 @@ def _normalize(row: dict[str, Any]) -> GeocodeResult | None:
         return None
 
     name = _text(row.get("name"))
+
+    # The one provider string that is *replaced* rather than truncated when it is too long.
+    # The others are labels, and a clipped label is still a usable label; this one is a
+    # licence notice, and one cut mid-sentence is not attribution at all - which is the
+    # thing this field exists to guarantee. Nominatim's own is about seventy characters, so
+    # in practice this only fires for a provider doing something strange.
+    licence = _text(row.get("licence"))
+    if licence is not None and len(licence) > _ATTRIBUTION_MAX_LENGTH:
+        logger.warning("Geocoder sent a %d-character licence; falling back to the default credit.", len(licence))
+        licence = None
+
     return GeocodeResult(
         latitude=latitude,
         longitude=longitude,
         location=location,
         display_name=(_text(row.get("display_name")) or location)[:_DISPLAY_NAME_MAX_LENGTH],
         name=name[:_NAME_MAX_LENGTH] if name else None,
-        attribution=(_text(row.get("licence")) or _DEFAULT_ATTRIBUTION)[:_ATTRIBUTION_MAX_LENGTH],
+        attribution=licence or _DEFAULT_ATTRIBUTION,
     )
 
 

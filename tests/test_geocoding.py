@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from redis.exceptions import ConnectionError
 
 from src.app.api import router
 from src.app.api.dependencies import get_current_user
@@ -65,16 +66,26 @@ def anonymous_client(geocode_app: Any) -> Generator[TestClient]:
 
 class FakeRedis:
     """Enough of the Redis client for this module: `get`/`set` with an expiry we record but
-    don't act on, since nothing here needs a clock."""
+    don't act on, since nothing here needs a clock.
 
-    def __init__(self) -> None:
+    `failing=True` makes both raise, which is how the "a cache outage is a miss, not an
+    error" branches get exercised - the one thing a purely in-memory double would otherwise
+    let go untested.
+    """
+
+    def __init__(self, *, failing: bool = False) -> None:
         self.store: dict[str, bytes] = {}
         self.expiries: dict[str, int] = {}
+        self.failing = failing
 
     async def get(self, key: str) -> bytes | None:
+        if self.failing:
+            raise ConnectionError("redis is down")
         return self.store.get(key)
 
     async def set(self, key: str, value: str, ex: int | None = None) -> None:
+        if self.failing:
+            raise ConnectionError("redis is down")
         self.store[key] = value.encode()
         if ex is not None:
             self.expiries[key] = ex
@@ -83,6 +94,13 @@ class FakeRedis:
 @pytest.fixture
 def fake_redis() -> Generator[FakeRedis]:
     redis = FakeRedis()
+    with patch.object(geocoding_service.cache, "client", redis):
+        yield redis
+
+
+@pytest.fixture
+def broken_redis() -> Generator[FakeRedis]:
+    redis = FakeRedis(failing=True)
     with patch.object(geocoding_service.cache, "client", redis):
         yield redis
 
@@ -316,6 +334,20 @@ class TestDegradation:
         assert response.status_code == 200
         assert response.json() is None
 
+    def test_a_refusal_is_bounded_and_kept_to_one_line_in_the_log(self, client: TestClient, no_redis: None, caplog):
+        """The only provider string that reaches a log rather than `_normalize`. It arrives
+        from a body bounded at half a megabyte, and a value carrying newlines can forge
+        entries around itself in anything that parses the file afterwards."""
+        refusal = "Bandwidth limit exceeded\nWARNING fake log line\n" + "x" * 5000
+
+        with caplog.at_level(logging.WARNING), _responds({"error": refusal}):
+            client.get("/api/v1/geocode/reverse", params={"lat": 1, "lon": 2})
+
+        (record,) = [r for r in caplog.records if "Geocoder refused" in r.message]
+        logged = record.getMessage()
+        assert "\n" not in logged
+        assert len(logged) < 300
+
     def test_a_refusal_is_not_mistaken_for_an_empty_answer(self, client: TestClient, fake_redis: FakeRedis):
         """Nominatim wears the same `{"error": ...}` shape for a bandwidth or abuse
         complaint as for "unable to geocode". Cached as a miss, one bad minute would pin a
@@ -357,12 +389,13 @@ class TestDegradation:
 
     def test_truncates_provider_strings_rather_than_dropping_the_row(self, client: TestClient, no_redis: None):
         """An over-long `display_name` would otherwise raise inside the normalizer and turn
-        one verbose row into a failed lookup."""
-        with _responds({**REVERSE_PAYLOAD, "display_name": "x" * 2000, "licence": "y" * 2000}):
+        one verbose row into a failed lookup. The licence is the exception - it is replaced
+        rather than clipped, see `TestShortLocation`."""
+        with _responds({**REVERSE_PAYLOAD, "display_name": "x" * 2000, "name": "y" * 2000}):
             body = client.get("/api/v1/geocode/reverse", params={"lat": 1, "lon": 2}).json()
 
         assert len(body["display_name"]) == 512
-        assert len(body["attribution"]) == 255
+        assert len(body["name"]) == 255
 
     def test_survives_an_oversized_body(self, client: TestClient, fake_redis: FakeRedis):
         """The per-read timeout bounds each read, not the response - so the size cap is what
@@ -459,6 +492,16 @@ class TestCaching:
         assert len(provider.requests) == 1
         (key,) = fake_redis.store
         assert key.startswith("geocode:")
+
+    def test_a_redis_outage_is_a_miss_not_an_error(self, client: TestClient, broken_redis: FakeRedis):
+        """Both the read and the write raise here. Geocoding is a suggestion; losing the
+        cache should cost the provider an extra call, not cost the diver their answer."""
+        with _responds(REVERSE_PAYLOAD) as provider:
+            response = client.get("/api/v1/geocode/reverse", params={"lat": 28.5717, "lon": 34.5372})
+
+        assert response.status_code == 200
+        assert response.json()["location"] == "Dahab, Egypt"
+        assert len(provider.requests) == 1
 
     def test_an_unreadable_cache_entry_is_treated_as_a_miss(self, client: TestClient, fake_redis: FakeRedis):
         with _responds(REVERSE_PAYLOAD) as patched:
@@ -600,6 +643,15 @@ class TestShortLocation:
 
         assert result is not None
         assert "OpenStreetMap" in result.attribution
+
+    def test_replaces_an_over_long_licence_rather_than_cutting_it(self):
+        """The one provider string not truncated: a label clipped mid-word is still a usable
+        label, a licence notice clipped mid-sentence is not attribution at all."""
+        row = {"lat": "1", "lon": "2", "display_name": "Somewhere", "licence": "Licensed under " + "x" * 400}
+        result = geocoding_service._normalize(row)
+
+        assert result is not None
+        assert result.attribution == geocoding_service._DEFAULT_ATTRIBUTION
 
     @pytest.mark.parametrize(
         "row",
