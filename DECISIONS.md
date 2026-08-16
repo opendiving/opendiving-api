@@ -5699,3 +5699,21 @@ provider rows, and search answers are kept for a month — so without the bump e
 searched query would have handed back a boxless result well into next month. That is precisely what
 the constant is for, and it is the step easiest to forget because nothing fails, locally or in CI,
 when it is skipped.
+
+## The project instructions live in AGENTS.md, and CLAUDE.md is an import
+
+`CLAUDE.md` used to hold everything. It now holds a `@AGENTS.md` import and the one line that is
+genuinely about Claude Code — that the parent `opendiving/CLAUDE.md` loads alongside it, which
+describes Claude's directory walk and would be false in a file other agents read. The instructions
+themselves moved to `AGENTS.md` unchanged.
+
+`AGENTS.md` is the cross-tool convention, so one file serves every coding agent rather than a copy
+per tool that drifts apart. Claude Code does not read it natively; the documented bridge is exactly
+the import used here, so nothing is lost by moving the content out.
+
+The web repo made the same change for an additional reason that does **not** apply here: `next dev`
+appends a managed block to whichever of the two files it finds, so that repo needed a file for it to
+write to that nobody hand-maintains, plus a Prettier override to stop the formatter and the
+generator undoing each other. There is no such generator on this side — nothing writes to these
+files but us, `mdformat` treats `AGENTS.md` like every other doc, and no configuration changed. The
+split here buys cross-tool reach and symmetry with the web repo, nothing more.
