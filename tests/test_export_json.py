@@ -93,6 +93,24 @@ class TestWhatUddfCannotHold:
         assert (document["dives"][0]["cns_end"], document["dives"][0]["otu_end"]) == (8.0, 21.0)
 
     @pytest.mark.asyncio
+    async def test_the_entry_and_exit_positions_are_here_for_the_same_reason(self, monkeypatch):
+        """UDDF 3.2.2 hangs `<geography>` off a `<site>` and nowhere else - neither
+        `informationbeforedive` nor `waypoint` has a coordinate element - so a dive's own
+        two positions survive only in this file and in `dives.csv`."""
+        document = await _render(full_bundle(), monkeypatch)
+        dive = document["dives"][0]
+        assert (dive["entry_latitude"], dive["entry_longitude"]) == (27.7278, 34.2564)
+        assert (dive["exit_latitude"], dive["exit_longitude"]) == (27.7291, 34.2572)
+
+    @pytest.mark.asyncio
+    async def test_a_dive_with_only_an_exit_position_exports_one(self, monkeypatch):
+        """Which is the ordinary shape: no wrist computer gets a fix before the descent."""
+        document = await _render(full_bundle(), monkeypatch)
+        dive = document["dives"][1]
+        assert (dive["entry_latitude"], dive["entry_longitude"]) == (None, None)
+        assert (dive["exit_latitude"], dive["exit_longitude"]) == (27.7315, 34.259)
+
+    @pytest.mark.asyncio
     async def test_the_ceiling_channel_survives_in_the_embedded_profile(self, monkeypatch):
         """UDDF drops it (`<decostop>` needs a duration we do not have); the JSON must not."""
         document = await _render(full_bundle(), monkeypatch, {2: TRIMIX_PROFILE})

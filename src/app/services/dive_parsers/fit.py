@@ -34,6 +34,7 @@ from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from .base import DiveParser
 from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, ceiling_cm, scaled_int, series
 from .exceptions import EXTRACTION_ERRORS, DiveParseError
+from .positions import GeoFix, degrees_from_semicircles, entry_and_exit, geo_fix
 
 # Every FIT file carries the ASCII string `.FIT` at offset 8, immediately after the
 # 8-byte header preamble. It is the format's only magic number, and unlike the `.fit`
@@ -289,6 +290,11 @@ class _FitScan:
     depth: list[tuple[datetime, float]] = field(default_factory=list)
     ceiling: list[tuple[datetime, int]] = field(default_factory=list)
     temperature: list[tuple[datetime, int]] = field(default_factory=list)
+    # Satellite fixes off the same `record` stream, already in degrees. Not a profile
+    # channel - nothing draws them - so they are kept as usable fixes rather than as
+    # points on an axis, and only two of them survive `_parse_dive`. A device writes very
+    # few: 84 of 3 201 records on the fullest file in the corpus.
+    positions: list[GeoFix] = field(default_factory=list)
     # Keyed by the transmitter's ANT id, insertion-ordered so cylinders come out in the
     # order the device first reported them.
     pressure: dict[int, list[tuple[datetime, float]]] = field(default_factory=dict)
@@ -303,9 +309,10 @@ class FitParser(DiveParser):
     Extracts the fields with a direct equivalent on the `Dive`/`DiveMixture` backend
     models (`models/dive.py`, `models/dive_mixture.py`), plus - separately, via
     `parse_profile` - the per-sample depth/ceiling/temperature/tank-pressure curves and
-    the file's dive events, stored as `DiveProfile`. FIT activity files carry a great deal
-    more (GPS track, ascent rates, heart rate, battery telemetry) with nowhere to persist
-    it, so none of that is parsed.
+    the file's dive events, stored as `DiveProfile`. The `record` stream's satellite fixes
+    are reduced to the dive's entry and exit positions; see `positions.py`. FIT activity
+    files carry a great deal more (the rest of the GPS track, ascent rates, heart rate,
+    battery telemetry) with nowhere to persist it, so none of that is parsed.
     """
 
     key = "fit"
@@ -487,7 +494,7 @@ class FitParser(DiveParser):
 
     @staticmethod
     def _collect_record(scan: _FitScan, frame: fitdecode.FitDataMessage) -> None:
-        """Take depth and temperature off one `record`.
+        """Take depth, temperature and any satellite fix off one `record`.
 
         Channels are sampled independently, so a record may carry either, both or
         neither: a Suunto Ocean dive writes 4 295 records of which only 431 carry
@@ -517,6 +524,19 @@ class FitParser(DiveParser):
         temperature = _native_value(frame, "temperature")
         if temperature is not None:
             scan.temperature.append((timestamp, temperature))
+
+        # Semicircles, the FIT profile's own angle unit, and the only field pair here
+        # that is a *pair*: `geo_fix` keeps a record's position only when both halves
+        # are readable, since half of one is not a place. `_native_value` for the same
+        # reason as everything else on this message - Suunto's developer fields shadow
+        # native ones by name.
+        fix = geo_fix(
+            timestamp.timestamp(),
+            degrees_from_semicircles(_native_value(frame, "position_lat")),
+            degrees_from_semicircles(_native_value(frame, "position_long")),
+        )
+        if fix is not None:
+            scan.positions.append(fix)
 
     @staticmethod
     def _collect_tank_update(scan: _FitScan, frame: fitdecode.FitDataMessage) -> None:
@@ -583,6 +603,13 @@ class FitParser(DiveParser):
             _native_value(summary, "bottom_time") if summary is not None else None,
         )
 
+        # Timestamps as POSIX seconds, which is all `entry_and_exit` compares them as.
+        # The depth channel is the pivot rather than the session's own clock: FIT has no
+        # in-water time to read (see `_tank_pressures`), and this needs none.
+        entry, exit_fix = entry_and_exit(
+            scan.positions, [(timestamp.timestamp(), depth) for timestamp, depth in scan.depth]
+        )
+
         return ParsedDiveSchema(
             avg_depth=cls._depth(session, summary, "avg_depth"),
             bottom_temperature=cls._bottom_temperature(scan, session),
@@ -607,6 +634,10 @@ class FitParser(DiveParser):
             # be "whatever the first sample read", which is a guess about when the diver
             # entered the water rather than a barometer reading.
             surface_pressure_bar=None,
+            entry_latitude=None if entry is None else entry.latitude,
+            entry_longitude=None if entry is None else entry.longitude,
+            exit_latitude=None if exit_fix is None else exit_fix.latitude,
+            exit_longitude=None if exit_fix is None else exit_fix.longitude,
             # Deliberately not parsed, though `session.dive_number` is right there. It is
             # the *computer's* counter, not the diver's lifetime dive number - it starts
             # at 1 on a new or factory-reset device. The example corpus shows this

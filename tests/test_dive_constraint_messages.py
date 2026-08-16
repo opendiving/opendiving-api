@@ -52,6 +52,24 @@ class TestFkErrorDetail:
     def test_weight_must_be_non_negative(self):
         assert _fk_error_detail(_integrity_error("ck_dive_weight_non_negative")) == "Weight must be zero or positive."
 
+    def test_coordinate_ranges(self):
+        """Unreachable through the form - nothing sets these but the import - but a
+        constraint with no message here is a raw 500 rather than a sentence."""
+        assert (
+            _fk_error_detail(_integrity_error("ck_dive_entry_latitude_range"))
+            == "Imported latitudes must be between -90 and 90."
+        )
+        assert (
+            _fk_error_detail(_integrity_error("ck_dive_exit_longitude_range"))
+            == "Imported longitudes must be between -180 and 180."
+        )
+
+    def test_half_a_position(self):
+        assert (
+            _fk_error_detail(_integrity_error("ck_dive_exit_position_pair"))
+            == "An imported position needs both a latitude and a longitude."
+        )
+
     def test_unknown_violation_falls_back_to_generic_message(self):
         exc = IntegrityError("INSERT ...", {}, Exception("some other constraint"))
         assert _fk_error_detail(exc) == "Invalid reference: a related record does not exist."

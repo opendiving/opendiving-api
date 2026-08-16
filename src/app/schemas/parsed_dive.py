@@ -1,8 +1,16 @@
 import math
+from typing import Self
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 from .dive_mixture import GasRole
+
+# The bounds `ck_dive_entry_latitude_range` and its three siblings enforce, and the only
+# bounds a coordinate has. Named here rather than written out at each guard because three
+# places mirror them - these validators, `services/dive_parsers/positions.py` (which drops
+# a junk fix before it can displace a real one), and the `CHECK`s themselves.
+LATITUDE_LIMIT = 90.0
+LONGITUDE_LIMIT = 180.0
 
 
 class _ParserOutput(BaseModel):
@@ -171,6 +179,15 @@ class ParsedDiveSchema(_ParserOutput):
     otu_end: float | None = None
     surface_pressure_bar: float | None = None
 
+    # Where the diver got in and where they got out, in decimal degrees, on the same
+    # server-side-only terms as the exposure readings above: a file records these, a form
+    # does not offer them. See `services/dive_parsers/positions.py` for which fix becomes
+    # which - and for why an entry position is routinely absent while an exit one is not.
+    entry_latitude: float | None = None
+    entry_longitude: float | None = None
+    exit_latitude: float | None = None
+    exit_longitude: float | None = None
+
     @field_validator("avg_depth", "max_depth")
     @classmethod
     def _drop_non_positive_depth(cls, value: float | None) -> float | None:
@@ -237,6 +254,53 @@ class ParsedDiveSchema(_ParserOutput):
         fails identically every time.
         """
         return None if value is not None and not (0.5 <= value <= 1.2) else value
+
+    @field_validator("entry_latitude", "exit_latitude")
+    @classmethod
+    def _drop_impossible_latitude(cls, value: float | None) -> float | None:
+        """Past the poles this is not a latitude - `ck_dive_entry_latitude_range` and its
+        exit twin, mirrored on the same terms as every bounded column above."""
+        return None if value is not None and abs(value) > LATITUDE_LIMIT else value
+
+    @field_validator("entry_longitude", "exit_longitude")
+    @classmethod
+    def _drop_impossible_longitude(cls, value: float | None) -> float | None:
+        """Past the antimeridian this is not a longitude - `ck_dive_entry_longitude_range`
+        and its exit twin.
+
+        Worth stating even though `positions.py` has already filtered the fixes it built
+        these from: this schema is also what `backfill_tech_fields` writes through, and
+        that path reaches the columns via a Core `UPDATE` with no Pydantic after it.
+        """
+        return None if value is not None and abs(value) > LONGITUDE_LIMIT else value
+
+    @model_validator(mode="after")
+    def _drop_half_positions(self) -> Self:
+        """Half a position is not a position, and neither is Null Island.
+
+        The same rule `WholeCoordinatePair` applies to a dive site's coordinates, in the
+        one place it can be applied here: these fields are never named by a caller, so
+        there is no request body to check and nothing to reject - a parser hands over what
+        it read, and the wrong halves are dropped rather than 422'd.
+
+        Both conditions are reachable *only* through this schema's own field validators,
+        which is why this runs after them rather than instead of them. `positions.py`
+        emits a pair or nothing; `_drop_non_finite` nulling a `NaN` latitude, or
+        `_drop_impossible_longitude` nulling a longitude of 400, is what leaves a lone
+        ordinate behind - and a lone ordinate written to the column is a dive pinned to
+        the equator or the prime meridian, which is a claim the file never made. It also
+        violates `ck_dive_entry_position_pair`, so the alternative to dropping it is an
+        `IntegrityError` on an otherwise importable file.
+
+        Exactly `0.0, 0.0` goes the same way. See `geo_fix`, and *"What divelogs.de does
+        with our UDDF"* in DECISIONS.md, where Null Island was first written up.
+        """
+        for latitude, longitude in (("entry_latitude", "entry_longitude"), ("exit_latitude", "exit_longitude")):
+            values = (getattr(self, latitude), getattr(self, longitude))
+            if (values[0] is None) != (values[1] is None) or values == (0.0, 0.0):
+                setattr(self, latitude, None)
+                setattr(self, longitude, None)
+        return self
 
 
 class ParsedDiveResponse(ParsedDiveSchema):

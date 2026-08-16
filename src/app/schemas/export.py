@@ -112,6 +112,14 @@ class ExportDive(PublicUUIDSchema):
     otu_start: float | None = None
     otu_end: float | None = None
     surface_pressure_bar: float | None = None
+    # Decimal degrees, as stored. UDDF 3.2.2 has nowhere to put a per-dive position - its
+    # only `<geography>` hangs off a `<site>`, and neither `informationbeforedive` nor
+    # `waypoint` has a coordinate element - so this file and `dives.csv` are the only two
+    # export formats that carry them. See DECISIONS.md.
+    entry_latitude: float | None = None
+    entry_longitude: float | None = None
+    exit_latitude: float | None = None
+    exit_longitude: float | None = None
     trip_uuid: uuid_pkg.UUID | None = None
     dive_site_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In visit order")]
     gear_item_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In the diver's own order")]

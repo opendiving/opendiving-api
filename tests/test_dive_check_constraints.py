@@ -188,6 +188,49 @@ class TestDiveCheckConstraints:
         db.add(_make_dive(dive_owner.id, surface_pressure_bar=0.55))
         db.commit()
 
+    def test_coordinates_past_the_poles_or_the_antimeridian_are_rejected(self, db: Session, dive_owner: User) -> None:
+        """The limits of the coordinate system, so a value outside them is a unit error -
+        a Suunto radian or a FIT semicircle count that reached the column unconverted."""
+        _assert_violates(
+            db, _make_dive(dive_owner.id, entry_latitude=90.1, entry_longitude=34.0), "ck_dive_entry_latitude_range"
+        )
+        _assert_violates(
+            db, _make_dive(dive_owner.id, entry_latitude=28.0, entry_longitude=-180.1), "ck_dive_entry_longitude_range"
+        )
+        _assert_violates(
+            db, _make_dive(dive_owner.id, exit_latitude=-90.1, exit_longitude=34.0), "ck_dive_exit_latitude_range"
+        )
+        _assert_violates(
+            db, _make_dive(dive_owner.id, exit_latitude=28.0, exit_longitude=180.1), "ck_dive_exit_longitude_range"
+        )
+
+    def test_the_bounds_themselves_are_allowed(self, db: Session, dive_owner: User) -> None:
+        """Inclusive on both sides: the poles and the antimeridian are real places, and a
+        dive at one of them would be the most interesting row in the table."""
+        db.add(_make_dive(dive_owner.id, entry_latitude=90.0, entry_longitude=180.0))
+        db.add(_make_dive(dive_owner.id, exit_latitude=-90.0, exit_longitude=-180.0))
+        db.commit()
+
+    def test_half_a_position_is_rejected(self, db: Session, dive_owner: User) -> None:
+        """Either half alone pins the dive to the equator or the prime meridian, which is
+        a claim no file made. `ParsedDiveSchema._drop_half_positions` is what keeps an
+        import from ever reaching this; the constraint is what makes that a guarantee."""
+        _assert_violates(db, _make_dive(dive_owner.id, entry_latitude=28.0), "ck_dive_entry_position_pair")
+        _assert_violates(db, _make_dive(dive_owner.id, entry_longitude=34.0), "ck_dive_entry_position_pair")
+        _assert_violates(db, _make_dive(dive_owner.id, exit_latitude=28.0), "ck_dive_exit_position_pair")
+        _assert_violates(db, _make_dive(dive_owner.id, exit_longitude=34.0), "ck_dive_exit_position_pair")
+
+    def test_an_exit_position_with_no_entry_one_is_allowed(self, db: Session, dive_owner: User) -> None:
+        """The two pairs are independent, and this is the corpus's ordinary shape rather
+        than a corner: a wrist computer gets no fix until the diver surfaces, so every
+        GPS-carrying export in it records an exit position and no entry one."""
+        db.add(_make_dive(dive_owner.id, exit_latitude=28.437455, exit_longitude=34.458997))
+        db.commit()
+
+    def test_null_positions_are_allowed(self, db: Session, dive_owner: User) -> None:
+        db.add(_make_dive(dive_owner.id))
+        db.commit()
+
 
 class TestDiveMixtureCheckConstraints:
     @pytest.fixture

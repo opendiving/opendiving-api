@@ -318,8 +318,25 @@ def full_bundle() -> ExportBundle:
         cns_end=8.0,
         otu_end=21.0,
         surface_pressure_bar=1.013,
+        entry_latitude=27.727800,
+        entry_longitude=34.256400,
+        exit_latitude=27.729100,
+        exit_longitude=34.257200,
     )
-    trimix = make_dive(2, UUIDS["dive-trimix"], max_depth=52.0, avg_depth=30.0, trip_id=1, notes="Deco 20 min")
+    # An exit position and no entry one, which is not a half-filled dive but the ordinary
+    # answer for a wrist computer: a receiver gets no fix underwater, and every GPS-
+    # carrying export in the corpus logs its first fix *after* the diver surfaced. The
+    # writers have to render one position of two without inventing the other.
+    trimix = make_dive(
+        2,
+        UUIDS["dive-trimix"],
+        max_depth=52.0,
+        avg_depth=30.0,
+        trip_id=1,
+        notes="Deco 20 min",
+        exit_latitude=27.731500,
+        exit_longitude=34.259000,
+    )
     bare = make_dive(3, UUIDS["dive-bare"], dive_number=3, duration=1200)
 
     return build_bundle(
