@@ -5799,6 +5799,15 @@ deepest point needs no threshold: it is wherever the depth channel peaks, and "b
 point" is a plain reading of "on the way in". With no depth channel at all there is no pivot, and
 the honest answer is neither position rather than a guessed order.
 
+**The pivot drops non-finite depths before choosing**, and that guard belongs in `entry_and_exit`
+rather than in either parser. An `inf` wins `max` outright wherever it sits and a `NaN` wins
+whenever it is first (every later `x > NaN` is `False`), so one such reading lands the split on an
+arbitrary sample and writes an entry fix into the exit columns — silently, which is the one failure
+mode this whole module exists to avoid. `json.loads` accepts a bare `NaN` and overflows large
+exponents to `inf`, so this is the same hazard `_ParserOutput._drop_non_finite` was written for,
+arriving somewhere that has no schema between it and the answer. Note the asymmetry that hid it: the
+*profile* path meets the same sample in `scaled_int`'s `Decimal.quantize` and dies loudly.
+
 **Last-before and first-after, not first and last**, because the boat motoring out to the site logs
 fixes too: the fix that says where a diver got in is the one just before they descended, and the
 mirror argument holds for the exit as the diver drifts on the surface. Neither list may be assumed

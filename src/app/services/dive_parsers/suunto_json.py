@@ -15,7 +15,7 @@ from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from .base import DiveParser
 from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, ceiling_cm, scaled_int_or_none, series
 from .exceptions import EXTRACTION_ERRORS, DiveParseError
-from .positions import NO_POSITIONS, EntryExit, GeoFix, degrees_from_radians, entry_and_exit, geo_fix
+from .positions import EntryExit, GeoFix, degrees_from_radians, entry_and_exit, geo_fix
 
 logger = logging.getLogger(__name__)
 
@@ -267,15 +267,30 @@ def _positions(samples: list[dict[str, Any]]) -> EntryExit:
     export mixing a naive header timestamp with offset-aware sample timestamps made
     subtracting the two a `TypeError` that failed the whole import.
 
-    Best-effort, like `_mixtures_from_cylinders` and for the same reason: this runs over
-    every file of an export shape that is barely documented, and a dive whose header
-    parses perfectly must not fail to import because one GPS sample carried a timestamp
-    `fromisoformat` refused.
+    Best-effort **per sample**, like `_scan_samples` below and unlike
+    `_mixtures_from_cylinders`: a sample that cannot be read is skipped and the pass
+    carries on. Guarding the whole loop instead was the first attempt, and it met the
+    stated goal - a dive whose header parses perfectly must not fail over one bad GPS
+    sample - at the coarsest possible granularity, discarding every fix already collected
+    along with the one that raised. A GPS-carrying export in this corpus yields exactly
+    one usable position, so that is the whole feature lost to one bad neighbour.
+
+    **This is a separate pass over the samples, and `_scan_samples` merged its two
+    collections to avoid exactly that** - so the divergence is deliberate rather than an
+    oversight of the note 45 lines down. Two things stop it folding in. The failure
+    guards have to stay independent: a cylinder reconstruction that dies must not cost
+    the positions, and vice versa, which one shared pass under one `try` cannot promise.
+    And `_scan_samples` runs *conditionally*, only for an export with no `Gases` block,
+    while this runs for every file - so folding them would mean running the cylinder scan
+    on the D5 exports that skip it today, buying back a pass on the Ocean shape by adding
+    one everywhere else. What it costs as it stands is one more `fromisoformat` per
+    sample on a parse measured at 2-11 ms.
     """
     fixes: list[GeoFix] = []
     depths: list[tuple[float, float]] = []
-    try:
-        for sample in samples:
+    unreadable = 0
+    for sample in samples:
+        try:
             time_text = sample.get("TimeISO8601")
             if not time_text:
                 continue
@@ -290,11 +305,17 @@ def _positions(samples: list[dict[str, Any]]) -> EntryExit:
                 degrees_from_radians(sample.get("Latitude")),
                 degrees_from_radians(sample.get("Longitude")),
             )
-            if fix is not None:
-                fixes.append(fix)
-    except EXTRACTION_ERRORS:
-        logger.warning("Could not read GPS fixes from Suunto JSON samples", exc_info=True)
-        return NO_POSITIONS
+        except EXTRACTION_ERRORS:
+            # Counted rather than logged per sample: a file whose timestamps are all
+            # unreadable would otherwise write one warning per sample, thousands of them,
+            # for a single fact about the file.
+            unreadable += 1
+            continue
+        if fix is not None:
+            fixes.append(fix)
+
+    if unreadable:
+        logger.warning("Skipped %d unreadable sample(s) while reading GPS fixes from a Suunto JSON export", unreadable)
 
     return entry_and_exit(fixes, depths)
 

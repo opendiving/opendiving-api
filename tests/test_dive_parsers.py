@@ -2371,6 +2371,43 @@ class TestEntryAndExitPositions:
 
         assert (parsed.entry_latitude, parsed.exit_latitude) == (None, None)
 
+    def test_a_non_finite_depth_never_becomes_the_pivot(self):
+        """`json.loads` accepts a bare `Infinity`, and an `inf` wins `max` outright - so
+        the split would land on the surface sample it arrived on, putting a pre-descent
+        fix in the exit columns with nothing downstream able to tell. A `NaN` breaks it
+        the other way, winning whenever it is first, since every later `x > NaN` is
+        `False`. The profile path dies loudly on the same reading; this one would not."""
+        for bad in ("Infinity", "NaN"):
+            content = _ocean_json(
+                [
+                    json.loads(f'{{"TimeISO8601": "{_ocean_time(0)}", "Depth": {bad}}}'),
+                    _ocean_fix(60, math.radians(28.2), math.radians(34.2)),
+                    _ocean_depth(600, 30.0),
+                    _ocean_fix(1200, math.radians(28.9), math.radians(34.9)),
+                ]
+            )
+
+            parsed = SuuntoJsonParser.parse(content)
+
+            assert (parsed.entry_latitude, parsed.entry_longitude) == (28.2, 34.2), bad
+            assert (parsed.exit_latitude, parsed.exit_longitude) == (28.9, 34.9), bad
+
+    def test_one_unreadable_sample_does_not_discard_the_rest(self):
+        """Skipped per sample rather than per file. A GPS-carrying export in this corpus
+        yields exactly one usable position, so unwinding the whole pass on the first bad
+        `TimeISO8601` would cost the entire feature for that dive."""
+        content = _ocean_json(
+            [
+                {"TimeISO8601": "not-a-timestamp", "Latitude": 0.1, "Longitude": 0.2},
+                _ocean_fix(0, *self.DAHAB_RADIANS),
+                _ocean_depth(600, 30.0),
+            ]
+        )
+
+        parsed = SuuntoJsonParser.parse(content)
+
+        assert (parsed.entry_latitude, parsed.entry_longitude) == self.DAHAB_DEGREES
+
     def test_half_a_fix_is_not_a_fix(self):
         """A latitude with no longitude pins the dive to the prime meridian - which is
         also what `ck_dive_entry_position_pair` refuses, so this would fail the attach."""

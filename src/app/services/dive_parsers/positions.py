@@ -145,7 +145,19 @@ def entry_and_exit(fixes: list[GeoFix], depths: list[tuple[float, float]]) -> En
     With no depth channel there is no pivot and so no answer: a file that recorded
     positions but never a depth cannot say which of them is the entry, and inventing an
     order would be guessing. Returns nothing, rather than the half-truth.
+
+    **Non-finite depths are dropped before the pivot is chosen**, here rather than in
+    either caller, so the guarantee holds for a third format too. It is not hypothetical:
+    `json.loads` accepts a bare `NaN` and overflows large exponents to `inf`, which is why
+    `_ParserOutput._drop_non_finite` and `EXTRACTION_ERRORS` exist at all. Both break
+    `max` in their own direction - an `inf` wins outright wherever it sits, and a `NaN`
+    wins whenever it happens to be first, since every later `x > NaN` is `False` - and
+    either lands the split on an arbitrary sample. That is the one failure this module is
+    written to avoid, silently: an entry fix written into the exit columns, with nothing
+    downstream able to tell. The profile path catches the same reading loudly (it dies in
+    `scaled_int`'s `Decimal.quantize`); this path would not have.
     """
+    depths = [point for point in depths if math.isfinite(point[1])]
     if not fixes or not depths:
         return NO_POSITIONS
 
