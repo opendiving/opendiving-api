@@ -80,8 +80,12 @@ async def replace_gear_items_for_dive(
     diver never saw it and never asked to remove it, and no client can preserve a reference
     it was never handed.
 
-    Declined rather than missed - see "One narrower case `dirtyFields` cannot reach" in
-    DECISIONS.md for the fix and why its cost was judged too high for a path this narrow.
+    Declined rather than missed, though **not** for the reason the site half declined it: the
+    position-contiguity cost that settled it there does not apply here, since gear has no
+    `replace_gear_item_on_dives` to keep in step and `position` is a pure sort key. Filtering
+    the delete would be about one subquery. It was declined to keep this function and
+    `replace_dive_sites_for_dive` mirrors of each other - see "One narrower case
+    `dirtyFields` cannot reach" in DECISIONS.md, which gives both halves of that.
     """
     unique_ids = list(dict.fromkeys(gear_item_ids))
     await db.execute(delete(DiveGearItem).where(DiveGearItem.dive_id == dive_id))
