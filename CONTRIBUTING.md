@@ -47,9 +47,11 @@ uv run pytest --cov=src/app --cov-report=term-missing
 ```
 
 Note that lint and type-checking cover `tests/` and the build-time `scripts/` as well as `src/`.
-mypy runs as three separate invocations on purpose: the app is importable as both `app.*` (via
-`mypy_path`) and `src.app.*` (how the tests import it), and asking it to check both roots at once
-fails with "source file found twice under different module names".
+mypy runs as three separate invocations, for two different reasons. `src` and `tests` are split
+because the app is importable as both `app.*` (via `mypy_path`) and `src.app.*` (how the tests
+import it), and asking it to check both roots at once fails with "source file found twice under
+different module names". `scripts` is third only because it sits under neither root — it imports
+nothing from the app, and needs no environment either.
 
 mypy and pytest need `ENVIRONMENT=local` and a `SECRET_KEY` in the environment (any value — CI uses
 a throwaway one).
