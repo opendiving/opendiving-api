@@ -8,6 +8,7 @@ from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNu
 from ..core.utils.datetime_offset import require_utc_offset
 from .dive_mixture import DiveMixtureCreate, DiveMixtureRead
 from .dive_profile import DiveProfileInfo
+from .dive_site import Latitude, Longitude
 from .gear_item import GearItemInfo
 
 _START_TIME_EXAMPLE = "2021-04-04T10:04:47.910+02:00"
@@ -107,10 +108,17 @@ class DiveTechScalars(BaseModel):
 
 
 class DiveSiteInfo(PublicUUIDSchema):
-    """Summary of a dive site visited during a dive, keyed by its public `uuid`."""
+    """Summary of a dive site visited during a dive, keyed by its public `uuid`, and
+    enough of the site to place it on a map without a second request per site.
+
+    The position is the site's own, half of a dive's location story; the other half is
+    the `entry_*`/`exit_*` fix recorded by the dive computer on `DiveTechScalars`.
+    """
 
     name: str
     location: str | None = None
+    latitude: Latitude
+    longitude: Longitude
 
 
 class DiveRead(DiveBase, DiveTechScalars, PublicUUIDSchema):

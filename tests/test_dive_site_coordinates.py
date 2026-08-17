@@ -1,5 +1,5 @@
 """Unit tests for dive site coordinates (`schemas/dive_site.py`,
-`api/v1/dive_sites.py::patch_dive_site`).
+`api/v1/dive_sites.py::patch_dive_site`, `schemas/dive.py::DiveSiteInfo`).
 
 One rule is worth this much test: **latitude and longitude are one value**. Half a pair is
 not a partial position, it is a meaningless one - a site pinned on the equator or the prime
@@ -23,6 +23,7 @@ No database: `patch_dive_site`'s collaborators are stubbed and the assertions ar
 """
 
 import uuid as uuid_pkg
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -32,6 +33,8 @@ from uuid6 import uuid7
 
 from src.app.api.v1 import dive_sites as dive_sites_module
 from src.app.core.utils import cache as cache_module
+from src.app.crud.crud_dive_dive_sites import get_dive_sites_for_dive, get_dive_sites_for_dives
+from src.app.schemas.dive import DiveSiteInfo
 from src.app.schemas.dive_site import DiveSiteCreate, DiveSiteUpdate, WholeCoordinatePair
 
 USER_UUID = uuid7()
@@ -212,22 +215,131 @@ class TestWhatReachesTheColumns:
 
 
 class TestDiveCacheInvalidation:
-    """`DiveSiteInfo` - the site summary embedded in every dive read - is `uuid`, `name`
-    and `location`. Only a change to one of those can make a cached dive stale, and
-    dropping a diver's whole cached logbook because they dragged a marker would be a real
-    cost for no staleness avoided.
+    """`DiveSiteInfo` - the site summary embedded in every dive read - is `uuid`, `name`,
+    `location` and, since the dive page grew a map, the position. Only a change to one of
+    those can make a cached dive stale; notes and the rest still leave the logbook alone.
+
+    The two gates are deliberately not the same gate: staleness covers the position,
+    uniqueness does not, so dragging a marker must not pay for a name query it cannot
+    fail - and must not 422 on a legacy duplicate name it did not touch.
     """
 
     @pytest.mark.asyncio
-    async def test_a_coordinate_edit_leaves_the_cached_dives_alone(
-        self, captured: dict[str, Any], mock_redis: Any
-    ) -> None:
+    async def test_a_coordinate_edit_now_drops_them(self, captured: dict[str, Any], mock_redis: Any) -> None:
         await _patch({"latitude": BLUE_HOLE[0], "longitude": BLUE_HOLE[1]}, mock_redis)
 
-        captured["invalidate_dive_caches"].assert_not_awaited()
+        captured["invalidate_dive_caches"].assert_awaited_once_with(1)
 
     @pytest.mark.asyncio
     async def test_a_rename_still_drops_them(self, captured: dict[str, Any], mock_redis: Any) -> None:
         await _patch({"name": "Blue Hole (Dahab)"}, mock_redis)
 
         captured["invalidate_dive_caches"].assert_awaited_once_with(1)
+
+    @pytest.mark.asyncio
+    async def test_an_edit_to_neither_leaves_them_alone(self, captured: dict[str, Any], mock_redis: Any) -> None:
+        await _patch({"notes": "Deep, dark, and busier than it looks"}, mock_redis)
+
+        captured["invalidate_dive_caches"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_coordinate_edit_skips_the_uniqueness_recheck(
+        self, captured: dict[str, Any], mock_redis: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A marker drag says nothing about the name, so the query is pointless - and on a
+        row whose name is already duplicated somewhere (rows predating the constraint), a
+        widened single gate would refuse the move with a 422 about a field it never sent.
+        """
+        name_exists = AsyncMock(return_value=True)
+        monkeypatch.setattr(dive_sites_module, "dive_site_name_exists", name_exists)
+
+        await _patch({"latitude": BLUE_HOLE[0], "longitude": BLUE_HOLE[1]}, mock_redis)
+
+        name_exists.assert_not_awaited()
+        assert captured["update_data"] == {"latitude": BLUE_HOLE[0], "longitude": BLUE_HOLE[1]}
+
+
+class TestTheEmbeddedSiteSummary:
+    """`DiveSiteInfo` is what a dive read carries about each site it was logged against,
+    and the web app reads the position straight off it rather than fetching every site.
+    The unset case has to serialize as an explicit `null` rather than vanish, so a client
+    can tell "no position recorded" from a field the API forgot to send.
+    """
+
+    def test_a_positioned_site_carries_its_coordinates(self) -> None:
+        site = DiveSiteInfo(
+            uuid=uuid7(), name="Blue Hole", location="Dahab, Egypt", latitude=BLUE_HOLE[0], longitude=BLUE_HOLE[1]
+        )
+
+        assert (site.model_dump()["latitude"], site.model_dump()["longitude"]) == BLUE_HOLE
+
+    def test_a_site_without_a_position_serializes_explicit_nulls(self) -> None:
+        dumped = DiveSiteInfo(uuid=uuid7(), name="Blue Hole").model_dump()
+
+        assert dumped["latitude"] is None
+        assert dumped["longitude"] is None
+
+    def test_a_coordinate_off_the_globe_is_refused(self) -> None:
+        """The read schema shares `Latitude`/`Longitude` with the write ones, so the range
+        check comes along - a row that could only exist via raw SQL fails loudly here."""
+        with pytest.raises(ValidationError):
+            DiveSiteInfo(uuid=uuid7(), name="Null Island Adjacent", latitude=91.0, longitude=0.0)
+
+
+class TestTheSummaryLoaders:
+    """Both loaders name every column twice - once in the `select()`, once in the
+    `DiveSiteInfo(...)` call - and the two lists are maintained by hand. Nothing about a
+    latitude built from `row.longitude` is a type error or a range error, so a transposed
+    pair would sail through every other test in this file and land the pin in the wrong
+    hemisphere. That is what these assert against, which is why the fixture uses a real
+    pair whose halves are not interchangeable.
+
+    The **constructor** half only: the rows are `SimpleNamespace`s that always carry every
+    attribute, so a column dropped from a `select()` fails against Postgres rather than
+    here. Transposition is the likelier of the two mistakes and the one with no other
+    check anywhere.
+    """
+
+    def _db(self, rows: list[SimpleNamespace]) -> MagicMock:
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=rows)
+        return db
+
+    def _row(self, **overrides: Any) -> SimpleNamespace:
+        columns: dict[str, Any] = {
+            "uuid": uuid7(),
+            "name": "Blue Hole",
+            "location": "Dahab, Egypt",
+            "latitude": BLUE_HOLE[0],
+            "longitude": BLUE_HOLE[1],
+        }
+        return SimpleNamespace(**(columns | overrides))
+
+    @pytest.mark.asyncio
+    async def test_the_single_dive_loader_maps_each_column_to_its_own_field(self) -> None:
+        row = self._row()
+
+        sites = await get_dive_sites_for_dive(self._db([row]), dive_id=7)
+
+        assert [(s.uuid, s.name, s.location, s.latitude, s.longitude) for s in sites] == [
+            (row.uuid, "Blue Hole", "Dahab, Egypt", BLUE_HOLE[0], BLUE_HOLE[1])
+        ]
+
+    @pytest.mark.asyncio
+    async def test_the_single_dive_loader_passes_an_absent_position_through(self) -> None:
+        sites = await get_dive_sites_for_dive(self._db([self._row(latitude=None, longitude=None)]), dive_id=7)
+
+        assert (sites[0].latitude, sites[0].longitude) == (None, None)
+
+    @pytest.mark.asyncio
+    async def test_the_batched_loader_maps_each_column_to_its_own_field(self) -> None:
+        """Same assertion against the second copy of the same mapping, plus the grouping
+        the batched version adds: a dive with no sites keeps its empty list."""
+        row = self._row(dive_id=7)
+
+        by_dive = await get_dive_sites_for_dives(self._db([row]), dive_ids=[7, 8])
+
+        assert by_dive[8] == []
+        assert [(s.uuid, s.name, s.location, s.latitude, s.longitude) for s in by_dive[7]] == [
+            (row.uuid, "Blue Hole", "Dahab, Egypt", BLUE_HOLE[0], BLUE_HOLE[1])
+        ]

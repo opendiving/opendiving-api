@@ -9,12 +9,17 @@ from ..schemas.dive import DiveSiteInfo
 async def get_dive_sites_for_dive(db: AsyncSession, dive_id: int) -> list[DiveSiteInfo]:
     """Return the dive sites visited during a dive, in the order they were visited."""
     result = await db.execute(
-        select(DiveSite.uuid, DiveSite.name, DiveSite.location)
+        select(DiveSite.uuid, DiveSite.name, DiveSite.location, DiveSite.latitude, DiveSite.longitude)
         .join(DiveDiveSite, DiveDiveSite.dive_site_id == DiveSite.id)
         .where(DiveDiveSite.dive_id == dive_id)
         .order_by(DiveDiveSite.position)
     )
-    return [DiveSiteInfo(uuid=row.uuid, name=row.name, location=row.location) for row in result]
+    return [
+        DiveSiteInfo(
+            uuid=row.uuid, name=row.name, location=row.location, latitude=row.latitude, longitude=row.longitude
+        )
+        for row in result
+    ]
 
 
 async def get_dive_sites_for_dives(db: AsyncSession, dive_ids: list[int]) -> dict[int, list[DiveSiteInfo]]:
@@ -24,13 +29,24 @@ async def get_dive_sites_for_dives(db: AsyncSession, dive_ids: list[int]) -> dic
         return sites_by_dive
 
     result = await db.execute(
-        select(DiveDiveSite.dive_id, DiveSite.uuid, DiveSite.name, DiveSite.location)
+        select(
+            DiveDiveSite.dive_id,
+            DiveSite.uuid,
+            DiveSite.name,
+            DiveSite.location,
+            DiveSite.latitude,
+            DiveSite.longitude,
+        )
         .join(DiveSite, DiveSite.id == DiveDiveSite.dive_site_id)
         .where(DiveDiveSite.dive_id.in_(dive_ids))
         .order_by(DiveDiveSite.dive_id, DiveDiveSite.position)
     )
     for row in result:
-        sites_by_dive[row.dive_id].append(DiveSiteInfo(uuid=row.uuid, name=row.name, location=row.location))
+        sites_by_dive[row.dive_id].append(
+            DiveSiteInfo(
+                uuid=row.uuid, name=row.name, location=row.location, latitude=row.latitude, longitude=row.longitude
+            )
+        )
     return sites_by_dive
 
 
