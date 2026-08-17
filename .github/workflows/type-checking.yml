@@ -19,10 +19,11 @@ jobs:
       - name: Install package with dev dependencies
         run: uv sync --extra dev
 
-      # Two invocations rather than `mypy src tests`: the app is reachable as both
-      # `app.*` (via `mypy_path = "src"`) and `src.app.*` (how the tests import it), and
-      # checking both roots at once makes mypy refuse with "source file found twice
-      # under different module names".
+      # `src` and `tests` are checked separately rather than as one `mypy src tests`: the
+      # app is reachable as both `app.*` (via `mypy_path = "src"`) and `src.app.*` (how the
+      # tests import it), and checking both roots at once makes mypy refuse with "source
+      # file found twice under different module names". The `scripts` step below is third
+      # for its own unrelated reason, given there.
       - name: Run mypy on src
         run: uv run mypy src --config-file pyproject.toml
         env:
