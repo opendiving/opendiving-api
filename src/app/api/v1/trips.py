@@ -400,7 +400,9 @@ async def erase_trip(
     flagged rather than removed, so dives that referenced this trip keep their `trip_id` in
     the database - but the trip stops appearing in reads, and those dives read back with
     `trip_uuid: null`. The link survives only in an export, which reads a deleted trip back
-    flagged `is_deleted` so the diver leaves with the record.
+    flagged `is_deleted` - and only until each dive's next `PATCH`, which submits back the
+    `trip_uuid: null` it was handed and clears the column for good. Re-point the dives with
+    `move_dives_to` before deleting if the association matters; there is no way back after.
 
     Pass `move_dives_to` and every one of the caller's live dives on this trip is
     re-pointed at that one first, in the same transaction as the delete: either the diver's

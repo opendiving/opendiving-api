@@ -19,17 +19,21 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
-from src.app.api.v1.dives import _cached_read_dive
+from src.app.api.v1.dives import _cached_read_dive, _cached_read_dives
 from src.app.crud.crud_dive_dive_sites import (
     get_dive_sites_for_dive,
     get_dive_sites_for_dives,
     replace_dive_sites_for_dive,
 )
-from src.app.crud.crud_trips import get_trip_uuids_by_ids
+from src.app.crud.crud_dive_sites import crud_dive_sites
+from src.app.crud.crud_trips import crud_trips, get_trip_uuids_by_ids
+from src.app.models.dive import Dive
+from src.app.models.dive_dive_site import DiveDiveSite
 from src.app.models.user import User
 from src.app.schemas.dive import DiveReadInternal
 from tests.conftest import db_available
@@ -40,6 +44,7 @@ from tests.helpers.generators import create_dive, create_dive_site, create_trip
 # is the question here, since the mapping under test happens inside the body. `cast`
 # because the decorator's return type does not advertise `__wrapped__`.
 _read_dive_uncached = cast(Any, _cached_read_dive).__wrapped__
+_read_dives_uncached = cast(Any, _cached_read_dives).__wrapped__
 
 
 @pytest.mark.skipif(not db_available(), reason="No database connection available")
@@ -219,3 +224,76 @@ class TestTheSerializedDiveStillCarriesTheKey:
         assert lookup.await_args is not None
         assert lookup.await_args.kwargs["user_id"] == 7
         assert lookup.await_args.kwargs["trip_ids"] == [11]
+
+    @pytest.mark.asyncio
+    async def test_the_list_path_scopes_the_lookup_too(self) -> None:
+        """The bulk shape the `user_id` scope was actually reasoned about: `GET /dives`
+        collects `trip_id`s off a page of rows and resolves them in one call, which is the
+        caller a future change is most likely to get wrong."""
+        rows = [self._dive_row(trip_id=11), self._dive_row(trip_id=None), self._dive_row(trip_id=12)]
+        lookup = AsyncMock(return_value={})
+
+        with (
+            patch(
+                "src.app.api.v1.dives.crud_dives.get_multi",
+                AsyncMock(return_value={"data": rows, "total_count": len(rows)}),
+            ),
+            patch("src.app.api.v1.dives.get_trip_uuids_by_ids", lookup),
+            patch("src.app.api.v1.dives.get_dive_sites_for_dives", AsyncMock(return_value={})),
+            patch("src.app.api.v1.dives.get_gear_items_for_dives", AsyncMock(return_value={})),
+        ):
+            await _read_dives_uncached(
+                request=None,
+                user_id=7,
+                user_uuid=uuid7(),
+                db=AsyncMock(),
+                page=1,
+                items_per_page=10,
+                trip_id=None,
+                dive_site_id=None,
+                gear_item_id=None,
+            )
+
+        assert lookup.await_args is not None
+        assert lookup.await_args.kwargs["user_id"] == 7
+        # Only the rows that have a trip, and the null one filtered out rather than passed
+        # through as a `None` the `IN` clause would have to cope with.
+        assert lookup.await_args.kwargs["trip_ids"] == [11, 12]
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestAPlainDeleteLeavesTheLinksAlone:
+    """The invariant export depends on, which nothing else pins.
+
+    Both routes soft-delete and touch no join rows, which is what leaves `_owned` something
+    to resurrect. The tests above build `is_deleted=True` rows directly and the route tests
+    stub the CRUD delete, so a change that started clearing the links on delete - the
+    "option 4" DECISIONS.md rejects - would pass the entire suite while quietly emptying
+    `still_referenced`.
+    """
+
+    @pytest.mark.asyncio
+    async def test_deleting_a_site_keeps_its_dive_links(self, db: Session, async_db: AsyncSession, diver: User) -> None:
+        site = create_dive_site(db, diver)
+        dive = create_dive(db, diver)
+        await replace_dive_sites_for_dive(async_db, dive_id=dive.id, dive_site_ids=[site.id])
+
+        await crud_dive_sites.delete(db=async_db, uuid=site.uuid)
+
+        links = await async_db.execute(select(DiveDiveSite.dive_site_id).where(DiveDiveSite.dive_id == dive.id))
+        assert [row.dive_site_id for row in links] == [site.id]
+        # And the read hides it, so the row surviving is not the read being unfiltered.
+        assert await get_dive_sites_for_dive(async_db, dive_id=dive.id) == []
+
+    @pytest.mark.asyncio
+    async def test_deleting_a_trip_keeps_its_dives_pointing_at_it(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        trip = create_trip(db, diver)
+        dive = create_dive(db, diver, trip=trip)
+
+        await crud_trips.delete(db=async_db, uuid=trip.uuid)
+
+        stored = await async_db.execute(select(Dive.trip_id).where(Dive.id == dive.id))
+        assert stored.scalar_one() == trip.id
+        assert await get_trip_uuids_by_ids(async_db, trip_ids=[trip.id], user_id=diver.id) == {}

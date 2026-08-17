@@ -242,7 +242,11 @@ async def erase_dive_site(
     404 unless the caller owns it, exactly as for a site that doesn't exist. Idempotent
     otherwise: deleting an already-deleted site succeeds rather than 404ing. The site's
     links to the dives logged at it survive in the database, but it stops being rendered on
-    them, so their cached reads are invalidated too.
+    them, so their cached reads are invalidated too. Those links last only until each
+    dive's next `PATCH`, which submits back the shortened site list it was handed and drops
+    the row for good - so an export taken later may no longer show it. Since this route is
+    idempotent and honours `move_dives_to` on an already-deleted site, a diver who deleted
+    first can still re-point the dives afterwards.
 
     Pass `move_dives_to` and every one of the caller's live dives logged here has this site
     swapped for that one first, in the same transaction as the delete: either the whole log
