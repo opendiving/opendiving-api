@@ -308,9 +308,12 @@ async def erase_gear_item(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Soft-deletes a gear item. Dives and gear sets that already reference it keep their
-    join rows (and so keep showing it), matching how a soft-deleted dive site behaves -
-    archiving is the non-destructive way to retire gear you still want in your log.
+    """Soft-deletes a gear item. The `dive_gear_item` and `gear_set_item` rows referencing
+    it are left where they are, matching how a soft-deleted dive site behaves - but the
+    dive reads no longer render it (`get_gear_items_for_dive`), so it drops off the dives
+    it was used on while the links survive for export. Gear sets still show it; that
+    sibling is unfixed, see DECISIONS.md. Archiving, not deleting, is the non-destructive
+    way to retire gear you still want in your log.
 
     Its service schedules go with it, though: `is_deleted` is application-level, so the
     `ON DELETE CASCADE` on `gear_service_schedule.gear_item_id` never fires, and without
@@ -324,8 +327,12 @@ async def erase_gear_item(
     await soft_delete_schedules_for_gear_item(db=db, gear_item_id=db_gear_item.id, commit=False)
     await crud_gear_items.delete(db=db, uuid=uuid)
     await invalidate_gear_caches(owner_id)
-    # Soft-deleted gear stays on the dives that used it, so their cached reads still
-    # reference it - drop them rather than reasoning about which fields "look" deleted.
+    # Unconditional, and load-bearing: a fresh dive read now omits this item, so every
+    # cached read of a dive that used it would go on listing kit the diver has deleted for
+    # the rest of the hour - the symptom the read filter exists to remove, surviving it.
+    # This predates that filter (the staleness then ran the other way round, a cached read
+    # holding a stale name or `is_archived`), which is why the filter needed no change
+    # here - unlike `erase_trip`, whose skip had to go. See DECISIONS.md.
     await invalidate_dive_caches(owner_id)
 
     return {"message": "Gear item deleted"}

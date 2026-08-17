@@ -8,19 +8,32 @@ from .crud_gear_items import GEAR_ITEM_INFO_COLUMNS, gear_item_info_from_row
 
 
 async def get_gear_items_for_dive(db: AsyncSession, dive_id: int) -> list[GearItemInfo]:
-    """Return the gear items used on a dive, in the order they were listed.
+    """Return the *live* gear items used on a dive, in the order they were listed.
 
-    **Includes soft-deleted items, which is the same bug the dive-site loaders had and a
-    deliberate deferral rather than an oversight.** A deleted gear item goes on being
-    listed on the dives it was used on, though `GET /gear-item/{uuid}` 404s for it - see
-    "No manual DDL, and one sibling left alone" in DECISIONS.md. Before adding the filter,
-    check `erase_gear_item`: it has its own cache invalidation and `dive_count` bookkeeping
-    to reason about, which is why this was not bundled into the sites-and-trips change.
+    The same filter, for the same reasons, as `get_dive_sites_for_dive`: `erase_gear_item`
+    flags the item and leaves the `dive_gear_item` rows alone, so without this a dive goes
+    on listing kit that `GET /gear-item/{uuid}` answers 404 for, and that `PATCH /dive`
+    refuses to accept back (`resolve_gear_item_ids_for_user` resolves only live items, so
+    reading a dive's gear list and writing it back verbatim would 422). The links stay
+    because export still wants them: `_owned` in `services/export/loader.py` reads
+    deleted-but-referenced items back on purpose, flagged `is_deleted`, so UDDF's
+    `xs:IDREF` references resolve.
+
+    They stay only until that dive's next `PATCH`, though, and this filter is what makes
+    that so: a client seeding an edit form from this list submits it back one entry short,
+    and `replace_gear_items_for_dive` is a delete-and-reinsert. `recalculate_gear_dive_counts`
+    then drops the item's `dive_count` to match, which is the one way the severance shows on
+    the deleted item's own row. See "The links outlive the delete, but not the dive's next
+    edit" in DECISIONS.md before writing anything that relies on the row being there.
+
+    Only `is_deleted` hides. Archived items come through as they always have, flagged
+    `is_archived` for the client to render: archiving retires kit from the dive form's
+    picker precisely so the dives that used it keep showing it.
     """
     result = await db.execute(
         select(*GEAR_ITEM_INFO_COLUMNS)
         .join(DiveGearItem, DiveGearItem.gear_item_id == GearItem.id)
-        .where(DiveGearItem.dive_id == dive_id)
+        .where(DiveGearItem.dive_id == dive_id, GearItem.is_deleted.is_(False))
         .order_by(DiveGearItem.position)
     )
     return [gear_item_info_from_row(row) for row in result]
@@ -29,8 +42,11 @@ async def get_gear_items_for_dive(db: AsyncSession, dive_id: int) -> list[GearIt
 async def get_gear_items_for_dives(db: AsyncSession, dive_ids: list[int]) -> dict[int, list[GearItemInfo]]:
     """Batched version of `get_gear_items_for_dive`, e.g. for a paginated dive listing.
 
-    Carries the same deferred soft-delete bug, and has to be filtered in the same change:
-    this is what `GET /dives` enriches its rows through.
+    Filters deleted items for the same reasons - this is what `GET /dives` enriches its
+    rows through, so a filter on the single-dive loader alone would leave the list page
+    still showing them - and needs nothing extra to degrade well: the per-dive lists are
+    pre-seeded empty, so a dive whose only item is gone comes back with `[]` rather than
+    dropping out of the mapping.
     """
     items_by_dive: dict[int, list[GearItemInfo]] = {dive_id: [] for dive_id in dive_ids}
     if not dive_ids:
@@ -39,7 +55,7 @@ async def get_gear_items_for_dives(db: AsyncSession, dive_ids: list[int]) -> dic
     result = await db.execute(
         select(DiveGearItem.dive_id, *GEAR_ITEM_INFO_COLUMNS)
         .join(GearItem, GearItem.id == DiveGearItem.gear_item_id)
-        .where(DiveGearItem.dive_id.in_(dive_ids))
+        .where(DiveGearItem.dive_id.in_(dive_ids), GearItem.is_deleted.is_(False))
         .order_by(DiveGearItem.dive_id, DiveGearItem.position)
     )
     for row in result:
