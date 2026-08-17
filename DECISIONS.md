@@ -6189,16 +6189,51 @@ position-renumbering hazards `replace_dive_site_on_dives` needed three careful s
 wipe-guard test to get right.
 
 The cost of hiding, stated plainly: a dive that *was* logged at a since-deleted site now shows no
-site, and a diver could read that as data loss. Nothing is lost — the links persist and surface in
-an export — but the app no longer shows them, which makes **export the only place the association is
-visible**. `move_dives_to` is the affordance for a diver who cares: re-point the dives, then delete.
+site, and a diver could read that as data loss. The links themselves survive the delete, so an
+export still carries the association — but read the next subsection before relying on that, because
+it does not survive indefinitely.
 
-### What "the links stay" now means for export
+### The links outlive the delete, but not the dive's next edit
+
+**A read hides them; the next `PATCH /dive` on that dive destroys them.** This is the real cost of
+hiding, and it is not what "the links stay in the database" suggests on its own.
+
+The round trip is ordinary and needs nothing to do with sites or trips. `GET /dive/{uuid}` now
+answers `trip_uuid: null` with the deleted site absent from `dive_sites`. A client that seeds an
+edit form from that read and submits it — a notes fix, a depth correction — sends back exactly what
+it was handed: `trip_uuid: null`, and a `dive_site_uuids` list one entry shorter. `patch_dive` reads
+an explicit null as *remove the trip* (`update_data["trip_id"] = None`), and any `dive_site_uuids`
+goes through `replace_dive_sites_for_dive`, which is a wholesale delete-and-reinsert. The `trip_id`
+and the `dive_dive_site` rows are then gone for real, `_owned`'s `still_referenced` set no longer
+holds the site or trip, and the record drops out of `export.json` too. There is no undelete path, so
+that is permanent.
+
+**Accepted deliberately**, on the reading that a diver who edits a dive after deleting its site is
+confirming the removal. But note what the trade actually is, because the framing above oversells it:
+before the filter, that same round trip failed *loudly* — the read handed back the deleted trip's
+uuid, `resolve_trip_id_for_user` refused it, and PATCH answered 422. Hiding replaces a loud 422 with
+a silent write that deletes data. And it is the same deletion this section rejects as option 4
+("clearing the links deletes exactly the rows that machinery exists to preserve"), just lazy and
+scattered — on whichever dives the diver happens to edit next — instead of all at once at delete
+time.
+
+The two answers that would have made "nothing is lost" literally true were both weighed and dropped.
+Leaving soft-deleted rows alone in `replace_dive_sites_for_dive` handles the site half, but the trip
+half cannot be done that way: "the diver cleared the trip" and "the client echoed back a null it was
+handed" are the same request, so telling them apart means changing the request. Surfacing the hidden
+references to the client so an edit form can round-trip them is the honest fix, and it reopens the
+read-contract question this section settled — it is most of the tombstone design, arrived at from
+the other side.
+
+So: `move_dives_to` is the affordance for a diver who cares about the association. Re-point the
+dives, then delete. Deleting first and editing later is what loses it.
+
+### What "the links stay" means for export
 
 `_owned`'s resurrection rule used to justify itself partly by pointing at the app — a deleted site
 "goes on being shown" on its dives. This change falsifies that half. The rule stands on the IDREF
-argument alone, which was always sufficient, and it is now *more* load-bearing rather than less: it
-is the last copy of the association. Its docstring says so.
+argument alone, which was always sufficient, and export is now the only place the association is
+visible at all — for as long as it lasts, per the subsection above. Its docstring says so.
 
 ### The trap this had to avoid, and the shape of it
 

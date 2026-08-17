@@ -193,8 +193,14 @@ async def _owned(
     Note this deliberately outlives what the *app* shows. The dive reads stopped rendering
     deleted sites and trips (`get_dive_sites_for_dive`, `get_trip_uuids_by_ids`), so export
     is now the only place a diver can see that a dive was logged at a site they since
-    removed. That makes the resurrection more load-bearing, not less: the IDREF argument
-    alone already requires it, and it is also the last copy of the association.
+    removed - the IDREF argument alone already requires the resurrection, and it happens to
+    be the last copy of the association too.
+
+    It is not a durable copy, and nothing here can make it one. A dive whose hidden site or
+    trip the diver edits away - which an ordinary `PATCH /dive` does silently, since the
+    client submits back the shortened list it was shown - loses the row itself, and then
+    there is nothing left for `still_referenced` to name. See "The links outlive the
+    delete, but not the dive's next edit" in DECISIONS.md.
 
     One query rather than a filtered read plus a patch-up, so the ordering stays the
     database's and the `user_id` scope cannot be forgotten on the second pass.

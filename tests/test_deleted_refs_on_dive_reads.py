@@ -9,122 +9,47 @@ skip themselves otherwise. See CONTRIBUTING.md for why a run on the host needs
 
 The route-level halves - `erase_trip` and `erase_dive_site` dropping the dive caches so a
 cached read cannot outlive the filter - live in `test_move_dives_on_delete.py`, against the
-stubs that can see the invalidation call.
+stubs that can see the invalidation call. The serialized shape the clients consume is
+pinned here too, against a stub, since that one is about `_to_public_dive` and a schema
+default rather than a query.
 """
 
-from collections.abc import AsyncGenerator
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
+from typing import Any, cast
+from unittest.mock import AsyncMock, patch
 
 import pytest
-import pytest_asyncio
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
-from src.app.core.config import settings
-from src.app.core.db.database import Base
+from src.app.api.v1.dives import _cached_read_dive
 from src.app.crud.crud_dive_dive_sites import (
     get_dive_sites_for_dive,
     get_dive_sites_for_dives,
     replace_dive_sites_for_dive,
 )
 from src.app.crud.crud_trips import get_trip_uuids_by_ids
-from src.app.models.dive import Dive
-from src.app.models.dive_site import DiveSite
-from src.app.models.trip import Trip
 from src.app.models.user import User
-from tests.conftest import sync_engine
-from tests.helpers.generators import create_user
+from src.app.schemas.dive import DiveReadInternal
+from tests.conftest import db_available
+from tests.helpers.generators import create_dive, create_dive_site, create_trip
+
+# The undecorated body. `_cached_read_dive` carries `@cache`, which would need a Redis
+# client in place and would then serialize the response on the way out - neither of which
+# is the question here, since the mapping under test happens inside the body. `cast`
+# because the decorator's return type does not advertise `__wrapped__`.
+_read_dive_uncached = cast(Any, _cached_read_dive).__wrapped__
 
 
-def _db_available() -> bool:
-    try:
-        with sync_engine.connect():
-            return True
-    except OperationalError:
-        return False
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _ensure_tables() -> None:
-    """Create any missing tables (idempotent), as in `test_move_dives_on_delete.py`."""
-    if _db_available():
-        Base.metadata.create_all(sync_engine)
-
-
-@pytest_asyncio.fixture
-async def async_db() -> AsyncGenerator[AsyncSession]:
-    """An `AsyncSession` on its own engine - the loaders under test are async, while the
-    `db` fixture used to seed rows is the sync one the rest of the suite shares."""
-    engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
-    session_factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-    async with session_factory() as session:
-        yield session
-    await engine.dispose()
-
-
-@pytest.fixture
-def diver(db: Session) -> User:
-    return create_user(db)
-
-
-@pytest.fixture
-def other_diver(db: Session) -> User:
-    return create_user(db)
-
-
-def _site(db: Session, user: User, *, is_deleted: bool = False) -> DiveSite:
-    row = DiveSite(
-        user_id=user.id,
-        name=f"Pescador {uuid7().hex[-8:]}",
-        location="Moalboal",
-        notes="",
-        is_deleted=is_deleted,
-    )
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    return row
-
-
-def _trip(db: Session, user: User, *, is_deleted: bool = False) -> Trip:
-    row = Trip(
-        user_id=user.id,
-        name=f"Visayas {uuid7().hex[-8:]}",
-        start_date=date(2026, 6, 1),
-        notes="",
-        is_deleted=is_deleted,
-    )
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    return row
-
-
-def _dive(db: Session, user: User, *, trip: Trip | None = None) -> Dive:
-    row = Dive(
-        user_id=user.id,
-        trip_id=trip.id if trip is not None else None,
-        dive_number=1,
-        start_time=datetime(2026, 6, 1, 9, 0, tzinfo=UTC),
-        duration=1800,
-        notes="",
-    )
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    return row
-
-
-@pytest.mark.skipif(not _db_available(), reason="No database connection available")
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
 class TestDeletedDiveSitesAreNotRendered:
     @pytest.mark.asyncio
     async def test_a_deleted_site_drops_off_the_dive(self, db: Session, async_db: AsyncSession, diver: User) -> None:
         """The bug in one assertion: `GET /dive-site/{uuid}` 404s for this site, so the
         dive page must not go on showing it."""
-        live, deleted = _site(db, diver), _site(db, diver, is_deleted=True)
-        dive = _dive(db, diver)
+        live, deleted = create_dive_site(db, diver), create_dive_site(db, diver, is_deleted=True)
+        dive = create_dive(db, diver)
         await replace_dive_sites_for_dive(async_db, dive_id=dive.id, dive_site_ids=[live.id, deleted.id])
 
         sites = await get_dive_sites_for_dive(async_db, dive_id=dive.id)
@@ -135,8 +60,8 @@ class TestDeletedDiveSitesAreNotRendered:
     async def test_a_dive_whose_only_site_is_deleted_reads_back_empty(
         self, db: Session, async_db: AsyncSession, diver: User
     ) -> None:
-        deleted = _site(db, diver, is_deleted=True)
-        dive = _dive(db, diver)
+        deleted = create_dive_site(db, diver, is_deleted=True)
+        dive = create_dive(db, diver)
         await replace_dive_sites_for_dive(async_db, dive_id=dive.id, dive_site_ids=[deleted.id])
 
         assert await get_dive_sites_for_dive(async_db, dive_id=dive.id) == []
@@ -148,8 +73,8 @@ class TestDeletedDiveSitesAreNotRendered:
         """Position 0 is the primary site every single-site surface shows. Deleting the
         primary promotes the one behind it rather than leaving the dive headed by a site
         that no longer exists - `position` is a sort key, not an identity."""
-        deleted, second = _site(db, diver, is_deleted=True), _site(db, diver)
-        dive = _dive(db, diver)
+        deleted, second = create_dive_site(db, diver, is_deleted=True), create_dive_site(db, diver)
+        dive = create_dive(db, diver)
         await replace_dive_sites_for_dive(async_db, dive_id=dive.id, dive_site_ids=[deleted.id, second.id])
 
         sites = await get_dive_sites_for_dive(async_db, dive_id=dive.id)
@@ -160,8 +85,8 @@ class TestDeletedDiveSitesAreNotRendered:
     async def test_the_batched_loader_hides_them_too(self, db: Session, async_db: AsyncSession, diver: User) -> None:
         """`GET /dives` enriches its rows through the batched loader, so a filter on the
         single-dive one alone would leave the list page still showing the deleted site."""
-        live, deleted = _site(db, diver), _site(db, diver, is_deleted=True)
-        with_live, with_deleted = _dive(db, diver), _dive(db, diver)
+        live, deleted = create_dive_site(db, diver), create_dive_site(db, diver, is_deleted=True)
+        with_live, with_deleted = create_dive(db, diver), create_dive(db, diver)
         await replace_dive_sites_for_dive(async_db, dive_id=with_live.id, dive_site_ids=[live.id])
         await replace_dive_sites_for_dive(async_db, dive_id=with_deleted.id, dive_site_ids=[deleted.id])
 
@@ -173,13 +98,13 @@ class TestDeletedDiveSitesAreNotRendered:
         assert by_dive[with_deleted.id] == []
 
 
-@pytest.mark.skipif(not _db_available(), reason="No database connection available")
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
 class TestDeletedTripsAreNotRendered:
     @pytest.mark.asyncio
     async def test_a_deleted_trip_stops_resolving(self, db: Session, async_db: AsyncSession, diver: User) -> None:
         """A dive keeps its `trip_id` when the trip is deleted, so the miss here is what
         turns into the `trip_uuid: null` the dive reads answer with."""
-        live, deleted = _trip(db, diver), _trip(db, diver, is_deleted=True)
+        live, deleted = create_trip(db, diver), create_trip(db, diver, is_deleted=True)
 
         by_id = await get_trip_uuids_by_ids(async_db, trip_ids=[live.id, deleted.id], user_id=diver.id)
 
@@ -192,10 +117,105 @@ class TestDeletedTripsAreNotRendered:
         """Not reachable through today's callers, which pass ids read off the caller's own
         dives - this pins the scope so a future caller sourcing ids elsewhere cannot leak
         another logbook's uuid."""
-        theirs = _trip(db, other_diver)
+        theirs = create_trip(db, other_diver)
 
         assert await get_trip_uuids_by_ids(async_db, trip_ids=[theirs.id], user_id=diver.id) == {}
 
     @pytest.mark.asyncio
     async def test_no_ids_is_no_query(self, db: Session, async_db: AsyncSession, diver: User) -> None:
         assert await get_trip_uuids_by_ids(async_db, trip_ids=[], user_id=diver.id) == {}
+
+
+class TestTheSerializedDiveStillCarriesTheKey:
+    """What the clients actually consume, which neither loader test states.
+
+    `trip_uuid` has to come back **present and null** rather than omitted: the resolution
+    is a `.get()` miss in `_cached_read_dive` and a `default=None` on `DiveRead`, two facts
+    in two files that a refactor could change independently without any query breaking.
+    Stubbed rather than database-backed, since the question is the mapping and the schema
+    default.
+    """
+
+    @staticmethod
+    def _dive_row(trip_id: int | None) -> dict[str, Any]:
+        """Built through `DiveReadInternal` rather than as a literal, so a column added to
+        the row shape can't leave this fixture one key short of what the route reads."""
+        return DiveReadInternal(
+            id=5,
+            uuid=uuid7(),
+            user_id=7,
+            trip_id=trip_id,
+            dive_number=1,
+            start_time=datetime(2026, 6, 1, 9, 0, tzinfo=UTC),
+            utc_offset_minutes=120,
+            duration=1800,
+            notes="",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        ).model_dump()
+
+    @pytest.mark.asyncio
+    async def test_a_dive_whose_trip_was_deleted_serializes_trip_uuid_as_null(self) -> None:
+        owner_uuid = uuid7()
+        row = self._dive_row(trip_id=11)
+
+        with (
+            patch("src.app.api.v1.dives.crud_dives.get", AsyncMock(return_value=row)),
+            # The deleted trip resolves to nothing - an empty mapping is exactly what the
+            # filtered lookup returns for a `trip_id` whose trip is gone.
+            patch("src.app.api.v1.dives.get_trip_uuids_by_ids", AsyncMock(return_value={})),
+            patch("src.app.api.v1.dives.get_mixtures_for_dive", AsyncMock(return_value=[])),
+            patch("src.app.api.v1.dives.get_dive_sites_for_dive", AsyncMock(return_value=[])),
+            patch("src.app.api.v1.dives.get_gear_items_for_dive", AsyncMock(return_value=[])),
+            patch("src.app.api.v1.dives.get_file_infos_for_dives", AsyncMock(return_value={})),
+            patch("src.app.api.v1.dives.get_profile_infos_for_dives", AsyncMock(return_value={})),
+        ):
+            dive = await _read_dive_uncached(
+                request=None, user_id=7, uuid=row["uuid"], owner_uuid=owner_uuid, db=AsyncMock()
+            )
+
+        serialized = dive.model_dump()
+        assert "trip_uuid" in serialized
+        assert serialized["trip_uuid"] is None
+        assert serialized["dive_sites"] == []
+
+    @pytest.mark.asyncio
+    async def test_a_live_trip_still_comes_through(self) -> None:
+        owner_uuid, trip_uuid = uuid7(), uuid7()
+        row = self._dive_row(trip_id=11)
+
+        with (
+            patch("src.app.api.v1.dives.crud_dives.get", AsyncMock(return_value=row)),
+            patch("src.app.api.v1.dives.get_trip_uuids_by_ids", AsyncMock(return_value={11: trip_uuid})),
+            patch("src.app.api.v1.dives.get_mixtures_for_dive", AsyncMock(return_value=[])),
+            patch("src.app.api.v1.dives.get_dive_sites_for_dive", AsyncMock(return_value=[])),
+            patch("src.app.api.v1.dives.get_gear_items_for_dive", AsyncMock(return_value=[])),
+            patch("src.app.api.v1.dives.get_file_infos_for_dives", AsyncMock(return_value={})),
+            patch("src.app.api.v1.dives.get_profile_infos_for_dives", AsyncMock(return_value={})),
+        ):
+            dive = await _read_dive_uncached(
+                request=None, user_id=7, uuid=row["uuid"], owner_uuid=owner_uuid, db=AsyncMock()
+            )
+
+        assert dive.trip_uuid == trip_uuid
+
+    @pytest.mark.asyncio
+    async def test_the_lookup_is_scoped_to_the_reader(self) -> None:
+        """The `user_id` the route passes has to be the dive's owner - the same value that
+        scopes the cache key - or the scope added to the lookup would be decorative."""
+        row = self._dive_row(trip_id=11)
+        lookup = AsyncMock(return_value={})
+
+        with (
+            patch("src.app.api.v1.dives.crud_dives.get", AsyncMock(return_value=row)),
+            patch("src.app.api.v1.dives.get_trip_uuids_by_ids", lookup),
+            patch("src.app.api.v1.dives.get_mixtures_for_dive", AsyncMock(return_value=[])),
+            patch("src.app.api.v1.dives.get_dive_sites_for_dive", AsyncMock(return_value=[])),
+            patch("src.app.api.v1.dives.get_gear_items_for_dive", AsyncMock(return_value=[])),
+            patch("src.app.api.v1.dives.get_file_infos_for_dives", AsyncMock(return_value={})),
+            patch("src.app.api.v1.dives.get_profile_infos_for_dives", AsyncMock(return_value={})),
+        ):
+            await _read_dive_uncached(request=None, user_id=7, uuid=row["uuid"], owner_uuid=uuid7(), db=AsyncMock())
+
+        assert lookup.await_args is not None
+        assert lookup.await_args.kwargs["user_id"] == 7
+        assert lookup.await_args.kwargs["trip_ids"] == [11]

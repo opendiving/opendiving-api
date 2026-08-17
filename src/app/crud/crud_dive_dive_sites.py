@@ -50,6 +50,13 @@ async def get_dive_sites_for_dive(db: AsyncSession, dive_id: int) -> list[DiveSi
     them: `_owned` in `services/export/loader.py` reads deleted-but-referenced sites back on
     purpose, flagged `is_deleted`, so the record survives where it belongs rather than here.
 
+    They stay only until that dive's next `PATCH`, though, and this filter is what makes
+    that so: a client seeding an edit form from this list submits it back one entry short,
+    and `replace_dive_sites_for_dive` is a delete-and-reinsert, so the row is then gone for
+    good. Accepted rather than worked around - see "The links outlive the delete, but not
+    the dive's next edit" in DECISIONS.md before writing anything that relies on the row
+    being there.
+
     Dropping a row promotes whatever follows it into the slot ahead - a dive logged at
     `[A, B]` whose A is deleted reads back as `[B]`, and B becomes the primary site every
     single-site surface shows. That is intended: `position` is a sort key, not an identity,
