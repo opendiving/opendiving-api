@@ -88,8 +88,10 @@ rather than on its own:
 docker compose -f docker-compose.yml -f docker-compose.test.yml up --build --abort-on-container-exit api
 ```
 
-CI does run Postgres and Redis as service containers, and fails the job if the database-backed tests
-skip — so unlike before, a green CI run means they actually executed.
+CI does run Postgres and Redis as service containers, and fails the job if *any* test skips — so
+unlike before, a green CI run means the database-backed ones actually executed. That also means a
+new test that skips itself will fail CI even when the skip is deliberate; the exclusion goes in the
+"Assert no test skipped" step of `.github/workflows/tests.yml`.
 
 Two things to know when you do run them against a live database: they write to whatever `POSTGRES_*`
 resolves to — your dev database, by default — and the `create_user` helper commits a row per test

@@ -84,12 +84,18 @@ jobs:
       # This makes *any* skip a failure, which is stricter than it sounds - the suite has
       # none today. A test that genuinely has to skip (a platform guard, an optional
       # dependency) needs an exclusion carved out here, and that is the right place to have
-      # the argument about whether it should skip in CI at all.
-      - name: Assert the database-backed tests actually ran
+      # the argument about whether it should skip in CI at all. Hence the message naming
+      # both causes rather than asserting the Postgres one.
+      #
+      # Read off the tail rather than the whole file, so a failing test whose captured
+      # output happens to contain "3 skipped" cannot masquerade as this failure. pytest's
+      # counts line is always last, with or without `-q`.
+      - name: Assert no test skipped
         if: always() && steps.tests.outcome != 'skipped'
         run: |
-          if grep -qE "[0-9]+ skipped" /tmp/pytest.txt; then
-            echo "::error::Tests skipped - Postgres was probably not reachable from the job."
+          if tail -5 /tmp/pytest.txt | grep -qE "[0-9]+ skipped"; then
+            tail -5 /tmp/pytest.txt | grep -E "[0-9]+ skipped"
+            echo "::error::Tests skipped - either Postgres was unreachable from the job or a test skipped deliberately. See the counts line above."
             exit 1
           fi
 
