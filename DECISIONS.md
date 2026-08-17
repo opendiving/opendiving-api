@@ -5986,3 +5986,166 @@ condition today are not entitled to grow with it.
 Already-cached dive payloads written before this deploy carry no site coordinates and will not until
 the 3600 s TTL expires or any mutation drops them. Self-healing, and the failure mode meanwhile is a
 map with fewer pins rather than a wrong one.
+
+## Deleting a trip or a dive site can move its dives first, in one transaction
+
+`DELETE /trip/{uuid}` and `DELETE /dive-site/{uuid}` take an optional `move_dives_to={uuid}`. Given
+it, every one of the caller's live dives that references the doomed resource is re-pointed at the
+replacement *and then* the resource is soft-deleted, all inside one transaction. Omitted, both
+routes do exactly what they did before.
+
+It exists because the web app's "delete this trip — and move its dives to Cebu 2026?" dialog could
+otherwise only be built client-side: page `GET /dives?trip_uuid=X`, `PATCH /dive/{uuid}` per dive,
+then `DELETE`. That works, and it is wrong in three ways at once. It is **not atomic** (a failure
+halfway leaves some dives moved and the trip still there, with nothing to retry against); it is
+**N+1** (a liveaboard's forty dives is forty-one requests, each one invalidating the dive caches
+again); and it is **racy** (a dive added between the last page fetch and the delete is simply
+missed). None of the three is fixable from the client.
+
+### The count is always in the response, and the response is a model
+
+Both routes now return `{"message": ..., "moved_dives": N}` — `N` is 0 when the parameter was
+omitted, not absent. Always-present rather than conditional: a key that appears only sometimes makes
+the field optional in every typed client forever, to save one integer on the calls that did not ask
+for a move. "Zero dives moved" is also just true.
+
+These are the only two deletes on the API that answer with a **model** (`DeletedWithMovedDives` in
+`core/schemas.py`) rather than the bare `dict[str, str]` every other one returns, and the reason is
+the same goal. Widening the annotation to `dict[str, str | int]` — the obvious minimal change —
+publishes `additionalProperties: {anyOf: [string, integer]}`, so a generated client gets
+`Record<string, string | number>`: `message` comes out `string | number` and `moved_dives` still
+needs a cast before it can go anywhere near a toast. The dict is the right shape for a response with
+one fixed key and no structure; the moment there are two fields of different types it stops
+publishing what the client needs. A response model costs eight lines and makes both fields typed.
+
+### A bad replacement is a 422, not a 404
+
+This is the one place the web app's proposal was talked out of. `move_dives_to` is a *reference
+inside a request*, not the resource being addressed, so it answers the way `gear_service`'s and
+`gear_sets`' body references already do, and the way `PATCH /dive` answers for a `trip_uuid` or
+`dive_site_uuids` entry it cannot resolve — 422, with the same "Trip not found." / "Dive site not
+found." wording. See *"Ownership checks go through one `fetch_owned_or_raise`"*, which lists exactly
+this exception and its reason: a 404 here would name the wrong thing as missing, the request rather
+than the route's resource. `PATCH /dive` matters most of the three, since it is the per-dive call
+this parameter exists to replace — a client should not have to learn a second answer for the same
+mistake.
+
+`move_dives_to == uuid` is a 422 as well. It resolves perfectly well and would move every dive onto
+a trip that is about to be deleted, which is the one outcome the diver cannot have meant.
+
+The addressed resource keeps its 404, and gets it first: ownership is settled before the replacement
+is looked at, so a hand-crafted call cannot turn someone else's 404 into a 422 that confirms the
+uuid is real.
+
+### Soft-deleted dives stay where they are
+
+Both reassignments are scoped to `is_deleted = False`. Deleted dives are outside everything the
+diver can see, and leaving their `trip_id`/join rows pointing at the resource about to be
+soft-deleted preserves the pairing they were logged with — which is what a plain delete already does
+to *every* dive. It also keeps `moved_dives` equal to the number the confirmation dialog got from
+`GET /dives?trip_uuid=X&items_per_page=1`, which filters the same way; a toast contradicting the
+dialog that opened it would read as a bug whichever number was right.
+
+### The dive-site case is three set-based statements, not a loop
+
+The trip case is one `UPDATE dive SET trip_id`. Sites are many-to-many with an ordered join table
+(see *"Dive sites are many-to-many with dives via a join table"*), so `replace_dive_site_on_dives`
+has to preserve three things a per-dive read-modify-write would get for free — while staying
+set-based, because doing 2N statements server-side to spare the client N requests is not much of a
+trade:
+
+1. **The replacement inherits the doomed site's slot.** Position 0 is the primary site, the one
+   shown wherever only one fits. `UPDATE dive_dive_site SET dive_site_id` never touches `position`,
+   so this is free — but it is the reason the swap is an `UPDATE` rather than a delete-and-insert.
+2. **A dive logged at both sites ends up with one row.** `ux_dive_dive_site_dive_id_dive_site_id`
+   would make that a 500 rather than a duplicate. The first statement deletes whichever of the pair
+   sits *later*, leaving the earlier slot to the survivor — the same "first occurrence wins, and its
+   position is the one kept" rule `replace_dive_sites_for_dive` gets from `dict.fromkeys`.
+3. **Positions stay contiguous.** Removing that row can leave a hole (`[A, B, X]` → 0 and 2). The
+   third statement renumbers, but only the dives a row was actually deleted from. Nothing reads
+   `position` as more than a sort key today, so this buys consistency rather than fixing a bug — the
+   point is not having one writer that disagrees with every other about what the column means.
+
+The count is the union of the dive ids the delete and the update returned, so a dive that only
+*lost* the doomed site (because it already held the replacement) still counts as one that moved. It
+referenced the site being deleted and now does not, which is what the diver was asked about.
+
+The self-join carries `doomed.id != already_there.id`, which is dead weight in every real call - the
+two aliases select different sites, so it is always true - and load-bearing in the one call that
+cannot happen. Given `from == to` without it, every row joins *itself*, the `CASE` falls to its
+`else_`, and the `DELETE` strips the site from every live dive the diver has while the `UPDATE`
+matches nothing and the function returns a plausible count: a silent wipe, reported as a success.
+`erase_dive_site` does refuse that call with a 422, but the refusal is in another module and the
+docstring states no precondition, so the statement is made correct on its own terms instead. Pinned
+by `test_a_site_moved_onto_itself_destroys_nothing`. `reassign_dives_to_trip` is harmless in the
+same situation, which is exactly what would make the asymmetry easy to miss later.
+
+### Atomicity is the session, not a new abstraction
+
+Neither reassignment commits. Both write through the request's session and `crud_*.delete` commits
+last, taking the reassignment with it — the same shape `erase_dive` already uses for
+`delete_files_for_dive(commit=False)`. If anything raises in between, `async_get_db` closes the
+session on the way out and the transaction rolls back. That ordering is the whole guarantee, so
+`tests/test_move_dives_on_delete.py` asserts the call order rather than merely that both calls
+happened.
+
+### `updated_at` is stamped by hand, and only on the trip half
+
+`TimestampMixin` gives `updated_at` no `onupdate`, so every writer sets it explicitly — FastCRUD
+through `DiveUpdateInternal`, `dive_numbering`'s bulk renumber in its own `.values()`, and now
+`reassign_dives_to_trip`. Skipping it would make one logical edit ("this dive is on that trip now")
+leave two different row states depending on whether it arrived through this route or through
+`PATCH /dive`, which puts `trip_id` in `update_data` and does bump it. Nothing reads
+`dive.updated_at` today — it is in no response schema and no ETag — so this is about not seeding a
+discrepancy for whatever reads it first.
+
+`replace_dive_site_on_dives` deliberately has no equivalent. `dive_dive_site` carries no timestamps,
+and `PATCH /dive` with only `dive_site_uuids` leaves `update_data` empty and skips
+`crud_dives.update` entirely, so *not* touching `dive.updated_at` is what matches the per-dive call
+there. The asymmetry between the two halves mirrors an asymmetry that already exists.
+
+### Cache invalidation moved on one route and not the other
+
+`erase_dive_site` already dropped the user's dive caches unconditionally, because a soft-deleted
+site stays attached to the dives logged at it. `erase_trip` did not, and still does not for a plain
+delete: leaving `dive.trip_id` alone means no cached dive read says anything different afterwards. A
+*move* does change what each moved dive reports, so `erase_trip` now invalidates when
+`moved_dives > 0` — and only then, so the bare delete pays nothing.
+
+**And that condition is coupled to the deferred bug below, which is worth stating because the
+coupling is invisible from either end.** "No cached dive read says anything different after a plain
+trip delete" is only true because `get_trip_uuids_by_ids` resolves a soft-deleted trip like any
+other — so a *fresh* read also still names the deleted trip. Fix that (the "hide" answer to the
+three-way call below) and the two stop agreeing: a fresh read starts answering `trip_uuid: null`
+while the cached one still names the trip, and since a plain delete does not invalidate, the deleted
+trip goes on rendering on its dives for the rest of the hour — the exact symptom the fix was for,
+surviving the fix. So **whoever filters `is_deleted` into that lookup has to make this invalidation
+unconditional in the same commit.** The warning lives on `get_trip_uuids_by_ids` too, since that is
+the function someone will be editing when it matters.
+
+`erase_dive_site` has no such coupling: it invalidates unconditionally, which is already correct
+under any of the three answers.
+
+The general shape worth keeping: **an invalidation you skipped because "nothing changed" is a claim
+about a read path, not about the write.** When the read path is itself known-wrong and queued for a
+fix, the skip is borrowed against that wrongness, and the debt comes due in a different file from
+the one being fixed.
+
+### No manual DDL
+
+Nothing in the schema changed: this is two query parameters and three statements over columns that
+already exist.
+
+### An adjacent bug this deliberately did not fix
+
+While checking the docstring claim that a soft-deleted site stays attached to its dives, a live run
+confirmed that it does — and that it is still *rendered*. A dive logged at a since-deleted site
+reads back with that site in `dive_sites`, on both `GET /dive/{uuid}` and the list rows, though
+`GET /dive-site/{uuid}` 404s. The same is true of trips: `dive.trip_uuid` still names a deleted
+trip, because `get_trip_uuids_by_ids` filters on neither `is_deleted` nor owner. So the dive page
+renders a site and a trip that exist nowhere else in the app.
+
+`move_dives_to` makes it *less* reachable — moving the dives first is exactly how a diver avoids
+stranding them — but it does not fix it, and it was left out on purpose: hiding them, tombstoning
+them, or leaving them as a historical record is a product decision with a client-visible contract
+change attached, and it is not this PR's.
