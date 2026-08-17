@@ -1,18 +1,24 @@
-from collections.abc import Callable, Generator
-from typing import Any
+from collections.abc import AsyncGenerator, Callable, Generator
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+import pytest_asyncio
 from faker import Faker
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm.session import Session
 from uuid6 import uuid7
 
 from src.app.core.config import settings
+from src.app.core.db.database import Base
 from src.app.main import app
+
+if TYPE_CHECKING:
+    from src.app.models.user import User
 
 DATABASE_URI = settings.POSTGRES_URI
 DATABASE_PREFIX = settings.POSTGRES_SYNC_PREFIX
@@ -69,6 +75,80 @@ def db() -> Generator[Session, Any]:
     session = local_session()
     yield session
     session.close()
+
+
+def db_available() -> bool:
+    """Whether the Postgres-backed tests can run at all.
+
+    Every module that needs a real database guards its classes with
+    `@pytest.mark.skipif(not db_available(), ...)`, because most of the suite mocks the
+    session and a cold checkout has nothing listening. Note the skip is silent - see
+    CONTRIBUTING.md for why a run on the host needs `POSTGRES_SERVER=localhost` before
+    these execute at all.
+    """
+    try:
+        with sync_engine.connect():
+            return True
+    except OperationalError:
+        return False
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _ensure_tables() -> None:
+    """Create any missing tables once per session, for the database-backed modules.
+
+    Idempotent, and a no-op when nothing is listening, so it costs an unreachable
+    connection attempt on a mocked-only run.
+
+    **Consolidation in progress.** Eight modules grew their own module-scoped copy of this
+    and of `db_available`; only `test_move_dives_on_delete.py` and
+    `test_deleted_refs_on_dive_reads.py` use the shared ones so far. The rest still define
+    their own, and a module-level fixture *shadows* a same-named one here - so for those
+    this fixture does not run at all, and their copies are what create the tables. Nothing
+    breaks either way (the `create_all` is the same call), but do not read this as the
+    single definition until the others move: `test_dive_neighbors.py`, `test_trips.py`,
+    `test_dive_numbering.py`, `test_export_loader.py`, `test_dive_profile_storage.py` and
+    `test_dive_check_constraints.py` still have copies, three of them of `async_db`,
+    `diver` and `other_diver` as well.
+    """
+    if db_available():
+        Base.metadata.create_all(sync_engine)
+
+
+@pytest_asyncio.fixture
+async def async_db() -> AsyncGenerator[AsyncSession]:
+    """An `AsyncSession` on its own engine, for testing async crud against real Postgres.
+
+    Separate from `db`, which is the sync session the rest of the suite seeds rows with -
+    a test typically wants both: `db` to arrange, `async_db` to exercise the code under
+    test. Engine per test rather than per session, which is wasteful but matches what the
+    modules that predate this fixture did.
+    """
+    engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
+    session_factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    async with session_factory() as session:
+        yield session
+    await engine.dispose()
+
+
+@pytest.fixture
+def diver(db: Session) -> User:
+    # Imported in the body, not at module scope: `tests.helpers.generators` imports
+    # `fake`/`unique_username`/`unique_email` from this module, so a top-level import here
+    # would be a cycle that fails on a half-initialized `conftest`.
+    from tests.helpers.generators import create_user
+
+    return create_user(db)
+
+
+@pytest.fixture
+def other_diver(db: Session) -> User:
+    """A second logbook in the same tables. `user_id` is the only thing keeping a bulk
+    `UPDATE` off another diver's dives, and a suite with one diver in it cannot notice
+    when that condition stops working."""
+    from tests.helpers.generators import create_user
+
+    return create_user(db)
 
 
 def override_dependency(dependency: Callable[..., Any], mocked_response: Any) -> None:

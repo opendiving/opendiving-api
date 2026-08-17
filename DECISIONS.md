@@ -6107,29 +6107,28 @@ there. The asymmetry between the two halves mirrors an asymmetry that already ex
 ### Cache invalidation moved on one route and not the other
 
 `erase_dive_site` already dropped the user's dive caches unconditionally, because a soft-deleted
-site stays attached to the dives logged at it. `erase_trip` did not, and still does not for a plain
-delete: leaving `dive.trip_id` alone means no cached dive read says anything different afterwards. A
-*move* does change what each moved dive reports, so `erase_trip` now invalidates when
-`moved_dives > 0` — and only then, so the bare delete pays nothing.
+site stays attached to the dives logged at it. `erase_trip` did not, for a plain delete: leaving
+`dive.trip_id` alone meant no cached dive read said anything different afterwards. A *move* does
+change what each moved dive reports, so `erase_trip` invalidated when `moved_dives > 0` — and only
+then, so the bare delete paid nothing.
 
-**And that condition is coupled to the deferred bug below, which is worth stating because the
-coupling is invisible from either end.** "No cached dive read says anything different after a plain
-trip delete" is only true because `get_trip_uuids_by_ids` resolves a soft-deleted trip like any
-other — so a *fresh* read also still names the deleted trip. Fix that (the "hide" answer to the
-three-way call below) and the two stop agreeing: a fresh read starts answering `trip_uuid: null`
-while the cached one still names the trip, and since a plain delete does not invalidate, the deleted
-trip goes on rendering on its dives for the rest of the hour — the exact symptom the fix was for,
-surviving the fix. So **whoever filters `is_deleted` into that lookup has to make this invalidation
-unconditional in the same commit.** The warning lives on `get_trip_uuids_by_ids` too, since that is
-the function someone will be editing when it matters.
+**That condition was coupled to the deferred bug below, and the coupling was invisible from either
+end**, which is why it was written down in three places rather than one. "No cached dive read says
+anything different after a plain trip delete" was only true because `get_trip_uuids_by_ids` resolved
+a soft-deleted trip like any other — so a *fresh* read also still named the deleted trip.
 
-`erase_dive_site` has no such coupling: it invalidates unconditionally, which is already correct
-under any of the three answers.
+That is no longer the case: the section below fixed the read, so the condition is gone and
+`erase_trip` now invalidates unconditionally like `erase_dive_site`. **The warning did its job** —
+it was written by the PR that created the coupling, and read by the PR that removed it, which is the
+only test a note like that ever gets.
 
-The general shape worth keeping: **an invalidation you skipped because "nothing changed" is a claim
-about a read path, not about the write.** When the read path is itself known-wrong and queued for a
-fix, the skip is borrowed against that wrongness, and the debt comes due in a different file from
-the one being fixed.
+The general shape worth keeping, now that the specific case is closed: **an invalidation you skipped
+because "nothing changed" is a claim about a read path, not about the write.** When the read path is
+itself known-wrong and queued for a fix, the skip is borrowed against that wrongness, and the debt
+comes due in a different file from the one being fixed. Two things made it survivable here: the
+claim was recorded next to the *lookup* rather than only next to the invalidation, so it was in
+front of whoever would falsify it; and it named the consequence concretely enough (`trip_uuid: null`
+out of a fresh read, the old value out of cache, for an hour) to be checked rather than believed.
 
 ### No manual DDL
 
@@ -6149,3 +6148,157 @@ renders a site and a trip that exist nowhere else in the app.
 stranding them — but it does not fix it, and it was left out on purpose: hiding them, tombstoning
 them, or leaving them as a historical record is a product decision with a client-visible contract
 change attached, and it is not this PR's.
+
+**Since fixed — the answer was "hide".** See the section below.
+
+## A deleted site or trip stops being rendered on its dives, and the links stay in the database
+
+The three-way call above was made: **hide**. `get_dive_sites_for_dive`, `get_dive_sites_for_dives`
+and `get_trip_uuids_by_ids` now resolve only live rows, so a deleted site drops out of `dive_sites`
+and a deleted trip leaves `trip_uuid: null`. Nothing was deleted to achieve it — the
+`dive_dive_site` rows and `dive.trip_id` are untouched, and a filter on the read is the whole
+change.
+
+### Why hiding, over tombstoning or leaving it
+
+The deciding argument was not consistency with the 404s, which is the obvious one and would have
+been satisfied by tombstoning too. It is that **the write side had already voted.**
+`resolve_trip_id_for_user` and `resolve_dive_site_ids_for_user` both refuse a deleted resource, and
+they back `PATCH /dive` as well as the `trip_uuid=`/`dive_site_uuid=` list filters. So the old
+behaviour handed a client a `trip_uuid` and a `dive_sites[].uuid` that the same dive's PATCH would
+then reject: read a dive's site list into an edit form, submit it back unchanged, get a 422 naming a
+site the response had just given you. That is not a historical record, it is a reference the API
+emits and refuses to accept — which ruled out leaving it, and made hiding the option that puts the
+read side back in agreement with everything else.
+
+Tombstoning lost on cost against a dead end. It is the only one of the three needing hand-applied
+DDL (a flag on the site summary, and `trip_uuid: UUID | None` restructured into something that can
+carry one), and what it buys is a chip that cannot be clicked (its endpoint 404s), cannot be
+submitted (the write resolvers refuse it), and cannot be un-greyed, because **there is no undelete
+path in this codebase at all** — `UserRestoreDeleted` in `schemas/user.py` is referenced nowhere.
+
+A fourth option came up and is worth recording because it looks tidier than it is: clear the
+association at delete time — drop the `dive_dive_site` rows, null the `dive.trip_id` — so the
+loaders need no filter because no orphan exists. It loses to three things. `_owned` in
+`services/export/loader.py` deliberately reads deleted-but-referenced sites, items, trips and
+schedules back, flagged `is_deleted`, because UDDF's `xs:IDREF` references have to resolve; clearing
+the links deletes exactly the rows that machinery exists to preserve. It does not fix orphans
+already created, which a read filter does for past and future alike. And it turns `erase_dive_site`,
+which touches no dive rows today, into another multi-statement write over `dive_dive_site` with the
+position-renumbering hazards `replace_dive_site_on_dives` needed three careful statements and a
+wipe-guard test to get right.
+
+The cost of hiding, stated plainly: a dive that *was* logged at a since-deleted site now shows no
+site, and a diver could read that as data loss. The links themselves survive the delete, so an
+export still carries the association — but read the next subsection before relying on that, because
+it does not survive indefinitely.
+
+### The links outlive the delete, but not the dive's next edit
+
+**A read hides them; the next `PATCH /dive` on that dive destroys them.** This is the real cost of
+hiding, and it is not what "the links stay in the database" suggests on its own.
+
+**Confirmed on the shipped web client, not reasoned about in the abstract.** `opendiving-web`'s
+`dives/[id]/edit/page.tsx` seeds the form with `trip_uuid: diveData.trip_uuid` and
+`dive_site_uuids: diveData.dive_sites?.map((site) => site.uuid) ?? []`, and `buildDiveUpdate` in
+`lib/validations/dive.ts` forwards any value that is not `undefined` — a null included,
+deliberately, since that is how a diver removes a trip. So opening Edit on an affected dive and
+pressing Save without touching anything is enough. This is the default path, not an edge case.
+
+The round trip is ordinary and needs nothing to do with sites or trips. `GET /dive/{uuid}` now
+answers `trip_uuid: null` with the deleted site absent from `dive_sites`. A client that seeds an
+edit form from that read and submits it — a notes fix, a depth correction — sends back exactly what
+it was handed: `trip_uuid: null`, and a `dive_site_uuids` list one entry shorter. `patch_dive` reads
+an explicit null as *remove the trip* (`update_data["trip_id"] = None`), and any `dive_site_uuids`
+goes through `replace_dive_sites_for_dive`, which is a wholesale delete-and-reinsert. The `trip_id`
+and the `dive_dive_site` rows are then gone for real, `_owned`'s `still_referenced` set no longer
+holds the site or trip, and the record drops out of `export.json` too. There is no undelete path, so
+that is permanent.
+
+**Accepted deliberately**, on the reading that a diver who edits a dive after deleting its site is
+confirming the removal. But note what the trade actually is, because the framing above oversells it:
+before the filter, that same round trip failed *loudly* — the read handed back the deleted trip's
+uuid, `resolve_trip_id_for_user` refused it, and PATCH answered 422. Hiding replaces a loud 422 with
+a silent write that deletes data. And it is the same deletion this section rejects as option 4
+("clearing the links deletes exactly the rows that machinery exists to preserve"), just lazy and
+scattered — on whichever dives the diver happens to edit next — instead of all at once at delete
+time.
+
+**The fix is client-side, and it is queued rather than done.** No server-side answer works on the
+trip half: "the diver cleared the trip" and "the client echoed back a null it was handed" are the
+*same request*, so nothing in `patch_dive` can tell them apart. They are perfectly distinguishable
+one layer up, though — in the form, an untouched trip picker is simply not dirty. So the fix is for
+the web edit form to submit only dirty fields (react-hook-form's `dirtyFields`) rather than every
+field it was seeded with, which closes both halves at once and needs nothing here. That is a
+separate PR in `opendiving-web`, deliberately not blocking this one: the API change is correct on
+its own, and the exposure in between is a pre-launch app running on one developer's machine.
+
+Two server-side answers were weighed and dropped before that one was found. Leaving soft-deleted
+rows alone in `replace_dive_sites_for_dive` handles the site half but not the trip half, for the
+reason above. Surfacing the hidden references to the client so an edit form can round-trip them
+works, but reopens the read-contract question this section settled — it is most of the tombstone
+design, arrived at from the other side.
+
+Worth generalizing, since it is the second time in this feature's history that the fix landed in a
+different file from the bug: **a read filter is not a local change.** Hiding a field from a response
+changes what every client writes back through it, and the damage shows up on the write path, in
+another repo, on an unrelated user action.
+
+So: `move_dives_to` is the affordance for a diver who cares about the association. Re-point the
+dives, then delete. Deleting first and editing later is what loses it.
+
+### What "the links stay" means for export
+
+`_owned`'s resurrection rule used to justify itself partly by pointing at the app — a deleted site
+"goes on being shown" on its dives. This change falsifies that half. The rule stands on the IDREF
+argument alone, which was always sufficient, and export is now the only place the association is
+visible at all — for as long as it lasts, per the subsection above. Its docstring says so.
+
+### The trap this had to avoid, and the shape of it
+
+`erase_trip` skipped dive-cache invalidation on a plain delete, correctly, *because* the read being
+fixed here was broken. Filtering the lookup without touching that condition would have left a fresh
+read answering `trip_uuid: null` while the cached one still named the trip, for the rest of the hour
+— the symptom surviving its own fix, in a different file. The invalidation is unconditional as of
+the same commit. See "Cache invalidation moved on one route and not the other" above, which records
+how the warning was placed and why it worked.
+
+### `erase_trip` became idempotent, so the trip half has a way back
+
+`DELETE /trip/{uuid}` used to 404 on a second delete while `DELETE /dive-site/{uuid}` answered 200,
+and that asymmetry was documented as deliberate. Hiding the references is what made it a problem
+rather than a curiosity: a deleted site could still be recovered from — the route is idempotent and
+honours `move_dives_to` on an already-deleted site, so a diver who deleted first could still
+re-point the dives — while a deleted trip could not. This change made the association invisible on
+both halves, so shipping it would have left the trip half invisible *and* unrecoverable.
+
+Both routes now take `include_deleted=True`. The alignment went in that direction rather than the
+other one, and the direction is the whole decision. Making `erase_dive_site` 404 to match would have
+been equally consistent and simpler to explain, but it removes the only after-the-fact recovery the
+app has, right in the change that makes recovery matter. It also breaks a retry that was reasoned
+about on purpose: a client that loses the response to `delete?move_dives_to=X` can currently repeat
+the call and learn what happened, whereas one 404 would cover both "already gone, dives moved" and
+"already gone, dives stranded" — and the dives are the half the client needs to know about.
+Idempotent `DELETE` is the more conventional of the two answers besides.
+
+**Client-visible.** A retry that used to 404 now answers 200 with `moved_dives`. Nothing breaks — a
+client treating the old 404 as "already gone" still behaves correctly — but "deleted twice" is no
+longer distinguishable from "deleted once" by status alone.
+
+### `get_trip_uuids_by_ids` also gained a `user_id` scope
+
+Unrelated to the bug and not a fix for anything reachable: every caller passes ids read off the
+caller's own dives, so a cross-user id cannot arrive today. The scope was absent rather than
+deliberate, and it now matches `resolve_trip_id_for_user` directly above it, so a future caller that
+sources ids some other way cannot leak another logbook's uuid.
+
+### No manual DDL, and one sibling left alone
+
+Nothing in the schema changed — three `WHERE` clauses and one parameter.
+
+`get_gear_items_for_dive`/`get_gear_items_for_dives` in `crud_dive_gear_items.py` have the identical
+bug: they mirror these loaders line for line and filter nothing, so a deleted gear item goes on
+being listed on the dives it was used on. It is left out deliberately, the same way this one was
+left out of the `move_dives_to` PR — same shape, but `erase_gear_item` has its own invalidation and
+`dive_count` bookkeeping to check first, and bundling it would hide that check inside a change about
+sites and trips.

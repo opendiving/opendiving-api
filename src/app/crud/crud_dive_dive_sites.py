@@ -40,18 +40,51 @@ def dive_site_info_from_row(row: Any) -> DiveSiteInfo:
 
 
 async def get_dive_sites_for_dive(db: AsyncSession, dive_id: int) -> list[DiveSiteInfo]:
-    """Return the dive sites visited during a dive, in the order they were visited."""
+    """Return the *live* dive sites visited during a dive, in the order they were visited.
+
+    A soft-deleted site keeps its `dive_dive_site` rows - `erase_dive_site` flags the site
+    and leaves the links alone - so without the filter a dive goes on rendering a site that
+    `GET /dive-site/{uuid}` answers 404 for, and that `PATCH /dive` refuses to accept back
+    (`resolve_dive_site_ids_for_user` resolves only live sites, so reading a dive's site
+    list and writing it back verbatim would 422). The links stay because export still wants
+    them: `_owned` in `services/export/loader.py` reads deleted-but-referenced sites back on
+    purpose, flagged `is_deleted`, so the record survives where it belongs rather than here.
+
+    They stay only until that dive's next `PATCH`, though, and this filter is what makes
+    that so: a client seeding an edit form from this list submits it back one entry short,
+    and `replace_dive_sites_for_dive` is a delete-and-reinsert, so the row is then gone for
+    good. Accepted rather than worked around - see "The links outlive the delete, but not
+    the dive's next edit" in DECISIONS.md before writing anything that relies on the row
+    being there.
+
+    Dropping a row promotes whatever follows it into the slot ahead - a dive logged at
+    `[A, B]` whose A is deleted reads back as `[B]`, and B becomes the primary site every
+    single-site surface shows. That is intended: `position` is a sort key, not an identity,
+    and the alternative is a dive whose primary site does not exist.
+
+    Takes a `dive_id` and no owner, unlike `get_trip_uuids_by_ids` alongside it, which was
+    given a `user_id` scope as defence in depth. The asymmetry is intentional: a `dive_id`
+    is not a client-supplied handle - every route resolves and ownership-checks the dive
+    before reaching this - whereas the trip ids are read off dive rows in bulk, which is
+    the shape a future caller could get wrong. A cross-user join row cannot be created
+    through the API at all; see the note above `trip_for` in `services/export/loader.py`.
+    """
     result = await db.execute(
         select(*DIVE_SITE_INFO_COLUMNS)
         .join(DiveDiveSite, DiveDiveSite.dive_site_id == DiveSite.id)
-        .where(DiveDiveSite.dive_id == dive_id)
+        .where(DiveDiveSite.dive_id == dive_id, DiveSite.is_deleted.is_(False))
         .order_by(DiveDiveSite.position)
     )
     return [dive_site_info_from_row(row) for row in result]
 
 
 async def get_dive_sites_for_dives(db: AsyncSession, dive_ids: list[int]) -> dict[int, list[DiveSiteInfo]]:
-    """Batched version of `get_dive_sites_for_dive`, e.g. for a paginated dive listing."""
+    """Batched version of `get_dive_sites_for_dive`, e.g. for a paginated dive listing.
+
+    Filters deleted sites for the same reasons, and needs nothing extra to degrade well:
+    the per-dive lists are pre-seeded empty, so a dive whose only site is gone comes back
+    with `[]` rather than dropping out of the mapping.
+    """
     sites_by_dive: dict[int, list[DiveSiteInfo]] = {dive_id: [] for dive_id in dive_ids}
     if not dive_ids:
         return sites_by_dive
@@ -59,7 +92,7 @@ async def get_dive_sites_for_dives(db: AsyncSession, dive_ids: list[int]) -> dic
     result = await db.execute(
         select(DiveDiveSite.dive_id, *DIVE_SITE_INFO_COLUMNS)
         .join(DiveSite, DiveSite.id == DiveDiveSite.dive_site_id)
-        .where(DiveDiveSite.dive_id.in_(dive_ids))
+        .where(DiveDiveSite.dive_id.in_(dive_ids), DiveSite.is_deleted.is_(False))
         .order_by(DiveDiveSite.dive_id, DiveDiveSite.position)
     )
     for row in result:
