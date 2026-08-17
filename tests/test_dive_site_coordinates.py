@@ -23,6 +23,7 @@ No database: `patch_dive_site`'s collaborators are stubbed and the assertions ar
 """
 
 import uuid as uuid_pkg
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -32,6 +33,7 @@ from uuid6 import uuid7
 
 from src.app.api.v1 import dive_sites as dive_sites_module
 from src.app.core.utils import cache as cache_module
+from src.app.crud.crud_dive_dive_sites import get_dive_sites_for_dive, get_dive_sites_for_dives
 from src.app.schemas.dive import DiveSiteInfo
 from src.app.schemas.dive_site import DiveSiteCreate, DiveSiteUpdate, WholeCoordinatePair
 
@@ -282,3 +284,57 @@ class TestTheEmbeddedSiteSummary:
         check comes along - a row that could only exist via raw SQL fails loudly here."""
         with pytest.raises(ValidationError):
             DiveSiteInfo(uuid=uuid7(), name="Null Island Adjacent", latitude=91.0, longitude=0.0)
+
+
+class TestTheSummaryLoaders:
+    """Both loaders name every column twice - once in the `select()`, once in the
+    `DiveSiteInfo(...)` call - and the two lists are maintained by hand. Nothing about a
+    latitude built from `row.longitude` is a type error or a range error, so a transposed
+    pair would sail through every other test in this file and land the pin in the wrong
+    hemisphere. That is what these two assert against, which is why the fixture uses a real
+    pair whose halves are not interchangeable.
+    """
+
+    def _db(self, rows: list[SimpleNamespace]) -> MagicMock:
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=rows)
+        return db
+
+    def _row(self, **overrides: Any) -> SimpleNamespace:
+        columns: dict[str, Any] = {
+            "uuid": uuid7(),
+            "name": "Blue Hole",
+            "location": "Dahab, Egypt",
+            "latitude": BLUE_HOLE[0],
+            "longitude": BLUE_HOLE[1],
+        }
+        return SimpleNamespace(**(columns | overrides))
+
+    @pytest.mark.asyncio
+    async def test_the_single_dive_loader_maps_each_column_to_its_own_field(self) -> None:
+        row = self._row()
+
+        sites = await get_dive_sites_for_dive(self._db([row]), dive_id=7)
+
+        assert [(s.uuid, s.name, s.location, s.latitude, s.longitude) for s in sites] == [
+            (row.uuid, "Blue Hole", "Dahab, Egypt", BLUE_HOLE[0], BLUE_HOLE[1])
+        ]
+
+    @pytest.mark.asyncio
+    async def test_the_single_dive_loader_passes_an_absent_position_through(self) -> None:
+        sites = await get_dive_sites_for_dive(self._db([self._row(latitude=None, longitude=None)]), dive_id=7)
+
+        assert (sites[0].latitude, sites[0].longitude) == (None, None)
+
+    @pytest.mark.asyncio
+    async def test_the_batched_loader_maps_each_column_to_its_own_field(self) -> None:
+        """Same assertion against the second copy of the same mapping, plus the grouping
+        the batched version adds: a dive with no sites keeps its empty list."""
+        row = self._row(dive_id=7)
+
+        by_dive = await get_dive_sites_for_dives(self._db([row]), dive_ids=[7, 8])
+
+        assert by_dive[8] == []
+        assert [(s.uuid, s.name, s.location, s.latitude, s.longitude) for s in by_dive[7]] == [
+            (row.uuid, "Blue Hole", "Dahab, Egypt", BLUE_HOLE[0], BLUE_HOLE[1])
+        ]

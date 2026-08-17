@@ -1213,11 +1213,12 @@ ALTER TABLE gear_item ADD COLUMN type VARCHAR(32);
 
 ## Renaming a dive site or gear item invalidates that user's dive caches
 
-A dive's cached representation embeds *summaries of other resources*: its dive sites'
-names/locations (`DiveSiteInfo`) and its gear items' names/brands/types (`GearItemInfo`). So
-renaming a dive site or a gear item makes every cached dive that references it stale, even though no
-dive row changed. Both the paginated list (`_cached_read_dives`) and the single-dive read carry
-those summaries, so both go stale.
+A dive's cached representation embeds *summaries of other resources*: its dive sites' names,
+locations and positions (`DiveSiteInfo` — the position joined them later, see *"The dive page is the
+map view, so `DiveSiteInfo` carries coordinates after all"*) and its gear items' names/brands/types
+(`GearItemInfo`). So renaming a dive site, dragging its marker or renaming a gear item makes every
+cached dive that references it stale, even though no dive row changed. Both the paginated list
+(`_cached_read_dives`) and the single-dive read carry those summaries, so both go stale.
 
 This was originally shipped as a known limitation, because the single-dive cache key was a flat
 `dive_cache:{uuid}`. The renaming endpoint knows only the owner's `user_id`, not which of their

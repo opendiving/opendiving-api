@@ -1,9 +1,10 @@
 """Cross-resource cache invalidation.
 
 A dive's cached representation embeds *summaries of other resources* - its dive
-sites' names/locations (`DiveSiteInfo`) and its gear items' names/brands/types
-(`GearItemInfo`). So renaming a dive site or a gear item makes every cached dive
-that references it stale, even though the dive row itself never changed.
+sites' names, locations and positions (`DiveSiteInfo`) and its gear items'
+names/brands/types (`GearItemInfo`). So renaming a dive site, dragging its marker
+or renaming a gear item makes every cached dive that references it stale, even
+though the dive row itself never changed.
 
 These helpers live here rather than in the route modules so `dives.py`,
 `gear_items.py` and `dive_sites.py` can all reach them without importing each
