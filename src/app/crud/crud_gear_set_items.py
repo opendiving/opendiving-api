@@ -72,6 +72,24 @@ async def replace_gear_items_for_set(
 
     Duplicate ids are silently deduplicated (keeping each id's first occurrence, which
     determines its position) to avoid a unique-constraint violation.
+
+    **The wipe takes soft-deleted items with it, and that is a known accepted loss** - the
+    third of the three `replace_*` helpers carrying it, after `replace_dive_sites_for_dive`
+    and `replace_gear_items_for_dive`, and for the same reason. Since `get_gear_items_for_set`
+    stopped returning deleted items, a client editing a set's membership submits back only
+    what it was shown, so a set holding a live item and a hidden one comes back without the
+    hidden one and the delete below destroys its row. No client can prevent it: it cannot
+    preserve a reference it was never handed.
+
+    One thing is milder here than on the dive helpers. `patch_gear_set` reaches this only
+    when the request actually carries `gear_item_uuids`, so renaming a set or changing its
+    `weight` severs nothing - there is no equivalent of the trip half's indistinguishable
+    "the diver cleared it" versus "the client echoed back a null", because an absent list
+    means *don't touch*. The narrow case survives regardless: adding one item resubmits the
+    whole list, and the hidden row goes with it.
+
+    Declined rather than missed - see "One narrower case `dirtyFields` cannot reach" in
+    DECISIONS.md for the fix and why its cost was judged too high for a path this narrow.
     """
     unique_ids = list(dict.fromkeys(gear_item_ids))
     await db.execute(delete(GearSetItem).where(GearSetItem.gear_set_id == gear_set_id))

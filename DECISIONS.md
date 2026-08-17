@@ -6265,6 +6265,11 @@ rather than only as an absence — until the same edit removes the item from the
 *"`dive_count` is unaffected at delete time"* below, which traces that. The answer is the same on
 both, and for the same reason.
 
+**And on a third helper since:** `replace_gear_items_for_set` inherited the identical case when the
+gear-set loaders got the filter — with the one asymmetry that the declined fix is *cheaper* there,
+`gear_set_item.position` carrying no unique constraint to keep contiguous. Still declined, but it is
+the half to revisit first. See *"The severance is the same cost, and slightly smaller here"* below.
+
 Two server-side answers were weighed and dropped before that one was found. Leaving soft-deleted
 rows alone in `replace_dive_sites_for_dive` handles the site half but not the trip half, for the
 reason above. Surfacing the hidden references to the client so an edit form can round-trip them
@@ -6459,10 +6464,9 @@ the damage sooner and to more rows.
 
 ### The severance is the same cost, and slightly smaller here
 
-`replace_gear_items_for_set` is a delete-and-reinsert, exactly like its dive counterpart, so a
+`replace_gear_items_for_set` is a delete-and-reinsert, exactly like its two dive counterparts, so a
 client that reads a set's item list and submits it back destroys the hidden links for good — the
-same trade "The links outlive the delete, but not the dive's next edit" describes, and the same
-`dirtyFields` fix in `opendiving-web` closes it.
+same trade "The links outlive the delete, but not the dive's next edit" describes.
 
 Two things make it milder than the dive half rather than worse. `patch_gear_set` only calls
 `replace_gear_items_for_set` when the request actually carries `gear_item_uuids`, so renaming a set
@@ -6470,6 +6474,20 @@ or changing its `weight` severs nothing — there is no equivalent of the trip h
 indistinguishable "the diver cleared it" vs "the client echoed back a null", because membership is a
 list and an absent list means *don't touch*. And what is lost is a line in a template rather than a
 fact about a dive that happened.
+
+**But the narrow case above lands here unchanged, and `dirtyFields` cannot reach it either.** A set
+holding a live item and a hidden deleted one seeds an edit form from a list of one; the diver adds a
+second item; `gear_item_uuids` is now legitimately dirty and gets submitted as the two items the
+client has ever been handed, and the hidden row goes with the wipe. Same shape as *"One narrower
+case `dirtyFields` cannot reach"* records for `dive_site_uuids` and `gear_item_uuids` on a dive,
+same reason no client can prevent it, and declined here for the same reason — with one difference in
+the cost of fixing it, which cuts the other way. The proposed remedy there (delete only the rows
+whose target is live, insert the submitted list at 0..n-1, renumber the survivors after it) runs
+into position-contiguity care on `dive_dive_site`; on `gear_set_item` `position` carries no unique
+constraint, so the renumbering is cosmetic and the fix is genuinely cheaper on this half. It is
+still declined, because a set is a template and the three helpers answering the same question three
+different ways would cost more than the path is worth — but if that call is ever revisited,
+**revisit it here first.** `replace_gear_items_for_set`'s docstring says so.
 
 ### Both deferred checks, again, and both clean
 
