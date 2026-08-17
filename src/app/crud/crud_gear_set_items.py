@@ -91,6 +91,14 @@ async def replace_gear_items_for_set(
 
     Declined rather than missed - see "One narrower case `dirtyFields` cannot reach" in
     DECISIONS.md for the fix and why its cost was judged too high for a path this narrow.
+
+    **If that call is ever revisited, revisit it on this helper first.** The fix is to
+    delete only the rows whose item is live, insert the submitted list at 0..n-1, then
+    renumber the survivors after it - and what made it too expensive on
+    `replace_dive_sites_for_dive` is the position contiguity `dive_dive_site` needs.
+    `gear_set_item.position` carries no unique constraint (`ux_gear_set_item_gear_set_id_gear_item_id`
+    is on the pair of FKs), so here the renumbering is cosmetic and the change is a
+    genuinely smaller one. Its sibling's docstring defers to this note.
     """
     unique_ids = list(dict.fromkeys(gear_item_ids))
     await db.execute(delete(GearSetItem).where(GearSetItem.gear_set_id == gear_set_id))
