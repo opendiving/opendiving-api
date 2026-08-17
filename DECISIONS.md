@@ -6256,14 +6256,37 @@ position-contiguity problem `replace_dive_site_on_dives` needed three careful st
 wipe-guard test to get right, for a path this narrow. There is no unique-constraint risk in it —
 `resolve_dive_site_ids_for_user` refuses a deleted site, so a hidden uuid cannot come back in.
 
+One objection that sounds decisive is not, and this section's own filter is why: a preserved hidden
+row sitting at position 0 does **not** leave the dive headed by a site that no longer exists. The
+read filters before it orders, so the first *live* row heads the list either way — the promotion
+`get_dive_sites_for_dive`'s docstring already describes. Every effect a preserved row's position
+could have is export-only, on both halves, since `_ordered_ids_by_dive` is the one reader that takes
+the join rows unfiltered. The cost is the renumbering, not a rendering hazard.
+
 **`gear_item_uuids` has the same shape, and since the gear filter landed it is reachable too.**
 `replace_gear_items_for_dive` is the same wholesale replace, so a dive holding a live item and a
 hidden deleted one loses the hidden row as soon as the diver edits the gear list at all. It is
 slightly more visible there than here: `recalculate_gear_dive_counts` runs on the same `patch_dive`
 and takes the deleted item's `dive_count` to zero, so the loss shows as a number in `export.json`
 rather than only as an absence — until the same edit removes the item from the export entirely. See
-*"`dive_count` is unaffected at delete time"* below, which traces that. The answer is the same on
-both, and for the same reason.
+*"`dive_count` is unaffected at delete time"* below, which traces that.
+
+**Same answer on the gear half, but not for the same reason, and the difference was measured rather
+than assumed.** The paragraph above declines the fix on the position-contiguity cost, and that cost
+does not exist for gear: there is no `replace_gear_item_on_dives` to keep in step, because gear has
+no `move_dives_to` route. Nor does anything else carry over — `DiveGearItem.position` is a pure sort
+key with none of `DiveDiveSite`'s primary-slot meaning, `GearItemInfo` carries no position field,
+and the table constrains only `(dive_id, gear_item_id)`, so holes and ties are already legal. On the
+gear half the fix is close to one subquery on the `DELETE`.
+
+It was declined anyway, and on a different ground: `replace_dive_sites_for_dive` and
+`replace_gear_items_for_dive` are deliberate mirrors, down to the `dict.fromkeys` dedupe comment,
+and buying back a narrow case on the cheap half at the price of the two diverging trades a rare data
+loss for a permanent shape difference every later reader has to hold. Recorded because the estimate
+was the thing at risk of being inherited: reusing the site-side number here would have rejected a
+cheap fix on an expensive fix's grounds. If this is ever revisited, gear is the half to prototype
+on, and the detail to settle there is ordering — a preserved row can tie with a newly inserted one,
+invisible in the app but not in export.
 
 Two server-side answers were weighed and dropped before that one was found. Leaving soft-deleted
 rows alone in `replace_dive_sites_for_dive` handles the site half but not the trip half, for the
