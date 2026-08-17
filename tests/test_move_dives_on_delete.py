@@ -294,6 +294,16 @@ class TestEraseTripWithAReplacement:
         trip_route["delete"].assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_an_already_deleted_trip_still_moves_its_dives(self, trip_route: dict[str, Any]) -> None:
+        """The mirror of the dive-site case, and the reason the two now match: a deleted
+        trip is invisible on its dives, so re-pointing them afterwards is the only way back
+        - and a retry of a half-failed delete should not be worse than the first attempt."""
+        await _erase_trip(trip_route, move_dives_to=uuid7())
+
+        assert trip_route["owned"].await_args.kwargs["include_deleted"] is True
+        trip_route["reassign"].assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_a_trip_that_is_not_the_callers_is_still_a_404(self, trip_route: dict[str, Any]) -> None:
         """Ownership of the addressed trip is settled before the replacement is even
         looked at, so a bad replacement cannot turn someone else's 404 into a 422 that

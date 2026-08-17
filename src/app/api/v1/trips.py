@@ -411,15 +411,22 @@ async def erase_trip(
     the same answer `PATCH /dive` gives for a `trip_uuid` it can't resolve, which is the
     per-dive call this parameter exists to replace.
 
-    Deleting a trip twice is a 404 the second time, with or without `move_dives_to` - so a
-    client retrying after a lost response should read that 404 as "already gone" rather
-    than as a failure. Note this is the opposite of `DELETE /dive-site/{uuid}`, which is
-    idempotent and answers the same retry with a 200.
+    Idempotent, like `DELETE /dive-site/{uuid}`: deleting an already-deleted trip succeeds
+    rather than 404ing, and `move_dives_to` is honoured on one. That is what leaves a diver
+    who deleted first a way back - the dives are still attached, so they can still be
+    re-pointed - which matters because a deleted trip is otherwise invisible: its dives
+    read `trip_uuid: null` and no endpoint will name it again.
+
+    It also keeps a retry of a half-failed delete from being worse than the first attempt.
+    A client that lost the response to `delete?move_dives_to=X` can repeat the call and get
+    a definitive answer; a 404 would have covered both "already gone, dives moved" and
+    "already gone, dives stranded" with one status, and the dives are the part it needs.
 
     `moved_dives` counts what was re-pointed, for the "12 dives moved to Cebu 2026" the web
     app says afterwards. It is present either way, and 0 when the parameter was omitted.
     """
-    db_trip = await _get_owned_trip(db, uuid, current_user)
+    # `include_deleted`: deleting an already-soft-deleted trip is a no-op, not a 404.
+    db_trip = await _get_owned_trip(db, uuid, current_user, include_deleted=True)
     owner_id = db_trip.user_id
 
     moved_dives = 0

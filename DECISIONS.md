@@ -6263,6 +6263,28 @@ read answering `trip_uuid: null` while the cached one still named the trip, for 
 the same commit. See "Cache invalidation moved on one route and not the other" above, which records
 how the warning was placed and why it worked.
 
+### `erase_trip` became idempotent, so the trip half has a way back
+
+`DELETE /trip/{uuid}` used to 404 on a second delete while `DELETE /dive-site/{uuid}` answered 200,
+and that asymmetry was documented as deliberate. Hiding the references is what made it a problem
+rather than a curiosity: a deleted site could still be recovered from — the route is idempotent and
+honours `move_dives_to` on an already-deleted site, so a diver who deleted first could still
+re-point the dives — while a deleted trip could not. This change made the association invisible on
+both halves, so shipping it would have left the trip half invisible *and* unrecoverable.
+
+Both routes now take `include_deleted=True`. The alignment went in that direction rather than the
+other one, and the direction is the whole decision. Making `erase_dive_site` 404 to match would have
+been equally consistent and simpler to explain, but it removes the only after-the-fact recovery the
+app has, right in the change that makes recovery matter. It also breaks a retry that was reasoned
+about on purpose: a client that loses the response to `delete?move_dives_to=X` can currently repeat
+the call and learn what happened, whereas one 404 would cover both "already gone, dives moved" and
+"already gone, dives stranded" — and the dives are the half the client needs to know about.
+Idempotent `DELETE` is the more conventional of the two answers besides.
+
+**Client-visible.** A retry that used to 404 now answers 200 with `moved_dives`. Nothing breaks — a
+client treating the old 404 as "already gone" still behaves correctly — but "deleted twice" is no
+longer distinguishable from "deleted once" by status alone.
+
 ### `get_trip_uuids_by_ids` also gained a `user_id` scope
 
 Unrelated to the bug and not a fix for anything reachable: every caller passes ids read off the
