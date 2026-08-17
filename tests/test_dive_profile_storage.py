@@ -11,19 +11,13 @@ Same skip-if-unreachable guard and same write-real-rows-and-leave-them conventio
 `test_dive_check_constraints.py`; see the note there.
 """
 
-from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 
 import pytest
-import pytest_asyncio
 from sqlalchemy import select
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.ext.asyncio.session import AsyncSession
 from sqlalchemy.orm import Session
 
-from src.app.core.config import settings
-from src.app.core.db.database import Base
 from src.app.models.dive import Dive
 from src.app.models.dive_profile import DiveProfile
 from src.app.models.user import User
@@ -34,38 +28,10 @@ from src.app.services.dive_profiles import (
     get_gas_attribution_for_dives,
     store_profile,
 )
-from tests.conftest import sync_engine
+from tests.conftest import db_available
 from tests.helpers.generators import create_user
 
-
-def _db_available() -> bool:
-    try:
-        with sync_engine.connect():
-            return True
-    except OperationalError:
-        return False
-
-
-pytestmark = pytest.mark.skipif(not _db_available(), reason="No database connection available")
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _ensure_tables() -> None:
-    Base.metadata.create_all(sync_engine)
-
-
-@pytest_asyncio.fixture
-async def async_db() -> AsyncGenerator[AsyncSession]:
-    """An `AsyncSession` on its own engine, exactly as `test_dive_numbering.py` builds one
-    and for the same reason: the code under test is async while `conftest`'s `db` fixture
-    is the sync session the rest of the suite shares, and pytest-asyncio gives each test
-    its own event loop - so a pooled connection from the previous test cannot be reused.
-    """
-    engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
-    session_factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-    async with session_factory() as session:
-        yield session
-    await engine.dispose()
+pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
 
 @pytest.fixture

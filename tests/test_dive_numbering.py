@@ -9,35 +9,20 @@ Automatically skipped when no database is reachable (e.g. running `pytest` outsi
 project's docker compose setup).
 """
 
-from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
-import pytest_asyncio
 from sqlalchemy import select
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
-from src.app.core.config import settings
-from src.app.core.db.database import Base
 from src.app.models.dive import Dive
 from src.app.models.user import User
 from src.app.services.dive_numbering import renumber_dives, suggest_dive_number, summarize_numbering
-from tests.conftest import sync_engine
-from tests.helpers.generators import create_user
+from tests.conftest import db_available
 
-
-def _db_available() -> bool:
-    try:
-        with sync_engine.connect():
-            return True
-    except OperationalError:
-        return False
-
-
-pytestmark = pytest.mark.skipif(not _db_available(), reason="No database connection available")
+pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
 # Every dive in this module hangs off this instant, so a test reads as "day 3 of the log"
 # rather than as a date. Fixed rather than `now()`-relative: `suggest_dive_number` slices
@@ -48,38 +33,6 @@ _EPOCH = datetime(2024, 5, 1, 9, 0, tzinfo=UTC)
 
 def _day(offset: int) -> datetime:
     return _EPOCH + timedelta(days=offset)
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _ensure_tables() -> None:
-    """Create any missing tables (idempotent), as in `test_dive_check_constraints.py`."""
-    Base.metadata.create_all(sync_engine)
-
-
-@pytest_asyncio.fixture
-async def async_db() -> AsyncGenerator[AsyncSession]:
-    """An `AsyncSession` on its own engine, since the service under test is async while
-    `conftest`'s `db` fixture (used here to seed rows) is the sync one the rest of the
-    suite shares. Built per test because pytest-asyncio gives each one its own event loop.
-    """
-    engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
-    session_factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-    async with session_factory() as session:
-        yield session
-    await engine.dispose()
-
-
-@pytest.fixture
-def diver(db: Session) -> User:
-    return create_user(db)
-
-
-@pytest.fixture
-def other_diver(db: Session) -> User:
-    """A second log in the same table. Every query in the service filters by `user_id`,
-    and a test suite that only ever has one user in the database cannot notice when one
-    of them stops."""
-    return create_user(db)
 
 
 def _log(db: Session, user: User, *numbered_days: tuple[int, int], **overrides: Any) -> list[Dive]:
