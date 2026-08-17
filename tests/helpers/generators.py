@@ -117,6 +117,11 @@ def create_dive(
 # of the log" rather than as a date. Fixed rather than `now()`-relative: the services these
 # tests exercise slice a log by time, and a suite that quietly means something different
 # each day it runs is the wrong tool for testing that.
+#
+# Deliberately unrelated to the 2026 dates `create_dive`/`create_trip` use, and two years
+# clear of them: a module mixing the two builders gets dives that sort unambiguously into a
+# "log" half and a "single row" half. If you ever need them interleaved, pass the day
+# offsets rather than moving this.
 LOG_EPOCH = datetime(2024, 5, 1, 9, 0, tzinfo=UTC)
 
 
@@ -133,7 +138,8 @@ def create_dive_log(
     Separate from `create_dive` rather than layered on it: this exists to arrange a *log*
     whose ordering is the thing under test, so it takes dive numbers and days as data and
     commits the whole set at once. `overrides` reaches the model directly, which is how a
-    test seeds `is_deleted`/`deleted_at` or a `utc_offset_minutes` that differs per dive.
+    test seeds `is_deleted`/`deleted_at` or a `utc_offset_minutes`. They apply to every
+    dive in the call, so a log whose rows differ in one of them takes two calls.
     """
     dives = [
         models.Dive(
