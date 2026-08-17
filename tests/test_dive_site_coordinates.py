@@ -291,8 +291,13 @@ class TestTheSummaryLoaders:
     `DiveSiteInfo(...)` call - and the two lists are maintained by hand. Nothing about a
     latitude built from `row.longitude` is a type error or a range error, so a transposed
     pair would sail through every other test in this file and land the pin in the wrong
-    hemisphere. That is what these two assert against, which is why the fixture uses a real
+    hemisphere. That is what these assert against, which is why the fixture uses a real
     pair whose halves are not interchangeable.
+
+    The **constructor** half only: the rows are `SimpleNamespace`s that always carry every
+    attribute, so a column dropped from a `select()` fails against Postgres rather than
+    here. Transposition is the likelier of the two mistakes and the one with no other
+    check anywhere.
     """
 
     def _db(self, rows: list[SimpleNamespace]) -> MagicMock:
