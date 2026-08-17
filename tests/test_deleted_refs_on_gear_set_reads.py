@@ -1,9 +1,14 @@
 """Tests that a gear set stops naming a gear item the diver has deleted.
 
-The last surface in the family `test_deleted_refs_on_dive_reads.py` covers, and the one
+The fourth surface in the family `test_deleted_refs_on_dive_reads.py` covers, and the one
 where the answer was chosen rather than inherited: a gear set is a template, so clearing
 the `gear_set_item` rows in `erase_gear_item` was on the table too. It reads instead, and
 the rows stay - see DECISIONS.md, and `get_gear_items_for_set` for the short version.
+
+Fourth of four *summary-embedding loaders*, which is not the same as last: the
+gear-service resolvers still emit uuids the API refuses back, deliberately and for a
+reason of their own. See "The siblings this one leaves alone" in DECISIONS.md before
+assuming an untested read there is an oversight.
 
 Same shape as the dive-read module: the links survive the delete, so nothing but the
 query's own `WHERE` decides whether the app renders an orphan, and a stubbed session

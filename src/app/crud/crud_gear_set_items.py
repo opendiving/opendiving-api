@@ -10,7 +10,7 @@ from .crud_gear_items import GEAR_ITEM_INFO_COLUMNS, gear_item_info_from_row
 async def get_gear_items_for_set(db: AsyncSession, gear_set_id: int) -> list[GearItemInfo]:
     """Return the *live* gear items in a set, in the order they were added.
 
-    The symptom is the one `get_gear_items_for_dive` has: `erase_gear_item` flags the item
+    The symptom is the one `get_gear_items_for_dive` had: `erase_gear_item` flags the item
     and leaves the `gear_set_item` rows alone, so without this a set goes on listing kit
     that `GET /gear-item/{uuid}` answers 404 for and that `PATCH /gear-set` refuses back -
     `resolve_gear_item_ids_for_user` resolves only live items, so reading a set's item list
@@ -26,8 +26,9 @@ async def get_gear_items_for_set(db: AsyncSession, gear_set_id: int) -> list[Gea
     The links survive the delete, and no further than the set's next membership edit:
     `patch_gear_set` runs `replace_gear_items_for_set` - a delete-and-reinsert - whenever
     the request carries `gear_item_uuids`, so a client submitting back the shortened list
-    it was handed drops the row for good. A rename or a weight change does not, which is
-    the one way this is gentler than the dive half.
+    it was handed drops the row for good. A rename or a weight change does not, an absent
+    list meaning *don't touch* - which is the same guard `patch_dive` puts on both of its
+    list replacements, not something gentler about this half.
 
     Only `is_deleted` hides. Archived items come through flagged, exactly as on the dive
     loaders: archiving retires kit from the picker without unpicking the sets it is in.
@@ -81,12 +82,12 @@ async def replace_gear_items_for_set(
     hidden one and the delete below destroys its row. No client can prevent it: it cannot
     preserve a reference it was never handed.
 
-    One thing is milder here than on the dive helpers. `patch_gear_set` reaches this only
-    when the request actually carries `gear_item_uuids`, so renaming a set or changing its
-    `weight` severs nothing - there is no equivalent of the trip half's indistinguishable
-    "the diver cleared it" versus "the client echoed back a null", because an absent list
-    means *don't touch*. The narrow case survives regardless: adding one item resubmits the
-    whole list, and the hidden row goes with it.
+    `patch_gear_set` reaches this only when the request actually carries `gear_item_uuids`,
+    so renaming a set or changing its `weight` severs nothing - but that is not a mercy
+    peculiar to sets: `patch_dive` guards both of its list replacements with the same
+    `is not None`. The only half without that guard is the scalar `trip_uuid`, where an
+    explicit null and an echoed one are the same request. And the narrow case survives the
+    guard anyway: adding one item resubmits the whole list, and the hidden row goes with it.
 
     Declined rather than missed - see "One narrower case `dirtyFields` cannot reach" in
     DECISIONS.md for the fix and why its cost was judged too high for a path this narrow.
