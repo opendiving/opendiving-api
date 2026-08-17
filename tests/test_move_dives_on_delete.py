@@ -221,13 +221,15 @@ class TestEraseTripWithoutTheParameter:
         assert await _erase_trip(trip_route) == DeletedWithMovedDives(message="Trip deleted", moved_dives=0)
 
     @pytest.mark.asyncio
-    async def test_the_dive_caches_are_left_alone(self, trip_route: dict[str, Any]) -> None:
-        """A plain delete leaves every `dive.trip_id` where it is, so no cached dive read
-        says anything different afterwards - unlike a move, which changes the `trip_uuid`
-        each moved dive reports."""
+    async def test_the_dive_caches_are_dropped_anyway(self, trip_route: dict[str, Any]) -> None:
+        """A plain delete leaves every `dive.trip_id` where it is, but `get_trip_uuids_by_ids`
+        resolves only live trips, so each of those dives starts reading back
+        `trip_uuid: null`. Skipping this - which the route did while that lookup resolved
+        deleted trips too - would leave the cached reads naming a trip a fresh read no
+        longer does, which is the orphan reference the filter exists to remove."""
         await _erase_trip(trip_route)
 
-        trip_route["invalidate_dives"].assert_not_awaited()
+        trip_route["invalidate_dives"].assert_awaited_once_with(USER_ID)
 
 
 class TestEraseTripWithAReplacement:
@@ -263,12 +265,14 @@ class TestEraseTripWithAReplacement:
         trip_route["invalidate_dives"].assert_awaited_once_with(USER_ID)
 
     @pytest.mark.asyncio
-    async def test_a_replacement_that_moved_nothing_drops_nothing(self, trip_route: dict[str, Any]) -> None:
+    async def test_a_replacement_that_moved_nothing_still_drops_the_caches(self, trip_route: dict[str, Any]) -> None:
+        """The count no longer gates the invalidation: the trip is gone from every dive
+        read either way, so an empty trip's delete has to drop the caches like any other."""
         trip_route["reassign"].side_effect = _records(trip_route["calls"], "reassign", 0)
 
         await _erase_trip(trip_route, move_dives_to=uuid7())
 
-        trip_route["invalidate_dives"].assert_not_awaited()
+        trip_route["invalidate_dives"].assert_awaited_once_with(USER_ID)
 
     @pytest.mark.asyncio
     async def test_a_replacement_that_is_not_the_callers_is_a_422(self, trip_route: dict[str, Any]) -> None:
@@ -325,11 +329,10 @@ class TestEraseDiveSiteWithoutTheParameter:
 
     @pytest.mark.asyncio
     async def test_the_dive_caches_are_dropped_anyway(self, dive_site_route: dict[str, Any]) -> None:
-        """The mirror image of the trip route's `test_the_dive_caches_are_left_alone`, and
-        the reason the two differ: a soft-deleted site stays attached to the dives logged
-        at it and is still rendered on them, so a bare delete does change what every one of
-        those cached reads should say. Making this conditional on `moved_dives` the way
-        `erase_trip` is would leave them holding a site that no longer exists."""
+        """A deleted site drops out of every dive read, so a bare delete changes what all
+        of those cached reads should say. Making this conditional on `moved_dives` would
+        leave them holding a site that no longer exists - which is exactly what the trip
+        route did until its lookup started filtering deleted trips; the two now match."""
         await _erase_dive_site(dive_site_route)
 
         dive_site_route["invalidate_dives"].assert_awaited_once_with(USER_ID)

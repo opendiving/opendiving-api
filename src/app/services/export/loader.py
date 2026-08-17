@@ -177,18 +177,24 @@ async def _owned(
     something else in this export still points at.
 
     The second half is not a nicety. A soft-deleted dive site **stays attached to the
-    dives logged at it** and goes on being shown by the app (`erase_dive_site`), and the
-    same is true of a gear item on its dives and gear sets (`erase_gear_item`), of a trip
-    on its dives (`erase_trip`), and of a service schedule on its records (which
+    dives logged at it** (`erase_dive_site` flags the site and leaves the join rows), and
+    the same is true of a gear item on its dives and gear sets (`erase_gear_item`), of a
+    trip on its dives (`erase_trip`), and of a service schedule on its records (which
     `_schedule_uuids_by_id` resolves with no `is_deleted` filter). Leaving those out
     would put a uuid in `export.json` that nothing in the file defines - and in UDDF,
     where the same reference is an `xs:IDREF`, would produce a document that does not
     validate.
 
-    So the rule is: **an export holds every record the caller can still see**, which for
-    these four tables is a superset of what their list endpoints return. The resurrected
-    rows carry `is_deleted: true` in `export.json`, so a reader can tell them from the
-    live ones rather than being handed a site the diver thought they had removed.
+    So the rule is: **an export holds every record something in it still references**,
+    which for these four tables is a superset of what their list endpoints return. The
+    resurrected rows carry `is_deleted: true` in `export.json`, so a reader can tell them
+    from the live ones rather than being handed a site the diver thought they removed.
+
+    Note this deliberately outlives what the *app* shows. The dive reads stopped rendering
+    deleted sites and trips (`get_dive_sites_for_dive`, `get_trip_uuids_by_ids`), so export
+    is now the only place a diver can see that a dive was logged at a site they since
+    removed. That makes the resurrection more load-bearing, not less: the IDREF argument
+    alone already requires it, and it is also the last copy of the association.
 
     One query rather than a filtered read plus a patch-up, so the ordering stays the
     database's and the `user_id` scope cannot be forgotten on the second pass.

@@ -441,7 +441,7 @@ async def _cached_read_dives(
     sites_by_dive = await get_dive_sites_for_dives(db=db, dive_ids=dive_ids)
     gear_by_dive = await get_gear_items_for_dives(db=db, dive_ids=dive_ids)
     referenced_trip_ids = [d["trip_id"] for d in dives_data["data"] if d["trip_id"] is not None]
-    trip_uuid_by_id = await get_trip_uuids_by_ids(db=db, trip_ids=referenced_trip_ids)
+    trip_uuid_by_id = await get_trip_uuids_by_ids(db=db, trip_ids=referenced_trip_ids, user_id=user_id)
 
     dives_data["data"] = [
         _to_public_dive(
@@ -622,7 +622,7 @@ async def _cached_read_dive(
 
     trip_uuid: uuid_pkg.UUID | None = None
     if db_dive["trip_id"] is not None:
-        trip_uuid_by_id = await get_trip_uuids_by_ids(db=db, trip_ids=[db_dive["trip_id"]])
+        trip_uuid_by_id = await get_trip_uuids_by_ids(db=db, trip_ids=[db_dive["trip_id"]], user_id=user_id)
         trip_uuid = trip_uuid_by_id.get(db_dive["trip_id"])
 
     mixtures = await get_mixtures_for_dive(db=db, dive_id=db_dive["id"])

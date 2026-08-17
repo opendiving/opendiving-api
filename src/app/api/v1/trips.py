@@ -397,8 +397,10 @@ async def erase_trip(
     """Soft-delete a trip, optionally moving its dives onto another trip first.
 
     404 unless the caller owns it, exactly as for a trip that doesn't exist. The row is
-    flagged rather than removed, so dives that referenced this trip keep their `trip_id` -
-    the trip simply stops appearing in reads.
+    flagged rather than removed, so dives that referenced this trip keep their `trip_id` in
+    the database - but the trip stops appearing in reads, and those dives read back with
+    `trip_uuid: null`. The link survives only in an export, which reads a deleted trip back
+    flagged `is_deleted` so the diver leaves with the record.
 
     Pass `move_dives_to` and every one of the caller's live dives on this trip is
     re-pointed at that one first, in the same transaction as the delete: either the diver's
@@ -433,16 +435,12 @@ async def erase_trip(
     # only writer here that commits, and both wrote through this one session.
     await crud_trips.delete(db=db, uuid=uuid)
     await _trip_cache.invalidate_list(owner_id)
-    # Only when dives actually moved. A plain delete leaves every `dive.trip_id` where it
-    # was, so nothing a cached dive read says about its trip has changed; a move changes
-    # the `trip_uuid` each of those dives reports.
-    #
-    # That holds *because* `get_trip_uuids_by_ids` resolves a soft-deleted trip like any
-    # other, so a fresh read after a plain delete still names this trip - which is itself
-    # the bug DECISIONS.md defers. Filter deleted trips out of that lookup and this
-    # condition has to go with it, or the trip goes on rendering on its dives out of cache
-    # for an hour after the fix. See the warning on that function.
-    if moved_dives:
-        await invalidate_dive_caches(owner_id)
+    # Unconditional, like `erase_dive_site`. Either branch changes what this user's dives
+    # report: a move rewrites each moved dive's `trip_uuid`, and a plain delete makes
+    # `get_trip_uuids_by_ids` stop resolving this trip, so every dive still pointing at it
+    # reads back `trip_uuid: null`. Skipping the plain-delete case - which this route did
+    # while that lookup still resolved deleted trips - would leave the cached reads naming
+    # a trip fresh ones no longer do, for the rest of the hour.
+    await invalidate_dive_caches(owner_id)
 
     return DeletedWithMovedDives(message="Trip deleted", moved_dives=moved_dives)
