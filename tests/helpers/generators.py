@@ -1,4 +1,5 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 from sqlalchemy.orm import Session
 from uuid6 import uuid7  # 126
@@ -110,3 +111,43 @@ def create_dive(
             is_deleted=is_deleted,
         ),
     )
+
+
+# Every dive seeded by `create_dive_log` hangs off this instant, so a test reads as "day 3
+# of the log" rather than as a date. Fixed rather than `now()`-relative: the services these
+# tests exercise slice a log by time, and a suite that quietly means something different
+# each day it runs is the wrong tool for testing that.
+LOG_EPOCH = datetime(2024, 5, 1, 9, 0, tzinfo=UTC)
+
+
+def log_day(offset: int) -> datetime:
+    return LOG_EPOCH + timedelta(days=offset)
+
+
+def create_dive_log(
+    db: Session, user: models.User, *numbered_days: tuple[int, int], **overrides: Any
+) -> list[models.Dive]:
+    """Seed a log from `(dive_number, day offset)` pairs and return the dives, in the order
+    given.
+
+    Separate from `create_dive` rather than layered on it: this exists to arrange a *log*
+    whose ordering is the thing under test, so it takes dive numbers and days as data and
+    commits the whole set at once. `overrides` reaches the model directly, which is how a
+    test seeds `is_deleted`/`deleted_at` or a `utc_offset_minutes` that differs per dive.
+    """
+    dives = [
+        models.Dive(
+            user_id=user.id,
+            dive_number=dive_number,
+            start_time=log_day(day),
+            duration=1800,
+            notes="",
+            **overrides,
+        )
+        for dive_number, day in numbered_days
+    ]
+    db.add_all(dives)
+    db.commit()
+    for dive in dives:
+        db.refresh(dive)
+    return dives

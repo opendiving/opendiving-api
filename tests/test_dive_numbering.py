@@ -10,7 +10,6 @@ project's docker compose setup).
 """
 
 from datetime import UTC, datetime, timedelta, timezone
-from typing import Any
 
 import pytest
 from sqlalchemy import select
@@ -21,39 +20,9 @@ from src.app.models.dive import Dive
 from src.app.models.user import User
 from src.app.services.dive_numbering import renumber_dives, suggest_dive_number, summarize_numbering
 from tests.conftest import db_available
+from tests.helpers.generators import create_dive_log, log_day
 
 pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
-
-# Every dive in this module hangs off this instant, so a test reads as "day 3 of the log"
-# rather than as a date. Fixed rather than `now()`-relative: `suggest_dive_number` slices
-# a log by time, and a suite that quietly means something different each day it runs is
-# the wrong tool for testing that.
-_EPOCH = datetime(2024, 5, 1, 9, 0, tzinfo=UTC)
-
-
-def _day(offset: int) -> datetime:
-    return _EPOCH + timedelta(days=offset)
-
-
-def _log(db: Session, user: User, *numbered_days: tuple[int, int], **overrides: Any) -> list[Dive]:
-    """Seed a log from `(dive_number, day offset)` pairs and return the dives, in the
-    order given."""
-    dives = [
-        Dive(
-            user_id=user.id,
-            dive_number=dive_number,
-            start_time=_day(day),
-            duration=1800,
-            notes="",
-            **overrides,
-        )
-        for dive_number, day in numbered_days
-    ]
-    db.add_all(dives)
-    db.commit()
-    for dive in dives:
-        db.refresh(dive)
-    return dives
 
 
 async def _numbers_by_day(async_db: AsyncSession, user: User) -> list[int]:
@@ -69,7 +38,7 @@ async def _numbers_by_day(async_db: AsyncSession, user: User) -> list[int]:
 class TestSuggestDiveNumber:
     @pytest.mark.asyncio
     async def test_first_dive_of_an_empty_log_is_number_one(self, async_db: AsyncSession, diver: User) -> None:
-        suggestion = await suggest_dive_number(async_db, user_id=diver.id, start_time=_day(0))
+        suggestion = await suggest_dive_number(async_db, user_id=diver.id, start_time=log_day(0))
 
         assert suggestion.dive_number == 1
         assert suggestion.is_taken is False
@@ -78,9 +47,9 @@ class TestSuggestDiveNumber:
     async def test_dive_logged_after_the_whole_log_continues_it(
         self, db: Session, async_db: AsyncSession, diver: User
     ) -> None:
-        _log(db, diver, (1, 0), (2, 1), (3, 2))
+        create_dive_log(db, diver, (1, 0), (2, 1), (3, 2))
 
-        suggestion = await suggest_dive_number(async_db, user_id=diver.id, start_time=_day(3))
+        suggestion = await suggest_dive_number(async_db, user_id=diver.id, start_time=log_day(3))
 
         assert suggestion.dive_number == 4
 
@@ -90,9 +59,9 @@ class TestSuggestDiveNumber:
     ) -> None:
         """The bug this endpoint exists to fix: "newest dive + 1" would suggest #213 for a
         dive that sits between #11 and #12."""
-        _log(db, diver, (11, 0), (12, 10), (13, 11), (212, 100))
+        create_dive_log(db, diver, (11, 0), (12, 10), (13, 11), (212, 100))
 
-        suggestion = await suggest_dive_number(async_db, user_id=diver.id, start_time=_day(5))
+        suggestion = await suggest_dive_number(async_db, user_id=diver.id, start_time=log_day(5))
 
         assert suggestion.dive_number == 12
 
@@ -100,9 +69,9 @@ class TestSuggestDiveNumber:
     async def test_dive_older_than_the_whole_log_is_number_one(
         self, db: Session, async_db: AsyncSession, diver: User
     ) -> None:
-        _log(db, diver, (1, 5), (2, 6))
+        create_dive_log(db, diver, (1, 5), (2, 6))
 
-        suggestion = await suggest_dive_number(async_db, user_id=diver.id, start_time=_day(0))
+        suggestion = await suggest_dive_number(async_db, user_id=diver.id, start_time=log_day(0))
 
         assert suggestion.dive_number == 1
 
@@ -112,9 +81,9 @@ class TestSuggestDiveNumber:
     ) -> None:
         """Back-filling produces collisions by construction - the diver is told, and the
         suggestion stands. `renumber_dives` is what reconciles the log afterwards."""
-        _log(db, diver, (1, 0), (2, 10))
+        create_dive_log(db, diver, (1, 0), (2, 10))
 
-        suggestion = await suggest_dive_number(async_db, user_id=diver.id, start_time=_day(5))
+        suggestion = await suggest_dive_number(async_db, user_id=diver.id, start_time=log_day(5))
 
         assert suggestion.dive_number == 2
         assert suggestion.is_taken is True
@@ -125,9 +94,9 @@ class TestSuggestDiveNumber:
     ) -> None:
         """A diver whose first 46 dives are on paper starts this log at #47; the next dive
         is #51, not #5."""
-        _log(db, diver, (47, 0), (48, 1), (49, 2), (50, 3))
+        create_dive_log(db, diver, (47, 0), (48, 1), (49, 2), (50, 3))
 
-        suggestion = await suggest_dive_number(async_db, user_id=diver.id, start_time=_day(4))
+        suggestion = await suggest_dive_number(async_db, user_id=diver.id, start_time=log_day(4))
 
         assert suggestion.dive_number == 51
 
@@ -137,24 +106,24 @@ class TestSuggestDiveNumber:
     ) -> None:
         """09:00+02:00 is 07:00 UTC, so this dive precedes the 08:00 UTC one - a
         comparison against the wall-clock hour would put it after."""
-        _log(db, diver, (1, 0))
-        db.add(Dive(user_id=diver.id, dive_number=2, start_time=_day(1).replace(hour=8), duration=1800, notes=""))
+        create_dive_log(db, diver, (1, 0))
+        db.add(Dive(user_id=diver.id, dive_number=2, start_time=log_day(1).replace(hour=8), duration=1800, notes=""))
         db.commit()
 
         suggestion = await suggest_dive_number(
             async_db,
             user_id=diver.id,
-            start_time=_day(1).replace(hour=9, tzinfo=timezone(timedelta(hours=2))),
+            start_time=log_day(1).replace(hour=9, tzinfo=timezone(timedelta(hours=2))),
         )
 
         assert suggestion.dive_number == 2
 
     @pytest.mark.asyncio
     async def test_ignores_deleted_dives(self, db: Session, async_db: AsyncSession, diver: User) -> None:
-        _log(db, diver, (1, 0), (2, 1))
-        _log(db, diver, (3, 2), is_deleted=True, deleted_at=datetime.now(UTC))
+        create_dive_log(db, diver, (1, 0), (2, 1))
+        create_dive_log(db, diver, (3, 2), is_deleted=True, deleted_at=datetime.now(UTC))
 
-        suggestion = await suggest_dive_number(async_db, user_id=diver.id, start_time=_day(3))
+        suggestion = await suggest_dive_number(async_db, user_id=diver.id, start_time=log_day(3))
 
         assert suggestion.dive_number == 3
 
@@ -162,10 +131,10 @@ class TestSuggestDiveNumber:
     async def test_ignores_another_divers_log(
         self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
     ) -> None:
-        _log(db, other_diver, (400, 0), (401, 1))
-        _log(db, diver, (1, 0))
+        create_dive_log(db, other_diver, (400, 0), (401, 1))
+        create_dive_log(db, diver, (1, 0))
 
-        suggestion = await suggest_dive_number(async_db, user_id=diver.id, start_time=_day(2))
+        suggestion = await suggest_dive_number(async_db, user_id=diver.id, start_time=log_day(2))
 
         assert suggestion.dive_number == 2
         assert suggestion.is_taken is False
@@ -183,7 +152,7 @@ class TestSummarizeNumbering:
 
     @pytest.mark.asyncio
     async def test_clean_log_is_sequential(self, db: Session, async_db: AsyncSession, diver: User) -> None:
-        _log(db, diver, (1, 0), (2, 1), (3, 2))
+        create_dive_log(db, diver, (1, 0), (2, 1), (3, 2))
 
         summary = await summarize_numbering(async_db, user_id=diver.id)
 
@@ -199,7 +168,7 @@ class TestSummarizeNumbering:
     ) -> None:
         """#47-#49 with nothing missing is a tidy log, not a broken one - the first 46
         dives are simply in a paper logbook."""
-        _log(db, diver, (47, 0), (48, 1), (49, 2))
+        create_dive_log(db, diver, (47, 0), (48, 1), (49, 2))
 
         summary = await summarize_numbering(async_db, user_id=diver.id)
 
@@ -208,7 +177,7 @@ class TestSummarizeNumbering:
 
     @pytest.mark.asyncio
     async def test_counts_gaps(self, db: Session, async_db: AsyncSession, diver: User) -> None:
-        _log(db, diver, (1, 0), (5, 1), (6, 2))
+        create_dive_log(db, diver, (1, 0), (5, 1), (6, 2))
 
         summary = await summarize_numbering(async_db, user_id=diver.id)
 
@@ -218,7 +187,7 @@ class TestSummarizeNumbering:
 
     @pytest.mark.asyncio
     async def test_counts_duplicates(self, db: Session, async_db: AsyncSession, diver: User) -> None:
-        _log(db, diver, (1, 0), (2, 1), (2, 2), (2, 3))
+        create_dive_log(db, diver, (1, 0), (2, 1), (2, 2), (2, 3))
 
         summary = await summarize_numbering(async_db, user_id=diver.id)
 
@@ -231,7 +200,7 @@ class TestSummarizeNumbering:
         self, db: Session, async_db: AsyncSession, diver: User
     ) -> None:
         """Numbers that go 1, 9, 4, 5: only #4 is lower than the dive before it."""
-        _log(db, diver, (1, 0), (9, 1), (4, 2), (5, 3))
+        create_dive_log(db, diver, (1, 0), (9, 1), (4, 2), (5, 3))
 
         summary = await summarize_numbering(async_db, user_id=diver.id)
 
@@ -243,7 +212,7 @@ class TestSummarizeNumbering:
     ) -> None:
         """Reporting it under both headings would tell a diver two things are wrong with
         their log when one is."""
-        _log(db, diver, (1, 0), (2, 1), (2, 2))
+        create_dive_log(db, diver, (1, 0), (2, 1), (2, 2))
 
         summary = await summarize_numbering(async_db, user_id=diver.id)
 
@@ -254,9 +223,9 @@ class TestSummarizeNumbering:
     async def test_ignores_deleted_dives_and_other_divers(
         self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
     ) -> None:
-        _log(db, diver, (1, 0), (2, 1))
-        _log(db, diver, (99, 2), is_deleted=True, deleted_at=datetime.now(UTC))
-        _log(db, other_diver, (500, 0))
+        create_dive_log(db, diver, (1, 0), (2, 1))
+        create_dive_log(db, diver, (99, 2), is_deleted=True, deleted_at=datetime.now(UTC))
+        create_dive_log(db, other_diver, (500, 0))
 
         summary = await summarize_numbering(async_db, user_id=diver.id)
 
@@ -269,7 +238,7 @@ class TestRenumberDives:
     async def test_dry_run_reports_the_changes_and_writes_nothing(
         self, db: Session, async_db: AsyncSession, diver: User
     ) -> None:
-        _log(db, diver, (11, 0), (12, 1), (13, 2))
+        create_dive_log(db, diver, (11, 0), (12, 1), (13, 2))
 
         result = await renumber_dives(async_db, user_id=diver.id, dry_run=True)
 
@@ -283,7 +252,7 @@ class TestRenumberDives:
         self, db: Session, async_db: AsyncSession, diver: User
     ) -> None:
         # Deliberately scrambled: gaps, a duplicate, and numbers that don't follow dates.
-        _log(db, diver, (7, 0), (3, 1), (3, 2), (99, 3))
+        create_dive_log(db, diver, (7, 0), (3, 1), (3, 2), (99, 3))
 
         result = await renumber_dives(async_db, user_id=diver.id)
 
@@ -297,7 +266,7 @@ class TestRenumberDives:
     @pytest.mark.asyncio
     async def test_starts_the_count_where_asked(self, db: Session, async_db: AsyncSession, diver: User) -> None:
         """The diver whose first 46 dives are on paper renumbers to #47 onwards."""
-        _log(db, diver, (1, 0), (2, 1), (3, 2))
+        create_dive_log(db, diver, (1, 0), (2, 1), (3, 2))
 
         await renumber_dives(async_db, user_id=diver.id, start_at=47)
 
@@ -306,9 +275,9 @@ class TestRenumberDives:
     @pytest.mark.asyncio
     async def test_scope_leaves_earlier_dives_untouched(self, db: Session, async_db: AsyncSession, diver: User) -> None:
         """Tidy the recent tail without rewriting the part that mirrors a paper logbook."""
-        _log(db, diver, (100, 0), (101, 1), (9, 2), (4, 3))
+        create_dive_log(db, diver, (100, 0), (101, 1), (9, 2), (4, 3))
 
-        result = await renumber_dives(async_db, user_id=diver.id, start_at=102, from_start_time=_day(2))
+        result = await renumber_dives(async_db, user_id=diver.id, start_at=102, from_start_time=log_day(2))
 
         assert result.dives_in_scope == 2
         assert await _numbers_by_day(async_db, diver) == [100, 101, 102, 103]
@@ -317,16 +286,16 @@ class TestRenumberDives:
     async def test_scope_boundary_includes_a_dive_at_the_exact_instant(
         self, db: Session, async_db: AsyncSession, diver: User
     ) -> None:
-        _log(db, diver, (1, 0), (2, 1))
+        create_dive_log(db, diver, (1, 0), (2, 1))
 
-        result = await renumber_dives(async_db, user_id=diver.id, start_at=50, from_start_time=_day(1))
+        result = await renumber_dives(async_db, user_id=diver.id, start_at=50, from_start_time=log_day(1))
 
         assert result.dives_in_scope == 1
         assert await _numbers_by_day(async_db, diver) == [1, 50]
 
     @pytest.mark.asyncio
     async def test_already_clean_log_reports_no_changes(self, db: Session, async_db: AsyncSession, diver: User) -> None:
-        _log(db, diver, (1, 0), (2, 1), (3, 2))
+        create_dive_log(db, diver, (1, 0), (2, 1), (3, 2))
 
         result = await renumber_dives(async_db, user_id=diver.id)
 
@@ -340,7 +309,7 @@ class TestRenumberDives:
         """The case a row-by-row renumber would break on: every dive takes the number the
         dive before it currently holds. One `UPDATE ... FROM` has no intermediate state to
         collide with."""
-        _log(db, diver, (2, 0), (3, 1), (4, 2), (5, 3))
+        create_dive_log(db, diver, (2, 0), (3, 1), (4, 2), (5, 3))
 
         await renumber_dives(async_db, user_id=diver.id)
 
@@ -350,9 +319,9 @@ class TestRenumberDives:
     async def test_leaves_deleted_dives_and_other_divers_alone(
         self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
     ) -> None:
-        _log(db, diver, (7, 0), (8, 1))
-        deleted = _log(db, diver, (99, 2), is_deleted=True, deleted_at=datetime.now(UTC))[0]
-        theirs = _log(db, other_diver, (500, 0))[0]
+        create_dive_log(db, diver, (7, 0), (8, 1))
+        deleted = create_dive_log(db, diver, (99, 2), is_deleted=True, deleted_at=datetime.now(UTC))[0]
+        theirs = create_dive_log(db, other_diver, (500, 0))[0]
 
         await renumber_dives(async_db, user_id=diver.id)
 
@@ -365,7 +334,7 @@ class TestRenumberDives:
         self, db: Session, async_db: AsyncSession, diver: User
     ) -> None:
         """The end state the whole feature exists to reach."""
-        _log(db, diver, (7, 0), (3, 1), (3, 2), (99, 3))
+        create_dive_log(db, diver, (7, 0), (3, 1), (3, 2), (99, 3))
 
         await renumber_dives(async_db, user_id=diver.id)
 
