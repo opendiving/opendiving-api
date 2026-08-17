@@ -91,11 +91,21 @@ class DiveTechScalars(BaseModel):
     ]
     entry_latitude: Annotated[
         float | None,
-        Field(default=None, examples=[28.437455], description="Latitude of the last satellite fix before the descent"),
+        Field(
+            default=None,
+            examples=[28.437455],
+            description="Latitude of the last position the import recorded before the descent - a satellite fix, "
+            "or the dive-start position the computer logged itself",
+        ),
     ]
     entry_longitude: Annotated[
         float | None,
-        Field(default=None, examples=[34.458997], description="Longitude of the last satellite fix before the descent"),
+        Field(
+            default=None,
+            examples=[34.458997],
+            description="Longitude of the last position the import recorded before the descent - a satellite fix, "
+            "or the dive-start position the computer logged itself",
+        ),
     ]
     exit_latitude: Annotated[
         float | None,

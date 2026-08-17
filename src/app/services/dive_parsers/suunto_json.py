@@ -363,6 +363,11 @@ def _positions(samples: list[dict[str, Any]]) -> EntryExit:
         # Both, rather than one or the other: no file in the corpus writes an origin and a
         # fix onto one sample, but nothing in the format forbids it and dropping either
         # would be this function choosing between two positions instead of `entry_and_exit`.
+        # **The order is the tie-break**, and it is load-bearing rather than incidental:
+        # two positions off one sample share a timestamp, and `entry_and_exit` separates
+        # equal timestamps by their order here, so the sample fix wins and the origin is
+        # the fallback. Reordering this tuple would change that silently - hence
+        # `test_a_sample_fix_outranks_an_origin_on_the_same_sample`.
         fixes.extend(candidate for candidate in (fix, origin_fix) if candidate is not None)
 
     if unreadable:

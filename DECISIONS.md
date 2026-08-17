@@ -5782,8 +5782,8 @@ columns on the row that was already being selected.
 ## Every GPS fix in the corpus is an exit fix, which is why the split is on the deepest sample
 
 `services/dive_parsers/positions.py` decides which fix is the entry and which the exit by splitting
-on the dive's **deepest sample**: the last fix before it is the entry, the first fix at or after it
-is the exit. The obvious rule — first fix, last fix — is wrong on every file we have.
+on the dive's **deepest sample**: the last fix at or before it is the entry, the first one strictly
+after it is the exit. The obvious rule — first fix, last fix — is wrong on every file we have.
 
 GPS does not reach a wrist through seawater, so every position in a dive log was recorded at the
 surface. In the 19 Suunto Ocean exports that carry GPS at all, **all of them log their first fix
@@ -5914,6 +5914,25 @@ nothing reads. Left alone it would have bailed out before the origin on any file
 and no sample fixes — a shape the corpus does not currently contain, so no existing test would have
 noticed. It now checks both keys, and a fixture with an origin and no `Latitude` anywhere holds it
 there.
+
+**The tie at the pivot changed direction because of this**, and it is the subtlest part of the
+change. `entry_and_exit` split on `< deepest_at` / `>= deepest_at`, so a position sharing the
+pivot's timestamp landed in the *exit*. That was unreachable while fixes were the only channel —
+every one of them sits at ~96 % of the dive, nowhere near the peak — and the origin is the first
+position that can sit at t=0 and tie: a depth channel whose readings are all equal pivots on its
+earliest sample, since `max` keeps the first of equal values. Such a file would have written the
+dive's *starting* position into `exit_latitude`/`exit_longitude` and left the entry empty — the
+exact silent failure the section above exists to prevent, arriving through the change meant to fix
+it. The split is now `<=` / `>`. Nothing is received at depth, so a tie means a degenerate file
+either way; resolving it towards the entry is right for an origin and no worse for a plain fix,
+which has no defensible column at that instant.
+
+A second tie sits underneath it: two positions collected off *one sample* share a timestamp exactly,
+and `max`/`min` keep the first of equal keys — so which one wins is decided by the order
+`_positions` appends them in, and by nothing either value says. The sample fix is appended first and
+therefore wins; the origin is the fallback. No corpus file writes both onto one sample, so this is
+pinned by a test rather than by evidence, and the point of pinning it is that reordering that tuple
+would otherwise change behaviour with nothing to catch it.
 
 One thing worth knowing before trusting an origin: `69d150a4`'s sits ~350 m from its own exit, at
 the position of that morning's dive. Confirmed as a genuine drift dive rather than a stale fix

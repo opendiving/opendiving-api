@@ -2441,6 +2441,45 @@ class TestEntryAndExitPositions:
 
         assert (parsed.entry_latitude, parsed.entry_longitude) == (28.2, 34.2)
 
+    def test_an_origin_sharing_the_pivots_timestamp_is_still_the_entry(self):
+        """The tie `DiveRouteOrigin` made reachable. A depth channel whose readings are all
+        equal pivots on its earliest sample, and the origin sits at exactly that instant -
+        so with the split resolving ties towards the exit, the dive's *starting* position
+        would have been written into the exit columns with the entry left empty."""
+        content = _ocean_json(
+            [
+                _ocean_origin(0, *self.OCEAN_ORIGIN_DEGREES),
+                _ocean_depth(0, 30.0),
+                _ocean_depth(600, 30.0),
+            ]
+        )
+
+        parsed = SuuntoJsonParser.parse(content)
+
+        assert (parsed.entry_latitude, parsed.entry_longitude) == self.OCEAN_ORIGIN_ROUNDED
+        assert (parsed.exit_latitude, parsed.exit_longitude) == (None, None)
+
+    def test_a_sample_fix_outranks_an_origin_on_the_same_sample(self):
+        """Two positions off one sample share a timestamp, and `entry_and_exit` separates
+        equal timestamps by collection order - so which wins is decided by the order
+        `_positions` appends them in, not by anything either value says. No corpus file
+        writes both onto one sample; this pins the tie-break so a reorder cannot change it
+        silently."""
+        content = _ocean_json(
+            [
+                {
+                    **_ocean_origin(0, *self.OCEAN_ORIGIN_DEGREES),
+                    "Latitude": math.radians(28.2),
+                    "Longitude": math.radians(34.2),
+                },
+                _ocean_depth(600, 30.0),
+            ]
+        )
+
+        parsed = SuuntoJsonParser.parse(content)
+
+        assert (parsed.entry_latitude, parsed.entry_longitude) == (28.2, 34.2)
+
     def test_a_malformed_origin_does_not_cost_the_fixes_beside_it(self):
         """Best-effort per sample, like the rest of this pass. An origin that is a string,
         or that carries half a pair, is skipped rather than taking the exit down with it.

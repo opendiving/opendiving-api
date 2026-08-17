@@ -150,7 +150,17 @@ def geo_fix(at: float, latitude: float | None, longitude: float | None) -> GeoFi
 
 
 def entry_and_exit(fixes: list[GeoFix], depths: list[tuple[float, float]]) -> EntryExit:
-    """Split fixes on the deepest sample: the last one before it, the first one after.
+    """Split fixes on the deepest sample: the last one at or before it, the first one after.
+
+    **A position sharing the pivot's timestamp is an entry, not an exit**, and the tie is
+    worth spelling out because it used to fall the other way. No fix is received at depth,
+    so a position landing exactly on the deepest sample means a degenerate file - a depth
+    channel whose readings are all equal pivots on its earliest sample, and `Suunto`'s
+    `DiveRouteOrigin` sits at exactly that instant. Resolved towards the exit, such a file
+    would write the dive's *starting* position into `exit_latitude`/`exit_longitude` and
+    leave the entry empty, which is the one silent failure this module exists to prevent.
+    Resolved towards the entry it is right for the origin and no worse for anything else,
+    since a plain fix at the pivot has no defensible column either way.
 
     "Last before" and "first after" rather than "first" and "last" because the fix that
     describes where a diver got in is the one taken just before they descended, not the
@@ -191,8 +201,11 @@ def entry_and_exit(fixes: list[GeoFix], depths: list[tuple[float, float]]) -> En
     # moment the diver first reached the deepest reading rather than the last.
     deepest_at = max(depths, key=lambda point: point[1])[0]
 
-    before = [fix for fix in fixes if fix.at < deepest_at]
-    after = [fix for fix in fixes if fix.at >= deepest_at]
+    before = [fix for fix in fixes if fix.at <= deepest_at]
+    after = [fix for fix in fixes if fix.at > deepest_at]
+    # `max`/`min` keep the *first* of equal keys, so two positions sharing one timestamp
+    # are separated by their order in `fixes` - which is the order the parser collected
+    # them in. `SuuntoJsonParser._positions` relies on that and says so.
     return EntryExit(
         entry=max(before, key=lambda fix: fix.at) if before else None,
         exit=min(after, key=lambda fix: fix.at) if after else None,
