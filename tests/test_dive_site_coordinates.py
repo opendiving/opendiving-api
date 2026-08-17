@@ -36,6 +36,7 @@ from src.app.api.v1 import dive_sites as dive_sites_module
 from src.app.core.utils import cache as cache_module
 from src.app.crud.crud_dive_dive_sites import (
     DIVE_SITE_INFO_COLUMNS,
+    dive_site_info_from_row,
     get_dive_sites_for_dive,
     get_dive_sites_for_dives,
 )
@@ -305,7 +306,8 @@ class TestTheSummaryLoaders:
     The **mapping** only: the rows are `SimpleNamespace`s that always carry every
     attribute, so nothing here executes SQL and a query that forgot a column would still
     fail against Postgres rather than here. The shared tuple is what makes that divergence
-    hard to write in the first place; the last test covers the half it cannot catch.
+    hard to write in the first place; the last two tests hold the tuple, the schema and
+    the constructor to the same set of names as `DiveSiteInfo` grows.
     """
 
     def _db(self, rows: list[SimpleNamespace]) -> MagicMock:
@@ -341,8 +343,8 @@ class TestTheSummaryLoaders:
 
     @pytest.mark.asyncio
     async def test_the_batched_loader_maps_each_column_to_its_own_field(self) -> None:
-        """Same assertion against the second copy of the same mapping, plus the grouping
-        the batched version adds: a dive with no sites keeps its empty list."""
+        """Same assertion through the batched loader, plus the grouping it adds: a dive
+        with no sites keeps its empty list."""
         row = self._row(dive_id=7)
 
         by_dive = await get_dive_sites_for_dives(self._db([row]), dive_ids=[7, 8])
@@ -353,9 +355,24 @@ class TestTheSummaryLoaders:
         ]
 
     def test_the_shared_columns_cover_every_field_of_the_summary(self) -> None:
-        """The one way a field can still go missing: `DiveSiteInfo` grows one, and neither
-        the tuple nor the constructor is extended. Every field but `uuid` has a default -
-        `latitude` and `longitude` included - so that reads back as a site without the new
-        value rather than raising anywhere.
+        """One way a field can still go missing: `DiveSiteInfo` grows one and the tuple is
+        left alone. `location`, `latitude` and `longitude` all default, so a new field
+        alongside them reads back absent rather than raising anywhere.
         """
         assert {column.key for column in DIVE_SITE_INFO_COLUMNS} == set(DiveSiteInfo.model_fields)
+
+    def test_the_constructor_consumes_every_shared_column(self) -> None:
+        """The other way, and the one the assertion above cannot see: tuple and schema both
+        grow the field, `dive_site_info_from_row` does not. The mapping tests hard-code
+        their five-tuples, so nothing else would notice it defaulting.
+
+        Comparing field name against column name rather than position also refuses a
+        transposed pair, from the other side than the tests above.
+        """
+        row = self._row()
+
+        info = dive_site_info_from_row(row)
+
+        assert {field: getattr(info, field) for field in DiveSiteInfo.model_fields} == {
+            column.key: getattr(row, column.key) for column in DIVE_SITE_INFO_COLUMNS
+        }
