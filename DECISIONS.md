@@ -5855,9 +5855,10 @@ a valid longitude that no bound would ever catch.
 ### UDDF has no slot for either position
 
 Checked against the vendored XSD rather than assumed, the same way the rest of *"What UDDF 3.2.2 has
-no slot for"* was: `<geography>` hangs off a `<site>` and nowhere else. `informationbeforediveType`
-and `informationafterdiveType` have no coordinate element, and neither does `waypointType` — which
-carries `heading` but no position. So the entry and exit positions join the deco ceiling and the
-CNS/OTU scalars on the list of things that survive in `export.json` and `dives.csv` only.
-`dives.csv` gets four columns beside the other import-owned readings, empty where there was no fix
-rather than `0` — the Null Island trap again, from the writing side.
+no slot for"* was: `geographyType` is referenced from exactly two places, `siteType` and
+`trippartType`, and neither is per-dive. `informationbeforediveType` and `informationafterdiveType`
+have no coordinate element, and neither does `waypointType` — which carries `heading` but no
+position. So the entry and exit positions join the deco ceiling and the CNS/OTU scalars on the list
+of things that survive in `export.json` and `dives.csv` only. `dives.csv` gets four columns beside
+the other import-owned readings, empty where there was no fix rather than `0` — the Null Island trap
+again, from the writing side.

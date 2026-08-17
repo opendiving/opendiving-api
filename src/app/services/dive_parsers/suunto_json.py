@@ -15,7 +15,7 @@ from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from .base import DiveParser
 from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, ceiling_cm, scaled_int_or_none, series
 from .exceptions import EXTRACTION_ERRORS, DiveParseError
-from .positions import EntryExit, GeoFix, degrees_from_radians, entry_and_exit, geo_fix
+from .positions import NO_POSITIONS, EntryExit, GeoFix, degrees_from_radians, entry_and_exit, geo_fix
 
 logger = logging.getLogger(__name__)
 
@@ -286,6 +286,14 @@ def _positions(samples: list[dict[str, Any]]) -> EntryExit:
     one everywhere else. What it costs as it stands is one more `fromisoformat` per
     sample on a parse measured at 2-11 ms.
     """
+    # An exact early-out, not a heuristic: with no `Latitude` key anywhere, `geo_fix` can
+    # never build a fix and the answer is `NO_POSITIONS` whatever the depths say. Worth
+    # the extra scan because the D5 shape - which has no GPS at all - would otherwise pay
+    # ~8 300 `fromisoformat` calls per file to build a `depths` list nothing then reads,
+    # on `POST /dive/parse`, on attach, and once per stored file in `backfill_tech_fields`.
+    if not any(isinstance(sample, dict) and "Latitude" in sample for sample in samples):
+        return NO_POSITIONS
+
     fixes: list[GeoFix] = []
     depths: list[tuple[float, float]] = []
     unreadable = 0
