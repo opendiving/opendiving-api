@@ -6364,7 +6364,8 @@ read being stale in its **membership** — listing kit that a fresh read omits, 
 hour. The comment on the call says so, because an invalidation whose only justification lives in
 another file is exactly what a later cleanup deletes as redundant. There is a test for it too
 (`TestErasingGearItemDropsTheDiveCaches`), which the trip half only acquired when its skip was
-removed.
+removed. **Since renamed** to `TestErasingGearItemDropsTheCachedReads`, when the gear-set section
+below gave the same route a second cache family to answer for.
 
 ### `dive_count` is unaffected at delete time, and moves later for a reason that is not this filter
 

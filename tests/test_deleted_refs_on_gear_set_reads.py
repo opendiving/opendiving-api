@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
+from src.app.crud.crud_gear_items import crud_gear_items
 from src.app.crud.crud_gear_set_items import (
     get_gear_items_for_set,
     get_gear_items_for_sets,
@@ -105,14 +106,25 @@ class TestDeletedGearItemsAreNotRenderedInSets:
         assert by_set[with_deleted.id] == []
 
     @pytest.mark.asyncio
-    async def test_the_link_rows_survive_the_filter(self, db: Session, async_db: AsyncSession, diver: User) -> None:
+    async def test_deleting_a_gear_item_keeps_its_set_links(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
         """The half that is easy to lose to a later "tidy up the orphans" change: hiding
-        was chosen *over* clearing the rows at delete time, so the membership has to still
-        be in the database for `_owned` to resurrect the item into an export."""
-        deleted = create_gear_item(db, diver, is_deleted=True)
+        was chosen *over* clearing the rows in `erase_gear_item`, so the membership has to
+        still be in the database for `_owned` to resurrect the item into an export.
+
+        The delete has to happen here rather than being arranged with an already-deleted
+        fixture, which is what makes this a regression test at all: a fixture proves only
+        that an insert can be read back, and would go on passing the day someone adds the
+        `DELETE FROM gear_set_item` this section of DECISIONS.md argues against.
+        """
+        item = create_gear_item(db, diver)
         gear_set = create_gear_set(db, diver)
-        await replace_gear_items_for_set(async_db, gear_set_id=gear_set.id, gear_item_ids=[deleted.id])
+        await replace_gear_items_for_set(async_db, gear_set_id=gear_set.id, gear_item_ids=[item.id])
 
-        rows = await async_db.execute(select(GearSetItem.gear_item_id).where(GearSetItem.gear_set_id == gear_set.id))
+        await crud_gear_items.delete(db=async_db, uuid=item.uuid)
 
-        assert list(rows.scalars().all()) == [deleted.id]
+        links = await async_db.execute(select(GearSetItem.gear_item_id).where(GearSetItem.gear_set_id == gear_set.id))
+        assert [row.gear_item_id for row in links] == [item.id]
+        # And the read hides it, so the row surviving is not the read being unfiltered.
+        assert await get_gear_items_for_set(async_db, gear_set_id=gear_set.id) == []
