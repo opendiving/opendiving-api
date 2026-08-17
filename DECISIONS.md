@@ -6070,6 +6070,16 @@ The count is the union of the dive ids the delete and the update returned, so a 
 *lost* the doomed site (because it already held the replacement) still counts as one that moved. It
 referenced the site being deleted and now does not, which is what the diver was asked about.
 
+The self-join carries `doomed.id != already_there.id`, which is dead weight in every real call - the
+two aliases select different sites, so it is always true - and load-bearing in the one call that
+cannot happen. Given `from == to` without it, every row joins *itself*, the `CASE` falls to its
+`else_`, and the `DELETE` strips the site from every live dive the diver has while the `UPDATE`
+matches nothing and the function returns a plausible count: a silent wipe, reported as a success.
+`erase_dive_site` does refuse that call with a 422, but the refusal is in another module and the
+docstring states no precondition, so the statement is made correct on its own terms instead. Pinned
+by `test_a_site_moved_onto_itself_destroys_nothing`. `reassign_dives_to_trip` is harmless in the
+same situation, which is exactly what would make the asymmetry easy to miss later.
+
 ### Atomicity is the session, not a new abstraction
 
 Neither reassignment commits. Both write through the request's session and `crud_*.delete` commits

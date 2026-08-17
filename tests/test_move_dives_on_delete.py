@@ -695,6 +695,25 @@ class TestReplaceDiveSiteOnDives:
         assert await _sites_of(async_db, erased) == [(doomed.id, 0)]
 
     @pytest.mark.asyncio
+    async def test_a_site_moved_onto_itself_destroys_nothing(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        """`erase_dive_site` refuses this with a 422, so it is unreachable through the API
+        - but the refusal is in another module, and without the `doomed.id !=
+        already_there.id` join condition every row would match itself, the `DELETE` would
+        strip the site off every dive in the log and the `UPDATE` would match nothing. A
+        silent wipe reported as a plausible count is the worst failure this function has,
+        so it is pinned here rather than left to the caller."""
+        site, other = _site(db, diver), _site(db, diver)
+        dive = _dive(db, diver)
+        await replace_dive_sites_for_dive(async_db, dive_id=dive.id, dive_site_ids=[site.id, other.id])
+
+        await replace_dive_site_on_dives(async_db, user_id=diver.id, from_dive_site_id=site.id, to_dive_site_id=site.id)
+        await async_db.commit()
+
+        assert await _sites_of(async_db, dive) == [(site.id, 0), (other.id, 1)]
+
+    @pytest.mark.asyncio
     async def test_a_site_nothing_was_logged_at_moves_nothing(
         self, db: Session, async_db: AsyncSession, diver: User
     ) -> None:

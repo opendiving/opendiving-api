@@ -123,6 +123,15 @@ async def replace_dive_site_on_dives(
     # The two rows of a dive that holds both sites, resolved to whichever one loses. Ties
     # on `position` (nothing forbids them) fall to the replacement's row, so the doomed row
     # is the one the `UPDATE` below rewrites - deterministic either way.
+    #
+    # `doomed.id != already_there.id` is what keeps this statement correct on its own terms
+    # rather than on a caller's. Without it, `from == to` makes every row join *itself*,
+    # the `case` falls to `else_`, and the `DELETE` strips the site from every one of the
+    # diver's dives while the `UPDATE` matches nothing - silent data loss reported as a
+    # plausible count. `erase_dive_site` does reject that call with a 422, but a guard in
+    # another module is not a precondition this one is entitled to assume, and the
+    # comparison is free: the two aliases select different sites in every real call, so it
+    # can only ever be true.
     doomed = aliased(DiveDiveSite)
     already_there = aliased(DiveDiveSite)
     loser_ids = (
@@ -130,6 +139,7 @@ async def replace_dive_site_on_dives(
         .select_from(doomed)
         .join(already_there, already_there.dive_id == doomed.dive_id)
         .where(
+            doomed.id != already_there.id,
             doomed.dive_site_id == from_dive_site_id,
             already_there.dive_site_id == to_dive_site_id,
             doomed.dive_id.in_(live_dive_ids),
