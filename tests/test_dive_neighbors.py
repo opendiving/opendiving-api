@@ -35,33 +35,7 @@ from src.app.models.user import User
 from src.app.schemas.dive import DiveNeighbors
 from src.app.services.dive_neighbors import find_dive_neighbors
 from tests.conftest import db_available
-
-_EPOCH = datetime(2024, 5, 1, 9, 0, tzinfo=UTC)
-
-
-def _day(offset: int) -> datetime:
-    return _EPOCH + timedelta(days=offset)
-
-
-def _log(db: Session, user: User, *numbered_days: tuple[int, int], **overrides: Any) -> list[Dive]:
-    """Seed a log from `(dive_number, day offset)` pairs and return the dives, in the
-    order given."""
-    dives = [
-        Dive(
-            user_id=user.id,
-            dive_number=dive_number,
-            start_time=_day(day),
-            duration=1800,
-            notes="",
-            **overrides,
-        )
-        for dive_number, day in numbered_days
-    ]
-    db.add_all(dives)
-    db.commit()
-    for dive in dives:
-        db.refresh(dive)
-    return dives
+from tests.helpers.generators import create_dive_log, log_day
 
 
 async def _neighbors_of(async_db: AsyncSession, dive: Dive) -> Any:
@@ -72,7 +46,7 @@ async def _neighbors_of(async_db: AsyncSession, dive: Dive) -> Any:
 class TestFindDiveNeighbors:
     @pytest.mark.asyncio
     async def test_a_dive_in_the_middle_has_both(self, db: Session, async_db: AsyncSession, diver: User) -> None:
-        first, middle, last = _log(db, diver, (1, 0), (2, 1), (3, 2))
+        first, middle, last = create_dive_log(db, diver, (1, 0), (2, 1), (3, 2))
 
         neighbors = await _neighbors_of(async_db, middle)
 
@@ -85,7 +59,7 @@ class TestFindDiveNeighbors:
     async def test_next_means_later_in_time(self, db: Session, async_db: AsyncSession, diver: User) -> None:
         """The direction that reverses between this endpoint and `GET /dives`: the list is
         newest first, so a dive's `next` is the row *above* it there."""
-        _, middle, last = _log(db, diver, (1, 0), (2, 1), (3, 2))
+        _, middle, last = create_dive_log(db, diver, (1, 0), (2, 1), (3, 2))
 
         neighbors = await _neighbors_of(async_db, middle)
 
@@ -95,7 +69,7 @@ class TestFindDiveNeighbors:
 
     @pytest.mark.asyncio
     async def test_the_oldest_dive_has_no_previous(self, db: Session, async_db: AsyncSession, diver: User) -> None:
-        first, second = _log(db, diver, (1, 0), (2, 1))
+        first, second = create_dive_log(db, diver, (1, 0), (2, 1))
 
         neighbors = await _neighbors_of(async_db, first)
 
@@ -105,7 +79,7 @@ class TestFindDiveNeighbors:
 
     @pytest.mark.asyncio
     async def test_the_newest_dive_has_no_next(self, db: Session, async_db: AsyncSession, diver: User) -> None:
-        first, second = _log(db, diver, (1, 0), (2, 1))
+        first, second = create_dive_log(db, diver, (1, 0), (2, 1))
 
         neighbors = await _neighbors_of(async_db, second)
 
@@ -115,7 +89,7 @@ class TestFindDiveNeighbors:
 
     @pytest.mark.asyncio
     async def test_a_log_of_one_has_neither(self, db: Session, async_db: AsyncSession, diver: User) -> None:
-        (only,) = _log(db, diver, (1, 0))
+        (only,) = create_dive_log(db, diver, (1, 0))
 
         neighbors = await _neighbors_of(async_db, only)
 
@@ -124,7 +98,7 @@ class TestFindDiveNeighbors:
 
     @pytest.mark.asyncio
     async def test_carries_enough_to_label_the_link(self, db: Session, async_db: AsyncSession, diver: User) -> None:
-        first, second = _log(db, diver, (47, 0), (48, 1))
+        first, second = create_dive_log(db, diver, (47, 0), (48, 1))
 
         neighbors = await _neighbors_of(async_db, second)
 
@@ -138,15 +112,15 @@ class TestFindDiveNeighbors:
     ) -> None:
         """A prev/next label reads in the timezone *that* dive was logged in, not this
         one's - the same rule `DiveRead` follows."""
-        _log(db, diver, (1, 0), utc_offset_minutes=420)
-        (second,) = _log(db, diver, (2, 1))
+        create_dive_log(db, diver, (1, 0), utc_offset_minutes=420)
+        (second,) = create_dive_log(db, diver, (2, 1))
 
         neighbors = await _neighbors_of(async_db, second)
 
         assert neighbors.previous is not None
         assert neighbors.previous.start_time.utcoffset() == timedelta(hours=7)
         # Same instant either way - only how it is expressed changes.
-        assert neighbors.previous.start_time == _day(0)
+        assert neighbors.previous.start_time == log_day(0)
 
     @pytest.mark.asyncio
     async def test_chronology_is_start_time_not_dive_number(
@@ -154,7 +128,7 @@ class TestFindDiveNeighbors:
     ) -> None:
         """`dive_number` is a label nothing orders by (see `services/dive_numbering.py`),
         so a log numbered out of date order still walks in date order."""
-        _, middle, later = _log(db, diver, (9, 0), (4, 1), (5, 2))
+        _, middle, later = create_dive_log(db, diver, (9, 0), (4, 1), (5, 2))
 
         neighbors = await _neighbors_of(async_db, middle)
 
@@ -166,8 +140,8 @@ class TestFindDiveNeighbors:
     async def test_another_divers_dives_are_never_neighbours(
         self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
     ) -> None:
-        _log(db, other_diver, (400, 0), (401, 2))
-        (mine,) = _log(db, diver, (1, 1))
+        create_dive_log(db, other_diver, (400, 0), (401, 2))
+        (mine,) = create_dive_log(db, diver, (1, 1))
 
         neighbors = await _neighbors_of(async_db, mine)
 
@@ -176,8 +150,8 @@ class TestFindDiveNeighbors:
 
     @pytest.mark.asyncio
     async def test_deleted_dives_are_skipped(self, db: Session, async_db: AsyncSession, diver: User) -> None:
-        first, _ = _log(db, diver, (1, 0), (3, 3))
-        _log(db, diver, (2, 1), is_deleted=True, deleted_at=datetime.now(UTC))
+        first, _ = create_dive_log(db, diver, (1, 0), (3, 3))
+        create_dive_log(db, diver, (2, 1), is_deleted=True, deleted_at=datetime.now(UTC))
 
         neighbors = await _neighbors_of(async_db, first)
 
@@ -199,7 +173,7 @@ class TestSharedStartTimes:
     async def test_a_tied_dive_is_never_its_own_neighbour(
         self, db: Session, async_db: AsyncSession, diver: User
     ) -> None:
-        _, tied, _ = _log(db, diver, (1, 0), (2, 0), (3, 0))
+        _, tied, _ = create_dive_log(db, diver, (1, 0), (2, 0), (3, 0))
 
         neighbors = await _neighbors_of(async_db, tied)
 
@@ -210,7 +184,7 @@ class TestSharedStartTimes:
 
     @pytest.mark.asyncio
     async def test_tied_dives_are_ordered_by_id(self, db: Session, async_db: AsyncSession, diver: User) -> None:
-        first, tied, last = _log(db, diver, (1, 0), (2, 0), (3, 0))
+        first, tied, last = create_dive_log(db, diver, (1, 0), (2, 0), (3, 0))
 
         neighbors = await _neighbors_of(async_db, tied)
 
@@ -225,7 +199,7 @@ class TestSharedStartTimes:
     ) -> None:
         """What a client actually does with this endpoint. A `>=` comparison would hand
         back the same dive forever; the tie-break is what makes the walk finite."""
-        dives = _log(db, diver, (1, 0), (2, 0), (3, 0), (4, 1))
+        dives = create_dive_log(db, diver, (1, 0), (2, 0), (3, 0), (4, 1))
         by_uuid = {dive.uuid: dive for dive in dives}
 
         visited: list[uuid_pkg.UUID] = []
@@ -241,7 +215,7 @@ class TestSharedStartTimes:
     async def test_the_ends_of_a_wholly_tied_log_are_still_ends(
         self, db: Session, async_db: AsyncSession, diver: User
     ) -> None:
-        first, _, last = _log(db, diver, (1, 0), (2, 0), (3, 0))
+        first, _, last = create_dive_log(db, diver, (1, 0), (2, 0), (3, 0))
 
         assert (await _neighbors_of(async_db, first)).previous is None
         assert (await _neighbors_of(async_db, last)).next is None
@@ -260,7 +234,7 @@ class TestReadDiveNeighborsRoute:
         dive = MagicMock()
         dive.id = dive_id
         dive.user_id = 1
-        dive.start_time = _day(2)
+        dive.start_time = log_day(2)
         return dive
 
     @pytest.mark.asyncio
@@ -320,7 +294,7 @@ class TestCacheKey:
 
         with patch.object(cache_module, "client", redis):
             await dives_module._cached_read_dive_neighbors(
-                request, user_id=7, uuid=uuid, start_time=_day(0), dive_id=11, db=MagicMock()
+                request, user_id=7, uuid=uuid, start_time=log_day(0), dive_id=11, db=MagicMock()
             )
 
         key = redis.set.call_args[0][0]
