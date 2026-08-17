@@ -6224,14 +6224,46 @@ a silent write that deletes data. And it is the same deletion this section rejec
 scattered — on whichever dives the diver happens to edit next — instead of all at once at delete
 time.
 
-**The fix is client-side, and it is queued rather than done.** No server-side answer works on the
-trip half: "the diver cleared the trip" and "the client echoed back a null it was handed" are the
-*same request*, so nothing in `patch_dive` can tell them apart. They are perfectly distinguishable
-one layer up, though — in the form, an untouched trip picker is simply not dirty. So the fix is for
-the web edit form to submit only dirty fields (react-hook-form's `dirtyFields`) rather than every
-field it was seeded with, which closes both halves at once and needs nothing here. That is a
-separate PR in `opendiving-web`, deliberately not blocking this one: the API change is correct on
-its own, and the exposure in between is a pre-launch app running on one developer's machine.
+**The fix for that is client-side, and it is done.** No server-side answer works on the trip half:
+"the diver cleared the trip" and "the client echoed back a null it was handed" are the *same
+request*, so nothing in `patch_dive` can tell them apart. They are perfectly distinguishable one
+layer up, though — in the form, an untouched trip picker is simply not dirty. So the fix was for the
+web edit form to submit only dirty fields (react-hook-form's `dirtyFields`) rather than every field
+it was seeded with, which needs nothing here. It shipped separately in `opendiving-web` and
+deliberately did not block this: the API change is correct on its own, and the exposure in between
+was a pre-launch app on one developer's machine.
+
+### One narrower case `dirtyFields` cannot reach, and we are living with
+
+Submitting only dirty fields closes the *untouched* save. It cannot close this one, and nothing in a
+browser can:
+
+A dive is linked to site A (live) and site B (soft-deleted). The read hides B, so the form seeds
+from `["A"]`. The diver adds C. `dive_site_uuids` is now **legitimately dirty**, so it is submitted
+— as `["A", "C"]`, which is the only list the client has ever been given.
+`replace_dive_sites_for_dive` deletes every join row for the dive and reinserts those two, and B's
+link is gone. The diver never saw B and never asked to remove it.
+
+The client cannot preserve a reference it was never handed, and inventing a uuid it never received
+is not an option, so this one is ours or nobody's. **Accepted deliberately**, on scope: it needs a
+deleted site *and* an edit to the very list that site is missing from, and `move_dives_to` exists so
+a diver rehomes those dives rather than stranding them.
+
+The fix, if it is ever worth doing: have `replace_dive_sites_for_dive` delete only the rows whose
+site is live, insert the submitted list at positions 0..n-1, and renumber the surviving hidden rows
+after them. It was declined because it turns a clean wipe-and-reinsert into exactly the
+position-contiguity problem `replace_dive_site_on_dives` needed three careful statements and a
+wipe-guard test to get right, for a path this narrow. There is no unique-constraint risk in it —
+`resolve_dive_site_ids_for_user` refuses a deleted site, so a hidden uuid cannot come back in.
+
+**`gear_item_uuids` has the same shape, and since the gear filter landed it is reachable too.**
+`replace_gear_items_for_dive` is the same wholesale replace, so a dive holding a live item and a
+hidden deleted one loses the hidden row as soon as the diver edits the gear list at all. It is
+slightly more visible there than here: `recalculate_gear_dive_counts` runs on the same `patch_dive`
+and takes the deleted item's `dive_count` to zero, so the loss shows as a number in `export.json`
+rather than only as an absence — until the same edit removes the item from the export entirely. See
+*"`dive_count` is unaffected at delete time"* below, which traces that. The answer is the same on
+both, and for the same reason.
 
 Two server-side answers were weighed and dropped before that one was found. Leaving soft-deleted
 rows alone in `replace_dive_sites_for_dive` handles the site half but not the trip half, for the

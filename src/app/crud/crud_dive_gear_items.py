@@ -71,6 +71,17 @@ async def replace_gear_items_for_dive(
     Duplicate ids are silently deduplicated (keeping each id's first occurrence, which
     determines its position) to avoid a unique-constraint violation - same
     delete-and-reinsert approach as `replace_dive_sites_for_dive`/`replace_mixtures_for_dive`.
+
+    **The wipe takes soft-deleted items with it, and that is a known accepted loss** - the
+    same one `replace_dive_sites_for_dive` carries, for the same reason. Since
+    `get_gear_items_for_dive` stopped returning deleted items, a client editing a dive's
+    gear list submits back only what it was shown, so a dive holding a live item and a
+    hidden one comes back without the hidden one and the delete below destroys its row. The
+    diver never saw it and never asked to remove it, and no client can preserve a reference
+    it was never handed.
+
+    Declined rather than missed - see "One narrower case `dirtyFields` cannot reach" in
+    DECISIONS.md for the fix and why its cost was judged too high for a path this narrow.
     """
     unique_ids = list(dict.fromkeys(gear_item_ids))
     await db.execute(delete(DiveGearItem).where(DiveGearItem.dive_id == dive_id))
