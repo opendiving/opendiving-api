@@ -236,6 +236,20 @@ def _ocean_fix(offset_seconds: int, latitude: float, longitude: float) -> dict:
     }
 
 
+def _ocean_origin(offset_seconds: int, latitude: float, longitude: float) -> dict:
+    """The first sample's `DiveRouteOrigin`, in the shape the Ocean writes one.
+
+    Note the units: **degrees here, radians in `_ocean_fix`** - one export, two
+    conventions. `DiveRouteQuality` rides along because the real files carry it, and
+    because the parser deliberately ignores it.
+    """
+    return {
+        "TimeISO8601": _ocean_time(offset_seconds),
+        "DiveRouteOrigin": {"Altitude": 6, "Latitude": latitude, "Longitude": longitude},
+        "DiveRouteQuality": 0,
+    }
+
+
 OCEAN_JSON_WITH_CYLINDERS = _ocean_json(
     [
         _ocean_gas_switch(0, 0),
@@ -2277,6 +2291,14 @@ class TestEntryAndExitPositions:
     DAHAB_RADIANS = (0.49632722063772405, 0.6014229493488608)
     DAHAB_DEGREES = (28.437455, 34.458997)
 
+    # `69e21526`, the same dive's two coordinate channels. The origin block and the first
+    # sample fix land 4 m apart on one jetty - and are written in *different units*, which
+    # is the trap `degrees_verbatim` exists for and what these two pairs pin down.
+    OCEAN_ORIGIN_DEGREES = (28.567251205444336, 34.53325653076172)
+    OCEAN_ORIGIN_ROUNDED = (28.567251, 34.533257)
+    OCEAN_SURFACED_RADIANS = (0.49859222167449974, 0.6027186224443467)
+    OCEAN_SURFACED_ROUNDED = (28.56723, 34.533233)
+
     @staticmethod
     def _fit(*records: Message) -> ParsedDiveSchema:
         return FitParser.parse(dive_fit_file(*records))
@@ -2337,8 +2359,11 @@ class TestEntryAndExitPositions:
 
     def test_a_dive_whose_fixes_all_come_after_it_has_no_entry_position(self):
         """The corpus's normal case, not an edge one: GPS does not reach a wrist under
-        water, and all 19 GPS-carrying exports log their first fix past `DiveTime`. An
+        water, and all 19 GPS-carrying exports log their first *fix* past `DiveTime`. An
         entry position invented from those would be the exit position under another name.
+
+        FIT, where the fixes really are the only channel. The Suunto JSON of such a dive
+        gets its entry from `DiveRouteOrigin` instead - see the tests below.
         """
         parsed = self._fit(
             self._fix_record(600, None, None, depth=30.0),
@@ -2347,6 +2372,131 @@ class TestEntryAndExitPositions:
 
         assert (parsed.entry_latitude, parsed.entry_longitude) == (None, None)
         assert (parsed.exit_latitude, parsed.exit_longitude) == self.DAHAB_DEGREES
+
+    def test_the_dive_route_origin_is_the_entry_the_sample_fixes_never_carry(self):
+        """`69e21526` end to end, in the shape the device writes it: an origin at t=0, a
+        descent, and a fix stream that only starts once the diver is back on the surface.
+
+        Before this the file yielded an exit and no entry, on all 19 GPS-carrying exports
+        - while the Suunto app drew both pins from that same export.
+        """
+        content = _ocean_json(
+            [
+                _ocean_origin(0, *self.OCEAN_ORIGIN_DEGREES),
+                _ocean_depth(600, 45.82),
+                _ocean_fix(4200, *self.OCEAN_SURFACED_RADIANS),
+            ]
+        )
+
+        parsed = SuuntoJsonParser.parse(content)
+
+        assert (parsed.entry_latitude, parsed.entry_longitude) == self.OCEAN_ORIGIN_ROUNDED
+        assert (parsed.exit_latitude, parsed.exit_longitude) == self.OCEAN_SURFACED_ROUNDED
+
+    def test_the_dive_route_origin_is_degrees_where_the_sample_fixes_are_radians(self):
+        """One export, two units. Run through `degrees_from_radians` like the fixes beside
+        it, this origin would come out at 1 636 degrees and be dropped by `geo_fix`'s range
+        check - so the bug would read as "this file has no entry", which is exactly what
+        the file looked like before and would have hidden the regression completely.
+
+        No `Latitude` key anywhere in this fixture, which also pins the early-out in
+        `_positions`: a file carrying an origin and no sample fixes must not bail out
+        before reading it.
+        """
+        content = _ocean_json([_ocean_origin(0, *self.OCEAN_ORIGIN_DEGREES), _ocean_depth(600, 30.0)])
+
+        parsed = SuuntoJsonParser.parse(content)
+
+        assert (parsed.entry_latitude, parsed.entry_longitude) == self.OCEAN_ORIGIN_ROUNDED
+        assert math.degrees(self.OCEAN_ORIGIN_DEGREES[0]) > LATITUDE_LIMIT
+
+    def test_a_null_island_origin_is_not_a_position(self):
+        """Two files in the corpus write `0, 0` here, and `DiveRouteQuality` does not tell
+        them apart from the good ones - it reads 1 on both. The coordinates do."""
+        content = _ocean_json(
+            [
+                _ocean_origin(0, 0, 0),
+                _ocean_depth(600, 30.0),
+            ]
+        )
+
+        parsed = SuuntoJsonParser.parse(content)
+
+        assert (parsed.entry_latitude, parsed.entry_longitude) == (None, None)
+
+    def test_a_fix_taken_after_the_origin_but_before_the_descent_wins(self):
+        """The origin is fed in as an ordinary fix, not assigned to the entry, so the
+        module's one rule still decides across both channels: the last position before the
+        descent is the entry, whichever channel it arrived on. Nothing in the corpus does
+        this yet - a Garmin-style pre-descent fix would."""
+        content = _ocean_json(
+            [
+                _ocean_origin(0, *self.OCEAN_ORIGIN_DEGREES),
+                _ocean_fix(60, math.radians(28.2), math.radians(34.2)),
+                _ocean_depth(600, 30.0),
+            ]
+        )
+
+        parsed = SuuntoJsonParser.parse(content)
+
+        assert (parsed.entry_latitude, parsed.entry_longitude) == (28.2, 34.2)
+
+    def test_an_origin_sharing_the_pivots_timestamp_is_still_the_entry(self):
+        """The tie `DiveRouteOrigin` made reachable. A depth channel whose readings are all
+        equal pivots on its earliest sample, and the origin sits at exactly that instant -
+        so with the split resolving ties towards the exit, the dive's *starting* position
+        would have been written into the exit columns with the entry left empty."""
+        content = _ocean_json(
+            [
+                _ocean_origin(0, *self.OCEAN_ORIGIN_DEGREES),
+                _ocean_depth(0, 30.0),
+                _ocean_depth(600, 30.0),
+            ]
+        )
+
+        parsed = SuuntoJsonParser.parse(content)
+
+        assert (parsed.entry_latitude, parsed.entry_longitude) == self.OCEAN_ORIGIN_ROUNDED
+        assert (parsed.exit_latitude, parsed.exit_longitude) == (None, None)
+
+    def test_a_sample_fix_outranks_an_origin_on_the_same_sample(self):
+        """Two positions off one sample share a timestamp, and `entry_and_exit` separates
+        equal timestamps by collection order - so which wins is decided by the order
+        `_positions` appends them in, not by anything either value says. No corpus file
+        writes both onto one sample; this pins the tie-break so a reorder cannot change it
+        silently."""
+        content = _ocean_json(
+            [
+                {
+                    **_ocean_origin(0, *self.OCEAN_ORIGIN_DEGREES),
+                    "Latitude": math.radians(28.2),
+                    "Longitude": math.radians(34.2),
+                },
+                _ocean_depth(600, 30.0),
+            ]
+        )
+
+        parsed = SuuntoJsonParser.parse(content)
+
+        assert (parsed.entry_latitude, parsed.entry_longitude) == (28.2, 34.2)
+
+    def test_a_malformed_origin_does_not_cost_the_fixes_beside_it(self):
+        """Best-effort per sample, like the rest of this pass. An origin that is a string,
+        or that carries half a pair, is skipped rather than taking the exit down with it.
+        """
+        for broken in ("not-an-object", {"Latitude": 28.5}, {}):
+            content = _ocean_json(
+                [
+                    {"TimeISO8601": _ocean_time(0), "DiveRouteOrigin": broken},
+                    _ocean_depth(600, 30.0),
+                    _ocean_fix(4200, *self.OCEAN_SURFACED_RADIANS),
+                ]
+            )
+
+            parsed = SuuntoJsonParser.parse(content)
+
+            assert (parsed.entry_latitude, parsed.entry_longitude) == (None, None), broken
+            assert (parsed.exit_latitude, parsed.exit_longitude) == self.OCEAN_SURFACED_ROUNDED, broken
 
     def test_json_fixes_are_ordered_by_their_own_timestamps_not_by_file_order(self):
         """A Suunto export's sample timestamps are not monotonic across channels - the

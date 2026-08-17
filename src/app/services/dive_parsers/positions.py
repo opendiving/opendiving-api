@@ -14,12 +14,18 @@ own deepest sample: everything before it is on the way in, everything after it i
 way out.
 
 The corpus is emphatic about why that split matters rather than "first fix, last fix".
-Across the 19 Suunto Ocean exports that carry GPS at all, **every single fix falls after
-the diver surfaced** - the earliest one on any of them lands at 96 % of the dive's
-duration, in the logging tail past `Header.DiveTime`. A parser taking "the first fix" as
-the entry point would have written the *exit* position into the entry columns on all 19,
-and nothing downstream could have told. So an absent entry is the normal answer for this
-device, and saying so is the point.
+Across the 19 Suunto Ocean exports that carry GPS at all, **every fix in the sample stream
+falls after the diver surfaced** - the earliest one on any of them lands at 96 % of the
+dive's duration, in the logging tail past `Header.DiveTime`. A parser taking "the first
+fix" as the entry point would have written the *exit* position into the entry columns on
+all 19, and nothing downstream could have told.
+
+**The entry position is recorded, just not as a fix.** 18 of those 19 files also carry a
+single `DiveRouteOrigin` on their first sample, timestamped identically to
+`Header.DateTime` - the position the device had when the dive began, which is the entry
+pin the Suunto app draws. It reaches this module as a fix like any other and needs no
+special rule, because its timestamp puts it before the deepest sample on its own. What it
+does need is its own unit: see `degrees_verbatim`.
 """
 
 import math
@@ -92,6 +98,26 @@ def degrees_from_radians(value: object) -> float | None:
     return math.degrees(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
+def degrees_verbatim(value: object) -> float | None:
+    """An angle a file already states in decimal degrees.
+
+    Exists for `DiveRouteOrigin`, and it is the reason that block cannot simply be fed
+    through `degrees_from_radians` with the fixes beside it: **one Suunto export states
+    coordinates in two different units**. The sample stream's `Latitude` is radians, and
+    this block - written by the same device into the same file - is plain degrees. The
+    corpus settles it rather than the naming: `69e21526` records an origin of
+    `28.567251, 34.533257` against a first sample fix of `0.4985922, 0.6027186`, which
+    converts to `28.567230, 34.533233` - the same jetty, 4 m apart. Converted a second
+    time the origin would land past the pole and be dropped by `geo_fix`, which is the
+    quiet failure this function's existence is meant to make impossible to write.
+
+    Still a function rather than a bare `sample.get()` for the type guard: `geo_fix` takes
+    `float | None`, and a `bool` is an `int` in Python - so `True` would otherwise arrive
+    as a latitude of 1 degree.
+    """
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
 def geo_fix(at: float, latitude: float | None, longitude: float | None) -> GeoFix | None:
     """One fix, or `None` when the file recorded nothing usable at this sample.
 
@@ -124,7 +150,17 @@ def geo_fix(at: float, latitude: float | None, longitude: float | None) -> GeoFi
 
 
 def entry_and_exit(fixes: list[GeoFix], depths: list[tuple[float, float]]) -> EntryExit:
-    """Split fixes on the deepest sample: the last one before it, the first one after.
+    """Split fixes on the deepest sample: the last one at or before it, the first one after.
+
+    **A position sharing the pivot's timestamp is an entry, not an exit**, and the tie is
+    worth spelling out because it used to fall the other way. No fix is received at depth,
+    so a position landing exactly on the deepest sample means a degenerate file - a depth
+    channel whose readings are all equal pivots on its earliest sample, and `Suunto`'s
+    `DiveRouteOrigin` sits at exactly that instant. Resolved towards the exit, such a file
+    would write the dive's *starting* position into `exit_latitude`/`exit_longitude` and
+    leave the entry empty, which is the one silent failure this module exists to prevent.
+    Resolved towards the entry it is right for the origin and no worse for anything else,
+    since a plain fix at the pivot has no defensible column either way.
 
     "Last before" and "first after" rather than "first" and "last" because the fix that
     describes where a diver got in is the one taken just before they descended, not the
@@ -165,8 +201,11 @@ def entry_and_exit(fixes: list[GeoFix], depths: list[tuple[float, float]]) -> En
     # moment the diver first reached the deepest reading rather than the last.
     deepest_at = max(depths, key=lambda point: point[1])[0]
 
-    before = [fix for fix in fixes if fix.at < deepest_at]
-    after = [fix for fix in fixes if fix.at >= deepest_at]
+    before = [fix for fix in fixes if fix.at <= deepest_at]
+    after = [fix for fix in fixes if fix.at > deepest_at]
+    # `max`/`min` keep the *first* of equal keys, so two positions sharing one timestamp
+    # are separated by their order in `fixes` - which is the order the parser collected
+    # them in. `SuuntoJsonParser._positions` relies on that and says so.
     return EntryExit(
         entry=max(before, key=lambda fix: fix.at) if before else None,
         exit=min(after, key=lambda fix: fix.at) if after else None,

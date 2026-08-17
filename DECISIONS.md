@@ -5782,8 +5782,8 @@ columns on the row that was already being selected.
 ## Every GPS fix in the corpus is an exit fix, which is why the split is on the deepest sample
 
 `services/dive_parsers/positions.py` decides which fix is the entry and which the exit by splitting
-on the dive's **deepest sample**: the last fix before it is the entry, the first fix at or after it
-is the exit. The obvious rule — first fix, last fix — is wrong on every file we have.
+on the dive's **deepest sample**: the last fix at or before it is the entry, the first one strictly
+after it is the exit. The obvious rule — first fix, last fix — is wrong on every file we have.
 
 GPS does not reach a wrist through seawater, so every position in a dive log was recorded at the
 surface. In the 19 Suunto Ocean exports that carry GPS at all, **all of them log their first fix
@@ -5793,8 +5793,9 @@ depth-above-1 m span ends at 2 690–4 450 s on those dives and the fixes start 
 one file has a fix before or during the dive. "The first fix" would therefore have written the
 **exit** position into the entry columns on all 19, and nothing downstream could have noticed.
 
-So an absent entry position is the normal answer for a wrist computer, not a gap to fill. It is the
-Garmin-with-a-surface-fix case that will populate the entry columns, and none is in the corpus yet.
+So an absent entry position is the normal answer *from the fix stream*, not a gap to fill there. It
+is a second channel that fills those columns — see *"The Suunto entry position is a
+`DiveRouteOrigin`, not a fix"* below, which corrects the conclusion this paragraph originally drew.
 
 **The deepest sample is the pivot in preference to an in-water window** because a window needs a
 depth threshold, and this file would have to invent one — `FitParser._tank_pressures` declines to
@@ -5827,6 +5828,7 @@ Each format states a coordinate in its own unit, and only a dive exported twice 
 | ----------- | ----------------------------- | ------------------------------------- |
 | FIT         | `record.position_lat/_long`   | semicircles (180/2³¹ degrees)         |
 | Suunto JSON | sample `Latitude`/`Longitude` | **radians**                           |
+| Suunto JSON | `DiveRouteOrigin.Latitude`    | **degrees** — same file, other unit   |
 | Suunto XML  | —                             | no coordinate anywhere in 384 exports |
 
 The radians are the trap: `0.496, 0.601` is a perfectly plausible pair of degrees in the Gulf of
@@ -5856,6 +5858,86 @@ FIT's own absent-marker needs no handling here and it is worth saying why: `posi
 `sint32`, whose invalid sentinel is `0x7FFFFFFF`, and `fitdecode`'s base-type parser already returns
 `None` for it. Left to arithmetic it would be 180.000000 degrees — out of range for a latitude, but
 a valid longitude that no bound would ever catch.
+
+### The Suunto entry position is a `DiveRouteOrigin`, not a fix
+
+The section above concluded that a wrist computer simply does not record where the diver got in.
+That was a correct reading of the sample stream and a wrong conclusion about the format, and the
+Suunto app is what exposed it: it draws two pins for these dives, and it draws them from the same
+export we were reading. The entry pin comes from a block nothing was looking at.
+
+Every 2026 Ocean export that carries GPS at all — 18 of the 19 — writes exactly one
+`DiveRouteOrigin` on its **first sample**, timestamped identically to `Header.DateTime`:
+
+```json
+{
+  "TimeISO8601": "2026-04-17T11:49:23.510+02:00",
+  "DiveRouteOrigin": { "Altitude": 6, "Latitude": 28.567251, "Longitude": 34.533257 },
+  "DiveRouteQuality": 0
+}
+```
+
+Reading it turns 16 of the 19 GPS-carrying files from exit-only into a real pair. The other three
+are right to stay empty: two write `0, 0` here and one has no origin at all.
+
+**It is fed to `entry_and_exit` as an ordinary fix rather than assigned to the entry column.** Its
+timestamp puts it before the deepest sample on its own, so the module's one rule already lands it in
+the right column — and a file that does log a pre-descent *fix* then still gets last-before-the-
+descent across both channels instead of being overridden by a t=0 block. Nothing in the corpus
+exercises that yet; the Garmin case the section above predicted would.
+
+**The unit is the trap, and it is a nastier one than the radians were.** The sample fixes are
+radians and this block is degrees — one file, one device, two conventions, 12 lines apart in the
+same function. Run through `degrees_from_radians` with the fixes beside it, `28.567251` becomes 1
+636 degrees, `geo_fix`'s range check drops it, and the result is a file with no entry position —
+which is **exactly what the file looked like before this change**. The bug would have restored the
+old behaviour while every test named after the old behaviour still passed. Hence `degrees_verbatim`:
+a named no-op conversion, so the unit is stated at the call site rather than implied by its absence,
+and `test_the_dive_route_origin_is_degrees_where_the_sample_fixes_are_radians` asserts the failed
+conversion would be out of range rather than only asserting the right answer.
+
+The cross-check that pins the unit is the same kind used for the radians, but within one file:
+`69e21526` writes an origin of `28.567251, 34.533257` and a first sample fix of
+`0.4985922, 0.6027186`, which converts to `28.567230, 34.533233`. Same jetty, 4 m apart. Read either
+one in the other's unit and they are not on the same continent.
+
+**`DiveRouteQuality` is deliberately not read.** It sits right beside the origin and looks exactly
+like a validity flag, which is the reason for writing this down: it is not one. Across the corpus it
+reads `1` on six good origins *and* on both `0, 0` ones, and `0` on ten good ones — no threshold
+separates them. Junk origins are rejected on the evidence of the coordinates themselves, by the same
+Null Island guard in `geo_fix` that the fixes go through.
+
+**The early-out in `_positions` had to learn about it too**, and this is the sort of thing that
+un-does a feature quietly six months later. That guard skips the whole pass when no sample carries a
+`Latitude`, and it exists to keep the D5 shape from paying ~8 300 `fromisoformat` calls for a list
+nothing reads. Left alone it would have bailed out before the origin on any file that carried one
+and no sample fixes — a shape the corpus does not currently contain, so no existing test would have
+noticed. It now checks both keys, and a fixture with an origin and no `Latitude` anywhere holds it
+there.
+
+**The tie at the pivot changed direction because of this**, and it is the subtlest part of the
+change. `entry_and_exit` split on `< deepest_at` / `>= deepest_at`, so a position sharing the
+pivot's timestamp landed in the *exit*. That was unreachable while fixes were the only channel —
+every one of them sits at ~96 % of the dive, nowhere near the peak — and the origin is the first
+position that can sit at t=0 and tie: a depth channel whose readings are all equal pivots on its
+earliest sample, since `max` keeps the first of equal values. Such a file would have written the
+dive's *starting* position into `exit_latitude`/`exit_longitude` and left the entry empty — the
+exact silent failure the section above exists to prevent, arriving through the change meant to fix
+it. The split is now `<=` / `>`. Nothing is received at depth, so a tie means a degenerate file
+either way; resolving it towards the entry is right for an origin and no worse for a plain fix,
+which has no defensible column at that instant.
+
+A second tie sits underneath it: two positions collected off *one sample* share a timestamp exactly,
+and `max`/`min` keep the first of equal keys — so which one wins is decided by the order
+`_positions` appends them in, and by nothing either value says. The sample fix is appended first and
+therefore wins; the origin is the fallback. No corpus file writes both onto one sample, so this is
+pinned by a test rather than by evidence, and the point of pinning it is that reordering that tuple
+would otherwise change behaviour with nothing to catch it.
+
+One thing worth knowing before trusting an origin: `69d150a4`'s sits ~350 m from its own exit, at
+the position of that morning's dive. Confirmed as a genuine drift dive rather than a stale fix
+carried over from the previous dive, which is the failure mode to rule out if a future file looks
+wrong this way.
 
 ### UDDF has no slot for either position
 
