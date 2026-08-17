@@ -81,6 +81,20 @@ def create_gear_item(
     )
 
 
+def create_gear_set(db: Session, user: models.User, *, is_deleted: bool = False) -> models.GearSet:
+    """A gear set of this user's. Uniquely named like the rest, and for one extra reason:
+    `gear_set_name_exists` treats names as unique per user, so a fixture reusing one would
+    be a duplicate the API would refuse to create."""
+    return _persist(
+        db,
+        models.GearSet(
+            user_id=user.id,
+            name=f"Wreck kit {uuid7().hex[-8:]}",
+            is_deleted=is_deleted,
+        ),
+    )
+
+
 def create_dive(
     db: Session, user: models.User, *, trip: models.Trip | None = None, is_deleted: bool = False
 ) -> models.Dive:

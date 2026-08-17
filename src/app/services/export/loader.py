@@ -191,19 +191,21 @@ async def _owned(
     resurrected rows carry `is_deleted: true` in `export.json`, so a reader can tell them
     from the live ones rather than being handed a site the diver thought they removed.
 
-    Note this deliberately outlives what the *app* shows. The dive reads stopped rendering
-    deleted sites, trips and gear items (`get_dive_sites_for_dive`, `get_trip_uuids_by_ids`,
-    `get_gear_items_for_dive`), so export is now the only place a diver can see that a dive
-    was logged at a site they since removed, or with kit they since deleted - the IDREF
-    argument alone already requires the resurrection, and it happens to be the last copy of
-    the association too. Gear *sets* are the exception, and only because
-    `get_gear_items_for_set` has not had the same filter applied yet.
+    Note this deliberately outlives what the *app* shows, and now on every surface: the
+    dive reads stopped rendering deleted sites, trips and gear items
+    (`get_dive_sites_for_dive`, `get_trip_uuids_by_ids`, `get_gear_items_for_dive`) and the
+    gear-set reads stopped rendering deleted items (`get_gear_items_for_set`), so export is
+    the only place left where a diver can see that a dive was logged at a site they since
+    removed, or that a set once held kit they since deleted. The IDREF argument alone
+    already requires the resurrection; being the last copy of the association is a
+    consequence, not the reason.
 
     It is not a durable copy, and nothing here can make it one. A dive whose hidden site,
     trip or gear the diver edits away - which an ordinary `PATCH /dive` does silently,
     since the client submits back the shortened list it was shown - loses the row itself,
-    and then there is nothing left for `still_referenced` to name. See "The links outlive
-    the delete, but not the dive's next edit" in DECISIONS.md.
+    and then there is nothing left for `still_referenced` to name. A `PATCH /gear-set`
+    carrying `gear_item_uuids` severs a set's membership the same way. See "The links
+    outlive the delete, but not the dive's next edit" in DECISIONS.md.
 
     One query rather than a filtered read plus a patch-up, so the ordering stays the
     database's and the `user_id` scope cannot be forgotten on the second pass.

@@ -7,13 +7,15 @@ stub was handed, which is exactly the question here, so these run against a live
 and skip themselves otherwise. See CONTRIBUTING.md for why a run on the host needs
 `POSTGRES_SERVER=localhost` to make them execute.
 
-The route-level halves - the erase routes dropping the dive caches so a cached read cannot
-outlive the filter - live against stubs that can see the invalidation call:
+The route-level halves - the erase routes dropping the cached reads so a cached response
+cannot outlive the filter - live against stubs that can see the invalidation call:
 `test_move_dives_on_delete.py` for `erase_trip`/`erase_dive_site`, and
-`TestErasingGearItemDropsTheDiveCaches` at the bottom of this module for `erase_gear_item`,
-which has no such module of its own. The serialized shape the clients consume is pinned here
-too, against a stub, since that one is about `_to_public_dive` and a schema default rather
-than a query.
+`TestErasingGearItemDropsTheCachedReads` at the bottom of this module for `erase_gear_item`,
+which has no such module of its own. That last one covers the gear caches as well as the
+dive ones, so it also serves `test_deleted_refs_on_gear_set_reads.py` - the sibling module
+for the fourth loader in this family, `get_gear_items_for_set`. The serialized shape the
+clients consume is pinned here too, against a stub, since that one is about
+`_to_public_dive` and a schema default rather than a query.
 """
 
 import uuid as uuid_pkg
@@ -381,18 +383,23 @@ class TestAPlainDeleteLeavesTheLinksAlone:
         assert await get_gear_items_for_dive(async_db, dive_id=dive.id) == []
 
 
-class TestErasingGearItemDropsTheDiveCaches:
+class TestErasingGearItemDropsTheCachedReads:
     """The route half of the gear filter, stubbed - the invalidation is not a query.
 
-    `erase_gear_item` already invalidated unconditionally before the filter landed, so
-    unlike `erase_trip` it needed no change. That makes it exactly the kind of thing a
-    later cleanup removes as redundant: the call has no visible effect on the delete
-    itself, and what it protects lives in another file. It is what stops a cached dive
-    read going on listing kit a fresh read now omits, for the rest of the hour.
+    `erase_gear_item` already invalidated both families unconditionally before either
+    filter landed, so unlike `erase_trip` it needed no change. That makes both calls
+    exactly the kind of thing a later cleanup removes as redundant: neither has a visible
+    effect on the delete itself, and what they protect lives in other files. Between them
+    they stop a cached dive read and a cached gear-set read going on listing kit that a
+    fresh read now omits, for the rest of the hour.
+
+    Which keys the gear pattern actually reaches is a separate question, pinned by
+    `TestCacheInvalidationPatterns` in `test_gear.py`; this only pins that the route calls
+    it, for the owner.
     """
 
     @staticmethod
-    def _stub_route(monkeypatch: pytest.MonkeyPatch) -> tuple[uuid_pkg.UUID, AsyncMock]:
+    def _stub_route(monkeypatch: pytest.MonkeyPatch) -> tuple[uuid_pkg.UUID, AsyncMock, AsyncMock]:
         uuid = uuid7()
         item = GearItemReadInternal(
             id=3,
@@ -408,20 +415,18 @@ class TestErasingGearItemDropsTheDiveCaches:
             dive_count=4,
             created_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
-        invalidate_dives = AsyncMock()
+        invalidate_dives, invalidate_gear = AsyncMock(), AsyncMock()
 
         monkeypatch.setattr(gear_items_module, "_get_owned_gear_item", AsyncMock(return_value=item))
         monkeypatch.setattr(gear_items_module, "soft_delete_schedules_for_gear_item", AsyncMock())
         monkeypatch.setattr(gear_items_module.crud_gear_items, "delete", AsyncMock())
-        monkeypatch.setattr(gear_items_module, "invalidate_gear_caches", AsyncMock())
+        monkeypatch.setattr(gear_items_module, "invalidate_gear_caches", invalidate_gear)
         monkeypatch.setattr(gear_items_module, "invalidate_dive_caches", invalidate_dives)
 
-        return uuid, invalidate_dives
+        return uuid, invalidate_dives, invalidate_gear
 
-    @pytest.mark.asyncio
-    async def test_the_owners_dive_caches_are_dropped(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        uuid, invalidate_dives = self._stub_route(monkeypatch)
-
+    @staticmethod
+    async def _erase(uuid: uuid_pkg.UUID) -> None:
         await gear_items_module.erase_gear_item(
             request=MagicMock(),
             uuid=uuid,
@@ -429,6 +434,24 @@ class TestErasingGearItemDropsTheDiveCaches:
             db=MagicMock(),
         )
 
+    @pytest.mark.asyncio
+    async def test_the_owners_dive_caches_are_dropped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        uuid, invalidate_dives, _ = self._stub_route(monkeypatch)
+
+        await self._erase(uuid)
+
         # The *item owner's* id, not the caller's - they are the same today only because
         # someone else's item reads as a 404 before this point.
         invalidate_dives.assert_awaited_once_with(7)
+
+    @pytest.mark.asyncio
+    async def test_the_owners_gear_caches_are_dropped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The gear-set half. This call predates both filters and used to guard only
+        against a cached *item* read holding a stale name; since `get_gear_items_for_set`
+        gained its filter it also guards a cached *set* read that would otherwise go on
+        listing the deleted item as a member."""
+        uuid, _, invalidate_gear = self._stub_route(monkeypatch)
+
+        await self._erase(uuid)
+
+        invalidate_gear.assert_awaited_once_with(7)
