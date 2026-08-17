@@ -78,8 +78,10 @@ jobs:
       #
       # Asserted against the whole run rather than against a list of the DB-backed modules
       # by name. That list was `test_dive_check_constraints.py` and `test_dive_numbering.py`
-      # when it was written and is eight modules now, and it goes stale in the one
-      # direction that matters: a module missing from it stops being checked, silently.
+      # when it was written and has grown with nearly every change to the suite since, and
+      # it goes stale in the one direction that matters: a module missing from it stops
+      # being checked, silently. (A count here would rot the same way - this comment
+      # carried one for a while, and it was wrong within two PRs.)
       #
       # This makes *any* skip a failure, which is stricter than it sounds - the suite has
       # none today. There is deliberately no allowlist: a count cannot tell a deliberate
