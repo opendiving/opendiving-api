@@ -13,6 +13,7 @@ from ...core.exceptions.http_exceptions import (
     NotFoundException,
     UnprocessableEntityException,
 )
+from ...core.schemas import DeletedWithMovedDives
 from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
@@ -235,7 +236,7 @@ async def erase_dive_site(
         uuid_pkg.UUID | None,
         Query(description="Move the dives logged at this site onto the site with this uuid before deleting it"),
     ] = None,
-) -> dict[str, str | int]:
+) -> DeletedWithMovedDives:
     """Soft-delete a dive site, optionally moving the dives logged at it to another site.
 
     404 unless the caller owns it, exactly as for a site that doesn't exist. Idempotent
@@ -284,4 +285,4 @@ async def erase_dive_site(
     # Soft-deleted sites stay on the dives logged at them, so drop those reads too.
     await invalidate_dive_caches(owner_id)
 
-    return {"message": "Dive site deleted", "moved_dives": moved_dives}
+    return DeletedWithMovedDives(message="Dive site deleted", moved_dives=moved_dives)

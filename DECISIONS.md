@@ -6002,16 +6002,21 @@ halfway leaves some dives moved and the trip still there, with nothing to retry 
 again); and it is **racy** (a dive added between the last page fetch and the delete is simply
 missed). None of the three is fixable from the client.
 
-### The count is always in the response
+### The count is always in the response, and the response is a model
 
 Both routes now return `{"message": ..., "moved_dives": N}` — `N` is 0 when the parameter was
-omitted, not absent. The return annotation widened from `dict[str, str]` to `dict[str, str | int]`,
-which is what publishes it in `/openapi.json`, and pydantic's smart union keeps the integer an
-integer rather than stringifying it.
+omitted, not absent. Always-present rather than conditional: a key that appears only sometimes makes
+the field optional in every typed client forever, to save one integer on the calls that did not ask
+for a move. "Zero dives moved" is also just true.
 
-Always-present rather than conditional: a key that appears only sometimes makes the field optional
-in every typed client forever, to save one integer on the calls that did not ask for a move. "Zero
-dives moved" is also just true.
+These are the only two deletes on the API that answer with a **model** (`DeletedWithMovedDives` in
+`core/schemas.py`) rather than the bare `dict[str, str]` every other one returns, and the reason is
+the same goal. Widening the annotation to `dict[str, str | int]` — the obvious minimal change —
+publishes `additionalProperties: {anyOf: [string, integer]}`, so a generated client gets
+`Record<string, string | number>`: `message` comes out `string | number` and `moved_dives` still
+needs a cast before it can go anywhere near a toast. The dict is the right shape for a response with
+one fixed key and no structure; the moment there are two fields of different types it stops
+publishing what the client needs. A response model costs eight lines and makes both fields typed.
 
 ### A bad replacement is a 422, not a 404
 

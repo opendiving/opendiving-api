@@ -15,6 +15,7 @@ from ...core.exceptions.http_exceptions import (
     NotFoundException,
     UnprocessableEntityException,
 )
+from ...core.schemas import DeletedWithMovedDives
 from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
@@ -392,7 +393,7 @@ async def erase_trip(
         uuid_pkg.UUID | None,
         Query(description="Move this trip's dives onto the trip with this uuid before deleting it"),
     ] = None,
-) -> dict[str, str | int]:
+) -> DeletedWithMovedDives:
     """Soft-delete a trip, optionally moving its dives onto another trip first.
 
     404 unless the caller owns it, exactly as for a trip that doesn't exist. The row is
@@ -433,4 +434,4 @@ async def erase_trip(
     if moved_dives:
         await invalidate_dive_caches(owner_id)
 
-    return {"message": "Trip deleted", "moved_dives": moved_dives}
+    return DeletedWithMovedDives(message="Trip deleted", moved_dives=moved_dives)
