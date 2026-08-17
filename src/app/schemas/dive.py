@@ -38,7 +38,7 @@ class DiveBase(BaseModel):
 
 
 class DiveTechScalars(BaseModel):
-    """Readings a dive computer keeps that the diver has no way to supply by hand.
+    """What the dive computer recorded and the diver never typed.
 
     Its own mixin rather than fields on `DiveBase` precisely so it lands on the read
     shapes and *not* on `DiveCreate`/`DiveUpdate`: these are written only by the import
@@ -48,6 +48,18 @@ class DiveTechScalars(BaseModel):
     CNS and OTU depend on the decompression algorithm the device ran and on the diver's
     exposure carried over from earlier dives, so nothing on a logged dive reconstructs
     them - a typed-in value would be a guess presented as a reading. See DECISIONS.md.
+
+    The entry/exit coordinates join them for the *mechanism* rather than that argument: a
+    diver could in principle type a position, but nothing offers to, so these travel the
+    same import-owned path. That has one consequence worth stating, because it is what
+    would break first if a form ever did offer them: `store_tech_scalars` writes every
+    field of this mixin on every attach, `None` included, so re-attaching an export
+    overwrites whatever these hold. Adding a hand-set position means taking it off this
+    mixin, not adding a special case to that write.
+
+    The membership is load-bearing in the other direction too - `TECH_SCALAR_FIELDS` is
+    read off `model_fields`, so a field added here is written by the import and picked up
+    by `backfill_tech_fields` on its next run without either being edited.
 
     On `DiveRead` rather than `DiveReadWithMixtures`, unlike `source_file`/`gas_use`/
     `profile`: those are kept off the list response because each costs
@@ -75,6 +87,22 @@ class DiveTechScalars(BaseModel):
             description="Ambient pressure at the surface, in bar. Display only - gas-use maths deliberately "
             "assumes 1 bar (see `services/dive_gas.py`).",
         ),
+    ]
+    entry_latitude: Annotated[
+        float | None,
+        Field(default=None, examples=[28.437455], description="Latitude of the last satellite fix before the descent"),
+    ]
+    entry_longitude: Annotated[
+        float | None,
+        Field(default=None, examples=[34.458997], description="Longitude of the last satellite fix before the descent"),
+    ]
+    exit_latitude: Annotated[
+        float | None,
+        Field(default=None, examples=[28.437480], description="Latitude of the first satellite fix after the ascent"),
+    ]
+    exit_longitude: Annotated[
+        float | None,
+        Field(default=None, examples=[34.458370], description="Longitude of the first satellite fix after the ascent"),
     ]
 
 

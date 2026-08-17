@@ -15,6 +15,7 @@ from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from .base import DiveParser
 from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, ceiling_cm, scaled_int_or_none, series
 from .exceptions import EXTRACTION_ERRORS, DiveParseError
+from .positions import NO_POSITIONS, EntryExit, GeoFix, degrees_from_radians, entry_and_exit, geo_fix
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +253,81 @@ def _dive_window_end(header: dict[str, Any]) -> datetime | None:
     return datetime.fromisoformat(start_text) + timedelta(seconds=float(dive_time))
 
 
+def _positions(samples: list[dict[str, Any]]) -> EntryExit:
+    """The entry and exit fixes this export's samples carry, if it carries GPS at all.
+
+    Only the 2026 Ocean shape does - the D5 exports in the corpus have no `Latitude` key
+    anywhere - and it writes fixes on samples of their own, carrying `GPSAltitude` and
+    nothing else. So this walks the stream for two channels that have no sample in common
+    with each other: the fixes, and the depth readings `entry_and_exit` pivots on.
+
+    Timestamps as POSIX seconds off each sample's own `TimeISO8601`, rather than as an
+    elapsed offset from `Header.DateTime` the way `_parse_samples` measures its axis.
+    Nothing here needs an origin, and asking for one would reintroduce a fixed bug: an
+    export mixing a naive header timestamp with offset-aware sample timestamps made
+    subtracting the two a `TypeError` that failed the whole import.
+
+    Best-effort **per sample**, like `_scan_samples` below and unlike
+    `_mixtures_from_cylinders`: a sample that cannot be read is skipped and the pass
+    carries on. Guarding the whole loop instead was the first attempt, and it met the
+    stated goal - a dive whose header parses perfectly must not fail over one bad GPS
+    sample - at the coarsest possible granularity, discarding every fix already collected
+    along with the one that raised. A GPS-carrying export in this corpus yields exactly
+    one usable position, so that is the whole feature lost to one bad neighbour.
+
+    **This is a separate pass over the samples, and `_scan_samples` merged its two
+    collections to avoid exactly that** - so the divergence is deliberate rather than an
+    oversight of the note 45 lines down. Two things stop it folding in. The failure
+    guards have to stay independent: a cylinder reconstruction that dies must not cost
+    the positions, and vice versa, which one shared pass under one `try` cannot promise.
+    And `_scan_samples` runs *conditionally*, only for an export with no `Gases` block,
+    while this runs for every file - so folding them would mean running the cylinder scan
+    on the D5 exports that skip it today, buying back a pass on the Ocean shape by adding
+    one everywhere else. What it costs as it stands is one more `fromisoformat` per
+    sample on a parse measured at 2-11 ms.
+    """
+    # An exact early-out, not a heuristic: with no `Latitude` key anywhere, `geo_fix` can
+    # never build a fix and the answer is `NO_POSITIONS` whatever the depths say. Worth
+    # the extra scan because the D5 shape - which has no GPS at all - would otherwise pay
+    # ~8 300 `fromisoformat` calls per file to build a `depths` list nothing then reads,
+    # on `POST /dive/parse`, on attach, and once per stored file in `backfill_tech_fields`.
+    if not any(isinstance(sample, dict) and "Latitude" in sample for sample in samples):
+        return NO_POSITIONS
+
+    fixes: list[GeoFix] = []
+    depths: list[tuple[float, float]] = []
+    unreadable = 0
+    for sample in samples:
+        try:
+            time_text = sample.get("TimeISO8601")
+            if not time_text:
+                continue
+            at = datetime.fromisoformat(time_text).timestamp()
+
+            depth = sample.get("Depth")
+            if isinstance(depth, (int, float)) and not isinstance(depth, bool):
+                depths.append((at, float(depth)))
+
+            fix = geo_fix(
+                at,
+                degrees_from_radians(sample.get("Latitude")),
+                degrees_from_radians(sample.get("Longitude")),
+            )
+        except EXTRACTION_ERRORS:
+            # Counted rather than logged per sample: a file whose timestamps are all
+            # unreadable would otherwise write one warning per sample, thousands of them,
+            # for a single fact about the file.
+            unreadable += 1
+            continue
+        if fix is not None:
+            fixes.append(fix)
+
+    if unreadable:
+        logger.warning("Skipped %d unreadable sample(s) while reading GPS fixes from a Suunto JSON export", unreadable)
+
+    return entry_and_exit(fixes, depths)
+
+
 def _scan_samples(
     samples: list[dict[str, Any]], dive_end: datetime | None
 ) -> tuple[dict[int, tuple[float, float]], list[int]]:
@@ -415,10 +491,11 @@ class SuuntoJsonParser(DiveParser):
     backend models (`models/dive.py`, `models/dive_mixture.py`), plus -
     separately, via `parse_profile` - the per-sample depth/ceiling/temperature/
     tank-pressure curves and the sample stream's events, stored as
-    `DiveProfile`. The export has plenty of other
-    fields (per-compartment tissue loading, algorithm metadata, GPS track,
-    battery telemetry) with nowhere to persist them, so they aren't parsed at
-    all. Gas mixtures come from
+    `DiveProfile`, and - from the same sample stream - the entry/exit fixes
+    described in `positions.py`. The export has plenty of other
+    fields (per-compartment tissue loading, algorithm metadata, the rest of the
+    GPS track, battery telemetry) with nowhere to persist them, so they aren't
+    parsed at all. Gas mixtures come from
     `DeviceLog.Header.Diving.Gases` (present in Suunto D5-style exports; absent
     from "clean"/header-only exports, which don't have gas data at all).
     """
@@ -627,6 +704,7 @@ class SuuntoJsonParser(DiveParser):
 
         start_tissue = diving.get("StartTissue") or {}
         end_tissue = diving.get("EndTissue") or {}
+        entry, exit_fix = _positions(samples)
 
         return ParsedDiveSchema(
             avg_depth=header.get("DepthAverage", depth.get("Avg")),
@@ -650,6 +728,13 @@ class SuuntoJsonParser(DiveParser):
             # Pascal, the same integer the XML export writes into its own
             # `<SurfacePressure>`.
             surface_pressure_bar=_pascals_to_bar(diving.get("SurfacePressure")),
+            # Radians in this export, degrees in the FIT file of the same dive - see
+            # `degrees_from_radians`. Every fix in the corpus lands after the diver
+            # surfaced, so this shape reliably yields an exit and no entry.
+            entry_latitude=None if entry is None else entry.latitude,
+            entry_longitude=None if entry is None else entry.longitude,
+            exit_latitude=None if exit_fix is None else exit_fix.latitude,
+            exit_longitude=None if exit_fix is None else exit_fix.longitude,
             dive_number=None,
             # D5-style exports report this as `Duration` rather than `DiveTime`.
             duration=_round_or_none(header.get("DiveTime", header.get("Duration"))),

@@ -105,6 +105,12 @@ _DIVE_CONSTRAINT_MESSAGES = {
     "ck_dive_otu_start_non_negative": "Imported OTU values must be zero or positive.",
     "ck_dive_otu_end_non_negative": "Imported OTU values must be zero or positive.",
     "ck_dive_surface_pressure_range": "Imported surface pressure must be between 0.5 and 1.2 bar.",
+    "ck_dive_entry_latitude_range": "Imported latitudes must be between -90 and 90.",
+    "ck_dive_exit_latitude_range": "Imported latitudes must be between -90 and 90.",
+    "ck_dive_entry_longitude_range": "Imported longitudes must be between -180 and 180.",
+    "ck_dive_exit_longitude_range": "Imported longitudes must be between -180 and 180.",
+    "ck_dive_entry_position_pair": "An imported position needs both a latitude and a longitude.",
+    "ck_dive_exit_position_pair": "An imported position needs both a latitude and a longitude.",
 }
 
 

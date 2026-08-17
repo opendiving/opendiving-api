@@ -486,6 +486,13 @@ class TestTechScalarExtraction:
             "otu_start": 22.0,
             "otu_end": 23.0,
             "surface_pressure_bar": 1.057,
+            # A DM5 XML export carries no GPS at all - no file in the 384-export corpus
+            # has a coordinate anywhere in it - so this format contributes the columns
+            # and never a value.
+            "entry_latitude": None,
+            "entry_longitude": None,
+            "exit_latitude": None,
+            "exit_longitude": None,
         }
 
     def test_covers_exactly_the_columns_the_read_schema_publishes(self) -> None:
@@ -908,6 +915,10 @@ class TestScalarsAreWrittenAtAttach:
                 "otu_start": None,
                 "otu_end": None,
                 "surface_pressure_bar": 1.057,
+                "entry_latitude": None,
+                "entry_longitude": None,
+                "exit_latitude": None,
+                "exit_longitude": None,
             }
         ]
 

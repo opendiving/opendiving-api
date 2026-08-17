@@ -75,6 +75,12 @@ DIVES_HEADER = (
     "cns_end",
     "otu_end",
     "surface_pressure_bar",
+    # Empty where the dive computer recorded no fix, rather than `0` - which a reader
+    # would take for Null Island, the trap `dive-sites.csv` avoids the same way.
+    "entry_latitude",
+    "entry_longitude",
+    "exit_latitude",
+    "exit_longitude",
     "source_file",
     "notes",
     "dive_uuid",
@@ -153,6 +159,10 @@ def _dive_row(bundle: ExportBundle, dive: Dive) -> tuple[Any, ...]:
         dive.cns_end,
         dive.otu_end,
         dive.surface_pressure_bar,
+        dive.entry_latitude,
+        dive.entry_longitude,
+        dive.exit_latitude,
+        dive.exit_longitude,
         None if source_file is None else source_file.original_filename,
         dive.notes,
         str(dive.uuid),

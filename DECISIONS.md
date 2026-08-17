@@ -5717,3 +5717,148 @@ write to that nobody hand-maintains, plus a Prettier override to stop the format
 generator undoing each other. There is no such generator on this side — nothing writes to these
 files but us, `mdformat` treats `AGENTS.md` like every other doc, and no configuration changed. The
 split here buys cross-tool reach and symmetry with the web repo, nothing more.
+
+## GPS from an import lands on the dive, and the plan that said otherwise was wrong twice
+
+`plans/dive-site-coordinates-and-maps.md` phase 2 said, in bold: **do not add coordinate columns to
+`dive`.** The parsed fix was to ride along in the import response and pre-fill a *new dive site's*
+coordinates instead, on the grounds that per-dive entry points "spread across the dive schemas, the
+export bundle, and the UDDF writer for a feature nobody asked for yet" — while conceding that "a
+drift dive genuinely has one, so this will come back". It came back, and the corpus says the
+concession was the load-bearing half.
+
+`dive` now carries `entry_latitude`/`entry_longitude`/`exit_latitude`/`exit_longitude`, four plain
+`Float` columns on the same terms as `dive_site.latitude`/`longitude`. Two reasons, and the first is
+the one that settles it:
+
+- **A fix pair is not a site.** A dive site is one pin that many dives share; an entry and an exit
+  are two places *one* dive passed through, and on a drift dive they are hundreds of metres apart.
+  Folding either onto the site means picking one of them and discarding the other, and then
+  overwriting it on the next dive at the same site.
+- **A prefill is not storage.** The plan's version showed the number in a form and then dropped it
+  unless the diver happened to create a new site. Every import into an existing site — which is most
+  of them — threw the fix away exactly as the parsers used to.
+
+**Where they sit is what makes this cheap**, and it is the answer to the plan's spread worry.
+`DiveTechScalars` (`schemas/dive.py`) already exists for columns the import owns and the form cannot
+set, `TECH_SCALAR_FIELDS` is read off its `model_fields`, and `store_tech_scalars` spreads that into
+one `UPDATE`. So four fields on that mixin reach `DiveRead`, the attach path and
+`backfill_tech_fields` without any of the three being edited — the backfill in particular means the
+exports already stored get their positions on its next run rather than needing a re-upload. The one
+thing that write does have to be told about is the reverse: it writes every field of the mixin,
+`None` included, on every attach, so a hand-set position would be overwritten by a re-attach. Adding
+one means taking it off the mixin, not special-casing the write.
+
+The manual DDL, as ever (see *"Schema changes have no migration tool"*):
+
+```sql
+ALTER TABLE dive ADD COLUMN entry_latitude DOUBLE PRECISION, ADD COLUMN entry_longitude DOUBLE PRECISION,
+                 ADD COLUMN exit_latitude DOUBLE PRECISION, ADD COLUMN exit_longitude DOUBLE PRECISION;
+ALTER TABLE dive ADD CONSTRAINT ck_dive_entry_latitude_range CHECK (entry_latitude IS NULL OR (entry_latitude >= -90 AND entry_latitude <= 90));
+ALTER TABLE dive ADD CONSTRAINT ck_dive_entry_longitude_range CHECK (entry_longitude IS NULL OR (entry_longitude >= -180 AND entry_longitude <= 180));
+ALTER TABLE dive ADD CONSTRAINT ck_dive_exit_latitude_range CHECK (exit_latitude IS NULL OR (exit_latitude >= -90 AND exit_latitude <= 90));
+ALTER TABLE dive ADD CONSTRAINT ck_dive_exit_longitude_range CHECK (exit_longitude IS NULL OR (exit_longitude >= -180 AND exit_longitude <= 180));
+ALTER TABLE dive ADD CONSTRAINT ck_dive_entry_position_pair CHECK ((entry_latitude IS NULL) = (entry_longitude IS NULL));
+ALTER TABLE dive ADD CONSTRAINT ck_dive_exit_position_pair CHECK ((exit_latitude IS NULL) = (exit_longitude IS NULL));
+```
+
+**The pair rule is a `CHECK` here and a schema validator on `dive_site`, and the difference is who
+types the numbers.** A diver types a site's coordinates, so `WholeCoordinatePair` refuses a half
+pair with a 422 that says which half is missing — see *"Dive site coordinates are two `Float`
+columns"*. Nothing types these, so there is no one to tell: a half pair could only be a parser bug,
+and the database refusing it outright is the stronger guarantee.
+`ParsedDiveSchema._drop_half_positions` keeps an import from ever reaching that refusal, because the
+one realistic way to produce a lone ordinate is a *sibling* validator nulling the other one —
+`_drop_non_finite` on a `NaN` latitude.
+
+`DiveSiteInfo` stays untouched, so this adds nothing to the cached dive payload beyond the four
+columns on the row that was already being selected.
+
+## Every GPS fix in the corpus is an exit fix, which is why the split is on the deepest sample
+
+`services/dive_parsers/positions.py` decides which fix is the entry and which the exit by splitting
+on the dive's **deepest sample**: the last fix before it is the entry, the first fix at or after it
+is the exit. The obvious rule — first fix, last fix — is wrong on every file we have.
+
+GPS does not reach a wrist through seawater, so every position in a dive log was recorded at the
+surface. In the 19 Suunto Ocean exports that carry GPS at all, **all of them log their first fix
+after the diver had already surfaced**: the earliest one on any file lands at 96 % of the dive's
+duration, in the tail past `Header.DiveTime` where the computer keeps logging on the boat. The
+depth-above-1 m span ends at 2 690–4 450 s on those dives and the fixes start at 2 807–4 497 s; not
+one file has a fix before or during the dive. "The first fix" would therefore have written the
+**exit** position into the entry columns on all 19, and nothing downstream could have noticed.
+
+So an absent entry position is the normal answer for a wrist computer, not a gap to fill. It is the
+Garmin-with-a-surface-fix case that will populate the entry columns, and none is in the corpus yet.
+
+**The deepest sample is the pivot in preference to an in-water window** because a window needs a
+depth threshold, and this file would have to invent one — `FitParser._tank_pressures` declines to
+invent exactly that, in writing, and FIT has no in-water time to read instead (`total_elapsed_time`,
+`total_timer_time` and `session.timestamp - start_time` are all the same number, tail included). The
+deepest point needs no threshold: it is wherever the depth channel peaks, and "before the deepest
+point" is a plain reading of "on the way in". With no depth channel at all there is no pivot, and
+the honest answer is neither position rather than a guessed order.
+
+**The pivot drops non-finite depths before choosing**, and that guard belongs in `entry_and_exit`
+rather than in either parser. An `inf` wins `max` outright wherever it sits and a `NaN` wins
+whenever it is first (every later `x > NaN` is `False`), so one such reading lands the split on an
+arbitrary sample and writes an entry fix into the exit columns — silently, which is the one failure
+mode this whole module exists to avoid. `json.loads` accepts a bare `NaN` and overflows large
+exponents to `inf`, so this is the same hazard `_ParserOutput._drop_non_finite` was written for,
+arriving somewhere that has no schema between it and the answer. Note the asymmetry that hid it: the
+*profile* path meets the same sample in `scaled_int`'s `Decimal.quantize` and dies loudly.
+
+**Last-before and first-after, not first and last**, because the boat motoring out to the site logs
+fixes too: the fix that says where a diver got in is the one just before they descended, and the
+mirror argument holds for the exit as the diver drifts on the surface. Neither list may be assumed
+sorted — a Suunto export's sample timestamps are not monotonic across channels — so both ends are
+found by scanning rather than by indexing.
+
+### The two conversions, and the cross-format check that pins them
+
+Each format states a coordinate in its own unit, and only a dive exported twice settles either:
+
+| Format      | Field                         | Unit                                  |
+| ----------- | ----------------------------- | ------------------------------------- |
+| FIT         | `record.position_lat/_long`   | semicircles (180/2³¹ degrees)         |
+| Suunto JSON | sample `Latitude`/`Longitude` | **radians**                           |
+| Suunto XML  | —                             | no coordinate anywhere in 384 exports |
+
+The radians are the trap: `0.496, 0.601` is a perfectly plausible pair of degrees in the Gulf of
+Guinea, and nothing in one file says otherwise. Two dives in the corpus exist as *both* a FIT and a
+JSON export, and the semicircles and the radians converge on the same degrees —
+`28.437455, 34.458997` in the Gulf of Aqaba, and `28.56723, 34.533233`. Read as degrees the JSON
+would have put a Dahab dive 3 000 km away in the Atlantic.
+
+That cross-format agreement is also why stored coordinates are **rounded to six decimal places**.
+Six is ~11 cm, far inside any consumer receiver's error, and the two conversion paths agree exactly
+at six places while disagreeing in the digits below — so one dive imported from both its exports
+produces one position rather than two that differ in the ninth decimal.
+
+**Two junk-fix rules are enforced at the fix rather than at the column**, and the reason is
+positional rather than about the values. `entry_and_exit` picks the fix *closest* to the dive, so a
+bad fix beside a good one would be the one chosen and would then be nulled by the schema — costing a
+position the file actually recorded. Both are dropped as `geo_fix` builds them:
+
+- **Exactly `0.0, 0.0` is not a position.** Already recorded from the divelogs.de importer work
+  (*"What divelogs.de does with our UDDF"*): Null Island is a place, and a receiver with no lock
+  reports the origin. Both formats can express it, as two zero semicircles or two zero radians.
+- **Out of range is a unit error, not an unusual dive.** Worth knowing that FIT cannot express one
+  for longitude: a semicircle count spans exactly one circle, so ±2³¹ *is* ±180°. Only the JSON's
+  radians can overshoot, which is the same unit confusion again.
+
+FIT's own absent-marker needs no handling here and it is worth saying why: `position_lat` is a
+`sint32`, whose invalid sentinel is `0x7FFFFFFF`, and `fitdecode`'s base-type parser already returns
+`None` for it. Left to arithmetic it would be 180.000000 degrees — out of range for a latitude, but
+a valid longitude that no bound would ever catch.
+
+### UDDF has no slot for either position
+
+Checked against the vendored XSD rather than assumed, the same way the rest of *"What UDDF 3.2.2 has
+no slot for"* was: `geographyType` is referenced from exactly two places, `siteType` and
+`trippartType`, and neither is per-dive. `informationbeforediveType` and `informationafterdiveType`
+have no coordinate element, and neither does `waypointType` — which carries `heading` but no
+position. So the entry and exit positions join the deco ceiling and the CNS/OTU scalars on the list
+of things that survive in `export.json` and `dives.csv` only. `dives.csv` gets four columns beside
+the other import-owned readings, empty where there was no fix rather than `0` — the Null Island trap
+again, from the writing side.

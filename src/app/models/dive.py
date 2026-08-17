@@ -65,6 +65,23 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # recorded choice rather than an oversight, so this column does not feed SAC/RMV.
     surface_pressure_bar: Mapped[float | None] = mapped_column(Float, default=None)
 
+    # Where the diver got in and where they got out, in decimal degrees. Written by the
+    # same import path as the readings above and for the same reason - a dive computer's
+    # own satellite fixes, which `services/dive_parsers/positions.py` reduces to these
+    # two - so they are not on the dive form either.
+    #
+    # Per-dive rather than on the dive site the dive links to, which is the decision this
+    # reverses: a site is one pin, and an entry and an exit are two different places on a
+    # drift dive, which is precisely what a fix pair records. See DECISIONS.md.
+    #
+    # Two `Float` columns per position, like `dive_site.latitude`/`longitude` and for the
+    # same reasons; four of them here because there are two positions, not because a
+    # coordinate needs four numbers.
+    entry_latitude: Mapped[float | None] = mapped_column(Float, default=None)
+    entry_longitude: Mapped[float | None] = mapped_column(Float, default=None)
+    exit_latitude: Mapped[float | None] = mapped_column(Float, default=None)
+    exit_longitude: Mapped[float | None] = mapped_column(Float, default=None)
+
     @declared_attr.directive
     @classmethod
     def __table_args__(cls) -> tuple:
@@ -96,6 +113,45 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
             CheckConstraint(
                 "surface_pressure_bar IS NULL OR (surface_pressure_bar >= 0.5 AND surface_pressure_bar <= 1.2)",
                 name="ck_dive_surface_pressure_range",
+            ),
+            # Bounded on both sides like the surface pressure, and for a plainer reason:
+            # these are the limits of the coordinate system. A value outside them is a
+            # unit error - a FIT semicircle count read as degrees, or a Suunto radian
+            # read the same way - rather than a dive somewhere unusual.
+            #
+            # One constraint per column, mirrored one-for-one by a validator on
+            # `ParsedDiveSchema`, so that every single-column bound a parser can reach
+            # still has a parse-side guard (`test_every_single_column_bound_a_parser_can
+            # _reach_has_a_parse_side_guard` counts them).
+            CheckConstraint(
+                "entry_latitude IS NULL OR (entry_latitude >= -90 AND entry_latitude <= 90)",
+                name="ck_dive_entry_latitude_range",
+            ),
+            CheckConstraint(
+                "entry_longitude IS NULL OR (entry_longitude >= -180 AND entry_longitude <= 180)",
+                name="ck_dive_entry_longitude_range",
+            ),
+            CheckConstraint(
+                "exit_latitude IS NULL OR (exit_latitude >= -90 AND exit_latitude <= 90)",
+                name="ck_dive_exit_latitude_range",
+            ),
+            CheckConstraint(
+                "exit_longitude IS NULL OR (exit_longitude >= -180 AND exit_longitude <= 180)",
+                name="ck_dive_exit_longitude_range",
+            ),
+            # A pair, unlike every constraint above it: half a position is not a partial
+            # position but a meaningless one, a dive pinned to the equator or the prime
+            # meridian by whichever half survived. `dive_site` leaves the same rule to its
+            # write schemas because a diver types those two numbers and has to be told
+            # which one is missing; nothing types these, so the database is the right
+            # place to refuse a half pair outright.
+            CheckConstraint(
+                "(entry_latitude IS NULL) = (entry_longitude IS NULL)",
+                name="ck_dive_entry_position_pair",
+            ),
+            CheckConstraint(
+                "(exit_latitude IS NULL) = (exit_longitude IS NULL)",
+                name="ck_dive_exit_position_pair",
             ),
             # Serves `_cached_read_dives` (`GET /dives`, by far the hottest query on this
             # table): `WHERE user_id = ... AND is_deleted = false ORDER BY start_time DESC`.

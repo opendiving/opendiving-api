@@ -1,16 +1,23 @@
 """Unit tests for dive-computer export file parsers."""
 
 import json
+import math
 import random
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import BaseModel
+from sqlalchemy import CheckConstraint
 
 from src.app.models.dive import Dive
 from src.app.models.dive_mixture import DiveMixture
 from src.app.schemas.dive_mixture import GasRole
-from src.app.schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
+from src.app.schemas.parsed_dive import (
+    LATITUDE_LIMIT,
+    LONGITUDE_LIMIT,
+    DiveMixtureSchema,
+    ParsedDiveSchema,
+)
 from src.app.services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file
 from src.app.services.dive_parsers.fit import _MAX_CYLINDERS, FitParser
 from src.app.services.dive_parsers.fit import _MAX_FRAMES as MAX_FRAMES
@@ -211,6 +218,24 @@ def _ocean_gas_switch(offset_seconds: int, gas_number: int) -> dict:
     }
 
 
+def _ocean_depth(offset_seconds: int, depth: float) -> dict:
+    return {"TimeISO8601": _ocean_time(offset_seconds), "Depth": depth}
+
+
+def _ocean_fix(offset_seconds: int, latitude: float, longitude: float) -> dict:
+    """A GPS sample, in the shape the Ocean writes one: radians, and no other channel.
+
+    The device logs these on samples of their own, sharing nothing with the depth
+    readings but the timeline - which is why the extraction walks the stream for both.
+    """
+    return {
+        "TimeISO8601": _ocean_time(offset_seconds),
+        "GPSAltitude": -0.2,
+        "Latitude": latitude,
+        "Longitude": longitude,
+    }
+
+
 OCEAN_JSON_WITH_CYLINDERS = _ocean_json(
     [
         _ocean_gas_switch(0, 0),
@@ -263,6 +288,22 @@ DIVE_START = datetime(2026, 4, 17, 9, 49, 23, tzinfo=UTC)
 # When the device finished writing the file. The dive was logged at UTC+02:00, which is
 # recoverable only from the gap between this and `local_timestamp`.
 ACTIVITY_END = datetime(2026, 4, 17, 11, 1, 5, tzinfo=UTC)
+
+
+def _dive_constraints() -> dict[str, str]:
+    """`dive`'s named `CheckConstraint`s, by name, as the SQL they carry."""
+    return {
+        str(constraint.name): str(constraint.sqltext)
+        for constraint in Dive.metadata.tables["dive"].constraints
+        if isinstance(constraint, CheckConstraint) and constraint.name is not None
+    }
+
+
+def _semicircles(degrees: float) -> int:
+    """Degrees into the signed 32-bit angle FIT stores, for a fixture that wants a
+    coordinate it can read back. The two real corpus values are used raw instead - see
+    `TestEntryAndExitPositions`."""
+    return round(degrees * 2**31 / 180)
 
 
 def _records(samples: list[tuple[int, float, int]]) -> list[Message]:
@@ -1898,7 +1939,11 @@ class TestTechScalars:
         `ck_dive_mixture_oxygen_helium_sum` and `ck_dive_mixture_pressure_order` constrain
         a *pair*, so there is no "the bad value" to null - honouring them on the parse side
         means choosing which of two recorded readings to discard, which is a different
-        decision from "this number is not a reading" and is not made here. `duration`,
+        decision from "this number is not a reading" and is not made here. The two
+        `ck_dive_*_position_pair` constraints are pairs in the same sense and are excluded
+        for the same reason - they are honoured by `_drop_half_positions`, a *model*
+        validator, which is exactly what this counter cannot see. The four coordinate
+        *ranges* under them are single-column and are counted. `duration`,
         `volume`, `oxygen` and `helium` are single-column and still unguarded; they are
         pre-existing and out of this phase's scope, and they are listed here so the gap is
         recorded rather than implied.
@@ -1911,6 +1956,10 @@ class TestTechScalars:
             (Dive, "otu_start"),
             (Dive, "otu_end"),
             (Dive, "surface_pressure_bar"),
+            (Dive, "entry_latitude"),
+            (Dive, "entry_longitude"),
+            (Dive, "exit_latitude"),
+            (Dive, "exit_longitude"),
             (DiveMixture, "po2_limit"),
             (DiveMixture, "gas_number"),
         }
@@ -2212,6 +2261,254 @@ class TestParsersInventNothing:
 
         assert (mixture.start_pressure, mixture.end_pressure) == (None, None)
         assert mixture.oxygen == 49.0
+
+
+class TestEntryAndExitPositions:
+    """Which satellite fix becomes the entry point and which the exit one.
+
+    The numbers below are the two dives in the corpus that exist as *both* a FIT and a
+    Suunto JSON export - the only cross-format check available for this, and the reason
+    the two conversions (semicircles, radians) are pinned to the same degrees.
+    """
+
+    # `69cfaef7`, off Dahab. The FIT export writes these two semicircle counts; the JSON
+    # export of the same dive writes the same position in radians.
+    DAHAB_SEMICIRCLES = (339272053, 411111844)
+    DAHAB_RADIANS = (0.49632722063772405, 0.6014229493488608)
+    DAHAB_DEGREES = (28.437455, 34.458997)
+
+    @staticmethod
+    def _fit(*records: Message) -> ParsedDiveSchema:
+        return FitParser.parse(dive_fit_file(*records))
+
+    @staticmethod
+    def _fix_record(offset: int, latitude: int | None, longitude: int | None, depth: float = 0.0) -> Message:
+        """A `record` carrying a depth reading and, where given, a position in semicircles."""
+        position = {}
+        if latitude is not None:
+            position["position_lat"] = latitude
+        if longitude is not None:
+            position["position_long"] = longitude
+        return message("record", timestamp=DIVE_START + timedelta(seconds=offset), depth=depth, **position)
+
+    def test_fit_reads_semicircles_as_degrees(self):
+        parsed = self._fit(
+            self._fix_record(0, *self.DAHAB_SEMICIRCLES),
+            self._fix_record(600, None, None, depth=30.0),
+        )
+
+        assert (parsed.entry_latitude, parsed.entry_longitude) == self.DAHAB_DEGREES
+
+    def test_json_reads_radians_as_the_same_degrees(self):
+        """One dive, two exports, one position. Read as degrees rather than radians, the
+        JSON would put a Gulf of Aqaba dive 3 000 km away in the Atlantic."""
+        content = _ocean_json(
+            [
+                _ocean_fix(0, *self.DAHAB_RADIANS),
+                _ocean_depth(600, 30.0),
+            ]
+        )
+
+        parsed = SuuntoJsonParser.parse(content)
+
+        assert (parsed.entry_latitude, parsed.entry_longitude) == self.DAHAB_DEGREES
+
+    def test_the_entry_is_the_last_fix_before_the_deepest_sample(self):
+        """Not the *first* fix: the boat motoring out to the site logs fixes too, and the
+        one that says where the diver got in is the one just before the descent."""
+        parsed = self._fit(
+            self._fix_record(0, _semicircles(28.1), _semicircles(34.1)),
+            self._fix_record(60, _semicircles(28.2), _semicircles(34.2)),
+            self._fix_record(600, None, None, depth=30.0),
+            self._fix_record(1200, _semicircles(28.9), _semicircles(34.9)),
+        )
+
+        assert (parsed.entry_latitude, parsed.entry_longitude) == (28.2, 34.2)
+
+    def test_the_exit_is_the_first_fix_after_the_deepest_sample(self):
+        """Mirrored, and for the mirrored reason: the diver drifts once they surface."""
+        parsed = self._fit(
+            self._fix_record(600, None, None, depth=30.0),
+            self._fix_record(1200, _semicircles(28.5), _semicircles(34.5)),
+            self._fix_record(1800, _semicircles(28.8), _semicircles(34.8)),
+        )
+
+        assert (parsed.exit_latitude, parsed.exit_longitude) == (28.5, 34.5)
+
+    def test_a_dive_whose_fixes_all_come_after_it_has_no_entry_position(self):
+        """The corpus's normal case, not an edge one: GPS does not reach a wrist under
+        water, and all 19 GPS-carrying exports log their first fix past `DiveTime`. An
+        entry position invented from those would be the exit position under another name.
+        """
+        parsed = self._fit(
+            self._fix_record(600, None, None, depth=30.0),
+            self._fix_record(3000, *self.DAHAB_SEMICIRCLES),
+        )
+
+        assert (parsed.entry_latitude, parsed.entry_longitude) == (None, None)
+        assert (parsed.exit_latitude, parsed.exit_longitude) == self.DAHAB_DEGREES
+
+    def test_json_fixes_are_ordered_by_their_own_timestamps_not_by_file_order(self):
+        """A Suunto export's sample timestamps are not monotonic across channels - the
+        sensor streams are appended out of order - so "the last one in the list" is not
+        "the last one before the descent"."""
+        content = _ocean_json(
+            [
+                _ocean_fix(60, math.radians(28.2), math.radians(34.2)),
+                _ocean_fix(0, math.radians(28.1), math.radians(34.1)),
+                _ocean_depth(600, 30.0),
+            ]
+        )
+
+        parsed = SuuntoJsonParser.parse(content)
+
+        assert (parsed.entry_latitude, parsed.entry_longitude) == (28.2, 34.2)
+
+    def test_a_file_with_no_depth_channel_places_no_fix(self):
+        """Nothing to pivot on. A position that cannot be told apart from its opposite is
+        worth less than no position, since nothing downstream could ever discover it."""
+        parsed = self._fit(message("record", timestamp=DIVE_START, position_lat=339272053, position_long=411111844))
+
+        assert (parsed.entry_latitude, parsed.exit_latitude) == (None, None)
+
+    def test_a_non_finite_depth_never_becomes_the_pivot(self):
+        """`json.loads` accepts a bare `Infinity`, and an `inf` wins `max` outright - so
+        the split would land on the surface sample it arrived on, putting a pre-descent
+        fix in the exit columns with nothing downstream able to tell. A `NaN` breaks it
+        the other way, winning whenever it is first, since every later `x > NaN` is
+        `False`. The profile path dies loudly on the same reading; this one would not."""
+        for bad in ("Infinity", "NaN"):
+            content = _ocean_json(
+                [
+                    json.loads(f'{{"TimeISO8601": "{_ocean_time(0)}", "Depth": {bad}}}'),
+                    _ocean_fix(60, math.radians(28.2), math.radians(34.2)),
+                    _ocean_depth(600, 30.0),
+                    _ocean_fix(1200, math.radians(28.9), math.radians(34.9)),
+                ]
+            )
+
+            parsed = SuuntoJsonParser.parse(content)
+
+            assert (parsed.entry_latitude, parsed.entry_longitude) == (28.2, 34.2), bad
+            assert (parsed.exit_latitude, parsed.exit_longitude) == (28.9, 34.9), bad
+
+    def test_one_unreadable_sample_does_not_discard_the_rest(self):
+        """Skipped per sample rather than per file. A GPS-carrying export in this corpus
+        yields exactly one usable position, so unwinding the whole pass on the first bad
+        `TimeISO8601` would cost the entire feature for that dive."""
+        content = _ocean_json(
+            [
+                {"TimeISO8601": "not-a-timestamp", "Latitude": 0.1, "Longitude": 0.2},
+                _ocean_fix(0, *self.DAHAB_RADIANS),
+                _ocean_depth(600, 30.0),
+            ]
+        )
+
+        parsed = SuuntoJsonParser.parse(content)
+
+        assert (parsed.entry_latitude, parsed.entry_longitude) == self.DAHAB_DEGREES
+
+    def test_half_a_fix_is_not_a_fix(self):
+        """A latitude with no longitude pins the dive to the prime meridian - which is
+        also what `ck_dive_entry_position_pair` refuses, so this would fail the attach."""
+        parsed = self._fit(
+            self._fix_record(0, _semicircles(28.2), None),
+            self._fix_record(600, None, None, depth=30.0),
+        )
+
+        assert (parsed.entry_latitude, parsed.entry_longitude) == (None, None)
+
+    def test_null_island_never_displaces_a_real_fix(self):
+        """A receiver with no lock reports the origin. Dropped at the fix rather than at
+        the column, because `0.0, 0.0` is the *later* of these two and would otherwise be
+        chosen as the entry and then nulled - costing a position the file did record."""
+        parsed = self._fit(
+            self._fix_record(0, *self.DAHAB_SEMICIRCLES),
+            self._fix_record(60, 0, 0),
+            self._fix_record(600, None, None, depth=30.0),
+        )
+
+        assert (parsed.entry_latitude, parsed.entry_longitude) == self.DAHAB_DEGREES
+
+    def test_an_out_of_range_reading_never_displaces_a_real_fix(self):
+        """Same rule, other cause: a latitude past the pole is not a reading, and taking
+        it as the entry fix would lose the good one beside it as well as itself.
+
+        A latitude, not a longitude, because a *semicircle* count cannot be out of range
+        for a longitude - the unit spans exactly one circle, so 2^31 is 180 degrees and
+        anything larger is not a `sint32`. Only the JSON export's radians can overshoot
+        both, which is what `test_json_radians_read_as_degrees_would_be_out_of_range`
+        covers.
+        """
+        parsed = self._fit(
+            self._fix_record(0, *self.DAHAB_SEMICIRCLES),
+            self._fix_record(60, _semicircles(150.0), _semicircles(34.2)),
+            self._fix_record(600, None, None, depth=30.0),
+        )
+
+        assert (parsed.entry_latitude, parsed.entry_longitude) == self.DAHAB_DEGREES
+
+    def test_json_radians_read_as_degrees_would_be_out_of_range(self):
+        """The unit error this guards against, from the far side: a Suunto file's radians
+        run to 2*pi, so a value that overshoots once converted was already nonsense."""
+        content = _ocean_json([_ocean_fix(0, 1.6, 7.0), _ocean_depth(600, 30.0)])
+
+        parsed = SuuntoJsonParser.parse(content)
+
+        assert (parsed.entry_latitude, parsed.entry_longitude) == (None, None)
+
+    def test_fit_reads_the_formats_own_absent_marker_as_no_fix(self):
+        """0x7FFFFFFF is `sint32`'s invalid sentinel, and `fitdecode` resolves it to
+        `None`. Read as a number it is 180.000000 degrees - out of range for a latitude,
+        but a perfectly valid longitude that no bound would ever catch."""
+        parsed = self._fit(
+            self._fix_record(0, 0x7FFFFFFF, 0x7FFFFFFF),
+            self._fix_record(600, None, None, depth=30.0),
+        )
+
+        assert (parsed.entry_latitude, parsed.entry_longitude) == (None, None)
+
+    def test_xml_records_no_position_at_all(self):
+        """No DM5 export in the 384-file corpus carries a coordinate anywhere."""
+        parsed = SuuntoXmlParser.parse(VALID_SUUNTO_XML.encode())
+
+        assert (parsed.entry_latitude, parsed.entry_longitude) == (None, None)
+        assert (parsed.exit_latitude, parsed.exit_longitude) == (None, None)
+
+    def test_a_lone_ordinate_left_by_a_field_validator_takes_its_partner_with_it(self):
+        """The one way a half pair can reach the schema: `_drop_non_finite` nulls a `NaN`
+        latitude and leaves a perfectly good longitude behind. Both formats can express a
+        non-finite float - `json.loads` accepts a bare `NaN` - and the surviving half
+        would pin the dive to the equator."""
+        parsed = ParsedDiveSchema(
+            avg_depth=None,
+            bottom_temperature=None,
+            dive_number=None,
+            duration=None,
+            max_depth=None,
+            start_time=None,
+            mixtures=[],
+            entry_latitude=float("nan"),
+            entry_longitude=34.2,
+        )
+
+        assert (parsed.entry_latitude, parsed.entry_longitude) == (None, None)
+
+    def test_the_coordinate_bounds_are_the_ones_the_database_enforces(self):
+        constraints = _dive_constraints()
+
+        assert f"{LATITUDE_LIMIT:g}" in constraints["ck_dive_entry_latitude_range"]
+        assert f"{LATITUDE_LIMIT:g}" in constraints["ck_dive_exit_latitude_range"]
+        assert f"{LONGITUDE_LIMIT:g}" in constraints["ck_dive_entry_longitude_range"]
+        assert f"{LONGITUDE_LIMIT:g}" in constraints["ck_dive_exit_longitude_range"]
+
+    def test_neither_position_can_be_half_stored(self):
+        """The rule the schema drops a half pair for, stated by the database as well -
+        see `test_dive_check_constraints.py` for it being exercised against a real one."""
+        constraints = _dive_constraints()
+
+        assert constraints["ck_dive_entry_position_pair"] == "(entry_latitude IS NULL) = (entry_longitude IS NULL)"
+        assert constraints["ck_dive_exit_position_pair"] == "(exit_latitude IS NULL) = (exit_longitude IS NULL)"
 
 
 class TestParseDiveFile:

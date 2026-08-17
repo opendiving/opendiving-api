@@ -6,9 +6,12 @@ Run once after deploying the columns, from the API container:
     docker compose exec api python -m src.scripts.backfill_dive_tech_fields --parser-key suunto_xml
     docker compose exec api python -m src.scripts.backfill_dive_tech_fields --dry-run
 
-Fills `dive.cns_start/cns_end/otu_start/otu_end/surface_pressure_bar` and, where the
-stored cylinders still demonstrably match the file's, `dive_mixture.po2_limit/gas_number/
-role`. Every dive with a stored export is a candidate on every run; see
+Fills `dive.cns_start/cns_end/otu_start/otu_end/surface_pressure_bar`, the entry/exit
+coordinates beside them, and - where the stored cylinders still demonstrably match the
+file's - `dive_mixture.po2_limit/gas_number/role`. The dive columns are whatever
+`DiveTechScalars` publishes rather than a list kept here, which is what let the
+coordinates arrive without editing this script. Every dive with a stored export is a
+candidate on every run; see
 `services/dive_files.py::backfill_tech_fields` for why there is no version column to
 select on and why the mixture half is deliberately the timid one.
 
