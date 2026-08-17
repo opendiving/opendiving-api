@@ -55,10 +55,11 @@ mypy and pytest need `ENVIRONMENT=local` and a `SECRET_KEY` in the environment (
 a throwaway one).
 
 **The suite runs without a database.** Almost every test mocks the session (`mock_db`), so a cold
-checkout with nothing else running gives you a green run in under a second. The exception is
-`tests/test_dive_check_constraints.py`, which inserts real rows through a sync session to verify the
-constraints Postgres actually enforces. It is marked `skipif` on a connection attempt, so with no
-database reachable those tests **skip silently** rather than fail.
+checkout with nothing else running gives you a green run in under a second. The exceptions are the
+eight modules that insert real rows through a session to verify what Postgres itself settles — the
+constraints it enforces, the window functions a renumber runs, whether a query filtered by `user_id`
+at all. They share one `skipif(not db_available())` guard from `tests/conftest.py`, so with no
+database reachable they **skip silently** rather than fail.
 
 That matters if you touch `models/` or add a `CheckConstraint`: your local run can be green because
 the tests that would have caught you never executed.
