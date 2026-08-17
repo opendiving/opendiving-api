@@ -80,11 +80,11 @@ def db() -> Generator[Session, Any]:
 def db_available() -> bool:
     """Whether the Postgres-backed tests can run at all.
 
-    Every module that needs a real database guards its classes with
-    `@pytest.mark.skipif(not db_available(), ...)`, because most of the suite mocks the
-    session and a cold checkout has nothing listening. Note the skip is silent - see
-    CONTRIBUTING.md for why a run on the host needs `POSTGRES_SERVER=localhost` before
-    these execute at all.
+    Most of the suite mocks the session and a cold checkout has nothing listening, so every
+    module that needs a real database guards on `not db_available()` - as a module-level
+    `pytestmark` where the whole module is database-backed, and per class where it also
+    holds classes that are not. Note the skip is silent: see CONTRIBUTING.md for why a run
+    on the host needs `POSTGRES_SERVER=localhost` before these execute at all.
     """
     try:
         with sync_engine.connect():
@@ -101,10 +101,12 @@ def _ensure_tables() -> None:
     `create_tables()` lifespan hook. Idempotent, and a no-op when nothing is listening, so
     it costs an unreachable connection attempt on a mocked-only run.
 
-    This is now the only definition - the eight modules that had grown their own
+    This is now the only definition - the seven modules that had grown their own
     module-scoped copy of it and of `db_available` all use these. Keep it that way: a
     module-level fixture of the same name *shadows* this one, so a re-introduced copy
-    silently stops this from running for that module rather than conflicting with it.
+    silently stops this from running for that module rather than conflicting with it. See
+    *"The Postgres test fixtures are shared, and a local copy silently wins"* in
+    `DECISIONS.md`.
     """
     if db_available():
         Base.metadata.create_all(sync_engine)
@@ -116,8 +118,14 @@ async def async_db() -> AsyncGenerator[AsyncSession]:
 
     Separate from `db`, which is the sync session the rest of the suite seeds rows with -
     a test typically wants both: `db` to arrange, `async_db` to exercise the code under
-    test. Engine per test rather than per session, which is wasteful but matches what the
-    modules that predate this fixture did.
+    test.
+
+    Engine per test rather than per session, and disposed at teardown, because
+    pytest-asyncio gives each test its own event loop and a pooled asyncpg connection is
+    bound to the loop that opened it - a session-scoped engine hands the second test a
+    connection from the first test's dead loop. Wasteful, and not optional. Every module
+    that predates this fixture had worked that out separately; see *"The Postgres test
+    fixtures are shared, and a local copy silently wins"* in `DECISIONS.md`.
     """
     engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
     session_factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)

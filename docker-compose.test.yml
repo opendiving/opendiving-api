@@ -1,9 +1,10 @@
 # Overlay for running the test suite against real Postgres and Redis:
 #
-#   docker compose -f docker-compose.yml -f docker-compose.test.yml up --abort-on-container-exit api
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml up --build --abort-on-container-exit api
 #
-# This is the only way to exercise the DB-backed tests (`test_dive_check_constraints.py`,
-# `test_dive_numbering.py`), which skip themselves when nothing is listening on Postgres.
+# One of two ways to exercise the eight DB-backed test modules, which skip themselves when nothing
+# is listening on Postgres. Here `db` resolves and nothing needs overriding; on the host it takes
+# `POSTGRES_SERVER=localhost`, since `src/.env` names the compose hostname. See CONTRIBUTING.md.
 services:
   api:
     build:

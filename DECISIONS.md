@@ -6573,3 +6573,65 @@ the history is worth keeping — so unlike a set member, the reference may genui
 its target, and this series' reflex answer ("filter the loader") may be the wrong one there.
 Deciding that inside a change about gear sets would bury it, exactly as deciding the gear-set
 question inside a change about dive reads would have.
+
+## The Postgres test fixtures are shared, and a local copy silently wins
+
+Eight test modules need a real database. Seven of them once had their own `_db_available()` and
+their own module-scoped `_ensure_tables` — verbatim copies, because each was written by looking at
+the last one; four also had their own `async_db`, three their own `diver`/`other_diver`. They now
+come from `tests/conftest.py`, which took two passes: one to write the shared set and move the first
+module onto it, a second to move the remaining six.
+
+The reason this is worth a section is not the duplication. It is the failure mode a duplicate has
+here, which produces no error at all:
+
+**A module-level fixture shadows a same-named one in `conftest.py`.** pytest resolves fixtures from
+the nearest scope outwards, so a module defining `_ensure_tables` does not conflict with conftest's
+and does not override it in a way anything reports — conftest's simply never runs for that module.
+Between the two passes the shared session-scoped `_ensure_tables` was therefore not resolved for six
+of the eight modules that depended on it, and nothing anywhere said so. It was harmless twice over:
+every copy called the same `Base.metadata.create_all(sync_engine)` against the same engine, and the
+two modules that *did* resolve it triggered the session-scoped original once for the whole run
+anyway. Both of those are luck. Give conftest's fixture something to do that the copies don't — a
+session-scoped seed, a second engine, anything keyed to which modules requested it — and the modules
+that most need it are exactly the ones that silently opt out.
+
+The same applies to `diver`, `other_diver` and `async_db`. `async_db` is where a divergence would
+bite hardest: it builds and disposes an engine per test because pytest-asyncio gives each test its
+own event loop and a pooled asyncpg connection is bound to the loop that opened it. A stale local
+copy that stops disposing produces cross-test event-loop errors that read as a bug in the code under
+test.
+
+So: **do not re-introduce a module-level fixture with a name `conftest.py` already uses and whose
+behaviour you still depend on.** Deliberate replacement is fine and the repo does it —
+`test_client_cache_middleware.py`, `test_geocoding.py` and `test_export_endpoints.py` each define
+their own `client` over conftest's, because they mount a purpose-built `FastAPI()` rather than the
+real app, and want nothing the shared one provides. That is a substitution, and it is legible as
+one. The trap is the copy of a fixture you *also* rely on, where the shadowing is invisible and the
+thing you rely on is the thing that stops happening.
+
+`db_available()` is deliberately a plain function rather than a fixture, for a related reason: it is
+called at import time by `pytest.mark.skipif`, which a fixture cannot serve. It is also uncached and
+called once per `skipif` rather than once per module — fourteen calls across the eight modules at
+the time of writing, plus the autouse fixture's own. That is fine at both ends: a connection when
+Postgres is up, and an immediate refusal (or a DNS failure, for the compose hostname) when it is not
+— neither costs anything measurable across fifteen calls. It would only hurt against a host that
+drops packets rather than refusing them, where each call waits out the full connect timeout; a run
+pointed at a blackholed address takes minutes rather than seconds for exactly that reason.
+
+### Why the skip is silent
+
+These modules skip rather than fail when nothing is listening, which is right locally — most of the
+suite mocks the session, and a cold checkout should be green in a second — and dangerous everywhere
+else, because a green local run looks identical whether the database-backed tests ran or not.
+CONTRIBUTING.md carries the incantation (`POSTGRES_SERVER=localhost`) and what CI asserts; two
+things that catch people out on top of it:
+
+- **A worktree has no `src/.env`.** It is gitignored, so it does not follow a `git worktree add`,
+  and without it the settings fall back to defaults — `postgres`/`postgres` against a database named
+  `postgres`, where the dev stack uses its own password and `opendive`. `POSTGRES_SERVER=localhost`
+  is then *not* enough on its own: the connection fails on the credentials or the database name
+  rather than on the host, and the tests skip exactly as if the database were down. Copy `src/.env`
+  in before believing a worktree run.
+- **The skip count is the only thing on screen that distinguishes the two runs.** Not the pass
+  count, which also changes for unrelated reasons.
