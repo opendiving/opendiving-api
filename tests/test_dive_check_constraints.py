@@ -8,7 +8,7 @@ they verify the actual constraints Postgres enforces - not just the Python-level
 messages.
 
 Automatically skipped if no database is reachable (e.g. running `pytest` outside the
-project's docker compose setup), since no other test in this suite requires a live DB.
+project's docker compose setup).
 """
 
 from collections.abc import Generator
@@ -16,34 +16,16 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from src.app.core.db.database import Base
 from src.app.models.dive import Dive
 from src.app.models.dive_mixture import DiveMixture
 from src.app.models.user import User
-from tests.conftest import sync_engine
+from tests.conftest import db_available
 from tests.helpers.generators import create_user
 
-
-def _db_available() -> bool:
-    try:
-        with sync_engine.connect():
-            return True
-    except OperationalError:
-        return False
-
-
-pytestmark = pytest.mark.skipif(not _db_available(), reason="No database connection available")
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _ensure_tables() -> None:
-    """Create any missing tables (idempotent) so these tests don't depend on the
-    `api` service having already run its startup `create_tables()` lifespan hook.
-    """
-    Base.metadata.create_all(sync_engine)
+pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
 
 @pytest.fixture

@@ -17,76 +17,30 @@ ownership check and the cache, which is a question about the call, not about the
 """
 
 import uuid as uuid_pkg
-from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatch
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import pytest_asyncio
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
 from src.app.api.v1 import dives as dives_module
-from src.app.core.config import settings
-from src.app.core.db.database import Base
 from src.app.core.exceptions.http_exceptions import NotFoundException
 from src.app.core.utils import cache as cache_module
 from src.app.models.dive import Dive
 from src.app.models.user import User
 from src.app.schemas.dive import DiveNeighbors
 from src.app.services.dive_neighbors import find_dive_neighbors
-from tests.conftest import sync_engine
-from tests.helpers.generators import create_user
-
-
-def _db_available() -> bool:
-    try:
-        with sync_engine.connect():
-            return True
-    except OperationalError:
-        return False
-
+from tests.conftest import db_available
 
 _EPOCH = datetime(2024, 5, 1, 9, 0, tzinfo=UTC)
 
 
 def _day(offset: int) -> datetime:
     return _EPOCH + timedelta(days=offset)
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _ensure_tables() -> None:
-    """Create any missing tables (idempotent), as in `test_dive_numbering.py`."""
-    if _db_available():
-        Base.metadata.create_all(sync_engine)
-
-
-@pytest_asyncio.fixture
-async def async_db() -> AsyncGenerator[AsyncSession]:
-    """An `AsyncSession` on its own engine - the service under test is async, while the
-    `db` fixture used to seed rows is the sync one the rest of the suite shares."""
-    engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
-    session_factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-    async with session_factory() as session:
-        yield session
-    await engine.dispose()
-
-
-@pytest.fixture
-def diver(db: Session) -> User:
-    return create_user(db)
-
-
-@pytest.fixture
-def other_diver(db: Session) -> User:
-    """A second log in the same table. `user_id` is the only thing keeping one diver's
-    dives out of another's chain, and a suite with one user in it cannot notice when that
-    filter stops working."""
-    return create_user(db)
 
 
 def _log(db: Session, user: User, *numbered_days: tuple[int, int], **overrides: Any) -> list[Dive]:
@@ -114,7 +68,7 @@ async def _neighbors_of(async_db: AsyncSession, dive: Dive) -> Any:
     return await find_dive_neighbors(async_db, user_id=dive.user_id, start_time=dive.start_time, dive_id=dive.id)
 
 
-@pytest.mark.skipif(not _db_available(), reason="No database connection available")
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
 class TestFindDiveNeighbors:
     @pytest.mark.asyncio
     async def test_a_dive_in_the_middle_has_both(self, db: Session, async_db: AsyncSession, diver: User) -> None:
@@ -231,7 +185,7 @@ class TestFindDiveNeighbors:
         assert neighbors.next.dive_number == 3
 
 
-@pytest.mark.skipif(not _db_available(), reason="No database connection available")
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
 class TestSharedStartTimes:
     """Two dives can carry the same `start_time` - a computer that records to the minute,
     or a repetitive dive entered twice by hand - and `id` is what breaks the tie.

@@ -19,10 +19,9 @@ anything skips. See CONTRIBUTING.md.
 from datetime import UTC, date, datetime
 
 import pytest
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from src.app.core.db.database import Base, async_engine, local_session
+from src.app.core.db.database import async_engine, local_session
 from src.app.models.certification import Certification
 from src.app.models.dive import Dive
 from src.app.models.dive_dive_site import DiveDiveSite
@@ -38,24 +37,10 @@ from src.app.models.trip import Trip
 from src.app.models.trip_location import TripLocation
 from src.app.models.user import User
 from src.app.services.export.loader import ExportBundle, load_export_bundle
-from tests.conftest import sync_engine
+from tests.conftest import db_available
 from tests.helpers.generators import create_user
 
-
-def _db_available() -> bool:
-    try:
-        with sync_engine.connect():
-            return True
-    except OperationalError:
-        return False
-
-
-pytestmark = pytest.mark.skipif(not _db_available(), reason="No database connection available")
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _ensure_tables() -> None:
-    Base.metadata.create_all(sync_engine)
+pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
 
 @pytest.fixture

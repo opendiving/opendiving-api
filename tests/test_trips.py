@@ -31,7 +31,6 @@ to make them execute.
 """
 
 import uuid as uuid_pkg
-from collections.abc import AsyncGenerator
 from datetime import UTC, date, datetime
 from fnmatch import fnmatch
 from typing import Any
@@ -42,14 +41,12 @@ import pytest_asyncio
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
-from sqlalchemy.exc import IntegrityError, OperationalError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
 from src.app.api.v1 import trips as trips_module
-from src.app.core.config import settings
-from src.app.core.db.database import Base
 from src.app.core.exceptions.http_exceptions import NotFoundException, UnprocessableEntityException
 from src.app.core.utils import cache as cache_module
 from src.app.crud.crud_trip_locations import get_locations_for_trip, replace_locations_for_trip
@@ -68,8 +65,8 @@ from src.app.schemas.trip import (
     TripReadInternal,
     TripUpdateRequest,
 )
-from tests.conftest import sync_engine
-from tests.helpers.generators import create_user
+from tests.conftest import db_available
+from tests.helpers.generators import create_trip
 
 USER_ID = 1
 USER_UUID = uuid7()
@@ -563,53 +560,12 @@ class TestSearchConditions:
         assert sql.count(f"'%50{'\\' * 2}%%' ESCAPE") == 3
 
 
-def _db_available() -> bool:
-    try:
-        with sync_engine.connect():
-            return True
-    except OperationalError:
-        return False
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _ensure_tables() -> None:
-    """Create any missing tables (idempotent), as in `test_dive_neighbors.py`."""
-    if _db_available():
-        Base.metadata.create_all(sync_engine)
-
-
-@pytest_asyncio.fixture
-async def async_db() -> AsyncGenerator[AsyncSession]:
-    """An `AsyncSession` on its own engine - the crud under test is async, while the `db`
-    fixture used to seed the trip rows is the sync one the rest of the suite shares."""
-    engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
-    session_factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-    async with session_factory() as session:
-        yield session
-    await engine.dispose()
-
-
-@pytest.fixture
-def diver(db: Session) -> User:
-    return create_user(db)
-
-
-@pytest.fixture
-def other_diver(db: Session) -> User:
-    """A second logbook in the same tables - `user_id` is the only thing keeping one
-    diver's trips out of another's search results."""
-    return create_user(db)
-
-
 @pytest.fixture
 def trip(db: Session, diver: User) -> Trip:
-    row = Trip(user_id=diver.id, name=f"Visayas {uuid7().hex[-8:]}", start_date=date(2026, 6, 1), notes="")
-    db.add(row)
-    db.commit()
-    return row
+    return create_trip(db, diver)
 
 
-@pytest.mark.skipif(not _db_available(), reason="No database connection available")
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
 class TestReplaceLocations:
     """`replace_locations_for_trip` against a live Postgres - what the table holds after
     a write, which is the half a stubbed session cannot answer.
@@ -696,7 +652,7 @@ class TestReplaceLocations:
         assert read_back.model_dump() == written.model_dump()
 
 
-@pytest.mark.skipif(not _db_available(), reason="No database connection available")
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
 class TestSearchAgainstPostgres:
     """`_search_conditions` executed rather than compiled.
 
