@@ -110,13 +110,16 @@ class TestDeletedGearItemsAreNotRenderedInSets:
         self, db: Session, async_db: AsyncSession, diver: User
     ) -> None:
         """The half that is easy to lose to a later "tidy up the orphans" change: hiding
-        was chosen *over* clearing the rows in `erase_gear_item`, so the membership has to
-        still be in the database for `_owned` to resurrect the item into an export.
+        was chosen *over* clearing the rows at delete time, so the membership has to still
+        be in the database for `_owned` to resurrect the item into an export.
 
-        The delete has to happen here rather than being arranged with an already-deleted
-        fixture, which is what makes this a regression test at all: a fixture proves only
-        that an insert can be read back, and would go on passing the day someone adds the
-        `DELETE FROM gear_set_item` this section of DECISIONS.md argues against.
+        Be precise about what this pins, because the prose around it invites overclaiming.
+        It deletes through `crud_gear_items.delete` rather than through `erase_gear_item`,
+        so it does *not* catch a `DELETE FROM gear_set_item` added to the route - that is
+        one live-Postgres test away from also needing Redis, which is why the dive-side
+        sibling stops here too. What it does catch is the soft delete turning hard: the FK
+        is `ON DELETE CASCADE`, so a real `DELETE` would take the membership with it and
+        leave the export with nothing to resurrect.
         """
         item = create_gear_item(db, diver)
         gear_set = create_gear_set(db, diver)

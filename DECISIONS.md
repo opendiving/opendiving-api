@@ -6393,8 +6393,11 @@ tidies up.
 
 ### The sibling this one left alone: gear sets
 
-`get_gear_items_for_set`/`get_gear_items_for_sets` in `crud_gear_set_items.py` still list deleted
-items, and it is the same one-line filter with none of the bookkeeping above attached. It is left
+*Written while it was still true; `get_gear_items_for_set` has since been filtered, so read this as
+the case for deferring rather than as a description of the code.*
+
+`get_gear_items_for_set`/`get_gear_items_for_sets` in `crud_gear_set_items.py` still listed deleted
+items, and it was the same one-line filter with none of the bookkeeping above attached. It was left
 out because it is a different question, not a smaller one: a dive is a historical record and a gear
 set is a template the diver curates, so "the item vanishes from the set" and "clear the link when
 the item is deleted" are both defensible there in a way the second is not for dives. The round-trip
