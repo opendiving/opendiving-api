@@ -56,10 +56,14 @@ a throwaway one).
 
 **The suite runs without a database.** Almost every test mocks the session (`mock_db`), so a cold
 checkout with nothing else running gives you a green run in under a second. The exceptions are the
-eight modules that insert real rows through a session to verify what Postgres itself settles — the
+modules that insert real rows through a session to verify what Postgres itself settles — the
 constraints it enforces, the window functions a renumber runs, whether a query filtered by `user_id`
 at all. They share one `skipif(not db_available())` guard from `tests/conftest.py`, so with no
-database reachable they **skip silently** rather than fail.
+database reachable they **skip silently** rather than fail — and that shared guard is also how you
+find them: `grep -rl 'skipif(not db_available' tests/`. Deliberately not listed by name here, and
+not counted either, because the set grows with nearly every change to the suite and a list in a doc
+is the copy that stops being true. (Grep the guard, not the bare `db_available` — that also matches
+`conftest.py`, which defines it rather than being one of them.)
 
 That matters if you touch `models/` or add a `CheckConstraint`: your local run can be green because
 the tests that would have caught you never executed.
@@ -74,12 +78,13 @@ Point the host run at the published port instead:
 POSTGRES_SERVER=localhost ENVIRONMENT=local SECRET_KEY=testsecret uv run pytest -q
 ```
 
-That is the difference between `1311 passed, 141 skipped` and `1452 passed`. The totals move with
-every test added and these two will drift; **a skip count against no skip line at all is the part
-worth reading**, and it is the only thing on screen that tells you which of the two runs you just
-did. CI sets exactly that variable and fails the job if anything skips (see below), so this is about
-getting the answer before you push rather than after — but the skip is silent and a green local run
-looks identical either way, so it is easy to spend a review round believing those tests ran.
+That is the difference between a run ending `… passed, … skipped` and one ending `… passed` with no
+skip line at all. **The skip line is the whole signal** — the totals themselves say nothing, since
+they move with every test added, and this is the only thing on screen that tells you which of the
+two runs you just did. CI sets exactly that variable and fails the job if anything skips (see
+below), so this is about getting the answer before you push rather than after — but the skip is
+silent and a green local run looks identical either way, so it is easy to spend a review round
+believing those tests ran.
 
 Alternatively use the containerised suite, where `db` resolves and nothing needs overriding — note
 that `docker-compose.test.yml` is an *overlay*, so it has to be passed alongside the base file
@@ -123,8 +128,9 @@ so nothing checks it.
 
 One mypy quirk in `tests/`: `call-arg` is disabled there. Pydantic's mypy plugin doesn't read
 defaults out of `Annotated[T, Field(default=None)]`, which is the form every schema in `app/schemas`
-uses, so it reports a missing argument for every optional field a test omits — 108 false positives.
-Every other error code still applies. See `DECISIONS.md`.
+uses, so it reports a missing argument for every optional field a test omits — 108 false positives
+when the suite was first pointed at mypy, which is what the exemption exists for. Every other error
+code still applies. See `DECISIONS.md`.
 
 ## How the code is laid out
 

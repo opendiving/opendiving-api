@@ -6576,11 +6576,12 @@ question inside a change about dive reads would have.
 
 ## The Postgres test fixtures are shared, and a local copy silently wins
 
-Eight test modules need a real database. Seven of them once had their own `_db_available()` and
-their own module-scoped `_ensure_tables` — verbatim copies, because each was written by looking at
-the last one; four also had their own `async_db`, three their own `diver`/`other_diver`. They now
-come from `tests/conftest.py`, which took two passes: one to write the shared set and move the first
-module onto it, a second to move the remaining six.
+Several test modules need a real database — `grep -rl 'skipif(not db_available' tests/` is the
+current list, and it grows. Seven of them once had their own `_db_available()` and their own
+module-scoped `_ensure_tables` — verbatim copies, because each was written by looking at the last
+one; four also had their own `async_db`, three their own `diver`/`other_diver`. They now come from
+`tests/conftest.py`, which took two passes: one to write the shared set and move the first module
+onto it, a second to move the remaining six.
 
 The reason this is worth a section is not the duplication. It is the failure mode a duplicate has
 here, which produces no error at all:
@@ -6612,12 +6613,12 @@ thing you rely on is the thing that stops happening.
 
 `db_available()` is deliberately a plain function rather than a fixture, for a related reason: it is
 called at import time by `pytest.mark.skipif`, which a fixture cannot serve. It is also uncached and
-called once per `skipif` rather than once per module — fourteen calls across the eight modules at
-the time of writing, plus the autouse fixture's own. That is fine at both ends: a connection when
-Postgres is up, and an immediate refusal (or a DNS failure, for the compose hostname) when it is not
-— neither costs anything measurable across fifteen calls. It would only hurt against a host that
-drops packets rather than refusing them, where each call waits out the full connect timeout; a run
-pointed at a blackholed address takes minutes rather than seconds for exactly that reason.
+called once per `skipif` rather than once per module — plus the autouse fixture's own, and the
+figure climbs with each guard added. That is fine at both ends: a connection when Postgres is up,
+and an immediate refusal (or a DNS failure, for the compose hostname) when it is not — neither costs
+anything measurable at that scale. It would only hurt against a host that drops packets rather than
+refusing them, where each call waits out the full connect timeout; a run pointed at a blackholed
+address takes minutes rather than seconds for exactly that reason.
 
 ### Why the skip is silent
 
