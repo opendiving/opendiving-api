@@ -61,6 +61,26 @@ def create_trip(db: Session, user: models.User, *, is_deleted: bool = False) -> 
     )
 
 
+def create_gear_item(
+    db: Session, user: models.User, *, is_deleted: bool = False, is_archived: bool = False
+) -> models.GearItem:
+    """A gear item of this user's. Uniquely named for the same reason as the rest, and
+    doubly so here: `ux_gear_item_user_id_brand_name_lower` is a real unique index over
+    (user, brand, name) that a repeated fixture name would collide on."""
+    return _persist(
+        db,
+        models.GearItem(
+            user_id=user.id,
+            name=f"MK25 {uuid7().hex[-8:]}",
+            brand="Scubapro",
+            type="regulator",
+            notes="",
+            is_deleted=is_deleted,
+            is_archived=is_archived,
+        ),
+    )
+
+
 def create_dive(
     db: Session, user: models.User, *, trip: models.Trip | None = None, is_deleted: bool = False
 ) -> models.Dive:

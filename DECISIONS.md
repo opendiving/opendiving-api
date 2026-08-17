@@ -6302,3 +6302,69 @@ being listed on the dives it was used on. It is left out deliberately, the same 
 left out of the `move_dives_to` PR — same shape, but `erase_gear_item` has its own invalidation and
 `dive_count` bookkeeping to check first, and bundling it would hide that check inside a change about
 sites and trips.
+
+**Since done, and both checks came back clean.** See the section below.
+
+## The gear-item loaders got the same filter, and both deferred checks came back clean
+
+`get_gear_items_for_dive`/`get_gear_items_for_dives` now filter `GearItem.is_deleted` too, so a
+deleted gear item drops off the dives it was used on exactly as a deleted site does. Two `WHERE`
+clauses, no schema change, and the whole argument above carries over unchanged — the write side had
+already voted here as well (`resolve_gear_item_ids_for_user` refuses a deleted item, so a dive's
+gear list was a set of uuids the same dive's `PATCH` would 422 on), the `dive_gear_item` rows are
+untouched so `_owned` can still resurrect the item for UDDF's `xs:IDREF`, and the next ordinary
+`PATCH /dive` on an affected dive destroys the links for good.
+
+It was worth deferring even though nothing turned up, because "nothing turned up" is a fact about
+this route that had to be established rather than assumed — the trip half of the sites-and-trips
+change looked equally harmless and was not.
+
+### `erase_gear_item`'s invalidation was already unconditional
+
+The trap that caught `erase_trip` is not here. `erase_gear_item` has always dropped the owner's dive
+caches on every delete, because a soft-deleted item stayed on its dives and a cached read could hold
+a stale name or `is_archived` — the same reasoning that made `erase_dive_site` unconditional. So the
+filter needed no change alongside it.
+
+What changed is *why* the call is there, and it is worth stating because the reason inverted. It
+used to guard against a cached read being stale in its **fields**; it now guards against a cached
+read being stale in its **membership** — listing kit that a fresh read omits, for the rest of the
+hour. The comment on the call says so, because an invalidation whose only justification lives in
+another file is exactly what a later cleanup deletes as redundant. There is a test for it too
+(`TestErasingGearItemDropsTheDiveCaches`), which the trip half only acquired when its skip was
+removed.
+
+### `dive_count` is unaffected at delete time, and moves later for a reason that is not this filter
+
+`recalculate_gear_dive_counts` counts `dive_gear_item` rows joined to the user's **live dives**, per
+item, and filters nothing on the item itself. This change touches no join row and no dive, so
+deleting an item moves no count — a deleted item keeps whatever `dive_count` it had, which is what
+`_owned` writes into `export.json`.
+
+The count does move later, on the severance the section above describes: when a client submits back
+a gear list one entry short, `replace_gear_items_for_dive` drops the links and the
+`recalculate_gear_dive_counts` that `patch_dive` already runs takes the deleted item to zero. That
+is the same permanent loss the site half has, and here it is legible as a number rather than only as
+an absence — but nothing user-facing reads it, since `GET /gear-item/{uuid}` 404s for a deleted item
+and the service digest filters `GearItem.is_deleted` before it reads `dive_count`. Only
+`export.json` shows it, and only until the same edit removes the item from the export entirely.
+
+### Archived is not deleted, and the filter has to keep them apart
+
+`is_archived` is deliberately **not** filtered. Archiving exists so that retired kit leaves the dive
+form's picker *while* the dives that used it go on showing it — that is the whole feature, and
+`dive_count` "stays meaningful" per the column comment on the model. So the loaders return archived
+items flagged, and only `is_deleted` hides. Pinned by a test, because the two flags sit next to each
+other on the same model and a filter on both would silently empty the gear list of every diver who
+tidies up.
+
+### The sibling this one left alone: gear sets
+
+`get_gear_items_for_set`/`get_gear_items_for_sets` in `crud_gear_set_items.py` still list deleted
+items, and it is the same one-line filter with none of the bookkeeping above attached. It is left
+out because it is a different question, not a smaller one: a dive is a historical record and a gear
+set is a template the diver curates, so "the item vanishes from the set" and "clear the link when
+the item is deleted" are both defensible there in a way the second is not for dives. The round-trip
+422 is real on that half too (`PATCH /gear-set` resolves through the same
+`resolve_gear_item_ids_for_user`), so it wants deciding rather than leaving — but deciding it inside
+a change about dive reads would have buried the decision.

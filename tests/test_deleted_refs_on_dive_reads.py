@@ -1,22 +1,25 @@
-"""Tests that a dive read stops naming a dive site or trip the diver has deleted.
+"""Tests that a dive read stops naming a dive site, trip or gear item the diver has deleted.
 
-Both loaders keep their links when the thing they point at is soft-deleted - that is what
-lets an export read the record back - so nothing but the query's own `WHERE` decides
-whether the app renders an orphan. A stubbed session answers with whatever rows the stub
-was handed, which is exactly the question here, so these run against a live Postgres and
-skip themselves otherwise. See CONTRIBUTING.md for why a run on the host needs
+Every one of those loaders keeps its links when the thing they point at is soft-deleted -
+that is what lets an export read the record back - so nothing but the query's own `WHERE`
+decides whether the app renders an orphan. A stubbed session answers with whatever rows the
+stub was handed, which is exactly the question here, so these run against a live Postgres
+and skip themselves otherwise. See CONTRIBUTING.md for why a run on the host needs
 `POSTGRES_SERVER=localhost` to make them execute.
 
-The route-level halves - `erase_trip` and `erase_dive_site` dropping the dive caches so a
-cached read cannot outlive the filter - live in `test_move_dives_on_delete.py`, against the
-stubs that can see the invalidation call. The serialized shape the clients consume is
-pinned here too, against a stub, since that one is about `_to_public_dive` and a schema
-default rather than a query.
+The route-level halves - the erase routes dropping the dive caches so a cached read cannot
+outlive the filter - live against stubs that can see the invalidation call:
+`test_move_dives_on_delete.py` for `erase_trip`/`erase_dive_site`, and
+`TestErasingGearItemDropsTheDiveCaches` at the bottom of this module for `erase_gear_item`,
+which has no such module of its own. The serialized shape the clients consume is pinned here
+too, against a stub, since that one is about `_to_public_dive` and a schema default rather
+than a query.
 """
 
+import uuid as uuid_pkg
 from datetime import UTC, datetime
 from typing import Any, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -24,20 +27,29 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
+import src.app.api.v1.gear_items as gear_items_module
 from src.app.api.v1.dives import _cached_read_dive, _cached_read_dives
 from src.app.crud.crud_dive_dive_sites import (
     get_dive_sites_for_dive,
     get_dive_sites_for_dives,
     replace_dive_sites_for_dive,
 )
+from src.app.crud.crud_dive_gear_items import (
+    get_gear_items_for_dive,
+    get_gear_items_for_dives,
+    replace_gear_items_for_dive,
+)
 from src.app.crud.crud_dive_sites import crud_dive_sites
+from src.app.crud.crud_gear_items import crud_gear_items
 from src.app.crud.crud_trips import crud_trips, get_trip_uuids_by_ids
 from src.app.models.dive import Dive
 from src.app.models.dive_dive_site import DiveDiveSite
+from src.app.models.dive_gear_item import DiveGearItem
 from src.app.models.user import User
 from src.app.schemas.dive import DiveReadInternal
+from src.app.schemas.gear_item import GearItemReadInternal, GearType
 from tests.conftest import db_available
-from tests.helpers.generators import create_dive, create_dive_site, create_trip
+from tests.helpers.generators import create_dive, create_dive_site, create_gear_item, create_trip
 
 # The undecorated body. `_cached_read_dive` carries `@cache`, which would need a Redis
 # client in place and would then serialize the response on the way out - neither of which
@@ -100,6 +112,61 @@ class TestDeletedDiveSitesAreNotRendered:
         assert [site.uuid for site in by_dive[with_live.id]] == [live.uuid]
         # Present and empty rather than absent - the pre-seeded lists are what keep a dive
         # whose every site is gone from dropping out of the mapping its caller indexes.
+        assert by_dive[with_deleted.id] == []
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestDeletedGearItemsAreNotRendered:
+    @pytest.mark.asyncio
+    async def test_a_deleted_item_drops_off_the_dive(self, db: Session, async_db: AsyncSession, diver: User) -> None:
+        """The same assertion as the dive-site case: `GET /gear-item/{uuid}` 404s for this
+        item, so the dive page must not go on listing it."""
+        live, deleted = create_gear_item(db, diver), create_gear_item(db, diver, is_deleted=True)
+        dive = create_dive(db, diver)
+        await replace_gear_items_for_dive(async_db, dive_id=dive.id, gear_item_ids=[live.id, deleted.id])
+
+        items = await get_gear_items_for_dive(async_db, dive_id=dive.id)
+
+        assert [item.uuid for item in items] == [live.uuid]
+
+    @pytest.mark.asyncio
+    async def test_a_dive_whose_only_item_is_deleted_reads_back_empty(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        deleted = create_gear_item(db, diver, is_deleted=True)
+        dive = create_dive(db, diver)
+        await replace_gear_items_for_dive(async_db, dive_id=dive.id, gear_item_ids=[deleted.id])
+
+        assert await get_gear_items_for_dive(async_db, dive_id=dive.id) == []
+
+    @pytest.mark.asyncio
+    async def test_an_archived_item_still_comes_through(self, db: Session, async_db: AsyncSession, diver: User) -> None:
+        """The distinction the filter has to keep. Archiving retires kit from the dive
+        form's picker *so that* the dives that used it go on showing it - a filter on
+        `is_archived` as well would quietly empty the gear list of every diver who tidies
+        up. It comes back flagged, for the client to render as it likes."""
+        archived = create_gear_item(db, diver, is_archived=True)
+        dive = create_dive(db, diver)
+        await replace_gear_items_for_dive(async_db, dive_id=dive.id, gear_item_ids=[archived.id])
+
+        items = await get_gear_items_for_dive(async_db, dive_id=dive.id)
+
+        assert [(item.uuid, item.is_archived) for item in items] == [(archived.uuid, True)]
+
+    @pytest.mark.asyncio
+    async def test_the_batched_loader_hides_them_too(self, db: Session, async_db: AsyncSession, diver: User) -> None:
+        """`GET /dives` enriches its rows through the batched loader, so a filter on the
+        single-dive one alone would leave the list page still listing the deleted item."""
+        live, deleted = create_gear_item(db, diver), create_gear_item(db, diver, is_deleted=True)
+        with_live, with_deleted = create_dive(db, diver), create_dive(db, diver)
+        await replace_gear_items_for_dive(async_db, dive_id=with_live.id, gear_item_ids=[live.id])
+        await replace_gear_items_for_dive(async_db, dive_id=with_deleted.id, gear_item_ids=[deleted.id])
+
+        by_dive = await get_gear_items_for_dives(async_db, dive_ids=[with_live.id, with_deleted.id])
+
+        assert [item.uuid for item in by_dive[with_live.id]] == [live.uuid]
+        # Present and empty rather than absent, exactly as for sites - the pre-seeded lists
+        # are what keep a dive whose every item is gone from dropping out of the mapping.
         assert by_dive[with_deleted.id] == []
 
 
@@ -297,3 +364,71 @@ class TestAPlainDeleteLeavesTheLinksAlone:
         stored = await async_db.execute(select(Dive.trip_id).where(Dive.id == dive.id))
         assert stored.scalar_one() == trip.id
         assert await get_trip_uuids_by_ids(async_db, trip_ids=[trip.id], user_id=diver.id) == {}
+
+    @pytest.mark.asyncio
+    async def test_deleting_a_gear_item_keeps_its_dive_links(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        item = create_gear_item(db, diver)
+        dive = create_dive(db, diver)
+        await replace_gear_items_for_dive(async_db, dive_id=dive.id, gear_item_ids=[item.id])
+
+        await crud_gear_items.delete(db=async_db, uuid=item.uuid)
+
+        links = await async_db.execute(select(DiveGearItem.gear_item_id).where(DiveGearItem.dive_id == dive.id))
+        assert [row.gear_item_id for row in links] == [item.id]
+        # And the read hides it, so the row surviving is not the read being unfiltered.
+        assert await get_gear_items_for_dive(async_db, dive_id=dive.id) == []
+
+
+class TestErasingGearItemDropsTheDiveCaches:
+    """The route half of the gear filter, stubbed - the invalidation is not a query.
+
+    `erase_gear_item` already invalidated unconditionally before the filter landed, so
+    unlike `erase_trip` it needed no change. That makes it exactly the kind of thing a
+    later cleanup removes as redundant: the call has no visible effect on the delete
+    itself, and what it protects lives in another file. It is what stops a cached dive
+    read going on listing kit a fresh read now omits, for the rest of the hour.
+    """
+
+    @staticmethod
+    def _stub_route(monkeypatch: pytest.MonkeyPatch) -> tuple[uuid_pkg.UUID, AsyncMock]:
+        uuid = uuid7()
+        item = GearItemReadInternal(
+            id=3,
+            uuid=uuid,
+            user_id=7,
+            name="MK25 EVO",
+            brand="Scubapro",
+            type=GearType.REGULATOR,
+            notes="",
+            rented=False,
+            is_archived=False,
+            archived_at=None,
+            dive_count=4,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        invalidate_dives = AsyncMock()
+
+        monkeypatch.setattr(gear_items_module, "_get_owned_gear_item", AsyncMock(return_value=item))
+        monkeypatch.setattr(gear_items_module, "soft_delete_schedules_for_gear_item", AsyncMock())
+        monkeypatch.setattr(gear_items_module.crud_gear_items, "delete", AsyncMock())
+        monkeypatch.setattr(gear_items_module, "invalidate_gear_caches", AsyncMock())
+        monkeypatch.setattr(gear_items_module, "invalidate_dive_caches", invalidate_dives)
+
+        return uuid, invalidate_dives
+
+    @pytest.mark.asyncio
+    async def test_the_owners_dive_caches_are_dropped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        uuid, invalidate_dives = self._stub_route(monkeypatch)
+
+        await gear_items_module.erase_gear_item(
+            request=MagicMock(),
+            uuid=uuid,
+            current_user={"id": 7, "uuid": uuid7()},
+            db=MagicMock(),
+        )
+
+        # The *item owner's* id, not the caller's - they are the same today only because
+        # someone else's item reads as a 404 before this point.
+        invalidate_dives.assert_awaited_once_with(7)
