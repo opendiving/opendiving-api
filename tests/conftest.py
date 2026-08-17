@@ -98,9 +98,18 @@ def _ensure_tables() -> None:
     """Create any missing tables once per session, for the database-backed modules.
 
     Idempotent, and a no-op when nothing is listening, so it costs an unreachable
-    connection attempt on a mocked-only run. Shared rather than repeated per module: it
-    used to be a module-scoped copy in each, which meant the same `create_all` ran once
-    per module and drifted between them.
+    connection attempt on a mocked-only run.
+
+    **Consolidation in progress.** Eight modules grew their own module-scoped copy of this
+    and of `db_available`; only `test_move_dives_on_delete.py` and
+    `test_deleted_refs_on_dive_reads.py` use the shared ones so far. The rest still define
+    their own, and a module-level fixture *shadows* a same-named one here - so for those
+    this fixture does not run at all, and their copies are what create the tables. Nothing
+    breaks either way (the `create_all` is the same call), but do not read this as the
+    single definition until the others move: `test_dive_neighbors.py`, `test_trips.py`,
+    `test_dive_numbering.py`, `test_export_loader.py`, `test_dive_profile_storage.py` and
+    `test_dive_check_constraints.py` still have copies, three of them of `async_db`,
+    `diver` and `other_diver` as well.
     """
     if db_available():
         Base.metadata.create_all(sync_engine)

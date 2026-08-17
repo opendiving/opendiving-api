@@ -6198,6 +6198,13 @@ it does not survive indefinitely.
 **A read hides them; the next `PATCH /dive` on that dive destroys them.** This is the real cost of
 hiding, and it is not what "the links stay in the database" suggests on its own.
 
+**Confirmed on the shipped web client, not reasoned about in the abstract.** `opendiving-web`'s
+`dives/[id]/edit/page.tsx` seeds the form with `trip_uuid: diveData.trip_uuid` and
+`dive_site_uuids: diveData.dive_sites?.map((site) => site.uuid) ?? []`, and `buildDiveUpdate` in
+`lib/validations/dive.ts` forwards any value that is not `undefined` — a null included,
+deliberately, since that is how a diver removes a trip. So opening Edit on an affected dive and
+pressing Save without touching anything is enough. This is the default path, not an edge case.
+
 The round trip is ordinary and needs nothing to do with sites or trips. `GET /dive/{uuid}` now
 answers `trip_uuid: null` with the deleted site absent from `dive_sites`. A client that seeds an
 edit form from that read and submits it — a notes fix, a depth correction — sends back exactly what
@@ -6217,13 +6224,25 @@ a silent write that deletes data. And it is the same deletion this section rejec
 scattered — on whichever dives the diver happens to edit next — instead of all at once at delete
 time.
 
-The two answers that would have made "nothing is lost" literally true were both weighed and dropped.
-Leaving soft-deleted rows alone in `replace_dive_sites_for_dive` handles the site half, but the trip
-half cannot be done that way: "the diver cleared the trip" and "the client echoed back a null it was
-handed" are the same request, so telling them apart means changing the request. Surfacing the hidden
-references to the client so an edit form can round-trip them is the honest fix, and it reopens the
-read-contract question this section settled — it is most of the tombstone design, arrived at from
-the other side.
+**The fix is client-side, and it is queued rather than done.** No server-side answer works on the
+trip half: "the diver cleared the trip" and "the client echoed back a null it was handed" are the
+*same request*, so nothing in `patch_dive` can tell them apart. They are perfectly distinguishable
+one layer up, though — in the form, an untouched trip picker is simply not dirty. So the fix is for
+the web edit form to submit only dirty fields (react-hook-form's `dirtyFields`) rather than every
+field it was seeded with, which closes both halves at once and needs nothing here. That is a
+separate PR in `opendiving-web`, deliberately not blocking this one: the API change is correct on
+its own, and the exposure in between is a pre-launch app running on one developer's machine.
+
+Two server-side answers were weighed and dropped before that one was found. Leaving soft-deleted
+rows alone in `replace_dive_sites_for_dive` handles the site half but not the trip half, for the
+reason above. Surfacing the hidden references to the client so an edit form can round-trip them
+works, but reopens the read-contract question this section settled — it is most of the tombstone
+design, arrived at from the other side.
+
+Worth generalizing, since it is the second time in this feature's history that the fix landed in a
+different file from the bug: **a read filter is not a local change.** Hiding a field from a response
+changes what every client writes back through it, and the damage shows up on the write path, in
+another repo, on an unrelated user action.
 
 So: `move_dives_to` is the affordance for a diver who cares about the association. Re-point the
 dives, then delete. Deleting first and editing later is what loses it.

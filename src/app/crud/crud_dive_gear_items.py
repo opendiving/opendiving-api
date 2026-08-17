@@ -8,7 +8,15 @@ from .crud_gear_items import GEAR_ITEM_INFO_COLUMNS, gear_item_info_from_row
 
 
 async def get_gear_items_for_dive(db: AsyncSession, dive_id: int) -> list[GearItemInfo]:
-    """Return the gear items used on a dive, in the order they were listed."""
+    """Return the gear items used on a dive, in the order they were listed.
+
+    **Includes soft-deleted items, which is the same bug the dive-site loaders had and a
+    deliberate deferral rather than an oversight.** A deleted gear item goes on being
+    listed on the dives it was used on, though `GET /gear-item/{uuid}` 404s for it - see
+    "No manual DDL, and one sibling left alone" in DECISIONS.md. Before adding the filter,
+    check `erase_gear_item`: it has its own cache invalidation and `dive_count` bookkeeping
+    to reason about, which is why this was not bundled into the sites-and-trips change.
+    """
     result = await db.execute(
         select(*GEAR_ITEM_INFO_COLUMNS)
         .join(DiveGearItem, DiveGearItem.gear_item_id == GearItem.id)
@@ -19,7 +27,11 @@ async def get_gear_items_for_dive(db: AsyncSession, dive_id: int) -> list[GearIt
 
 
 async def get_gear_items_for_dives(db: AsyncSession, dive_ids: list[int]) -> dict[int, list[GearItemInfo]]:
-    """Batched version of `get_gear_items_for_dive`, e.g. for a paginated dive listing."""
+    """Batched version of `get_gear_items_for_dive`, e.g. for a paginated dive listing.
+
+    Carries the same deferred soft-delete bug, and has to be filtered in the same change:
+    this is what `GET /dives` enriches its rows through.
+    """
     items_by_dive: dict[int, list[GearItemInfo]] = {dive_id: [] for dive_id in dive_ids}
     if not dive_ids:
         return items_by_dive

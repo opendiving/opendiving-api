@@ -61,6 +61,13 @@ async def get_dive_sites_for_dive(db: AsyncSession, dive_id: int) -> list[DiveSi
     `[A, B]` whose A is deleted reads back as `[B]`, and B becomes the primary site every
     single-site surface shows. That is intended: `position` is a sort key, not an identity,
     and the alternative is a dive whose primary site does not exist.
+
+    Takes a `dive_id` and no owner, unlike `get_trip_uuids_by_ids` alongside it, which was
+    given a `user_id` scope as defence in depth. The asymmetry is intentional: a `dive_id`
+    is not a client-supplied handle - every route resolves and ownership-checks the dive
+    before reaching this - whereas the trip ids are read off dive rows in bulk, which is
+    the shape a future caller could get wrong. A cross-user join row cannot be created
+    through the API at all; see the note above `trip_for` in `services/export/loader.py`.
     """
     result = await db.execute(
         select(*DIVE_SITE_INFO_COLUMNS)
