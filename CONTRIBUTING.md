@@ -66,19 +66,19 @@ the tests that would have caught you never executed.
 **Bringing the stack up is not enough on its own**, and this is the trap worth knowing. The skip is
 a connection attempt against `POSTGRES_SERVER`, which `src/.env` sets to `db` — the *compose*
 hostname, which does not resolve on the host. So `docker compose up` followed by `uv run pytest` on
-the host still skips all 44, no matter that Postgres is up and its port is published. Point the host
-run at the published port instead:
+the host still skips every one of them, no matter that Postgres is up and its port is published.
+Point the host run at the published port instead:
 
 ```bash
 POSTGRES_SERVER=localhost ENVIRONMENT=local SECRET_KEY=testsecret uv run pytest -q
 ```
 
-That is the difference between `705 passed, 70 skipped` and `775 passed`. The totals move with every
-test added and these two will drift; **`70 skipped` against no skip line at all is the part worth
-reading**, and it is the only thing on screen that tells you which of the two runs you just did. CI
-sets exactly that variable and fails the job if anything skips (see below), so this is about getting
-the answer before you push rather than after — but the skip is silent and a green local run looks
-identical either way, so it is easy to spend a review round believing those tests ran.
+That is the difference between `1311 passed, 141 skipped` and `1452 passed`. The totals move with
+every test added and these two will drift; **a skip count against no skip line at all is the part
+worth reading**, and it is the only thing on screen that tells you which of the two runs you just
+did. CI sets exactly that variable and fails the job if anything skips (see below), so this is about
+getting the answer before you push rather than after — but the skip is silent and a green local run
+looks identical either way, so it is easy to spend a review round believing those tests ran.
 
 Alternatively use the containerised suite, where `db` resolves and nothing needs overriding — note
 that `docker-compose.test.yml` is an *overlay*, so it has to be passed alongside the base file
@@ -89,9 +89,13 @@ docker compose -f docker-compose.yml -f docker-compose.test.yml up --build --abo
 ```
 
 CI does run Postgres and Redis as service containers, and fails the job if *any* test skips — so
-unlike before, a green CI run means the database-backed ones actually executed. That also means a
-new test that skips itself will fail CI even when the skip is deliberate; the exclusion goes in the
-"Assert no test skipped" step of `.github/workflows/tests.yml`.
+unlike before, a green CI run means the database-backed ones actually executed. The run passes
+`-rs`, so a job that fails this way names the tests that skipped rather than only counting them.
+
+There is no allowlist: the check is a grep over pytest's counts line, which cannot tell a deliberate
+skip from an unreachable database. The suite has no deliberate skips today, and adding the first one
+means reworking that step in `.github/workflows/tests.yml` — against the `SKIPPED` lines `-rs`
+prints, say — rather than filling in a slot that already exists.
 
 Two things to know when you do run them against a live database: they write to whatever `POSTGRES_*`
 resolves to — your dev database, by default — and the `create_user` helper commits a row per test
