@@ -31,7 +31,7 @@ fake = Faker()
 
 
 def unique_username() -> str:
-    """A username no previous test run can have taken.
+    """A username no previous test run has realistically taken.
 
     `fake.user_name()` draws from a small vocabulary, and the tests that need a database
     write real rows and never clean them up (`create_user`, and the
@@ -42,10 +42,18 @@ def unique_username() -> str:
     broken fixture. `fake.unique` would not help: it only de-duplicates within one
     process, not against rows already in the table.
 
-    Derived from uuid7, so it is unique across runs and machines rather than merely
-    unlikely to repeat. Shaped to satisfy the app's own rule for usernames
-    (`^[a-z0-9]+$`, 2-20 characters - see `schemas/user.py`), which the ORM does not
-    enforce but which a fixture has no business violating.
+    The suffix is uuid7's low 48 bits, which `uuid6` fills from `secrets` - so this is 48
+    bits of CSPRNG entropy per name, drawn independently of any other process or machine.
+    Still a probabilistic argument rather than a guarantee, but a different order of one:
+    the birthday bound puts an even chance of collision somewhere past sixteen million
+    names, against a few hundred for `fake.user_name()`. Note it is *only* the random tail
+    - `hex[-12:]` slices below uuid7's timestamp, so nothing here is time-ordered, and two
+    names generated in the same millisecond are as independent as any other two.
+
+    Shaped to satisfy the app's own rule for usernames (`^[a-z0-9]+$`, 2-20 characters -
+    see `schemas/user.py`), which the ORM does not enforce but which a fixture has no
+    business violating. That 20-character cap is why the suffix is 12 hex characters rather
+    than the whole uuid.
     """
     return f"t{uuid7().hex[-12:]}"
 

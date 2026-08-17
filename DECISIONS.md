@@ -3214,10 +3214,24 @@ Past a few hundred rows the birthday problem catches up and runs start failing w
 like a broken test rather than a broken fixture. `fake.unique` does not help: it de-duplicates
 within one process, not against rows already in the table.
 
-`unique_username()`/`unique_email()` in `conftest.py` derive from uuid7 instead, so they are unique
-across runs and machines rather than merely unlikely to repeat. They are also shaped to satisfy the
-app's own rule for a username (`^[a-z0-9]+$`, 2-20 characters) - the ORM does not enforce it, but a
-fixture writing values the API would reject is a trap for whoever next asserts on one.
+`unique_username()`/`unique_email()` in `conftest.py` use `uuid7().hex[-12:]` instead.
+"uuid-derived", in this section's own heading, invites a reading that is wrong and worth heading
+off: the slice takes the low 48 bits, which `uuid6` fills from `secrets`, and discards the timestamp
+entirely. So these names are neither time-ordered nor unique by construction — they are 48 bits of
+CSPRNG entropy, drawn independently of any other process or machine.
+
+That is still a probabilistic argument, just a different order of one. The birthday bound puts an
+even chance of collision somewhere past sixteen million names; `fake.user_name()` was producing its
+first `IntegrityError` in the low hundreds — not the same measurement, but five orders of magnitude
+apart, which is the only precision the comparison needs. At the scale a `user` table of test rows
+actually reaches, that is the difference between "fails every other week" and "will not happen". Do
+not tighten it to "cannot collide" in a future edit — it can, and the reason that does not matter is
+the entropy, not a guarantee.
+
+The names are also shaped to satisfy the app's own rule for a username (`^[a-z0-9]+$`, 2-20
+characters) - the ORM does not enforce it, but a fixture writing values the API would reject is a
+trap for whoever next asserts on one. That cap is why the suffix is 12 hex characters and not the
+whole uuid.
 
 The address is `@example.com`, not something under `.test`. Both are reserved by RFC 2606 and
 neither reaches a real inbox, but `email-validator` - which backs Pydantic's `EmailStr` - rejects

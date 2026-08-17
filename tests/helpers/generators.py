@@ -2,7 +2,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy.orm import Session
-from uuid6 import uuid7  # 126
+from uuid6 import uuid7
 
 from src.app import models
 from tests.conftest import fake, unique_email, unique_username
@@ -11,8 +11,9 @@ from tests.conftest import fake, unique_email, unique_username
 def create_user(db: Session, is_super_user: bool = False) -> models.User:
     _user = models.User(
         name=fake.name(),
-        # Unique across runs, not merely unlikely to repeat: this writes a real row to
-        # the developer's database and nothing cleans it up. See `unique_username`.
+        # 48 bits of CSPRNG entropy rather than a name from faker's small vocabulary: this
+        # writes a real row to the developer's database and nothing cleans it up, so the
+        # namespace only ever fills up. See `unique_username`.
         username=unique_username(),
         email=unique_email(),
         profile_image_url=fake.image_url(),
