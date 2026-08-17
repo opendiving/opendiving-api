@@ -95,10 +95,13 @@ async def replace_gear_items_for_set(
     **If that call is ever revisited, revisit it on this helper first.** The fix is to
     delete only the rows whose item is live, insert the submitted list at 0..n-1, then
     renumber the survivors after it - and what made it too expensive on
-    `replace_dive_sites_for_dive` is the position contiguity `dive_dive_site` needs.
-    `gear_set_item.position` carries no unique constraint (`ux_gear_set_item_gear_set_id_gear_item_id`
-    is on the pair of FKs), so here the renumbering is cosmetic and the change is a
-    genuinely smaller one. Its sibling's docstring defers to this note.
+    `replace_dive_sites_for_dive` is the meaning `dive_dive_site.position` carries:
+    position 0 is the *primary* site every single-site surface renders, which is why
+    `replace_dive_site_on_dives` maintains 0..n-1 contiguity in a dedicated third statement
+    with a wipe-guard test behind it. Nothing reads `gear_set_item.position` as anything but
+    a sort key, so here the renumbering is cosmetic and the change is a genuinely smaller
+    one. Not a constraint difference - neither table has a unique constraint on `position`.
+    Its sibling's docstring defers to this note.
     """
     unique_ids = list(dict.fromkeys(gear_item_ids))
     await db.execute(delete(GearSetItem).where(GearSetItem.gear_set_id == gear_set_id))

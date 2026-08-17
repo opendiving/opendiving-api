@@ -119,8 +119,9 @@ async def replace_dive_sites_for_dive(
     DECISIONS.md, which records the fix (delete only rows whose site is live, then renumber
     the survivors after the submitted list) and why the position-contiguity cost was judged
     too high for a path this narrow. Reconsider it if the balance changes - but on
-    `replace_gear_items_for_set` rather than here: `gear_set_item.position` has no unique
-    constraint to keep contiguous, so it is where the same fix is cheapest to try first.
+    `replace_gear_items_for_set` rather than here: nothing reads `gear_set_item.position`
+    as more than a sort key, whereas position 0 here *is* the primary site, so it is where
+    the same fix is cheapest to try first.
     """
     unique_ids = list(dict.fromkeys(dive_site_ids))
     await db.execute(delete(DiveDiveSite).where(DiveDiveSite.dive_id == dive_id))

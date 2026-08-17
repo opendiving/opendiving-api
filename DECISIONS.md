@@ -6267,8 +6267,9 @@ both, and for the same reason.
 
 **And on a third helper since:** `replace_gear_items_for_set` inherited the identical case when the
 gear-set loaders got the filter — with the one asymmetry that the declined fix is *cheaper* there,
-`gear_set_item.position` carrying no unique constraint to keep contiguous. Still declined, but it is
-the half to revisit first. See *"The severance is the same cost, and slightly smaller here"* below.
+nothing reading `gear_set_item.position` as more than a sort key while position 0 on
+`dive_dive_site` is the primary site. Still declined, but it is the half to revisit first. See *"The
+severance is the same cost, and slightly smaller here"* below.
 
 Two server-side answers were weighed and dropped before that one was found. Leaving soft-deleted
 rows alone in `replace_dive_sites_for_dive` handles the site half but not the trip half, for the
@@ -6439,13 +6440,15 @@ than as history.
 
 The multi-statement-write leg **mostly falls away**. `erase_dive_site` would have needed the
 position renumbering that took `replace_dive_site_on_dives` three careful statements and a
-wipe-guard test; a set needs none of it, because `position` on `gear_set_item` is only an `ORDER BY`
-key with no unique constraint over it (`ux_gear_set_item_gear_set_id_gear_item_id` is on the pair of
-FKs), so a gap is invisible until the next `replace_gear_items_for_set` renumbers from zero anyway.
-The clear would have been one `DELETE ... WHERE gear_item_id = :id`. No test pins the gap itself —
-hiding is what shipped, so nothing in the codebase ever creates one;
-`test_the_rest_keep_their_order` pins the adjacent thing that is real, that the survivors of a
-hidden row at position 0 come back in the diver's order rather than renumbered.
+wipe-guard test; a set needs none of it, because nothing reads `gear_set_item.position` as anything
+but an `ORDER BY` key — whereas position 0 on `dive_dive_site` *is* the primary site, which is what
+made contiguity there worth defending. (Not a constraint difference: neither table has a unique
+constraint on `position`, only on its pair of FKs.) So a gap in a set is invisible until the next
+`replace_gear_items_for_set` renumbers from zero anyway. The clear would have been one
+`DELETE ... WHERE gear_item_id = :id`. No test pins the gap itself — hiding is what shipped, so
+nothing in the codebase ever creates one; `test_the_rest_keep_their_order` pins the adjacent thing
+that is real, that the survivors of a hidden row at position 0 come back in the diver's order rather
+than renumbered.
 
 The "does not fix the orphans already created" leg **carries over unchanged**, and it decided this.
 A read filter fixes past and future in one line; a delete-time clear fixes only future deletes and
@@ -6490,11 +6493,12 @@ case `dirtyFields` cannot reach"* records for `dive_site_uuids` and `gear_item_u
 same reason no client can prevent it, and declined here for the same reason — with one difference in
 the cost of fixing it, which cuts the other way. The proposed remedy there (delete only the rows
 whose target is live, insert the submitted list at 0..n-1, renumber the survivors after it) runs
-into position-contiguity care on `dive_dive_site`; on `gear_set_item` `position` carries no unique
-constraint, so the renumbering is cosmetic and the fix is genuinely cheaper on this half. It is
-still declined, because a set is a template and the three helpers answering the same question three
-different ways would cost more than the path is worth — but if that call is ever revisited,
-**revisit it here first.** `replace_gear_items_for_set`'s docstring says so.
+into position-contiguity care on `dive_dive_site`, whose position 0 is the primary site every
+single-site surface renders; nothing reads `gear_set_item.position` that way, so the renumbering is
+cosmetic and the fix is genuinely cheaper on this half. It is still declined, because a set is a
+template and the three helpers answering the same question three different ways would cost more than
+the path is worth — but if that call is ever revisited, **revisit it here first.**
+`replace_gear_items_for_set`'s docstring says so.
 
 ### Both deferred checks, again, and both clean
 
