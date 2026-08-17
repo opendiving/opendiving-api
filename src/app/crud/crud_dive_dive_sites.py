@@ -107,6 +107,18 @@ async def replace_dive_sites_for_dive(
 
     Duplicate ids are silently deduplicated (keeping each id's first occurrence,
     which determines its position) to avoid a unique-constraint violation.
+
+    **The wipe takes soft-deleted sites with it, and that is a known accepted loss.** Since
+    `get_dive_sites_for_dive` stopped returning them, a client editing a dive's site list
+    submits back only the sites it was shown - so a dive linked to a live A and a hidden B
+    comes back as `["A", "C"]` when the diver adds C, and B's row is destroyed by the
+    delete below. The diver never saw B and never asked to remove it, and no client can
+    prevent this: it cannot preserve a reference it was never handed.
+
+    Declined rather than missed - see "One narrower case `dirtyFields` cannot reach" in
+    DECISIONS.md, which records the fix (delete only rows whose site is live, then renumber
+    the survivors after the submitted list) and why the position-contiguity cost was judged
+    too high for a path this narrow. Reconsider it here if the balance changes.
     """
     unique_ids = list(dict.fromkeys(dive_site_ids))
     await db.execute(delete(DiveDiveSite).where(DiveDiveSite.dive_id == dive_id))
