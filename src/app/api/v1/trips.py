@@ -407,6 +407,11 @@ async def erase_trip(
     the same answer `PATCH /dive` gives for a `trip_uuid` it can't resolve, which is the
     per-dive call this parameter exists to replace.
 
+    Deleting a trip twice is a 404 the second time, with or without `move_dives_to` - so a
+    client retrying after a lost response should read that 404 as "already gone" rather
+    than as a failure. Note this is the opposite of `DELETE /dive-site/{uuid}`, which is
+    idempotent and answers the same retry with a 200.
+
     `moved_dives` counts what was re-pointed, for the "12 dives moved to Cebu 2026" the web
     app says afterwards. It is present either way, and 0 when the parameter was omitted.
     """

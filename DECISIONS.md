@@ -6089,6 +6089,21 @@ session on the way out and the transaction rolls back. That ordering is the whol
 `tests/test_move_dives_on_delete.py` asserts the call order rather than merely that both calls
 happened.
 
+### `updated_at` is stamped by hand, and only on the trip half
+
+`TimestampMixin` gives `updated_at` no `onupdate`, so every writer sets it explicitly — FastCRUD
+through `DiveUpdateInternal`, `dive_numbering`'s bulk renumber in its own `.values()`, and now
+`reassign_dives_to_trip`. Skipping it would make one logical edit ("this dive is on that trip now")
+leave two different row states depending on whether it arrived through this route or through
+`PATCH /dive`, which puts `trip_id` in `update_data` and does bump it. Nothing reads
+`dive.updated_at` today — it is in no response schema and no ETag — so this is about not seeding a
+discrepancy for whatever reads it first.
+
+`replace_dive_site_on_dives` deliberately has no equivalent. `dive_dive_site` carries no timestamps,
+and `PATCH /dive` with only `dive_site_uuids` leaves `update_data` empty and skips
+`crud_dives.update` entirely, so *not* touching `dive.updated_at` is what matches the per-dive call
+there. The asymmetry between the two halves mirrors an asymmetry that already exists.
+
 ### Cache invalidation moved on one route and not the other
 
 `erase_dive_site` already dropped the user's dive caches unconditionally, because a soft-deleted

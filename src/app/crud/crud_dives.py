@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 from fastcrud import FastCRUD
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,11 +44,18 @@ async def reassign_dives_to_trip(db: AsyncSession, *, user_id: int, from_trip_id
     `user_id` is redundant against a trip id already resolved for this owner, and is here
     anyway: it is the one condition that cannot be got wrong quietly, since a bulk `UPDATE`
     with a stale or mis-resolved trip id would otherwise rewrite another diver's log.
+
+    `updated_at` is set by hand because `TimestampMixin` gives it no `onupdate`, so every
+    writer does - FastCRUD through `DiveUpdateInternal`, and `dive_numbering`'s bulk
+    renumber in its own `.values()`. Skipping it here would make "this dive moved to that
+    trip" leave a different row behind depending on whether it arrived through this call or
+    through `PATCH /dive`, which puts `trip_id` in `update_data` and does bump it - and
+    these are the same edit.
     """
     moved = await db.execute(
         update(Dive)
         .where(Dive.trip_id == from_trip_id, Dive.user_id == user_id, Dive.is_deleted.is_(False))
-        .values(trip_id=to_trip_id)
+        .values(trip_id=to_trip_id, updated_at=datetime.now(UTC))
         .returning(Dive.id)
     )
     return len(moved.all())

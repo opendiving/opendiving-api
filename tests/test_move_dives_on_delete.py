@@ -530,6 +530,20 @@ class TestReassignDivesToTrip:
         assert _trip_ids(db, live, erased) == [replacement.id, doomed.id]
 
     @pytest.mark.asyncio
+    async def test_a_moved_dive_is_stamped_as_updated(self, db: Session, async_db: AsyncSession, diver: User) -> None:
+        """`TimestampMixin` gives `updated_at` no `onupdate`, so a bulk `UPDATE` that
+        forgets it leaves the row claiming it has not changed since it was written. The
+        same edit through `PATCH /dive` does stamp it, and these have to agree."""
+        doomed, replacement = _trip(db, diver), _trip(db, diver)
+        dive = _dive(db, diver, trip=doomed)
+        assert db.execute(select(Dive.updated_at).where(Dive.id == dive.id)).scalar_one() is None
+
+        await reassign_dives_to_trip(async_db, user_id=diver.id, from_trip_id=doomed.id, to_trip_id=replacement.id)
+        await async_db.commit()
+
+        assert db.execute(select(Dive.updated_at).where(Dive.id == dive.id)).scalar_one() is not None
+
+    @pytest.mark.asyncio
     async def test_an_empty_trip_moves_nothing(self, db: Session, async_db: AsyncSession, diver: User) -> None:
         doomed, replacement = _trip(db, diver), _trip(db, diver)
 
