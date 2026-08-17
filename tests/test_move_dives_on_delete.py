@@ -323,6 +323,17 @@ class TestEraseDiveSiteWithoutTheParameter:
             message="Dive site deleted", moved_dives=0
         )
 
+    @pytest.mark.asyncio
+    async def test_the_dive_caches_are_dropped_anyway(self, dive_site_route: dict[str, Any]) -> None:
+        """The mirror image of the trip route's `test_the_dive_caches_are_left_alone`, and
+        the reason the two differ: a soft-deleted site stays attached to the dives logged
+        at it and is still rendered on them, so a bare delete does change what every one of
+        those cached reads should say. Making this conditional on `moved_dives` the way
+        `erase_trip` is would leave them holding a site that no longer exists."""
+        await _erase_dive_site(dive_site_route)
+
+        dive_site_route["invalidate_dives"].assert_awaited_once_with(USER_ID)
+
 
 class TestEraseDiveSiteWithAReplacement:
     @pytest.mark.asyncio
