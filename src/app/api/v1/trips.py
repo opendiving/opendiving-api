@@ -436,6 +436,12 @@ async def erase_trip(
     # Only when dives actually moved. A plain delete leaves every `dive.trip_id` where it
     # was, so nothing a cached dive read says about its trip has changed; a move changes
     # the `trip_uuid` each of those dives reports.
+    #
+    # That holds *because* `get_trip_uuids_by_ids` resolves a soft-deleted trip like any
+    # other, so a fresh read after a plain delete still names this trip - which is itself
+    # the bug DECISIONS.md defers. Filter deleted trips out of that lookup and this
+    # condition has to go with it, or the trip goes on rendering on its dives out of cache
+    # for an hour after the fix. See the warning on that function.
     if moved_dives:
         await invalidate_dive_caches(owner_id)
 

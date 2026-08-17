@@ -6112,6 +6112,25 @@ delete: leaving `dive.trip_id` alone means no cached dive read says anything dif
 *move* does change what each moved dive reports, so `erase_trip` now invalidates when
 `moved_dives > 0` — and only then, so the bare delete pays nothing.
 
+**And that condition is coupled to the deferred bug below, which is worth stating because the
+coupling is invisible from either end.** "No cached dive read says anything different after a plain
+trip delete" is only true because `get_trip_uuids_by_ids` resolves a soft-deleted trip like any
+other — so a *fresh* read also still names the deleted trip. Fix that (the "hide" answer to the
+three-way call below) and the two stop agreeing: a fresh read starts answering `trip_uuid: null`
+while the cached one still names the trip, and since a plain delete does not invalidate, the deleted
+trip goes on rendering on its dives for the rest of the hour — the exact symptom the fix was for,
+surviving the fix. So **whoever filters `is_deleted` into that lookup has to make this invalidation
+unconditional in the same commit.** The warning lives on `get_trip_uuids_by_ids` too, since that is
+the function someone will be editing when it matters.
+
+`erase_dive_site` has no such coupling: it invalidates unconditionally, which is already correct
+under any of the three answers.
+
+The general shape worth keeping: **an invalidation you skipped because "nothing changed" is a claim
+about a read path, not about the write.** When the read path is itself known-wrong and queued for a
+fix, the skip is borrowed against that wrongness, and the debt comes due in a different file from
+the one being fixed.
+
 ### No manual DDL
 
 Nothing in the schema changed: this is two query parameters and three statements over columns that

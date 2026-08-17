@@ -30,7 +30,25 @@ async def resolve_trip_id_for_user(db: AsyncSession, trip_uuid: uuid_pkg.UUID, u
 
 
 async def get_trip_uuids_by_ids(db: AsyncSession, trip_ids: list[int]) -> dict[int, uuid_pkg.UUID]:
-    """Batched lookup of trip `id` -> `uuid`, e.g. for enriching a paginated dive listing."""
+    """Batched lookup of trip `id` -> `uuid`, e.g. for enriching a paginated dive listing.
+
+    Deliberately unfiltered on `is_deleted`, and something depends on that. A dive keeps its
+    `trip_id` when its trip is soft-deleted, so this resolves the uuid either way and a dive
+    goes on reporting a trip that `GET /trip/{uuid}` now 404s. That is the trip half of the
+    orphan-reference problem written up in DECISIONS.md ("An adjacent bug this deliberately
+    did not fix"), and it is a real bug.
+
+    **Adding the filter here means changing `erase_trip` in the same commit.** That route
+    invalidates the user's dive caches only when `move_dives_to` actually moved something,
+    and it is allowed to because a plain delete currently leaves every cached dive read
+    saying exactly what a fresh one would. Filter deleted trips out here and that stops
+    being true: a fresh read starts answering `trip_uuid: null` while the cached one still
+    names the trip, so the deleted trip keeps rendering on its dives for the rest of the
+    hour - the precise symptom the filter was added to fix, surviving the fix. The
+    invalidation there has to become unconditional at the same time.
+
+    `erase_dive_site` needs no equivalent warning: it already invalidates unconditionally.
+    """
     if not trip_ids:
         return {}
 
