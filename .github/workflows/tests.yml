@@ -10,11 +10,11 @@ jobs:
   tests:
     runs-on: ubuntu-latest
 
-    # The suite is mostly pure-logic unit tests, but the DB-backed ones
-    # (tests/test_dive_check_constraints.py, tests/test_dive_numbering.py) guard
-    # `CheckConstraint` behaviour that only Postgres can enforce, and they skip
-    # themselves when nothing is listening. Without these services they skipped
-    # silently on every run and the constraints were effectively untested in CI.
+    # The suite is mostly pure-logic unit tests, but a handful of modules guard behaviour
+    # only Postgres can settle - the `CheckConstraint`s it enforces, the window functions
+    # a renumber runs, whether a query filtered by `user_id` at all - and they skip
+    # themselves when nothing is listening. Without these services they skipped silently
+    # on every run and that behaviour was effectively untested in CI.
     services:
       postgres:
         image: postgres:16
@@ -62,21 +62,41 @@ jobs:
       - name: Install package with dev dependencies
         run: uv sync --extra dev
 
+      # Teed so the assertion below reads *this* run rather than a second one of its own.
+      # `pipefail` is not on by default in an Actions `run:` block (the shell is `bash -e`),
+      # and without it the pipeline reports tee's exit status - a failing suite would go
+      # green.
       - name: Run tests with coverage
         id: tests
-        run: uv run pytest --cov=src/app --cov-report=term-missing
+        run: |
+          set -o pipefail
+          uv run pytest -rs --cov=src/app --cov-report=term-missing | tee /tmp/pytest.txt
 
       # The DB-backed tests skip themselves rather than fail when Postgres is
       # unreachable, which is the right behaviour locally but means a broken `services:`
       # block above would look exactly like a green run. Fail the job instead.
-      - name: Assert the database-backed tests actually ran
+      #
+      # Asserted against the whole run rather than against a list of the DB-backed modules
+      # by name. That list was `test_dive_check_constraints.py` and `test_dive_numbering.py`
+      # when it was written and is eight modules now, and it goes stale in the one
+      # direction that matters: a module missing from it stops being checked, silently.
+      #
+      # This makes *any* skip a failure, which is stricter than it sounds - the suite has
+      # none today. There is deliberately no allowlist: a count cannot tell a deliberate
+      # skip from an unreachable database, so the first test that genuinely has to skip
+      # means reworking this check (against the `SKIPPED` lines `-rs` prints, say) rather
+      # than filling in a slot. Hence the message naming both causes.
+      #
+      # Read off the tail rather than the whole file: pytest's counts line is always last,
+      # so this cannot be tripped by a failing test whose *captured output* contains
+      # "3 skipped". The `-rs` and `FAILED` lines share the window, which only ever adds a
+      # redundant annotation to an already-red job.
+      - name: Assert no test skipped
         if: always() && steps.tests.outcome != 'skipped'
         run: |
-          uv run pytest tests/test_dive_check_constraints.py tests/test_dive_numbering.py \
-            -q --no-header -p no:cacheprovider \
-            | tee /tmp/db-tests.txt
-          if grep -qE "[0-9]+ skipped" /tmp/db-tests.txt; then
-            echo "::error::Database-backed tests skipped - Postgres was not reachable from the job."
+          if tail -5 /tmp/pytest.txt | grep -qE "[0-9]+ skipped"; then
+            tail -5 /tmp/pytest.txt | grep -E "[0-9]+ skipped"
+            echo "::error::Tests skipped - either Postgres was unreachable from the job or a test skipped deliberately. See the counts line above."
             exit 1
           fi
 
