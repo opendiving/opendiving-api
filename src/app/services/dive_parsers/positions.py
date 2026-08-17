@@ -14,12 +14,18 @@ own deepest sample: everything before it is on the way in, everything after it i
 way out.
 
 The corpus is emphatic about why that split matters rather than "first fix, last fix".
-Across the 19 Suunto Ocean exports that carry GPS at all, **every single fix falls after
-the diver surfaced** - the earliest one on any of them lands at 96 % of the dive's
-duration, in the logging tail past `Header.DiveTime`. A parser taking "the first fix" as
-the entry point would have written the *exit* position into the entry columns on all 19,
-and nothing downstream could have told. So an absent entry is the normal answer for this
-device, and saying so is the point.
+Across the 19 Suunto Ocean exports that carry GPS at all, **every fix in the sample stream
+falls after the diver surfaced** - the earliest one on any of them lands at 96 % of the
+dive's duration, in the logging tail past `Header.DiveTime`. A parser taking "the first
+fix" as the entry point would have written the *exit* position into the entry columns on
+all 19, and nothing downstream could have told.
+
+**The entry position is recorded, just not as a fix.** 18 of those 19 files also carry a
+single `DiveRouteOrigin` on their first sample, timestamped identically to
+`Header.DateTime` - the position the device had when the dive began, which is the entry
+pin the Suunto app draws. It reaches this module as a fix like any other and needs no
+special rule, because its timestamp puts it before the deepest sample on its own. What it
+does need is its own unit: see `degrees_verbatim`.
 """
 
 import math
@@ -90,6 +96,26 @@ def degrees_from_radians(value: object) -> float | None:
     below.
     """
     return math.degrees(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def degrees_verbatim(value: object) -> float | None:
+    """An angle a file already states in decimal degrees.
+
+    Exists for `DiveRouteOrigin`, and it is the reason that block cannot simply be fed
+    through `degrees_from_radians` with the fixes beside it: **one Suunto export states
+    coordinates in two different units**. The sample stream's `Latitude` is radians, and
+    this block - written by the same device into the same file - is plain degrees. The
+    corpus settles it rather than the naming: `69e21526` records an origin of
+    `28.567251, 34.533257` against a first sample fix of `0.4985922, 0.6027186`, which
+    converts to `28.567230, 34.533233` - the same jetty, 4 m apart. Converted a second
+    time the origin would land past the pole and be dropped by `geo_fix`, which is the
+    quiet failure this function's existence is meant to make impossible to write.
+
+    Still a function rather than a bare `sample.get()` for the type guard: `geo_fix` takes
+    `float | None`, and a `bool` is an `int` in Python - so `True` would otherwise arrive
+    as a latitude of 1 degree.
+    """
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
 def geo_fix(at: float, latitude: float | None, longitude: float | None) -> GeoFix | None:

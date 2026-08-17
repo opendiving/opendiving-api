@@ -15,7 +15,15 @@ from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from .base import DiveParser
 from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, ceiling_cm, scaled_int_or_none, series
 from .exceptions import EXTRACTION_ERRORS, DiveParseError
-from .positions import NO_POSITIONS, EntryExit, GeoFix, degrees_from_radians, entry_and_exit, geo_fix
+from .positions import (
+    NO_POSITIONS,
+    EntryExit,
+    GeoFix,
+    degrees_from_radians,
+    degrees_verbatim,
+    entry_and_exit,
+    geo_fix,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +269,22 @@ def _positions(samples: list[dict[str, Any]]) -> EntryExit:
     nothing else. So this walks the stream for two channels that have no sample in common
     with each other: the fixes, and the depth readings `entry_and_exit` pivots on.
 
+    **`DiveRouteOrigin` is read as a third channel, and it is where the entry position
+    comes from.** Every fix in the sample stream lands after the diver surfaced (see
+    `positions.py`), so on the strength of those alone this shape yields an exit and no
+    entry - which is what it used to do, on all 19 GPS-carrying files, while the Suunto
+    app drew both pins from the same export. The missing half is a lone block on the first
+    sample, timestamped identically to `Header.DateTime`, alongside a `DiveRouteQuality`
+    and a `QualityFeatures` array this deliberately ignores: the flag reads 1 on good
+    origins and on `0, 0` ones alike across the corpus, so treating it as a validity
+    signal would drop real positions and keep junk ones. `geo_fix` already rejects the two
+    Null Island origins on the evidence of the coordinates themselves.
+
+    It is fed in as an ordinary fix rather than assigned to the entry directly, so that a
+    file which does log a pre-descent fix still gets the rule the rest of the module
+    promises - the *last* position before the descent wins, whichever channel it arrived
+    on. No file in the corpus exercises that yet.
+
     Timestamps as POSIX seconds off each sample's own `TimeISO8601`, rather than as an
     elapsed offset from `Header.DateTime` the way `_parse_samples` measures its axis.
     Nothing here needs an origin, and asking for one would reintroduce a fixed bug: an
@@ -286,12 +310,17 @@ def _positions(samples: list[dict[str, Any]]) -> EntryExit:
     one everywhere else. What it costs as it stands is one more `fromisoformat` per
     sample on a parse measured at 2-11 ms.
     """
-    # An exact early-out, not a heuristic: with no `Latitude` key anywhere, `geo_fix` can
-    # never build a fix and the answer is `NO_POSITIONS` whatever the depths say. Worth
-    # the extra scan because the D5 shape - which has no GPS at all - would otherwise pay
+    # An exact early-out, not a heuristic: with neither key anywhere, `geo_fix` can never
+    # build a fix and the answer is `NO_POSITIONS` whatever the depths say. Worth the
+    # extra scan because the D5 shape - which has no GPS at all - would otherwise pay
     # ~8 300 `fromisoformat` calls per file to build a `depths` list nothing then reads,
     # on `POST /dive/parse`, on attach, and once per stored file in `backfill_tech_fields`.
-    if not any(isinstance(sample, dict) and "Latitude" in sample for sample in samples):
+    # **Both keys, or the early-out silently un-does the origin**: they are independent in
+    # principle, and a file carrying an origin but no sample fixes would bail out here
+    # having never looked at it.
+    if not any(
+        isinstance(sample, dict) and ("Latitude" in sample or "DiveRouteOrigin" in sample) for sample in samples
+    ):
         return NO_POSITIONS
 
     fixes: list[GeoFix] = []
@@ -313,14 +342,28 @@ def _positions(samples: list[dict[str, Any]]) -> EntryExit:
                 degrees_from_radians(sample.get("Latitude")),
                 degrees_from_radians(sample.get("Longitude")),
             )
+            # Degrees here against radians two lines up - the same file, in two units.
+            # See `degrees_verbatim`.
+            origin = sample.get("DiveRouteOrigin")
+            origin_fix = (
+                geo_fix(
+                    at,
+                    degrees_verbatim(origin.get("Latitude")),
+                    degrees_verbatim(origin.get("Longitude")),
+                )
+                if isinstance(origin, dict)
+                else None
+            )
         except EXTRACTION_ERRORS:
             # Counted rather than logged per sample: a file whose timestamps are all
             # unreadable would otherwise write one warning per sample, thousands of them,
             # for a single fact about the file.
             unreadable += 1
             continue
-        if fix is not None:
-            fixes.append(fix)
+        # Both, rather than one or the other: no file in the corpus writes an origin and a
+        # fix onto one sample, but nothing in the format forbids it and dropping either
+        # would be this function choosing between two positions instead of `entry_and_exit`.
+        fixes.extend(candidate for candidate in (fix, origin_fix) if candidate is not None)
 
     if unreadable:
         logger.warning("Skipped %d unreadable sample(s) while reading GPS fixes from a Suunto JSON export", unreadable)
@@ -491,8 +534,9 @@ class SuuntoJsonParser(DiveParser):
     backend models (`models/dive.py`, `models/dive_mixture.py`), plus -
     separately, via `parse_profile` - the per-sample depth/ceiling/temperature/
     tank-pressure curves and the sample stream's events, stored as
-    `DiveProfile`, and - from the same sample stream - the entry/exit fixes
-    described in `positions.py`. The export has plenty of other
+    `DiveProfile`, and - from the same sample stream, out of both its satellite
+    fixes and its `DiveRouteOrigin` - the entry/exit positions described in
+    `positions.py`. The export has plenty of other
     fields (per-compartment tissue loading, algorithm metadata, the rest of the
     GPS track, battery telemetry) with nowhere to persist them, so they aren't
     parsed at all. Gas mixtures come from
@@ -728,9 +772,10 @@ class SuuntoJsonParser(DiveParser):
             # Pascal, the same integer the XML export writes into its own
             # `<SurfacePressure>`.
             surface_pressure_bar=_pascals_to_bar(diving.get("SurfacePressure")),
-            # Radians in this export, degrees in the FIT file of the same dive - see
-            # `degrees_from_radians`. Every fix in the corpus lands after the diver
-            # surfaced, so this shape reliably yields an exit and no entry.
+            # Radians in this export's sample fixes, degrees in the FIT file of the same
+            # dive - and degrees again in its own `DiveRouteOrigin`, which is where the
+            # entry comes from since every sample fix lands after the diver surfaced. See
+            # `degrees_from_radians` and `degrees_verbatim`.
             entry_latitude=None if entry is None else entry.latitude,
             entry_longitude=None if entry is None else entry.longitude,
             exit_latitude=None if exit_fix is None else exit_fix.latitude,
