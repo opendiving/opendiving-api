@@ -19,12 +19,13 @@ from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
 from ...core.utils.search import LIKE_ESCAPE_CHAR, escape_like, search_multi
+from ...crud.crud_dives import reassign_dives_to_trip
 from ...crud.crud_trip_locations import (
     get_locations_for_trip,
     get_locations_for_trips,
     replace_locations_for_trip,
 )
-from ...crud.crud_trips import crud_trips, trip_name_exists
+from ...crud.crud_trips import crud_trips, resolve_trip_id_for_user, trip_name_exists
 from ...models.trip import Trip
 from ...models.trip_location import TripLocation
 from ...schemas.trip import (
@@ -35,6 +36,7 @@ from ...schemas.trip import (
     TripReadInternal,
     TripUpdateRequest,
 )
+from ...services.cache_invalidation import invalidate_dive_caches
 
 router = APIRouter(tags=["trips"])
 
@@ -386,16 +388,49 @@ async def erase_trip(
     uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
-) -> dict[str, str]:
-    """Soft-delete a trip.
+    move_dives_to: Annotated[
+        uuid_pkg.UUID | None,
+        Query(description="Move this trip's dives onto the trip with this uuid before deleting it"),
+    ] = None,
+) -> dict[str, str | int]:
+    """Soft-delete a trip, optionally moving its dives onto another trip first.
 
     404 unless the caller owns it, exactly as for a trip that doesn't exist. The row is
     flagged rather than removed, so dives that referenced this trip keep their `trip_id` -
     the trip simply stops appearing in reads.
-    """
-    owner_id = (await _get_owned_trip(db, uuid, current_user)).user_id
 
+    Pass `move_dives_to` and every one of the caller's live dives on this trip is
+    re-pointed at that one first, in the same transaction as the delete: either the diver's
+    log ends up entirely on the replacement trip with this one gone, or nothing happened.
+    A replacement that isn't the caller's own live trip, or that is this trip, is a 422 -
+    the same answer `PATCH /dive` gives for a `trip_uuid` it can't resolve, which is the
+    per-dive call this parameter exists to replace.
+
+    `moved_dives` counts what was re-pointed, for the "12 dives moved to Cebu 2026" the web
+    app says afterwards. It is present either way, and 0 when the parameter was omitted.
+    """
+    db_trip = await _get_owned_trip(db, uuid, current_user)
+    owner_id = db_trip.user_id
+
+    moved_dives = 0
+    if move_dives_to is not None:
+        if move_dives_to == uuid:
+            raise UnprocessableEntityException("A trip cannot be moved onto itself.")
+        replacement_id = await resolve_trip_id_for_user(db=db, trip_uuid=move_dives_to, user_id=owner_id)
+        if replacement_id is None:
+            raise UnprocessableEntityException("Trip not found.")
+        moved_dives = await reassign_dives_to_trip(
+            db=db, user_id=owner_id, from_trip_id=db_trip.id, to_trip_id=replacement_id
+        )
+
+    # Commits the reassignment above along with the delete - `crud_trips.delete` is the
+    # only writer here that commits, and both wrote through this one session.
     await crud_trips.delete(db=db, uuid=uuid)
     await _trip_cache.invalidate_list(owner_id)
+    # Only when dives actually moved. A plain delete leaves every `dive.trip_id` where it
+    # was, so nothing a cached dive read says about its trip has changed; a move changes
+    # the `trip_uuid` each of those dives reports.
+    if moved_dives:
+        await invalidate_dive_caches(owner_id)
 
-    return {"message": "Trip deleted"}
+    return {"message": "Trip deleted", "moved_dives": moved_dives}
