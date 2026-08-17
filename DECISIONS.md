@@ -5230,6 +5230,10 @@ only a change to one of those can leave a cached dive stale — and dragging a m
 become the most common one-field edit there is. The site's own list cache is still invalidated
 unconditionally, because the list does carry coordinates.
 
+**Those last two paragraphs are reversed** by *"The dive page is the map view, so `DiveSiteInfo`
+carries coordinates after all"* below: the view exists, `DiveSiteInfo` has the pair, and a marker
+drag invalidates cached dives again. Everything above them still holds.
+
 **In UDDF, `<geography>` is emitted for a site that has a location *or* a position.** It used to be
 location-only, because `geographyType` makes `<location>` `minOccurs="1"` and a name-only site has
 nothing valid to put there. A coordinates-only site has the same problem and the coordinates are the
@@ -5862,3 +5866,40 @@ position. So the entry and exit positions join the deco ceiling and the CNS/OTU 
 of things that survive in `export.json` and `dives.csv` only. `dives.csv` gets four columns beside
 the other import-owned readings, empty where there was no fix rather than `0` — the Null Island trap
 again, from the writing side.
+
+## The dive page is the map view, so `DiveSiteInfo` carries coordinates after all
+
+Keeping `latitude`/`longitude` off `DiveSiteInfo` was decided "for a map view that does not exist
+yet" (*"Dive site coordinates are two `Float` columns, and half a pair is not a position"*). That is
+a decision with its own revisit condition written into it, and building the dive page's location map
+is the condition being met. The pair is now on the summary embedded in every dive read.
+
+The **payload cost is smaller than the phrasing suggested**: two floats per *linked* site, on rows
+the query already selects — a dive is linked to one site in almost every case, and a dive with no
+site pays nothing. Against that, the alternative the web app would otherwise be stuck with is a
+per-site fetch waterfall on a page that already renders the sites' names, which is one request per
+map instead of one request per page.
+
+**Invalidation comes back with it, and the uniqueness re-check deliberately does not.**
+`patch_dive_site` used to compute one `touches_dive_summary` flag and gate both on it. Now there are
+two, and the split is the whole point:
+
+- `touches_name_or_location` still gates `dive_site_name_exists`. Uniqueness is a rule about a name
+  at a location; a position has never been part of it.
+- `touches_dive_summary` adds `"latitude" in values.model_fields_set` and gates
+  `invalidate_dive_caches`. Only `latitude` is tested because `WholeCoordinatePair` has already
+  refused any body naming one coordinate without the other, so longitude never travels alone.
+
+Widening the single flag instead would have been one character less code and two real bugs: a marker
+drag would pay for a name-uniqueness query that cannot fail, and — worse — a site whose name is
+already duplicated at its location (rows predating the constraint, or a restored dump) could not be
+repositioned at all, because the re-check would 422 on a field the caller never sent.
+
+The general shape worth keeping: **when one flag gates two collaborators, adding a field to the
+summary is the moment the flag stops meaning one thing.** The house rule that mutations invalidate
+whatever *embeds* the record is about staleness only; validation gates that happen to share the
+condition today are not entitled to grow with it.
+
+Already-cached dive payloads written before this deploy carry no site coordinates and will not until
+the 3600 s TTL expires or any mutation drops them. Self-healing, and the failure mode meanwhile is a
+map with fewer pins rather than a wrong one.
