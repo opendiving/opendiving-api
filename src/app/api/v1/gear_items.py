@@ -309,11 +309,11 @@ async def erase_gear_item(
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
     """Soft-deletes a gear item. The `dive_gear_item` and `gear_set_item` rows referencing
-    it are left where they are, matching how a soft-deleted dive site behaves - but the
-    dive reads no longer render it (`get_gear_items_for_dive`), so it drops off the dives
-    it was used on while the links survive for export. Gear sets still show it; that
-    sibling is unfixed, see DECISIONS.md. Archiving, not deleting, is the non-destructive
-    way to retire gear you still want in your log.
+    it are left where they are, matching how a soft-deleted dive site behaves - but
+    neither surface renders it any longer (`get_gear_items_for_dive`,
+    `get_gear_items_for_set`), so it drops off the dives it was used on *and* out of the
+    sets it was in, while the links survive for export. Archiving, not deleting, is the
+    non-destructive way to retire gear you still want in your log.
 
     Its service schedules go with it, though: `is_deleted` is application-level, so the
     `ON DELETE CASCADE` on `gear_service_schedule.gear_item_id` never fires, and without
@@ -326,6 +326,10 @@ async def erase_gear_item(
 
     await soft_delete_schedules_for_gear_item(db=db, gear_item_id=db_gear_item.id, commit=False)
     await crud_gear_items.delete(db=db, uuid=uuid)
+    # Load-bearing twice over since `get_gear_items_for_set` gained its filter: this drops
+    # the gear *set* caches too (one `user_{id}_gear_*` pattern covers all four key
+    # shapes), without which a cached set read would go on listing the deleted item as a
+    # member for the rest of the hour - stale in its membership, not just in its fields.
     await invalidate_gear_caches(owner_id)
     # Unconditional, and load-bearing: a fresh dive read now omits this item, so every
     # cached read of a dive that used it would go on listing kit the diver has deleted for

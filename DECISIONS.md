@@ -6400,3 +6400,94 @@ the item is deleted" are both defensible there in a way the second is not for di
 422 is real on that half too (`PATCH /gear-set` resolves through the same
 `resolve_gear_item_ids_for_user`), so it wants deciding rather than leaving — but deciding it inside
 a change about dive reads would have buried the decision.
+
+**Since decided: hide, same as the other three.** See the section below.
+
+## A gear set hides its deleted items too, and the "clear the link instead" option lost on two legs
+
+The fourth and last loader in the family got the same one-line filter:
+`get_gear_items_for_set`/`get_gear_items_for_sets` now resolve only live items, so a deleted gear
+item drops out of every set that held it. The `gear_set_item` rows are untouched, and nothing in the
+schema changed.
+
+What is worth recording is not the filter — it is identical to the three above — but that the
+alternative was live here and is not live anywhere else, and why it still lost.
+
+### Why the argument that killed "clear the link" for dives does not carry over
+
+The sites-and-trips section rejects clearing the association at delete time on three legs. Checked
+one at a time against gear sets, **only one survives intact, and it is not the famous one.**
+
+The IDREF leg **does not apply**. It reads as though clearing would strand a reference, but it does
+the opposite — clearing removes the reference, so nothing dangles either way. Its actual weight for
+dives is that the `dive_dive_site`/`dive_gear_item` rows *are* the historical record, and `_owned`
+exists to keep them exportable; deleting them destroys the only copy of "this dive was logged with
+this kit". A set's membership is not a record of anything that happened, and the repo already says
+so in its own words — `write_gear_items_csv` in `services/export/tabular.py` folds set names into
+the gear-item row precisely because "a set is a shortcut for filling in a form rather than a record
+of anything that happened". Clearing would have cost the export a line that reads as noise rather
+than as history.
+
+The multi-statement-write leg **mostly falls away**. `erase_dive_site` would have needed the
+position renumbering that took `replace_dive_site_on_dives` three careful statements and a
+wipe-guard test; a set needs none of it, because `position` on `gear_set_item` is only an `ORDER BY`
+key with no unique constraint over it (`ux_gear_set_item_gear_set_id_gear_item_id` is on the pair of
+FKs), so a gap is invisible until the next `replace_gear_items_for_set` renumbers from zero anyway.
+The clear would have been one `DELETE ... WHERE gear_item_id = :id`. There is a test pinning the
+gap-tolerance, since it is the assumption that makes hiding cheap.
+
+The "does not fix the orphans already created" leg **carries over unchanged**, and it decided this.
+A read filter fixes past and future in one line; a delete-time clear fixes only future deletes and
+leaves every set already holding a dead item wrong until someone writes a backfill. There is no
+backfill script in this repo and no place one would obviously live.
+
+### And one argument that only exists on this half
+
+Clearing would make deleting **one** gear item silently rewrite **every set the diver owns** — an
+edit to records the diver did not name, as a side effect of an action about something else, with no
+undo (there is no undelete path in this codebase; see the sites-and-trips section). Hiding defers
+that write to the moment the diver next curates the set themselves. Deleting gear is already the
+destructive choice against archiving; it should not also quietly re-author the diver's templates.
+
+Set against that, the honest case for clearing was that it makes the loss legible at the moment it
+happens instead of leaving a silent severance to fire later. Real, but it buys legibility by doing
+the damage sooner and to more rows.
+
+### The severance is the same cost, and slightly smaller here
+
+`replace_gear_items_for_set` is a delete-and-reinsert, exactly like its dive counterpart, so a
+client that reads a set's item list and submits it back destroys the hidden links for good — the
+same trade "The links outlive the delete, but not the dive's next edit" describes, and the same
+`dirtyFields` fix in `opendiving-web` closes it.
+
+Two things make it milder than the dive half rather than worse. `patch_gear_set` only calls
+`replace_gear_items_for_set` when the request actually carries `gear_item_uuids`, so renaming a set
+or changing its `weight` severs nothing — there is no equivalent of the trip half's
+indistinguishable "the diver cleared it" vs "the client echoed back a null", because membership is a
+list and an absent list means *don't touch*. And what is lost is a line in a template rather than a
+fact about a dive that happened.
+
+### Both deferred checks, again, and both clean
+
+**Cache invalidation reaches the set keys.** `erase_gear_item` calls `invalidate_gear_caches`
+unconditionally, and that is the gear *item* helper by name only — its single pattern is
+`user_{id}_gear_*`, which covers all four gear key shapes including `user_{id}_gear_sets:page_...`
+and `user_{id}_gear_set:{uuid}`. So no change was needed and a cached set read cannot outlive the
+filter. The pattern's reach was already pinned by `TestCacheInvalidationPatterns` in `test_gear.py`;
+what was *not* pinned is that the route calls it at all, which is now
+`TestErasingGearItemDropsTheCachedReads` — renamed from `...DropsTheDiveCaches`, since the same stub
+covers both families. The call's justification has inverted a second time and the comment on it says
+so: stale *fields* first, then stale dive *membership*, now stale set membership too.
+
+**`dive_count` is untouched.** `recalculate_gear_dive_counts` counts `dive_gear_item` rows joined to
+live dives and reads nothing about sets, so neither this filter nor a set edit moves it. The one way
+a deleted item's count still moves is the dive-side severance the section above describes.
+
+### What export shows now
+
+`_owned` resurrects a deleted-but-referenced gear item on four referrers, and set membership is one
+of them (`item_ids_by_set`). Hiding leaves that intact: `export.json` still lists the item inside
+the set's `gear_item_uuids`, flagged `is_deleted` on the item itself, and export is now the only
+surface anywhere that shows the association — on this half as on the other three. Clearing would
+have removed one of the four referrers, which for an item that was only ever in a set and never
+dived or serviced would have dropped it out of the export entirely.
