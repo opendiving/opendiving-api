@@ -10,7 +10,7 @@ documented REST API — so your data is never more than one `curl` away.
 ## What it does
 
 - **Dive log API** — dives with gas mixtures (O₂/He, pressures), multiple ordered dive sites per
-  dive, trips, weights, and notes. Soft deletes throughout.
+  dive, trips, weights, water type, altitude, and notes. Soft deletes throughout.
 - **Technical diving** — per-cylinder ppO₂ limits and gas roles, CNS/OTU and surface pressure
   persisted from imports, and per-tank gas consumption derived from recorded gas switches on
   multi-tank dives.
