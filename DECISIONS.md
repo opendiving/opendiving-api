@@ -6669,11 +6669,16 @@ optional once there are users who are not the developer.
 `_schedule_uuids_by_id` has nothing to hide, and the null it used to produce is now produced by
 `gear_service_schedule_id`'s `ON DELETE SET NULL` at the source. Kept because the *reason* the two
 halves differed is still load-bearing at both sites, and because one of the two conclusions still
-holds verbatim: `get_gear_item_uuids_by_id` is still unguarded, and every call site still indexes it
-directly. What changed is why that is safe. It used to rest on an argument about which references a
-write refuses; it now rests on `gear_item_id` being `NOT NULL` and `ON DELETE CASCADE` on both
-tables that carry it, so a schedule or record whose item is gone is gone itself and an id read off
-one of those rows always resolves.
+holds: `get_gear_item_uuids_by_id` is still **unguarded** - it filters nothing, and the split below
+is why.
+
+The other conclusion did not survive, and this paragraph went on asserting it for one commit longer
+than it was true. Every call site *used* to index the mapping directly, on the reasoning that
+`gear_item_id` is `NOT NULL` and `ON DELETE CASCADE` on both tables that carry it, so a schedule or
+record whose item is gone is gone itself. That holds within one snapshot and not across two
+statements, which is a 500 rather than a subtlety - see *"One new failure mode: the resolve is a
+second statement"* above. No call site indexes directly now: the list routes skip the row, the
+single-resource routes 404.
 
 `_schedule_uuids_by_id` now filters `is_deleted`; `get_gear_item_uuids_by_id` deliberately still
 does not. The deferral above expected one answer for both, and the useful result is *why* that was
@@ -6707,11 +6712,12 @@ reads the schedule uuid.
 ### The item half: the same filter is a 500, and nothing votes for it
 
 `gear_item_uuid` is **required** on `GearServiceRecordRead` and `GearServiceScheduleRead`, and all
-four call sites index the mapping directly rather than `.get()`-ing it. So the "one-line filter"
-that worked everywhere else raises `KeyError` here — a 500 on every record of a deleted item, on the
-one list where those records are still visible. Making it a null instead means tombstoning the field
-or hiding the records, and hiding them contradicts `soft_delete_schedules_for_gear_item`'s
-deliberate choice to keep service history, which has its own test.
+four call sites indexed the mapping directly rather than `.get()`-ing it (they no longer do - see
+the paragraph above). So the "one-line filter" that worked everywhere else raises `KeyError` here —
+a 500 on every record of a deleted item, on the one list where those records are still visible.
+Making it a null instead means tombstoning the field or hiding the records, and hiding them
+contradicts `soft_delete_schedules_for_gear_item`'s deliberate choice to keep service history, which
+has its own test.
 
 And the argument that decided all four earlier changes — **the write side had already voted** —
 simply does not reach this one. There is no write that accepts a `gear_item_uuid` on a record and
