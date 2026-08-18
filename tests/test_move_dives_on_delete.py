@@ -215,11 +215,11 @@ class TestEraseTripWithoutTheParameter:
 
     @pytest.mark.asyncio
     async def test_the_dive_caches_are_dropped_anyway(self, trip_route: dict[str, Any]) -> None:
-        """A plain delete leaves every `dive.trip_id` where it is, but `get_trip_uuids_by_ids`
-        resolves only live trips, so each of those dives starts reading back
-        `trip_uuid: null`. Skipping this - which the route did while that lookup resolved
-        deleted trips too - would leave the cached reads naming a trip a fresh read no
-        longer does, which is the orphan reference the filter exists to remove."""
+        """A plain delete nulls `dive.trip_id` on every dive that was on the trip - the FK is
+        `ON DELETE SET NULL` and the delete is real - so each of those dives starts reading
+        back `trip_uuid: null`. Skipping this would leave the cached reads naming a trip a
+        fresh read no longer does, for the rest of the hour. The route did skip it once, back
+        when a soft-deleted trip left both the column and the lookup answering as before."""
         await _erase_trip(trip_route)
 
         trip_route["invalidate_dives"].assert_awaited_once_with(USER_ID)
@@ -337,11 +337,11 @@ class TestEraseDiveSiteWithoutTheParameter:
 
     @pytest.mark.asyncio
     async def test_the_dive_caches_are_dropped_anyway(self, dive_site_route: dict[str, Any]) -> None:
-        """A deleted site drops out of every dive read, so a bare delete changes what all
-        of those cached reads should say. Making this conditional on whether anything moved
-        would leave them holding a site that no longer exists - which is exactly what the
-        trip route did until its lookup started filtering deleted trips; the two now
-        match."""
+        """The cascade removes this site from every dive logged at it, so a bare delete
+        changes what all of those cached reads should say. Making this conditional on
+        whether anything moved would leave them holding a site that no longer exists. The
+        trip route once did exactly that, back when a soft-deleted trip changed nothing
+        about a dive read; the two match now."""
         await _erase_dive_site(dive_site_route)
 
         dive_site_route["invalidate_dives"].assert_awaited_once_with(USER_ID)
