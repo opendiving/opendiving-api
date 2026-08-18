@@ -544,11 +544,13 @@ class TestSearchConditions:
 
         assert "trip_location.trip_id = trip.id" in sql
 
-    def test_stays_inside_the_callers_own_undeleted_trips(self) -> None:
+    def test_stays_inside_the_callers_own_trips(self) -> None:
         sql = _as_sql(*trips_module._search_conditions(user_id=7, term="moalboal"))
 
         assert "trip.user_id = 7" in sql
-        assert "trip.is_deleted IS false" in sql
+        # Ownership is the whole scope now: trips are hard-deleted, so there is no
+        # liveness clause the EXISTS could be written outside of.
+        assert "is_deleted" not in sql
 
     def test_a_wildcard_in_the_term_matches_literally(self) -> None:
         """`escape_like` on both sides of the OR, same as every other picker - otherwise

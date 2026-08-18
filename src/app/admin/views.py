@@ -69,18 +69,27 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         allowed_actions={"view"},
     )
 
+    # `DiveSite`, `Trip`, `GearItem`, `GearSet` and `GearServiceSchedule` are registered
+    # without `"delete"`, and that is not squeamishness about a superuser having the power.
+    # FastCRUD's `delete` branches on whether the model carries `is_deleted`, and since
+    # those five became hard-deleted it takes the `DELETE FROM` branch - so the button that
+    # used to flag one row now destroys the row, its schedules, its service records and
+    # every join row pointing at it, through the FK cascades. It would do that with **no
+    # cache invalidation**: that lives on the API routes (`services/cache_invalidation.py`)
+    # and nowhere else, so Redis would go on serving the deleted rows for the rest of the
+    # TTL. Delete through the API. `view`/`create`/`update` are unaffected.
     admin.add_view(
         model=DiveSite,
         create_schema=DiveSiteCreateInternal,
         update_schema=DiveSiteUpdate,
-        allowed_actions={"view", "create", "update", "delete"},
+        allowed_actions={"view", "create", "update"},
     )
 
     admin.add_view(
         model=Trip,
         create_schema=TripCreateInternal,
         update_schema=TripUpdate,
-        allowed_actions={"view", "create", "update", "delete"},
+        allowed_actions={"view", "create", "update"},
     )
 
     admin.add_view(
@@ -112,7 +121,7 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         model=GearItem,
         create_schema=GearItemCreateInternal,
         update_schema=GearItemUpdate,
-        allowed_actions={"view", "create", "update", "delete"},
+        allowed_actions={"view", "create", "update"},
     )
 
     # `last_service_on`/`next_due_on`/`next_due_at_dive_count` and the `notified_*`
@@ -122,7 +131,7 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         model=GearServiceSchedule,
         create_schema=GearServiceScheduleCreateInternal,
         update_schema=GearServiceScheduleUpdate,
-        allowed_actions={"view", "create", "update", "delete"},
+        allowed_actions={"view", "create", "update"},
     )
 
     admin.add_view(
@@ -136,7 +145,7 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         model=GearSet,
         create_schema=GearSetCreateInternal,
         update_schema=GearSetUpdate,
-        allowed_actions={"view", "create", "update", "delete"},
+        allowed_actions={"view", "create", "update"},
     )
 
     admin.add_view(

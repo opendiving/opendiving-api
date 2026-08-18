@@ -4,10 +4,10 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Te
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
-from ..core.db.models import PublicUUIDMixin, SoftDeleteMixin, TimestampMixin
+from ..core.db.models import PublicUUIDMixin, TimestampMixin
 
 
-class GearItem(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
+class GearItem(Base, PublicUUIDMixin, TimestampMixin):
     """A single piece of diving equipment owned (or rented) by a user, e.g. a
     regulator, BCD, drysuit or dive computer.
 
@@ -40,7 +40,8 @@ class GearItem(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
 
     # Archiving hides retired/sold/returned gear from the dive form's picker without
     # deleting it, so historical dives keep referencing it and its `dive_count` stays
-    # meaningful. Distinct from `is_deleted` (soft delete), which removes it everywhere.
+    # meaningful. It is the non-destructive path, and the only one: a `DELETE` takes the
+    # item, its schedules, its service records and every join row with it.
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
@@ -55,28 +56,26 @@ class GearItem(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     @classmethod
     def __table_args__(cls) -> tuple:
         return (
-            # Case-insensitive uniqueness per user on (brand, name), ignoring soft-deleted
-            # items so the combination can be reused once an item has been "deleted".
-            # COALESCE maps a NULL brand to '' so two brand-less items with the same name
-            # are also considered duplicates. Two genuinely identical items (e.g. a pair of
-            # matching stage cylinders) are expected to be told apart by name ("Stage 1"/
-            # "Stage 2"), which is also what makes their per-item dive counts meaningful.
+            # Case-insensitive uniqueness per user on (brand, name). COALESCE maps a NULL
+            # brand to '' so two brand-less items with the same name are also considered
+            # duplicates. Two genuinely identical items (e.g. a pair of matching stage
+            # cylinders) are expected to be told apart by name ("Stage 1"/"Stage 2"), which
+            # is also what makes their per-item dive counts meaningful. Archived items still
+            # hold their slot - archiving is not deleting.
             Index(
                 "ux_gear_item_user_id_brand_name_lower",
                 "user_id",
                 func.coalesce(func.lower(cls.brand), ""),
                 func.lower(cls.name),
                 unique=True,
-                postgresql_where=cls.is_deleted.is_(False),
             ),
-            # Serves `read_gear_items` (`GET /gear-items`): `WHERE user_id = ... AND
-            # is_deleted = false [AND is_archived = false] ORDER BY name ASC`. Keyed on the
-            # plain (case-sensitive) `name` so it can satisfy the ORDER BY, which the
+            # Serves `read_gear_items` (`GET /gear-items`): `WHERE user_id = ...
+            # [AND is_archived = false] ORDER BY name ASC`. Keyed on the plain
+            # (case-sensitive) `name` so it can satisfy the ORDER BY, which the
             # `lower(name)`-keyed unique index above can't.
             Index(
                 "ix_gear_item_user_id_name",
                 "user_id",
                 "name",
-                postgresql_where=cls.is_deleted.is_(False),
             ),
         )

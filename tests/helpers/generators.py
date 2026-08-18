@@ -35,7 +35,7 @@ def _persist[RowT](db: Session, row: RowT) -> RowT:
     return row
 
 
-def create_dive_site(db: Session, user: models.User, *, is_deleted: bool = False) -> models.DiveSite:
+def create_dive_site(db: Session, user: models.User) -> models.DiveSite:
     """A dive site of this user's, named uniquely for the same reason `create_user` is:
     these rows go into the developer's own database and nothing removes them."""
     return _persist(
@@ -45,12 +45,11 @@ def create_dive_site(db: Session, user: models.User, *, is_deleted: bool = False
             name=f"Pescador {uuid7().hex[-8:]}",
             location="Moalboal",
             notes="",
-            is_deleted=is_deleted,
         ),
     )
 
 
-def create_trip(db: Session, user: models.User, *, is_deleted: bool = False) -> models.Trip:
+def create_trip(db: Session, user: models.User) -> models.Trip:
     return _persist(
         db,
         models.Trip(
@@ -58,14 +57,11 @@ def create_trip(db: Session, user: models.User, *, is_deleted: bool = False) -> 
             name=f"Visayas {uuid7().hex[-8:]}",
             start_date=date(2026, 6, 1),
             notes="",
-            is_deleted=is_deleted,
         ),
     )
 
 
-def create_gear_item(
-    db: Session, user: models.User, *, is_deleted: bool = False, is_archived: bool = False
-) -> models.GearItem:
+def create_gear_item(db: Session, user: models.User, *, is_archived: bool = False) -> models.GearItem:
     """A gear item of this user's. Uniquely named for the same reason as the rest, and
     doubly so here: `ux_gear_item_user_id_brand_name_lower` is a real unique index over
     (user, brand, name) that a repeated fixture name would collide on."""
@@ -77,15 +73,12 @@ def create_gear_item(
             brand="Scubapro",
             type="regulator",
             notes="",
-            is_deleted=is_deleted,
             is_archived=is_archived,
         ),
     )
 
 
-def create_gear_service_schedule(
-    db: Session, user: models.User, item: models.GearItem, *, is_deleted: bool = False
-) -> models.GearServiceSchedule:
+def create_gear_service_schedule(db: Session, user: models.User, item: models.GearItem) -> models.GearServiceSchedule:
     """A service schedule on one of this user's gear items.
 
     `interval_months` is set because `ck_gear_service_schedule_has_an_interval` requires at
@@ -100,7 +93,6 @@ def create_gear_service_schedule(
             kind="inspection",
             starts_on=date(2026, 1, 1),
             interval_months=12,
-            is_deleted=is_deleted,
         ),
     )
 
@@ -115,8 +107,8 @@ def create_gear_service_record(
     """A service record, optionally attached to a schedule.
 
     `gear_service_schedule_id` is nullable on purpose - a diver can log a service that no
-    schedule was tracking - which is what lets a deleted schedule read back as `null`
-    rather than needing a shape of its own.
+    schedule was tracking - which is also the state a record lands in when its schedule is
+    deleted, the FK's `ON DELETE SET NULL` clearing the column.
     """
     return _persist(
         db,
@@ -132,7 +124,7 @@ def create_gear_service_record(
     )
 
 
-def create_gear_set(db: Session, user: models.User, *, is_deleted: bool = False) -> models.GearSet:
+def create_gear_set(db: Session, user: models.User) -> models.GearSet:
     """A gear set of this user's. Uniquely named like the rest, and for one extra reason:
     `gear_set_name_exists` treats names as unique per user, so a fixture reusing one would
     be a duplicate the API would refuse to create."""
@@ -141,7 +133,6 @@ def create_gear_set(db: Session, user: models.User, *, is_deleted: bool = False)
         models.GearSet(
             user_id=user.id,
             name=f"Wreck kit {uuid7().hex[-8:]}",
-            is_deleted=is_deleted,
         ),
     )
 

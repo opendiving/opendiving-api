@@ -94,7 +94,13 @@ async def fetch_owned_or_raise[OwnedRowT: OwnedRow](
     distinction, without the volume. Raise the level to see both.
 
     `include_deleted` exists for the routes that legitimately act on a soft-deleted row
-    (restoring a certification, say) - everything else wants the default.
+    (restoring a certification, say) - everything else wants the default. Both it and the
+    filter it controls apply only to the models that still carry the column: `Certification`
+    is the last one routed through here, and `Trip`/`DiveSite`/`GearItem`/`GearSet` are hard
+    -deleted now. The check is on the model rather than unconditional because FastCRUD's
+    `get_model_column` raises `ValueError` for a column the model lacks instead of ignoring
+    it, so an unconditional filter would turn every `GET`/`PATCH`/`DELETE` on those four
+    into a 500.
 
     Note the two intentional non-users: `api.v1.gear_service._owned_gear_item` and
     `api.v1.gear_sets._resolve_item_ids` answer 422 for both cases, because there the
@@ -108,7 +114,7 @@ async def fetch_owned_or_raise[OwnedRowT: OwnedRow](
     for someone else's row, so nothing is disclosed by saying so.
     """
     filters: dict[str, Any] = {"uuid": uuid}
-    if not include_deleted:
+    if not include_deleted and hasattr(crud.model, "is_deleted"):
         filters["is_deleted"] = False
 
     row = await crud.get(db=db, schema_to_select=schema, return_as_model=True, **filters)

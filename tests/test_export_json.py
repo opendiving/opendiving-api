@@ -162,8 +162,10 @@ class TestReferences:
 
     @pytest.mark.asyncio
     async def test_a_record_whose_schedule_was_deleted_keeps_its_history(self, monkeypatch):
-        """`gear_service_record` outlives the rule it was logged against by design, and a
-        *soft*-deleted schedule leaves the id in place while dropping out of the export."""
+        """`gear_service_record` outlives the rule it was logged against by design. Deleting
+        the schedule nulls `gear_service_schedule_id` through the FK's `ON DELETE SET NULL`,
+        so the record keeps every denormalized field and loses only the reference; this
+        clears the bundle instead, which is the same thing from the writer's side."""
         bundle = full_bundle()
         bundle.schedules.clear()
         bundle.schedule_by_id.clear()
@@ -177,9 +179,10 @@ class TestReferences:
 
 
 class TestUnresolvableReferences:
-    """`loader._owned` reads deleted-but-referenced rows back, so these are unreachable
-    through the API - but the export's stated policy is that a row nobody can see must
-    never cost a diver their download, and only a test keeps that true."""
+    """Unreachable through the API - a join row cannot outlive the row it points at, now
+    that the five referenced tables are hard-deleted - but the export's stated policy is
+    that a row nobody can see must never cost a diver their download, and only a test keeps
+    that true."""
 
     @pytest.mark.asyncio
     async def test_a_schedule_and_record_whose_gear_item_is_missing_are_skipped(self, monkeypatch):

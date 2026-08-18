@@ -139,10 +139,3 @@ class GearItemUpdate(RejectsExplicitNulls):
 class GearItemUpdateInternal(GearItemUpdate):
     archived_at: datetime | None = None
     updated_at: datetime
-
-
-class GearItemDelete(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    is_deleted: bool
-    deleted_at: datetime

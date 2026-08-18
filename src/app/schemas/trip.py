@@ -168,10 +168,3 @@ class TripUpdateRequest(TripUpdate):
 
 class TripUpdateInternal(TripUpdate):
     updated_at: datetime
-
-
-class TripDelete(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    is_deleted: bool
-    deleted_at: datetime

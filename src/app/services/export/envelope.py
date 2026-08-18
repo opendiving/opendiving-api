@@ -191,7 +191,6 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     start_date=trip.start_date,
                     end_date=trip.end_date,
                     notes=trip.notes,
-                    is_deleted=trip.is_deleted,
                     created_at=trip.created_at,
                 )
                 for trip in bundle.trips
@@ -207,7 +206,6 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     latitude=site.latitude,
                     longitude=site.longitude,
                     notes=site.notes,
-                    is_deleted=site.is_deleted,
                     created_at=site.created_at,
                 )
                 for site in bundle.dive_sites
@@ -226,7 +224,6 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     is_archived=item.is_archived,
                     archived_at=item.archived_at,
                     dive_count=item.dive_count,
-                    is_deleted=item.is_deleted,
                     created_at=item.created_at,
                 )
                 for item in bundle.gear_items
@@ -265,14 +262,12 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     last_service_on=schedule.last_service_on,
                     next_due_on=schedule.next_due_on,
                     next_due_at_dive_count=schedule.next_due_at_dive_count,
-                    is_deleted=schedule.is_deleted,
                     created_at=schedule.created_at,
                 )
                 for schedule in bundle.schedules
                 # `.get()`-and-skip rather than indexing, for the reason spelled out on
-                # `ExportBundle.gear_for`: after `_owned` reads deleted-but-referenced
-                # items back, a miss here can only be hand-edited data, and a 500 on the
-                # export is the worst answer to a row nobody can see.
+                # `ExportBundle.gear_for`: a miss here can only be hand-edited data, and a
+                # 500 on the export is the worst answer to a row nobody can see.
                 if (item := bundle.gear_item_by_id.get(schedule.gear_item_id))
             ],
         ),
@@ -307,10 +302,13 @@ def _schedule_uuid(bundle: ExportBundle, schedule_id: int) -> uuid_pkg.UUID | No
     """A record's schedule, or `None` when the rule it was logged against is gone.
 
     History outlives the rule by design (see `models/gear_service_record.py`), and the FK
-    is `ON DELETE SET NULL` for exactly that. `loader._owned` reads back a *soft*-deleted
-    schedule a record still points at, so the usual answer here is a uuid the file also
-    defines - but a hard-deleted one leaves nothing to resolve, and `.get()` is what keeps
-    that a null rather than a `KeyError`.
+    is `ON DELETE SET NULL` for exactly that: deleting a schedule nulls
+    `gear_service_record.gear_service_schedule_id` at the source, so the id never reaches
+    this function and the null comes from the caller rather than from here.
+
+    The `.get()` is still what stands between a stale id and a `KeyError` - it is reachable
+    only through hand-edited data now, and skipping is the right answer there for the reason
+    `ExportBundle.gear_for` gives.
     """
     schedule = bundle.schedule_by_id.get(schedule_id)
     return None if schedule is None else schedule.uuid

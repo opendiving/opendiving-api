@@ -2,10 +2,10 @@ from sqlalchemy import Float, ForeignKey, Index, String, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
-from ..core.db.models import PublicUUIDMixin, SoftDeleteMixin, TimestampMixin
+from ..core.db.models import PublicUUIDMixin, TimestampMixin
 
 
-class GearSet(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
+class GearSet(Base, PublicUUIDMixin, TimestampMixin):
     """A named, reusable grouping of a user's gear items, e.g. "Sidemount",
     "Tech - trimix" or "Warm water rec".
 
@@ -36,21 +36,19 @@ class GearSet(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     @classmethod
     def __table_args__(cls) -> tuple:
         return (
-            # Case-insensitive uniqueness per user on name, ignoring soft-deleted sets -
-            # same pattern as `dive_site`/`trip` (see DECISIONS.md).
+            # Case-insensitive uniqueness per user on name - same pattern as
+            # `dive_site`/`trip` (see DECISIONS.md).
             Index(
                 "ux_gear_set_user_id_name_lower",
                 "user_id",
                 func.lower(cls.name),
                 unique=True,
-                postgresql_where=cls.is_deleted.is_(False),
             ),
-            # Serves `read_gear_sets` (`GET /gear-sets`): `WHERE user_id = ... AND
-            # is_deleted = false ORDER BY name ASC`.
+            # Serves `read_gear_sets` (`GET /gear-sets`): `WHERE user_id = ... ORDER BY
+            # name ASC`.
             Index(
                 "ix_gear_set_user_id_name",
                 "user_id",
                 "name",
-                postgresql_where=cls.is_deleted.is_(False),
             ),
         )

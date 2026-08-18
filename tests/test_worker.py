@@ -265,7 +265,7 @@ class TestSendGearServiceDigests:
         send.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_the_query_excludes_archived_deleted_and_opted_out(self) -> None:
+    async def test_the_query_excludes_archived_paused_and_opted_out(self) -> None:
         session = _RecordingSession([])
         session_patch, email_patch = _patched(session)
         with session_patch, email_patch:
@@ -274,10 +274,12 @@ class TestSendGearServiceDigests:
         statement = session.calls[0]
         # Retiring gear must silence it without pausing every rule on it.
         assert "gear_item.is_archived IS false" in statement
-        assert "gear_item.is_deleted IS false" in statement
-        assert "gear_service_schedule.is_deleted IS false" in statement
         assert "gear_service_schedule.is_active IS true" in statement
+        # `User` is the one of the three that still soft-deletes; the gear halves need no
+        # clause because a deleted item takes its schedules with it.
         assert '"user".is_deleted IS false' in statement
+        assert "gear_item.is_deleted" not in statement
+        assert "gear_service_schedule.is_deleted" not in statement
         assert '"user".gear_service_emails IS true' in statement
         # Both interval arms are pre-filtered on.
         assert "gear_service_schedule.next_due_on <=" in statement

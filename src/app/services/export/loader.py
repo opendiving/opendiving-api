@@ -14,19 +14,19 @@ for the blobs, `uddf.py`/`envelope.py` for the profile series), so peak memory i
 file plus one profile rather than a diver's entire history of both. That is the one
 place this module accepts an N+1 on purpose.
 
-**Scoping is "everything the caller can still see", which is not the same as "what the
-list endpoints return".** The `user_id` filter is absolute and never varies. The
-soft-delete filter does: four tables go on showing a deleted row wherever something else
-still references it - a dive site stays on its dives, a gear item on its dives and sets,
-a trip on its dives, a schedule on its records - so those rows are read back too, flagged
-`is_deleted` in `export.json`. See `_owned`, which is where that rule lives and where the
-consequence of getting it wrong is spelled out.
+**Scoping is "everything the caller can still see".** The `user_id` filter is absolute,
+and the only other filter is soft-delete liveness on the three tables that still have the
+column - `Dive`, `GearServiceRecord` and `Certification`. Nothing is resurrected: this
+module used to read deleted-but-still-referenced trips, dive sites, gear items and
+schedules back so that a uuid in `export.json` (an `xs:IDREF` in UDDF) always resolved,
+and those five tables are hard-deleted now, so a dangling reference cannot be created in
+the first place. See `_owned`.
 """
 
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...crud.crud_dive_mixtures import get_mixtures_for_dives
@@ -117,17 +117,17 @@ class ExportBundle:
         """A dive's gear in the order the diver listed it."""
         return [item for item_id in self.gear_ids_by_dive[dive.id] if (item := self.gear_item_by_id.get(item_id))]
 
-    # Both of the above resolve through `.get()` rather than indexing, and after `_owned`
-    # reads deleted-but-referenced rows back there is exactly one way left to hit the
-    # miss: a join row pointing at *another user's* site or item. That cannot be created
-    # through the API - every write validates ownership first (`resolve_dive_site_ids_for_user`,
-    # `resolve_gear_item_ids_for_user`) - so it would mean hand-edited data. Skipping is
-    # the only defensible answer either way: the row is not this caller's to export, and a
-    # 500 on the one endpoint that exists so a diver can leave with their data is the
-    # worst possible failure mode for a bad row nobody can see.
+    # Both of the above resolve through `.get()` rather than indexing, and there is exactly
+    # one way left to hit the miss: a join row pointing at *another user's* site or item.
+    # That cannot be created through the API - every write validates ownership first
+    # (`resolve_dive_site_ids_for_user`, `resolve_gear_item_ids_for_user`) - so it would
+    # mean hand-edited data. Skipping is the only defensible answer either way: the row is
+    # not this caller's to export, and a 500 on the one endpoint that exists so a diver can
+    # leave with their data is the worst possible failure mode for a bad row nobody can see.
 
     def trip_for(self, dive: Dive) -> Trip | None:
-        """The dive's trip, or `None` - including when the trip has since been deleted."""
+        """The dive's trip, or `None` - which is what a dive whose trip was deleted has,
+        the FK's `ON DELETE SET NULL` having cleared the column."""
         return None if dive.trip_id is None else self.trip_by_id.get(dive.trip_id)
 
 
@@ -165,58 +165,31 @@ async def _ordered_ids_by_dive(
     return sites, gear
 
 
-async def _owned(
-    db: AsyncSession,
-    model: Any,
-    *,
-    user_id: int,
-    order_by: Any,
-    still_referenced: set[int] | None = None,
-) -> list[Any]:
-    """One user's rows from a soft-deleting table: the live ones, plus any dead one that
-    something else in this export still points at.
+async def _owned(db: AsyncSession, model: Any, *, user_id: int, order_by: Any) -> list[Any]:
+    """One user's rows from a table, in a stable order - the live ones, where the table
+    still has a notion of liveness.
 
-    The second half is not a nicety. A soft-deleted dive site **stays attached to the
-    dives logged at it** (`erase_dive_site` flags the site and leaves the join rows), and
-    the same is true of a gear item on its dives and gear sets (`erase_gear_item`, which
-    leaves both join tables alone), of a trip on its dives (`erase_trip`), and of a service
-    schedule on its records (`erase_gear_service_schedule` directly, or
-    `soft_delete_schedules_for_gear_item` when the whole item goes - either way the
-    schedule is flagged and `gear_service_record.gear_service_schedule_id` still points at
-    it). Leaving those out
-    would put a uuid in `export.json` that nothing in the file defines - and in UDDF,
-    where the same reference is an `xs:IDREF`, would produce a document that does not
-    validate.
+    Three of the eight tables read through here soft-delete (`Dive`, `GearServiceRecord`,
+    `Certification`); the other five hard-delete, and asking a `Trip` for `is_deleted`
+    would be an `AttributeError` rather than a filter that quietly matches everything. The
+    check is on the model rather than a per-call flag so that a soft-deleting table added
+    to this bundle later is filtered by default: the failure mode of forgetting is a
+    deleted dive appearing in a diver's export, which is the one direction that must not
+    be the accident. `api.dependencies.fetch_owned_or_raise` branches the same way.
 
-    So the rule is: **an export holds every record something in it still references**,
-    which for these four tables is a superset of what their list endpoints return. The
-    resurrected rows carry `is_deleted: true` in `export.json`, so a reader can tell them
-    from the live ones rather than being handed a site the diver thought they removed.
-
-    Note this deliberately outlives what the *app* shows, and now on every surface: the
-    dive reads stopped rendering deleted sites, trips and gear items
-    (`get_dive_sites_for_dive`, `get_trip_uuids_by_ids`, `get_gear_items_for_dive`), the
-    gear-set reads stopped rendering deleted items (`get_gear_items_for_set`), and a service
-    record stopped naming a deleted schedule (`_schedule_uuids_by_id`), so export is the
-    only place left where a diver can see that a dive was logged at a site they since
-    removed, that a set once held kit they since deleted, or that a service was logged
-    against a schedule that is gone. The IDREF argument alone
-    already requires the resurrection; being the last copy of the association is a
-    consequence, not the reason.
-
-    It is not a durable copy, and nothing here can make it one. A dive whose hidden site,
-    trip or gear the diver edits away - which an ordinary `PATCH /dive` does silently,
-    since the client submits back the shortened list it was shown - loses the row itself,
-    and then there is nothing left for `still_referenced` to name. A `PATCH /gear-set`
-    carrying `gear_item_uuids` severs a set's membership the same way. See "The links
-    outlive the delete, but not the dive's next edit" in DECISIONS.md.
-
-    One query rather than a filtered read plus a patch-up, so the ordering stays the
-    database's and the `user_id` scope cannot be forgotten on the second pass.
+    This used to take a `still_referenced` set as well, and resurrect any dead row
+    something else in the export still pointed at - a dive site on its dives, a gear item
+    on its dives and sets, a trip on its dives, a schedule on its records. Without it a
+    uuid in `export.json` named nothing the file defined, and the UDDF `xs:IDREF` of the
+    same reference produced a document that would not validate. The five tables that
+    needed it are hard-deleted now, so the join row goes with the row it points at and a
+    dangling reference cannot exist to be repaired. See "The row goes, and so does
+    everything pointing at it" in DECISIONS.md.
     """
-    live = model.is_deleted.is_(False)
-    visible = live if not still_referenced else or_(live, model.id.in_(still_referenced))
-    rows = await db.execute(select(model).where(model.user_id == user_id, visible).order_by(*order_by))
+    conditions = [model.user_id == user_id]
+    if hasattr(model, "is_deleted"):
+        conditions.append(model.is_deleted.is_(False))
+    rows = await db.execute(select(model).where(*conditions).order_by(*order_by))
     return list(rows.scalars().all())
 
 
@@ -227,9 +200,12 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
     endpoints (the caller is resolved from their own bearer token) but is worth failing
     loudly on rather than exporting an archive addressed to nobody.
 
-    The order of the reads below is load-bearing: everything that *references* a
-    soft-deleting table is read first, so `_owned` knows which dead rows have to come
-    back with the live ones.
+    The order of the reads below still matters, though no longer for the reason it was
+    written for - `_owned` used to need every referrer read before the table it referenced,
+    so it knew which dead rows to bring back. What is left is ordinary data dependency:
+    `dive_ids` comes from `dives`, `item_ids_by_set` from `gear_sets`, `locations_by_trip`
+    from `trips` and `cert_files_by_cert` from `certifications`. Reorder on those, not on
+    the strength of the resurrection having gone.
     """
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if user is None:
@@ -258,48 +234,12 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
         db, GearServiceRecord, user_id=user_id, order_by=(GearServiceRecord.serviced_on, GearServiceRecord.id)
     )
 
-    # Schedules before gear items, because a schedule is itself a referrer. Deleting a
-    # gear item soft-deletes its schedules and deliberately *keeps* its service records
-    # (`soft_delete_schedules_for_gear_item`), so a live record drags back a dead schedule
-    # which is then the only thing still naming a dead item.
     schedules = await _owned(
-        db,
-        GearServiceSchedule,
-        user_id=user_id,
-        order_by=(GearServiceSchedule.gear_item_id, GearServiceSchedule.id),
-        still_referenced={
-            record.gear_service_schedule_id for record in service_records if record.gear_service_schedule_id is not None
-        },
+        db, GearServiceSchedule, user_id=user_id, order_by=(GearServiceSchedule.gear_item_id, GearServiceSchedule.id)
     )
-
-    trips = await _owned(
-        db,
-        Trip,
-        user_id=user_id,
-        order_by=(Trip.start_date, Trip.id),
-        still_referenced={dive.trip_id for dive in dives if dive.trip_id is not None},
-    )
-    dive_sites = await _owned(
-        db,
-        DiveSite,
-        user_id=user_id,
-        order_by=(DiveSite.name, DiveSite.id),
-        still_referenced={site_id for site_ids in site_ids_by_dive.values() for site_id in site_ids},
-    )
-    gear_items = await _owned(
-        db,
-        GearItem,
-        user_id=user_id,
-        order_by=(GearItem.name, GearItem.id),
-        # Four referrers, and the last two are the ones easy to miss: an item stays in the
-        # export because a dive used it, a set contains it, a service *record* logs work on
-        # it, or a *schedule* is still measured against it. Deleting an item that was never
-        # dived and never in a set but had one service logged reaches only the last two.
-        still_referenced={item_id for item_ids in gear_ids_by_dive.values() for item_id in item_ids}
-        | {item_id for item_ids in item_ids_by_set.values() for item_id in item_ids}
-        | {record.gear_item_id for record in service_records}
-        | {schedule.gear_item_id for schedule in schedules},
-    )
+    trips = await _owned(db, Trip, user_id=user_id, order_by=(Trip.start_date, Trip.id))
+    dive_sites = await _owned(db, DiveSite, user_id=user_id, order_by=(DiveSite.name, DiveSite.id))
+    gear_items = await _owned(db, GearItem, user_id=user_id, order_by=(GearItem.name, GearItem.id))
     certifications = await _owned(
         db, Certification, user_id=user_id, order_by=(Certification.certified_on, Certification.id)
     )
@@ -314,9 +254,7 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
         profile_by_dive=await get_profile_infos_for_dives(db=db, dive_ids=dive_ids),
         attribution_by_dive=await get_gas_attribution_for_dives(db=db, dive_ids=dive_ids),
         trips=trips,
-        # After `_owned`, so a soft-deleted trip that a dive still points at keeps its
-        # places too - the export shows that trip, and a trip without its locations would
-        # read as one the diver never said anything about.
+        # After the `trips` read above, which is what supplies the ids.
         locations_by_trip=await get_locations_for_trips(db=db, trip_ids=[trip.id for trip in trips]),
         dive_sites=dive_sites,
         gear_items=gear_items,

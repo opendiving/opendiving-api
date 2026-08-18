@@ -66,6 +66,48 @@ class TestAdminPasswordIsRequiredInProduction:
             _settings(CRUD_ADMIN_ALLOWED_IPS_LIST=["203.0.113.7"])
 
 
+class TestHardDeletedModelsCannotBeDeletedFromThePanel:
+    """The five models that hard-delete are registered without `"delete"`.
+
+    Asserted against the source for the same reason `TestDefaults` below is - importing
+    `register_admin_views` means constructing a `CRUDAdmin`, which wants a database - and
+    it is worth asserting at all because the button looks harmless and is not. FastCRUD's
+    `delete` branches on whether the model carries `is_deleted`; since these five lost it,
+    the panel's delete would take the `DELETE FROM` branch and destroy the row, its
+    schedules, its service records and every join row through the FK cascades. With **no
+    cache invalidation**, which is route-level only, so Redis would go on serving the
+    deleted rows for the rest of the TTL.
+    """
+
+    HARD_DELETED = ("DiveSite", "Trip", "GearItem", "GearServiceSchedule", "GearSet")
+
+    @staticmethod
+    def _views_source() -> str:
+        from pathlib import Path
+
+        return (Path(__file__).resolve().parents[1] / "src" / "app" / "admin" / "views.py").read_text()
+
+    @pytest.mark.parametrize("model", HARD_DELETED)
+    def test_the_view_is_registered_without_delete(self, model: str):
+        source = self._views_source()
+        block = source[source.index(f"model={model},") :]
+        actions = block[block.index("allowed_actions=") : block.index("\n    )")]
+
+        assert '"delete"' not in actions, model
+        assert '"view", "create", "update"' in actions, model
+
+    def test_the_soft_deleting_models_keep_theirs(self):
+        """The distinction is soft-delete, not caution: `Dive`, `GearServiceRecord` and
+        `Certification` still flag a row rather than removing it, so the panel's delete
+        stays what it always was for them."""
+        source = self._views_source()
+
+        for model in ("Dive", "GearServiceRecord", "Certification"):
+            block = source[source.index(f"model={model},") :]
+            actions = block[block.index("allowed_actions=") : block.index("\n    )")]
+            assert '"delete"' in actions, model
+
+
 class TestDefaults:
     """Asserted against the source rather than `Settings.model_fields`, because
     `starlette.config.Config` resolves each field's default from the developer's own

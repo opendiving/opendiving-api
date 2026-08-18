@@ -58,8 +58,7 @@ class GearServiceRecord(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     @classmethod
     def __table_args__(cls) -> tuple:
         return (
-            # Serves the gear detail page's "service history, newest first" list. No
-            # standalone `gear_item_id` index - this one's leading column covers it.
+            # Serves the gear detail page's "service history, newest first" list.
             Index(
                 "ix_gear_service_record_gear_item_id_serviced_on",
                 "gear_item_id",
@@ -75,4 +74,16 @@ class GearServiceRecord(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
                 cls.serviced_on.desc(),
                 postgresql_where=cls.is_deleted.is_(False),
             ),
+            # The two plain indexes below duplicate the leading columns of the two above,
+            # and are not redundant with them: both of those are *partial* on
+            # `is_deleted`, and this is the one table in the five-way hard-delete change
+            # that keeps its soft-delete flag. Postgres runs a referential-integrity
+            # lookup with no predicate of its own, so it cannot prove a partial index
+            # covers the rows it needs and will not use one - it seq-scans instead. Both
+            # FKs here are cascade targets of a delete a diver can trigger from the UI
+            # (`gear_item_id` is `ON DELETE CASCADE`, `gear_service_schedule_id` is
+            # `ON DELETE SET NULL`), so that scan would run on every gear-item and every
+            # schedule delete. Invisible at a few hundred rows; an incident at ten million.
+            Index("ix_gear_service_record_gear_item_id", "gear_item_id"),
+            Index("ix_gear_service_record_schedule_id", "gear_service_schedule_id"),
         )

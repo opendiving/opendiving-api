@@ -30,9 +30,7 @@ from ...services.cache_invalidation import invalidate_dive_caches
 router = APIRouter(tags=["dive-sites"])
 
 
-async def _get_owned_dive_site(
-    db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict, *, include_deleted: bool = False
-) -> DiveSiteReadInternal:
+async def _get_owned_dive_site(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> DiveSiteReadInternal:
     """Fetch a dive site by public uuid and assert the caller owns it.
 
     Thin wrapper over `fetch_owned_or_raise` - see there for why someone else's row reads
@@ -46,7 +44,6 @@ async def _get_owned_dive_site(
         current_user=current_user,
         schema=DiveSiteReadInternal,
         not_found_message="Dive site not found",
-        include_deleted=include_deleted,
     )
 
 
@@ -236,35 +233,31 @@ async def erase_dive_site(
         Query(description="Move the dives logged at this site onto the site with this uuid before deleting it"),
     ] = None,
 ) -> dict[str, str]:
-    """Soft-delete a dive site, optionally moving the dives logged at it to another site.
+    """Delete a dive site, optionally moving the dives logged at it to another site.
 
-    404 unless the caller owns it, exactly as for a site that doesn't exist. Idempotent
-    otherwise: deleting an already-deleted site succeeds rather than 404ing. The site's
-    links to the dives logged at it survive in the database, but it stops being rendered on
-    them, so their cached reads are invalidated too. Those links last only until each
-    dive's next `PATCH`, which submits back the shortened site list it was handed and drops
-    the row for good - so an export taken later may no longer show it. Since this route is
-    idempotent and honours `move_dives_to` on an already-deleted site, a diver who deleted
-    first can still re-point the dives afterwards.
+    404 unless the caller owns it, exactly as for a site that doesn't exist - and a second
+    `DELETE` on the same uuid is now a 404 too, because the row really is gone. This route
+    used to be idempotent to insure against a half-failed multi-statement delete; one
+    `DELETE FROM dive_site` in one transaction cannot half-fail.
+
+    The `dive_dive_site` rows linking it to the dives logged there go with it
+    (`ON DELETE CASCADE`) - the rule was already declared on the FK and finally fires - so
+    those dives read back one site shorter and their cached reads are invalidated too.
+    Nothing survives the delete; `move_dives_to` before it if the association matters.
 
     Pass `move_dives_to` and every one of the caller's live dives logged here has this site
     swapped for that one first, in the same transaction as the delete: either the whole log
     moved and this site is gone, or nothing happened. The replacement takes this site's slot
     in each dive's ordered site list - so it inherits being the primary site if this one was
     - and a dive already logged at both ends up holding it once. A replacement that isn't
-    the caller's own live site, or that is this site, is a 422: the same answer `PATCH
-    /dive` gives for a `dive_site_uuids` entry it can't resolve, which is the per-dive call
-    this parameter exists to replace.
-
-    Passing it for an already-deleted site is honoured rather than refused - the dives are
-    still there to move, and refusing would make the retry of a half-failed delete worse
-    than the first attempt.
+    the caller's own site, or that is this site, is a 422: the same answer `PATCH /dive`
+    gives for a `dive_site_uuids` entry it can't resolve, which is the per-dive call this
+    parameter exists to replace.
 
     The response is the bare `{"message": ...}` every other delete on the API returns; the
     count of what moved is not reported. See DECISIONS.md.
     """
-    # `include_deleted`: deleting an already-soft-deleted site is a no-op, not a 404.
-    db_dive_site = await _get_owned_dive_site(db, uuid, current_user, include_deleted=True)
+    db_dive_site = await _get_owned_dive_site(db, uuid, current_user)
     owner_id = db_dive_site.user_id
 
     if move_dives_to is not None:
@@ -284,7 +277,7 @@ async def erase_dive_site(
     # only writer here that commits, and both wrote through this one session.
     await crud_dive_sites.delete(db=db, uuid=uuid)
     await _dive_site_cache.invalidate_list(owner_id)
-    # Soft-deleted sites stay on the dives logged at them, so drop those reads too.
+    # The cascade shortens the site list of every dive logged here, so drop those reads too.
     await invalidate_dive_caches(owner_id)
 
     return {"message": "Dive site deleted"}

@@ -180,30 +180,29 @@ class TestTheNormalizedFiles:
         assert rows[1][0] == rows[2][0] == "XTX50"
 
     def test_gear_service_rows_join_by_uuid_not_by_display_name(self):
-        """A gear item's name is not unique, and after `loader._owned` resurrects a
-        deleted item it can name both a live and a deleted one."""
+        """A gear item's name is not unique across a diver's history."""
         rows = _parse(_render(write_gear_service_csv(full_bundle())))
         item_uuid = GEAR_SERVICE_HEADER.index("gear_item_uuid")
         assert {row[item_uuid] for row in rows[1:]} == {str(UUIDS["gear-regulator"])}
         assert all(row[GEAR_SERVICE_HEADER.index("row_uuid")] for row in rows[1:])
 
-    def test_the_resurrectable_files_all_flag_a_deleted_row(self):
-        """`loader._owned` reads deleted-but-referenced rows back and `export.json` flags
-        them, so the CSVs in the same archive must not list them as live."""
-        bundle = full_bundle()
-        bundle.trips[0].is_deleted = True
-        bundle.dive_sites[0].is_deleted = True
-        bundle.gear_items[0].is_deleted = True
-        bundle.schedules[0].is_deleted = True
-
+    def test_no_file_carries_a_deleted_column_any_more(self):
+        """These four had one because `loader._owned` could resurrect their rows, and a
+        CSV listing as live what `export.json` flagged as deleted would have contradicted
+        itself inside one archive. Nothing is resurrected now, so a column that could only
+        ever read `False` is a column that misleads. A breaking format change, deliberately
+        - see the PR body."""
         for writer, header in (
             (write_trips_csv, TRIPS_HEADER),
             (write_dive_sites_csv, DIVE_SITES_HEADER),
             (write_gear_items_csv, GEAR_ITEMS_HEADER),
             (write_gear_service_csv, GEAR_SERVICE_HEADER),
         ):
-            rows = _parse(_render(writer(bundle)))
-            assert rows[1][header.index("deleted")] == "True", writer.__name__
+            assert "deleted" not in header, writer.__name__
+            # And the rows still line up with the header they claim - dropping a column
+            # from one and not the other shifts every cell after it.
+            rows = _parse(_render(writer(full_bundle())))
+            assert all(len(row) == len(header) for row in rows), writer.__name__
 
     def test_certifications_name_the_agency_the_diver_gave(self):
         rows = _parse(_render(write_certifications_csv(full_bundle())))

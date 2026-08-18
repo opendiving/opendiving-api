@@ -8,6 +8,7 @@ recalculation statement. The endpoint behaviour on top of a live Postgres/Redis 
 exercised end to end by hand (see DECISIONS.md), not here.
 """
 
+import uuid as uuid_pkg
 from datetime import UTC, date, datetime
 from fnmatch import fnmatch
 from unittest.mock import AsyncMock, MagicMock
@@ -15,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from uuid6 import uuid7
 
+from src.app.api.v1 import gear_items as gear_items_module
 from src.app.api.v1.gear_items import _to_public_gear_item
 from src.app.api.v1.gear_sets import _to_public_gear_set
 from src.app.crud.crud_dive_gear_items import replace_gear_items_for_dive
@@ -259,6 +261,62 @@ class TestRecalculateGearDiveCounts:
         await recalculate_gear_dive_counts(db, user_id=1, commit=False)
 
         db.commit.assert_not_awaited()
+
+
+class TestErasingGearItemDropsTheCachedReads:
+    """Both invalidation calls on `erase_gear_item`, stubbed - invalidation is not a query.
+
+    Worth pinning because neither has a visible effect on the delete itself, and what they
+    protect lives in other files: between them they stop a cached dive read and a cached
+    gear-set read going on listing kit that a fresh read now omits, for the rest of the
+    hour. That makes both exactly the kind of thing a later cleanup removes as redundant.
+
+    Which keys the gear pattern actually reaches is a separate question, pinned by
+    `TestCacheInvalidationPatterns` below; this only pins that the route calls it, for the
+    item's owner rather than the caller.
+    """
+
+    @staticmethod
+    def _stub_route(monkeypatch: pytest.MonkeyPatch) -> tuple[uuid_pkg.UUID, AsyncMock, AsyncMock]:
+        uuid = uuid7()
+        item = _internal_gear_item(uuid=uuid, user_id=7)
+        invalidate_dives, invalidate_gear = AsyncMock(), AsyncMock()
+
+        monkeypatch.setattr(gear_items_module, "_get_owned_gear_item", AsyncMock(return_value=item))
+        monkeypatch.setattr(gear_items_module.crud_gear_items, "delete", AsyncMock())
+        monkeypatch.setattr(gear_items_module, "invalidate_gear_caches", invalidate_gear)
+        monkeypatch.setattr(gear_items_module, "invalidate_dive_caches", invalidate_dives)
+
+        return uuid, invalidate_dives, invalidate_gear
+
+    @staticmethod
+    async def _erase(uuid: uuid_pkg.UUID) -> None:
+        await gear_items_module.erase_gear_item(
+            request=MagicMock(),
+            uuid=uuid,
+            current_user={"id": 7, "uuid": uuid7()},
+            db=MagicMock(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_owners_dive_caches_are_dropped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        uuid, invalidate_dives, _ = self._stub_route(monkeypatch)
+
+        await self._erase(uuid)
+
+        # The *item owner's* id, not the caller's - they are the same today only because
+        # someone else's item reads as a 404 before this point.
+        invalidate_dives.assert_awaited_once_with(7)
+
+    @pytest.mark.asyncio
+    async def test_the_owners_gear_caches_are_dropped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The gear-set half: the cascade unpicks the item from every set it was in, so a
+        cached set read would otherwise go on listing it as a member."""
+        uuid, _, invalidate_gear = self._stub_route(monkeypatch)
+
+        await self._erase(uuid)
+
+        invalidate_gear.assert_awaited_once_with(7)
 
 
 class TestCacheInvalidationPatterns:

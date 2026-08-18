@@ -10,7 +10,6 @@ from ..models.gear_service_schedule import GearServiceSchedule
 from ..schemas.gear_service import (
     GearServiceDueItem,
     GearServiceScheduleCreateInternal,
-    GearServiceScheduleDelete,
     GearServiceScheduleInfo,
     GearServiceScheduleReadInternal,
     GearServiceScheduleUpdate,
@@ -56,7 +55,7 @@ CRUDGearServiceSchedule = FastCRUD[
     GearServiceScheduleCreateInternal,
     GearServiceScheduleUpdate,
     GearServiceScheduleUpdateInternal,
-    GearServiceScheduleDelete,
+    GearServiceScheduleUpdate,
     GearServiceScheduleReadInternal,
 ]
 crud_gear_service_schedules = CRUDGearServiceSchedule(GearServiceSchedule)
@@ -74,7 +73,6 @@ async def get_schedules_for_gear_item(db: AsyncSession, gear_item_id: int) -> li
         select(*SERVICE_SCHEDULE_INFO_COLUMNS)
         .where(
             GearServiceSchedule.gear_item_id == gear_item_id,
-            GearServiceSchedule.is_deleted.is_(False),
         )
         .order_by(*_INFO_ORDER)
     )
@@ -98,7 +96,6 @@ async def get_schedules_for_gear_items(
         select(GearServiceSchedule.gear_item_id, *SERVICE_SCHEDULE_INFO_COLUMNS)
         .where(
             GearServiceSchedule.gear_item_id.in_(gear_item_ids),
-            GearServiceSchedule.is_deleted.is_(False),
         )
         .order_by(GearServiceSchedule.gear_item_id, *_INFO_ORDER)
     )
@@ -110,18 +107,17 @@ async def get_schedules_for_gear_items(
 async def schedule_kind_exists(
     db: AsyncSession, gear_item_id: int, kind: str, label: str | None = None, exclude_id: int | None = None
 ) -> bool:
-    """Case-insensitive check for whether a non-deleted schedule of the same (kind, label)
-    already exists on the item.
+    """Case-insensitive check for whether a schedule of the same (kind, label) already
+    exists on the item.
 
-    Mirrors the `ux_gear_service_schedule_item_kind_label` partial unique index, so the
-    route can return a friendly 422 instead of a raw integrity error - the same
+    Mirrors the `ux_gear_service_schedule_item_kind_label` unique index, so the route can
+    return a friendly 422 instead of a raw integrity error - the same
     application-level/DB-level pairing as `gear_item_name_exists`. A NULL label and an
     empty one are treated as the same "unlabelled" slot, matching the index's COALESCE.
     """
     normalized = (label or "").strip().lower()
     stmt = select(GearServiceSchedule.id).where(
         GearServiceSchedule.gear_item_id == gear_item_id,
-        GearServiceSchedule.is_deleted.is_(False),
         GearServiceSchedule.kind == kind,
         func.coalesce(func.lower(GearServiceSchedule.label), "") == normalized,
     )
@@ -165,9 +161,7 @@ async def get_due_overview_for_user(
         .join(GearItem, GearItem.id == GearServiceSchedule.gear_item_id)
         .where(
             GearServiceSchedule.user_id == user_id,
-            GearServiceSchedule.is_deleted.is_(False),
             GearServiceSchedule.is_active.is_(True),
-            GearItem.is_deleted.is_(False),
             GearItem.is_archived.is_(False),
         )
         .order_by(GearServiceSchedule.next_due_on.asc().nulls_last(), GearItem.name)
@@ -180,8 +174,8 @@ async def get_due_overview_for_user(
 async def resolve_schedule_for_user(
     db: AsyncSession, schedule_uuid: uuid_pkg.UUID, user_id: int
 ) -> GearServiceSchedule | None:
-    """Resolve a schedule's public `uuid` to its row, scoped to non-deleted schedules
-    owned by the given user.
+    """Resolve a schedule's public `uuid` to its row, scoped to schedules owned by the
+    given user.
 
     Returns `None` when the uuid doesn't exist or belongs to somebody else - callers
     turn both into a 404, so an outsider can't tell a real schedule from an imaginary one.
@@ -190,7 +184,6 @@ async def resolve_schedule_for_user(
         select(GearServiceSchedule).where(
             GearServiceSchedule.uuid == schedule_uuid,
             GearServiceSchedule.user_id == user_id,
-            GearServiceSchedule.is_deleted.is_(False),
         )
     )
     return result.scalar_one_or_none()

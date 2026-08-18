@@ -1,13 +1,13 @@
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, String, and_, func
+from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, String, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
-from ..core.db.models import PublicUUIDMixin, SoftDeleteMixin, TimestampMixin
+from ..core.db.models import PublicUUIDMixin, TimestampMixin
 
 
-class GearServiceSchedule(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
+class GearServiceSchedule(Base, PublicUUIDMixin, TimestampMixin):
     """A servicing *rule* attached to a gear item: "this regulator needs a full service
     every 12 months or every 100 dives, whichever comes first".
 
@@ -53,8 +53,9 @@ class GearServiceSchedule(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin
     # from the `GearItem` row it already fetched, never accepted from the client.
     dive_count_at_start: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
-    # Pause reminders without losing the rule. Distinct from `gear_item.is_archived`
-    # (which silences every schedule on the item at once) and from `is_deleted`.
+    # Pause reminders without losing the rule. Distinct from `gear_item.is_archived`,
+    # which silences every schedule on the item at once, and from deleting the rule,
+    # which unlinks its service records for good.
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
 
     # ---- derived, maintained solely by `services.gear_service.recalculate_service_schedule` ----
@@ -105,25 +106,31 @@ class GearServiceSchedule(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin
             # One rule per (item, kind, label). COALESCE maps a NULL label to '' so two
             # label-less "service" rules on the same item are duplicates, exactly how
             # `ux_gear_item_user_id_brand_name_lower` treats a NULL brand - while still
-            # allowing two distinctly-labelled "other" rules. Partial on `is_deleted` so
-            # a deleted rule frees its slot again.
+            # allowing two distinctly-labelled "other" rules. Deleting a rule frees its
+            # slot because the row is gone, not because the index looks away.
+            #
+            # It has to stay *unpartitioned* for a second reason now: it is the only index
+            # on `gear_item_id`, which is an `ON DELETE CASCADE` target, and a referential
+            # -integrity lookup carries no `WHERE` of its own, so a partial index cannot
+            # serve it. See `gear_service_record`, which needs two plain indexes of its own
+            # for exactly that reason.
             Index(
                 "ux_gear_service_schedule_item_kind_label",
                 "gear_item_id",
                 "kind",
                 func.coalesce(func.lower(cls.label), ""),
                 unique=True,
-                postgresql_where=cls.is_deleted.is_(False),
             ),
             # Serves the digest job's `WHERE next_due_on <= today + 30` scan, which runs
             # across *every* user's schedules rather than one owner's - the whole reason
             # `next_due_on` is a stored column instead of being computed in Python.
             # No standalone `gear_item_id` index: it's the leading column of the unique
             # index above, which already fully serves `get_schedules_for_gear_items`'
-            # `gear_item_id IN (...)` (same reasoning as `GearSetItem`'s missing one).
+            # `gear_item_id IN (...)` (same reasoning as `GearSetItem`'s missing one) and
+            # the cascade's RI lookup.
             Index(
                 "ix_gear_service_schedule_next_due_on",
                 "next_due_on",
-                postgresql_where=and_(cls.is_deleted.is_(False), cls.is_active.is_(True)),
+                postgresql_where=cls.is_active.is_(True),
             ),
         )

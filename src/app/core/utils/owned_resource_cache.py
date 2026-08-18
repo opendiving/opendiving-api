@@ -142,7 +142,6 @@ class OwnedResourceCache[InternalT, PublicT]:
                 offset=offset,
                 limit=items_per_page,
                 user_id=user_id,
-                is_deleted=False,
                 sort_columns=self._sort_columns,
                 sort_orders=self._sort_orders,
             )
@@ -152,11 +151,14 @@ class OwnedResourceCache[InternalT, PublicT]:
         return response
 
     def search_conditions(self, *, user_id: int, term: str) -> tuple[ColumnElement[bool], ...]:
-        """The `WHERE` clauses matching the user's non-deleted rows against a search term."""
+        """The `WHERE` clauses matching the user's rows against a search term.
+
+        No liveness clause: both resources routed through this factory are hard-deleted, so
+        the column this used to name no longer exists on either of their models.
+        """
         model = self._crud.model
         return (
             model.user_id == user_id,
-            model.is_deleted.is_(False),
             search_clause(model, self._search_columns, term),
         )
 
@@ -181,9 +183,7 @@ class OwnedResourceCache[InternalT, PublicT]:
         Only ever reached through `read_item`, and only after the caller's authorization has
         already been checked by the route - see the class docstring.
         """
-        db_item = await self._crud.get(
-            db=db, uuid=uuid, is_deleted=False, schema_to_select=self._schema_to_select, return_as_model=True
-        )
+        db_item = await self._crud.get(db=db, uuid=uuid, schema_to_select=self._schema_to_select, return_as_model=True)
         if db_item is None:
             raise NotFoundException(f"{self._resource_label} not found")
 

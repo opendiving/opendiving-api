@@ -215,11 +215,11 @@ class TestEraseTripWithoutTheParameter:
 
     @pytest.mark.asyncio
     async def test_the_dive_caches_are_dropped_anyway(self, trip_route: dict[str, Any]) -> None:
-        """A plain delete leaves every `dive.trip_id` where it is, but `get_trip_uuids_by_ids`
-        resolves only live trips, so each of those dives starts reading back
-        `trip_uuid: null`. Skipping this - which the route did while that lookup resolved
-        deleted trips too - would leave the cached reads naming a trip a fresh read no
-        longer does, which is the orphan reference the filter exists to remove."""
+        """A plain delete nulls `dive.trip_id` on every dive that was on the trip - the FK is
+        `ON DELETE SET NULL` and the delete is real - so each of those dives starts reading
+        back `trip_uuid: null`. Skipping this would leave the cached reads naming a trip a
+        fresh read no longer does, for the rest of the hour. The route did skip it once, back
+        when a soft-deleted trip left both the column and the lookup answering as before."""
         await _erase_trip(trip_route)
 
         trip_route["invalidate_dives"].assert_awaited_once_with(USER_ID)
@@ -297,14 +297,18 @@ class TestEraseTripWithAReplacement:
         trip_route["delete"].assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_an_already_deleted_trip_still_moves_its_dives(self, trip_route: dict[str, Any]) -> None:
-        """The mirror of the dive-site case, and the reason the two now match: a deleted
-        trip is invisible on its dives, so re-pointing them afterwards is the only way back
-        - and a retry of a half-failed delete should not be worse than the first attempt."""
-        await _erase_trip(trip_route, move_dives_to=uuid7())
+    async def test_a_second_delete_moves_nothing(self, trip_route: dict[str, Any]) -> None:
+        """This route used to be idempotent, and is not any more. The insurance was against
+        a half-failed multi-statement delete; one `DELETE FROM trip` in one transaction
+        cannot half-fail, so a repeat call finds nothing and must not run the reassignment
+        against a trip id that no longer names a row."""
+        trip_route["owned"].side_effect = NotFoundException("Trip not found")
 
-        assert trip_route["owned"].await_args.kwargs["include_deleted"] is True
-        trip_route["reassign"].assert_awaited_once()
+        with pytest.raises(NotFoundException):
+            await _erase_trip(trip_route, move_dives_to=uuid7())
+
+        trip_route["reassign"].assert_not_awaited()
+        trip_route["delete"].assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_a_trip_that_is_not_the_callers_is_still_a_404(self, trip_route: dict[str, Any]) -> None:
@@ -333,11 +337,11 @@ class TestEraseDiveSiteWithoutTheParameter:
 
     @pytest.mark.asyncio
     async def test_the_dive_caches_are_dropped_anyway(self, dive_site_route: dict[str, Any]) -> None:
-        """A deleted site drops out of every dive read, so a bare delete changes what all
-        of those cached reads should say. Making this conditional on whether anything moved
-        would leave them holding a site that no longer exists - which is exactly what the
-        trip route did until its lookup started filtering deleted trips; the two now
-        match."""
+        """The cascade removes this site from every dive logged at it, so a bare delete
+        changes what all of those cached reads should say. Making this conditional on
+        whether anything moved would leave them holding a site that no longer exists. The
+        trip route once did exactly that, back when a soft-deleted trip changed nothing
+        about a dive read; the two match now."""
         await _erase_dive_site(dive_site_route)
 
         dive_site_route["invalidate_dives"].assert_awaited_once_with(USER_ID)
@@ -378,14 +382,16 @@ class TestEraseDiveSiteWithAReplacement:
             await _erase_dive_site(dive_site_route, move_dives_to=dive_site_route["uuid"])
 
     @pytest.mark.asyncio
-    async def test_an_already_deleted_site_still_moves_its_dives(self, dive_site_route: dict[str, Any]) -> None:
-        """`include_deleted=True` is what makes the plain delete idempotent, and the same
-        call is what leaves the dives reachable here - a retry of a half-failed delete
-        should not be worse than the first attempt."""
-        await _erase_dive_site(dive_site_route, move_dives_to=dive_site_route["replacement_uuid"])
+    async def test_a_second_delete_moves_nothing(self, dive_site_route: dict[str, Any]) -> None:
+        """The mirror of the trip case: idempotency is gone, so a repeat call 404s before
+        it can re-point anything at a site id that no longer names a row."""
+        dive_site_route["owned"].side_effect = NotFoundException("Dive site not found")
 
-        assert dive_site_route["owned"].await_args.kwargs["include_deleted"] is True
-        dive_site_route["replace"].assert_awaited_once()
+        with pytest.raises(NotFoundException):
+            await _erase_dive_site(dive_site_route, move_dives_to=dive_site_route["replacement_uuid"])
+
+        dive_site_route["replace"].assert_not_awaited()
+        dive_site_route["delete"].assert_not_awaited()
 
 
 def _trip_ids(db: Session, *dives: Dive) -> list[int | None]:

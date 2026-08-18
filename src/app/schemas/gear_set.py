@@ -87,10 +87,3 @@ class GearSetUpdateRequest(GearSetUpdate):
 
 class GearSetUpdateInternal(GearSetUpdate):
     updated_at: datetime
-
-
-class GearSetDelete(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    is_deleted: bool
-    deleted_at: datetime

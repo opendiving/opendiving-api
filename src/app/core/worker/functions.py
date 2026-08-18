@@ -93,9 +93,11 @@ async def send_gear_service_digests(ctx: dict[Any, Any]) -> str:
     when something enters "due soon", one when it goes overdue, and then only a
     quarterly nudge while it stays overdue.
 
-    Two filters matter beyond the obvious soft-delete ones. Archived gear is skipped, so
-    retiring a piece of kit silences it without the diver having to also pause every rule
-    on it; and `user.gear_service_emails` is the opt-out.
+    Three filters matter. Archived gear is skipped, so retiring a piece of kit silences it
+    without the diver having to also pause every rule on it; `is_active` pauses one rule
+    without touching the item; and `user.gear_service_emails` is the opt-out. There is no
+    liveness filter on the gear halves any more - a deleted item takes its schedules with
+    it - and `User.is_deleted` is the one that remains, since users still soft-delete.
 
     "Today" is UTC - `User` has no timezone column, and at date granularity with a
     30-day lead time being a few hours out either way changes nothing. If that ever
@@ -129,9 +131,7 @@ async def send_gear_service_digests(ctx: dict[Any, Any]) -> str:
                 .join(GearItem, GearItem.id == GearServiceSchedule.gear_item_id)
                 .join(User, User.id == GearServiceSchedule.user_id)
                 .where(
-                    GearServiceSchedule.is_deleted.is_(False),
                     GearServiceSchedule.is_active.is_(True),
-                    GearItem.is_deleted.is_(False),
                     GearItem.is_archived.is_(False),
                     User.is_deleted.is_(False),
                     User.gear_service_emails.is_(True),

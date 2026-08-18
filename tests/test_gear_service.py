@@ -10,12 +10,15 @@ Postgres/Redis is exercised by hand (see DECISIONS.md), not here.
 
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import ValidationError
 from uuid6 import uuid7
 
+from src.app.api.v1 import gear_service as gear_service_module
+from src.app.core.exceptions.http_exceptions import NotFoundException
 from src.app.crud.crud_gear_service_schedules import get_due_overview_for_user
 from src.app.schemas.gear_service import (
     GearServiceDueResponse,
@@ -35,7 +38,6 @@ from src.app.services.gear_service import (
     recalculate_service_schedule,
     service_status,
     should_notify,
-    soft_delete_schedules_for_gear_item,
 )
 
 
@@ -468,52 +470,6 @@ class TestRecalculateServiceSchedule:
         db.commit.assert_not_awaited()
 
 
-class TestSoftDeleteSchedulesForGearItem:
-    """Soft-deleting a gear item has to silence its reminders, and must not blow up on
-    the common case of an item that never had any.
-    """
-
-    @pytest.mark.asyncio
-    async def test_soft_deletes_the_items_live_schedules(self) -> None:
-        db = MagicMock()
-        db.execute = AsyncMock()
-        db.commit = AsyncMock()
-
-        await soft_delete_schedules_for_gear_item(db, gear_item_id=7)
-
-        statement = str(db.execute.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
-        # A plain UPDATE, not a fastcrud `delete(allow_multiple=True)`, which raises
-        # NoResultFound when zero rows match - i.e. for most gear.
-        assert statement.startswith("UPDATE gear_service_schedule SET")
-        assert "gear_service_schedule.gear_item_id = 7" in statement
-        assert "gear_service_schedule.is_deleted IS false" in statement
-        db.commit.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_leaves_the_service_history_alone(self) -> None:
-        db = MagicMock()
-        db.execute = AsyncMock()
-        db.commit = AsyncMock()
-
-        await soft_delete_schedules_for_gear_item(db, gear_item_id=7)
-
-        # A soft delete is meant to be recoverable, and discarding the receipts would
-        # make it much less so. They survive for export rather than for a view: nothing
-        # in the app displays a deleted item's records - archiving is that surface.
-        assert db.execute.await_count == 1
-        assert "gear_service_record" not in str(db.execute.await_args.args[0].compile())
-
-    @pytest.mark.asyncio
-    async def test_skips_commit_when_commit_is_false(self) -> None:
-        db = MagicMock()
-        db.execute = AsyncMock()
-        db.commit = AsyncMock()
-
-        await soft_delete_schedules_for_gear_item(db, gear_item_id=7, commit=False)
-
-        db.commit.assert_not_awaited()
-
-
 class TestDueOverview:
     """The dashboard's `GET /gear-service-due` list, and specifically its row cap.
 
@@ -594,3 +550,173 @@ class TestDueOverview:
         # An older client (or a cached response predating the field) must not read as
         # "the list is partial" just because the flag is absent.
         assert GearServiceDueResponse(data=[]).truncated is False
+
+
+class TestAVanishedGearItemDoesNotFiveHundred:
+    """The window hard delete opened, and the one behaviour change in this file that is not
+    a docstring.
+
+    Every route here reads its schedule/record rows and then resolves those rows'
+    `gear_item_id`s to uuids in a *second* statement, at READ COMMITTED. A
+    `DELETE /gear-item/{uuid}` committing in between takes the schedule or record with it
+    (`ON DELETE CASCADE`) and leaves an id that resolves to nothing. Through the soft-delete
+    era the `gear_item` row survived, so the lookup could not miss and indexing it directly
+    was safe; it is not any more, and a `KeyError` here is a 500 on a plain `GET`.
+
+    Stubbed, because arranging a real commit between two statements of one request is a
+    great deal of machinery to reproduce something a mismatched pair of return values
+    states exactly.
+    """
+
+    @staticmethod
+    def _schedule_row(gear_item_id: int) -> dict[str, Any]:
+        return {
+            "id": 1,
+            "uuid": uuid7(),
+            "user_id": 7,
+            "gear_item_id": gear_item_id,
+            "kind": "service",
+            "label": None,
+            "starts_on": date(2026, 1, 1),
+            "interval_months": 12,
+            "interval_dives": None,
+            "dive_count_at_start": 0,
+            "is_active": True,
+            "last_service_on": None,
+            "next_due_on": None,
+            "next_due_at_dive_count": None,
+            "created_at": datetime(2026, 1, 1, tzinfo=UTC),
+        }
+
+    @pytest.mark.asyncio
+    async def test_the_schedule_list_drops_the_row_rather_than_raising(self, monkeypatch) -> None:
+        """A page of one whose item vanished comes back empty, which is what a fresh read a
+        moment later returns anyway."""
+        page = {"data": [self._schedule_row(gear_item_id=3)], "total_count": 1}
+        monkeypatch.setattr(gear_service_module.crud_gear_service_schedules, "get_multi", AsyncMock(return_value=page))
+        # The delete landed between the two statements, so the id resolves to nothing.
+        monkeypatch.setattr(gear_service_module, "get_gear_item_uuids_by_id", AsyncMock(return_value={}))
+
+        result = await cast(Any, gear_service_module._cached_read_schedules).__wrapped__(
+            request=None,
+            user_id=7,
+            user_uuid=uuid7(),
+            db=MagicMock(),
+            page=1,
+            items_per_page=10,
+            gear_item_id=None,
+        )
+
+        assert result["data"] == []
+
+    @pytest.mark.asyncio
+    async def test_the_schedule_list_still_renders_the_rows_that_resolve(self, monkeypatch) -> None:
+        """The other half, so the test above cannot pass by the route dropping everything."""
+        item_uuid = uuid7()
+        page = {"data": [self._schedule_row(gear_item_id=3)], "total_count": 1}
+        monkeypatch.setattr(gear_service_module.crud_gear_service_schedules, "get_multi", AsyncMock(return_value=page))
+        monkeypatch.setattr(gear_service_module, "get_gear_item_uuids_by_id", AsyncMock(return_value={3: item_uuid}))
+
+        result = await cast(Any, gear_service_module._cached_read_schedules).__wrapped__(
+            request=None,
+            user_id=7,
+            user_uuid=uuid7(),
+            db=MagicMock(),
+            page=1,
+            items_per_page=10,
+            gear_item_id=None,
+        )
+
+        assert [row["gear_item_uuid"] for row in result["data"]] == [item_uuid]
+
+    @staticmethod
+    def _record_row(gear_item_id: int) -> dict[str, Any]:
+        return {
+            "id": 1,
+            "uuid": uuid7(),
+            "user_id": 7,
+            "gear_item_id": gear_item_id,
+            "gear_service_schedule_id": None,
+            "kind": "service",
+            "label": None,
+            "serviced_on": date(2026, 1, 1),
+            "dive_count_at_service": 0,
+            "performed_by": None,
+            "notes": "",
+            "created_at": datetime(2026, 1, 1, tzinfo=UTC),
+        }
+
+    @pytest.mark.asyncio
+    async def test_the_record_list_drops_the_row_rather_than_raising(self, monkeypatch) -> None:
+        """The record half got the identical fix, so it needs the identical test - the two
+        call sites are the reason this class is not named after schedules."""
+        page = {"data": [self._record_row(gear_item_id=3)], "total_count": 1}
+        monkeypatch.setattr(gear_service_module.crud_gear_service_records, "get_multi", AsyncMock(return_value=page))
+        monkeypatch.setattr(gear_service_module, "get_gear_item_uuids_by_id", AsyncMock(return_value={}))
+        monkeypatch.setattr(gear_service_module, "_schedule_uuids_by_id", AsyncMock(return_value={}))
+
+        result = await cast(Any, gear_service_module._cached_read_records).__wrapped__(
+            request=None,
+            user_id=7,
+            user_uuid=uuid7(),
+            db=MagicMock(),
+            page=1,
+            items_per_page=10,
+            gear_item_id=None,
+            gear_service_schedule_id=None,
+        )
+
+        assert result["data"] == []
+
+    @pytest.mark.asyncio
+    async def test_the_record_list_still_renders_the_rows_that_resolve(self, monkeypatch) -> None:
+        item_uuid = uuid7()
+        page = {"data": [self._record_row(gear_item_id=3)], "total_count": 1}
+        monkeypatch.setattr(gear_service_module.crud_gear_service_records, "get_multi", AsyncMock(return_value=page))
+        monkeypatch.setattr(gear_service_module, "get_gear_item_uuids_by_id", AsyncMock(return_value={3: item_uuid}))
+        monkeypatch.setattr(gear_service_module, "_schedule_uuids_by_id", AsyncMock(return_value={}))
+
+        result = await cast(Any, gear_service_module._cached_read_records).__wrapped__(
+            request=None,
+            user_id=7,
+            user_uuid=uuid7(),
+            db=MagicMock(),
+            page=1,
+            items_per_page=10,
+            gear_item_id=None,
+            gear_service_schedule_id=None,
+        )
+
+        assert [row["gear_item_uuid"] for row in result["data"]] == [item_uuid]
+
+    @pytest.mark.asyncio
+    async def test_the_single_record_read_404s(self, monkeypatch) -> None:
+        """Deleting the item cascades to the record, so the addressed resource is gone."""
+        record = SimpleNamespace(id=1, uuid=uuid7(), user_id=7, gear_item_id=3, gear_service_schedule_id=None)
+        monkeypatch.setattr(gear_service_module, "resolve_record_for_user", AsyncMock(return_value=record))
+        monkeypatch.setattr(gear_service_module, "get_gear_item_uuids_by_id", AsyncMock(return_value={}))
+        monkeypatch.setattr(gear_service_module, "_schedule_uuids_by_id", AsyncMock(return_value={}))
+
+        with pytest.raises(NotFoundException):
+            await gear_service_module.read_gear_service_record(
+                request=MagicMock(),
+                uuid=record.uuid,
+                current_user={"id": 7, "uuid": uuid7()},
+                db=MagicMock(),
+            )
+
+    @pytest.mark.asyncio
+    async def test_the_single_schedule_read_404s(self, monkeypatch) -> None:
+        """A 404 rather than a skip: the addressed resource really is gone, since deleting
+        the item cascades to the schedule."""
+        schedule = SimpleNamespace(id=1, uuid=uuid7(), user_id=7, gear_item_id=3)
+        monkeypatch.setattr(gear_service_module, "resolve_schedule_for_user", AsyncMock(return_value=schedule))
+        monkeypatch.setattr(gear_service_module, "get_gear_item_uuids_by_id", AsyncMock(return_value={}))
+
+        with pytest.raises(NotFoundException):
+            await gear_service_module.read_gear_service_schedule(
+                request=MagicMock(),
+                uuid=schedule.uuid,
+                current_user={"id": 7, "uuid": uuid7()},
+                db=MagicMock(),
+            )

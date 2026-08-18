@@ -116,7 +116,6 @@ async def _owned_gear_item(db: AsyncSession, gear_item_uuid: uuid_pkg.UUID, user
         db=db,
         uuid=gear_item_uuid,
         user_id=user_id,
-        is_deleted=False,
         schema_to_select=GearItemReadInternal,
         return_as_model=True,
     )
@@ -195,7 +194,7 @@ async def _cached_read_schedules(
     has authorized the caller - `@cache` serves a hit without re-running any of the
     function body, authorization included.
     """
-    filters: dict[str, Any] = {"user_id": user_id, "is_deleted": False}
+    filters: dict[str, Any] = {"user_id": user_id}
     if gear_item_id is not None:
         filters["gear_item_id"] = gear_item_id
 
@@ -209,9 +208,16 @@ async def _cached_read_schedules(
     )
     # One round trip for the whole page's items rather than one per row.
     uuid_by_id = await get_gear_item_uuids_by_id(db=db, gear_item_ids=[row["gear_item_id"] for row in data["data"]])
+    # `.get()`-and-skip rather than indexing: this and the read above are two statements at
+    # READ COMMITTED, so a `DELETE /gear-item/{uuid}` committing between them takes the
+    # schedule with it (`ON DELETE CASCADE`) and leaves an id here that resolves to nothing.
+    # Dropping the row is what a fresh read a moment later returns anyway; indexing would be
+    # a `KeyError` and a 500. Unreachable while these five soft-deleted, since the row
+    # survived - see `get_gear_item_uuids_by_id`.
     data["data"] = [
-        _to_public_schedule(row, user_uuid=user_uuid, gear_item_uuid=uuid_by_id[row["gear_item_id"]]).model_dump()
+        _to_public_schedule(row, user_uuid=user_uuid, gear_item_uuid=item_uuid).model_dump()
         for row in data["data"]
+        if (item_uuid := uuid_by_id.get(row["gear_item_id"])) is not None
     ]
 
     response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
@@ -261,7 +267,7 @@ async def _cached_read_schedule(
     """Fetches (and caches) a single schedule. Authorization happens in the route - see
     `_cached_read_schedules`."""
     db_schedule = await crud_gear_service_schedules.get(
-        db=db, uuid=uuid, is_deleted=False, schema_to_select=GearServiceScheduleReadInternal, return_as_model=True
+        db=db, uuid=uuid, schema_to_select=GearServiceScheduleReadInternal, return_as_model=True
     )
     if db_schedule is None:
         raise NotFoundException("Service schedule not found")
@@ -288,12 +294,19 @@ async def read_gear_service_schedule(
         raise NotFoundException("Service schedule not found")
 
     uuid_by_id = await get_gear_item_uuids_by_id(db=db, gear_item_ids=[schedule.gear_item_id])
+    # A miss means the item was deleted between the two statements, which took this schedule
+    # with it - so the addressed resource is genuinely gone, and 404 is what the resolve
+    # above would have answered had the delete landed a moment earlier.
+    gear_item_uuid = uuid_by_id.get(schedule.gear_item_id)
+    if gear_item_uuid is None:
+        raise NotFoundException("Service schedule not found")
+
     return await _cached_read_schedule(
         request,
         user_id=current_user["id"],
         uuid=uuid,
         owner_uuid=current_user["uuid"],
-        gear_item_uuid=uuid_by_id[schedule.gear_item_id],
+        gear_item_uuid=gear_item_uuid,
         db=db,
     )
 
@@ -353,11 +366,13 @@ async def erase_gear_service_schedule(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Soft-deletes a servicing rule.
+    """Delete a servicing rule.
 
-    Service records that satisfied it keep their `gear_service_schedule_id` (the FK's
-    `ON DELETE SET NULL` only fires on a hard delete) and stay in the item's history -
-    deleting a reminder must never throw away the receipts.
+    Service records that satisfied it stay in the item's history with their
+    `gear_service_schedule_id` nulled - the FK's `ON DELETE SET NULL` finally fires, which
+    is exactly what it was declared for: deleting a reminder must never throw away the
+    receipts. 404 unless the caller owns it, and a second `DELETE` on the same uuid is a
+    404 too.
     """
     schedule = await resolve_schedule_for_user(db=db, schedule_uuid=uuid, user_id=current_user["id"])
     if schedule is None:
@@ -468,14 +483,17 @@ async def _cached_read_records(
     schedule_uuid_by_id = await _schedule_uuids_by_id(
         db=db, schedule_ids=[row["gear_service_schedule_id"] for row in data["data"]]
     )
+    # `.get()`-and-skip on the item, for the reason `_cached_read_schedules` gives; the
+    # schedule half was always a `.get()` because that reference is legitimately nullable.
     data["data"] = [
         _to_public_record(
             row,
             user_uuid=user_uuid,
-            gear_item_uuid=uuid_by_id[row["gear_item_id"]],
+            gear_item_uuid=item_uuid,
             gear_service_schedule_uuid=schedule_uuid_by_id.get(row["gear_service_schedule_id"]),
         ).model_dump()
         for row in data["data"]
+        if (item_uuid := uuid_by_id.get(row["gear_item_id"])) is not None
     ]
 
     response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
@@ -483,32 +501,23 @@ async def _cached_read_records(
 
 
 async def _schedule_uuids_by_id(db: AsyncSession, schedule_ids: list[int | None]) -> dict[int | None, uuid_pkg.UUID]:
-    """Resolve *live* schedule ids to public uuids for a page of records, in one query.
+    """Resolve schedule ids to public uuids for a page of records, in one query.
 
     Both the parameter and the key type are `int | None` because a record's
     `gear_service_schedule_id` is nullable: the Nones are dropped here rather than at
     every call site, and the widened key lets callers `.get()` a nullable id directly
     (which correctly yields `None`, since the returned mapping never has a `None` key).
 
-    A soft-deleted schedule is dropped too, which is why the `.get()` at both call sites
-    is load-bearing rather than defensive. Without the filter a record went on naming a
-    schedule that `GET /gear-service-schedule/{uuid}` answers 404 for
-    (`resolve_schedule_for_user` resolves only live rows), that `POST /gear-service-record`
-    refuses to be created against, and that `?gear_service_schedule_uuid=` answers 422 for.
+    The `.get()` at both call sites stays load-bearing: a record whose schedule was
+    deleted has its `gear_service_schedule_id` nulled by the FK's `ON DELETE SET NULL`, so
+    the id is dropped by the `if schedule_id is not None` above and the mapping legitimately
+    has no entry for it. `gear_service_schedule_uuid` is `UUID | None` and documented as
+    null when the rule is gone, which is exactly the state that produces.
 
-    Two routes strand the reference, and the direct one is the common one:
-    `erase_gear_service_schedule` flags the schedule while its records keep their
-    `gear_service_schedule_id` on purpose ("deleting a reminder must never throw away the
-    receipts"), and `erase_gear_item` reaches the same state indirectly by soft-deleting an
-    item's schedules and keeping its records.
-
-    This costs the read nothing, and that is the whole reason the filter is *here* and not
-    on the item half. `gear_service_schedule_uuid` was already `UUID | None` and already
-    documented as null when the schedule is gone, so a hidden schedule lands in a state the
-    contract describes. `gear_item_uuid` is required and indexed unguarded at every call
-    site, so the same filter there would be a `KeyError` rather than a null - see
-    "The service-record resolvers split, and only one of them was the same question" in
-    DECISIONS.md, which records why the item half is deliberately unfiltered.
+    No liveness filter, and none is reachable - a schedule row cannot outlive itself. It
+    carried one through the soft-delete era for the same reason the null exists; see "The
+    service-record resolvers split, and only one of them was the same question" in
+    DECISIONS.md.
     """
     wanted = {schedule_id for schedule_id in schedule_ids if schedule_id is not None}
     if not wanted:
@@ -518,7 +527,6 @@ async def _schedule_uuids_by_id(db: AsyncSession, schedule_ids: list[int | None]
         db=db,
         id__in=list(wanted),
         limit=len(wanted),
-        is_deleted=False,
         schema_to_select=GearServiceScheduleReadInternal,
     )
     return {row["id"]: row["uuid"] for row in rows["data"]}
@@ -609,12 +617,17 @@ async def read_gear_service_record(
 
     uuid_by_id = await get_gear_item_uuids_by_id(db=db, gear_item_ids=[record.gear_item_id])
     schedule_uuid_by_id = await _schedule_uuids_by_id(db=db, schedule_ids=[record.gear_service_schedule_id])
+    # Same race as on the schedule half: the item going takes this record with it.
+    gear_item_uuid = uuid_by_id.get(record.gear_item_id)
+    if gear_item_uuid is None:
+        raise NotFoundException("Service record not found")
+
     return await _cached_read_record(
         request,
         user_id=current_user["id"],
         uuid=uuid,
         owner_uuid=current_user["uuid"],
-        gear_item_uuid=uuid_by_id[record.gear_item_id],
+        gear_item_uuid=gear_item_uuid,
         gear_service_schedule_uuid=schedule_uuid_by_id.get(record.gear_service_schedule_id),
         db=db,
     )

@@ -33,7 +33,8 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # an existing table).
     gear_service_emails: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
 
-    # Overrides `SoftDeleteMixin.is_deleted` to add an index: unlike Dive/Trip/DiveSite
-    # (each of which has a compound partial index that already covers `is_deleted` as a
-    # leading/predicate column), no other index on this table covers it.
+    # Overrides `SoftDeleteMixin.is_deleted` to add an index: unlike Dive, Certification and
+    # GearServiceRecord (each of which has a compound partial index whose predicate already
+    # pins `is_deleted`), no other index on this table covers it. Trip and DiveSite used to
+    # be on that list and are hard-deleted now, so they have no such column to cover.
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, index=True, kw_only=True)

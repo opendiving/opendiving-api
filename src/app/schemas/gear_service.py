@@ -199,13 +199,6 @@ class GearServiceScheduleUpdateInternal(GearServiceScheduleUpdate):
     updated_at: datetime
 
 
-class GearServiceScheduleDelete(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    is_deleted: bool
-    deleted_at: datetime
-
-
 # -------------------- record --------------------
 class GearServiceRecordBase(BaseModel):
     kind: Annotated[ServiceKind, Field(examples=[ServiceKind.SERVICE])]
@@ -240,7 +233,7 @@ class GearServiceRecordReadInternal(GearServiceRecordBase, PublicUUIDSchema):
 
 class GearServiceRecordCreate(GearServiceRecordBase):
     """`gear_service_schedule_uuid` is optional: if it's omitted and the item has
-    exactly one non-deleted schedule matching `(kind, label)`, the route links it
+    exactly one schedule matching `(kind, label)`, the route links it
     automatically, so "log the annual service" from the item page satisfies the rule
     without the diver picking anything.
 

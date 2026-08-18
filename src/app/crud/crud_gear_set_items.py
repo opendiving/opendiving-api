@@ -8,35 +8,23 @@ from .crud_gear_items import GEAR_ITEM_INFO_COLUMNS, gear_item_info_from_row
 
 
 async def get_gear_items_for_set(db: AsyncSession, gear_set_id: int) -> list[GearItemInfo]:
-    """Return the *live* gear items in a set, in the order they were added.
+    """Return the gear items in a set, in the order they were added.
 
-    The symptom is the one `get_gear_items_for_dive` had: `erase_gear_item` flags the item
-    and leaves the `gear_set_item` rows alone, so without this a set goes on listing kit
-    that `GET /gear-item/{uuid}` answers 404 for and that `PATCH /gear-set` refuses back -
-    `resolve_gear_item_ids_for_user` resolves only live items, so reading a set's item list
-    and writing it verbatim would 422.
+    Nothing hides here: `erase_gear_item` is a real `DELETE` and `gear_set_item.gear_item_id`
+    is `ON DELETE CASCADE`, so deleting one item unpicks it from every set the diver owns,
+    at the source. That is the outcome the old read filter was chosen *over* - clearing the
+    rows at delete time was rejected partly because it "silently rewrites every set the
+    diver owns" - and the objection does not survive the row itself going: there is no
+    membership left to rewrite, and no orphan left to hide.
 
-    The *answer* was a real choice here rather than the obvious one, because a gear set is
-    a template the diver curates and not a record of anything that happened, so clearing
-    the rows in `erase_gear_item` was defensible in a way it is not for a dive. Hiding won
-    on two things a delete-time clear cannot do: it fixes the orphans already in the
-    database, and it keeps deleting one item from silently rewriting every set the diver
-    owns. See DECISIONS.md before changing it back.
-
-    The links survive the delete, and no further than the set's next membership edit:
-    `patch_gear_set` runs `replace_gear_items_for_set` - a delete-and-reinsert - whenever
-    the request carries `gear_item_uuids`, so a client submitting back the shortened list
-    it was handed drops the row for good. A rename or a weight change does not, an absent
-    list meaning *don't touch* - which is the same guard `patch_dive` puts on both of its
-    list replacements, not something gentler about this half.
-
-    Only `is_deleted` hides. Archived items come through flagged, exactly as on the dive
-    loaders: archiving retires kit from the picker without unpicking the sets it is in.
+    **Archived** items come through flagged, exactly as on the dive loaders: archiving
+    retires kit from the picker without unpicking the sets it is in, and is now the only
+    thing that does.
     """
     result = await db.execute(
         select(*GEAR_ITEM_INFO_COLUMNS)
         .join(GearSetItem, GearSetItem.gear_item_id == GearItem.id)
-        .where(GearSetItem.gear_set_id == gear_set_id, GearItem.is_deleted.is_(False))
+        .where(GearSetItem.gear_set_id == gear_set_id)
         .order_by(GearSetItem.position)
     )
     return [gear_item_info_from_row(row) for row in result]
@@ -45,11 +33,8 @@ async def get_gear_items_for_set(db: AsyncSession, gear_set_id: int) -> list[Gea
 async def get_gear_items_for_sets(db: AsyncSession, gear_set_ids: list[int]) -> dict[int, list[GearItemInfo]]:
     """Batched version of `get_gear_items_for_set`, for the paginated gear set listing.
 
-    Filters deleted items for the same reasons - this is what `GET /gear-sets` builds its
-    page from, so a filter on the single-set loader alone would leave the list still
-    showing them - and degrades the same way: the per-set lists are pre-seeded empty, so a
-    set whose every item is gone comes back with `[]` rather than dropping out of the
-    mapping its caller indexes.
+    Pre-seeds the per-set lists empty so a set whose every item was deleted comes back with
+    `[]` rather than dropping out of the mapping its caller indexes.
     """
     items_by_set: dict[int, list[GearItemInfo]] = {gear_set_id: [] for gear_set_id in gear_set_ids}
     if not gear_set_ids:
@@ -58,7 +43,7 @@ async def get_gear_items_for_sets(db: AsyncSession, gear_set_ids: list[int]) -> 
     result = await db.execute(
         select(GearSetItem.gear_set_id, *GEAR_ITEM_INFO_COLUMNS)
         .join(GearItem, GearItem.id == GearSetItem.gear_item_id)
-        .where(GearSetItem.gear_set_id.in_(gear_set_ids), GearItem.is_deleted.is_(False))
+        .where(GearSetItem.gear_set_id.in_(gear_set_ids))
         .order_by(GearSetItem.gear_set_id, GearSetItem.position)
     )
     for row in result:
@@ -74,34 +59,11 @@ async def replace_gear_items_for_set(
     Duplicate ids are silently deduplicated (keeping each id's first occurrence, which
     determines its position) to avoid a unique-constraint violation.
 
-    **The wipe takes soft-deleted items with it, and that is a known accepted loss** - the
-    third of the three `replace_*` helpers carrying it, after `replace_dive_sites_for_dive`
-    and `replace_gear_items_for_dive`, and for the same reason. Since `get_gear_items_for_set`
-    stopped returning deleted items, a client editing a set's membership submits back only
-    what it was shown, so a set holding a live item and a hidden one comes back without the
-    hidden one and the delete below destroys its row. No client can prevent it: it cannot
-    preserve a reference it was never handed.
-
-    `patch_gear_set` reaches this only when the request actually carries `gear_item_uuids`,
-    so renaming a set or changing its `weight` severs nothing - but that is not a mercy
-    peculiar to sets: `patch_dive` guards both of its list replacements with the same
-    `is not None`. The only half without that guard is the scalar `trip_uuid`, where an
-    explicit null and an echoed one are the same request. And the narrow case survives the
-    guard anyway: adding one item resubmits the whole list, and the hidden row goes with it.
-
-    Declined rather than missed - see "One narrower case `dirtyFields` cannot reach" in
-    DECISIONS.md for the fix and why its cost was judged too high for a path this narrow.
-
-    **If that call is ever revisited, revisit it on this helper first.** The fix is to
-    delete only the rows whose item is live, insert the submitted list at 0..n-1, then
-    renumber the survivors after it - and what made it too expensive on
-    `replace_dive_sites_for_dive` is the meaning `dive_dive_site.position` carries:
-    position 0 is the *primary* site every single-site surface renders, which is why
-    `replace_dive_site_on_dives` maintains 0..n-1 contiguity in a dedicated third statement
-    with a wipe-guard test behind it. Nothing reads `gear_set_item.position` as anything but
-    a sort key, so here the renumbering is cosmetic and the change is a genuinely smaller
-    one. Not a constraint difference - neither table has a unique constraint on `position`.
-    Its sibling's docstring defers to this note.
+    Safe to hand a full list: a deleted gear item takes its `gear_set_item` rows with it,
+    so what `get_gear_items_for_set` hands out is the whole membership and echoing it back
+    destroys nothing. `patch_gear_set` still reaches this only when the request actually
+    carries `gear_item_uuids` - an absent list means *don't touch*, the same guard
+    `patch_dive` puts on both of its list replacements.
     """
     unique_ids = list(dict.fromkeys(gear_item_ids))
     await db.execute(delete(GearSetItem).where(GearSetItem.gear_set_id == gear_set_id))
