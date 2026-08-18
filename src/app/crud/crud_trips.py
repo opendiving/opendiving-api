@@ -31,12 +31,12 @@ async def resolve_trip_id_for_user(db: AsyncSession, trip_uuid: uuid_pkg.UUID, u
 async def get_trip_uuids_by_ids(db: AsyncSession, trip_ids: list[int], user_id: int) -> dict[int, uuid_pkg.UUID]:
     """Batched lookup of trip `id` -> `uuid`, e.g. for enriching a paginated dive listing.
 
-    Resolves only a *live* trip of this user's, which makes an unresolvable `trip_id` an
-    expected outcome rather than a missing row: a dive keeps its `trip_id` when its trip is
-    soft-deleted, and callers turn the resulting miss into `trip_uuid: null`. That is what
-    stops a dive reporting a trip `GET /trip/{uuid}` answers 404 for, and it matches the
-    write side - `resolve_trip_id_for_user` refuses a deleted trip, so a `trip_uuid` this
-    returned would be one `PATCH /dive` then rejected.
+    A miss is no longer an expected outcome. Trips are hard-deleted and `dive.trip_id` is
+    `ON DELETE SET NULL`, so deleting a trip clears the column on every dive that pointed
+    at it rather than leaving an id behind for this lookup to decline - the callers' `None`
+    now comes from the row itself, and their `if trip_id is not None` guard is what
+    produces it. This used to filter `is_deleted` and turn a hidden trip into the same
+    null; there is no hidden trip to filter for.
 
     The `user_id` scope is defence in depth rather than a fix: today every caller passes
     ids taken from the caller's own dives, so a cross-user id cannot arrive. Scoping it

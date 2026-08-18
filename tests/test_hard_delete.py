@@ -59,15 +59,9 @@ from tests.helpers.generators import (
     create_gear_service_schedule,
     create_gear_set,
     create_trip,
-    create_user,
 )
 
 pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
-
-
-@pytest.fixture
-def diver(db: Session) -> User:
-    return create_user(db)
 
 
 async def _count(async_db: AsyncSession, model: Any, row_id: int) -> int:
