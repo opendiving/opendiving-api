@@ -6071,10 +6071,21 @@ rule no mock can see, that a dive which merely *lost* the doomed site (because i
 replacement) still counts as one that moved. Unread by the routes, load-bearing for the tests that
 prove the statements did what they claim.
 
-**Client-visible, and the sequencing matters.** The web app had to stop reading `moved_dives` first;
-shipping this against a client still reading it gives a toast built on `undefined`. The reverse
-order is free — a client that no longer reads the field does not care that it is still sent — which
-is why the web change went first and this one is strictly second.
+**Client-visible, and the sequencing is a requirement rather than a detail.** The web app has to
+stop reading `moved_dives` *before* this ships. The reverse order is free — a client that no longer
+reads the field does not care that it is still sent — so the web change goes first and this one is
+strictly second.
+
+Worth knowing what "before" is actually buying, because the failure is quiet rather than loud.
+Getting the order wrong degrades gracefully: the read is `result.moved_dives > 0`, and
+`undefined > 0` is `false`, so the toast silently drops the "12 dives moved to Cebu 2026" half and
+says only that the trip was deleted. Nothing throws and nothing looks broken — which is the argument
+for the ordering, not against it. A break that announces itself gets fixed; this one just quietly
+stops telling divers where their dives went.
+
+The web app's `DeletedWithMovedDives` *type* outlives both changes by design — it comes out in a
+follow-up, after this. Until then the generated-side type declares a required `moved_dives` the API
+no longer sends. Types-only, nothing reads it, no runtime consequence.
 
 ### A bad replacement is a 422, not a 404
 
