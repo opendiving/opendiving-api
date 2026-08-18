@@ -302,10 +302,13 @@ def _schedule_uuid(bundle: ExportBundle, schedule_id: int) -> uuid_pkg.UUID | No
     """A record's schedule, or `None` when the rule it was logged against is gone.
 
     History outlives the rule by design (see `models/gear_service_record.py`), and the FK
-    is `ON DELETE SET NULL` for exactly that. `loader._owned` reads back a *soft*-deleted
-    schedule a record still points at, so the usual answer here is a uuid the file also
-    defines - but a hard-deleted one leaves nothing to resolve, and `.get()` is what keeps
-    that a null rather than a `KeyError`.
+    is `ON DELETE SET NULL` for exactly that: deleting a schedule nulls
+    `gear_service_record.gear_service_schedule_id` at the source, so the id never reaches
+    this function and the null comes from the caller rather than from here.
+
+    The `.get()` is still what stands between a stale id and a `KeyError` - it is reachable
+    only through hand-edited data now, and skipping is the right answer there for the reason
+    `ExportBundle.gear_for` gives.
     """
     schedule = bundle.schedule_by_id.get(schedule_id)
     return None if schedule is None else schedule.uuid

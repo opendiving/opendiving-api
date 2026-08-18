@@ -21,8 +21,10 @@ class TripLocation(Base):
     coordinates - the free-text escape hatch that keeps a throttled or unreachable
     provider from blocking the diver.
 
-    The FK's `ON DELETE CASCADE` only fires on a hard delete; a soft-deleted trip keeps
-    its rows, invisible along with it (same semantics as the dive join tables).
+    The FK's `ON DELETE CASCADE` is the only way these rows are removed, and it fires:
+    `erase_trip` is a real `DELETE FROM trip`, so a trip takes its places with it. That is
+    *not* the same as the dive join tables, whose cascade still never runs - `Dive` is
+    soft-deleted, so no `DELETE FROM dive` is ever issued.
     """
 
     __tablename__ = "trip_location"

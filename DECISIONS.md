@@ -6187,6 +6187,21 @@ contradicting the dialog that opened it would have read as a bug whichever numbe
 number exists any more (see the subsection above), so the scoping now stands on the first argument
 alone, which was always the sufficient one.
 
+**And that first argument has since been falsified outright — the scope stands on nothing, and is
+kept anyway.** It rested on the resource being *soft*-deleted, so that a skipped dive's `trip_id` or
+join row went on pointing at a row that still existed. Both resources are hard-deleted now, so the
+FK does the opposite of preserving: `dive.trip_id` is `ON DELETE SET NULL` and
+`dive_dive_site.dive_site_id` is `ON DELETE CASCADE`, and both fire on precisely the rows these two
+statements decline to move. A soft-deleted dive therefore loses the association either way, and now
+loses it *silently* rather than keeping it.
+
+Recorded rather than fixed, on the same grounds the loss is affordable at all: no surface renders a
+soft-deleted dive, so nothing user-facing can tell. Widening the scope to every dive is the obvious
+fix and is not obviously right — it would move rows the diver cannot see onto a trip they did not
+choose for them — and the whole question disappears if dives ever go hard-delete too. Both
+`reassign_dives_to_trip` and `replace_dive_site_on_dives` say so at the site. See *"The row goes,
+and so does everything pointing at it"*.
+
 ### The dive-site case is three set-based statements, not a loop
 
 The trip case is one `UPDATE dive SET trip_id`. Sites are many-to-many with an ordered join table

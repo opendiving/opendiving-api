@@ -35,13 +35,22 @@ async def reassign_dives_to_trip(db: AsyncSession, *, user_id: int, from_trip_id
     """Point every one of a diver's live dives on one trip at another, and return how many
     moved. Does not commit - the caller's delete does, so the two land together.
 
-    Soft-deleted dives are deliberately left behind. They are outside everything the diver
-    can see, and leaving their `trip_id` on the trip about to be soft-deleted preserves the
-    pairing they were logged with - which is exactly what a plain `DELETE /trip/{uuid}`
-    already does to every dive. That argument was always the sufficient one; the scope used
-    to have a second justification - it kept the returned count equal to the number the web
-    app's confirmation dialog had pre-fetched from `GET /dives?trip_uuid=...` - and both
-    that count and that dialog are gone. See DECISIONS.md.
+    Soft-deleted dives are deliberately left behind, and that now costs something it did
+    not use to. They are outside everything the diver can see, and the scope originally
+    preserved the pairing they were logged with - back when the trip was about to be
+    *soft*-deleted and its row survived. It does not preserve anything now: `dive.trip_id`
+    is `ON DELETE SET NULL`, and the caller's `DELETE FROM trip` is real, so the cascade
+    nulls the column on exactly the dives this `UPDATE` skipped. The promise `erase_trip`
+    makes - either the log moved or nothing happened - holds for the log a diver can see
+    and not for the rows underneath it.
+
+    Left as a permanent accepted loss rather than fixed, for the reason
+    `replace_dive_site_on_dives` gives for the identical case on the site half: no surface
+    renders a soft-deleted dive, so there is no visible consequence, and the whole thing
+    disappears if dives ever go hard-delete too. The scope also used to have a second
+    justification - it kept the returned count equal to the number the web app's
+    confirmation dialog had pre-fetched from `GET /dives?trip_uuid=...` - and both that
+    count and that dialog are gone. See DECISIONS.md.
 
     The count itself outlived its route: `erase_trip` discards it now that `DELETE
     /trip/{uuid}` answers a bare `{"message": ...}`. It is kept because it is the natural
