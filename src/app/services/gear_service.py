@@ -268,14 +268,11 @@ async def soft_delete_schedules_for_gear_item(db: AsyncSession, gear_item_id: in
     plain `UPDATE` avoids the extra round trip entirely.
 
     Records are deliberately left alone: a soft delete is meant to be recoverable, and
-    throwing away the service history would make it a good deal less so.
-
-    An earlier version of this docstring justified that by calling the records
-    "unreachable once the item is gone", which is false and was worth correcting rather
-    than deleting: `GET /gear-service-records` has no item filter applied by default, so
-    it lists them, and that visibility is the reason keeping them is worth anything. What
-    a deleted item does lose is the route *to* them - `GET /gear-item/{uuid}` 404s, and
-    `?gear_item_uuid=` 422s - so the all-records list is the only place they surface.
+    throwing away the service history would make it a good deal less so. They stay
+    *visible*, too, which is what makes keeping them worth anything - `GET
+    /gear-service-records` applies no item filter, so they go on being listed. What a
+    deleted item loses is the route to them: `GET /gear-item/{uuid}` 404s and
+    `?gear_item_uuid=` 422s, leaving the unfiltered list the only place they surface.
     """
     await db.execute(
         update(GearServiceSchedule)

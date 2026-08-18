@@ -4824,12 +4824,25 @@ export still points at it. That is a deliberate departure from what the list end
 it is the subtlest choice on the export branch — it was got wrong twice before it was got right, so
 it is worth stating in full.
 
-**The app already shows these rows.** `erase_dive_site` says so outright ("The site stays attached
+**The app already shows these rows.** ~~`erase_dive_site` says so outright ("The site stays attached
 to the dives logged at it"), `erase_gear_item` likewise ("Dives and gear sets that already reference
 it keep their join rows"), `erase_trip` keeps a dive's `trip_id`, and the service-record listing
 resolves a schedule's uuid through a query with no `is_deleted` filter. So a diver looking at a dive
 in the app sees a site they deleted, and an export that dropped it would be exporting less than the
-screen in front of them.
+screen in front of them.~~
+
+**Struck: every one of those four supports has since been falsified, and the argument with them.**
+The *rows* do still stay attached — that half was always true and still is — but the app stopped
+*rendering* them, one surface at a time: dive sites and trips, then gear items on dives, then gear
+items in sets, and finally a record's schedule. Export now shows strictly more than the screen, not
+the same. See "A deleted site or trip stops being rendered on its dives" and the sections following
+it, which record each step.
+
+The rule is unaffected, and it is worth being precise about why rather than restating it: the
+resurrection never needed this argument. It stands on the two failure modes below — the `KeyError`
+and the dangling `xs:IDREF` — which are properties of the join rows outliving the delete, and are
+untouched by what any read renders. This paragraph was a second, softer justification that has now
+expired; the load-bearing one never moved.
 
 **Two failure modes, and neither is subtle once it happens.** The join tables carry no `is_deleted`
 of their own, so `site_ids_by_dive` names ids that a `is_deleted = false` read never returned — an
