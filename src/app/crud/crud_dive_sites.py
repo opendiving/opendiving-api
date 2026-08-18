@@ -21,8 +21,8 @@ crud_dive_sites = CRUDDiveSite(DiveSite)
 async def resolve_dive_site_ids_for_user(
     db: AsyncSession, dive_site_uuids: list[uuid_pkg.UUID], user_id: int
 ) -> dict[uuid_pkg.UUID, int] | None:
-    """Resolve dive site public `uuid`s to their internal `id`s, scoped to non-deleted
-    dive sites belonging to the given user.
+    """Resolve dive site public `uuid`s to their internal `id`s, scoped to dive sites
+    belonging to the given user.
 
     Returns `None` if any given uuid doesn't resolve to a dive site owned by the user
     (used to prevent a user from linking another user's dive site(s) to their own dive).

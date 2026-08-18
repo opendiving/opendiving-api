@@ -501,7 +501,7 @@ async def _cached_read_records(
 
 
 async def _schedule_uuids_by_id(db: AsyncSession, schedule_ids: list[int | None]) -> dict[int | None, uuid_pkg.UUID]:
-    """Resolve *live* schedule ids to public uuids for a page of records, in one query.
+    """Resolve schedule ids to public uuids for a page of records, in one query.
 
     Both the parameter and the key type are `int | None` because a record's
     `gear_service_schedule_id` is nullable: the Nones are dropped here rather than at
