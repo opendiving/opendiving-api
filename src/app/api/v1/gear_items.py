@@ -318,7 +318,9 @@ async def erase_gear_item(
     Its service schedules go with it, though: `is_deleted` is application-level, so the
     `ON DELETE CASCADE` on `gear_service_schedule.gear_item_id` never fires, and without
     this the digest would keep emailing about gear the diver can no longer see. The
-    service *records* are left alone - see `soft_delete_schedules_for_gear_item`.
+    service *records* are left alone, but nothing in the app can show them once the item
+    is gone - archiving is what keeps a piece of kit's service history readable. See
+    `soft_delete_schedules_for_gear_item`.
     """
     # `include_deleted`: deleting an already-soft-deleted gear item is a no-op, not a 404.
     db_gear_item = await _get_owned_gear_item(db, uuid, current_user, include_deleted=True)

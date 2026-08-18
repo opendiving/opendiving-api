@@ -497,8 +497,9 @@ class TestSoftDeleteSchedulesForGearItem:
 
         await soft_delete_schedules_for_gear_item(db, gear_item_id=7)
 
-        # Records are unreachable once the item is gone, and a soft delete is meant to
-        # be recoverable - discarding the receipts would make it much less so.
+        # A soft delete is meant to be recoverable, and discarding the receipts would
+        # make it much less so. They survive for export rather than for a view: nothing
+        # in the app displays a deleted item's records - archiving is that surface.
         assert db.execute.await_count == 1
         assert "gear_service_record" not in str(db.execute.await_args.args[0].compile())
 

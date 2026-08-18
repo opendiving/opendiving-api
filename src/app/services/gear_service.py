@@ -268,11 +268,22 @@ async def soft_delete_schedules_for_gear_item(db: AsyncSession, gear_item_id: in
     plain `UPDATE` avoids the extra round trip entirely.
 
     Records are deliberately left alone: a soft delete is meant to be recoverable, and
-    throwing away the service history would make it a good deal less so. They stay
-    *visible*, too, which is what makes keeping them worth anything - `GET
-    /gear-service-records` applies no item filter, so they go on being listed. What a
-    deleted item loses is the route to them: `GET /gear-item/{uuid}` 404s and
-    `?gear_item_uuid=` 422s, leaving the unfiltered list the only place they surface.
+    throwing away the service history would make it a good deal less so. What that buys
+    is narrower than it has twice been described as, so it is worth stating exactly. The
+    rows survive for `/export/*` and for an undelete that does not exist yet, and they
+    stay listable by `GET /gear-service-records` with no item filter. Nothing in the
+    product displays them: the item-scoped routes refuse a deleted item (`GET
+    /gear-item/{uuid}` 404s, `?gear_item_uuid=` 422s), and while a record already known
+    by uuid still reads, patches and deletes through `/gear-service-record/{uuid}` -
+    `resolve_record_for_user` scopes to the *record's* own `is_deleted` and never looks
+    at the item - that unfiltered list is the only place a client can learn the uuid,
+    and the web client only ever lists records from the item page.
+
+    That gap is a choice, not an omission. **Archiving** is the supported way to retire
+    kit and go on reading its history: an archived item resolves normally through
+    `_owned_gear_item`, so its records and schedules stay listable, while the digest
+    leaves it alone. See "A deleted gear item's service history has no view, and
+    archiving is the surface that does" in DECISIONS.md.
     """
     await db.execute(
         update(GearServiceSchedule)

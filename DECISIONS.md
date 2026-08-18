@@ -1528,8 +1528,12 @@ overwhelmingly common case - deleting an item that never had a schedule - matche
 `purge_expired_tokens` works around the same pitfall with a `count()` first; a raw `UPDATE` avoids
 the extra round trip entirely.
 
-Service *records* are deliberately left alone. They're unreachable once the item is gone, and a soft
-delete is meant to be recoverable - discarding the history would make it a good deal less so.
+Service *records* are deliberately left alone, because a soft delete is meant to be recoverable and
+discarding the history would make it a good deal less so. ~~They're unreachable once the item is
+gone~~ - struck, for the same reason the docstring that said it was corrected:
+`GET /gear-service-records` lists them with no item filter. Reachable in the API and invisible in
+the product is the actual state, and "A deleted gear item's service history has no view, and
+archiving is the surface that does" records why that is where it stays.
 
 ## `user.gear_service_emails` is the only new column on an existing table
 
@@ -6739,3 +6743,101 @@ things that catch people out on top of it:
   in before believing a worktree run.
 - **The skip count is the only thing on screen that distinguishes the two runs.** Not the pass
   count, which also changes for unrelated reasons.
+
+## A deleted gear item's service history has no view, and archiving is the surface that does
+
+The section above corrected a docstring that justified keeping a deleted item's service records by
+calling them "unreachable once the item is gone", which was false. That left a larger question it
+did not answer: the codebase spends real effort preserving this history in two places -
+`soft_delete_schedules_for_gear_item` and `erase_gear_service_schedule` ("deleting a reminder must
+never throw away the receipts") - and nothing in the shipped product can display it. The answer is
+that **no behaviour changes**, because the product already has the surface for this and it is called
+archiving.
+
+### What is reachable, precisely
+
+A record is not soft-deleted when its item is; only the item and its schedules are. So:
+
+- `GET /gear-service-records` with no `gear_item_uuid` lists them, and is the only *listing* that
+  does. `GET /gear-item/{uuid}` 404s, and `?gear_item_uuid=` answers **422**, because
+  `read_gear_service_records` resolves the uuid through `_owned_gear_item` first.
+- A record already known by uuid is not affected at all: `/gear-service-record/{uuid}` reads,
+  patches and deletes it as normal, because `resolve_record_for_user` scopes to the *record's* own
+  `is_deleted` and never looks at the item. That is the shape `get_gear_item_uuids_by_id`'s missing
+  filter exists to keep working - the alternative is a 500 - and it is why the dead end is a
+  *navigation* problem rather than a permission one. The only place a client can learn the uuid is
+  the unfiltered list above.
+- `/export/*` carries them, with the item resurrected and flagged `is_deleted: true`.
+- `opendiving-web` never sees them. The sole path to records is `gear-service-card.tsx` calling
+  `fetchAllServiceRecords(userUuid, gearItemUuid, …)`, where `gearItemUuid` is a *required*
+  parameter, and the card renders only inside `/gear/[id]` - a page that 404s for a deleted item.
+
+So: reachable in the API, invisible in the product. That is the state the wording now describes,
+rather than either of the two things it has previously claimed.
+
+### Archiving is not a workaround for this, it is the feature
+
+"Archiving gear is separate from soft-deleting it" draws the line as retired-but-kept versus gone
+from the gear list. What makes it the answer here is that the keeping is complete:
+`_owned_gear_item` and `_get_owned_gear_item` filter `is_deleted` and nothing else, so an archived
+item resolves normally - its detail page loads, and `?gear_item_uuid=` works on both the schedule
+and the record listings. Meanwhile "Archived or soft-deleted gear never generates a reminder"
+excludes it from the digest. Retired, quiet, and still fully readable is exactly the need a "history
+of deleted gear" view would be built for, and it ships today: the gear page carries a *Show
+archived* toggle, and an archived item links to the same detail page as a live one.
+
+The delete route's docstring already pointed at archiving for the dive log ("the non-destructive way
+to retire gear you still want in your log"); it now says the same about service history, which is
+the half a diver is most likely to be surprised by. That docstring is published as the endpoint
+description in `/openapi.json`, so it is the steer clients actually read.
+
+### What the alternatives cost, and why neither is worth it
+
+**An `include_deleted_items` flag on `GET /gear-service-records`** hands back rows whose
+`gear_item_uuid` navigates nowhere, so any view built on it needs the item's *name* from somewhere:
+either a label denormalized onto the record, or a summary object on the response. The first means a
+new column and manual DDL, plus a second copy of the name to keep in step with renames - the problem
+"Renaming a dive site or gear item invalidates that user's dive caches" exists to manage. The second
+means resolving deleted items in a resolver that is deliberately unguarded, and a new dimension in
+the cache key. That is a real amount of machinery to build a second, worse archive.
+
+**Relaxing the 422 for a soft-deleted item the caller owns** is a much smaller diff, and it is the
+more tempting one. It loses on consistency: "Ownership checks go through one `fetch_owned_or_raise`"
+and "Someone else's row is a 404, not a 403" settle that a deleted resource reads as absent
+everywhere, and four sections in this series have just finished applying that to reads. Carving one
+query parameter out of it buys a filtered list whose rows still name an item whose detail route 404s
+\- navigation that dead-ends one hop later.
+
+Both share the deeper objection. They make deleting into a slightly lossy archive, at which point
+the two flags mean nearly the same thing. `is_archived` earns its place by being the reversible one;
+`is_deleted` earns its place by actually removing the item.
+
+### So what the records are for
+
+Not a view. Three things, and it is worth naming them because "we keep the history" invites the
+assumption that something displays it:
+
+1. **Export.** `/export/*` is the durable copy, and it is the answer to "I want my service history".
+2. **Recoverability.** A soft delete is supposed to leave room for an undelete. There is no undelete
+   endpoint yet; discarding the records would make writing one pointless.
+3. **The export referrer graph.** Per "An export holds every record the caller can still see",
+   record → schedule → item is the only path by which an item that was never dived and never in a
+   set survives into an export at all.
+
+### Why the wording keeps rotting here, and what is pinned
+
+The same false claim was written three times - the docstring corrected in #61, the paragraph under
+"Soft-deleting a gear item soft-deletes its schedules", and a comment in
+`test_gear_service.py::test_leaves_the_service_history_alone`. All three justified keeping the rows
+by asserting something about *reachability*, and reachability moved underneath them. The replacement
+wording states where the rows are and are not, and points at archiving for what the diver should do
+instead, which are both facts about this repo rather than about what a client renders.
+
+The premise this decision stands on is one kwarg from being false. Adding `is_archived=False` to
+`_owned_gear_item` - to match the listing filter, which looks like the obvious tidy-up - would
+silently take the service history off archived items too, leaving the decision standing on nothing
+and breaking no existing test. `tests/test_gear_service_history_reachability.py` pins both halves:
+an archived item resolves, a deleted one raises the 422.
+
+No DDL, no schema change, no route change, and nothing handed off to `opendiving-web` -
+deliberately, since the conclusion is that the view it would build should not exist.
