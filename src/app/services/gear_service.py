@@ -267,9 +267,12 @@ async def soft_delete_schedules_for_gear_item(db: AsyncSession, gear_item_id: in
     pitfall is worked around with a `count()` first in `purge_expired_tokens`; here a
     plain `UPDATE` avoids the extra round trip entirely.
 
-    Records are deliberately left alone. They're unreachable once the item is gone, and
-    a soft delete is meant to be recoverable - throwing away the service history would
-    make it a good deal less so.
+    Records are deliberately left alone: a soft delete is meant to be recoverable, and
+    throwing away the service history would make it a good deal less so. They stay
+    *visible*, too, which is what makes keeping them worth anything - `GET
+    /gear-service-records` applies no item filter, so they go on being listed. What a
+    deleted item loses is the route to them: `GET /gear-item/{uuid}` 404s and
+    `?gear_item_uuid=` 422s, leaving the unfiltered list the only place they surface.
     """
     await db.execute(
         update(GearServiceSchedule)

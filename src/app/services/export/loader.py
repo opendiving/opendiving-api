@@ -180,8 +180,10 @@ async def _owned(
     dives logged at it** (`erase_dive_site` flags the site and leaves the join rows), and
     the same is true of a gear item on its dives and gear sets (`erase_gear_item`, which
     leaves both join tables alone), of a trip on its dives (`erase_trip`), and of a service
-    schedule on its records (which
-    `_schedule_uuids_by_id` resolves with no `is_deleted` filter). Leaving those out
+    schedule on its records (`erase_gear_service_schedule` directly, or
+    `soft_delete_schedules_for_gear_item` when the whole item goes - either way the
+    schedule is flagged and `gear_service_record.gear_service_schedule_id` still points at
+    it). Leaving those out
     would put a uuid in `export.json` that nothing in the file defines - and in UDDF,
     where the same reference is an `xs:IDREF`, would produce a document that does not
     validate.
@@ -193,10 +195,12 @@ async def _owned(
 
     Note this deliberately outlives what the *app* shows, and now on every surface: the
     dive reads stopped rendering deleted sites, trips and gear items
-    (`get_dive_sites_for_dive`, `get_trip_uuids_by_ids`, `get_gear_items_for_dive`) and the
-    gear-set reads stopped rendering deleted items (`get_gear_items_for_set`), so export is
-    the only place left where a diver can see that a dive was logged at a site they since
-    removed, or that a set once held kit they since deleted. The IDREF argument alone
+    (`get_dive_sites_for_dive`, `get_trip_uuids_by_ids`, `get_gear_items_for_dive`), the
+    gear-set reads stopped rendering deleted items (`get_gear_items_for_set`), and a service
+    record stopped naming a deleted schedule (`_schedule_uuids_by_id`), so export is the
+    only place left where a diver can see that a dive was logged at a site they since
+    removed, that a set once held kit they since deleted, or that a service was logged
+    against a schedule that is gone. The IDREF argument alone
     already requires the resurrection; being the last copy of the association is a
     consequence, not the reason.
 

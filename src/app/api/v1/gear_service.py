@@ -483,19 +483,43 @@ async def _cached_read_records(
 
 
 async def _schedule_uuids_by_id(db: AsyncSession, schedule_ids: list[int | None]) -> dict[int | None, uuid_pkg.UUID]:
-    """Resolve schedule ids to public uuids for a page of records, in one query.
+    """Resolve *live* schedule ids to public uuids for a page of records, in one query.
 
     Both the parameter and the key type are `int | None` because a record's
     `gear_service_schedule_id` is nullable: the Nones are dropped here rather than at
     every call site, and the widened key lets callers `.get()` a nullable id directly
     (which correctly yields `None`, since the returned mapping never has a `None` key).
+
+    A soft-deleted schedule is dropped too, which is why the `.get()` at both call sites
+    is load-bearing rather than defensive. Without the filter a record went on naming a
+    schedule that `GET /gear-service-schedule/{uuid}` answers 404 for
+    (`resolve_schedule_for_user` resolves only live rows), that `POST /gear-service-record`
+    refuses to be created against, and that `?gear_service_schedule_uuid=` answers 422 for.
+
+    Two routes strand the reference, and the direct one is the common one:
+    `erase_gear_service_schedule` flags the schedule while its records keep their
+    `gear_service_schedule_id` on purpose ("deleting a reminder must never throw away the
+    receipts"), and `erase_gear_item` reaches the same state indirectly by soft-deleting an
+    item's schedules and keeping its records.
+
+    This costs the read nothing, and that is the whole reason the filter is *here* and not
+    on the item half. `gear_service_schedule_uuid` was already `UUID | None` and already
+    documented as null when the schedule is gone, so a hidden schedule lands in a state the
+    contract describes. `gear_item_uuid` is required and indexed unguarded at every call
+    site, so the same filter there would be a `KeyError` rather than a null - see
+    "The service-record resolvers split, and only one of them was the same question" in
+    DECISIONS.md, which records why the item half is deliberately unfiltered.
     """
     wanted = {schedule_id for schedule_id in schedule_ids if schedule_id is not None}
     if not wanted:
         return {}
 
     rows = await crud_gear_service_schedules.get_multi(
-        db=db, id__in=list(wanted), limit=len(wanted), schema_to_select=GearServiceScheduleReadInternal
+        db=db,
+        id__in=list(wanted),
+        limit=len(wanted),
+        is_deleted=False,
+        schema_to_select=GearServiceScheduleReadInternal,
     )
     return {row["id"]: row["uuid"] for row in rows["data"]}
 
