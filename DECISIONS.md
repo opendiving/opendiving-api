@@ -6588,6 +6588,82 @@ its target, and this series' reflex answer ("filter the loader") may be the wron
 Deciding that inside a change about gear sets would bury it, exactly as deciding the gear-set
 question inside a change about dive reads would have.
 
+**Since decided, and it split.** One of the two was filtered and the other deliberately was not —
+and the paragraph above is wrong in one respect worth leaving visible: it calls the pair "the same
+reason and the same shape", and treats the emitted-and-refused argument as reaching both. It does
+not reach the item half, which has no write that echoes the reference back. See the section below.
+
+## The service-record resolvers split, and only one of them was the same question
+
+`_schedule_uuids_by_id` now filters `is_deleted`; `get_gear_item_uuids_by_id` deliberately still
+does not. The deferral above expected one answer for both, and the useful result is *why* that was
+wrong, because the two resolvers are indistinguishable from the outside and differ in two places
+that decide everything.
+
+### The schedule half: the null already existed
+
+`GearServiceRecordRead.gear_service_schedule_uuid` is `UUID | None`, documented before any of this
+as null when the record "isn't attached to a schedule — either it never was, or the schedule has
+since been hard-deleted". A soft-deleted schedule simply joins a state the contract already
+describes, so hiding it needs no flag, no tombstone and no new shape — the thing every earlier
+section in this series had to argue about was already settled here by an unrelated decision.
+
+Both call sites already read the mapping with `.get()`, so the filter is one `is_deleted=False`
+kwarg and the miss becomes the documented null. Nothing else moved.
+
+What it closes is real but *narrower than the deferral claimed*, and this is the correction worth
+recording: there is no `PATCH` that echoes the reference back, because `GearServiceRecordUpdate`
+carries no reference fields at all — only `kind`, `serviced_on`, `label`, `performed_by`, `notes`.
+The refused surfaces are a **create** (`POST /gear-service-record` naming the emitted schedule, 422)
+and a **query filter** (`?gear_service_schedule_uuid=…`, 422). Both are ordinary things a client
+does with a uuid it was just handed — log another service against that schedule, filter to it — so
+the argument holds; it is just not the read-then-write-it-back round trip the four earlier sections
+turned on.
+
+The record loses nothing legible when the reference goes. It denormalizes `kind`, `label`,
+`serviced_on`, `performed_by` and `notes`, which is what the shipped web card renders; it never
+reads the schedule uuid.
+
+### The item half: the same filter is a 500, and nothing votes for it
+
+`gear_item_uuid` is **required** on `GearServiceRecordRead` and `GearServiceScheduleRead`, and all
+four call sites index the mapping directly rather than `.get()`-ing it. So the "one-line filter"
+that worked everywhere else raises `KeyError` here — a 500 on every record of a deleted item, on the
+one list where those records are still visible. Making it a null instead means tombstoning the field
+or hiding the records, and hiding them contradicts `soft_delete_schedules_for_gear_item`'s
+deliberate choice to keep service history, which has its own test.
+
+And the argument that decided all four earlier changes — **the write side had already voted** —
+simply does not reach this one. There is no write that accepts a `gear_item_uuid` on a record and
+refuses a deleted one, because there is no write that accepts one at all. What is left is read
+navigation: `GET /gear-item/{uuid}` 404s, `?gear_item_uuid=` 422s. Emitted-and-refused, but only on
+reads, and unreachable in the shipped client, which lists records from the item page — a page that
+404s for a deleted item.
+
+So the asymmetry is not squeamishness about consistency. One half had a null waiting for it and a
+write that refuses the reference; the other has neither.
+
+### What is pinned, and why the second half needed a test more than the first
+
+`tests/test_deleted_refs_on_service_records.py` covers both, and the item half is the one that
+needed it: a test asserting a deleted item's uuid **still comes through** is what stands between
+this and a future reader "finishing the job" by adding the filter that looks conspicuously missing.
+It also pins the property the unguarded indexing depends on — every id in, every id out — so the
+break surfaces here rather than as a 500 in another file. `get_gear_item_uuids_by_id`'s docstring
+says the same thing at the site itself.
+
+### Nothing else moved
+
+Cache invalidation needed no change: `invalidate_gear_caches`'s `user_{id}_gear_*` pattern covers
+the `user_{id}_gear_service_*` keys, and every gear-service mutation route already calls it. Export
+is untouched — `_owned` bypasses both resolvers and goes on resurrecting dead schedules for the
+IDREF requirement. No DDL, no schema change.
+
+One docstring was corrected rather than deleted while here. `soft_delete_schedules_for_gear_item`
+justified keeping records by calling them "unreachable once the item is gone", which is false:
+`GET /gear-service-records` lists them with no item filter, and that visibility is precisely what
+makes keeping them worth anything. The behaviour was right and the reason given for it was not.
+
 ## The Postgres test fixtures are shared, and a local copy silently wins
 
 Several test modules need a real database — `grep -rl 'skipif(not db_available' tests/` is the

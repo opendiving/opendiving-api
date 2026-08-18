@@ -86,6 +86,24 @@ async def get_gear_item_uuids_by_id(db: AsyncSession, gear_item_ids: list[int]) 
 
     Unlike its counterpart this does no ownership filtering: callers reach it only with
     ids taken from rows they have already authorized.
+
+    **It does no `is_deleted` filtering either, and that is deliberate** - the one loader
+    in this family that stayed unfiltered while `get_dive_sites_for_dive`,
+    `get_gear_items_for_dive`, `get_gear_items_for_set` and `_schedule_uuids_by_id` all
+    gained the filter. Two reasons, and the second is the one that decides it:
+
+    `gear_item_uuid` is required on both `GearServiceScheduleRead` and
+    `GearServiceRecordRead`, and every call site indexes this mapping directly rather than
+    `.get()`-ing it, so filtering here is a `KeyError` and a 500 on every record of a
+    deleted item - not a null. Making it a null means tombstoning the field or hiding the
+    records, and hiding them contradicts `soft_delete_schedules_for_gear_item`, which keeps
+    service history on purpose.
+
+    And the argument that decided the other four does not reach this one: no write echoes
+    it back. `GearServiceRecordUpdate` carries no reference fields at all, so a client
+    cannot read a record's `gear_item_uuid` and be refused it on the way in. See
+    "The service-record resolvers split, and only one of them was the same question" in
+    DECISIONS.md before adding the filter that looks missing here.
     """
     if not gear_item_ids:
         return {}

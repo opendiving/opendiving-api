@@ -83,6 +83,55 @@ def create_gear_item(
     )
 
 
+def create_gear_service_schedule(
+    db: Session, user: models.User, item: models.GearItem, *, is_deleted: bool = False
+) -> models.GearServiceSchedule:
+    """A service schedule on one of this user's gear items.
+
+    `interval_months` is set because `ck_gear_service_schedule_has_an_interval` requires at
+    least one of the two intervals - a schedule with neither would never come due, so the
+    database refuses it.
+    """
+    return _persist(
+        db,
+        models.GearServiceSchedule(
+            user_id=user.id,
+            gear_item_id=item.id,
+            kind="inspection",
+            starts_on=date(2026, 1, 1),
+            interval_months=12,
+            is_deleted=is_deleted,
+        ),
+    )
+
+
+def create_gear_service_record(
+    db: Session,
+    user: models.User,
+    item: models.GearItem,
+    *,
+    schedule: models.GearServiceSchedule | None = None,
+) -> models.GearServiceRecord:
+    """A service record, optionally attached to a schedule.
+
+    `gear_service_schedule_id` is nullable on purpose - a diver can log a service that no
+    schedule was tracking - which is what lets a deleted schedule read back as `null`
+    rather than needing a shape of its own.
+    """
+    return _persist(
+        db,
+        models.GearServiceRecord(
+            user_id=user.id,
+            gear_item_id=item.id,
+            gear_service_schedule_id=schedule.id if schedule is not None else None,
+            kind="inspection",
+            serviced_on=date(2026, 6, 1),
+            dive_count_at_service=0,
+            notes="",
+        ),
+    )
+
+
 def create_gear_set(db: Session, user: models.User, *, is_deleted: bool = False) -> models.GearSet:
     """A gear set of this user's. Uniquely named like the rest, and for one extra reason:
     `gear_set_name_exists` treats names as unique per user, so a fixture reusing one would
