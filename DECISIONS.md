@@ -2042,11 +2042,21 @@ and a correspondingly meaningless `gas_use`/RMV. Fixed here rather than separate
 it the *same file* would yield 205.2 bar on the profile chart and 205 203 bar in the gas mixtures
 table on the same page.
 
-No corrective `UPDATE` was run against stored `dive_mixture` rows: on this database no row has a
-pressure above 500 bar (the highest is a plausible hand-entered 415), because the existing dives
-were bulk-imported by `export/import.py`, which never uploaded a file. Should such rows appear on
-another database, the correction is unambiguous - divide any pressure above ~500 bar by 1000 - since
-no real cylinder reaches it.
+No corrective `UPDATE` was run against stored `dive_mixture` rows: on this database no row carried a
+millibar-scale pressure at all, because the existing dives were bulk-imported by `export/import.py`,
+which never uploaded a file. Should such rows appear on another database, dividing by 1000 is the
+unambiguous correction for anything in the millibar range.
+
+**Two things this paragraph originally got wrong, and both matter to anyone applying it elsewhere.**
+It read the highest stored value, 415 bar, as "a plausible hand-entered 415" - it was a sidemount
+pair summed against one cylinder's water capacity, since re-encoded by the diver - and it offered
+"divide any pressure above ~500 bar by 1000" as a general rule. That figure is a *correction*
+heuristic for spotting a factor-of-1000 error, not a validity threshold, and it is **not** the bound
+these columns now carry: `ck_dive_mixture_start_pressure_range` and
+`ck_dive_mixture_end_pressure_range` band both fields at **350 bar**. A database cleaned to the ~500
+rule alone still holds 351-500 bar rows, and those make the `ALTER` fail. See *"A cylinder pressure
+is a bounded field, and every layer that writes one now says so"* for the bounds, the sidemount
+arithmetic, and why 350 rather than 500.
 
 ## Profile extraction is idempotent on (file digest, extractor version), and never fails an upload
 
