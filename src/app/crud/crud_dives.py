@@ -38,8 +38,15 @@ async def reassign_dives_to_trip(db: AsyncSession, *, user_id: int, from_trip_id
     Soft-deleted dives are deliberately left behind. They are outside everything the diver
     can see, and leaving their `trip_id` on the trip about to be soft-deleted preserves the
     pairing they were logged with - which is exactly what a plain `DELETE /trip/{uuid}`
-    already does to every dive. Scoping to live dives is also what makes the number this
-    returns the same one `GET /dives?trip_uuid=...` reported to the confirmation dialog.
+    already does to every dive. That argument was always the sufficient one; the scope used
+    to have a second justification - it kept the returned count equal to the number the web
+    app's confirmation dialog had pre-fetched from `GET /dives?trip_uuid=...` - and both
+    that count and that dialog are gone. See DECISIONS.md.
+
+    The count itself outlived its route: `erase_trip` discards it now that `DELETE
+    /trip/{uuid}` answers a bare `{"message": ...}`. It is kept because it is the natural
+    affected-row count of the statement below, and because the database-backed tests assert
+    against it.
 
     `user_id` is redundant against a trip id already resolved for this owner, and is here
     anyway: it is the one condition that cannot be got wrong quietly, since a bulk `UPDATE`
