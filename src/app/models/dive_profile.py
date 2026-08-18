@@ -45,9 +45,10 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
 
     **The `ON DELETE CASCADE` below never fires.** Dive deletion is application-level
     (`is_deleted`), so no `DELETE FROM dive` ever runs - the same trap `delete_files_for_dive`
-    and `soft_delete_schedules_for_gear_item` exist to work around. `delete_profile_for_dive`
-    in `services/dive_profiles.py` is what actually removes these rows, and it is called
-    from both the file-delete and the dive-delete paths.
+    and `delete_files_for_certification` exist to work around, and the one the gear tables
+    got out of by going hard-delete. `delete_profile_for_dive` in `services/dive_profiles.py`
+    is what actually removes these rows, and it is called from both the file-delete and the
+    dive-delete paths.
     """
 
     __tablename__ = "dive_profile"

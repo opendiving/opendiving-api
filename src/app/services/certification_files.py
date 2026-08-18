@@ -234,7 +234,9 @@ async def delete_files_for_certification(db: AsyncSession, *, certification_id: 
     Called when the certification itself is deleted. The FK's `ON DELETE CASCADE` can't
     do this for us: deletion here is application-level (`is_deleted`), so no `DELETE FROM
     certification` ever runs and the cascade never fires - the same reasoning as
-    `soft_delete_schedules_for_gear_item` in `services/gear_service.py`.
+    `delete_files_for_dive` in `services/dive_files.py`. `gear_service_schedule` used to
+    need a third copy of this and no longer does: `gear_item` is hard-deleted, so its
+    cascades fire on their own.
     """
     files = (
         (await db.execute(select(CertificationFile).where(CertificationFile.certification_id == certification_id)))

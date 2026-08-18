@@ -29,9 +29,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from src.app.api.dependencies import fetch_owned_or_raise
+from src.app.api.v1.gear_service import _owned_gear_item
 from src.app.core.exceptions.http_exceptions import NotFoundException
 from src.app.crud.crud_dive_sites import crud_dive_sites, dive_site_name_exists
 from src.app.crud.crud_gear_items import crud_gear_items, gear_item_name_exists
+from src.app.crud.crud_gear_service_records import crud_gear_service_records
 from src.app.crud.crud_gear_service_schedules import (
     crud_gear_service_schedules,
     resolve_schedule_for_user,
@@ -53,6 +55,7 @@ from tests.conftest import db_available
 from tests.helpers.generators import (
     create_dive_site,
     create_gear_item,
+    create_gear_service_record,
     create_gear_service_schedule,
     create_gear_set,
     create_trip,
@@ -242,3 +245,46 @@ class TestADeletedNameFreesItsSlot:
         await crud_gear_service_schedules.delete(db=async_db, uuid=schedule.uuid)
 
         assert await schedule_kind_exists(async_db, gear_item_id=item.id, kind=schedule.kind) is False
+
+
+class TestArchivingIsTheNonDestructivePath:
+    """The other half of the delete dialog's promise: "to keep it in your log **and its service
+    history**, archive it instead".
+
+    Deleting a gear item now destroys its service history, so archiving is not one of two ways to
+    retire kit and go on reading its records - it is the only one. That makes the premise below
+    worth strictly more than when *"A deleted gear item's service history has no view"* first
+    recorded it, and it is one kwarg from being false: adding `is_archived=False` to
+    `_owned_gear_item`, to match the listing filter, looks like an obvious tidy-up and would
+    silently take the history off archived items too.
+    """
+
+    @pytest.mark.asyncio
+    async def test_an_archived_item_still_resolves(self, db: Session, async_db: AsyncSession, diver: User) -> None:
+        item = create_gear_item(db, diver, is_archived=True)
+
+        resolved = await _owned_gear_item(async_db, item.uuid, diver.id)
+
+        assert resolved.id == item.id
+        assert resolved.is_archived is True
+
+    @pytest.mark.asyncio
+    async def test_archiving_keeps_the_schedules_and_records(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        """The contrast with `TestTheRowIsActuallyRemoved` is the whole point: same intent
+        ("retire this"), opposite outcome for everything hanging off the item."""
+        item = create_gear_item(db, diver)
+        schedule = create_gear_service_schedule(db, diver, item)
+        record = create_gear_service_record(db, diver, item, schedule=schedule)
+
+        item.is_archived = True
+        db.commit()
+
+        assert await _count(async_db, GearServiceSchedule, schedule.id) == 1
+        rows = await async_db.execute(
+            select(crud_gear_service_records.model.gear_service_schedule_id).where(
+                crud_gear_service_records.model.id == record.id
+            )
+        )
+        assert rows.scalar_one() == schedule.id

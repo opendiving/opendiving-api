@@ -95,6 +95,14 @@ CREATE INDEX ix_dive_dive_site_dive_id_position ON dive_dive_site (dive_id, posi
 
 ## Hot list queries needed composite indexes, not independent single-column ones
 
+**Two of the three lost their partial predicate.** `ix_trip_user_id_start_date` and
+`ix_dive_site_user_id_name` are plain composites now - trips and dive sites are hard-deleted, so
+there is no `is_deleted = false` for a predicate to pin. `ix_dive_user_id_start_time` is unchanged,
+and everything below about *why* a composite beats two single-column indexes is unchanged for all
+three. Worth knowing that `DROP COLUMN is_deleted` takes a partial index with it silently, and
+`create_all` does not put it back - see *"The row goes, and so does everything pointing at it"*,
+which is where the ten recreated indexes are accounted for.
+
 The paginated `GET /dives`, `/trips`, `/dive-sites` list endpoints all run the same shape of query:
 `WHERE user_id = ... AND is_deleted = false ORDER BY <some column> LIMIT ... OFFSET ...`.
 `dive`/`trip`/`dive_site` each only had independent single-column indexes on `user_id` and
@@ -197,6 +205,13 @@ payload. `DiveMixtureCreate` has `extra="forbid"` and no `id` field, so echoing 
 submit.)
 
 ## Case-insensitive per-user uniqueness (trips, dive sites)
+
+**The rule stands; the `WHERE is_deleted = false` on both halves is gone.** Trips and dive sites are
+hard-deleted now, so a deleted name frees its slot because the row is gone rather than because the
+index looks away from it - and the app-level check had to lose its clause in the same commit, or it
+would refuse a name the index would happily accept. The pattern below still applies to a new "named,
+user-owned" entity; drop the predicate unless the entity is genuinely soft-deletable, and note that
+the five that were are not any more. See *"The row goes, and so does everything pointing at it"*.
 
 `Trip.name` and `DiveSite.name` are unique per user, case-insensitively, but only among
 **non-soft-deleted** rows (so a name becomes reusable again once its previous record is "deleted").
@@ -1116,6 +1131,13 @@ a genuinely cheap operation that touches neither gear nor dives.
 
 ## Archiving gear is separate from soft-deleting it
 
+**Retitled by events: it is separate from *deleting*, and the gap is much wider now.** `gear_item`
+dropped `SoftDeleteMixin` in the hard-delete change, so the second bullet below is no longer a flag
+on a surviving row — it is `DELETE FROM gear_item`, taking the item's `dive_gear_item` and
+`gear_set_item` join rows, its service schedules and its service records with it through four FK
+cascades. Everything the first bullet says is unchanged, and archiving is now the *only*
+non-destructive way to retire kit. See *"The row goes, and so does everything pointing at it"*.
+
 `gear_item` carries both `is_deleted`/`deleted_at` (the usual `SoftDeleteMixin`) and its own
 `is_archived`/`archived_at`. They mean different things:
 
@@ -1508,7 +1530,10 @@ Three exclusions in the digest query and in `get_due_overview_for_user`, each fo
 - `gear_item.is_archived` - retiring a piece of kit has to silence it without the diver also having
   to pause every rule on it. Consistent with archiving already hiding an item from the dive form's
   picker.
-- `gear_item.is_deleted` / `gear_service_schedule.is_deleted` - the obvious ones.
+- ~~`gear_item.is_deleted` / `gear_service_schedule.is_deleted` - the obvious ones.~~ **Struck:**
+  both are gone with the hard-delete change. A deleted item takes its schedules with it through the
+  FK cascade, so there is no row left for the digest to skip. `user.is_deleted` stays - `User` is
+  still soft-deleted.
 - `user.gear_service_emails` - the opt-out, below.
 
 `gear_service_schedule.is_active` is a fourth, different thing: pausing one rule without deleting it
@@ -1516,6 +1541,13 @@ or touching the item. Three separate flags on the same axis sounds redundant but
 distinct question - is this *item* retired, is this *rule* paused, is this *user* opted out.
 
 ## Soft-deleting a gear item soft-deletes its schedules, with a raw `UPDATE`
+
+**Superseded in full.** `erase_gear_item` is a real `DELETE` now, so the cascade this function
+existed to stand in for fires on its own and the function is gone. Kept because the shape it
+describes - "the declared `ON DELETE` never runs, so hand-roll it" - is named in four more places in
+this repo (`dive_file`, `dive_profile`, `certification_file`, `dive_files.py`), and because the
+service-record half below is the one thing about it whose *answer* changed rather than its
+mechanism. See *"The row goes, and so does everything pointing at it"*.
 
 `gear_item.is_deleted` is application-level, so the `ON DELETE CASCADE` on
 `gear_service_schedule.gear_item_id` never fires for it (that only happens on a hard delete, which
@@ -1534,6 +1566,12 @@ gone~~ - struck, for the same reason the docstring that said it was corrected:
 `GET /gear-service-records` lists them with no item filter. Reachable in the API and invisible in
 the product is the actual state, and "A deleted gear item's service history has no view, and
 archiving is the surface that does" records why that is where it stays.
+
+**And struck a second time, in the other direction.** `gear_service_record.gear_item_id` is
+`ON DELETE CASCADE`, so deleting an item now destroys its records outright. The recoverability
+argument fell with the soft delete it depended on - there is still no undelete endpoint, and the
+half-built trash bin that made one imaginable was removed rather than finished. Archiving is what
+keeps a service history, and the gear delete dialog has always said so.
 
 ## `user.gear_service_emails` is the only new column on an existing table
 
@@ -1588,7 +1626,8 @@ does.
 keeps occupying its bytes forever with nothing able to read it. So files are hard-deleted -
 including when their parent certification is deleted, which `erase_certification` does explicitly:
 `is_deleted` is application-level, so no `DELETE FROM certification` ever runs and the FK's
-`ON DELETE CASCADE` never fires. Same trap as `soft_delete_schedules_for_gear_item`.
+`ON DELETE CASCADE` never fires. Same trap as `delete_files_for_dive` — and the one the gear tables
+have since escaped by going hard-delete, which is the alternative fix to hand-rolling the cascade.
 
 Two gotchas worth keeping:
 
@@ -2045,9 +2084,15 @@ recorded samples, not `dive.duration`; a computer keeps logging for ~20 s after 
 
 `dive_profile.dive_id` carries `ON DELETE CASCADE`, and it is decoration: dive deletion is
 application-level (`is_deleted`), so no `DELETE FROM dive` ever runs - the same trap
-`delete_files_for_dive` and `soft_delete_schedules_for_gear_item` already exist to work around. Said
-so in the model docstring, because a reader who trusts the FK will conclude the rows are cleaned up
+`delete_files_for_dive` and `delete_files_for_certification` already exist to work around. Said so
+in the model docstring, because a reader who trusts the FK will conclude the rows are cleaned up
 when they aren't.
+
+The gear tables had a fourth copy of this workaround and took the other way out: `gear_item` is
+hard-deleted now, so its declared cascades fire and the hand-rolled version was deleted. Dives are
+the one place where that is not obviously right - a dive is the record the whole app exists to hold,
+and folding these two blob paths into the cascade is the work that would have to come with it. See
+*"The row goes, and so does everything pointing at it"*.
 
 What actually removes them is `delete_profile_for_dive`, called from `delete_dive_file`. That covers
 **both** paths for free: the explicit `DELETE /dive/{uuid}/file`, and `delete_files_for_dive`, which
@@ -4823,6 +4868,17 @@ with `core.autocrlf`. Deliberately `-text` rather than `binary`: the latter is a
 
 ## An export holds every record the caller can still see, not every record still live
 
+**The rule survives; the machinery is gone.** `still_referenced` and everything below about
+resurrecting rows was removed with the hard-delete change: the five tables it read back are
+hard-deleted now, so a join row cannot outlive the row it points at and there is no dangling
+reference left to repair. `_owned` keeps only the two filters in the title — one user's rows, live
+where the table still has a notion of liveness (`Dive`, `GearServiceRecord`, `Certification`).
+
+Kept in full because the two failure modes below are the reason the cascades had to be got right
+rather than merely declared, and because the section is a record of getting the same thing wrong
+twice. Read it as the problem, not as the code. See *"The row goes, and so does everything pointing
+at it"*.
+
 `loader._owned` reads a soft-deleted row back into the export whenever something else in the same
 export still points at it. That is a deliberate departure from what the list endpoints return, and
 it is the subtlest choice on the export branch — it was got wrong twice before it was got right, so
@@ -4839,8 +4895,11 @@ screen in front of them.~~
 The *rows* do still stay attached — that half was always true and still is — but the app stopped
 *rendering* them, one surface at a time: dive sites and trips, then gear items on dives, then gear
 items in sets, and finally a record's schedule. Export now shows strictly more than the screen, not
-the same. See "A deleted site or trip stops being rendered on its dives" and the sections following
-it, which record each step.
+the same.
+
+**And then the rows stopped staying attached too**, which is what finally settled it: the four
+supports were falsified one by one, and the state they described was removed outright. See "The row
+goes, and so does everything pointing at it".
 
 The rule is unaffected, and it is worth being precise about why rather than restating it: the
 resurrection never needed this argument. It stands on the two failure modes below — the `KeyError`
@@ -6231,438 +6290,338 @@ stranding them — but it does not fix it, and it was left out on purpose: hidin
 them, or leaving them as a historical record is a product decision with a client-visible contract
 change attached, and it is not this PR's.
 
-**Since fixed — the answer was "hide".** See the section below.
+**Since fixed — the answer was "hide", and has since been superseded by hard delete.** See the
+section below.
 
-## A deleted site or trip stops being rendered on its dives, and the links stay in the database
+## The row goes, and so does everything pointing at it
 
-The three-way call above was made: **hide**. `get_dive_sites_for_dive`, `get_dive_sites_for_dives`
-and `get_trip_uuids_by_ids` now resolve only live rows, so a deleted site drops out of `dive_sites`
-and a deleted trip leaves `trip_uuid: null`. Nothing was deleted to achieve it — the
-`dive_dive_site` rows and `dive.trip_id` are untouched, and a filter on the read is the whole
+**Superseded, and this is what replaced them.** Three sections used to sit here, one per loader
+family, and they recorded the same decision three times: `get_dive_sites_for_dive` and its batched
+twin, then `get_gear_items_for_dive`/`get_gear_items_for_dives`, then
+`get_gear_items_for_set`/`get_gear_items_for_sets`, each gaining a `WHERE ... is_deleted IS false`
+so a soft-deleted row stopped being rendered on the dives and sets that referenced it. Underneath
+them sat `_schedule_uuids_by_id`'s filter, `_owned`'s resurrection machinery in
+`services/export/loader.py`, `soft_delete_schedules_for_gear_item`, `dirtyFields` in
+`opendiving-web`, and a documented case none of it could reach.
+
+All of it is gone. `Trip`, `DiveSite`, `GearItem`, `GearSet` and `GearServiceSchedule` are
+hard-deleted now: `DELETE FROM dive_site WHERE id = :id` is the whole implementation, and the
+`ON DELETE` rule declared on every FK that points at those five finally fires. Roughly 900 lines out
+and 40 in.
+
+The old sections are not reproduced. What is worth keeping is the argument, because the reasoning
+that chose hiding was sound at the time and reads as though it still applies.
+
+### The schema had been specifying the right behaviour and never executing it
+
+Every referencing FK already declared exactly the rule the product wants, and had since the tables
+were written:
+
+| FK                                             | `ondelete` | Effect                        |
+| ---------------------------------------------- | ---------- | ----------------------------- |
+| `dive.trip_id`                                 | `SET NULL` | dive survives, loses its trip |
+| `trip_location.trip_id`                        | `CASCADE`  | locations go with the trip    |
+| `dive_dive_site.dive_site_id`                  | `CASCADE`  | join row goes                 |
+| `dive_gear_item.gear_item_id`                  | `CASCADE`  | join row goes                 |
+| `gear_set_item.gear_item_id`                   | `CASCADE`  | membership goes               |
+| `gear_set_item.gear_set_id`                    | `CASCADE`  | membership goes with the set  |
+| `gear_service_record.gear_item_id`             | `CASCADE`  | record goes with the item     |
+| `gear_service_schedule.gear_item_id`           | `CASCADE`  | schedule goes with the item   |
+| `gear_service_record.gear_service_schedule_id` | `SET NULL` | receipt survives, unlinked    |
+
+`erase_gear_item`'s docstring said so outright — "`is_deleted` is application-level, so the
+`ON DELETE CASCADE` on `gear_service_schedule.gear_item_id` never fires" — and then hand-rolled
+`soft_delete_schedules_for_gear_item` to do by hand what Postgres would have done for free. The repo
+named the same trap in four more places (`dive_file`, `dive_profile`, `certification_file`,
+`dive_files.py`). Nine correct declarations, none of them reachable, and a growing pile of
+application code standing in for them.
+
+### The bug class this closes, and why it took three fixes not to
+
+The read was a lossy projection and the write was a wholesale replace, so a client that read a dive
+and wrote it back destroyed what the read had hidden. A dive whose trip was deleted read
+`trip_uuid: null`; echoing that null back cleared the FK for good. A dive whose site was deleted
+read one entry short; echoing that list back destroyed the join row.
+
+The fix landed in the **browser** — `buildDiveUpdate` plus `dirtyFields`, then the same shape again
+in `gear-set-dialog` — because "the diver cleared it" and "the client echoed what it was handed" are
+byte-identical requests, and are only distinguishable one layer up, in a form, where an untouched
+picker is simply not dirty. That closed the untouched save and could not close the rest: a dive
+holding a live site and a hidden deleted one lost the hidden row the moment the diver edited the
+list at all, because no client can preserve a reference it was never handed. That residue was
+recorded as accepted rather than fixed.
+
+There is nothing hidden left to lose. The join row goes with the row it points at, so what the
+loaders hand out is the whole truth and echoing it back destroys nothing.
+
+### The three legs that defeated "clear the link", checked one at a time
+
+The original section rejected a fourth option — clear the association at delete time, so the loaders
+need no filter because no orphan exists — on three grounds. None of them survives, and two were
+already conceded before this change.
+
+**The IDREF leg.** `_owned` deliberately read deleted-but-referenced rows back so that a uuid in
+`export.json` always named something the file defined, and so that UDDF's `xs:IDREF` version of the
+same reference validated; clearing the links would have destroyed exactly the rows that machinery
+existed to preserve. The gear-set section **already retracted this**, and correctly: clearing
+removes the reference, so nothing dangles either way. Its real weight was that the join rows *are*
+the historical record of "this dive was logged with this kit". That is still true, and it is why
+deleting is destructive and archiving exists — but it is an argument about what a delete should
+mean, not about whether a dangling reference is created. A cascade creates none, and
+`still_referenced` is gone with the problem it solved.
+
+**The orphan-backfill leg.** "A read filter fixes past and future in one line; a delete-time clear
+fixes only future deletes and leaves every set already holding a dead item wrong until someone
+writes a backfill." This is the leg that actually decided the gear-set call, and it is dead on the
+facts rather than on the reasoning: the project is pre-launch with no public hosting, the only
+affected database is the developer's own, and the backfill is one `DELETE FROM ... WHERE is_deleted`
+per table with the cascades doing the rest. It ran as step 1 of this change's DDL. The argument was
+a real cost when it was made and stopped being one when the deployment shape did.
+
+**The renumbering leg.** Clearing was said to turn `erase_dive_site` into another multi-statement
+write over `dive_dive_site`, with the position-contiguity hazards `replace_dive_site_on_dives`
+needed three careful statements and a wipe-guard test to get right. **It turns out not to apply at
+all**, and this was verified rather than assumed: only `replace_dive_sites_for_dive`,
+`replace_gear_items_for_dive` and `replace_gear_items_for_set` write `position`, and each wipes and
+reinserts `0..n-1` wholesale. Nothing appends at `max+1`, nothing reads `position` as anything but
+an `ORDER BY` key, and neither join table constrains it. A gap sorts identically to a contiguous
+run. `replace_dive_site_on_dives` keeps its renumbering statement — that is its own invariant, and
+its docstring already conceded it "buys consistency rather than a fixed bug".
+
+So the option that was rejected three times is the one that shipped, and it shipped as one `DELETE`
+rather than as the hand-rolled clear that was actually on the table.
+
+### What the read filters cost while they existed
+
+Worth keeping, because it is the most reusable thing in the three sections that were here:
+
+**A read filter is not a local change.** Hiding a field from a response changes what every client
+writes back through it, and the damage shows up on the write path, in another repo, on an unrelated
+user action. It was the second time in this feature's history that the fix landed in a different
+file from the bug; by the end it was the fourth.
+
+The related generalization, which the sections arrived at from the other side: the argument that
+carried every one of those four changes was **the write side had already voted.**
+`resolve_trip_id_for_user`, `resolve_dive_site_ids_for_user` and `resolve_gear_item_ids_for_user`
+all refused a deleted row, so the API was emitting references the same request would refuse back.
+That argument was right, and the conclusion drawn from it — filter the read to match the write — was
+the narrower of the two available. The wider one was to stop having a row the writes refuse.
+
+### `DELETE` stopped being idempotent
+
+`DELETE /trip/{uuid}` and `DELETE /dive-site/{uuid}` both answered 200 on a second call and honoured
+`move_dives_to` on an already-deleted row. Both now 404.
+
+That idempotency was argued for on two grounds and both are gone. It was the only after-the-fact
+recovery the app had — a diver who deleted first could still re-point the dives, because the
+association survived the delete — and there is no association to recover now. And it insured against
+a retry of a half-failed delete: a client that lost the response to `delete?move_dives_to=X` could
+repeat the call and get a definitive answer, where a 404 covered both "already gone, dives moved"
+and "already gone, dives stranded". A single `DELETE` in one transaction cannot half-fail, so there
+is no half state to disambiguate. `move_dives_to` still runs in the same transaction, before the
+delete.
+
+**Client-visible**, and the opposite direction to the last change here: a retry that answered 200
+now 404s. A client treating a 404 as "already gone" behaves correctly.
+
+### Accepted: a soft-deleted dive loses its site links on a `move_dives_to` delete
+
+`replace_dive_site_on_dives` scopes its `UPDATE` to live dives (`crud_dive_dive_sites.py`), so a
+soft-deleted dive's join rows are not moved — and the `CASCADE` then removes them. Its docstring
+promises "either the whole log moved and this site is gone, or nothing happened", and that now holds
+for the log a diver can see rather than for the rows underneath it.
+
+No surface renders a soft-deleted dive, so there is no visible consequence, and it is recorded
+rather than fixed. It disappears entirely if dives ever go hard-delete too.
+
+### What the cascade destroys that the soft delete kept
+
+One thing, and it is the only half of this change a diver could read as a loss: **deleting a gear
+item destroys its service history.** `gear_service_record.gear_item_id` is `ON DELETE CASCADE`, so
+the records go with the item, where before they survived invisibly.
+
+The gear delete dialog already promised exactly this — "To keep it in your log **and its service
+history**, archive it instead" — and offers Archive as a secondary action in the same dialog. See
+*"A deleted gear item's service history has no view, and archiving is the surface that does"* below,
+which established that the records were reachable in the API and invisible in the product; the
+conclusion it reached (archiving is the surface, and the view a diver wants already ships) is what
+makes this affordable. Deleting a schedule is the gentler case and always was: its
+`ON DELETE SET NULL` leaves the receipts in the item's history with
+`gear_service_schedule_id: null`, which is the state `GearServiceRecordRead` has documented all
+along.
+
+### The indexes are the part that needed care, not the deletes
+
+Three traps, in the order they bite.
+
+**`DROP COLUMN is_deleted` silently drops every index whose predicate references it** — no error, no
+`CASCADE` needed — which was 10 indexes across the five tables. **`create_all` will not put them
+back**: it emits `CREATE TABLE` for missing tables only and never alters an existing one. So the
+`CREATE INDEX` statements in the DDL are not tidying; without them the migration breaks the
+invariant the change rests on. The five `ux_*` are the database's only backstop for name uniqueness
+(the app-level `*_name_exists` checks are racy on their own), and
+`ix_gear_service_schedule_next_due_on` is what the digest job's scan is built around.
+
+Those ten come back **plain**. Their partial `is_deleted` predicates existed so a diver could reuse
+a deleted site's or item's name; hard delete gives that for free, because the row is gone rather
+than being looked away from. `ux_gear_service_schedule_item_kind_label` has a second reason to be
+unpartitioned now, covered below. Every `is_archived`/`is_active` predicate stays — archived is not
+deleted, and `gear_service_schedule.is_active` is a third thing again.
+
+**A partial index cannot serve a referential-integrity lookup.** This is the one that had to be
+found rather than followed: `gear_service_record` **keeps** `SoftDeleteMixin`, so its two indexes
+stay partial on `is_deleted` — and a cascade's lookup carries no predicate of its own, so Postgres
+cannot prove a partial index covers the rows it needs and seq-scans instead. Both of that table's
+FKs are cascade targets of a delete a diver triggers from the UI (`gear_item_id` is `CASCADE`,
+`gear_service_schedule_id` is `SET NULL`), so the scan would run on every gear-item and every
+schedule delete. Two plain indexes were added for exactly that:
+`ix_gear_service_record_gear_item_id` and `ix_gear_service_record_schedule_id`. They look redundant
+beside the two partial ones that lead with the same columns, and are not.
+
+**Measured rather than reasoned about**, since "Postgres will not use a partial index here" is
+exactly the kind of claim that is easier to assert than to check. Seeded one gear item with 20 000
+service records and ran the RI trigger's own query shape
+(`SELECT 1 FROM ONLY gear_service_record x WHERE gear_item_id = $1 FOR KEY SHARE OF x`):
+
+```
+with ix_gear_service_record_gear_item_id:  Index Scan using ix_gear_service_record_gear_item_id
+with only the two partial indexes:         Seq Scan on gear_service_record
+```
+
+Note the second plan is the *pre-change* state, and both of those partial indexes lead with the
+column being looked up. Leading column, right table, unusable — because the lookup carries no
+`is_deleted` clause for the predicate to be implied by.
+
+The same reasoning is why `ux_gear_service_schedule_item_kind_label` must stay unpartitioned: it is
+the *only* index on `gear_service_schedule.gear_item_id`, which is itself a cascade target — the
+model's own comment says "No standalone `gear_item_id` index: it's the leading column of the unique
+index above."
+
+An unindexed FK with `ON DELETE CASCADE` is the one genuine performance footgun in this design.
+Invisible at a few hundred rows, an incident at ten million. A metadata test asserting that every
+cascading FK has a *usable* index — not merely that an index exists, since a partial one on a
+cascade target counts as none — is listed under §Before launch in the plan and is not in this
 change.
 
-### Why hiding, over tombstoning or leaving it
-
-The deciding argument was not consistency with the 404s, which is the obvious one and would have
-been satisfied by tombstoning too. It is that **the write side had already voted.**
-`resolve_trip_id_for_user` and `resolve_dive_site_ids_for_user` both refuse a deleted resource, and
-they back `PATCH /dive` as well as the `trip_uuid=`/`dive_site_uuid=` list filters. So the old
-behaviour handed a client a `trip_uuid` and a `dive_sites[].uuid` that the same dive's PATCH would
-then reject: read a dive's site list into an edit form, submit it back unchanged, get a 422 naming a
-site the response had just given you. That is not a historical record, it is a reference the API
-emits and refuses to accept — which ruled out leaving it, and made hiding the option that puts the
-read side back in agreement with everything else.
-
-Tombstoning lost on cost against a dead end. It is the only one of the three needing hand-applied
-DDL (a flag on the site summary, and `trip_uuid: UUID | None` restructured into something that can
-carry one), and what it buys is a chip that cannot be clicked (its endpoint 404s), cannot be
-submitted (the write resolvers refuse it), and cannot be un-greyed, because **there is no undelete
-path in this codebase at all** — `UserRestoreDeleted` in `schemas/user.py` is referenced nowhere.
-
-A fourth option came up and is worth recording because it looks tidier than it is: clear the
-association at delete time — drop the `dive_dive_site` rows, null the `dive.trip_id` — so the
-loaders need no filter because no orphan exists. It loses to three things. `_owned` in
-`services/export/loader.py` deliberately reads deleted-but-referenced sites, items, trips and
-schedules back, flagged `is_deleted`, because UDDF's `xs:IDREF` references have to resolve; clearing
-the links deletes exactly the rows that machinery exists to preserve. It does not fix orphans
-already created, which a read filter does for past and future alike. And it turns `erase_dive_site`,
-which touches no dive rows today, into another multi-statement write over `dive_dive_site` with the
-position-renumbering hazards `replace_dive_site_on_dives` needed three careful statements and a
-wipe-guard test to get right.
-
-The cost of hiding, stated plainly: a dive that *was* logged at a since-deleted site now shows no
-site, and a diver could read that as data loss. The links themselves survive the delete, so an
-export still carries the association — but read the next subsection before relying on that, because
-it does not survive indefinitely.
-
-### The links outlive the delete, but not the dive's next edit
-
-**A read hides them; the next `PATCH /dive` on that dive destroys them.** This is the real cost of
-hiding, and it is not what "the links stay in the database" suggests on its own.
-
-**Confirmed on the shipped web client, not reasoned about in the abstract.** `opendiving-web`'s
-`dives/[id]/edit/page.tsx` seeds the form with `trip_uuid: diveData.trip_uuid` and
-`dive_site_uuids: diveData.dive_sites?.map((site) => site.uuid) ?? []`, and `buildDiveUpdate` in
-`lib/validations/dive.ts` forwards any value that is not `undefined` — a null included,
-deliberately, since that is how a diver removes a trip. So opening Edit on an affected dive and
-pressing Save without touching anything is enough. This is the default path, not an edge case.
-
-The round trip is ordinary and needs nothing to do with sites or trips. `GET /dive/{uuid}` now
-answers `trip_uuid: null` with the deleted site absent from `dive_sites`. A client that seeds an
-edit form from that read and submits it — a notes fix, a depth correction — sends back exactly what
-it was handed: `trip_uuid: null`, and a `dive_site_uuids` list one entry shorter. `patch_dive` reads
-an explicit null as *remove the trip* (`update_data["trip_id"] = None`), and any `dive_site_uuids`
-goes through `replace_dive_sites_for_dive`, which is a wholesale delete-and-reinsert. The `trip_id`
-and the `dive_dive_site` rows are then gone for real, `_owned`'s `still_referenced` set no longer
-holds the site or trip, and the record drops out of `export.json` too. There is no undelete path, so
-that is permanent.
-
-**Accepted deliberately**, on the reading that a diver who edits a dive after deleting its site is
-confirming the removal. But note what the trade actually is, because the framing above oversells it:
-before the filter, that same round trip failed *loudly* — the read handed back the deleted trip's
-uuid, `resolve_trip_id_for_user` refused it, and PATCH answered 422. Hiding replaces a loud 422 with
-a silent write that deletes data. And it is the same deletion this section rejects as option 4
-("clearing the links deletes exactly the rows that machinery exists to preserve"), just lazy and
-scattered — on whichever dives the diver happens to edit next — instead of all at once at delete
-time.
-
-**The fix for that is client-side, and it is done.** No server-side answer works on the trip half:
-"the diver cleared the trip" and "the client echoed back a null it was handed" are the *same
-request*, so nothing in `patch_dive` can tell them apart. They are perfectly distinguishable one
-layer up, though — in the form, an untouched trip picker is simply not dirty. So the fix was for the
-web edit form to submit only dirty fields (react-hook-form's `dirtyFields`) rather than every field
-it was seeded with, which needs nothing here. It shipped separately in `opendiving-web` and
-deliberately did not block this: the API change is correct on its own, and the exposure in between
-was a pre-launch app on one developer's machine.
-
-### One narrower case `dirtyFields` cannot reach, and we are living with
-
-Submitting only dirty fields closes the *untouched* save. It cannot close this one, and nothing in a
-browser can:
-
-A dive is linked to site A (live) and site B (soft-deleted). The read hides B, so the form seeds
-from `["A"]`. The diver adds C. `dive_site_uuids` is now **legitimately dirty**, so it is submitted
-— as `["A", "C"]`, which is the only list the client has ever been given.
-`replace_dive_sites_for_dive` deletes every join row for the dive and reinserts those two, and B's
-link is gone. The diver never saw B and never asked to remove it.
-
-The client cannot preserve a reference it was never handed, and inventing a uuid it never received
-is not an option, so this one is ours or nobody's. **Accepted deliberately**, on scope: it needs a
-deleted site *and* an edit to the very list that site is missing from, and `move_dives_to` exists so
-a diver rehomes those dives rather than stranding them.
-
-The fix, if it is ever worth doing: have `replace_dive_sites_for_dive` delete only the rows whose
-site is live, insert the submitted list at positions 0..n-1, and renumber the surviving hidden rows
-after them. It was declined because it turns a clean wipe-and-reinsert into exactly the
-position-contiguity problem `replace_dive_site_on_dives` needed three careful statements and a
-wipe-guard test to get right, for a path this narrow. There is no unique-constraint risk in it —
-`resolve_dive_site_ids_for_user` refuses a deleted site, so a hidden uuid cannot come back in.
-
-One objection that sounds decisive is not, and this section's own filter is why: a preserved hidden
-row sitting at position 0 does **not** leave the dive headed by a site that no longer exists. The
-read filters before it orders, so the first *live* row heads the list either way — the promotion
-`get_dive_sites_for_dive`'s docstring already describes. Every effect a preserved row's position
-could have is export-only, on both halves, since `_ordered_ids_by_dive` is the one reader that takes
-the join rows unfiltered. The cost is the renumbering, not a rendering hazard.
-
-**`gear_item_uuids` has the same shape, and since the gear filter landed it is reachable too.**
-`replace_gear_items_for_dive` is the same wholesale replace, so a dive holding a live item and a
-hidden deleted one loses the hidden row as soon as the diver edits the gear list at all. It is
-slightly more visible there than here: `recalculate_gear_dive_counts` runs on the same `patch_dive`
-and takes the deleted item's `dive_count` to zero, so the loss shows as a number in `export.json`
-rather than only as an absence — until the same edit removes the item from the export entirely. See
-*"`dive_count` is unaffected at delete time"* below, which traces that.
-
-**Same answer on the gear half, but not for the same reason, and the difference was measured rather
-than assumed.** The paragraph above declines the fix on the position-contiguity cost, and that cost
-does not exist for gear: there is no `replace_gear_item_on_dives` to keep in step, because gear has
-no `move_dives_to` route. Nor does anything else carry over — `DiveGearItem.position` is a pure sort
-key with none of `DiveDiveSite`'s primary-slot meaning, `GearItemInfo` carries no position field,
-and the table constrains only `(dive_id, gear_item_id)`, so holes and ties are already legal. On the
-gear half the fix is close to one subquery on the `DELETE`.
-
-It was declined anyway, and on a different ground: `replace_dive_sites_for_dive` and
-`replace_gear_items_for_dive` are deliberate mirrors, down to the `dict.fromkeys` dedupe comment,
-and buying back a narrow case on the cheap half at the price of the two diverging trades a rare data
-loss for a permanent shape difference every later reader has to hold. Recorded because the estimate
-was the thing at risk of being inherited: reusing the site-side number here would have rejected a
-cheap fix on an expensive fix's grounds. If this is ever revisited, gear is the half to prototype
-on, and the detail to settle there is ordering — a preserved row can tie with a newly inserted one,
-invisible in the app but not in export.
-
-**And on a third helper since:** `replace_gear_items_for_set` inherited the identical case when the
-gear-set loaders got the filter — with the one asymmetry that the declined fix is *cheaper* there,
-nothing reading `gear_set_item.position` as more than a sort key while position 0 on
-`dive_dive_site` is the primary site. Still declined, but it is the half to revisit first. See *"The
-severance is the same cost, and slightly smaller here"* below.
-
-Two server-side answers were weighed and dropped before that one was found. Leaving soft-deleted
-rows alone in `replace_dive_sites_for_dive` handles the site half but not the trip half, for the
-reason above. Surfacing the hidden references to the client so an edit form can round-trip them
-works, but reopens the read-contract question this section settled — it is most of the tombstone
-design, arrived at from the other side.
-
-Worth generalizing, since it is the second time in this feature's history that the fix landed in a
-different file from the bug: **a read filter is not a local change.** Hiding a field from a response
-changes what every client writes back through it, and the damage shows up on the write path, in
-another repo, on an unrelated user action.
-
-So: `move_dives_to` is the affordance for a diver who cares about the association. Re-point the
-dives, then delete. Deleting first and editing later is what loses it.
-
-### What "the links stay" means for export
-
-`_owned`'s resurrection rule used to justify itself partly by pointing at the app — a deleted site
-"goes on being shown" on its dives. This change falsifies that half. The rule stands on the IDREF
-argument alone, which was always sufficient, and export is now the only place the association is
-visible at all — for as long as it lasts, per the subsection above. Its docstring says so.
-
-### The trap this had to avoid, and the shape of it
-
-`erase_trip` skipped dive-cache invalidation on a plain delete, correctly, *because* the read being
-fixed here was broken. Filtering the lookup without touching that condition would have left a fresh
-read answering `trip_uuid: null` while the cached one still named the trip, for the rest of the hour
-— the symptom surviving its own fix, in a different file. The invalidation is unconditional as of
-the same commit. See "Cache invalidation moved on one route and not the other" above, which records
-how the warning was placed and why it worked.
-
-### `erase_trip` became idempotent, so the trip half has a way back
-
-`DELETE /trip/{uuid}` used to 404 on a second delete while `DELETE /dive-site/{uuid}` answered 200,
-and that asymmetry was documented as deliberate. Hiding the references is what made it a problem
-rather than a curiosity: a deleted site could still be recovered from — the route is idempotent and
-honours `move_dives_to` on an already-deleted site, so a diver who deleted first could still
-re-point the dives — while a deleted trip could not. This change made the association invisible on
-both halves, so shipping it would have left the trip half invisible *and* unrecoverable.
-
-Both routes now take `include_deleted=True`. The alignment went in that direction rather than the
-other one, and the direction is the whole decision. Making `erase_dive_site` 404 to match would have
-been equally consistent and simpler to explain, but it removes the only after-the-fact recovery the
-app has, right in the change that makes recovery matter. It also breaks a retry that was reasoned
-about on purpose: a client that loses the response to `delete?move_dives_to=X` can currently repeat
-the call and learn what happened, whereas one 404 would cover both "already gone, dives moved" and
-"already gone, dives stranded" — and the dives are the half the client needs to know about.
-Idempotent `DELETE` is the more conventional of the two answers besides.
-
-**Client-visible.** A retry that used to 404 now answers 200. Nothing breaks — a client treating the
-old 404 as "already gone" still behaves correctly — but "deleted twice" is no longer distinguishable
-from "deleted once" by status alone. Nor by body, since the count that briefly made the two tellable
-apart is gone as well.
-
-### `get_trip_uuids_by_ids` also gained a `user_id` scope
-
-Unrelated to the bug and not a fix for anything reachable: every caller passes ids read off the
-caller's own dives, so a cross-user id cannot arrive today. The scope was absent rather than
-deliberate, and it now matches `resolve_trip_id_for_user` directly above it, so a future caller that
-sources ids some other way cannot leak another logbook's uuid.
-
-### No manual DDL, and one sibling left alone
-
-Nothing in the schema changed — three `WHERE` clauses and one parameter.
-
-`get_gear_items_for_dive`/`get_gear_items_for_dives` in `crud_dive_gear_items.py` have the identical
-bug: they mirror these loaders line for line and filter nothing, so a deleted gear item goes on
-being listed on the dives it was used on. It is left out deliberately, the same way this one was
-left out of the `move_dives_to` PR — same shape, but `erase_gear_item` has its own invalidation and
-`dive_count` bookkeeping to check first, and bundling it would hide that check inside a change about
-sites and trips.
-
-**Since done, and both checks came back clean.** See the section below.
-
-## The gear-item loaders got the same filter, and both deferred checks came back clean
-
-`get_gear_items_for_dive`/`get_gear_items_for_dives` now filter `GearItem.is_deleted` too, so a
-deleted gear item drops off the dives it was used on exactly as a deleted site does. Two `WHERE`
-clauses, no schema change, and the whole argument above carries over unchanged — the write side had
-already voted here as well (`resolve_gear_item_ids_for_user` refuses a deleted item, so a dive's
-gear list was a set of uuids the same dive's `PATCH` would 422 on), the `dive_gear_item` rows are
-untouched so `_owned` can still resurrect the item for UDDF's `xs:IDREF`, and the next ordinary
-`PATCH /dive` on an affected dive destroys the links for good.
-
-It was worth deferring even though nothing turned up, because "nothing turned up" is a fact about
-this route that had to be established rather than assumed — the trip half of the sites-and-trips
-change looked equally harmless and was not.
-
-### `erase_gear_item`'s invalidation was already unconditional
-
-The trap that caught `erase_trip` is not here. `erase_gear_item` has always dropped the owner's dive
-caches on every delete, because a soft-deleted item stayed on its dives and a cached read could hold
-a stale name or `is_archived` — the same reasoning that made `erase_dive_site` unconditional. So the
-filter needed no change alongside it.
-
-What changed is *why* the call is there, and it is worth stating because the reason inverted. It
-used to guard against a cached read being stale in its **fields**; it now guards against a cached
-read being stale in its **membership** — listing kit that a fresh read omits, for the rest of the
-hour. The comment on the call says so, because an invalidation whose only justification lives in
-another file is exactly what a later cleanup deletes as redundant. There is a test for it too
-(`TestErasingGearItemDropsTheDiveCaches`), which the trip half only acquired when its skip was
-removed. **Since renamed** to `TestErasingGearItemDropsTheCachedReads`, when the gear-set section
-below gave the same route a second cache family to answer for.
-
-### `dive_count` is unaffected at delete time, and moves later for a reason that is not this filter
-
-`recalculate_gear_dive_counts` counts `dive_gear_item` rows joined to the user's **live dives**, per
-item, and filters nothing on the item itself. This change touches no join row and no dive, so
-deleting an item moves no count — a deleted item keeps whatever `dive_count` it had, which is what
-`_owned` writes into `export.json`.
-
-The count does move later, on the severance the section above describes: when a client submits back
-a gear list one entry short, `replace_gear_items_for_dive` drops the links and the
-`recalculate_gear_dive_counts` that `patch_dive` already runs takes the deleted item to zero. That
-is the same permanent loss the site half has, and here it is legible as a number rather than only as
-an absence — but nothing user-facing reads it, since `GET /gear-item/{uuid}` 404s for a deleted item
-and the service digest filters `GearItem.is_deleted` before it reads `dive_count`. Only
-`export.json` shows it, and only until the same edit removes the item from the export entirely.
-
-### Archived is not deleted, and the filter has to keep them apart
-
-`is_archived` is deliberately **not** filtered. Archiving exists so that retired kit leaves the dive
-form's picker *while* the dives that used it go on showing it — that is the whole feature, and
-`dive_count` "stays meaningful" per the column comment on the model. So the loaders return archived
-items flagged, and only `is_deleted` hides. Pinned by a test, because the two flags sit next to each
-other on the same model and a filter on both would silently empty the gear list of every diver who
-tidies up.
-
-### The sibling this one left alone: gear sets
-
-*Written while it was still true; `get_gear_items_for_set` has since been filtered, so read this as
-the case for deferring rather than as a description of the code.*
-
-`get_gear_items_for_set`/`get_gear_items_for_sets` in `crud_gear_set_items.py` still listed deleted
-items, and it was the same one-line filter with none of the bookkeeping above attached. It was left
-out because it is a different question, not a smaller one: a dive is a historical record and a gear
-set is a template the diver curates, so "the item vanishes from the set" and "clear the link when
-the item is deleted" are both defensible there in a way the second is not for dives. The round-trip
-422 is real on that half too (`PATCH /gear-set` resolves through the same
-`resolve_gear_item_ids_for_user`), so it wants deciding rather than leaving — but deciding it inside
-a change about dive reads would have buried the decision.
-
-**Since decided: hide, same as the other three.** See the section below.
-
-## A gear set hides its deleted items too, and the "clear the link instead" option lost on two legs
-
-The fourth loader in the family got the same one-line filter:
-`get_gear_items_for_set`/`get_gear_items_for_sets` now resolve only live items, so a deleted gear
-item drops out of every set that held it. The `gear_set_item` rows are untouched, and nothing in the
-schema changed. Fourth, **not last** — see the deferral at the end of this section.
-
-What is worth recording is not the filter — it is identical to the three above — but that the
-alternative was live here and is not live anywhere else, and why it still lost.
-
-### Why the argument that killed "clear the link" for dives does not carry over
-
-The sites-and-trips section rejects clearing the association at delete time on three legs. Checked
-one at a time against gear sets, **only one survives intact, and it is not the famous one.**
-
-The IDREF leg **does not apply**. It reads as though clearing would strand a reference, but it does
-the opposite — clearing removes the reference, so nothing dangles either way. Its actual weight for
-dives is that the `dive_dive_site`/`dive_gear_item` rows *are* the historical record, and `_owned`
-exists to keep them exportable; deleting them destroys the only copy of "this dive was logged with
-this kit". A set's membership is not a record of anything that happened, and the repo already says
-so in its own words — `write_gear_items_csv` in `services/export/tabular.py` folds set names into
-the gear-item row precisely because "a set is a shortcut for filling in a form rather than a record
-of anything that happened". Clearing would have cost the export a line that reads as noise rather
-than as history.
-
-The multi-statement-write leg **mostly falls away**. `erase_dive_site` would have needed the
-position renumbering that took `replace_dive_site_on_dives` three careful statements and a
-wipe-guard test; a set needs none of it, because nothing reads `gear_set_item.position` as anything
-but an `ORDER BY` key — whereas position 0 on `dive_dive_site` *is* the primary site, which is what
-made contiguity there worth defending. (Not a constraint difference: neither table has a unique
-constraint on `position`, only on its pair of FKs.) So a gap in a set is invisible until the next
-`replace_gear_items_for_set` renumbers from zero anyway. The clear would have been one
-`DELETE ... WHERE gear_item_id = :id`. No test pins the gap itself — hiding is what shipped, so
-nothing in the codebase ever creates one; `test_the_rest_keep_their_order` pins the adjacent thing
-that is real, that the survivors of a hidden row at position 0 come back in the diver's order rather
-than renumbered.
-
-The "does not fix the orphans already created" leg **carries over unchanged**, and it decided this.
-A read filter fixes past and future in one line; a delete-time clear fixes only future deletes and
-leaves every set already holding a dead item wrong until someone writes a backfill. There is no
-backfill script in this repo and no place one would obviously live.
-
-### And one argument that only exists on this half
-
-Clearing would make deleting **one** gear item silently rewrite **every set the diver owns** — an
-edit to records the diver did not name, as a side effect of an action about something else, with no
-undo (there is no undelete path in this codebase; see the sites-and-trips section). Hiding defers
-that write to the moment the diver next curates the set themselves. Deleting gear is already the
-destructive choice against archiving; it should not also quietly re-author the diver's templates.
-
-Set against that, the honest case for clearing was that it makes the loss legible at the moment it
-happens instead of leaving a silent severance to fire later. Real, but it buys legibility by doing
-the damage sooner and to more rows.
-
-### The severance is the same cost, and slightly smaller here
-
-`replace_gear_items_for_set` is a delete-and-reinsert, exactly like its two dive counterparts, so a
-client that reads a set's item list and submits it back destroys the hidden links for good — the
-same trade "The links outlive the delete, but not the dive's next edit" describes.
-
-One thing makes it milder than the dive half, and it is not the one that first suggested itself.
-`patch_gear_set` only calls `replace_gear_items_for_set` when the request actually carries
-`gear_item_uuids`, so renaming a set severs nothing — but **that is not an asymmetry**, and an
-earlier draft of this section wrongly claimed it was: `patch_dive` guards
-`replace_dive_sites_for_dive` and `replace_gear_items_for_dive` with the identical `is not None`
-check, so a notes-only dive edit severs nothing either. Every list-valued field in this codebase
-behaves that way. The lone exception is the scalar `trip_uuid`, where an explicit null cannot be
-told from an echoed one — which is a property of that field being a scalar, not of dives.
-
-The real mitigation is the plainer one: what is lost here is a line in a template, not a fact about
-a dive that happened.
-
-**But the narrow case above lands here unchanged, and `dirtyFields` cannot reach it either.** A set
-holding a live item and a hidden deleted one seeds an edit form from a list of one; the diver adds a
-second item; `gear_item_uuids` is now legitimately dirty and gets submitted as the two items the
-client has ever been handed, and the hidden row goes with the wipe. Same shape as *"One narrower
-case `dirtyFields` cannot reach"* records for `dive_site_uuids` and `gear_item_uuids` on a dive,
-same reason no client can prevent it, and declined here for the same reason — with one difference in
-the cost of fixing it, which cuts the other way. The proposed remedy there (delete only the rows
-whose target is live, insert the submitted list at 0..n-1, renumber the survivors after it) runs
-into position-contiguity care on `dive_dive_site`, whose position 0 is the primary site every
-single-site surface renders; nothing reads `gear_set_item.position` that way, so the renumbering is
-cosmetic and the fix is genuinely cheaper on this half. It is still declined, because a set is a
-template and the three helpers answering the same question three different ways would cost more than
-the path is worth — but if that call is ever revisited, **revisit it here first.**
-`replace_gear_items_for_set`'s docstring says so.
-
-### Both deferred checks, again, and both clean
-
-**Cache invalidation reaches the set keys.** `erase_gear_item` calls `invalidate_gear_caches`
-unconditionally, and that is the gear *item* helper by name only — its single pattern is
-`user_{id}_gear_*`, which covers all four gear key shapes including `user_{id}_gear_sets:page_...`
-and `user_{id}_gear_set:{uuid}`. So no change was needed and a cached set read cannot outlive the
-filter. The pattern's reach was already pinned by `TestCacheInvalidationPatterns` in `test_gear.py`;
-what was *not* pinned is that the route calls it at all, which is now
-`TestErasingGearItemDropsTheCachedReads` — renamed from `...DropsTheDiveCaches`, since the same stub
-covers both families. The call's justification has inverted a second time and the comment on it says
-so: stale *fields* first, then stale dive *membership*, now stale set membership too.
-
-**`dive_count` is untouched.** `recalculate_gear_dive_counts` counts `dive_gear_item` rows joined to
-live dives and reads nothing about sets, so neither this filter nor a set edit moves it. The one way
-a deleted item's count still moves is the dive-side severance the section above describes.
-
-### What export shows now
-
-`_owned` resurrects a deleted-but-referenced gear item on four referrers, and set membership is one
-of them (`item_ids_by_set`). Hiding leaves that intact: `export.json` still lists the item inside
-the set's `gear_item_uuids`, flagged `is_deleted` on the item itself, and export is now the only
-surface anywhere that shows the association — on this half as on the other three. Clearing would
-have removed one of the four referrers, which for an item that was only ever in a set and never
-dived or serviced would have dropped it out of the export entirely.
-
-### The siblings this one leaves alone: the service-record resolvers
-
-This closes the loaders that embed a *summary*, not every read that emits a uuid. Two resolvers on
-the gear-service surface still hand out references the API refuses back, and both are reachable
-through `erase_gear_item` — the very route this section is about — because deleting an item
-soft-deletes its schedules (`soft_delete_schedules_for_gear_item`) and deliberately keeps its
-records.
-
-- **`_schedule_uuids_by_id`** (`api/v1/gear_service.py`) resolves a page of records' schedule ids
-  with no `is_deleted` filter, so `GET /gear-service-record(s)` emits a `gear_service_schedule_uuid`
-  for a soft-deleted schedule. `resolve_schedule_for_user` *does* filter, so
-  `GET /gear-service-schedule/{uuid}` 404s on that uuid and
-  `GET /gear-service-records?gear_service_schedule_uuid=…` answers 422. That is precisely "a
-  reference the API emits and refuses to accept", the argument that decided all four changes above.
-- **`get_gear_item_uuids_by_id`** (`crud/crud_gear_items.py`) is unfiltered for the same reason and
-  in the same shape, so a service record goes on naming a `gear_item_uuid` that
-  `GET /gear-item/{uuid}` 404s for.
-
-Left out on the same principle each of these changes was scoped by, and *not* because it is a
-smaller version of one: the records surface has its own question to answer first, which is whether a
-record whose schedule is gone should still render at all. `soft_delete_schedules_for_gear_item` says
-the history is worth keeping — so unlike a set member, the reference may genuinely want to survive
-its target, and this series' reflex answer ("filter the loader") may be the wrong one there.
-Deciding that inside a change about gear sets would bury it, exactly as deciding the gear-set
-question inside a change about dive reads would have.
-
-**Since decided, and it split.** One of the two was filtered and the other deliberately was not —
-and the paragraph above is wrong in one respect worth leaving visible: it calls the pair "the same
-reason and the same shape", and treats the emitted-and-refused argument as reaching both. It does
-not reach the item half, which has no write that echoes the reference back. See the section below.
+### The DDL
+
+Per *"Schema changes have no migration tool"*: `create_all` creates brand-new tables only, so all of
+this is by hand. The order matters — purge while `is_deleted` still exists, then drop the columns,
+then rebuild the indexes.
+
+```sql
+-- 1. Purge rows already soft-deleted, letting the cascades fire.
+--    ONE-WAY: this destroys the full service history of every gear item ever
+--    soft-deleted. Dump the tables first if you want them back.
+DELETE FROM gear_service_schedule WHERE is_deleted;
+DELETE FROM gear_set             WHERE is_deleted;
+DELETE FROM gear_item            WHERE is_deleted;
+DELETE FROM dive_site            WHERE is_deleted;
+DELETE FROM trip                 WHERE is_deleted;
+
+-- 2. Confirm the cascades did the work. Every count must be 0. (These are real FK
+--    constraints, so a nonzero count means a constraint is missing, not that a
+--    sweep was needed - stop and find out which.)
+SELECT
+  (SELECT count(*) FROM dive_dive_site s
+     LEFT JOIN dive_site d ON d.id = s.dive_site_id WHERE d.id IS NULL) AS orphan_sites,
+  (SELECT count(*) FROM dive_gear_item g
+     LEFT JOIN gear_item i ON i.id = g.gear_item_id WHERE i.id IS NULL) AS orphan_dive_gear,
+  (SELECT count(*) FROM gear_set_item g
+     LEFT JOIN gear_item i ON i.id = g.gear_item_id WHERE i.id IS NULL) AS orphan_set_gear,
+  (SELECT count(*) FROM dive v
+     LEFT JOIN trip t ON t.id = v.trip_id WHERE v.trip_id IS NOT NULL AND t.id IS NULL) AS orphan_trips;
+
+-- 3. Drop the columns. This silently takes 10 indexes with it.
+ALTER TABLE trip                  DROP COLUMN is_deleted, DROP COLUMN deleted_at;
+ALTER TABLE dive_site             DROP COLUMN is_deleted, DROP COLUMN deleted_at;
+ALTER TABLE gear_item             DROP COLUMN is_deleted, DROP COLUMN deleted_at;
+ALTER TABLE gear_set              DROP COLUMN is_deleted, DROP COLUMN deleted_at;
+ALTER TABLE gear_service_schedule DROP COLUMN is_deleted, DROP COLUMN deleted_at;
+
+-- 4. Recreate all ten as plain indexes, matching the rewritten __table_args__.
+CREATE UNIQUE INDEX ux_trip_user_id_name_lower ON trip (user_id, lower(name));
+CREATE INDEX ix_trip_user_id_start_date ON trip (user_id, start_date DESC);
+
+CREATE UNIQUE INDEX ux_dive_site_user_id_name_location_lower
+  ON dive_site (user_id, lower(name), coalesce(lower(location), ''));
+CREATE INDEX ix_dive_site_user_id_name ON dive_site (user_id, name);
+
+CREATE UNIQUE INDEX ux_gear_item_user_id_brand_name_lower
+  ON gear_item (user_id, coalesce(lower(brand), ''), lower(name));
+CREATE INDEX ix_gear_item_user_id_name ON gear_item (user_id, name);
+
+CREATE UNIQUE INDEX ux_gear_set_user_id_name_lower ON gear_set (user_id, lower(name));
+CREATE INDEX ix_gear_set_user_id_name ON gear_set (user_id, name);
+
+-- Unpartitioned on purpose: the only index on `gear_item_id`, a CASCADE target.
+CREATE UNIQUE INDEX ux_gear_service_schedule_item_kind_label
+  ON gear_service_schedule (gear_item_id, kind, coalesce(lower(label), ''));
+-- Keeps its `is_active` predicate: paused is not deleted.
+CREATE INDEX ix_gear_service_schedule_next_due_on
+  ON gear_service_schedule (next_due_on) WHERE (is_active IS TRUE);
+
+-- 5. The two new plain indexes the partial ones cannot substitute for.
+CREATE INDEX ix_gear_service_record_gear_item_id ON gear_service_record (gear_item_id);
+CREATE INDEX ix_gear_service_record_schedule_id  ON gear_service_record (gear_service_schedule_id);
+
+-- 6. Verify nothing was lost - 32 rows, diffable against a create_all on a fresh DB.
+SELECT tablename, indexname FROM pg_indexes
+ WHERE tablename IN ('trip','dive_site','gear_item','gear_set',
+                     'gear_service_schedule','gear_service_record')
+ ORDER BY tablename, indexname;
+```
+
+Step 6 is not ceremony. Ten of those thirty-two are recreations of indexes step 3 dropped without
+saying so, and a name missing from the output is an index that will not come back on its own.
+
+### What stayed soft-deleted, and why
+
+`Dive`, `User`, `GearServiceRecord` and `Certification`. A dive is the irreplaceable record the
+whole app exists to hold, and its blobs (`dive_file`, `dive_profile`) have hand-rolled deletion
+paths that would need folding into the cascade at the same time — a separate decision. `User` is a
+separate concern again: auth, re-signup, and a GDPR purge job it needs regardless of this.
+`GearServiceRecord` and `Certification` are leaves nothing else references, so they gain nothing
+from the change.
+
+The asymmetry has one visible consequence beyond the indexes: `fetch_owned_or_raise` and
+`services/export/loader.py`'s `_owned` both apply the liveness filter only when the model actually
+carries the column. FastCRUD's `get_model_column` raises `ValueError` for a column the model lacks
+rather than ignoring it, so an unconditional `is_deleted=False` in `fetch_owned_or_raise` would have
+turned **every** `GET`/`PATCH`/`DELETE` on the four resources routed through it into a 500. The
+check is on the model rather than a per-call flag in both places, so that a soft-deleting table
+added later is filtered by default: the failure mode of forgetting is a deleted dive appearing in a
+diver's export, which is the one direction that must not be the accident.
+
+### The admin panel lost its delete on all five
+
+`admin/views.py` registers those five without `"delete"`. FastCRUD's `delete` branches on the
+column's presence, so leaving it registered would have silently turned "flag one row" into "destroy
+the item, its schedules, its service records and every join row" — with **no cache invalidation**,
+which is route-level only (`services/cache_invalidation.py`), leaving Redis stale for the TTL. The
+API routes are the only place that invalidation lives, and the panel is off by default.
+`view`/`create`/`update` stay.
+
+### No trash bin, and this change does not close that door
+
+What existed was neither a trash bin nor a stated "deletes are final": nothing could restore, no
+endpoint named a deleted row, and the relations severed on the next unrelated `PATCH`, so a restore
+would have handed back an empty trip. This removes a half-built version of it that cost complexity
+and returned nothing. Deciding the real thing — `deleted_at`, a restore endpoint, a TTL purge job,
+UI — or adopting "deletes are final" as a stated stance is §Before launch work, and it stops being
+optional once there are users who are not the developer.
 
 ## The service-record resolvers split, and only one of them was the same question
+
+**Both filters are gone with the read filters above** — schedules are hard-deleted, so
+`_schedule_uuids_by_id` has nothing to hide, and the null it used to produce is now produced by
+`gear_service_schedule_id`'s `ON DELETE SET NULL` at the source. Kept because the *reason* the two
+halves differed is still load-bearing at both sites, and because one of the two conclusions still
+holds verbatim: `get_gear_item_uuids_by_id` is still unguarded, and every call site still indexes it
+directly. What changed is why that is safe. It used to rest on an argument about which references a
+write refuses; it now rests on `gear_item_id` being `NOT NULL` and `ON DELETE CASCADE` on both
+tables that carry it, so a schedule or record whose item is gone is gone itself and an id read off
+one of those rows always resolves.
 
 `_schedule_uuids_by_id` now filters `is_deleted`; `get_gear_item_uuids_by_id` deliberately still
 does not. The deferral above expected one answer for both, and the useful result is *why* that was
@@ -6714,12 +6673,16 @@ write that refuses the reference; the other has neither.
 
 ### What is pinned, and why the second half needed a test more than the first
 
-`tests/test_deleted_refs_on_service_records.py` covers both, and the item half is the one that
-needed it: a test asserting a deleted item's uuid **still comes through** is what stands between
-this and a future reader "finishing the job" by adding the filter that looks conspicuously missing.
-It also pins the property the unguarded indexing depends on — every id in, every id out — so the
-break surfaces here rather than as a 500 in another file. `get_gear_item_uuids_by_id`'s docstring
-says the same thing at the site itself.
+`tests/test_deleted_refs_on_service_records.py` covered both, and the item half was the one that
+needed it: a test asserting a deleted item's uuid **still comes through** is what stood between this
+and a future reader "finishing the job" by adding the filter that looks conspicuously missing.
+
+**That file is gone with the hard-delete change**, and so is the state it arranged — there is no
+deleted-but-present item to assert about. What replaced it is
+`tests/test_hard_delete.py::TestTheRowIsActuallyRemoved`, which pins the premise underneath: the
+`DELETE` really is a `DELETE`, on all five resources. Re-adding `SoftDeleteMixin` to any of them
+would turn every cascade back off, and that is now the failure the suite catches.
+`get_gear_item_uuids_by_id`'s docstring still says at the site itself why it is unguarded.
 
 ### Nothing else moved
 
@@ -6732,6 +6695,11 @@ One docstring was corrected rather than deleted while here. `soft_delete_schedul
 justified keeping records by calling them "unreachable once the item is gone", which is false:
 `GET /gear-service-records` lists them with no item filter, and that visibility is precisely what
 makes keeping them worth anything. The behaviour was right and the reason given for it was not.
+
+That function no longer exists — the cascade it was hand-rolling does the work — and neither does
+the state it produced. A deleted item now takes its schedules **and its records** with it, so
+"unreachable" is finally true and finally irrelevant, because there is nothing left to reach. See
+*"The row goes, and so does everything pointing at it"* above and the section on archiving below.
 
 ## The Postgres test fixtures are shared, and a local copy silently wins
 
@@ -6797,6 +6765,17 @@ things that catch people out on top of it:
   count, which also changes for unrelated reasons.
 
 ## A deleted gear item's service history has no view, and archiving is the surface that does
+
+**The conclusion survived the hard-delete change and its premise did not**, which is worth stating
+first because this section is the reason that change was affordable. It found that a deleted item's
+service records were reachable in the API and invisible in the product, and that the surface a diver
+actually wants — retired kit whose history still reads — already ships, as archiving. That half is
+unchanged and is now the *only* answer: a deleted item's records are destroyed by
+`gear_service_record.gear_item_id`'s `ON DELETE CASCADE` rather than kept out of sight. Everything
+below about what is reachable describes the state before that, and the alternatives it weighs are
+moot — neither can be built against rows that no longer exist. Read it for why archiving is the
+feature and why neither alternative was worth building; do not read the reachability inventory as
+current.
 
 The section above corrected a docstring that justified keeping a deleted item's service records by
 calling them "unreachable once the item is gone", which was false. That left a larger question it
@@ -6876,6 +6855,13 @@ assumption that something displays it:
    record → schedule → item is the only path by which an item that was never dived and never in a
    set survives into an export at all.
 
+**Two of those three were arguments for keeping the records of a *deleted* item, and both fell.**
+Recoverability fell first and hardest: there is still no undelete endpoint, and the hard-delete
+change judged that a half-built trash bin costing complexity and returning nothing was worth less
+than the complexity. The referrer graph went with `still_referenced`. What is left is (1), and it is
+the whole answer: export a live or archived item and its history comes with it. Delete the item and
+there is nothing to export, which is what the delete dialog has always said.
+
 ### Why the wording keeps rotting here, and what is pinned
 
 The same false claim was written three times - the docstring corrected in #61, the paragraph under
@@ -6888,8 +6874,15 @@ instead, which are both facts about this repo rather than about what a client re
 The premise this decision stands on is one kwarg from being false. Adding `is_archived=False` to
 `_owned_gear_item` - to match the listing filter, which looks like the obvious tidy-up - would
 silently take the service history off archived items too, leaving the decision standing on nothing
-and breaking no existing test. `tests/test_gear_service_history_reachability.py` pins both halves:
+and breaking no existing test. `tests/test_gear_service_history_reachability.py` pinned both halves:
 an archived item resolves, a deleted one raises the 422.
+
+**That file went with the hard-delete change**, because its deleted-item half could no longer be
+arranged - there is no deleted-but-present item to raise a 422 about. Both halves moved to
+`tests/test_hard_delete.py::TestArchivingIsTheNonDestructivePath`, which pins that an archived item
+still resolves through `_owned_gear_item` and still holds its schedules and records. The kwarg that
+would break it costs strictly more now than when this was written: archiving is the *only* way a
+service history stays readable, rather than one of two.
 
 No DDL, no schema change, no route change, and nothing handed off to `opendiving-web` -
 deliberately, since the conclusion is that the view it would build should not exist.
