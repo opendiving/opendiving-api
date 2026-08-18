@@ -6071,25 +6071,24 @@ rule no mock can see, that a dive which merely *lost* the doomed site (because i
 replacement) still counts as one that moved. Unread by the routes, load-bearing for the tests that
 prove the statements did what they claim.
 
-**Client-visible, and the sequencing is a requirement rather than a detail.** The web app has to
-stop reading `moved_dives` *before* this ships. The reverse order is free — a client that no longer
-reads the field does not care that it is still sent — so the web change goes first and this one is
-strictly second.
+**Client-visible, and there was no compatibility window to manage.** Removing a response field is
+normally a sequencing problem — every client has to stop reading it before the server stops sending
+it. This one had no such constraint: the app is pre-launch, runs nowhere but a developer's machine,
+and its only two clients live in this same working tree. So the field came out on both sides at
+once, rather than the API leaving it in place while a deprecation made its way through a client
+nobody else is running.
 
-Worth knowing what "before" is actually buying, because the failure is quiet rather than loud.
-Getting the order wrong degrades gracefully: the read is `result.moved_dives > 0`, and
-`undefined > 0` is `false`, so the toast silently drops the "12 dives moved to Cebu 2026" half and
-says only that the trip was deleted. Nothing throws and nothing looks broken — which is the argument
-for the ordering, not against it. A break that announces itself gets fixed; this one just quietly
-stops telling divers where their dives went.
+That is worth stating rather than assuming, because it is a property of the project's *stage* and
+not of this change. The next removal, made after anything is deployed, does not get to reason this
+way — and the tell that the reasoning has expired is the same either way: someone is running a
+client you cannot redeploy in the same commit.
 
-The web app has a `DeletedWithMovedDives` of its own — hand-written, like everything in its
-`lib/api` (that repo has no client codegen, so nothing regenerates when this schema goes). It
-outlives both changes by design and comes out in a follow-up, after this: until then it declares a
-required `moved_dives` the API no longer sends. No runtime consequence, because the production read
-goes with the web change; what is left pointing at the field is a test asserting it round-trips
-through a *mocked* response, which keeps passing for exactly that reason and is the follow-up's job
-to remove.
+The removal is complete on the web side too, in the change that pairs with this one: its
+hand-written `DeletedWithMovedDives` (that repo has no client codegen, so nothing regenerates when
+this schema goes), the two return annotations naming it, and a test asserting the field round-trips
+through a *mocked* response. That last one is the reason the removal had to be deliberate rather
+than left to a failing build: mocking the response means the test goes on passing against an API
+that no longer sends the field, so nothing would have flagged the remnant.
 
 ### A bad replacement is a 422, not a 404
 
