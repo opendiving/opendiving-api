@@ -34,6 +34,22 @@ class GasRole(StrEnum):
 
 
 class DiveMixtureBase(BaseModel):
+    """The shape a mixture is read back in - and deliberately the *unbounded* one.
+
+    `DiveMixtureRead` inherits this and `crud_dive_mixtures` runs
+    `DiveMixtureRead.model_validate(row)` over every mixture on every read, so a bound
+    declared here would validate stored rows on the way **out**: one violating row would
+    turn `GET /dives` and `GET /dive/{uuid}` into a 500, making the dive unviewable
+    rather than merely unsavable, and `services/export/envelope.py` would break the whole
+    export on the same row. That is not hypothetical for this model - `_ParserOutput`'s
+    docstring records that one stored `NaN` already does exactly that.
+
+    A read schema that can reject its own table is a liability. The pressure bounds
+    therefore live on `DiveMixtureCreate`/`DiveMixtureUpdate` and on the DB `CHECK`s,
+    which together are what keep the table clean; a row that somehow slips past both
+    still reaches the diver as a field with a message rather than as a 500.
+    """
+
     volume: Annotated[float, Field(examples=[12.0], description="Cylinder volume in liters")]
     start_pressure: Annotated[
         float | None, Field(default=None, examples=[200.0], description="Starting pressure in bar")
@@ -74,6 +90,32 @@ class DiveMixtureBase(BaseModel):
 class DiveMixtureCreate(DiveMixtureBase):
     model_config = ConfigDict(extra="forbid")
 
+    start_pressure: Annotated[
+        float | None,
+        Field(
+            default=None,
+            gt=0,
+            le=350,
+            examples=[200.0],
+            description="Starting pressure in bar. Above 0: a cylinder at 0 bar delivers nothing, so no dive "
+            "began on one - see `DiveMixtureSchema._drop_unpressurized` for the corpus evidence that a file's 0 "
+            "is an absent-marker. At most 350: above any real 300 bar DIN fill, so what it catches is a unit "
+            "error or two cylinders summed as one.",
+        ),
+    ]
+    end_pressure: Annotated[
+        float | None,
+        Field(
+            default=None,
+            ge=0,
+            le=350,
+            examples=[50.0],
+            description="Ending pressure in bar. 0 is legal here and start is not: you cannot start a dive on an "
+            "empty cylinder, but you can finish one on an empty cylinder - an out-of-gas ascent, a drained stage "
+            "and an SPG pegged at zero are all dives worth logging honestly.",
+        ),
+    ]
+
 
 class DiveMixtureCreateInternal(DiveMixtureCreate):
     dive_id: int
@@ -89,8 +131,14 @@ class DiveMixtureUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     volume: Annotated[float | None, Field(default=None, description="Cylinder volume in liters")]
-    start_pressure: Annotated[float | None, Field(default=None, description="Starting pressure in bar")]
-    end_pressure: Annotated[float | None, Field(default=None, description="Ending pressure in bar")]
+    start_pressure: Annotated[
+        float | None,
+        Field(default=None, gt=0, le=350, description="Starting pressure in bar - above 0 and at most 350"),
+    ]
+    end_pressure: Annotated[
+        float | None,
+        Field(default=None, ge=0, le=350, description="Ending pressure in bar - 0 is legal, unlike a start"),
+    ]
     oxygen: Annotated[float | None, Field(default=None, description="Oxygen percentage")]
     helium: Annotated[float | None, Field(default=None, description="Helium percentage")]
     po2_limit: Annotated[

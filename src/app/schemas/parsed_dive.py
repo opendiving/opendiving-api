@@ -86,7 +86,8 @@ class DiveMixtureSchema(_ParserOutput):
     @field_validator("start_pressure", "end_pressure")
     @classmethod
     def _drop_unpressurized(cls, value: float | None) -> float | None:
-        """A cylinder pressure of 0 bar is not a reading, whichever parser produced it.
+        """Outside `(0, 350]` bar this is not a cylinder pressure, whichever parser
+        produced it.
 
         This is **not** the "treat zero as missing" rule DECISIONS.md rejects, and the
         two are worth holding apart. A gas fraction of 0 is inside the range the
@@ -112,11 +113,27 @@ class DiveMixtureSchema(_ParserOutput):
         same judgement `_mixtures_from_cylinders` already makes for a `null` Ocean
         reading, and putting it on the schema means a fourth parser inherits it.
 
-        `<= 0` rather than `== 0` - a negative gauge reading is no more a fill than a zero
-        - though only the zero is attested. `NaN` is not this validator's to catch, and
+        The lower clause excludes everything `<= 0` rather than just `== 0` - a negative
+        gauge reading is no more a fill than a zero - though only the zero is attested. `NaN` is not this validator's to catch, and
         deliberately so: `_ParserOutput._drop_non_finite` has already run it out.
+
+        **The upper clause is the parse-side half of a bounded column**, on the same terms
+        as `_drop_implausible_po2_limit` below and `_drop_implausible_surface_pressure`:
+        no parsed value should reach a bounded column without having passed the bound the
+        column applies, and `ck_dive_mixture_start_pressure_range` /
+        `ck_dive_mixture_end_pressure_range` now band both fields at 350 bar. That bound
+        is attested from this exact direction - the DM5 XML parser read millibar as bar
+        and stored `start_pressure = 205203` (see DECISIONS.md) - so without this clause a
+        recurrence would hand `/dive/parse` a 205203, prefill the form with it, and 422 on
+        Save: a field the diver never chose, which is the failure the other two are
+        written up for. 350 rather than a rounder number because it clears a 300 bar DIN
+        fill, the highest real one, and rejects everything above it.
+
+        The band is deliberately the same on both fields even though the request layer's
+        floors differ (`gt=0` for start, `ge=0` for end): a parser has no diver asserting
+        anything, and a 0 from a file is an absent-marker in either column.
         """
-        return None if value is not None and value <= 0 else value
+        return None if value is not None and not (0 < value <= 350) else value
 
     @field_validator("gas_number")
     @classmethod

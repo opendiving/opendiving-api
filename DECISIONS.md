@@ -3992,8 +3992,12 @@ would clear the error by storing "this cylinder started and finished the dive on
 rendered as a fill on the dive detail page, still overwriting the form's pressures on import, still
 disagreeing with the same dive's JSON. The form rule is also doing real work: a saved cylinder that
 started at 0 bar is nonsense whoever typed it. The honest fix is for the file's non-reading not to
-become a number in the first place. (`end_pressure` already allows 0 there, which is a separate
-asymmetry and deliberately left alone.)
+become a number in the first place. (`end_pressure` allows 0 - on the form and at every other layer
+
+- and that asymmetry is deliberate rather than a leftover: **you cannot start a dive on an empty
+  cylinder, but you can finish one on an empty cylinder.** See *"A cylinder pressure is a bounded
+  field, and every layer that writes one now says so"* below, which is where the rest of that
+  argument and the bounds it produced live.)
 
 **Why it lives on the schema rather than in `SuuntoXmlParser`,** where all the evidence is: the fact
 is about the field, not the format. No export can express a cylinder breathed from 0 bar, so no
@@ -4017,6 +4021,181 @@ WHERE start_pressure <= 0 AND end_pressure <= 0;
 
 Both columns together and both `<= 0`, matching the parser: a row with one real pressure was never
 produced by this bug and is not this statement's to touch.
+
+## A cylinder pressure is a bounded field, and every layer that writes one now says so
+
+The section above explains why `DiveMixtureSchema` nulls a parsed 0. What it left standing was that
+**only the parse layer and the web form acted on it at all** - the API accepted any float, and the
+`dive_mixture` table's only pressure constraint was the ordering one. So a client could `POST` a
+`start_pressure` of 0, the row stored it, and the dive's own edit form then refused to submit on a
+field the diver never touched. That symptom is what this was filed under; it is a consequence, not
+the thing that was wrong. **The decision is that a `start_pressure` of 0 must never reach the
+database in the first place.**
+
+The five layers and what each now does:
+
+| Layer                                  | `start_pressure`             | `end_pressure`               |
+| -------------------------------------- | ---------------------------- | ---------------------------- |
+| Parse (`DiveMixtureSchema`) - a *file* | outside `(0, 350]` -> `null` | outside `(0, 350]` -> `null` |
+| Request (`DiveMixtureCreate`/`Update`) | `gt=0, le=350` -> 422        | `ge=0, le=350` -> 422        |
+| Read (`DiveMixtureBase`/`Read`)        | **unbounded**                | **unbounded**                |
+| DB (`CHECK`)                           | `> 0 AND <= 350`             | `>= 0 AND <= 350`            |
+| Form (`diveMixtureSchema`, web)        | `positive().max(350)`        | `min(0).max(350)`            |
+
+### The asymmetry is physical, and that is the whole shape
+
+> **You cannot start a dive on an empty cylinder. You can finish one on an empty cylinder.**
+
+A cylinder at 0 bar gauge delivers nothing - the regulator's first stage needs supply above ambient,
+and ambient at the shallowest point of any dive is already 1 bar - so there is no dive whose first
+breath came from a cylinder reading 0, and no diver types one meaning it. An out-of-gas ascent is
+rare but it happens, as does a fully drained stage or bailout and an SPG pegged at zero, and those
+are exactly the dives worth logging honestly. So:
+
+- `start_pressure` ∈ `(0, 350]` ∪ `NULL`
+- `end_pressure` ∈ `[0, start_pressure]` ∪ `NULL`
+
+with `ck_dive_mixture_pressure_order` unchanged and now carrying its full weight. The rule being
+enforced is *"a cylinder that was never filled"*, not the much broader *"a zero is suspicious"* -
+which is why a 0 helium fraction and a 0 CNS reading are untouched. No stored row records
+`end_pressure = 0` either, so allowing it costs nothing today and preserves a real record the day
+someone needs it. The diver also already has an unambiguous way to say "I don't know" - an empty
+box, which normalizes to `null` - so a typed 0 is never load-bearing as a sentinel.
+
+`TestCreateAndUpdateAllowAnEmptyCylinderAtTheEnd` and `test_zero_end_pressure_is_allowed` pin the
+asymmetry from both sides deliberately: it is the thing most likely to be "tidied up" later by
+someone who reads the two adjacent fields and sees an inconsistency.
+
+### Reject at the request layer, coerce at the parse layer - not a contradiction
+
+The two schemas answer different questions about the same number, and the file already runs this
+split twice.
+
+- `DiveMixtureSchema` describes **a file**. Its own docstring draws the line: *"this schema
+  describes a file, that one describes a dive being saved."* A 0 there is a known dialect - DM5's
+  way of writing "no transmitter" - so translating it to `null` is interpretation, and 422-ing it
+  would reject a value the diver never typed and cannot see, failing the attach of an otherwise
+  importable export.
+- `DiveMixtureCreate` describes **a dive a client is asserting**. There is no dialect to interpret:
+  the wire format has `null`, every client can send it, and the parse layer has already been through
+  the file. A 0 arriving here is a bug or a typo, and coercing it silently swallows both.
+
+`_drop_negative_gas_number` exists precisely *because* `DiveMixtureCreate`'s `ge=0` would otherwise
+422 a field the diver never chose, and `_drop_implausible_po2_limit` states the rule outright: **no
+parsed value should reach a bounded column without having passed the bound the column applies.**
+`po2_limit` and `gas_number` were each a bounded request field with a parse-side coercion in front
+of it; `start_pressure` had the coercion and no bound. Adding it is the missing half of a pattern
+already established twice in the same class.
+
+### The bound goes on `Create`/`Update`, never on `DiveMixtureBase`
+
+This is the detail that had to be got right, because getting it wrong is worse than the bug.
+`DiveMixtureRead` inherits `DiveMixtureBase`, and `crud_dive_mixtures` runs
+`DiveMixtureRead.model_validate(row)` over **every mixture on every read**. A bound on `Base`
+therefore validates stored rows on the way *out*: one violating row would turn `GET /dives` and
+`GET /dive/{uuid}` into a **500**, making the dive unviewable rather than merely unsavable, and
+`services/export/envelope.py` rebuilds a `DiveMixtureBase` per mixture, so the full export would
+break on the same row. Not hypothetical for this model - `_ParserOutput`'s docstring records that
+one stored `NaN` already does exactly that, and only hand-written SQL clears it.
+
+So the two fields are redeclared on `DiveMixtureCreate` (which `DiveMixtureCreateInternal` inherits,
+keeping the admin create path covered) and on `DiveMixtureUpdate`. Redeclaring two fields on two
+classes is the entire cost. `TestTheReadSchemaStaysUnbounded` fails the moment someone "completes"
+the work by hoisting them to `Base`.
+
+That is also why `toDiveMixtureInput`'s `??` on the web side stays `??` rather than coercing a
+stored 0 to `""`: on the day a 0 *does* arrive - from a database an `ALTER` never reached - the
+fallback has to be a legible form error telling the diver what to do, not a 500 and not a silent
+repair of the data this design makes impossible.
+
+### Why a Pydantic bound *and* a `CHECK`, when `volume`/`oxygen`/`helium` have only a `CHECK`
+
+Two live conventions in one file, and this picks the newer one. `volume`, `oxygen` and `helium` are
+`CHECK`-only, which is why `_MIXTURE_CONSTRAINT_MESSAGES` exists and why its entries actually fire.
+`po2_limit` and `gas_number` are bounded in Pydantic and mirrored in a `CHECK`.
+
+The cost of the newer one is that Pydantic answers first, so a diver sees
+`mixtures.0.start_pressure: Input should be greater than 0` and the curated sentence never fires
+from the API path. That is already the accepted state for `po2_limit` and `gas_number`, and the
+trade is worth it: **a Pydantic 422 names the field and the index**, which a `CHECK` violation
+cannot, so the form can scroll to and focus the offending box - and it rejects before a transaction
+is opened. The messages are registered anyway as the backstop for any write that bypasses Pydantic,
+which is exactly what `backfill_tech_fields`-style Core `UPDATE`s do; without an entry
+`_mixture_error_detail` falls through to a bare "Invalid gas mixture."
+
+`"Start pressure must be above 0 and at most 350 bar."`, *not* "between 0 and 350" - the second
+phrasing tells a diver who just typed a 0 that the value they were rejected for is legal.
+`"End pressure must be between 0 and 350 bar."` is correct as written, because there 0 is legal.
+
+### 350 bar, and why the band is two-sided
+
+The upper half is not symmetry for its own sake. Two reasons, the second stronger than the first:
+
+- **The failure is attested and has already shipped a bug.** The DM5 XML parser read millibar as bar
+  and stored `start_pressure ~ 205203` (see *"DM5 XML expresses every pressure in millibar"*); the
+  fix went into the parser, but a bound at the request layer would have caught it at the boundary
+  instead of in the gas-mixtures table.
+- **Postgres sorts `NaN` above every number**, so a `CHECK` of `start_pressure > 0` alone **admits a
+  stored `NaN`** - the exact value that turns `GET /dives` into a 500. `'NaN'::float8 > 0` is true
+  and `'NaN'::float8 <= 350` is false, so only an upper clause rejects it. A one-sided band would
+  have left that door open while looking closed. `test_nan_pressures_are_rejected` is the case
+  nobody would think to write and the one the upper half exists for.
+
+**350 rather than 500.** 500 was never a validity threshold - it is this file's *correction*
+heuristic, "divide any pressure above ~500 bar by 1000", a rule for spotting a factor-of-1000 error.
+Reused as a bound it admits something a real row demonstrated: one dive stored
+`start_pressure = 415` / `end_pressure = 230`, which an earlier version of this file called "a
+plausible hand-entered 415". It was not. It was a **sidemount pair** - two 11.1 L cylinders whose
+pressures had been *summed* against one cylinder's water capacity, on dive 276 (2024-04-24, 22.6 m,
+59 min, EAN32). The arithmetic is the tell: `11.1 × (415−230) = 2 × 11.1 × ~92.5 = 2054 L`, so the
+summed form and the honest form describe the same gas and nothing derived from the dive was ever
+wrong - only the way it was written down. **No bound on a single field could have caught it except
+an upper one:** every individual number was positive, correctly ordered, and inside every constraint
+the table had. The diver has since re-encoded it as the two rows it always was.
+
+350 sits above any real 300 bar DIN fill, the highest there is, so the only things it can reject are
+a pair written as one cylinder, a unit error, and a `NaN` - and it makes each fail at the moment it
+is made. Framed like `po2_limit`'s band: **the band exists to catch a unit error, not to have an
+opinion about how hard someone fills a cylinder.** `test_a_300_bar_din_fill_is_allowed` pins that a
+real fill is not collateral.
+
+The parse layer is not exempt from the upper half either, by this file's own rule that no parsed
+value reaches a bounded column unbounded. `_drop_unpressurized` therefore nulls anything outside
+`(0, 350]` rather than only `<= 0`, mirroring `_drop_implausible_surface_pressure`, which is already
+a two-sided parse-side clamp against the same millibar error class. Otherwise a recurrence would
+hand `/dive/parse` a 205203, prefill the form with it, and 422 on Save - recoverable, unlike
+`gas_number` this field has an input, but it would leave the new bound guarded on one side only.
+`TestEveryParsedPressureSatisfiesTheRequestSchema` drives a real parser with a file out of range on
+each side; scoped as a sweep of the corpus fixtures it would pass green while proving nothing,
+because no fixture produces an out-of-range value.
+
+### No backfill, and what this changed for clients
+
+Of 3679 `dive_mixture` rows (re-derived at implementation time): `start_pressure` is NULL in 2368
+and ranges 96-230 bar in the rest; `end_pressure` is NULL in 2500 and ranges 6-200. **Zero rows
+violate either bound**, so both `ALTER`s validate on the spot and the success *is* the proof. The
+historical `UPDATE ... WHERE start_pressure <= 0 AND end_pressure <= 0` in the section above stays
+as a record of the earlier import bug - do not re-run it.
+
+```sql
+ALTER TABLE dive_mixture ADD CONSTRAINT ck_dive_mixture_start_pressure_range CHECK (start_pressure IS NULL OR (start_pressure > 0 AND start_pressure <= 350));
+ALTER TABLE dive_mixture ADD CONSTRAINT ck_dive_mixture_end_pressure_range CHECK (end_pressure IS NULL OR (end_pressure >= 0 AND end_pressure <= 350));
+```
+
+**This changes the API contract**: a pressure previously accepted now 422s. The only write paths
+that could store a bad one are `POST /dive` and `PATCH /dive/{uuid}` (both via `DiveMixtureCreate`)
+and the admin panel (`DiveMixtureUpdate`); imports cannot, since they all pass `_drop_unpressurized`
+first. Nothing downstream needed changing: `compute_gas_use` and `_pressure_used` already return
+`None` on a non-positive drop, UDDF export already skips a null start, and `merge_mixture_fields`
+writes only `po2_limit`/`gas_number`/`role`, so its Core `UPDATE` never touches pressures.
+
+**A real gap this surfaced, deliberately out of scope.** Sidemount and independent doubles have no
+first-class representation, and both available encodings are lossy: one shared pressure pair
+(`volume 22.2`, the convention 32 mixtures in this log already use) is untrue of two independent
+cylinders, while two honest mixtures silently forfeit gas consumption on any dive without a profile
+carrying gas switches - `compute_gas_use` returns `None` for anything but exactly one mixture. That
+rule is right for staged deco bottles breathed at different depths and wrong for a sidemount pair
+breathed alternately at the same depth, which is additive and could be summed safely.
 
 ## The mixture backfill joins on position, so the read it joins against must be ordered
 

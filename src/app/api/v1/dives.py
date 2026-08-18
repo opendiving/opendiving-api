@@ -144,6 +144,10 @@ _MIXTURE_CONSTRAINT_MESSAGES = {
     "ck_dive_mixture_helium_range": "Helium percentage must be between 0 and 100.",
     "ck_dive_mixture_oxygen_helium_sum": "Oxygen and helium percentages cannot sum to more than 100.",
     "ck_dive_mixture_pressure_order": "End pressure cannot be greater than start pressure.",
+    # "above 0", not "between 0 and 350": a diver told the value must be between 0 and 350
+    # has been told the 0 they just typed is legal.
+    "ck_dive_mixture_start_pressure_range": "Start pressure must be above 0 and at most 350 bar.",
+    "ck_dive_mixture_end_pressure_range": "End pressure must be between 0 and 350 bar.",
     "ck_dive_mixture_po2_limit_range": "Gas ppO2 limit must be between 0.4 and 2.0 bar.",
     "ck_dive_mixture_gas_number_non_negative": "Gas number cannot be negative.",
 }
