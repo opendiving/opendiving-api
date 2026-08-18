@@ -6033,21 +6033,48 @@ halfway leaves some dives moved and the trip still there, with nothing to retry 
 again); and it is **racy** (a dive added between the last page fetch and the delete is simply
 missed). None of the three is fixable from the client.
 
-### The count is always in the response, and the response is a model
+### The count was in the response, and has since been taken back out
 
-Both routes now return `{"message": ..., "moved_dives": N}` — `N` is 0 when the parameter was
-omitted, not absent. Always-present rather than conditional: a key that appears only sometimes makes
-the field optional in every typed client forever, to save one integer on the calls that did not ask
-for a move. "Zero dives moved" is also just true.
+Both routes answer `{"message": "Trip deleted"}` / `{"message": "Dive site deleted"}` — the same
+bare `dict[str, str]` every other delete on the API returns. `move_dives_to` is untouched: same
+parameter, same 422s, same move-then-delete in one transaction. Only the reporting went.
 
-These are the only two deletes on the API that answer with a **model** (`DeletedWithMovedDives` in
-`core/schemas.py`) rather than the bare `dict[str, str]` every other one returns, and the reason is
-the same goal. Widening the annotation to `dict[str, str | int]` — the obvious minimal change —
-publishes `additionalProperties: {anyOf: [string, integer]}`, so a generated client gets
-`Record<string, string | number>`: `message` comes out `string | number` and `moved_dives` still
-needs a cast before it can go anywhere near a toast. The dict is the right shape for a response with
+They used to return `{"message": ..., "moved_dives": N}`, `N` being 0 rather than absent when the
+parameter was omitted, and they were the only two deletes on the API that answered with a **model**
+(`DeletedWithMovedDives` in `core/schemas.py`) rather than a dict. Both of those were right for what
+they were for, and the argument is worth keeping because it recurs: widening the annotation to
+`dict[str, str | int]` — the obvious minimal change — publishes
+`additionalProperties: {anyOf: [string, integer]}`, so a generated client gets
+`Record<string, string | number>`, `message` comes out `string | number`, and `moved_dives` still
+needs a cast before it can go anywhere near a toast. **A dict is the right shape for a response with
 one fixed key and no structure; the moment there are two fields of different types it stops
-publishing what the client needs. A response model costs eight lines and makes both fields typed.
+publishing what the client needs.**
+
+What changed is upstream of all of that: nothing asks for the number any more. The count existed for
+one sentence — "12 dives moved to Cebu 2026" — in a confirmation dialog that also pre-counted the
+dives client-side, over a `GET /dives?trip_uuid=X&items_per_page=1` with a timeout race behind it,
+so it could phrase a "Move 2 dives to another trip first" checkbox. That dialog now states the
+consequence instead of asking about it ("Deleting removes this trip from every dive logged on it"),
+which is true at any N including zero, and the toast names the destination without a number. With
+the checkbox gone the count had no consumer on either side of the request.
+
+So this is not a reversal of the reasoning above — it is the field outliving its reason. Keeping it
+would have meant a second response shape on the API, and a model whose docstring argued for a
+precision no caller wanted. **A response field is only as justified as the thing that reads it; when
+that goes, the field is not "harmless to leave" — it is a contract everything downstream still has
+to type.**
+
+The two crud functions still return their counts (`reassign_dives_to_trip`,
+`replace_dive_site_on_dives`). That is deliberate: it is the natural affected-row count of a
+set-based statement, and it is what the database-backed tests assert against — including the one
+rule no mock can see, that a dive which merely *lost* the doomed site (because it already held the
+replacement) still counts as one that moved. Unread by the routes, load-bearing for the tests that
+prove the statements did what they claim.
+
+**Client-visible, and the sequencing matters.** The web app had to stop reading `moved_dives` first;
+shipping this against a client still reading it gives a toast built on `undefined`. The reverse
+order is free — a client that no longer reads the field does not care that it is still sent — which
+is why the web change went first and this one is strictly second.
 
 ### A bad replacement is a 422, not a 404
 
@@ -6073,9 +6100,11 @@ uuid is real.
 Both reassignments are scoped to `is_deleted = False`. Deleted dives are outside everything the
 diver can see, and leaving their `trip_id`/join rows pointing at the resource about to be
 soft-deleted preserves the pairing they were logged with — which is what a plain delete already does
-to *every* dive. It also keeps `moved_dives` equal to the number the confirmation dialog got from
-`GET /dives?trip_uuid=X&items_per_page=1`, which filters the same way; a toast contradicting the
-dialog that opened it would read as a bug whichever number was right.
+to *every* dive. It also used to keep the reported count equal to the number the confirmation dialog
+had pre-fetched from `GET /dives?trip_uuid=X&items_per_page=1`, which filters the same way — a toast
+contradicting the dialog that opened it would have read as a bug whichever number was right. Neither
+number exists any more (see the subsection above), so the scoping now stands on the first argument
+alone, which was always the sufficient one.
 
 ### The dive-site case is three set-based statements, not a loop
 
@@ -6373,9 +6402,10 @@ the call and learn what happened, whereas one 404 would cover both "already gone
 "already gone, dives stranded" — and the dives are the half the client needs to know about.
 Idempotent `DELETE` is the more conventional of the two answers besides.
 
-**Client-visible.** A retry that used to 404 now answers 200 with `moved_dives`. Nothing breaks — a
-client treating the old 404 as "already gone" still behaves correctly — but "deleted twice" is no
-longer distinguishable from "deleted once" by status alone.
+**Client-visible.** A retry that used to 404 now answers 200. Nothing breaks — a client treating the
+old 404 as "already gone" still behaves correctly — but "deleted twice" is no longer distinguishable
+from "deleted once" by status alone. Nor by body, since the count that briefly made the two tellable
+apart is gone as well.
 
 ### `get_trip_uuids_by_ids` also gained a `user_id` scope
 

@@ -13,7 +13,6 @@ from ...core.exceptions.http_exceptions import (
     NotFoundException,
     UnprocessableEntityException,
 )
-from ...core.schemas import DeletedWithMovedDives
 from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
@@ -236,7 +235,7 @@ async def erase_dive_site(
         uuid_pkg.UUID | None,
         Query(description="Move the dives logged at this site onto the site with this uuid before deleting it"),
     ] = None,
-) -> DeletedWithMovedDives:
+) -> dict[str, str]:
     """Soft-delete a dive site, optionally moving the dives logged at it to another site.
 
     404 unless the caller owns it, exactly as for a site that doesn't exist. Idempotent
@@ -261,22 +260,20 @@ async def erase_dive_site(
     still there to move, and refusing would make the retry of a half-failed delete worse
     than the first attempt.
 
-    `moved_dives` counts the dives that changed, for the "12 dives moved to Coral Garden"
-    the web app says afterwards. It is present either way, and 0 when the parameter was
-    omitted.
+    The response is the bare `{"message": ...}` every other delete on the API returns; the
+    count of what moved is not reported. See DECISIONS.md.
     """
     # `include_deleted`: deleting an already-soft-deleted site is a no-op, not a 404.
     db_dive_site = await _get_owned_dive_site(db, uuid, current_user, include_deleted=True)
     owner_id = db_dive_site.user_id
 
-    moved_dives = 0
     if move_dives_to is not None:
         if move_dives_to == uuid:
             raise UnprocessableEntityException("A dive site cannot be moved onto itself.")
         site_id_by_uuid = await resolve_dive_site_ids_for_user(db=db, dive_site_uuids=[move_dives_to], user_id=owner_id)
         if site_id_by_uuid is None:
             raise UnprocessableEntityException("Dive site not found.")
-        moved_dives = await replace_dive_site_on_dives(
+        await replace_dive_site_on_dives(
             db=db,
             user_id=owner_id,
             from_dive_site_id=db_dive_site.id,
@@ -290,4 +287,4 @@ async def erase_dive_site(
     # Soft-deleted sites stay on the dives logged at them, so drop those reads too.
     await invalidate_dive_caches(owner_id)
 
-    return DeletedWithMovedDives(message="Dive site deleted", moved_dives=moved_dives)
+    return {"message": "Dive site deleted"}

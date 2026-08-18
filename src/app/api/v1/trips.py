@@ -15,7 +15,6 @@ from ...core.exceptions.http_exceptions import (
     NotFoundException,
     UnprocessableEntityException,
 )
-from ...core.schemas import DeletedWithMovedDives
 from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
@@ -393,7 +392,7 @@ async def erase_trip(
         uuid_pkg.UUID | None,
         Query(description="Move this trip's dives onto the trip with this uuid before deleting it"),
     ] = None,
-) -> DeletedWithMovedDives:
+) -> dict[str, str]:
     """Soft-delete a trip, optionally moving its dives onto another trip first.
 
     404 unless the caller owns it, exactly as for a trip that doesn't exist. The row is
@@ -422,23 +421,20 @@ async def erase_trip(
     a definitive answer; a 404 would have covered both "already gone, dives moved" and
     "already gone, dives stranded" with one status, and the dives are the part it needs.
 
-    `moved_dives` counts what was re-pointed, for the "12 dives moved to Cebu 2026" the web
-    app says afterwards. It is present either way, and 0 when the parameter was omitted.
+    The response is the bare `{"message": ...}` every other delete on the API returns; the
+    count of what moved is not reported. See DECISIONS.md.
     """
     # `include_deleted`: deleting an already-soft-deleted trip is a no-op, not a 404.
     db_trip = await _get_owned_trip(db, uuid, current_user, include_deleted=True)
     owner_id = db_trip.user_id
 
-    moved_dives = 0
     if move_dives_to is not None:
         if move_dives_to == uuid:
             raise UnprocessableEntityException("A trip cannot be moved onto itself.")
         replacement_id = await resolve_trip_id_for_user(db=db, trip_uuid=move_dives_to, user_id=owner_id)
         if replacement_id is None:
             raise UnprocessableEntityException("Trip not found.")
-        moved_dives = await reassign_dives_to_trip(
-            db=db, user_id=owner_id, from_trip_id=db_trip.id, to_trip_id=replacement_id
-        )
+        await reassign_dives_to_trip(db=db, user_id=owner_id, from_trip_id=db_trip.id, to_trip_id=replacement_id)
 
     # Commits the reassignment above along with the delete - `crud_trips.delete` is the
     # only writer here that commits, and both wrote through this one session.
@@ -452,4 +448,4 @@ async def erase_trip(
     # a trip fresh ones no longer do, for the rest of the hour.
     await invalidate_dive_caches(owner_id)
 
-    return DeletedWithMovedDives(message="Trip deleted", moved_dives=moved_dives)
+    return {"message": "Trip deleted"}
