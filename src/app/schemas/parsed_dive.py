@@ -114,8 +114,9 @@ class DiveMixtureSchema(_ParserOutput):
         reading, and putting it on the schema means a fourth parser inherits it.
 
         The lower clause excludes everything `<= 0` rather than just `== 0` - a negative
-        gauge reading is no more a fill than a zero - though only the zero is attested. `NaN` is not this validator's to catch, and
-        deliberately so: `_ParserOutput._drop_non_finite` has already run it out.
+        gauge reading is no more a fill than a zero - though only the zero is attested.
+        `NaN` is not this validator's to catch, and deliberately so:
+        `_ParserOutput._drop_non_finite` has already run it out.
 
         **The upper clause is the parse-side half of a bounded column**, on the same terms
         as `_drop_implausible_po2_limit` below and `_drop_implausible_surface_pressure`:
