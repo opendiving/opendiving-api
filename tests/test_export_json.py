@@ -77,6 +77,20 @@ class TestWhatUddfCannotHold:
         assert [c["name"] for c in document["certifications"]] == ["Open Water Diver"]
 
     @pytest.mark.asyncio
+    async def test_both_account_preferences_travel_with_the_logbook(self, monkeypatch):
+        """`/export/archive` promises nothing in the account is reachable only through the
+        app, and these two are the whole of what an account can be set to.
+
+        `units` in particular travels as *account data*: it says which system the diver
+        reads in, and every measurement in this file stays metric regardless (the module
+        docstring's "not re-scaled or re-unitised" promise).
+        """
+        document = await _render(full_bundle(), monkeypatch)
+        assert document["user"]["gear_service_emails"] is True
+        assert document["user"]["units"] == "metric"
+        assert document["dives"][0]["max_depth"] == 28.4
+
+    @pytest.mark.asyncio
     async def test_the_per_cylinder_role_and_ppo2_limit_survive(self, monkeypatch):
         document = await _render(full_bundle(), monkeypatch)
         mixtures = document["dives"][1]["mixtures"]
