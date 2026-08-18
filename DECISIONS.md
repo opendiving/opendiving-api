@@ -6758,9 +6758,15 @@ archiving.
 
 A record is not soft-deleted when its item is; only the item and its schedules are. So:
 
-- `GET /gear-service-records` with no `gear_item_uuid` lists them, and is the only API surface that
+- `GET /gear-service-records` with no `gear_item_uuid` lists them, and is the only *listing* that
   does. `GET /gear-item/{uuid}` 404s, and `?gear_item_uuid=` answers **422**, because
   `read_gear_service_records` resolves the uuid through `_owned_gear_item` first.
+- A record already known by uuid is not affected at all: `/gear-service-record/{uuid}` reads,
+  patches and deletes it as normal, because `resolve_record_for_user` scopes to the *record's* own
+  `is_deleted` and never looks at the item. That is the shape `get_gear_item_uuids_by_id`'s missing
+  filter exists to keep working - the alternative is a 500 - and it is why the dead end is a
+  *navigation* problem rather than a permission one. The only place a client can learn the uuid is
+  the unfiltered list above.
 - `/export/*` carries them, with the item resurrected and flagged `is_deleted: true`.
 - `opendiving-web` never sees them. The sole path to records is `gear-service-card.tsx` calling
   `fetchAllServiceRecords(userUuid, gearItemUuid, …)`, where `gearItemUuid` is a *required*

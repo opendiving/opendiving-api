@@ -272,9 +272,12 @@ async def soft_delete_schedules_for_gear_item(db: AsyncSession, gear_item_id: in
     is narrower than it has twice been described as, so it is worth stating exactly. The
     rows survive for `/export/*` and for an undelete that does not exist yet, and they
     stay listable by `GET /gear-service-records` with no item filter. Nothing in the
-    product displays them, because every route to them runs through the item: `GET
-    /gear-item/{uuid}` 404s and `?gear_item_uuid=` 422s, and the web client only ever
-    lists records from the item page.
+    product displays them: the item-scoped routes refuse a deleted item (`GET
+    /gear-item/{uuid}` 404s, `?gear_item_uuid=` 422s), and while a record already known
+    by uuid still reads, patches and deletes through `/gear-service-record/{uuid}` -
+    `resolve_record_for_user` scopes to the *record's* own `is_deleted` and never looks
+    at the item - that unfiltered list is the only place a client can learn the uuid,
+    and the web client only ever lists records from the item page.
 
     That gap is a choice, not an omission. **Archiving** is the supported way to retire
     kit and go on reading its history: an archived item resolves normally through
