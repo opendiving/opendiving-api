@@ -8,7 +8,9 @@ writer faithfully renders whatever bundle it is handed.
 
 So the two assertions that matter are the boring ones - only the caller's rows, and
 nothing soft-deleted - and they are asserted per table rather than once for dives, since
-each table carries its own copy of both filters.
+each table applies them itself. The second only has three tables left to be wrong about:
+`Dive`, `GearServiceRecord` and `Certification` still soft-delete, and the other five are
+hard-deleted, so `_owned` skips a filter it cannot express rather than one it forgot.
 
 Like `test_dive_check_constraints.py`, these are skipped when no database is reachable.
 On a developer's machine that means `POSTGRES_SERVER=localhost` (`src/.env` points at the
@@ -106,22 +108,18 @@ class TestScoping:
         assert [dive.id for dive in bundle.dives] == [live.id]
 
     @pytest.mark.asyncio
-    async def test_every_other_table_is_scoped_and_filtered_too(self, db: Session, owner: User, stranger: User):
-        """Each of these carries its own `user_id`/`is_deleted` pair, so each is its own
-        chance to leave one of the two off."""
+    async def test_every_other_table_is_scoped_to_the_caller_too(self, db: Session, owner: User, stranger: User):
+        """Each of these applies the `user_id` scope itself, so each is its own chance to
+        leave it off."""
         db.add_all(
             [
                 DiveSite(user_id=owner.id, name="Mine", notes=""),
-                DiveSite(user_id=owner.id, name="Gone", notes="", is_deleted=True),
                 DiveSite(user_id=stranger.id, name="Theirs", notes=""),
                 Trip(user_id=owner.id, name="Mine", start_date=date(2026, 6, 1), notes=""),
-                Trip(user_id=owner.id, name="Gone", start_date=date(2026, 6, 1), notes="", is_deleted=True),
                 Trip(user_id=stranger.id, name="Theirs", start_date=date(2026, 6, 1), notes=""),
                 GearItem(user_id=owner.id, name="Mine", notes=""),
-                GearItem(user_id=owner.id, name="Gone", notes="", is_deleted=True),
                 GearItem(user_id=stranger.id, name="Theirs", notes=""),
                 Certification(user_id=owner.id, agency="padi", name="Mine", notes=""),
-                Certification(user_id=owner.id, agency="padi", name="Gone", notes="", is_deleted=True),
                 Certification(user_id=stranger.id, agency="padi", name="Theirs", notes=""),
             ]
         )
@@ -132,6 +130,31 @@ class TestScoping:
         assert [trip.name for trip in bundle.trips] == ["Mine"]
         assert [item.name for item in bundle.gear_items] == ["Mine"]
         assert [cert.name for cert in bundle.certifications] == ["Mine"]
+
+    @pytest.mark.asyncio
+    async def test_the_three_tables_that_still_soft_delete_are_filtered(self, db: Session, owner: User):
+        """`_owned` branches on whether the model carries the column, so a table gaining
+        one later is filtered by default. These three are what that branch is for; `Dive`
+        has its own test above, and this pins the two that would otherwise be checked
+        nowhere."""
+        item = GearItem(user_id=owner.id, name="Reg", notes="")
+        db.add_all([item, Certification(user_id=owner.id, agency="padi", name="Gone", notes="", is_deleted=True)])
+        db.commit()
+        db.add(
+            GearServiceRecord(
+                user_id=owner.id,
+                gear_item_id=item.id,
+                kind="service",
+                serviced_on=date(2026, 1, 1),
+                dive_count_at_service=0,
+                is_deleted=True,
+            )
+        )
+        db.commit()
+
+        bundle = await _load(owner.id)
+        assert bundle.certifications == []
+        assert bundle.service_records == []
 
     @pytest.mark.asyncio
     async def test_an_account_with_nothing_in_it_loads_an_empty_bundle(self, owner: User):
@@ -145,116 +168,123 @@ class TestScoping:
             await _load(-1)
 
 
-class TestStillReferencedButDeleted:
-    """The rows that are soft-deleted and still shown, which the app has three of.
+class TestTheCascadeLeavesNothingDangling:
+    """What replaced the resurrection.
 
-    `erase_dive_site` leaves the site on the dives logged at it, `erase_gear_item` leaves
-    the item on its dives and sets, `erase_trip` leaves the trip on its dives, and the
-    service-record listing resolves a schedule uuid with no `is_deleted` filter. Reading
-    only the live rows made `sites_for`/`gear_for` a `KeyError` - a 500 on all three
-    export endpoints for any diver who had ever deleted a site - and would have left
-    `export.json` with uuids nothing in the file defined and UDDF with dangling
-    `xs:IDREF`s.
+    `_owned` used to take a `still_referenced` set and read deleted-but-referenced rows
+    back, because `erase_dive_site` left the site on the dives logged at it,
+    `erase_gear_item` left the item on its dives and sets, `erase_trip` left the trip on
+    its dives, and a service record went on naming a deleted schedule. Without that,
+    `sites_for`/`gear_for` came back a `KeyError` - a 500 on all three export endpoints for
+    any diver who had ever deleted a site - and `export.json` carried uuids nothing in the
+    file defined, with UDDF's `xs:IDREF` version of the same reference refusing to validate.
+
+    All five of those tables are hard-deleted now, so the join row goes with the row it
+    points at and a dangling reference cannot be created to be repaired. These pin that,
+    since it is the premise the whole simplification rests on.
     """
 
     @pytest.mark.asyncio
-    async def test_a_deleted_site_and_gear_item_still_on_a_dive_come_back(self, db: Session, owner: User):
-        site = DiveSite(user_id=owner.id, name="Gone", notes="", is_deleted=True)
-        item = GearItem(user_id=owner.id, name="Gone", notes="", is_deleted=True)
-        db.add_all([site, item])
+    async def test_deleting_a_site_takes_its_dive_links_with_it(self, db: Session, owner: User):
+        site = DiveSite(user_id=owner.id, name="Gone", notes="")
+        db.add(site)
+        db.commit()
+        dive = _dive(db, owner, number=1)
+        db.add(DiveDiveSite(dive_id=dive.id, dive_site_id=site.id, position=0))
+        db.commit()
+
+        db.delete(site)
+        db.commit()
+
+        bundle = await _load(owner.id)
+        assert bundle.dive_sites == []
+        assert bundle.site_ids_by_dive[bundle.dives[0].id] == []
+        assert bundle.sites_for(bundle.dives[0]) == []
+
+    @pytest.mark.asyncio
+    async def test_deleting_a_gear_item_takes_its_dive_and_set_links_with_it(self, db: Session, owner: User):
+        item = GearItem(user_id=owner.id, name="Gone", notes="")
+        gear_set = GearSet(user_id=owner.id, name="Tech")
+        db.add_all([item, gear_set])
         db.commit()
         dive = _dive(db, owner, number=1)
         db.add_all(
             [
-                DiveDiveSite(dive_id=dive.id, dive_site_id=site.id, position=0),
                 DiveGearItem(dive_id=dive.id, gear_item_id=item.id, position=0),
+                GearSetItem(gear_set_id=gear_set.id, gear_item_id=item.id, position=0),
             ]
         )
         db.commit()
 
+        db.delete(item)
+        db.commit()
+
         bundle = await _load(owner.id)
-        assert [s.name for s in bundle.sites_for(bundle.dives[0])] == ["Gone"]
-        assert [i.name for i in bundle.gear_for(bundle.dives[0])] == ["Gone"]
-        assert [s.is_deleted for s in bundle.dive_sites] == [True]
+        assert bundle.gear_items == []
+        assert bundle.gear_for(bundle.dives[0]) == []
+        assert bundle.item_ids_by_set[gear_set.id] == []
 
     @pytest.mark.asyncio
-    async def test_a_deleted_trip_still_on_a_dive_comes_back(self, db: Session, owner: User):
-        trip = Trip(user_id=owner.id, name="Gone", start_date=date(2026, 6, 1), notes="", is_deleted=True)
+    async def test_deleting_a_trip_leaves_its_dives_pointing_at_nothing(self, db: Session, owner: User):
+        """`SET NULL`, not `CASCADE` - the dive is the irreplaceable record and survives
+        losing its trip. `trip_for` then answers `None` off the nulled column rather than
+        off a lookup miss."""
+        trip = Trip(user_id=owner.id, name="Gone", start_date=date(2026, 6, 1), notes="")
         db.add(trip)
         db.commit()
         dive = _dive(db, owner, number=1)
         dive.trip_id = trip.id
         db.commit()
 
-        bundle = await _load(owner.id)
-        exported = bundle.trip_for(bundle.dives[0])
-        assert exported is not None
-        assert exported.is_deleted is True
-
-    @pytest.mark.asyncio
-    async def test_a_deleted_gear_item_still_in_a_set_comes_back(self, db: Session, owner: User):
-        item = GearItem(user_id=owner.id, name="Gone", notes="", is_deleted=True)
-        gear_set = GearSet(user_id=owner.id, name="Tech")
-        db.add_all([item, gear_set])
-        db.commit()
-        db.add(GearSetItem(gear_set_id=gear_set.id, gear_item_id=item.id, position=0))
+        db.delete(trip)
         db.commit()
 
         bundle = await _load(owner.id)
-        assert bundle.item_ids_by_set[gear_set.id] == [item.id]
-        assert item.id in bundle.gear_item_by_id
+        assert bundle.trips == []
+        assert len(bundle.dives) == 1
+        assert bundle.dives[0].trip_id is None
+        assert bundle.trip_for(bundle.dives[0]) is None
 
     @pytest.mark.asyncio
-    async def test_a_deleted_schedule_still_on_a_record_comes_back(self, db: Session, owner: User):
+    async def test_deleting_a_schedule_leaves_its_records_unlinked(self, db: Session, owner: User):
+        """The one `SET NULL` on the gear side, and the reason the schedule half of this
+        change is safe: deleting a reminder must never throw away the receipts."""
         item = GearItem(user_id=owner.id, name="Reg", notes="")
         db.add(item)
         db.commit()
         schedule = GearServiceSchedule(
-            user_id=owner.id,
-            gear_item_id=item.id,
-            kind="service",
-            starts_on=date(2026, 1, 1),
-            interval_months=12,
-            is_deleted=True,
+            user_id=owner.id, gear_item_id=item.id, kind="service", starts_on=date(2026, 1, 1), interval_months=12
         )
         db.add(schedule)
         db.commit()
-        db.add(
-            GearServiceRecord(
-                user_id=owner.id,
-                gear_item_id=item.id,
-                kind="service",
-                serviced_on=date(2026, 1, 1),
-                dive_count_at_service=0,
-                gear_service_schedule_id=schedule.id,
-            )
+        record = GearServiceRecord(
+            user_id=owner.id,
+            gear_item_id=item.id,
+            kind="service",
+            serviced_on=date(2026, 1, 1),
+            dive_count_at_service=0,
+            gear_service_schedule_id=schedule.id,
         )
+        db.add(record)
+        db.commit()
+
+        db.delete(schedule)
         db.commit()
 
         bundle = await _load(owner.id)
-        assert schedule.id in bundle.schedule_by_id
+        assert bundle.schedules == []
+        assert [r.id for r in bundle.service_records] == [record.id]
+        assert bundle.service_records[0].gear_service_schedule_id is None
 
     @pytest.mark.asyncio
-    async def test_a_deleted_gear_item_whose_only_referrer_is_a_service_record_comes_back(
-        self, db: Session, owner: User
-    ):
-        """The longest referrer chain there is, and the one the first fix missed.
-
-        `erase_gear_item` soft-deletes the item *and* its schedules while deliberately
-        keeping the records. So a live record drags back a dead schedule, and the schedule
-        is then the only thing still naming a dead item - an item that was never dived and
-        never in a set is reachable by no other path.
-        """
-        item = GearItem(user_id=owner.id, name="Retired reg", notes="", is_deleted=True)
+    async def test_deleting_a_gear_item_takes_its_schedules_and_records_with_it(self, db: Session, owner: User):
+        """The one deletion a diver can notice as a loss, and the delete dialog already
+        promises it - archiving is the non-destructive path that keeps a service history."""
+        item = GearItem(user_id=owner.id, name="Retired reg", notes="")
         db.add(item)
         db.commit()
         schedule = GearServiceSchedule(
-            user_id=owner.id,
-            gear_item_id=item.id,
-            kind="service",
-            starts_on=date(2026, 1, 1),
-            interval_months=12,
-            is_deleted=True,
+            user_id=owner.id, gear_item_id=item.id, kind="service", starts_on=date(2026, 1, 1), interval_months=12
         )
         db.add(schedule)
         db.commit()
@@ -270,27 +300,23 @@ class TestStillReferencedButDeleted:
         )
         db.commit()
 
-        bundle = await _load(owner.id)
-        assert item.id in bundle.gear_item_by_id
-        assert schedule.id in bundle.schedule_by_id
-
-    @pytest.mark.asyncio
-    async def test_a_deleted_row_nothing_references_stays_out(self, db: Session, owner: User):
-        """The exception is only for what the app still shows. An orphaned deleted site
-        is genuinely gone, and resurrecting it would be the surprise."""
-        db.add(DiveSite(user_id=owner.id, name="Orphan", notes="", is_deleted=True))
+        db.delete(item)
         db.commit()
 
         bundle = await _load(owner.id)
-        assert bundle.dive_sites == []
+        assert bundle.gear_items == []
+        assert bundle.schedules == []
+        assert bundle.service_records == []
 
     @pytest.mark.asyncio
-    async def test_a_deleted_row_belonging_to_someone_else_is_never_resurrected(
+    async def test_a_link_to_someone_elses_site_is_skipped_rather_than_exported(
         self, db: Session, owner: User, stranger: User
     ):
-        """`still_referenced` widens the soft-delete filter and nothing else - the
-        `user_id` scope is not negotiable, and a stray id must not become a way in."""
-        theirs = DiveSite(user_id=stranger.id, name="Theirs", notes="", is_deleted=True)
+        """The `user_id` scope is not negotiable, and a stray join row must not become a
+        way in. This one cannot be created through the API - every write validates
+        ownership first - so it stands for hand-edited data, and the answer has to be
+        "skip", not "export" and not "500 the one endpoint a diver uses to leave"."""
+        theirs = DiveSite(user_id=stranger.id, name="Theirs", notes="")
         db.add(theirs)
         db.commit()
         dive = _dive(db, owner, number=1)
@@ -299,9 +325,6 @@ class TestStillReferencedButDeleted:
 
         bundle = await _load(owner.id)
         assert bundle.dive_sites == []
-        # And the export still builds: `sites_for` skips what it cannot resolve rather
-        # than raising, so a row that could only exist through hand-edited data does not
-        # take down the one endpoint a diver uses to leave with everything else.
         assert bundle.sites_for(bundle.dives[0]) == []
 
 

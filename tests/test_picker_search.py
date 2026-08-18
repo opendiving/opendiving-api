@@ -97,7 +97,7 @@ class TestOwnedResourceSearchConditions:
         # The OR has to stay parenthesized, or it would leak past the ownership check and
         # match every user's sites.
         assert (
-            "dive_site.user_id = 42 AND dive_site.is_deleted IS false "
+            "dive_site.user_id = 42 "
             "AND (dive_site.name ILIKE '%dahab%' ESCAPE '\\\\' "
             "OR dive_site.location ILIKE '%dahab%' ESCAPE '\\\\')" in sql
         )
@@ -106,7 +106,9 @@ class TestOwnedResourceSearchConditions:
         sql = _as_sql(*_trip_cache.search_conditions(user_id=7, term="dahab"), model=Trip)
 
         assert "trip.user_id = 7" in sql
-        assert "trip.is_deleted IS false" in sql
+        # The ownership scope is the only one left - both models are hard-deleted, so
+        # there is no liveness clause for the OR to leak past.
+        assert "is_deleted" not in sql
 
 
 class TestListCacheKeys:

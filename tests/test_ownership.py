@@ -33,8 +33,26 @@ class _Row(BaseModel):
     user_id: int
 
 
-def _crud(row: _Row | None) -> Any:
+class _SoftDeletingModel:
+    """Stands in for `Certification`, the last model routed through `fetch_owned_or_raise`
+    that still carries the column."""
+
+    is_deleted = False
+
+
+class _HardDeletingModel:
+    """Stands in for `Trip`/`DiveSite`/`GearItem`/`GearSet`."""
+
+
+def _crud(row: _Row | None, *, model: type = _SoftDeletingModel) -> Any:
+    """A stubbed FastCRUD.
+
+    `model` is set explicitly rather than left to `AsyncMock`'s auto-attribute, which
+    answers `hasattr` for anything and would make the liveness-filter tests below pass
+    whichever branch ran.
+    """
     crud = AsyncMock()
+    crud.model = model
     crud.get = AsyncMock(return_value=row)
     return crud
 
@@ -153,8 +171,8 @@ class TestFetchOwnedOrRaise:
 
     @pytest.mark.asyncio
     async def test_include_deleted_drops_the_filter(self):
-        """The delete routes pass this so deleting an already-deleted row is a no-op
-        rather than a 404.
+        """For the routes that legitimately act on a soft-deleted row - restoring a
+        certification, say.
         """
         crud = _crud(_Row(id=1, user_id=7))
 
@@ -166,6 +184,27 @@ class TestFetchOwnedOrRaise:
             schema=_Row,
             not_found_message="Thing not found",
             include_deleted=True,
+        )
+
+        assert "is_deleted" not in crud.get.await_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_a_hard_deleting_model_is_never_filtered(self):
+        """The filter has to be conditional rather than unconditional, and this is what
+        that costs if it is not: FastCRUD's `get_model_column` raises `ValueError` for a
+        column the model lacks instead of ignoring it, so an unconditional
+        `is_deleted=False` would turn every `GET`/`PATCH`/`DELETE` on a trip, dive site,
+        gear item or gear set into a 500.
+        """
+        crud = _crud(_Row(id=1, user_id=7), model=_HardDeletingModel)
+
+        await fetch_owned_or_raise(
+            db=AsyncMock(),
+            crud=crud,
+            uuid=uuid_pkg.uuid4(),
+            current_user=CALLER,
+            schema=_Row,
+            not_found_message="Thing not found",
         )
 
         assert "is_deleted" not in crud.get.await_args.kwargs

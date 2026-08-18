@@ -35,7 +35,6 @@ from src.app.services.gear_service import (
     recalculate_service_schedule,
     service_status,
     should_notify,
-    soft_delete_schedules_for_gear_item,
 )
 
 
@@ -464,52 +463,6 @@ class TestRecalculateServiceSchedule:
         db = self._db(self._schedule(), latest_record=None)
 
         await recalculate_service_schedule(db, schedule_id=3, commit=False)
-
-        db.commit.assert_not_awaited()
-
-
-class TestSoftDeleteSchedulesForGearItem:
-    """Soft-deleting a gear item has to silence its reminders, and must not blow up on
-    the common case of an item that never had any.
-    """
-
-    @pytest.mark.asyncio
-    async def test_soft_deletes_the_items_live_schedules(self) -> None:
-        db = MagicMock()
-        db.execute = AsyncMock()
-        db.commit = AsyncMock()
-
-        await soft_delete_schedules_for_gear_item(db, gear_item_id=7)
-
-        statement = str(db.execute.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
-        # A plain UPDATE, not a fastcrud `delete(allow_multiple=True)`, which raises
-        # NoResultFound when zero rows match - i.e. for most gear.
-        assert statement.startswith("UPDATE gear_service_schedule SET")
-        assert "gear_service_schedule.gear_item_id = 7" in statement
-        assert "gear_service_schedule.is_deleted IS false" in statement
-        db.commit.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_leaves_the_service_history_alone(self) -> None:
-        db = MagicMock()
-        db.execute = AsyncMock()
-        db.commit = AsyncMock()
-
-        await soft_delete_schedules_for_gear_item(db, gear_item_id=7)
-
-        # A soft delete is meant to be recoverable, and discarding the receipts would
-        # make it much less so. They survive for export rather than for a view: nothing
-        # in the app displays a deleted item's records - archiving is that surface.
-        assert db.execute.await_count == 1
-        assert "gear_service_record" not in str(db.execute.await_args.args[0].compile())
-
-    @pytest.mark.asyncio
-    async def test_skips_commit_when_commit_is_false(self) -> None:
-        db = MagicMock()
-        db.execute = AsyncMock()
-        db.commit = AsyncMock()
-
-        await soft_delete_schedules_for_gear_item(db, gear_item_id=7, commit=False)
 
         db.commit.assert_not_awaited()
 
