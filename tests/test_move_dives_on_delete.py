@@ -30,7 +30,6 @@ from uuid6 import uuid7
 from src.app.api.v1 import dive_sites as dive_sites_module
 from src.app.api.v1 import trips as trips_module
 from src.app.core.exceptions.http_exceptions import NotFoundException, UnprocessableEntityException
-from src.app.core.schemas import DeletedWithMovedDives
 from src.app.core.utils import cache as cache_module
 from src.app.crud.crud_dive_dive_sites import replace_dive_site_on_dives, replace_dive_sites_for_dive
 from src.app.crud.crud_dives import reassign_dives_to_trip
@@ -208,10 +207,11 @@ class TestEraseTripWithoutTheParameter:
         trip_route["delete"].assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_the_count_is_zero_rather_than_absent(self, trip_route: dict[str, Any]) -> None:
-        """Present either way: a conditional key makes every client's response type
-        optional to spare it one integer."""
-        assert await _erase_trip(trip_route) == DeletedWithMovedDives(message="Trip deleted", moved_dives=0)
+    async def test_the_response_is_the_bare_message(self, trip_route: dict[str, Any]) -> None:
+        """The same `{"message": ...}` every other delete on the API answers with. This
+        route used to publish a `moved_dives` count as well, for a toast that no longer
+        names a number."""
+        assert await _erase_trip(trip_route) == {"message": "Trip deleted"}
 
     @pytest.mark.asyncio
     async def test_the_dive_caches_are_dropped_anyway(self, trip_route: dict[str, Any]) -> None:
@@ -246,10 +246,11 @@ class TestEraseTripWithAReplacement:
         }
 
     @pytest.mark.asyncio
-    async def test_the_count_comes_back_for_the_toast(self, trip_route: dict[str, Any]) -> None:
-        assert await _erase_trip(trip_route, move_dives_to=uuid7()) == DeletedWithMovedDives(
-            message="Trip deleted", moved_dives=3
-        )
+    async def test_the_response_says_nothing_about_what_moved(self, trip_route: dict[str, Any]) -> None:
+        """Identical to the bare delete's, though the stub moved three dives: the count is
+        not in the contract any more, so a move is not distinguishable from a plain delete
+        by the response body."""
+        assert await _erase_trip(trip_route, move_dives_to=uuid7()) == {"message": "Trip deleted"}
 
     @pytest.mark.asyncio
     async def test_the_moved_dives_reads_are_dropped(self, trip_route: dict[str, Any]) -> None:
@@ -259,8 +260,10 @@ class TestEraseTripWithAReplacement:
 
     @pytest.mark.asyncio
     async def test_a_replacement_that_moved_nothing_still_drops_the_caches(self, trip_route: dict[str, Any]) -> None:
-        """The count no longer gates the invalidation: the trip is gone from every dive
-        read either way, so an empty trip's delete has to drop the caches like any other."""
+        """Nothing gates the invalidation: the trip is gone from every dive read either
+        way, so an empty trip's delete has to drop the caches like any other. This once
+        keyed off the number the reassignment returned, which is why the zero case is
+        pinned separately."""
         trip_route["reassign"].side_effect = _records(trip_route["calls"], "reassign", 0)
 
         await _erase_trip(trip_route, move_dives_to=uuid7())
@@ -325,17 +328,16 @@ class TestEraseDiveSiteWithoutTheParameter:
         dive_site_route["delete"].assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_the_count_is_zero_rather_than_absent(self, dive_site_route: dict[str, Any]) -> None:
-        assert await _erase_dive_site(dive_site_route) == DeletedWithMovedDives(
-            message="Dive site deleted", moved_dives=0
-        )
+    async def test_the_response_is_the_bare_message(self, dive_site_route: dict[str, Any]) -> None:
+        assert await _erase_dive_site(dive_site_route) == {"message": "Dive site deleted"}
 
     @pytest.mark.asyncio
     async def test_the_dive_caches_are_dropped_anyway(self, dive_site_route: dict[str, Any]) -> None:
         """A deleted site drops out of every dive read, so a bare delete changes what all
-        of those cached reads should say. Making this conditional on `moved_dives` would
-        leave them holding a site that no longer exists - which is exactly what the trip
-        route did until its lookup started filtering deleted trips; the two now match."""
+        of those cached reads should say. Making this conditional on whether anything moved
+        would leave them holding a site that no longer exists - which is exactly what the
+        trip route did until its lookup started filtering deleted trips; the two now
+        match."""
         await _erase_dive_site(dive_site_route)
 
         dive_site_route["invalidate_dives"].assert_awaited_once_with(USER_ID)
@@ -356,10 +358,10 @@ class TestEraseDiveSiteWithAReplacement:
         assert (kwargs["user_id"], kwargs["from_dive_site_id"], kwargs["to_dive_site_id"]) == (USER_ID, 21, 99)
 
     @pytest.mark.asyncio
-    async def test_the_count_comes_back_for_the_toast(self, dive_site_route: dict[str, Any]) -> None:
-        assert await _erase_dive_site(
-            dive_site_route, move_dives_to=dive_site_route["replacement_uuid"]
-        ) == DeletedWithMovedDives(message="Dive site deleted", moved_dives=3)
+    async def test_the_response_says_nothing_about_what_moved(self, dive_site_route: dict[str, Any]) -> None:
+        assert await _erase_dive_site(dive_site_route, move_dives_to=dive_site_route["replacement_uuid"]) == {
+            "message": "Dive site deleted"
+        }
 
     @pytest.mark.asyncio
     async def test_a_replacement_that_is_not_the_callers_is_a_422(self, dive_site_route: dict[str, Any]) -> None:

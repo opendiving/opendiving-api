@@ -16,31 +16,6 @@ class HealthCheck(BaseModel):
     description: str
 
 
-class DeletedWithMovedDives(BaseModel):
-    """What `DELETE /trip/{uuid}` and `DELETE /dive-site/{uuid}` answer, with or without
-    their `move_dives_to` parameter.
-
-    The one delete on the API whose response has structure worth publishing, and therefore
-    the one that is a model rather than the bare `{"message": ...}` dict the others return.
-    A dict typed `str | int` would put both fields behind an `anyOf` in `/openapi.json` -
-    every generated client would get `message` as `string | number` and still have to cast
-    `moved_dives` before it could go in a "12 dives moved to Cebu 2026" toast, which is the
-    whole reason the count is there.
-
-    `moved_dives` is 0 rather than absent when nothing was asked to move. A key that
-    appears only sometimes makes the field optional in every typed client forever, to save
-    one integer on the calls that did not ask for a move - and "zero dives moved" is true.
-
-    Which is also why it carries no `= 0` default. A default takes the field out of the
-    schema's `required` list, and on a *response* that reads to a generated client as
-    "may be absent" - putting the `number | undefined` back that the model exists to
-    remove. Both routes always pass it.
-    """
-
-    message: str
-    moved_dives: int
-
-
 # -------------- mixins --------------
 class PublicUUIDSchema(BaseModel):
     """Adds the opaque, uuid7-based `uuid` field exposed as a resource's public
