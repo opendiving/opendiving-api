@@ -11,6 +11,7 @@ from sqlalchemy import CheckConstraint
 
 from src.app.models.dive import Dive
 from src.app.models.dive_mixture import DiveMixture
+from src.app.schemas.dive import WaterType
 from src.app.schemas.dive_mixture import GasRole
 from src.app.schemas.parsed_dive import (
     LATITUDE_LIMIT,
@@ -1590,6 +1591,84 @@ class TestFitParserDiveSummary:
         assert FitParser.parse(content).max_depth == 27.5
 
 
+class TestFitWaterType:
+    """`dive_settings.water_type` is the only salinity evidence any supported export
+    carries, and the one field the FIT parser contributes to the dive *form* rather than
+    to the server-side tech scalars.
+
+    The vocabulary is kept verbatim - a computer left on its EN13319 factory calibration
+    imports as `en13319`, not as the nearest real water. Folding it into `salt` would be
+    the parser substituting a plausible value for what the file said, which is the rule
+    `TestParsersInventNothing` exists for.
+    """
+
+    @pytest.mark.parametrize(
+        ("native", "expected"),
+        [
+            ("salt", WaterType.SALT),
+            ("fresh", WaterType.FRESH),
+            ("en13319", WaterType.EN13319),
+        ],
+    )
+    def test_each_named_salinity_survives_the_import(self, native: str, expected: WaterType) -> None:
+        content = dive_fit_file(message("dive_settings", water_type=native))
+
+        assert FitParser.parse(content).water_type is expected
+
+    def test_a_custom_density_is_not_a_water_type(self) -> None:
+        """`custom` means the diver dialled in a `water_density` number, which has no
+        column here - so the file records no water *type*, and that is what `None` says.
+        Picking `salt` off a density near 1030 would be inventing the reading."""
+        content = dive_fit_file(message("dive_settings", water_type="custom", water_density=1030.0))
+
+        assert FitParser.parse(content).water_type is None
+
+    def test_a_file_with_no_dive_settings_records_nothing(self) -> None:
+        assert FitParser.parse(dive_fit_file()).water_type is None
+
+    def test_dive_settings_written_after_the_session_still_count(self) -> None:
+        """The branch sits *above* `_collect`'s first-session cut, which is what makes
+        this work. That cut exists for samples - messages belonging to whichever dive they
+        follow - and `tank_summary`'s comment records what gating a summary message there
+        cost: both cylinder pressures, and the whole SAC/RMV with them."""
+        content = fit_file(
+            message("file_id", type="activity", manufacturer="garmin"),
+            message("session", sport="diving", start_time=DIVE_START, total_elapsed_time=1800.0),
+            message("dive_settings", water_type="fresh"),
+        )
+
+        assert FitParser.parse(content).water_type is WaterType.FRESH
+
+    def test_the_first_setting_wins_on_a_two_dive_file(self) -> None:
+        """Same rule as `session`: the first dive is the one the file is about."""
+        content = fit_file(
+            message("file_id", type="activity", manufacturer="garmin"),
+            message("dive_settings", water_type="salt"),
+            message("session", sport="diving", start_time=DIVE_START, total_elapsed_time=1800.0),
+            message("dive_settings", water_type="fresh"),
+            message(
+                "session",
+                sport="diving",
+                start_time=DIVE_START + timedelta(seconds=7200),
+                total_elapsed_time=1500.0,
+            ),
+        )
+
+        assert FitParser.parse(content).water_type is WaterType.SALT
+
+    def test_neither_suunto_export_claims_a_water_type(self) -> None:
+        """Neither format carries salinity anywhere, so `None` is the honest answer - and
+        `ParsedDiveSchema.water_type`'s default is what supplies it, since both Suunto
+        parsers build the schema from explicit keyword arguments."""
+        xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}"><Duration>1800</Duration></Dive>
+""".encode()
+        json_content = json.dumps({"DeviceLog": {"Header": {"Duration": 1800}}}).encode()
+
+        assert SuuntoXmlParser.parse(xml).water_type is None
+        assert SuuntoJsonParser.parse(json_content).water_type is None
+
+
 class TestTechScalars:
     """CNS/OTU/surface pressure and the per-mixture ppO2, role and gas number.
 
@@ -1961,6 +2040,14 @@ class TestTechScalars:
         `volume`, `oxygen` and `helium` are single-column and still unguarded; they are
         pre-existing and out of this phase's scope, and they are listed here so the gap is
         recorded rather than implied.
+
+        **`altitude` is bounded and deliberately not here.** `ck_dive_altitude_range` is a
+        single-column bound, but no parser can reach that column: it is diver-entered
+        only, and nothing in any supported export carries a surface elevation. The set is
+        "bounded *and reachable from a parser*", so listing it would fail the assert below
+        for a value a parser cannot produce. It belongs with `duration` and friends as a
+        bounded-yet-unguarded column, and joins this set the day a parser learns to fill
+        it.
         """
         bounded = {
             (Dive, "avg_depth"),

@@ -363,6 +363,47 @@ class TestDiveContent:
         assert len(_tree(document).findall(f"{UDDF}gasdefinitions/{UDDF}mix")) == 1
 
     @pytest.mark.asyncio
+    async def test_the_altitude_lands_between_the_datetime_and_the_equipment(self, schema, monkeypatch):
+        """`informationbeforediveType` is an `xs:sequence`, so the position is the test:
+        emitted anywhere else the document stops validating. The air dive records 0 m -
+        the Red Sea really is at sea level - which is also what tells a `is not None`
+        guard apart from a truthiness one."""
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        schema.validate(document)
+        before = _dive(_tree(document), 0).find(f"{UDDF}informationbeforedive")
+        assert _text(before, f"{UDDF}altitude") == "0"
+        tags = [child.tag for child in before]
+        assert tags.index(f"{UDDF}altitude") == tags.index(f"{UDDF}datetime") + 1
+        assert tags.index(f"{UDDF}altitude") < tags.index(f"{UDDF}equipmentused")
+
+    @pytest.mark.asyncio
+    async def test_a_dive_that_records_no_altitude_gets_no_element(self, monkeypatch):
+        """UDDF has no way to say "not recorded" other than leaving the element out."""
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        assert _text(_dive(_tree(document), 1), f"{UDDF}informationbeforedive/{UDDF}altitude") is None
+
+    @pytest.mark.asyncio
+    async def test_a_mountain_lake_altitude_is_written_as_metres(self, schema, monkeypatch):
+        """Metres, unconverted - `altitudeType` in the XSD is `xs:float` and the schema's
+        own documentation says metres, so this is one of the few places UDDF's SI units
+        and ours already agree."""
+        bundle = build_bundle(dives=[make_dive(1, UUIDS["dive-air"], altitude=1500, water_type="fresh")])
+        document = await _render(bundle, monkeypatch=monkeypatch)
+        schema.validate(document)
+        assert _text(_dive(_tree(document), 0), f"{UDDF}informationbeforedive/{UDDF}altitude") == "1500"
+
+    @pytest.mark.asyncio
+    async def test_the_water_type_has_nowhere_to_go_in_this_format(self, monkeypatch):
+        """3.2.2 has no *per-dive* salinity or density child at all: the `density`
+        elements it does have belong to `sitedata` and to `baseCalculationType`, a
+        deco-planner input. Asserted rather than left implicit, because a reader who greps
+        the XSD for `density` finds hits and would otherwise "fix" this into
+        `applicationdata`. It is in `export.json` and `dives.csv` instead."""
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        assert list(_tree(document).iter(f"{UDDF}density")) == []
+        assert b"salt" not in document
+
+    @pytest.mark.asyncio
     async def test_gear_and_lead_ride_in_equipmentused(self, monkeypatch):
         document = await _render(full_bundle(), monkeypatch=monkeypatch)
         used = _dive(_tree(document), 0).find(f"{UDDF}informationbeforedive/{UDDF}equipmentused")

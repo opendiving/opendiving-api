@@ -93,6 +93,18 @@ class TestDivesCsv:
         assert "None" not in bare
         assert bare[DIVES_HEADER.index("max_depth_m")] == ""
 
+    def test_the_water_type_and_altitude_are_their_own_columns(self):
+        """`altitude_m` carries the unit suffix `water_type` has no need of, which is the
+        convention the rest of the header already follows (`max_depth_m`, `weight_kg`).
+        The 0 is the air dive's real sea-level altitude, and an empty cell on the next row
+        is the difference between that and "not recorded" - the distinction the whole
+        column is nullable for."""
+        rows = _parse(_render(write_dives_csv(full_bundle())))
+        assert rows[1][DIVES_HEADER.index("water_type")] == "salt"
+        assert rows[1][DIVES_HEADER.index("altitude_m")] == "0"
+        assert rows[2][DIVES_HEADER.index("water_type")] == ""
+        assert rows[2][DIVES_HEADER.index("altitude_m")] == ""
+
     def test_sites_are_joined_in_visit_order(self):
         rows = _parse(_render(write_dives_csv(full_bundle())))
         assert rows[1][DIVES_HEADER.index("dive_sites")] == "Shark Reef; Yolanda"

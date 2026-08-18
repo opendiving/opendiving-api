@@ -6944,3 +6944,107 @@ service history stays readable, rather than one of two.
 
 No DDL, no schema change, no route change, and nothing handed off to `opendiving-web` -
 deliberately, since the conclusion is that the view it would build should not exist.
+
+## Water type and altitude are dive columns, and the gas math deliberately ignores them
+
+`dive.water_type` and `dive.altitude` are the two settings a dive computer treats as calibration and
+a logbook treats as facts about the dive: what the water was, and how high above the sea it sat.
+Both are nullable, both are form-writable, and neither feeds any arithmetic.
+
+**Four values, and `en13319` is one of them.** `WaterType` (`schemas/dive.py`) is a `StrEnum` of
+`salt`, `fresh`, `brackish`, `en13319`, declared in that order because the frontend's picker takes
+its order from the enum rather than keeping a second sorted list - the `GearType` rule. Salt and
+fresh are the two real answers; brackish is a genuine third (the Baltic, estuaries, cenote
+haloclines) and is in Subsurface's vocabulary, which is the closest thing this domain has to a
+reference logbook. `en13319` is the European standard depth-instrument calibration (~1020 kg/m3),
+not a kind of water, and it is here for import fidelity: it is what a Shearwater ships set to and
+what a Garmin FIT file records, and folding it into `salt` on the way in would be the parser
+substituting a plausible value for what the file said - the rule *"Parsers report what a file
+recorded"* forbids exactly that. The diver corrects it on the prefilled form if they want to. There
+is no `OTHER`, because `NULL` already means "not recorded".
+
+**No `CHECK` on `water_type`, and that is the `GearItem.type` decision unchanged.** See
+*"`GearItem.type` is a closed vocabulary, but has no DB `CHECK` constraint"*: the value is a
+Pydantic enum on every write path including the admin panel, so a DB-side copy of the list buys
+nothing and costs a `DROP`/`ADD CONSTRAINT` per new member. The column is a plain `VARCHAR(32)`.
+`test_dive_check_constraints.py::test_any_water_type_string_is_accepted_by_the_database` records
+that the database really will take `'soda'`, so the gap is a decision rather than a surprise.
+
+**`altitude` is an `Integer` in metres, with a real `CHECK`.** `ck_dive_altitude_range` is
+`altitude IS NULL OR (altitude >= -450 AND altitude <= 6500)`. Numeric dive columns get DB bounds
+because their only other validation is the frontend's Zod schema (the `weight`/`visibility`
+pattern), and the band is chosen from real places rather than from a round number: the Dead Sea
+surface (~-430 m) is the lowest diveable water on Earth, and the highest attested dives are in the
+summit pool of Ojos del Salado (~6 390 m). Outside that, the value is a unit or typo error.
+`Integer` rather than `Float` because metre resolution is already finer than any use of the number,
+and dive computers themselves bucket altitude into 300 m bands. The name carries no unit suffix,
+like `max_depth` and `visibility`; `surface_pressure_bar` earned its suffix from an actual Pa-vs-bar
+bug, and nothing here has two plausible units in the data.
+
+**Neither is a `DiveTechScalars` field**, and that is what makes them writable. `store_tech_scalars`
+writes every field of that mixin on every attach, `None` included, so a field on it is overwritten
+wholesale each time an export is re-attached - which is right for CNS and OTU and wrong for
+something a diver typed. The consequences are accepted rather than worked around:
+`backfill_tech_fields` will never backfill `water_type` out of already-stored FIT files (pre-launch,
+the corpus is test data, and a one-off script is cheap if anyone ever wants it), and re-attaching an
+export can never clobber a correction.
+
+**FIT seeds `water_type` through the parse-prefill path, never through a server-side write.**
+`_FitScan` keeps the first `dive_settings` message and `_water_type` maps its native
+`{fresh, salt, en13319, custom}` onto the enum, with `custom` and anything unrecognized nulled -
+`custom` says the diver dialled in a `water_density` number, which is not a water type and has no
+column here. The value rides `ParsedDiveSchema` to the form and reaches the dive through the
+ordinary `DiveCreateRequest`. Two things about that are load-bearing:
+
+- **The `dive_settings` branch sits above `_collect`'s first-session cut.** That cut exists for
+  *samples* - messages belonging to whichever dive they follow - and `tank_summary`'s comment
+  records what gating a summary message there cost: both cylinder pressures, and the whole SAC/RMV
+  with them. Nothing pins where a device writes its settings, so the branch is placed to survive
+  either answer.
+- **`ParsedDiveSchema.water_type` declares `= None`, unlike its top-group neighbours.** Both Suunto
+  parsers construct that schema with explicit keyword arguments and neither format carries salinity
+  anywhere, so matching the neighbouring undefaulted style would turn every Suunto parse into a
+  `ValidationError`. The default is precisely what makes "nothing to do for Suunto" true.
+
+**`METERS_PER_BAR` stays 10.0.** Salt water is nearer 10.06 m/bar and fresh 10.33, so the field now
+exists to make the constant water-type-aware - and it deliberately is not. Reading it would put a 3%
+step between two dives of the same diver on the strength of a column that is `NULL` on most rows,
+which is a worse artefact than the flat 3% it removes: the dashboard's trend would show a change in
+the diver where there was only a change in what they wrote down. The error is already inside the
+noise of a hand-entered `avg_depth`. `altitude` does not touch the surface-pressure assumption
+either. If this is ever revisited, the null rows are the whole problem to solve first.
+
+**UDDF gets the altitude and deliberately not the water type.** `informationbeforediveType` is an
+`xs:sequence` with an `altitude` element (metres, `xs:float`) between `datetime` and
+`equipmentused`, so the writer emits it there and a wrong position fails the XSD validation
+`test_export_uddf.py` runs. There is **no per-dive salinity or density child anywhere in 3.2.2** -
+and the precision matters, because the XSD does contain `density` elements: they belong to
+`sitedata` (a property of a site) and to `baseCalculationType` (deco-planner input), neither of
+which is a fact about one dive. So `water_type` lives in `export.json` and `dives.csv` only, and
+`test_the_water_type_has_nowhere_to_go_in_this_format` asserts its absence so nobody "fixes" it into
+`applicationdata`. `dives.csv` gains `water_type` and `altitude_m` after `weight_kg` - a **breaking
+CSV header change**, and one that moves the byte-for-byte golden in `tests/fixtures/export/`.
+
+**No `GET /dives` filter and no stats breakdown in this iteration.** The dive list page renders no
+filter UI at all today - the existing `trip`/`site`/`gear` filters are entered from those resources'
+detail pages, which water type does not have - so an API param would be dead surface, and leaving it
+out keeps `_cached_read_dives`' `key_prefix` (`dives.py`) untouched. When it comes, the filter
+**must** join that key or filtered pages will collide. A salt-vs-fresh count is a different shape
+from `user_dive_stats`' scalar counters and wants a dashboard design first.
+
+Being new columns on an existing table (see *"Schema changes have no migration tool"*), this needed
+a manual migration on any existing database:
+
+```sql
+ALTER TABLE dive ADD COLUMN water_type VARCHAR(32);
+ALTER TABLE dive ADD COLUMN altitude integer;
+ALTER TABLE dive ADD CONSTRAINT ck_dive_altitude_range
+    CHECK (altitude IS NULL OR (altitude >= -450 AND altitude <= 6500));
+```
+
+`ck_dive_altitude_range` also needs an entry in `_DIVE_CONSTRAINT_MESSAGES` (`api/v1/dives.py`),
+which `tests/test_dive_constraint_messages.py` pins. Without one the failure is not the raw 500 the
+map's own comment used to claim: both dive write paths already wrap `IntegrityError`, so an unmapped
+constraint falls through to `_fk_error_detail`'s generic "Invalid reference: a related record does
+not exist." and answers 422 with a sentence about something else entirely. Both stale comments were
+corrected alongside this.

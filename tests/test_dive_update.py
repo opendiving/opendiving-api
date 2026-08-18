@@ -30,7 +30,7 @@ from uuid6 import uuid7
 
 from src.app.api.v1 import dives as dives_module
 from src.app.core.exceptions.http_exceptions import UnprocessableEntityException
-from src.app.schemas.dive import DiveCreateRequest, DiveUpdate, DiveUpdateRequest
+from src.app.schemas.dive import DiveCreateRequest, DiveUpdate, DiveUpdateRequest, WaterType
 from src.app.schemas.dive_mixture import GasRole
 
 TRIP_UUID = uuid7()
@@ -197,3 +197,84 @@ class TestMixtureFieldsAreClosed:
 
         assert values.mixtures is not None
         assert values.mixtures[0].role is GasRole.DECO
+
+
+class TestWaterTypeAndAltitude:
+    """The two environment fields are ordinary `DiveBase` scalars on every write path,
+    which is the whole point of them not being `DiveTechScalars` - a diver types them, an
+    import only ever seeds them.
+
+    The clearing half matters most: both columns are nullable, so `DiveUpdate`'s
+    "absent = untouched, null = cleared" contract applies with no entry in
+    `NON_NULLABLE_FIELDS` and no special case anywhere - and the route has to carry the
+    null through to `update_data` rather than dropping it with the unset keys.
+    """
+
+    def test_create_accepts_both(self) -> None:
+        values = DiveCreateRequest.model_validate(
+            {
+                "user_uuid": str(uuid7()),
+                "dive_number": 1,
+                "start_time": START_TIME.isoformat(),
+                "duration": 2048,
+                "water_type": "brackish",
+                "altitude": 372,
+            }
+        )
+
+        assert values.water_type is WaterType.BRACKISH
+        assert values.altitude == 372
+
+    def test_create_leaves_both_unset_by_default(self) -> None:
+        values = DiveCreateRequest.model_validate(
+            {
+                "user_uuid": str(uuid7()),
+                "dive_number": 1,
+                "start_time": START_TIME.isoformat(),
+                "duration": 2048,
+            }
+        )
+
+        assert values.water_type is None
+        assert values.altitude is None
+
+    @pytest.mark.parametrize("request_schema", [DiveCreateRequest, DiveUpdateRequest])
+    def test_a_water_type_outside_the_vocabulary_is_a_422_naming_the_field(
+        self, request_schema: type[BaseModel]
+    ) -> None:
+        """The enum is the only guard this column has - there is no DB `CHECK` behind it
+        (see DECISIONS.md), so a free-text value has to die in Pydantic or not at all."""
+        body: dict[str, Any] = {"water_type": "soda"}
+        if request_schema is DiveCreateRequest:
+            body |= {
+                "user_uuid": str(uuid7()),
+                "dive_number": 1,
+                "start_time": START_TIME.isoformat(),
+                "duration": 2048,
+            }
+
+        with pytest.raises(ValidationError) as exc_info:
+            request_schema.model_validate(body)
+
+        assert "water_type" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_a_patch_sets_both(self, captured: dict[str, Any]) -> None:
+        await _patch(DiveUpdateRequest.model_validate({"water_type": "fresh", "altitude": 1500}))
+
+        assert captured["update_data"]["water_type"] is WaterType.FRESH
+        assert captured["update_data"]["altitude"] == 1500
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_null_clears_both(self, captured: dict[str, Any]) -> None:
+        await _patch(DiveUpdateRequest.model_validate({"water_type": None, "altitude": None}))
+
+        assert captured["update_data"]["water_type"] is None
+        assert captured["update_data"]["altitude"] is None
+
+    @pytest.mark.asyncio
+    async def test_omitting_them_leaves_them_alone(self, captured: dict[str, Any]) -> None:
+        await _patch(DiveUpdateRequest.model_validate({"visibility": 15}))
+
+        assert "water_type" not in captured["update_data"]
+        assert "altitude" not in captured["update_data"]
