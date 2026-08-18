@@ -46,6 +46,27 @@ class DiveMixture(Base):
             "start_pressure IS NULL OR end_pressure IS NULL OR end_pressure <= start_pressure",
             name="ck_dive_mixture_pressure_order",
         ),
+        # The asymmetry is physical, and is the whole shape of these two: **you cannot
+        # start a dive on an empty cylinder, but you can finish one on an empty
+        # cylinder.** An out-of-gas ascent, a drained stage and an SPG pegged at zero are
+        # real dives worth logging, so `end_pressure` takes 0; a `start_pressure` of 0 is
+        # a file's absent-marker, a client bug or a typo, and all three are better stopped
+        # than stored (see `DiveMixtureSchema._drop_unpressurized` for the corpus).
+        #
+        # Both are bands rather than one-sided, for the same reason `po2_limit` is: 350
+        # bar sits above any real 300 bar DIN fill, so the only things it rejects are a
+        # unit error (the DM5 millibar bug stored 205203) and a sidemount pair summed as
+        # one cylinder. The upper clause is also what keeps a `NaN` out - Postgres sorts
+        # `NaN` above every number, so `> 0` alone admits it, and one stored `NaN` turns
+        # `GET /dives` into a 500 (see `_ParserOutput`).
+        CheckConstraint(
+            "start_pressure IS NULL OR (start_pressure > 0 AND start_pressure <= 350)",
+            name="ck_dive_mixture_start_pressure_range",
+        ),
+        CheckConstraint(
+            "end_pressure IS NULL OR (end_pressure >= 0 AND end_pressure <= 350)",
+            name="ck_dive_mixture_end_pressure_range",
+        ),
         # Range rather than "positive": 0.4 bar is roughly the hypoxic floor a diluent
         # sits at and 2.0 the highest ppO2 any real table contemplates, so a value
         # outside this is a unit error (a Suunto JSON export writes 140000 Pa for 1.4

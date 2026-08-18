@@ -313,6 +313,54 @@ class TestDiveMixtureCheckConstraints:
         db.add(_make_mixture(dive.id, start_pressure=200, end_pressure=None))
         db.commit()
 
+    def test_zero_start_pressure_is_rejected(self, db: Session, dive: Dive) -> None:
+        """A cylinder at 0 bar delivers nothing, so no dive began on one. Every 0 that
+        reaches this column is a file's absent-marker, a client bug or a typo - see
+        `DiveMixtureSchema._drop_unpressurized` for the corpus behind the first."""
+        _assert_violates(db, _make_mixture(dive.id, start_pressure=0), "ck_dive_mixture_start_pressure_range")
+
+    def test_negative_start_pressure_is_rejected(self, db: Session, dive: Dive) -> None:
+        _assert_violates(db, _make_mixture(dive.id, start_pressure=-1), "ck_dive_mixture_start_pressure_range")
+
+    def test_zero_end_pressure_is_allowed(self, db: Session, dive: Dive) -> None:
+        """The asymmetry, from the database's side: **you cannot start a dive on an empty
+        cylinder, but you can finish one on an empty cylinder.** An out-of-gas ascent, a
+        drained stage and an SPG pegged at zero are all real, and this is the boundary a
+        later tidy-up of the two adjacent constraints would silently take away."""
+        db.add(_make_mixture(dive.id, start_pressure=200, end_pressure=0))
+        db.commit()
+
+    def test_negative_end_pressure_is_rejected(self, db: Session, dive: Dive) -> None:
+        _assert_violates(db, _make_mixture(dive.id, end_pressure=-1), "ck_dive_mixture_end_pressure_range")
+
+    def test_pressures_above_the_band_are_rejected(self, db: Session, dive: Dive) -> None:
+        """205203 is what reading DM5's millibar as bar used to store (see DECISIONS.md),
+        and 415/230 is a sidemount pair summed against one cylinder's water capacity -
+        every individual number positive, correctly ordered, and inside every constraint
+        the table had before this one."""
+        _assert_violates(db, _make_mixture(dive.id, start_pressure=205203), "ck_dive_mixture_start_pressure_range")
+        _assert_violates(db, _make_mixture(dive.id, start_pressure=351), "ck_dive_mixture_start_pressure_range")
+        _assert_violates(db, _make_mixture(dive.id, end_pressure=351), "ck_dive_mixture_end_pressure_range")
+
+    def test_a_300_bar_din_fill_is_allowed(self, db: Session, dive: Dive) -> None:
+        """The highest real fill there is, and the reason the band is 350 rather than
+        tighter: it exists to catch a unit error, not to have an opinion about how hard
+        someone fills a cylinder."""
+        db.add(_make_mixture(dive.id, start_pressure=300, end_pressure=80))
+        db.commit()
+
+    def test_nan_pressures_are_rejected(self, db: Session, dive: Dive) -> None:
+        """The case the *upper* half of each band exists for, and the one nobody would
+        think to write. Postgres sorts `NaN` above every number, so `'NaN'::float8 > 0`
+        is **true** - a one-sided `> 0` constraint would have admitted it while looking
+        closed, and one stored `NaN` turns `GET /dives` into a 500 that only hand-written
+        SQL clears (see `_ParserOutput`).
+        """
+        _assert_violates(
+            db, _make_mixture(dive.id, start_pressure=float("nan")), "ck_dive_mixture_start_pressure_range"
+        )
+        _assert_violates(db, _make_mixture(dive.id, end_pressure=float("nan")), "ck_dive_mixture_end_pressure_range")
+
     def test_po2_limit_outside_the_diveable_band_is_rejected(self, db: Session, dive: Dive) -> None:
         """140000 is what a Suunto JSON export writes for 1.4 bar. Reaching the database
         unconverted is the failure this constraint exists for."""

@@ -111,6 +111,22 @@ class TestMixtureErrorDetail:
             == "End pressure cannot be greater than start pressure."
         )
 
+    def test_start_pressure_range(self):
+        """ "above 0", not "between 0 and 350": the second phrasing tells a diver who just
+        typed a 0 that the value they were rejected for is legal."""
+        assert (
+            _mixture_error_detail(_integrity_error("ck_dive_mixture_start_pressure_range"))
+            == "Start pressure must be above 0 and at most 350 bar."
+        )
+
+    def test_end_pressure_range(self):
+        """ "between" is correct here and not above, because 0 *is* legal at the end of a
+        dive - the message has to carry the asymmetry the constraints do."""
+        assert (
+            _mixture_error_detail(_integrity_error("ck_dive_mixture_end_pressure_range"))
+            == "End pressure must be between 0 and 350 bar."
+        )
+
     def test_unknown_violation_falls_back_to_generic_message(self):
         exc = IntegrityError("INSERT ...", {}, Exception("some other constraint"))
         assert _mixture_error_detail(exc) == "Invalid gas mixture."
