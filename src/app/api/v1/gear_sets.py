@@ -35,9 +35,7 @@ from ...services.cache_invalidation import invalidate_gear_caches
 router = APIRouter(tags=["gear"])
 
 
-async def _get_owned_gear_set(
-    db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict, *, include_deleted: bool = False
-) -> GearSetReadInternal:
+async def _get_owned_gear_set(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> GearSetReadInternal:
     """Fetch a gear set by public uuid and assert the caller owns it.
 
     Thin wrapper over `fetch_owned_or_raise` - see there for why someone else's row reads
@@ -51,7 +49,6 @@ async def _get_owned_gear_set(
         current_user=current_user,
         schema=GearSetReadInternal,
         not_found_message="Gear set not found",
-        include_deleted=include_deleted,
     )
 
 
@@ -145,7 +142,6 @@ async def _cached_read_gear_sets(
         offset=compute_offset(page, items_per_page),
         limit=items_per_page,
         user_id=user_id,
-        is_deleted=False,
         sort_columns="name",
         sort_orders="asc",
     )
@@ -199,9 +195,7 @@ async def _cached_read_gear_set(
     by the route before this is ever reached - `@cache` serves cached responses without
     re-checking it.
     """
-    db_gear_set = await crud_gear_sets.get(
-        db=db, uuid=uuid, is_deleted=False, schema_to_select=GearSetReadInternal, return_as_model=True
-    )
+    db_gear_set = await crud_gear_sets.get(db=db, uuid=uuid, schema_to_select=GearSetReadInternal, return_as_model=True)
     if db_gear_set is None:
         raise NotFoundException("Gear set not found")
 
@@ -272,11 +266,13 @@ async def erase_gear_set(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Soft-deletes a gear set. Sets are purely a convenience shortcut, so deleting one
-    never touches the gear items in it, nor any dive those items were logged on.
+    """Delete a gear set. Sets are purely a convenience shortcut, so deleting one takes its
+    `gear_set_item` membership rows with it (`ON DELETE CASCADE`) and touches neither the
+    gear items themselves nor any dive those items were logged on.
+
+    404 unless the caller owns it, and a second `DELETE` on the same uuid is a 404 too.
     """
-    # `include_deleted`: deleting an already-soft-deleted gear set is a no-op, not a 404.
-    owner_id = (await _get_owned_gear_set(db, uuid, current_user, include_deleted=True)).user_id
+    owner_id = (await _get_owned_gear_set(db, uuid, current_user)).user_id
 
     await crud_gear_sets.delete(db=db, uuid=uuid)
     await invalidate_gear_caches(owner_id)

@@ -60,9 +60,7 @@ _SORT_COLUMN = "start_date"
 _SORT_ORDER = "desc"
 
 
-async def _get_owned_trip(
-    db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict, *, include_deleted: bool = False
-) -> TripReadInternal:
+async def _get_owned_trip(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> TripReadInternal:
     """Fetch a trip by public uuid and assert the caller owns it.
 
     Thin wrapper over `fetch_owned_or_raise` - see there for why someone else's row reads
@@ -76,7 +74,6 @@ async def _get_owned_trip(
         current_user=current_user,
         schema=TripReadInternal,
         not_found_message="Trip not found",
-        include_deleted=include_deleted,
     )
 
 
@@ -119,7 +116,7 @@ _trip_cache: OwnedResourceCache[TripReadInternal, TripRead] = OwnedResourceCache
 
 
 def _search_conditions(user_id: int, term: str) -> tuple[ColumnElement[bool], ...]:
-    """The `WHERE` clauses matching a user's non-deleted trips against a search term.
+    """The `WHERE` clauses matching a user's trips against a search term.
 
     Hand-written rather than `OwnedResourceCache.search_conditions`, which can only OR
     columns of one table: a trip is as often remembered by where it went as by what it
@@ -129,7 +126,6 @@ def _search_conditions(user_id: int, term: str) -> tuple[ColumnElement[bool], ..
     pattern = f"%{escape_like(term)}%"
     return (
         Trip.user_id == user_id,
-        Trip.is_deleted.is_(False),
         or_(
             Trip.name.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
             select(TripLocation.id)
@@ -240,7 +236,6 @@ async def _cached_read_trips(
                 offset=offset,
                 limit=items_per_page,
                 user_id=user_id,
-                is_deleted=False,
                 sort_columns=_SORT_COLUMN,
                 sort_orders=_SORT_ORDER,
             ),
@@ -310,9 +305,7 @@ async def _cached_read_trip(
     Like `_cached_read_trips`, this must only be called once the route has established
     that the caller owns the trip: `@cache` can serve a hit without re-checking it.
     """
-    db_trip = await crud_trips.get(
-        db=db, uuid=uuid, is_deleted=False, schema_to_select=TripReadInternal, return_as_model=True
-    )
+    db_trip = await crud_trips.get(db=db, uuid=uuid, schema_to_select=TripReadInternal, return_as_model=True)
     if db_trip is None:
         raise NotFoundException("Trip not found")
     db_trip = cast(TripReadInternal, db_trip)
@@ -393,39 +386,29 @@ async def erase_trip(
         Query(description="Move this trip's dives onto the trip with this uuid before deleting it"),
     ] = None,
 ) -> dict[str, str]:
-    """Soft-delete a trip, optionally moving its dives onto another trip first.
+    """Delete a trip, optionally moving its dives onto another trip first.
 
-    404 unless the caller owns it, exactly as for a trip that doesn't exist. The row is
-    flagged rather than removed, so dives that referenced this trip keep their `trip_id` in
-    the database - but the trip stops appearing in reads, and those dives read back with
-    `trip_uuid: null`. The link survives only in an export, which reads a deleted trip back
-    flagged `is_deleted` - and only until each dive's next `PATCH`, which submits back the
-    `trip_uuid: null` it was handed and clears the column for good. Re-point the dives with
-    `move_dives_to` before deleting if the association matters; there is no way back after.
+    404 unless the caller owns it, exactly as for a trip that doesn't exist - and a second
+    `DELETE` on the same uuid is now a 404 too, because the row really is gone. This route
+    used to be idempotent to insure against a half-failed multi-statement delete; one
+    `DELETE FROM trip` in one transaction cannot half-fail.
+
+    `trip_location` rows go with it (`ON DELETE CASCADE`) and the dives logged on it survive
+    with `trip_id` nulled (`ON DELETE SET NULL`) - both rules were already declared on the
+    FKs and finally fire. Re-point the dives with `move_dives_to` before deleting if the
+    association matters; there is no way back after.
 
     Pass `move_dives_to` and every one of the caller's live dives on this trip is
     re-pointed at that one first, in the same transaction as the delete: either the diver's
     log ends up entirely on the replacement trip with this one gone, or nothing happened.
-    A replacement that isn't the caller's own live trip, or that is this trip, is a 422 -
-    the same answer `PATCH /dive` gives for a `trip_uuid` it can't resolve, which is the
+    A replacement that isn't the caller's own trip, or that is this trip, is a 422 - the
+    same answer `PATCH /dive` gives for a `trip_uuid` it can't resolve, which is the
     per-dive call this parameter exists to replace.
-
-    Idempotent, like `DELETE /dive-site/{uuid}`: deleting an already-deleted trip succeeds
-    rather than 404ing, and `move_dives_to` is honoured on one. That is what leaves a diver
-    who deleted first a way back - the dives are still attached, so they can still be
-    re-pointed - which matters because a deleted trip is otherwise invisible: its dives
-    read `trip_uuid: null` and no endpoint will name it again.
-
-    It also keeps a retry of a half-failed delete from being worse than the first attempt.
-    A client that lost the response to `delete?move_dives_to=X` can repeat the call and get
-    a definitive answer; a 404 would have covered both "already gone, dives moved" and
-    "already gone, dives stranded" with one status, and the dives are the part it needs.
 
     The response is the bare `{"message": ...}` every other delete on the API returns; the
     count of what moved is not reported. See DECISIONS.md.
     """
-    # `include_deleted`: deleting an already-soft-deleted trip is a no-op, not a 404.
-    db_trip = await _get_owned_trip(db, uuid, current_user, include_deleted=True)
+    db_trip = await _get_owned_trip(db, uuid, current_user)
     owner_id = db_trip.user_id
 
     if move_dives_to is not None:
@@ -441,10 +424,9 @@ async def erase_trip(
     await crud_trips.delete(db=db, uuid=uuid)
     await _trip_cache.invalidate_list(owner_id)
     # Unconditional, like `erase_dive_site`. Either branch changes what this user's dives
-    # report: a move rewrites each moved dive's `trip_uuid`, and a plain delete makes
-    # `get_trip_uuids_by_ids` stop resolving this trip, so every dive still pointing at it
-    # reads back `trip_uuid: null`. Skipping the plain-delete case - which this route did
-    # while that lookup still resolved deleted trips - would leave the cached reads naming
+    # report: a move rewrites each moved dive's `trip_uuid`, and a plain delete nulls
+    # `dive.trip_id` outright, so every dive that was on this trip reads back
+    # `trip_uuid: null`. Skipping the plain-delete case would leave the cached reads naming
     # a trip fresh ones no longer do, for the rest of the hour.
     await invalidate_dive_caches(owner_id)
 

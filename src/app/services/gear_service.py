@@ -13,7 +13,7 @@ named identically on both sides so one `grep SERVICE_DUE_SOON` finds the pair.
 """
 
 import calendar
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -247,48 +247,6 @@ async def recalculate_service_schedule(db: AsyncSession, schedule_id: int, commi
             notified_for_due_at_dive_count=None,
             notified_at=None,
         )
-    )
-
-    if commit:
-        await db.commit()
-
-
-async def soft_delete_schedules_for_gear_item(db: AsyncSession, gear_item_id: int, commit: bool = True) -> None:
-    """Soft-delete every schedule attached to a gear item, when the item itself is
-    soft-deleted.
-
-    Without this the digest would keep emailing about gear the diver can no longer see:
-    `is_deleted` on `gear_item` is application-level, so the `ON DELETE CASCADE` on
-    `gear_service_schedule.gear_item_id` never fires (it only would on a hard delete).
-
-    A raw `UPDATE` rather than `crud_gear_service_schedules.delete(allow_multiple=True)`:
-    fastcrud raises `NoResultFound` when zero rows match, and the overwhelmingly common
-    case - deleting an item that never had a schedule - matches zero rows. The same
-    pitfall is worked around with a `count()` first in `purge_expired_tokens`; here a
-    plain `UPDATE` avoids the extra round trip entirely.
-
-    Records are deliberately left alone: a soft delete is meant to be recoverable, and
-    throwing away the service history would make it a good deal less so. What that buys
-    is narrower than it has twice been described as, so it is worth stating exactly. The
-    rows survive for `/export/*` and for an undelete that does not exist yet, and they
-    stay listable by `GET /gear-service-records` with no item filter. Nothing in the
-    product displays them: the item-scoped routes refuse a deleted item (`GET
-    /gear-item/{uuid}` 404s, `?gear_item_uuid=` 422s), and while a record already known
-    by uuid still reads, patches and deletes through `/gear-service-record/{uuid}` -
-    `resolve_record_for_user` scopes to the *record's* own `is_deleted` and never looks
-    at the item - that unfiltered list is the only place a client can learn the uuid,
-    and the web client only ever lists records from the item page.
-
-    That gap is a choice, not an omission. **Archiving** is the supported way to retire
-    kit and go on reading its history: an archived item resolves normally through
-    `_owned_gear_item`, so its records and schedules stay listable, while the digest
-    leaves it alone. See "A deleted gear item's service history has no view, and
-    archiving is the surface that does" in DECISIONS.md.
-    """
-    await db.execute(
-        update(GearServiceSchedule)
-        .where(GearServiceSchedule.gear_item_id == gear_item_id, GearServiceSchedule.is_deleted.is_(False))
-        .values(is_deleted=True, deleted_at=datetime.now(UTC))
     )
 
     if commit:

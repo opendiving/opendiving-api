@@ -212,11 +212,7 @@ def write_mixtures_csv(bundle: ExportBundle) -> Iterator[str]:
     return _rows_to_csv(MIXTURES_HEADER, rows())
 
 
-# `deleted` is on the four files whose rows `loader._owned` can resurrect. Without it the
-# same archive would ship an `export.json` flagging a record as deleted and a CSV listing
-# it as live - and on `gear-items.csv`, which already has an `archived` column, the
-# omission would positively read as "not deleted".
-TRIPS_HEADER = ("name", "location", "start_date", "end_date", "dives", "deleted", "notes", "trip_uuid")
+TRIPS_HEADER = ("name", "location", "start_date", "end_date", "dives", "notes", "trip_uuid")
 
 
 def write_trips_csv(bundle: ExportBundle) -> Iterator[str]:
@@ -236,7 +232,6 @@ def write_trips_csv(bundle: ExportBundle) -> Iterator[str]:
                 trip.start_date.isoformat(),
                 None if trip.end_date is None else trip.end_date.isoformat(),
                 counts.get(trip.id, 0),
-                trip.is_deleted,
                 trip.notes,
                 str(trip.uuid),
             )
@@ -244,7 +239,7 @@ def write_trips_csv(bundle: ExportBundle) -> Iterator[str]:
     return _rows_to_csv(TRIPS_HEADER, rows())
 
 
-DIVE_SITES_HEADER = ("name", "location", "latitude", "longitude", "dives", "deleted", "notes", "dive_site_uuid")
+DIVE_SITES_HEADER = ("name", "location", "latitude", "longitude", "dives", "notes", "dive_site_uuid")
 
 
 def write_dive_sites_csv(bundle: ExportBundle) -> Iterator[str]:
@@ -261,7 +256,6 @@ def write_dive_sites_csv(bundle: ExportBundle) -> Iterator[str]:
                 site.latitude,
                 site.longitude,
                 counts.get(site.id, 0),
-                site.is_deleted,
                 site.notes,
                 str(site.uuid),
             )
@@ -275,7 +269,6 @@ GEAR_ITEMS_HEADER = (
     "type",
     "rented",
     "archived",
-    "deleted",
     "dive_count",
     "sets",
     "notes",
@@ -300,7 +293,6 @@ def write_gear_items_csv(bundle: ExportBundle) -> Iterator[str]:
                 item.type,
                 item.rented,
                 item.is_archived,
-                item.is_deleted,
                 item.dive_count,
                 "; ".join(sets_by_item.get(item.id, [])),
                 item.notes,
@@ -324,7 +316,6 @@ GEAR_SERVICE_HEADER = (
     "next_due_on",
     "next_due_at_dive_count",
     "active",
-    "deleted",
     "notes",
     "row_uuid",
 )
@@ -339,9 +330,8 @@ def write_gear_service_csv(bundle: ExportBundle) -> Iterator[str]:
     """
 
     def item_columns(gear_item_id: int) -> tuple[str, str]:
-        """Name *and* uuid: a name is not unique, and after the soft-delete resurrection
-        it can legitimately name both a live item and a deleted one. The uuid is what
-        actually joins this file to `gear-items.csv`."""
+        """Name *and* uuid: a name is not unique across a diver's history, and the uuid is
+        what actually joins this file to `gear-items.csv`."""
         item = bundle.gear_item_by_id.get(gear_item_id)
         return ("", "") if item is None else (item.name, str(item.uuid))
 
@@ -360,7 +350,6 @@ def write_gear_service_csv(bundle: ExportBundle) -> Iterator[str]:
                 None if schedule.next_due_on is None else schedule.next_due_on.isoformat(),
                 schedule.next_due_at_dive_count,
                 schedule.is_active,
-                schedule.is_deleted,
                 None,
                 str(schedule.uuid),
             )
@@ -372,7 +361,6 @@ def write_gear_service_csv(bundle: ExportBundle) -> Iterator[str]:
                 record.label,
                 record.serviced_on.isoformat(),
                 record.performed_by,
-                None,
                 None,
                 None,
                 None,

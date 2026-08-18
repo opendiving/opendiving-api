@@ -100,10 +100,3 @@ class DiveSiteUpdate(WholeCoordinatePair, RejectsExplicitNulls):
 
 class DiveSiteUpdateInternal(DiveSiteUpdate):
     updated_at: datetime
-
-
-class DiveSiteDelete(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    is_deleted: bool
-    deleted_at: datetime

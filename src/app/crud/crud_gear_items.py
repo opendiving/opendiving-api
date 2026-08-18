@@ -8,7 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models.gear_item import GearItem
 from ..schemas.gear_item import (
     GearItemCreateInternal,
-    GearItemDelete,
     GearItemInfo,
     GearItemReadInternal,
     GearItemUpdate,
@@ -42,7 +41,7 @@ def gear_item_info_from_row(row: Any) -> GearItemInfo:
 
 
 CRUDGearItem = FastCRUD[
-    GearItem, GearItemCreateInternal, GearItemUpdate, GearItemUpdateInternal, GearItemDelete, GearItemReadInternal
+    GearItem, GearItemCreateInternal, GearItemUpdate, GearItemUpdateInternal, GearItemUpdate, GearItemReadInternal
 ]
 crud_gear_items = CRUDGearItem(GearItem)
 
@@ -50,8 +49,8 @@ crud_gear_items = CRUDGearItem(GearItem)
 async def resolve_gear_item_ids_for_user(
     db: AsyncSession, gear_item_uuids: list[uuid_pkg.UUID], user_id: int
 ) -> dict[uuid_pkg.UUID, int] | None:
-    """Resolve gear item public `uuid`s to their internal `id`s, scoped to non-deleted
-    gear items belonging to the given user.
+    """Resolve gear item public `uuid`s to their internal `id`s, scoped to gear items
+    belonging to the given user.
 
     Archived items resolve normally: archiving only hides an item from the dive form's
     picker, it must not stop an existing dive/gear set that already references it from
@@ -67,7 +66,6 @@ async def resolve_gear_item_ids_for_user(
     stmt = select(GearItem.uuid, GearItem.id).where(
         GearItem.uuid.in_(unique_uuids),
         GearItem.user_id == user_id,
-        GearItem.is_deleted.is_(False),
     )
     result = await db.execute(stmt)
     mapping = {row.uuid: row.id for row in result}
@@ -87,23 +85,12 @@ async def get_gear_item_uuids_by_id(db: AsyncSession, gear_item_ids: list[int]) 
     Unlike its counterpart this does no ownership filtering: callers reach it only with
     ids taken from rows they have already authorized.
 
-    **It does no `is_deleted` filtering either, and that is deliberate** - the one loader
-    in this family that stayed unfiltered while `get_dive_sites_for_dive`,
-    `get_gear_items_for_dive`, `get_gear_items_for_set` and `_schedule_uuids_by_id` all
-    gained the filter. Two reasons, and the second is the one that decides it:
-
-    `gear_item_uuid` is required on both `GearServiceScheduleRead` and
-    `GearServiceRecordRead`, and every call site indexes this mapping directly rather than
-    `.get()`-ing it, so filtering here is a `KeyError` and a 500 on every record of a
-    deleted item - not a null. Making it a null means tombstoning the field or hiding the
-    records, and hiding them contradicts `soft_delete_schedules_for_gear_item`, which keeps
-    service history on purpose.
-
-    And the argument that decided the other four does not reach this one: no write echoes
-    it back. `GearServiceRecordUpdate` carries no reference fields at all, so a client
-    cannot read a record's `gear_item_uuid` and be refused it on the way in. See
-    "The service-record resolvers split, and only one of them was the same question" in
-    DECISIONS.md before adding the filter that looks missing here.
+    Every call site indexes this mapping directly rather than `.get()`-ing it, which is
+    safe because `gear_item_id` is `NOT NULL` and `ON DELETE CASCADE` on both tables that
+    carry it: a schedule or record whose item is gone is gone itself, so an id read off one
+    of those rows always resolves. It stayed unfiltered through the soft-delete era for a
+    weaker version of the same reason - see "The service-record resolvers split, and only
+    one of them was the same question" in DECISIONS.md.
     """
     if not gear_item_ids:
         return {}
@@ -115,15 +102,15 @@ async def get_gear_item_uuids_by_id(db: AsyncSession, gear_item_ids: list[int]) 
 async def gear_item_name_exists(
     db: AsyncSession, user_id: int, name: str, brand: str | None = None, exclude_id: int | None = None
 ) -> bool:
-    """Case-insensitive check for whether a non-deleted gear item with the same
-    (brand, name) already exists for the user.
+    """Case-insensitive check for whether a gear item with the same (brand, name) already
+    exists for the user.
 
-    Mirrors the `ux_gear_item_user_id_brand_name_lower` partial unique index. Two items
-    with NULL brand and the same name are treated as duplicates.
+    Mirrors the `ux_gear_item_user_id_brand_name_lower` unique index. Two items with NULL
+    brand and the same name are treated as duplicates. Archived items count - archiving is
+    not deleting, and the index does not look away from them either.
     """
     stmt = select(GearItem.id).where(
         GearItem.user_id == user_id,
-        GearItem.is_deleted.is_(False),
         func.lower(GearItem.name) == name.strip().lower(),
     )
     if brand is None:

@@ -199,13 +199,6 @@ class GearServiceScheduleUpdateInternal(GearServiceScheduleUpdate):
     updated_at: datetime
 
 
-class GearServiceScheduleDelete(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    is_deleted: bool
-    deleted_at: datetime
-
-
 # -------------------- record --------------------
 class GearServiceRecordBase(BaseModel):
     kind: Annotated[ServiceKind, Field(examples=[ServiceKind.SERVICE])]

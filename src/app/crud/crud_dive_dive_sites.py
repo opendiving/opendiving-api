@@ -40,24 +40,16 @@ def dive_site_info_from_row(row: Any) -> DiveSiteInfo:
 
 
 async def get_dive_sites_for_dive(db: AsyncSession, dive_id: int) -> list[DiveSiteInfo]:
-    """Return the *live* dive sites visited during a dive, in the order they were visited.
+    """Return the dive sites visited during a dive, in the order they were visited.
 
-    A soft-deleted site keeps its `dive_dive_site` rows - `erase_dive_site` flags the site
-    and leaves the links alone - so without the filter a dive goes on rendering a site that
-    `GET /dive-site/{uuid}` answers 404 for, and that `PATCH /dive` refuses to accept back
-    (`resolve_dive_site_ids_for_user` resolves only live sites, so reading a dive's site
-    list and writing it back verbatim would 422). The links stay because export still wants
-    them: `_owned` in `services/export/loader.py` reads deleted-but-referenced sites back on
-    purpose, flagged `is_deleted`, so the record survives where it belongs rather than here.
+    No liveness filter, and none is reachable: `erase_dive_site` is a real `DELETE`, and
+    `dive_dive_site.dive_site_id` is `ON DELETE CASCADE`, so a join row cannot outlive the
+    site it points at. Deleting a site therefore shortens this list at the source rather
+    than at the read, which is what closed the read-filter/write-replace coupling this
+    function used to sit at the centre of - see "The row goes, and so does everything
+    pointing at it" in DECISIONS.md.
 
-    They stay only until that dive's next `PATCH`, though, and this filter is what makes
-    that so: a client seeding an edit form from this list submits it back one entry short,
-    and `replace_dive_sites_for_dive` is a delete-and-reinsert, so the row is then gone for
-    good. Accepted rather than worked around - see "The links outlive the delete, but not
-    the dive's next edit" in DECISIONS.md before writing anything that relies on the row
-    being there.
-
-    Dropping a row promotes whatever follows it into the slot ahead - a dive logged at
+    Losing a row promotes whatever follows it into the slot ahead - a dive logged at
     `[A, B]` whose A is deleted reads back as `[B]`, and B becomes the primary site every
     single-site surface shows. That is intended: `position` is a sort key, not an identity,
     and the alternative is a dive whose primary site does not exist.
@@ -72,7 +64,7 @@ async def get_dive_sites_for_dive(db: AsyncSession, dive_id: int) -> list[DiveSi
     result = await db.execute(
         select(*DIVE_SITE_INFO_COLUMNS)
         .join(DiveDiveSite, DiveDiveSite.dive_site_id == DiveSite.id)
-        .where(DiveDiveSite.dive_id == dive_id, DiveSite.is_deleted.is_(False))
+        .where(DiveDiveSite.dive_id == dive_id)
         .order_by(DiveDiveSite.position)
     )
     return [dive_site_info_from_row(row) for row in result]
@@ -81,8 +73,7 @@ async def get_dive_sites_for_dive(db: AsyncSession, dive_id: int) -> list[DiveSi
 async def get_dive_sites_for_dives(db: AsyncSession, dive_ids: list[int]) -> dict[int, list[DiveSiteInfo]]:
     """Batched version of `get_dive_sites_for_dive`, e.g. for a paginated dive listing.
 
-    Filters deleted sites for the same reasons, and needs nothing extra to degrade well:
-    the per-dive lists are pre-seeded empty, so a dive whose only site is gone comes back
+    Pre-seeds the per-dive lists empty so a dive whose only site was deleted comes back
     with `[]` rather than dropping out of the mapping.
     """
     sites_by_dive: dict[int, list[DiveSiteInfo]] = {dive_id: [] for dive_id in dive_ids}
@@ -92,7 +83,7 @@ async def get_dive_sites_for_dives(db: AsyncSession, dive_ids: list[int]) -> dic
     result = await db.execute(
         select(DiveDiveSite.dive_id, *DIVE_SITE_INFO_COLUMNS)
         .join(DiveSite, DiveSite.id == DiveDiveSite.dive_site_id)
-        .where(DiveDiveSite.dive_id.in_(dive_ids), DiveSite.is_deleted.is_(False))
+        .where(DiveDiveSite.dive_id.in_(dive_ids))
         .order_by(DiveDiveSite.dive_id, DiveDiveSite.position)
     )
     for row in result:
@@ -108,20 +99,12 @@ async def replace_dive_sites_for_dive(
     Duplicate ids are silently deduplicated (keeping each id's first occurrence,
     which determines its position) to avoid a unique-constraint violation.
 
-    **The wipe takes soft-deleted sites with it, and that is a known accepted loss.** Since
-    `get_dive_sites_for_dive` stopped returning them, a client editing a dive's site list
-    submits back only the sites it was shown - so a dive linked to a live A and a hidden B
-    comes back as `["A", "C"]` when the diver adds C, and B's row is destroyed by the
-    delete below. The diver never saw B and never asked to remove it, and no client can
-    prevent this: it cannot preserve a reference it was never handed.
-
-    Declined rather than missed - see "One narrower case `dirtyFields` cannot reach" in
-    DECISIONS.md, which records the fix (delete only rows whose site is live, then renumber
-    the survivors after the submitted list) and why the position-contiguity cost was judged
-    too high for a path this narrow. Reconsider it if the balance changes - but on
-    `replace_gear_items_for_set` rather than here: nothing reads `gear_set_item.position`
-    as more than a sort key, whereas position 0 here *is* the primary site, so it is where
-    the same fix is cheapest to try first.
+    The wipe-and-reinsert is safe to hand a full list now. It used to destroy rows the
+    client had never been shown - a dive linked to a live A and a hidden soft-deleted B
+    came back as `["A", "C"]` when the diver added C, and B's row went - which is why the
+    browser grew `dirtyFields` and why that still could not close the last case. There is
+    nothing hidden left to lose: a deleted site takes its join rows with it, so what
+    `get_dive_sites_for_dive` hands out is the whole truth.
     """
     unique_ids = list(dict.fromkeys(dive_site_ids))
     await db.execute(delete(DiveDiveSite).where(DiveDiveSite.dive_id == dive_id))
@@ -165,6 +148,13 @@ async def replace_dive_site_on_dives(
     Soft-deleted dives are left alone, for the reasons in `reassign_dives_to_trip`, and the
     count covers every dive that referenced the doomed site - including one that only *lost*
     it because it already held the replacement.
+
+    That skip has a cost now that the caller's delete is a real one: a soft-deleted dive's
+    join rows are not moved here, and the `ON DELETE CASCADE` then removes them, so the
+    promise above ("either the whole log moved and this site is gone, or nothing happened")
+    holds for the log a diver can see and not for the rows underneath it. No surface renders
+    a soft-deleted dive, so there is no visible consequence - but it is a real, permanent
+    loss, recorded rather than fixed, and it disappears if dives ever go hard-delete too.
     """
     live_dive_ids = select(Dive.id).where(Dive.user_id == user_id, Dive.is_deleted.is_(False))
 

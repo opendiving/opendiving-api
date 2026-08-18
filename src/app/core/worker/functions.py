@@ -129,9 +129,7 @@ async def send_gear_service_digests(ctx: dict[Any, Any]) -> str:
                 .join(GearItem, GearItem.id == GearServiceSchedule.gear_item_id)
                 .join(User, User.id == GearServiceSchedule.user_id)
                 .where(
-                    GearServiceSchedule.is_deleted.is_(False),
                     GearServiceSchedule.is_active.is_(True),
-                    GearItem.is_deleted.is_(False),
                     GearItem.is_archived.is_(False),
                     User.is_deleted.is_(False),
                     User.gear_service_emails.is_(True),

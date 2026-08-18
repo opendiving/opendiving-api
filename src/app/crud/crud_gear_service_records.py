@@ -43,7 +43,6 @@ async def find_schedule_for_record(
     result = await db.execute(
         select(GearServiceSchedule).where(
             GearServiceSchedule.gear_item_id == gear_item_id,
-            GearServiceSchedule.is_deleted.is_(False),
             GearServiceSchedule.kind == kind,
             func.coalesce(func.lower(GearServiceSchedule.label), "") == (label or "").strip().lower(),
         )

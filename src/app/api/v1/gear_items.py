@@ -24,7 +24,6 @@ from ...schemas.gear_item import (
 )
 from ...schemas.gear_service import GearServiceScheduleInfo
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_gear_caches
-from ...services.gear_service import soft_delete_schedules_for_gear_item
 
 router = APIRouter(tags=["gear"])
 
@@ -34,9 +33,7 @@ router = APIRouter(tags=["gear"])
 GEAR_ITEM_SEARCH_COLUMNS = ("name", "brand")
 
 
-async def _get_owned_gear_item(
-    db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict, *, include_deleted: bool = False
-) -> GearItemReadInternal:
+async def _get_owned_gear_item(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> GearItemReadInternal:
     """Fetch a gear item by public uuid and assert the caller owns it.
 
     Thin wrapper over `fetch_owned_or_raise` - see there for why someone else's row reads
@@ -50,7 +47,6 @@ async def _get_owned_gear_item(
         current_user=current_user,
         schema=GearItemReadInternal,
         not_found_message="Gear item not found",
-        include_deleted=include_deleted,
     )
 
 
@@ -147,7 +143,6 @@ async def _cached_read_gear_items(
     if term:
         conditions = [
             GearItem.user_id == user_id,
-            GearItem.is_deleted.is_(False),
             search_clause(GearItem, GEAR_ITEM_SEARCH_COLUMNS, term),
         ]
         if not include_archived:
@@ -163,7 +158,7 @@ async def _cached_read_gear_items(
             limit=items_per_page,
         )
     else:
-        filters: dict[str, Any] = {"user_id": user_id, "is_deleted": False}
+        filters: dict[str, Any] = {"user_id": user_id}
         if not include_archived:
             filters["is_archived"] = False
 
@@ -232,7 +227,7 @@ async def _cached_read_gear_item(
     route before this is ever reached - see `_cached_read_gear_items`.
     """
     db_gear_item = await crud_gear_items.get(
-        db=db, uuid=uuid, is_deleted=False, schema_to_select=GearItemReadInternal, return_as_model=True
+        db=db, uuid=uuid, schema_to_select=GearItemReadInternal, return_as_model=True
     )
     if db_gear_item is None:
         raise NotFoundException("Gear item not found")
@@ -308,37 +303,32 @@ async def erase_gear_item(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Soft-deletes a gear item. The `dive_gear_item` and `gear_set_item` rows referencing
-    it are left where they are, matching how a soft-deleted dive site behaves - but
-    neither surface renders it any longer (`get_gear_items_for_dive`,
-    `get_gear_items_for_set`), so it drops off the dives it was used on *and* out of the
-    sets it was in, while the links survive for export. Archiving, not deleting, is the
-    non-destructive way to retire gear you still want in your log.
+    """Delete a gear item, and everything hanging off it.
 
-    Its service schedules go with it, though: `is_deleted` is application-level, so the
-    `ON DELETE CASCADE` on `gear_service_schedule.gear_item_id` never fires, and without
-    this the digest would keep emailing about gear the diver can no longer see. The
-    service *records* are left alone, but nothing in the app can show them once the item
-    is gone - archiving is what keeps a piece of kit's service history readable. See
-    `soft_delete_schedules_for_gear_item`.
+    404 unless the caller owns it, and a second `DELETE` on the same uuid is a 404 too.
+    Four `ON DELETE CASCADE`s do the work, all of them already declared on their FKs:
+    `dive_gear_item` and `gear_set_item` rows go, so the item drops off the dives it was
+    used on and out of the sets it was in; `gear_service_schedule` rows go, so the digest
+    stops emailing about kit the diver no longer has; and `gear_service_record` rows go
+    with them, so the item's service history is destroyed rather than kept invisibly.
+
+    That last one is the only behaviour a diver could notice as a loss, and the delete
+    dialog already promises it: **archiving** is the non-destructive way to retire gear
+    you still want in your log *and its service history*. See "A deleted gear item's
+    service history has no view, and archiving is the surface that does" in DECISIONS.md.
     """
-    # `include_deleted`: deleting an already-soft-deleted gear item is a no-op, not a 404.
-    db_gear_item = await _get_owned_gear_item(db, uuid, current_user, include_deleted=True)
+    db_gear_item = await _get_owned_gear_item(db, uuid, current_user)
     owner_id = db_gear_item.user_id
 
-    await soft_delete_schedules_for_gear_item(db=db, gear_item_id=db_gear_item.id, commit=False)
     await crud_gear_items.delete(db=db, uuid=uuid)
-    # Load-bearing twice over since `get_gear_items_for_set` gained its filter: this drops
-    # the gear *set* caches too (one `user_{id}_gear_*` pattern covers all four key
-    # shapes), without which a cached set read would go on listing the deleted item as a
-    # member for the rest of the hour - stale in its membership, not just in its fields.
+    # Load-bearing twice over: this drops the gear *set* caches too (one `user_{id}_gear_*`
+    # pattern covers all four key shapes), without which a cached set read would go on
+    # listing the deleted item as a member for the rest of the hour - stale in its
+    # membership, not just in its fields.
     await invalidate_gear_caches(owner_id)
     # Unconditional, and load-bearing: a fresh dive read now omits this item, so every
     # cached read of a dive that used it would go on listing kit the diver has deleted for
-    # the rest of the hour - the symptom the read filter exists to remove, surviving it.
-    # This predates that filter (the staleness then ran the other way round, a cached read
-    # holding a stale name or `is_archived`), which is why the filter needed no change
-    # here - unlike `erase_trip`, whose skip had to go. See DECISIONS.md.
+    # the rest of the hour.
     await invalidate_dive_caches(owner_id)
 
     return {"message": "Gear item deleted"}
