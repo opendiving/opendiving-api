@@ -6083,12 +6083,20 @@ not of this change. The next removal, made after anything is deployed, does not 
 way — and the tell that the reasoning has expired is the same either way: someone is running a
 client you cannot redeploy in the same commit.
 
-The removal is complete on the web side too, in the change that pairs with this one: its
-hand-written `DeletedWithMovedDives` (that repo has no client codegen, so nothing regenerates when
-this schema goes), the two return annotations naming it, and a test asserting the field round-trips
-through a *mocked* response. That last one is the reason the removal had to be deliberate rather
-than left to a failing build: mocking the response means the test goes on passing against an API
-that no longer sends the field, so nothing would have flagged the remnant.
+Nothing is deferred to a follow-up, which was a deliberate call and is the part worth recording. The
+web app carries its own `DeletedWithMovedDives` — hand-written, since that repo has no client
+codegen, so nothing regenerates when this schema goes — plus two return annotations naming it and a
+test asserting the field round-trips. Those belong to the paired web change rather than to a third
+PR after both.
+
+The reason that had to be decided rather than discovered: the test asserts against a *mocked*
+response, so it goes on passing against an API that no longer sends the field. A remnant that
+type-checks and tests green is one nothing will remind anyone about — the deferred cleanup would
+simply have stayed deferred.
+
+Deliberately not restating here which of those the web repo has already dropped. This file cannot
+keep another repo's branch state true, and an earlier draft of this very section asserted a web-side
+removal that had not happened yet. **Record the decision, not the other repo's contents.**
 
 ### A bad replacement is a 422, not a 404
 
