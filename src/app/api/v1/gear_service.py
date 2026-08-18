@@ -208,9 +208,16 @@ async def _cached_read_schedules(
     )
     # One round trip for the whole page's items rather than one per row.
     uuid_by_id = await get_gear_item_uuids_by_id(db=db, gear_item_ids=[row["gear_item_id"] for row in data["data"]])
+    # `.get()`-and-skip rather than indexing: this and the read above are two statements at
+    # READ COMMITTED, so a `DELETE /gear-item/{uuid}` committing between them takes the
+    # schedule with it (`ON DELETE CASCADE`) and leaves an id here that resolves to nothing.
+    # Dropping the row is what a fresh read a moment later returns anyway; indexing would be
+    # a `KeyError` and a 500. Unreachable while these five soft-deleted, since the row
+    # survived - see `get_gear_item_uuids_by_id`.
     data["data"] = [
-        _to_public_schedule(row, user_uuid=user_uuid, gear_item_uuid=uuid_by_id[row["gear_item_id"]]).model_dump()
+        _to_public_schedule(row, user_uuid=user_uuid, gear_item_uuid=item_uuid).model_dump()
         for row in data["data"]
+        if (item_uuid := uuid_by_id.get(row["gear_item_id"])) is not None
     ]
 
     response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
@@ -287,12 +294,19 @@ async def read_gear_service_schedule(
         raise NotFoundException("Service schedule not found")
 
     uuid_by_id = await get_gear_item_uuids_by_id(db=db, gear_item_ids=[schedule.gear_item_id])
+    # A miss means the item was deleted between the two statements, which took this schedule
+    # with it - so the addressed resource is genuinely gone, and 404 is what the resolve
+    # above would have answered had the delete landed a moment earlier.
+    gear_item_uuid = uuid_by_id.get(schedule.gear_item_id)
+    if gear_item_uuid is None:
+        raise NotFoundException("Service schedule not found")
+
     return await _cached_read_schedule(
         request,
         user_id=current_user["id"],
         uuid=uuid,
         owner_uuid=current_user["uuid"],
-        gear_item_uuid=uuid_by_id[schedule.gear_item_id],
+        gear_item_uuid=gear_item_uuid,
         db=db,
     )
 
@@ -469,14 +483,17 @@ async def _cached_read_records(
     schedule_uuid_by_id = await _schedule_uuids_by_id(
         db=db, schedule_ids=[row["gear_service_schedule_id"] for row in data["data"]]
     )
+    # `.get()`-and-skip on the item, for the reason `_cached_read_schedules` gives; the
+    # schedule half was always a `.get()` because that reference is legitimately nullable.
     data["data"] = [
         _to_public_record(
             row,
             user_uuid=user_uuid,
-            gear_item_uuid=uuid_by_id[row["gear_item_id"]],
+            gear_item_uuid=item_uuid,
             gear_service_schedule_uuid=schedule_uuid_by_id.get(row["gear_service_schedule_id"]),
         ).model_dump()
         for row in data["data"]
+        if (item_uuid := uuid_by_id.get(row["gear_item_id"])) is not None
     ]
 
     response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
@@ -600,12 +617,17 @@ async def read_gear_service_record(
 
     uuid_by_id = await get_gear_item_uuids_by_id(db=db, gear_item_ids=[record.gear_item_id])
     schedule_uuid_by_id = await _schedule_uuids_by_id(db=db, schedule_ids=[record.gear_service_schedule_id])
+    # Same race as on the schedule half: the item going takes this record with it.
+    gear_item_uuid = uuid_by_id.get(record.gear_item_id)
+    if gear_item_uuid is None:
+        raise NotFoundException("Service record not found")
+
     return await _cached_read_record(
         request,
         user_id=current_user["id"],
         uuid=uuid,
         owner_uuid=current_user["uuid"],
-        gear_item_uuid=uuid_by_id[record.gear_item_id],
+        gear_item_uuid=gear_item_uuid,
         gear_service_schedule_uuid=schedule_uuid_by_id.get(record.gear_service_schedule_id),
         db=db,
     )

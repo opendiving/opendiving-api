@@ -37,9 +37,16 @@ from .gear_item import GearType
 from .gear_service import ServiceKind
 
 EXPORT_FORMAT = "opendiving-export"
-# Still 1 after a trip's free-text `location` became the structured `locations` list below,
-# which the rule above would otherwise increment for: the app is pre-launch and nothing has
-# ever read a version-1 file, so there is no reader for the bump to tell anything.
+# Still 1 after two changes the rule above would otherwise increment for: a trip's free-text
+# `location` became the structured `locations` list below, and `is_deleted` was removed from
+# the trip, dive-site, gear-item and schedule shapes when those five tables went
+# hard-delete (there is no deleted-but-exported row left for the flag to describe - see
+# "The row goes, and so does everything pointing at it" in DECISIONS.md). The same reason
+# covers both: the app is pre-launch and nothing has ever read a version-1 file, so there is
+# no reader for the bump to tell anything.
+#
+# That reason expires at launch. The first export a stranger reads is the last one that can
+# change shape for free, and by then this needs to be either a real bump or a stated policy.
 EXPORT_VERSION = 1
 
 

@@ -85,12 +85,19 @@ async def get_gear_item_uuids_by_id(db: AsyncSession, gear_item_ids: list[int]) 
     Unlike its counterpart this does no ownership filtering: callers reach it only with
     ids taken from rows they have already authorized.
 
-    Every call site indexes this mapping directly rather than `.get()`-ing it, which is
-    safe because `gear_item_id` is `NOT NULL` and `ON DELETE CASCADE` on both tables that
-    carry it: a schedule or record whose item is gone is gone itself, so an id read off one
-    of those rows always resolves. It stayed unfiltered through the soft-delete era for a
-    weaker version of the same reason - see "The service-record resolvers split, and only
-    one of them was the same question" in DECISIONS.md.
+    **Every call site treats a miss as real**, and none of them index this mapping directly.
+    `gear_item_id` is `NOT NULL` and `ON DELETE CASCADE` on both tables that carry it, so
+    within any one consistent snapshot a schedule or record whose item is gone is gone
+    itself - but the caller reads those rows in a *separate statement* from this one, and
+    the session runs at READ COMMITTED, so a `DELETE /gear-item/{uuid}` committing in
+    between leaves an id here that resolves to nothing. The list routes drop the row; the
+    single-resource routes 404, the answer they would have given a moment later anyway.
+
+    That window is new. Through the soft-delete era the `gear_item` row survived its own
+    deletion, so this lookup could not miss whatever the timing, and indexing directly was
+    safe for a reason that stopped holding when the delete became real. See "The service
+    -record resolvers split, and only one of them was the same question" in DECISIONS.md
+    for why the mapping is nonetheless still unfiltered.
     """
     if not gear_item_ids:
         return {}

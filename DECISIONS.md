@@ -6608,6 +6608,40 @@ check is on the model rather than a per-call flag in both places, so that a soft
 added later is filtered by default: the failure mode of forgetting is a deleted dive appearing in a
 diver's export, which is the one direction that must not be the accident.
 
+### One new failure mode: the resolve is a second statement
+
+Found in review, and the only behavioural bug this change introduced rather than removed.
+
+Every gear-service read collects `gear_item_id`s off a page of schedules or records and then
+resolves them to uuids in a **separate statement**. The session runs at READ COMMITTED, which takes
+a fresh snapshot per statement, so a `DELETE /gear-item/{uuid}` committing between the two takes the
+schedule or record with it and leaves an id in hand that resolves to nothing. All four call sites
+indexed the mapping directly, so that was a `KeyError` — an uncaught 500 on a plain `GET`.
+
+**The window is new, and the reasoning that made direct indexing safe is exactly what expired.**
+Through the soft-delete era the `gear_item` row survived its own deletion, so the lookup could not
+miss whatever the timing. `get_gear_item_uuids_by_id`'s docstring had been rewritten in this very
+change to justify the indexing on `gear_item_id` being `NOT NULL` and `ON DELETE CASCADE` — true of
+any one consistent snapshot, and not a claim about two statements straddling a commit. Worth
+recording as a shape: **an invariant that holds within a snapshot is not a guarantee across
+statements**, and swapping a soft delete for a hard one converts every "the row is still there"
+assumption into a race.
+
+The two answers differ by route, and the split is the point:
+
+- **List routes drop the row.** `.get()`-and-skip, matching what the export writers already do for
+  an unresolvable reference. A page that omits it is what a fresh read a moment later returns
+  anyway.
+- **Single-resource routes 404.** A miss there means the addressed schedule or record was itself
+  cascaded away, so the resource genuinely does not exist — the same answer
+  `resolve_schedule_for_user` would have given had the delete landed a moment earlier.
+
+Pinned by `TestAVanishedGearItemDoesNotFiveHundred` in `tests/test_gear_service.py`, which stubs the
+two statements to disagree rather than trying to arrange a real commit between them.
+`gear_item_uuid` is required on both read schemas, so `.get()` alone would not have helped — a
+`None` there is a validation error rather than a null in the response, which is why skipping and
+404ing are the only two shapes available.
+
 ### The admin panel lost its delete on all five
 
 `admin/views.py` registers those five without `"delete"`. FastCRUD's `delete` branches on the
