@@ -599,6 +599,11 @@ def _dive_element(
         # a 0 would make the whole document invalid rather than one element wrong.
         _sub(before, "divenumber", str(dive.dive_number))
     _sub(before, "datetime", combine_start_time(dive.start_time, dive.utc_offset_minutes).isoformat())
+    # Between `<datetime>` and `<equipmentused>`, because `informationbeforediveType` is an
+    # `xs:sequence` and that is where `altitude` sits in it. Water type has no counterpart
+    # here at all - 3.2.2's `density` elements are site-level and deco-planner input, never
+    # a per-dive fact - so it stays in `export.json` and `dives.csv`. See DECISIONS.md.
+    _optional(before, "altitude", dive.altitude)
 
     gear = bundle.gear_for(dive)
     if dive.weight is not None or gear:

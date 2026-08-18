@@ -3,6 +3,7 @@ from typing import Self
 
 from pydantic import BaseModel, field_validator, model_validator
 
+from .dive import WaterType
 from .dive_mixture import GasRole
 
 # The bounds `ck_dive_entry_latitude_range` and its three siblings enforce, and the only
@@ -166,6 +167,19 @@ class ParsedDiveSchema(_ParserOutput):
     max_depth: float | None
     start_time: str | None
     mixtures: list[DiveMixtureSchema]
+
+    # A form-prefill field like everything above it, not one of the server-side ones
+    # below: a FIT file's `dive_settings.water_type` is a *starting point* the diver can
+    # correct, and it reaches the dive through the ordinary `DiveCreateRequest` the
+    # prefilled form submits, never through a server-side write.
+    #
+    # **The `= None` default is deliberate, unlike its undefaulted neighbours above.**
+    # Both Suunto parsers construct this schema with explicit keyword arguments and
+    # neither format carries salinity, so matching the neighbouring style here would make
+    # every Suunto parse a `ValidationError`. The default is what makes "nothing to do
+    # for Suunto" true. No validator: the enum type is the guard, and the column has no
+    # `CHECK` to mirror.
+    water_type: WaterType | None = None
 
     # Oxygen exposure and surface pressure, on the same all-nullable terms as everything
     # above. These have no place on the dive *form* - they are the device's own

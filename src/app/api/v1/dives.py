@@ -96,10 +96,13 @@ _DIVE_CONSTRAINT_MESSAGES = {
     "ck_dive_max_depth_positive": "Max depth must be positive.",
     "ck_dive_avg_depth_positive": "Average depth must be positive.",
     "ck_dive_weight_non_negative": "Weight must be zero or positive.",
+    "ck_dive_altitude_range": "Altitude must be between -450 and 6500 meters.",
     # Unreachable through the form - these columns are written only by the import path
-    # (see DECISIONS.md) - but a constraint with no message here surfaces as a raw 500,
-    # and the whole point of the map is that the DB is the backstop for whatever reaches
-    # it. A violation would mean a parser unit bug, so the messages say so.
+    # (see DECISIONS.md) - but a constraint with no message here is worse than a raw 500:
+    # both write paths already wrap `IntegrityError`, so an unmapped constraint falls
+    # through to the generic "Invalid reference" below and 422s with a sentence about
+    # something else entirely. A violation would mean a parser unit bug, so the messages
+    # say so.
     "ck_dive_cns_start_non_negative": "Imported CNS values must be zero or positive.",
     "ck_dive_cns_end_non_negative": "Imported CNS values must be zero or positive.",
     "ck_dive_otu_start_non_negative": "Imported OTU values must be zero or positive.",

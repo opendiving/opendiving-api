@@ -112,6 +112,8 @@ def _dive(bundle: ExportBundle, dive: Dive, *, profile: LoadedProfile | None, pa
         bottom_temperature=dive.bottom_temperature,
         visibility=dive.visibility,
         weight=dive.weight,
+        water_type=dive.water_type,
+        altitude=dive.altitude,
         cns_start=dive.cns_start,
         cns_end=dive.cns_end,
         otu_start=dive.otu_start,

@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 
 from ..core.schemas import PublicUUIDSchema
 from .certification import CertificationAgency, CertificationSide
-from .dive import DiveStartTime
+from .dive import DiveStartTime, WaterType
 from .dive_mixture import DiveMixtureBase
 from .dive_profile import DiveProfileRead
 from .gear_item import GearType
@@ -114,6 +114,15 @@ class ExportDive(PublicUUIDSchema):
     bottom_temperature: Annotated[float | None, Field(default=None, description="In degrees Celsius")]
     visibility: Annotated[int | None, Field(default=None, description="Underwater visibility in meters")]
     weight: Annotated[float | None, Field(default=None, description="Total ballast carried, in kilograms")]
+    # Water type is in this file and in `dives.csv`, and in neither UDDF: 3.2.2 has no
+    # *per-dive* salinity or density slot at all - the `density` elements it does have are
+    # site-level (`sitedata`) and deco-planner input (`baseCalculationType`), neither of
+    # which is a fact about one dive. Altitude does have one, and UDDF gets it. See
+    # DECISIONS.md.
+    water_type: WaterType | None = None
+    altitude: Annotated[
+        int | None, Field(default=None, description="Elevation of the water surface, in meters above sea level")
+    ]
     cns_start: float | None = None
     cns_end: float | None = None
     otu_start: float | None = None
