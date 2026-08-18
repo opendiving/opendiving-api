@@ -7252,12 +7252,11 @@ converting is the client's job at its display and entry edges.
 is `@cache`d under a user-scoped key. That is the same argument that keeps gear service status out
 of the API entirely (see *"Gas use is computed on read"*: `serviceStatus` can't be a field because
 it depends on today's date and the cache outlives the day, while gas use is cacheable because it
-"depends on nothing but the row"). A unit-varying response depends on something outside the row too
-
-- and worse, on something a diver can change mid-session, so the cache would have to be keyed by it
-  or serve feet to someone who just switched back to metres. A `?units=` query parameter is the same
-  bad trade with an extra cache dimension and a forked contract. There is no conversion code
-  anywhere in `src/`, and that is the design, not an omission.
+"depends on nothing but the row"). A unit-varying response depends on something outside the row too,
+and worse, on something a diver can change mid-session, so the cache would have to be keyed by it or
+serve feet to someone who just switched back to metres. A `?units=` query parameter is the same bad
+trade with an extra cache dimension and a forked contract. There is no conversion code anywhere in
+`src/`, and that is the design, not an omission.
 
 **The exports do not bend to it either.** `export.json`'s docstring promises values are "not
 re-scaled or re-unitised … exactly as the API serves them", and it still holds - the preference
