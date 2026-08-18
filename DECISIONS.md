@@ -6083,9 +6083,13 @@ says only that the trip was deleted. Nothing throws and nothing looks broken —
 for the ordering, not against it. A break that announces itself gets fixed; this one just quietly
 stops telling divers where their dives went.
 
-The web app's `DeletedWithMovedDives` *type* outlives both changes by design — it comes out in a
-follow-up, after this. Until then the generated-side type declares a required `moved_dives` the API
-no longer sends. Types-only, nothing reads it, no runtime consequence.
+The web app has a `DeletedWithMovedDives` of its own — hand-written, like everything in its
+`lib/api` (that repo has no client codegen, so nothing regenerates when this schema goes). It
+outlives both changes by design and comes out in a follow-up, after this: until then it declares a
+required `moved_dives` the API no longer sends. No runtime consequence, because the production read
+goes with the web change; what is left pointing at the field is a test asserting it round-trips
+through a *mocked* response, which keeps passing for exactly that reason and is the follow-up's job
+to remove.
 
 ### A bad replacement is a 422, not a 404
 
