@@ -52,9 +52,17 @@ class TestFkErrorDetail:
     def test_weight_must_be_non_negative(self):
         assert _fk_error_detail(_integrity_error("ck_dive_weight_non_negative")) == "Weight must be zero or positive."
 
+    def test_altitude_range(self):
+        assert (
+            _fk_error_detail(_integrity_error("ck_dive_altitude_range"))
+            == "Altitude must be between -450 and 6500 meters."
+        )
+
     def test_coordinate_ranges(self):
         """Unreachable through the form - nothing sets these but the import - but a
-        constraint with no message here is a raw 500 rather than a sentence."""
+        constraint with no message here is *worse* than a raw 500: both dive write paths
+        already wrap `IntegrityError`, so it falls through to the generic fallback below
+        and answers 422 with a sentence about a missing related record."""
         assert (
             _fk_error_detail(_integrity_error("ck_dive_entry_latitude_range"))
             == "Imported latitudes must be between -90 and 90."

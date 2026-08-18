@@ -313,6 +313,12 @@ def full_bundle() -> ExportBundle:
         bottom_temperature=24.9,
         visibility=20,
         weight=6.5,
+        water_type="salt",
+        # Zero on purpose, and not a stand-in for "not recorded": the Red Sea is at sea
+        # level, so 0 is what this dive's altitude honestly is - and it is the one value
+        # that tells a `is not None` guard apart from a truthiness one, in the writers
+        # that have to emit it and in the CSV cell that has to show it.
+        altitude=0,
         trip_id=1,
         notes='Strong current, "the wall" was worth it.\nSaw a thresher.',
         cns_end=8.0,

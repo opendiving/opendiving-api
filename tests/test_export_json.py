@@ -111,6 +111,18 @@ class TestWhatUddfCannotHold:
         assert (dive["exit_latitude"], dive["exit_longitude"]) == (27.7315, 34.259)
 
     @pytest.mark.asyncio
+    async def test_the_water_type_is_here_because_uddf_has_no_per_dive_slot(self, monkeypatch):
+        """3.2.2's `density` elements are site-level (`sitedata`) and deco-planner input
+        (`baseCalculationType`) - neither is a fact about one dive - so this file and
+        `dives.csv` are the only two that carry it. `altitude` is the counter-example: it
+        has a real slot, and the UDDF gets it too."""
+        document = await _render(full_bundle(), monkeypatch)
+        assert document["dives"][0]["water_type"] == "salt"
+        assert document["dives"][0]["altitude"] == 0
+        assert document["dives"][1]["water_type"] is None
+        assert document["dives"][1]["altitude"] is None
+
+    @pytest.mark.asyncio
     async def test_the_ceiling_channel_survives_in_the_embedded_profile(self, monkeypatch):
         """UDDF drops it (`<decostop>` needs a duration we do not have); the JSON must not."""
         document = await _render(full_bundle(), monkeypatch, {2: TRIMIX_PROFILE})

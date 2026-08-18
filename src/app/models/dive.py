@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, Text
+from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -41,6 +41,23 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # across dives (see DECISIONS.md). `Float`, not `Integer`: half-kilo increments are
     # normal, and pound-based weights don't convert to whole kilos.
     weight: Mapped[float | None] = mapped_column(Float, default=None)
+    # What the water was and how high above the sea it sat - the two calibration settings
+    # a dive computer carries, recorded here as facts about the dive. Both are diver
+    # knowledge first (the FIT import only ever *seeds* `water_type` through the form's
+    # prefill), so they sit here rather than on the import-owned `DiveTechScalars`.
+    #
+    # `water_type` is a plain `VARCHAR(32)` holding a `WaterType` value
+    # (`schemas/dive.py`) with no DB `CHECK` behind it, exactly like `gear_item.type` -
+    # a Pydantic enum guards every write path, so a DB copy of the list would only cost a
+    # `DROP`/`ADD CONSTRAINT` per new member. See DECISIONS.md.
+    #
+    # `altitude` is metres above sea level of the water surface, and is a different fact
+    # from `surface_pressure_bar` below: that one is the device's own barometer reading,
+    # import-only and display-only, while this is the place, which a diver can type.
+    # `Integer` because metre resolution is already finer than any use - computers
+    # themselves bucket altitude into 300 m bands.
+    water_type: Mapped[str | None] = mapped_column(String(32), default=None)
+    altitude: Mapped[int | None] = mapped_column(Integer, default=None)
     trip_id: Mapped[int | None] = mapped_column(ForeignKey("trip.id", ondelete="SET NULL"), default=None, index=True)
 
     # Oxygen-exposure and surface-pressure readings, written **only** by the import path
@@ -96,6 +113,15 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
             # deliberate entry (a drysuit with a heavy undergarment, a freedive), and it's
             # worth being able to tell apart from "didn't record it" (NULL).
             CheckConstraint("weight IS NULL OR weight >= 0", name="ck_dive_weight_non_negative"),
+            # Bounded on both sides because a number this far out is a unit or typo error
+            # rather than an unusual dive: the Dead Sea (~-430 m) is the lowest diveable
+            # surface on Earth, and the highest attested dives are the summit pool of Ojos
+            # del Salado (~6 390 m). `water_type` gets no constraint of its own - see the
+            # column's comment above.
+            CheckConstraint(
+                "altitude IS NULL OR (altitude >= -450 AND altitude <= 6500)",
+                name="ck_dive_altitude_range",
+            ),
             # `>= 0` rather than `> 0` for the same reason as `weight`: a dive that began
             # with no oxygen loading at all records a real 0, and that is worth telling
             # apart from "didn't record it". No upper bound - CNS above 100 % is exactly

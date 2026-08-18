@@ -1,5 +1,6 @@
 import uuid as uuid_pkg
 from datetime import datetime
+from enum import StrEnum
 from typing import Annotated, ClassVar
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
@@ -22,6 +23,32 @@ _START_TIME_EXAMPLE = "2021-04-04T10:04:47.910+02:00"
 DiveStartTime = Annotated[datetime, AfterValidator(require_utc_offset)]
 
 
+class WaterType(StrEnum):
+    """What the diver (or their computer) was calibrated for.
+
+    A closed vocabulary rather than free text, on the same terms as `GearType`
+    (`schemas/gear_item.py`): the value exists to be compared across dives, and the
+    members are declared in the order a picker should list them rather than
+    alphabetically, so the frontend takes that order from here instead of keeping a
+    second sorted list. Deliberately **not** mirrored by a DB `CHECK` - see DECISIONS.md.
+
+    Salt and fresh are the two real answers; brackish is a genuine third (the Baltic,
+    estuaries, cenote haloclines) and is in Subsurface's vocabulary too. `EN13319` is the
+    European standard depth-instrument calibration (~1020 kg/m3), not a kind of water -
+    it is here because it is what a Shearwater ships set to and what a FIT file records,
+    and folding it into `SALT` on import would be the parser substituting a plausible
+    value for what the file said (see `schemas/parsed_dive.py`). The diver can correct it
+    on the prefilled form.
+
+    No `OTHER`: `None` already means "not recorded".
+    """
+
+    SALT = "salt"
+    FRESH = "fresh"
+    BRACKISH = "brackish"
+    EN13319 = "en13319"
+
+
 class DiveBase(BaseModel):
     dive_number: Annotated[int, Field(examples=[5])]
     start_time: Annotated[DiveStartTime, Field(examples=[_START_TIME_EXAMPLE])]
@@ -33,6 +60,19 @@ class DiveBase(BaseModel):
     visibility: Annotated[int | None, Field(default=None, description="Underwater visibility in meters")]
     weight: Annotated[
         float | None, Field(default=None, examples=[6.0], description="Total ballast carried, in kilograms")
+    ]
+    # On `DiveBase` rather than `DiveTechScalars`, so both are writable on create and
+    # edit: these are things a diver knows, and an import that re-attached would otherwise
+    # overwrite a correction (see that mixin's docstring). No Pydantic bounds on
+    # `altitude`, matching every other numeric field here - `ck_dive_altitude_range` is
+    # the bound, mirrored by the frontend's Zod schema.
+    water_type: Annotated[
+        WaterType | None,
+        Field(default=None, examples=[WaterType.SALT], description="What the water was, as a dive computer calibrates"),
+    ]
+    altitude: Annotated[
+        int | None,
+        Field(default=None, examples=[372], description="Elevation of the water surface, in meters above sea level"),
     ]
 
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
@@ -559,6 +599,12 @@ class DiveUpdate(RejectsExplicitNulls):
     bottom_temperature: Annotated[float | None, Field(default=None)]
     visibility: Annotated[int | None, Field(default=None, description="Underwater visibility in meters")]
     weight: Annotated[float | None, Field(default=None, description="Total ballast carried, in kilograms")]
+    water_type: Annotated[
+        WaterType | None, Field(default=None, description="What the water was, as a dive computer calibrates")
+    ]
+    altitude: Annotated[
+        int | None, Field(default=None, description="Elevation of the water surface, in meters above sea level")
+    ]
     trip_uuid: Annotated[
         uuid_pkg.UUID | None, Field(default=None, description="Public id of the trip this dive belongs to")
     ]
@@ -603,6 +649,12 @@ class DiveUpdateInternal(BaseModel):
     bottom_temperature: Annotated[float | None, Field(default=None)]
     visibility: Annotated[int | None, Field(default=None, description="Underwater visibility in meters")]
     weight: Annotated[float | None, Field(default=None, description="Total ballast carried, in kilograms")]
+    water_type: Annotated[
+        WaterType | None, Field(default=None, description="What the water was, as a dive computer calibrates")
+    ]
+    altitude: Annotated[
+        int | None, Field(default=None, description="Elevation of the water surface, in meters above sea level")
+    ]
     trip_id: Annotated[int | None, Field(default=None, description="Internal id of the trip this dive belongs to")]
     utc_offset_minutes: Annotated[int | None, Field(default=None)]
     notes: Annotated[

@@ -23,6 +23,7 @@ from typing import Any
 import fitdecode
 from fitdecode.types import DevField, FieldData
 
+from ...schemas.dive import WaterType
 from ...schemas.dive_mixture import GasRole
 from ...schemas.dive_profile import (
     ParsedPressureSeries,
@@ -105,6 +106,17 @@ _EVENT_TYPE_BY_NAME = {
     "dive_gas_switched": ProfileEventType.GAS_SWITCH,
     "user_marker": ProfileEventType.BOOKMARK,
     "dive_alert": ProfileEventType.OTHER,
+}
+
+# `dive_settings.water_type`'s own vocabulary, which the FIT profile spells
+# `{0: fresh, 1: salt, 2: en13319, 3: custom}`. Three of the four are `WaterType` members
+# under the same name; `custom` is deliberately absent, so `.get()` nulls it - it says the
+# diver dialled in a `water_density` number, which is not a water type and has no column.
+# Anything a future profile revision adds nulls the same way rather than guessing.
+_WATER_TYPE_BY_NAME = {
+    "fresh": WaterType.FRESH,
+    "salt": WaterType.SALT,
+    "en13319": WaterType.EN13319,
 }
 
 # How many cylinders one dive may describe, **in total**. No device pairs more than a
@@ -277,6 +289,9 @@ class _FitScan:
 
     session: fitdecode.FitDataMessage | None = None
     activity: fitdecode.FitDataMessage | None = None
+    # The device's own salinity setting, and the only water-type evidence a FIT file
+    # carries. First one wins, like `session`/`activity`.
+    dive_settings: fitdecode.FitDataMessage | None = None
     # How many `session` messages have gone past, which is what bounds
     # `dive_summaries` to the first dive - see `_collect`.
     session_count: int = 0
@@ -453,8 +468,18 @@ class FitParser(DiveParser):
         elif frame.name == "activity":
             if scan.activity is None:
                 scan.activity = frame
+        elif frame.name == "dive_settings":
+            # Above the first-session cut for the same reason `tank_summary` is, and not
+            # because this one is known to be written late: nothing about a settings
+            # message pins where a device puts it, and the cut below exists for *samples*
+            # - messages that belong to whichever dive they follow. Bounding this one
+            # would risk the failure `tank_summary`'s comment records without buying
+            # anything, since only the first is kept either way.
+            if scan.dive_settings is None:
+                scan.dive_settings = frame
         elif frame.name == "dive_summary":
-            # Cut at the *second* session rather than the first, unlike everything below:
+            # Cut at the *second* session rather than the first, unlike everything below,
+            # and this is the branch that genuinely needs that looser bound:
             # a `dive_summary` is written after the session it refers to, so gating it on
             # the first would discard every one of them. Bounded all the same, because
             # `_dive_summary` prefers a summary whose `reference_mesg` names a session -
@@ -650,8 +675,27 @@ class FitParser(DiveParser):
             duration=round(duration) if duration is not None else None,
             max_depth=cls._depth(session, summary, "max_depth"),
             start_time=start_time.isoformat() if isinstance(start_time, datetime) else None,
+            water_type=cls._water_type(scan),
             mixtures=cls._mixtures(scan),
         )
+
+    @staticmethod
+    def _water_type(scan: _FitScan) -> WaterType | None:
+        """The device's salinity setting, kept verbatim where we have a name for it.
+
+        `en13319` stays `en13319` rather than being folded into `salt`: it is the
+        calibration a computer ships set to, and rewriting it as the nearest real water
+        would be inventing a reading (see `schemas/parsed_dive.py`). The diver can correct
+        it on the prefilled form.
+
+        `custom` maps to `None`, not to a fourth member. It says the diver dialled in a
+        density number, which lives in `dive_settings.water_density` and has no column
+        here - so the file records no water *type*, and `None` is what that means.
+        """
+        if scan.dive_settings is None:
+            return None
+        value = _native_value(scan.dive_settings, "water_type")
+        return _WATER_TYPE_BY_NAME.get(value) if isinstance(value, str) else None
 
     @staticmethod
     def _dive_session(scan: _FitScan) -> fitdecode.FitDataMessage:

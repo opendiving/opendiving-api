@@ -137,6 +137,37 @@ class TestDiveCheckConstraints:
         db.add(_make_dive(dive_owner.id, weight=None))
         db.commit()
 
+    def test_altitude_outside_the_diveable_band_is_rejected(self, db: Session, dive_owner: User) -> None:
+        """The band catches a unit or typo error, not an unusual dive: below -450 m is
+        under the Dead Sea, and above 6500 m is above the highest attested dive on the
+        planet."""
+        _assert_violates(db, _make_dive(dive_owner.id, altitude=-451), "ck_dive_altitude_range")
+        _assert_violates(db, _make_dive(dive_owner.id, altitude=6501), "ck_dive_altitude_range")
+
+    def test_the_altitude_bounds_themselves_are_allowed(self, db: Session, dive_owner: User) -> None:
+        """Inclusive on both sides, and both ends are real places: the Dead Sea surface
+        sits near -430 m and the Ojos del Salado summit pool near 6390 m."""
+        db.add(_make_dive(dive_owner.id, altitude=-450))
+        db.add(_make_dive(dive_owner.id, altitude=6500))
+        db.commit()
+
+    def test_sea_level_and_a_null_altitude_are_both_allowed(self, db: Session, dive_owner: User) -> None:
+        """0 is a recorded reading - most dives happen at sea level - and telling it apart
+        from "didn't record it" is why this column is nullable rather than defaulted."""
+        db.add(_make_dive(dive_owner.id, altitude=0))
+        db.add(_make_dive(dive_owner.id))
+        db.commit()
+
+    def test_any_water_type_string_is_accepted_by_the_database(self, db: Session, dive_owner: User) -> None:
+        """Deliberately unconstrained, exactly like `gear_item.type`: `WaterType` is a
+        Pydantic enum on every write path, so a DB copy of the vocabulary would buy
+        nothing and cost a `DROP`/`ADD CONSTRAINT` per new member (see DECISIONS.md).
+        This test is the record of that, not a gap - `test_dive_update.py` pins the 422
+        the API answers with."""
+        db.add(_make_dive(dive_owner.id, water_type="brackish"))
+        db.add(_make_dive(dive_owner.id, water_type="soda"))
+        db.commit()
+
     def test_negative_cns_is_rejected(self, db: Session, dive_owner: User) -> None:
         _assert_violates(db, _make_dive(dive_owner.id, cns_start=-1), "ck_dive_cns_start_non_negative")
         _assert_violates(db, _make_dive(dive_owner.id, cns_end=-1), "ck_dive_cns_end_non_negative")

@@ -35,15 +35,20 @@ from ..schemas.dive_profile import DEPTH_SCALE, GasAttribution
 from .dive_profiles import ProfileGasAttribution, get_gas_attribution_for_dives
 
 # Metres of water per bar of ambient pressure. Salt water is nearer 10.06 m/bar and
-# fresh water 10.33, but a dive has no water-type field and every dive log in
-# circulation uses the round number. The resulting error is under 3% - comfortably
-# inside the error of a hand-entered (or computer-averaged) average depth, and it
-# applies equally to every dive, so the trend the dashboard graphs is unaffected.
+# fresh water 10.33, but every dive log in circulation uses the round number and this one
+# does too. The resulting error is under 3% - comfortably inside the error of a
+# hand-entered (or computer-averaged) average depth, and it applies equally to every dive,
+# so the trend the dashboard graphs is unaffected.
+#
+# `dive.water_type` exists now, and this deliberately ignores it. Reading it would put a
+# 3% step between two dives of the same diver on the strength of a field that is null on
+# most rows, which is a worse artefact than the flat 3% it removes - the graph would show
+# a change in the diver rather than a change in what they wrote down. If it ever becomes
+# water-type-aware, the null rows are the whole problem to solve first. See DECISIONS.md.
 #
 # Two further simplifications are baked in for the same reason: surface pressure is
-# assumed to be 1 bar (wrong at an altitude lake) and air is treated as an ideal gas
-# (optimistic by roughly 5% at a 230 bar fill). Both are what every other dive log
-# does, and correcting either would need data the app doesn't collect.
+# assumed to be 1 bar (wrong at an altitude lake, and `dive.altitude` does not change that
+# either) and air is treated as an ideal gas (optimistic by roughly 5% at a 230 bar fill).
 METERS_PER_BAR = 10.0
 
 
