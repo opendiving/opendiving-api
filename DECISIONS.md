@@ -6083,20 +6083,20 @@ not of this change. The next removal, made after anything is deployed, does not 
 way — and the tell that the reasoning has expired is the same either way: someone is running a
 client you cannot redeploy in the same commit.
 
-Nothing is deferred to a follow-up, which was a deliberate call and is the part worth recording. The
-web app carries its own `DeletedWithMovedDives` — hand-written, since that repo has no client
-codegen, so nothing regenerates when this schema goes — plus two return annotations naming it and a
-test asserting the field round-trips. Those belong to the paired web change rather than to a third
-PR after both.
+Nothing was deferred to a follow-up, which was a deliberate call rather than an oversight. The web
+app keeps a hand-written mirror of this schema (no client codegen there, so nothing regenerates when
+a type here goes), and the tidy-up of that mirror shipped with the paired web change instead of
+becoming a third PR after both.
 
-The reason that had to be decided rather than discovered: the test asserts against a *mocked*
-response, so it goes on passing against an API that no longer sends the field. A remnant that
-type-checks and tests green is one nothing will remind anyone about — the deferred cleanup would
-simply have stayed deferred.
+The reason that had to be decided rather than left to be discovered: the web test covering this
+delete asserts against a *mocked* response, so it goes on passing against an API that no longer
+sends the field. A remnant that type-checks and tests green is one nothing will remind anyone about
+— "we'll clean it up after" would have meant "never", with no failing build to argue otherwise.
 
-Deliberately not restating here which of those the web repo has already dropped. This file cannot
-keep another repo's branch state true, and an earlier draft of this very section asserted a web-side
-removal that had not happened yet. **Record the decision, not the other repo's contents.**
+Deliberately not itemising here what the other repo does or does not still contain. This file cannot
+keep another repo's tree true, and two successive drafts of this very section proved it: one claimed
+a web-side removal that had not happened yet, the next was stale within the hour because it had. The
+decision survives; an inventory does not. **Record the decision, not the other repo's contents.**
 
 ### A bad replacement is a 422, not a 404
 
