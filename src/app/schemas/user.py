@@ -1,9 +1,27 @@
 from datetime import datetime
+from enum import StrEnum
 from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls
+
+
+class UnitSystem(StrEnum):
+    """Which measurement system a diver reads and types in.
+
+    Two whole systems rather than a choice per dimension (depth, pressure, weight,
+    ...): the two real camps are m/C/bar/kg/L and ft/F/psi/lb/cuft, and one toggle
+    covers both. Per-dimension granularity stays available as a later additive change.
+
+    Nothing the API serves is converted - see DECISIONS.md's *"Measurements are metric
+    in the database and on the wire; `units` is who's looking"*. This is the single
+    source of truth for the vocabulary, and like `GearType` it is deliberately not
+    mirrored by a DB `CHECK` constraint.
+    """
+
+    METRIC = "metric"
+    IMPERIAL = "imperial"
 
 
 class UserBase(BaseModel):
@@ -25,6 +43,10 @@ class UserRead(PublicUUIDSchema):
     # validates against a database where the column hasn't been added by hand yet (see
     # DECISIONS.md's "no migration tool" workflow).
     gear_service_emails: bool = True
+    # Feeds the settings page's units toggle, and every measurement the web app renders.
+    # Defaults for the same reason as its neighbour above - this still has to validate
+    # against a database where the column hasn't been added by hand yet.
+    units: UnitSystem = UnitSystem.METRIC
 
 
 class UserReadInternal(UserRead):
@@ -58,7 +80,13 @@ class UserUpdate(RejectsExplicitNulls):
 
     # Every field here maps to a `NOT NULL` column - `profile_image_url` included, which
     # carries a placeholder URL rather than a null when a user has no picture.
-    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "username", "profile_image_url", "gear_service_emails")
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = (
+        "name",
+        "username",
+        "profile_image_url",
+        "gear_service_emails",
+        "units",
+    )
 
     name: Annotated[str | None, Field(min_length=2, max_length=30, examples=["User Userberg"], default=None)]
     username: Annotated[
@@ -74,6 +102,11 @@ class UserUpdate(RejectsExplicitNulls):
     # without it the settings page's toggle would 422 rather than save.
     gear_service_emails: Annotated[
         bool | None, Field(default=None, description="Email me when gear is due for service")
+    ]
+    # Same `extra="forbid"` reasoning as its neighbour: without this field the settings
+    # page's units select would 422 rather than save.
+    units: Annotated[
+        UnitSystem | None, Field(default=None, description="Measurement system to display and accept values in")
     ]
 
 

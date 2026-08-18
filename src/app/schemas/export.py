@@ -18,7 +18,10 @@ a file that outlives it.
 Values are **not** re-scaled or re-unitised: depths are meters, pressures bar,
 temperatures Celsius, durations seconds, exactly as the API serves them, and the embedded
 profile keeps the integer scales `GET /dive/{uuid}/profile` uses (see `dive_profile.py`
-for why they are integers). The one derived value anywhere in here is `archive_path`,
+for why they are integers). The user's `units` preference is carried as account data and
+changes none of that - it says which system the diver reads in, not what this file
+records (see DECISIONS.md's *"Measurements are metric in the database and on the wire;
+`units` is who's looking"*). The one derived value anywhere in here is `archive_path`,
 which is a fact about the zip rather than about the logbook.
 """
 
@@ -35,6 +38,7 @@ from .dive_mixture import DiveMixtureBase
 from .dive_profile import DiveProfileRead
 from .gear_item import GearType
 from .gear_service import ServiceKind
+from .user import UnitSystem
 
 EXPORT_FORMAT = "opendiving-export"
 # Still 1 after two changes the rule above would otherwise increment for: a trip's free-text
@@ -62,9 +66,12 @@ class ExportUser(PublicUUIDSchema):
     name: str
     username: str
     email: str
-    # A diver-set preference, and the only account-level setting there is. Here because
-    # `/export/archive` says nothing in the account is reachable only through the app.
+    # The two account-level preferences there are. Here because `/export/archive` says
+    # nothing in the account is reachable only through the app - and `units` in
+    # particular is the diver's own setting travelling with a file whose measurements
+    # deliberately do not bend to it (see the module docstring).
     gear_service_emails: bool
+    units: UnitSystem
     created_at: datetime
 
 

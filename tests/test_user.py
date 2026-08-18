@@ -3,9 +3,11 @@
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from pydantic import ValidationError
+from uuid6 import uuid7
 
 from src.app.api.v1.users import erase_user, patch_user, read_current_user
-from src.app.schemas.user import UserUpdate
+from src.app.schemas.user import UnitSystem, UserRead, UserUpdate
 
 # Note: there is no `POST /user` endpoint to test here anymore - account creation only
 # happens via `POST /auth/complete` (see `tests/test_auth.py`).
@@ -109,3 +111,71 @@ class TestEraseUser:
 
                 assert result == {"message": "User deleted"}
                 mock_blacklist_token.assert_called_once_with(token=access_token, db=mock_db)
+
+
+class TestUnitsPreference:
+    """`units` - the account-level metric-or-imperial toggle.
+
+    Nothing the API serves is converted by it (see DECISIONS.md's *"Measurements are
+    metric in the database and on the wire; `units` is who's looking"*), so the whole
+    server-side surface is the two schemas these cover: it is read on `GET /user` and
+    written on `PATCH /user`, and that is all.
+
+    `test_update_explicit_nulls.py` covers the `NON_NULLABLE_FIELDS` half structurally,
+    off the SQLAlchemy metadata; the null case here is the same guard seen from the
+    caller's side.
+    """
+
+    def test_an_untouched_account_reads_as_metric(self):
+        """The Python-side default, and the reason it exists: a row read back from a
+        database where the hand-written `ALTER TABLE` hasn't run yet has no `units` key
+        at all, and `GET /user` still has to answer.
+        """
+        values = UserRead.model_validate(
+            {
+                "uuid": uuid7(),
+                "name": "Ada Lovelace",
+                "username": "ada",
+                "email": "ada@example.com",
+                "profile_image_url": "https://profileimageurl.com",
+            }
+        )
+
+        assert values.units is UnitSystem.METRIC
+
+    @pytest.mark.asyncio
+    async def test_patch_user_saves_the_units_preference(self, mock_db, current_user_dict):
+        """The field has to be on `UserUpdate` as well as `UserRead`: the schema is
+        `extra="forbid"`, so an omission here would 422 the settings toggle rather than
+        save it.
+        """
+        user_update = UserUpdate(units=UnitSystem.IMPERIAL)
+
+        with patch("src.app.api.v1.users.crud_users") as mock_crud:
+            mock_crud.exists = AsyncMock(return_value=False)
+            mock_crud.update = AsyncMock(return_value=None)
+
+            result = await patch_user(Mock(), user_update, current_user_dict, mock_db)
+
+            assert result == {"message": "User updated"}
+            written = mock_crud.update.call_args.kwargs["object"]
+            assert written.model_dump(exclude_unset=True) == {"units": UnitSystem.IMPERIAL}
+
+    def test_a_value_outside_the_vocabulary_is_rejected(self):
+        """`UnitSystem` is the only place the vocabulary is written down - there is no DB
+        `CHECK` mirroring it (the `GearItem.type` decision), so this rejection is the
+        whole enforcement.
+        """
+        with pytest.raises(ValidationError) as exc_info:
+            UserUpdate(units="cubits")  # type: ignore[arg-type]
+
+        assert "units" in str(exc_info.value)
+
+    def test_an_explicit_null_is_rejected(self):
+        """The column is `NOT NULL`, so `{"units": null}` is a 422 rather than an UPDATE
+        that reaches Postgres and comes back a 500 - see `RejectsExplicitNulls`.
+        """
+        with pytest.raises(ValidationError) as exc_info:
+            UserUpdate.model_validate({"units": None})
+
+        assert "cannot be null" in str(exc_info.value)

@@ -33,6 +33,17 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # an existing table).
     gear_service_emails: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
 
+    # Which measurement system this diver reads and types in - `metric` or `imperial`
+    # (`UnitSystem` in `schemas/user.py` is the vocabulary; the column is a plain
+    # `VARCHAR`, the `GearItem.type` shape). Stored server-side rather than per device
+    # so every client the diver signs into agrees, and nothing the API serves varies by
+    # it: measurements are metric everywhere and this says who is looking (see
+    # DECISIONS.md).
+    #
+    # Same `default`/`server_default` pair as `gear_service_emails` above, for the same
+    # reason - the column is NOT NULL and `create_all` never alters an existing table.
+    units: Mapped[str] = mapped_column(String(16), default="metric", server_default="metric")
+
     # Overrides `SoftDeleteMixin.is_deleted` to add an index: unlike Dive, Certification and
     # GearServiceRecord (each of which has a compound partial index whose predicate already
     # pins `is_deleted`), no other index on this table covers it. Trip and DiveSite used to

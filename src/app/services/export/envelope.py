@@ -75,6 +75,7 @@ def _user(bundle: ExportBundle) -> ExportUser:
         username=user.username,
         email=user.email,
         gear_service_emails=user.gear_service_emails,
+        units=user.units,
         created_at=user.created_at,
     )
 

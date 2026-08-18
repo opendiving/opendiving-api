@@ -7237,3 +7237,71 @@ map's own comment used to claim: both dive write paths already wrap `IntegrityEr
 constraint falls through to `_fk_error_detail`'s generic "Invalid reference: a related record does
 not exist." and answers 422 with a sentence about something else entirely. Both stale comments were
 corrected alongside this.
+
+## Measurements are metric in the database and on the wire; `units` is who's looking
+
+`user.units` is a `metric`/`imperial` preference on the account, and it changes **nothing the API
+serves**. Every stored measurement is metric and canonically so - `max_depth`/`avg_depth` in metres,
+`bottom_temperature` in Celsius, `visibility` and `altitude` in whole metres, `weight` in kilograms,
+a mixture's `volume` in litres and its pressures in bar, the profile channels as integer-scaled
+metric (cm, 0.1 C, 0.1 bar - see *"A dive profile is stored per channel"*), `sac_bar_per_min` with
+the unit written into the field name. The preference says which system the *viewer* reads in, and
+converting is the client's job at its display and entry edges.
+
+**Why the API never converts.** A converted response would be viewer-dependent, and every dive read
+is `@cache`d under a user-scoped key. That is the same argument that keeps gear service status out
+of the API entirely (see *"Gas use is computed on read"*: `serviceStatus` can't be a field because
+it depends on today's date and the cache outlives the day, while gas use is cacheable because it
+"depends on nothing but the row"). A unit-varying response depends on something outside the row too
+
+- and worse, on something a diver can change mid-session, so the cache would have to be keyed by it
+  or serve feet to someone who just switched back to metres. A `?units=` query parameter is the same
+  bad trade with an extra cache dimension and a forked contract. There is no conversion code
+  anywhere in `src/`, and that is the design, not an omission.
+
+**The exports do not bend to it either.** `export.json`'s docstring promises values are "not
+re-scaled or re-unitised … exactly as the API serves them", and it still holds - the preference
+rides *in* the file as account data, on `ExportUser` beside `gear_service_emails`, because
+`/export/archive` promises nothing in the account is reachable only through the app. `dives.csv`
+keeps its `_m`/`_kg`/`_bar` header suffixes, which are the contract that makes the numbers readable
+without knowing who exported them; UDDF is SI by specification. Likewise `sac_bar_per_min` is not
+renamed: a metric-committed field name is documentation, and a client that maps it to psi/min is
+doing the same job as the one that maps `max_depth` to feet.
+
+**One toggle, not one per dimension.** The two real user camps are whole systems - m/C/bar/kg/L and
+ft/F/psi/lb/cuft - and Shearwater Cloud and Garmin both expose exactly one switch. Subsurface offers
+per-dimension choices; that stays available as a later *additive* change, because the client's units
+module is keyed by dimension even though only one preference feeds it. ppO2 is in bar/ata across the
+whole industry regardless of the toggle and is not a converted dimension at all.
+
+**`UnitSystem` is a `StrEnum` over a plain `VARCHAR(16)`, with no `CHECK`** - the `GearItem.type`
+decision unchanged (see *"`GearItem.type` is a closed vocabulary, but has no DB `CHECK`
+constraint"*). The value is a Pydantic field on every write path including the admin panel, so a
+DB-side copy of the list buys nothing and costs a `DROP`/`ADD CONSTRAINT` per member.
+
+**The name is plural.** `units`, not `unit_system` or `measurement_system`, because the wire reads
+as a sentence at the point of use - `"units": "imperial"` - and the settings row says "Units".
+
+**Both schemas, and the null guard.** This is the `gear_service_emails` template exactly (see
+*"`user.gear_service_emails` is the only new column on an existing table"*): the field goes on
+`UserRead` **and** `UserUpdate`, because `UserUpdate` is `extra="forbid"` and missing the second
+422s the settings toggle instead of saving it. `UserRead`'s `= UnitSystem.METRIC` default is what
+lets `GET /user` answer against a database where the hand-written `ALTER` has not run yet.
+`UserAdminUpdate` inherits both the field and the guard with no separate edit. The column is
+`NOT NULL`, so `"units"` joins `UserUpdate.NON_NULLABLE_FIELDS` - and
+`test_update_explicit_nulls.py::test_the_declared_fields_match_the_table` reads that list back off
+the SQLAlchemy metadata, so forgetting it fails the build rather than quietly reopening the
+explicit-null hole (see *"Update schemas refuse an explicit null for a `NOT NULL` column"*). What no
+test can catch is a forgotten hand-applied `ALTER`.
+
+Being a new column on an existing table (see *"Schema changes have no migration tool"*), this needs
+a manual migration on any existing database:
+
+```sql
+ALTER TABLE "user" ADD COLUMN units VARCHAR(16) NOT NULL DEFAULT 'metric';
+```
+
+That is the whole manual-DDL list for this feature, and the whole API-side surface with it: no
+endpoint's response varies by the preference, so there is no cache key, no invalidation and no
+parser work anywhere in this change. Metric is the default for every existing row and every new
+account.
