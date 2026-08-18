@@ -6637,7 +6637,10 @@ The two answers differ by route, and the split is the point:
   `resolve_schedule_for_user` would have given had the delete landed a moment earlier.
 
 Pinned by `TestAVanishedGearItemDoesNotFiveHundred` in `tests/test_gear_service.py`, which stubs the
-two statements to disagree rather than trying to arrange a real commit between them.
+two statements to disagree rather than trying to arrange a real commit between them — **all four
+call sites, not just the schedule two.** The record half took the identical fix, and an earlier
+draft of this section claimed the coverage while the tests only exercised schedules, which is the
+shape of mistake that leaves a route free to regress to direct indexing with a green suite.
 `gear_item_uuid` is required on both read schemas, so `.get()` alone would not have helped — a
 `None` there is a validation error rather than a null in the response, which is why skipping and
 404ing are the only two shapes available.

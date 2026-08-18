@@ -629,6 +629,82 @@ class TestAVanishedGearItemDoesNotFiveHundred:
 
         assert [row["gear_item_uuid"] for row in result["data"]] == [item_uuid]
 
+    @staticmethod
+    def _record_row(gear_item_id: int) -> dict[str, Any]:
+        return {
+            "id": 1,
+            "uuid": uuid7(),
+            "user_id": 7,
+            "gear_item_id": gear_item_id,
+            "gear_service_schedule_id": None,
+            "kind": "service",
+            "label": None,
+            "serviced_on": date(2026, 1, 1),
+            "dive_count_at_service": 0,
+            "performed_by": None,
+            "notes": "",
+            "created_at": datetime(2026, 1, 1, tzinfo=UTC),
+        }
+
+    @pytest.mark.asyncio
+    async def test_the_record_list_drops_the_row_rather_than_raising(self, monkeypatch) -> None:
+        """The record half got the identical fix, so it needs the identical test - the two
+        call sites are the reason this class is not named after schedules."""
+        page = {"data": [self._record_row(gear_item_id=3)], "total_count": 1}
+        monkeypatch.setattr(gear_service_module.crud_gear_service_records, "get_multi", AsyncMock(return_value=page))
+        monkeypatch.setattr(gear_service_module, "get_gear_item_uuids_by_id", AsyncMock(return_value={}))
+        monkeypatch.setattr(gear_service_module, "_schedule_uuids_by_id", AsyncMock(return_value={}))
+
+        result = await cast(Any, gear_service_module._cached_read_records).__wrapped__(
+            request=None,
+            user_id=7,
+            user_uuid=uuid7(),
+            db=MagicMock(),
+            page=1,
+            items_per_page=10,
+            gear_item_id=None,
+            gear_service_schedule_id=None,
+        )
+
+        assert result["data"] == []
+
+    @pytest.mark.asyncio
+    async def test_the_record_list_still_renders_the_rows_that_resolve(self, monkeypatch) -> None:
+        item_uuid = uuid7()
+        page = {"data": [self._record_row(gear_item_id=3)], "total_count": 1}
+        monkeypatch.setattr(gear_service_module.crud_gear_service_records, "get_multi", AsyncMock(return_value=page))
+        monkeypatch.setattr(gear_service_module, "get_gear_item_uuids_by_id", AsyncMock(return_value={3: item_uuid}))
+        monkeypatch.setattr(gear_service_module, "_schedule_uuids_by_id", AsyncMock(return_value={}))
+
+        result = await cast(Any, gear_service_module._cached_read_records).__wrapped__(
+            request=None,
+            user_id=7,
+            user_uuid=uuid7(),
+            db=MagicMock(),
+            page=1,
+            items_per_page=10,
+            gear_item_id=None,
+            gear_service_schedule_id=None,
+        )
+
+        assert [row["gear_item_uuid"] for row in result["data"]] == [item_uuid]
+
+    @pytest.mark.asyncio
+    async def test_the_single_record_read_404s(self, monkeypatch) -> None:
+        """Deleting the item cascades to the record, so the addressed resource is gone."""
+        record = SimpleNamespace(id=1, uuid=uuid7(), user_id=7, gear_item_id=3, gear_service_schedule_id=None)
+        monkeypatch.setattr(gear_service_module, "resolve_record_for_user", AsyncMock(return_value=record))
+        monkeypatch.setattr(gear_service_module, "get_gear_item_uuids_by_id", AsyncMock(return_value={}))
+        monkeypatch.setattr(gear_service_module, "_schedule_uuids_by_id", AsyncMock(return_value={}))
+
+        with pytest.raises(NotFoundException):
+            await gear_service_module.read_gear_service_record(
+                request=MagicMock(),
+                uuid=record.uuid,
+                current_user={"id": 7, "uuid": uuid7()},
+                db=MagicMock(),
+            )
+
     @pytest.mark.asyncio
     async def test_the_single_schedule_read_404s(self, monkeypatch) -> None:
         """A 404 rather than a skip: the addressed resource really is gone, since deleting
