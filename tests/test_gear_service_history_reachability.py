@@ -50,7 +50,7 @@ class TestServiceHistoryReachability:
     async def test_another_divers_item_is_refused_the_same_way(
         self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
     ) -> None:
-        """Unarchiving is not a way to probe someone else's uuids: "not yours" and
+        """Archiving is not a way to probe someone else's uuids: "not yours" and
         "doesn't exist" answer identically here, as `_owned_gear_item`'s docstring says."""
         item = create_gear_item(db, other_diver, is_archived=True)
 
