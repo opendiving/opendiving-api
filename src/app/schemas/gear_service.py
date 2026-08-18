@@ -218,8 +218,12 @@ class GearServiceRecordBase(BaseModel):
 class GearServiceRecordRead(GearServiceRecordBase, PublicUUIDSchema):
     user_uuid: uuid_pkg.UUID
     gear_item_uuid: uuid_pkg.UUID
-    # NULL when the record isn't attached to a schedule - either it never was, or the
-    # schedule has since been hard-deleted (the FK is `ON DELETE SET NULL`).
+    # NULL in three cases, and the third is much the most common: the record was never
+    # attached to a schedule; the schedule was hard-deleted (the FK is `ON DELETE SET
+    # NULL`); or the schedule was *soft*-deleted, in which case the FK still points at it
+    # and `_schedule_uuids_by_id` declines to resolve it. Only the middle one empties the
+    # column - the other two are a live `gear_service_schedule_id` reading back as null,
+    # which is why nothing should infer the FK's state from this field.
     gear_service_schedule_uuid: uuid_pkg.UUID | None = None
     dive_count_at_service: int = 0
     created_at: datetime

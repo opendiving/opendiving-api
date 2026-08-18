@@ -494,9 +494,13 @@ async def _schedule_uuids_by_id(db: AsyncSession, schedule_ids: list[int | None]
     is load-bearing rather than defensive. Without the filter a record went on naming a
     schedule that `GET /gear-service-schedule/{uuid}` answers 404 for
     (`resolve_schedule_for_user` resolves only live rows), that `POST /gear-service-record`
-    refuses to be created against, and that `?gear_service_schedule_uuid=` answers 422 for
-    - reachable through `erase_gear_item`, which soft-deletes an item's schedules and
-    deliberately keeps its records.
+    refuses to be created against, and that `?gear_service_schedule_uuid=` answers 422 for.
+
+    Two routes strand the reference, and the direct one is the common one:
+    `erase_gear_service_schedule` flags the schedule while its records keep their
+    `gear_service_schedule_id` on purpose ("deleting a reminder must never throw away the
+    receipts"), and `erase_gear_item` reaches the same state indirectly by soft-deleting an
+    item's schedules and keeping its records.
 
     This costs the read nothing, and that is the whole reason the filter is *here* and not
     on the item half. `gear_service_schedule_uuid` was already `UUID | None` and already

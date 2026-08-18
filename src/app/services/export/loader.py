@@ -180,8 +180,10 @@ async def _owned(
     dives logged at it** (`erase_dive_site` flags the site and leaves the join rows), and
     the same is true of a gear item on its dives and gear sets (`erase_gear_item`, which
     leaves both join tables alone), of a trip on its dives (`erase_trip`), and of a service
-    schedule on its records (`soft_delete_schedules_for_gear_item` flags the schedule and
-    leaves `gear_service_record.gear_service_schedule_id` pointing at it). Leaving those out
+    schedule on its records (`erase_gear_service_schedule` directly, or
+    `soft_delete_schedules_for_gear_item` when the whole item goes - either way the
+    schedule is flagged and `gear_service_record.gear_service_schedule_id` still points at
+    it). Leaving those out
     would put a uuid in `export.json` that nothing in the file defines - and in UDDF,
     where the same reference is an `xs:IDREF`, would produce a document that does not
     validate.
