@@ -7638,6 +7638,15 @@ Two consequences worth stating, because both were found by a client rendering it
 - **The merge treats it as a placeholder, not a claim** (`_merge_result`): a real rank from either
   source displaces it, which is what makes a hit both registers matched come out with WoRMS's
   taxonomy rather than whichever source happened to be written first.
+- **A persisted catalog row can carry it too**, which is the half that gets reasoned away. The
+  tempting inference is "`resolve_species` 503s rather than invent a row, so anything in the catalog
+  came from an authoritative record, so its rank is real" — and the premise is true while the
+  conclusion is not, because the authoritative record itself may omit `rank`, and `_worms_taxon`
+  stores the sentinel rather than refusing the taxon over a missing display field. `resolve_species`
+  passes `taxon.rank` straight through, so `SpeciesRead.rank` and the `SpeciesInfo.rank` embedded in
+  a dive can both be `"unknown"`. A client guard against it on the *detail* card is live code, not
+  defensive padding — this exact inference was made independently on the web side and came within a
+  commit of documenting that guard as unreachable.
 
 The alternative — leaving the fields null — was rejected because both columns are `NOT NULL` on a
 resolved row, and a schema whose optionality differs between a search hit and the catalog row it
