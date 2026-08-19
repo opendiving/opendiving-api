@@ -1654,16 +1654,28 @@ class TestLocalSearchAgainstPostgres:
     async def test_the_matched_name_explains_a_hit_and_is_dropped_when_it_would_not(
         self, db: Session, async_db: AsyncSession
     ) -> None:
-        token = f"zzq{uuid7().hex[-8:]}"
-        alias = f"{token} alias"
-        species = self._seed(db, (alias, "synonym"))
+        # Two distinct tokens, so each half of this test reaches one name and only one. With a
+        # shared token both names match and `min` picks between them alphabetically, which
+        # decides the outcome by spelling rather than by the behaviour under test.
+        alias_token = f"zzalias{uuid7().hex[-8:]}"
+        alias = f"{alias_token} synonym"
+        scientific_name = f"zzfixture-local-sci-{uuid7().hex[-8:]}"
+        # **Seeded the way `resolve_species` really writes a row**, which matters for the second
+        # half: `_name_rows` always emits a `scientific`-kind name equal to `Species.
+        # scientific_name`, so a search for the binomial genuinely does match a `species_name`
+        # row and `min(matched_name)` returns it. Without that row the aggregate returns SQL
+        # NULL, the Python de-noising block is never reached, and the assertion below passes
+        # with that block deleted - which is exactly what the first version of this test did.
+        self._seed(db, (alias, "synonym"), (scientific_name, "scientific"), scientific_name=scientific_name)
 
-        by_alias, _ = await species_service._local_search(async_db, token)
+        # Only the alias carries this token, so it is unambiguously what matched - and it is
+        # neither the scientific name nor the common name, so the hint survives.
+        by_alias, _ = await species_service._local_search(async_db, alias_token)
         assert by_alias[0].matched_name == alias
 
         # Matched by the row's own scientific name, which the result already shows - so the
-        # hint would be noise and is nulled.
-        by_name, _ = await species_service._local_search(async_db, species.scientific_name.casefold())
+        # hint would be noise, and the de-noising block nulls it.
+        by_name, _ = await species_service._local_search(async_db, scientific_name.casefold())
         assert by_name[0].matched_name is None
 
     @pytest.mark.asyncio

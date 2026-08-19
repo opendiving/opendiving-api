@@ -7825,10 +7825,21 @@ The general rule: **a mocked session tests the code around a query, never the qu
 whose correctness lives in the SQL rather than in the Python — a `GROUP BY`, an aggregate, an
 `ESCAPE`, anything relying on a dialect's inference — needs one test that actually runs it.
 
-One of those tests failed its own mutation check, in the way this file keeps finding: the escaping
-case seeded a decoy row that did not match *either way*, so it passed with `escape_like` removed. A
-wildcard test needs a row that matches **only** if the wildcard is live; a decoy that simply fails
-to match proves nothing.
+Two of those tests failed their own mutation check, both the same way, and the shape is worth naming
+because it recurred immediately after being written up:
+
+- The escaping case seeded a decoy row that did not match *either way*, so it passed with
+  `escape_like` removed. A wildcard test needs a row that matches **only** if the wildcard is live.
+- The `matched_name` case seeded a species with a synonym but no `scientific`-kind name row, so a
+  search for the binomial matched no `species_name` at all, `min(matched_name)` returned SQL NULL,
+  and the assertion held without the Python de-noising branch ever running. `resolve_species` always
+  writes a `scientific` row equal to `Species.scientific_name`, so the fixture was a shape
+  production never produces.
+
+Both are one mistake: **the assertion was satisfied by the absence of the input, not by the
+behaviour**. Seeding a fixture simpler than the real row is how a test ends up proving something no
+code path can violate — and it is invisible, because the test passes and reads as though it covers
+the branch it names. Seed what the writer actually writes.
 
 ### `species_seen` is derived at last
 
