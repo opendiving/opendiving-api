@@ -1,14 +1,21 @@
 """Unit tests for the Arq worker background tasks."""
 
+from collections.abc import AsyncGenerator
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
+from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
+from src.app.core.db.database import async_engine
 from src.app.core.worker.functions import _due_text, purge_expired_tokens, send_gear_service_digests
+from src.app.models.user import User
 from src.app.schemas.gear_service import ServiceKind, ServiceStatus
+from tests.conftest import db_available
+from tests.helpers.generators import create_gear_item, create_gear_service_schedule
 
 
 class _FakeSessionContext:
@@ -229,7 +236,7 @@ class TestSendGearServiceDigests:
         update_statements = [c for c in session.calls if c.strip().upper().startswith("UPDATE")]
         assert len(update_statements) == 1
         # ...while still marking every one of the three schedules.
-        assert {mark["schedule_id"] for mark in session.updates} == {10, 11, 12}
+        assert {mark["id"] for mark in session.updates} == {10, 11, 12}
 
     @pytest.mark.asyncio
     async def test_a_second_run_with_unchanged_state_sends_nothing(self) -> None:
@@ -284,3 +291,71 @@ class TestSendGearServiceDigests:
         # Both interval arms are pre-filtered on.
         assert "gear_service_schedule.next_due_on <=" in statement
         assert "gear_item.dive_count >= gear_service_schedule.next_due_at_dive_count" in statement
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestSendGearServiceDigestsAgainstPostgres:
+    """The same job against a real database, because the mocked-session tests above
+    cannot see the statement fail.
+
+    `_RecordingSession` accepts any statement and files the parameters away, so an UPDATE
+    that Postgres never gets to run reads there as a pass. That is exactly what happened:
+    the mark was an ORM executemany UPDATE carrying its own WHERE clause, which SQLAlchemy
+    refuses outright ("bulk synchronize of persistent objects not supported..."), so the
+    email went out every day and the notify state was never recorded. One test that
+    actually reaches the database is the whole guard against that shape of bug.
+
+    Note this exercises `send_gear_service_digests` unscoped, as the cron runs it: it picks
+    up every due schedule in the database, not only this test's. Assertions therefore only
+    ever look at the row the test seeded.
+    """
+
+    @pytest_asyncio.fixture(autouse=True)
+    async def _dispose_the_app_engine(self) -> AsyncGenerator[None]:
+        """Return the app's own pool to a clean state after each test in this class.
+
+        Unlike the rest of the database-backed suite, these tests can't take the
+        `async_db` fixture and its per-test engine: the job under test opens its own
+        session from the module-level `local_session`, which is bound to the app's
+        session-lifetime `async_engine`. pytest-asyncio gives each test a fresh event
+        loop, and a pooled asyncpg connection belongs to the loop that opened it, so
+        without this the second test here is handed the first test's dead-loop connection
+        and dies with "attached to a different loop". Teardown runs inside the test's own
+        loop, which is what makes the close legal.
+        """
+        yield
+        await async_engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_the_mark_reaches_postgres_and_writes_the_notify_columns(self, db: Session, diver: User) -> None:
+        due_on = date(2020, 1, 1)
+        item = create_gear_item(db, diver)
+        schedule = create_gear_service_schedule(db, diver, item)
+        schedule.next_due_on = due_on
+        db.commit()
+
+        with patch("src.app.core.worker.functions.send_gear_service_digest_email", new_callable=AsyncMock) as send:
+            await send_gear_service_digests({})
+
+        send.assert_awaited()
+        db.refresh(schedule)
+        assert schedule.notified_stage == ServiceStatus.OVERDUE.value
+        assert schedule.notified_for_due_on == due_on
+        assert schedule.notified_at is not None
+
+    @pytest.mark.asyncio
+    async def test_a_second_run_does_not_send_the_same_reminder_again(self, db: Session, diver: User) -> None:
+        """The consequence of the mark landing, and the reason it matters: without it every
+        diver with gear due got the same digest every single day the cron ran."""
+        item = create_gear_item(db, diver)
+        schedule = create_gear_service_schedule(db, diver, item)
+        schedule.next_due_on = date(2020, 1, 1)
+        db.commit()
+
+        with patch("src.app.core.worker.functions.send_gear_service_digest_email", new_callable=AsyncMock):
+            await send_gear_service_digests({})
+
+        with patch("src.app.core.worker.functions.send_gear_service_digest_email", new_callable=AsyncMock) as send:
+            await send_gear_service_digests({})
+
+        assert diver.email not in {call.args[0] for call in send.await_args_list}

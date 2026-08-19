@@ -1515,6 +1515,53 @@ it ever matters, is materializing "dives remaining" onto the schedule inside
 `recalculate_gear_dive_counts`; that was rejected for the reasons under "A dive moves
 `gear_item.dive_count`" above.
 
+## The digest's mark is an ORM bulk UPDATE by primary key, and must carry no `WHERE`
+
+`send_gear_service_digests` marks a whole user's schedules in one executemany rather than a round
+trip per schedule. The form that works is SQLAlchemy's *ORM bulk UPDATE by primary key*: an
+`update()` against the mapped class with **no** `.where()` at all, and `id` present in each
+parameter dict. SQLAlchemy lifts `id` out for the `WHERE` clause and SETs the remaining keys,
+emitting exactly one statement.
+
+The form that looks equivalent and is not:
+
+```python
+# Broken. Raises before Postgres ever sees it.
+await db.execute(
+    update(GearServiceSchedule).where(GearServiceSchedule.id == bindparam("schedule_id")),
+    marks,
+)
+```
+
+Any *additional* `WHERE` criteria on an ORM executemany UPDATE puts the statement on a path that
+refuses to run:
+`InvalidRequestError: bulk synchronize of persistent objects not supported when using bulk update with additional WHERE criteria`.
+The message suggests `.execution_options(synchronize_session=None)`, and that is a dead end here -
+it clears the first error only to hit
+`No primary key value supplied for column(s) gear_service_schedule.id`, because that path still
+wants the primary key in the dicts under its own name. Once `id` is in the dicts, the explicit
+`WHERE` has nothing left to do; dropping it is the fix, not an extra execution option.
+
+The `bindparam` was there to dodge a genuine *Core* gotcha - in a Core executemany, a parameter
+named after a column the statement also SETs collides - which does not apply to the ORM path, where
+the primary key is the one key that is never treated as a SET value.
+
+This shipped broken and stayed broken, because the digest's tests drive a fake session that records
+`(statement, parameters)` and returns a `MagicMock`. A statement Postgres never executes cannot fail
+that way, so the suite was green while every run of the cron threw after the email went out - the
+mark never landed, and every diver with gear due got the same digest again the next day. Hence
+`TestSendGearServiceDigestsAgainstPostgres` in `tests/test_worker.py`, which runs the job against a
+real database and reads the notify columns back. Any future change to how a job writes in bulk needs
+at least one test on that side of the line; see also *"The Postgres test fixtures are shared, and a
+local copy silently wins"*.
+
+Those two tests can't use the shared `async_db` fixture, either: the job opens its own session from
+the module-level `local_session`, bound to the app's long-lived `async_engine`. pytest-asyncio gives
+each test a fresh event loop and a pooled asyncpg connection belongs to the loop that opened it, so
+the second test inherits the first one's dead-loop connection and fails with "attached to a
+different loop". The class disposes `async_engine` in an autouse fixture's teardown, which runs
+inside the test's own loop - the same constraint `async_db` solves with an engine per test.
+
 ## The digest's "today" is UTC, and that's fine at date granularity
 
 `User` has no timezone column - `Dive.utc_offset_minutes` is per-dive, not per-user - so

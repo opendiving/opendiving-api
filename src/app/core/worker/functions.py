@@ -6,7 +6,7 @@ from typing import Any
 
 import uvloop
 from arq.worker import Worker
-from sqlalchemy import and_, bindparam, or_, select, update
+from sqlalchemy import and_, or_, select, update
 
 from ...models.gear_item import GearItem
 from ...models.gear_service_schedule import GearServiceSchedule
@@ -198,11 +198,15 @@ async def send_gear_service_digests(ctx: dict[Any, Any]) -> str:
             # - a diver whose entire kit comes due at once was previously N statements.
             # Matches how `services.dive_stats` and `services.gear_stats` write.
             #
-            # `id` is bound as `schedule_id` because SQLAlchemy reserves the plain column
-            # name in the WHERE clause of an executemany UPDATE for the SET values.
+            # No `.where()`, and the primary key travels in the dicts under its own name:
+            # that is SQLAlchemy's ORM "bulk UPDATE by primary key", which lifts `id` out
+            # of each dict for the WHERE clause and SETs the rest. Matching the id through
+            # a `bindparam` instead compiles fine and passes a mocked session, but adds
+            # *additional* WHERE criteria, which that path refuses to execute at all. →
+            # DECISIONS.md, "The digest's mark is an ORM bulk UPDATE by primary key".
             marks = [
                 {
-                    "schedule_id": schedule_id,
+                    "id": schedule_id,
                     "notified_stage": stage,
                     "notified_for_due_on": due_on,
                     "notified_for_due_at_dive_count": due_at_dive_count,
@@ -211,10 +215,7 @@ async def send_gear_service_digests(ctx: dict[Any, Any]) -> str:
                 for schedule_id, stage, due_on, due_at_dive_count in bucket["marks"]
             ]
             if marks:
-                await db.execute(
-                    update(GearServiceSchedule).where(GearServiceSchedule.id == bindparam("schedule_id")),
-                    marks,
-                )
+                await db.execute(update(GearServiceSchedule), marks)
             await db.commit()
             sent_users += 1
             sent_schedules += len(bucket["lines"])
