@@ -27,6 +27,7 @@ import uuid as uuid_pkg
 from collections.abc import Callable, Generator
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -507,7 +508,7 @@ class TestSearchDegrades:
         handles 200 turns every genuine miss into a provider failure - and then never caches
         it, so the next keystroke asks again."""
         with _Providers(lambda request: httpx.Response(204)):
-            rows = await species_service._worms("/AphiaRecordsByName/nothing")
+            rows = await species_service._worms("AphiaRecordsByName", "nothing")
 
         assert rows == []
 
@@ -548,6 +549,63 @@ class TestCaching:
 
         ttls = sorted(fake_redis.expiries.values())
         assert ttls == [species_service._MISS_TTL_SECONDS, species_service._HIT_TTL_SECONDS]
+
+    @pytest.mark.asyncio
+    async def test_a_partial_answer_is_held_for_an_hour_not_a_month(self, fake_redis: FakeRedis):
+        """The trap the search budget creates, and the reason `_SourceAnswer.ok` exists.
+
+        A register that fails *fast* - connect refused, an error status, a body over the size
+        cap - returns just like one that genuinely had nothing, so without the flag the
+        merged answer counts as complete. Wikidata alone still produces results, so
+        `_store_search` would pin a taxonomy-less "clownfish" under the 30-day TTL, and every
+        later day when WoRMS was healthy would keep serving it.
+        """
+        db = _empty_db()
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "wbgetentities" in url:
+                return httpx.Response(200, json=WIKIDATA_ENTITIES)
+            if "wikidata" in url:
+                return httpx.Response(200, json=WIKIDATA_SEARCH)
+            raise httpx.ConnectError("worms is down")
+
+        with _Providers(handle):
+            response = await species_service.search_species(db, "clownfish")
+
+        # Wikidata answered, so this is a useful, non-empty, *partial* answer.
+        assert len(response.results) == 1
+        assert set(fake_redis.expiries.values()) == {species_service._MISS_TTL_SECONDS}
+
+    @pytest.mark.asyncio
+    async def test_an_oversized_wikidata_response_does_not_get_cached_as_the_answer(self, fake_redis: FakeRedis):
+        """A body over `_MAX_RESPONSE_BYTES` is a failure, not an empty register."""
+        db = _empty_db()
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "wbgetentities" in url:
+                return httpx.Response(200, content=b"x" * (species_service._MAX_RESPONSE_BYTES + 1))
+            if "wikidata" in url:
+                return httpx.Response(200, json=WIKIDATA_SEARCH)
+            return httpx.Response(200, json=[])
+
+        with _Providers(handle):
+            await species_service.search_species(db, "clownfish")
+
+        assert set(fake_redis.expiries.values()) == {species_service._MISS_TTL_SECONDS}
+
+    @pytest.mark.asyncio
+    async def test_a_healthy_fan_out_still_earns_the_month(self, fake_redis: FakeRedis):
+        """The other half: the short TTL must be the exception, or nothing is ever cached
+        usefully and the registers get asked on every keystroke."""
+        db = _empty_db()
+        with _registers(
+            by_name=[CLOWNFISH_RECORD], wikidata_search=WIKIDATA_SEARCH, wikidata_entities=WIKIDATA_ENTITIES
+        ):
+            await species_service.search_species(db, "amphiprion ocellaris")
+
+        assert set(fake_redis.expiries.values()) == {species_service._HIT_TTL_SECONDS}
 
     @pytest.mark.asyncio
     async def test_the_cached_entry_holds_no_local_uuid(self, fake_redis: FakeRedis):
@@ -618,6 +676,69 @@ class TestOutboundRequests:
             await species_service.search_species(db, "clownfish")
 
         assert any("haswbstatement" in url and "P850" in url for url in providers.urls())
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("query", "must_not_contain"),
+        [
+            # Dot segments: httpx resolves these *before* sending, so an unencoded term would
+            # send this server to `marinespecies.org/etc/passwd` instead of the search route -
+            # an authenticated user steering our outbound request, with the answer cached for
+            # a month under their string.
+            ("../../../etc/passwd", "/etc/passwd"),
+            # The quieter half of the same bug: unencoded, everything from the `#` is a
+            # client-side fragment and never leaves, so the diver silently searches for
+            # something other than what they typed.
+            ("fish#comment", "#comment"),
+            ("fish?x=1", "?x=1&"),
+        ],
+    )
+    async def test_a_typed_query_cannot_reshape_the_url(
+        self, no_redis: None, query: str, must_not_contain: str
+    ) -> None:
+        """WoRMS takes the search term in the URL *path*, unlike the geocoder next door which
+        passes user text as a query parameter - so the term has to be percent-encoded, and
+        `_worms` does it structurally rather than leaving it to each call site."""
+        with _registers() as providers:
+            await species_service._worms_by_name(query)
+
+        assert providers.urls(), "the request never left"
+        url = providers.urls()[0]
+        assert must_not_contain not in url
+        assert url.startswith(f"{settings.WORMS_API_URL.rstrip('/')}/AphiaRecordsByName/")
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_name_still_reaches_the_register_intact(self, no_redis: None) -> None:
+        """The encoding must not break the normal case: a space is a legal, common thing in a
+        binomial and has to arrive as one."""
+        with _registers() as providers:
+            await species_service._worms_by_name("amphiprion ocellaris")
+
+        assert "AphiaRecordsByName/amphiprion%20ocellaris" in providers.urls()[0]
+
+    @pytest.mark.asyncio
+    async def test_entities_are_fetched_in_small_batches(self, no_redis: None):
+        """`props=claims` returns every statement on an entity, and a taxon carries dozens of
+        external identifiers - about 50 KB each. Ten in one response routinely exceeds
+        `_MAX_RESPONSE_BYTES` (measured live: "shark" 667 KB, "turtle" 642 KB), which makes
+        `_request` return `None` and silently costs the whole Wikidata contribution for
+        exactly the words divers type most.
+        """
+        qids = [f"Q{n}" for n in range(species_service._WIKIDATA_SEARCH_LIMIT)]
+        db = _empty_db()
+        search = {"query": {"search": [{"title": qid} for qid in qids]}}
+
+        with _registers(wikidata_search=search, wikidata_entities={"entities": {}}) as providers:
+            await species_service.search_species(db, "shark")
+
+        # Parsed rather than counted off the raw URL: `props=claims|labels|aliases` is
+        # pipe-separated too, so a substring count would measure the wrong parameter.
+        batches = [parse_qs(urlparse(url).query)["ids"][0] for url in providers.urls() if "wbgetentities" in url]
+
+        assert len(batches) > 1, "all ten ids went out in one request"
+        assert sum(len(ids.split("|")) for ids in batches) == len(qids), "an id was dropped or duplicated"
+        for ids in batches:
+            assert len(ids.split("|")) <= species_service._WIKIDATA_ENTITY_BATCH
 
     @pytest.mark.asyncio
     async def test_a_saturated_provider_drops_out_rather_than_rejecting_anyone(

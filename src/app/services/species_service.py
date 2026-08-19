@@ -33,6 +33,7 @@ import json
 import logging
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 import anyio
 import httpx
@@ -97,6 +98,12 @@ _MAX_RESULTS = 25
 # asked for ten, which is plenty once it is merged into WoRMS's fifty.
 _WORMS_PAGE_SIZE = 50
 _WIKIDATA_SEARCH_LIMIT = 10
+
+# How many entities to ask `wbgetentities` for at once. Small on purpose - see
+# `_wikidata_entities`: a taxon entity with all its claims runs ~50 KB, so a batch of ten
+# regularly exceeds `_MAX_RESPONSE_BYTES` and costs the whole Wikidata contribution. Four
+# leaves roughly a two-fold margin against the heaviest entities measured.
+_WIKIDATA_ENTITY_BATCH = 4
 
 # A taxon's name does not change - that is rather the point of a nomenclatural register - so
 # a hit is held for a month. A *miss* is held for an hour, because an empty answer is far
@@ -350,8 +357,26 @@ async def _request(provider: str, url: str, params: dict[str, Any]) -> Any | Non
         return None
 
 
-async def _worms(path: str, params: dict[str, Any] | None = None) -> Any | None:
-    return await _request(_PROVIDER_WORMS, f"{settings.WORMS_API_URL.rstrip('/')}{path}", params or {})
+async def _worms(endpoint: str, segment: str | int, params: dict[str, Any] | None = None) -> Any | None:
+    """Call one of WoRMS's `/{endpoint}/{segment}` routes.
+
+    **The segment is percent-encoded here, and that is why this signature takes it apart
+    rather than accepting a ready-made path.** WoRMS puts the search term in the URL *path*,
+    unlike the geocoder next door which passes user text as a query parameter - so
+    interpolating it raw is a path injection: httpx resolves dot segments before sending, and
+    a diver searching for `../../../etc/passwd` would have this server request
+    `marinespecies.org/etc/passwd` instead, with the answer cached for a month under their
+    string. A `#` or `?` in the term is the quieter half of the same bug - both truncate the
+    search silently rather than being sent as part of the name.
+
+    `safe=""` because *nothing* is safe in a taxon name: `/` has to be encoded or it makes a
+    new path segment, and WoRMS's own routes take one segment. Structural rather than a call
+    to remember at each site - there is no way to reach `_request` with an unencoded segment
+    from here.
+    """
+    quoted = quote(str(segment), safe="")
+    url = f"{settings.WORMS_API_URL.rstrip('/')}/{endpoint}/{quoted}"
+    return await _request(_PROVIDER_WORMS, url, params or {})
 
 
 async def _wikidata(params: dict[str, Any]) -> Any | None:
@@ -603,42 +628,66 @@ def _choose_common_name(
 # -------------- search --------------
 
 
-async def _worms_by_name(query: str) -> tuple[list[SpeciesSearchResult], bool]:
+@dataclass(frozen=True, slots=True)
+class _SourceAnswer:
+    """What one source contributed to a search, and whether it actually managed to answer.
+
+    `ok` is the field that exists to be *false*, and it is the difference between "this
+    register has nothing for you" and "this register did not tell us anything". Both look
+    identical downstream - an empty `results` list - and conflating them is what let a
+    thirty-second outage get written into a thirty-day cache entry: a source that failed
+    fast still returned, so it counted as having answered, and the partial result was stored
+    as though it were the whole truth. `_store_search` reads this.
+    """
+
+    results: list[SpeciesSearchResult]
+    # True when the source had more matches than it sent, which is `has_more` regardless of
+    # what the merge does afterwards.
+    page_was_full: bool
+    ok: bool
+
+
+async def _worms_by_name(query: str) -> _SourceAnswer:
     """Scientific names and synonyms.
 
     `marine_only=false` because this app logs freshwater dives too, and WoRMS carries
     brackish and freshwater taxa that the default would hide.
     """
-    rows = await _worms(f"/AphiaRecordsByName/{query}", {"like": "true", "marine_only": "false"})
+    rows = await _worms("AphiaRecordsByName", query, {"like": "true", "marine_only": "false"})
     return _worms_page(rows)
 
 
-async def _worms_by_vernacular(query: str) -> tuple[list[SpeciesSearchResult], bool]:
+async def _worms_by_vernacular(query: str) -> _SourceAnswer:
     """Common names, as far as WoRMS has them - which is not far, hence Wikidata."""
-    rows = await _worms(f"/AphiaRecordsByVernacular/{query}", {"like": "true"})
+    rows = await _worms("AphiaRecordsByVernacular", query, {"like": "true"})
     return _worms_page(rows)
 
 
-def _worms_page(rows: Any) -> tuple[list[SpeciesSearchResult], bool]:
-    """A page of WoRMS records as results, plus whether the page was full.
+def _worms_page(rows: Any) -> _SourceAnswer:
+    """A page of WoRMS records as results, plus whether the page was full and whether WoRMS
+    answered at all.
 
-    A full page means WoRMS had at least fifty matches for one typed fragment, which is
-    `has_more` whatever the merge does afterwards - the diver should keep typing rather than
-    scroll a list that was never going to be complete.
+    `_request` hands back `None` for every way of not getting an answer - unreachable, an
+    error status, a body over the size cap, a body that did not parse - and `[]` only when
+    the register genuinely said "no such name". That distinction is preserved here rather
+    than collapsed, because it decides how long the merged answer is cached for.
     """
+    if rows is None:
+        return _SourceAnswer([], False, ok=False)
     if not isinstance(rows, list):
-        return [], False
+        # Valid JSON that is not an array is not WoRMS answering - a proxy or an error page.
+        return _SourceAnswer([], False, ok=False)
     results = [result for row in rows if (result := _worms_result(row)) is not None]
-    return results, len(rows) >= _WORMS_PAGE_SIZE
+    return _SourceAnswer(results, len(rows) >= _WORMS_PAGE_SIZE, ok=True)
 
 
-async def _wikidata_search(query: str) -> tuple[list[SpeciesSearchResult], bool]:
+async def _wikidata_search(query: str) -> _SourceAnswer:
     """Common names and aliases, via CirrusSearch filtered to entities that carry an AphiaID.
 
-    Two chained calls, counting as one provider against the throttle: the search returns
-    QIDs and nothing else useful, so the entities have to be fetched to get P850 at all. The
-    `haswbstatement:P850` filter is what keeps the result set to taxa WoRMS also knows,
-    which is what makes the merge possible.
+    Two chained steps, counting as one provider against the throttle: the search returns QIDs
+    and nothing else useful, so the entities have to be fetched to get P850 at all. The
+    `haswbstatement:P850` filter is what keeps the result set to taxa WoRMS also knows, which
+    is what makes the merge possible.
     """
     payload = await _wikidata(
         {
@@ -648,13 +697,16 @@ async def _wikidata_search(query: str) -> tuple[list[SpeciesSearchResult], bool]
             "srlimit": _WIKIDATA_SEARCH_LIMIT,
         }
     )
+    if payload is None:
+        return _SourceAnswer([], False, ok=False)
+
     qids = _wikidata_qids(payload)
     if not qids:
-        return [], False
+        return _SourceAnswer([], False, ok=True)
 
-    entities = await _wikidata_entities(qids)
+    entities, entities_ok = await _wikidata_entities(qids)
     results = [result for entity in entities if (result := _wikidata_result(entity)) is not None]
-    return results, len(qids) >= _WIKIDATA_SEARCH_LIMIT
+    return _SourceAnswer(results, len(qids) >= _WIKIDATA_SEARCH_LIMIT, ok=entities_ok)
 
 
 def _wikidata_qids(payload: Any) -> list[str]:
@@ -666,23 +718,54 @@ def _wikidata_qids(payload: Any) -> list[str]:
     return [title for hit in search if isinstance(hit, dict) and isinstance(title := hit.get("title"), str) and title]
 
 
-async def _wikidata_entities(qids: list[str]) -> list[_WikidataEntity]:
-    """The reduced entities for a batch of QIDs, in the order asked for.
+async def _wikidata_entities(qids: list[str]) -> tuple[list[_WikidataEntity], bool]:
+    """The reduced entities for a batch of QIDs, in the order asked for, and whether every
+    chunk came back.
 
-    One call for the whole batch - `wbgetentities` takes up to fifty ids - which is what
-    keeps a ten-hit search at two outbound requests rather than eleven.
+    **Asked for in chunks of `_WIKIDATA_ENTITY_BATCH`, not all at once**, even though
+    `wbgetentities` accepts fifty ids. `props=claims` returns *every* statement on an entity,
+    and a taxon carries a great many - dozens of external-database identifiers alone - so a
+    single entity runs around 50 KB. Ten of them in one response is routinely over the
+    512 KB `_MAX_RESPONSE_BYTES` cap: measured against the live API for the ids this code's
+    own search returns, "shark" came back 667 KB, "turtle" 642 KB and "dolphin" 568 KB.
+
+    That mattered far more than it looks. Tripping the cap makes `_request` return `None`,
+    which emptied the entire Wikidata contribution - the common-name layer this whole
+    two-source design exists for - for exactly the words divers type most, silently, and only
+    for the *popular* queries. Chunking keeps each response comfortably inside the cap
+    instead of tuning the cap up to meet an unbounded payload.
+
+    The chunks run concurrently: they are independent, they share the provider throttle, and
+    the whole thing is inside the caller's search budget either way.
     """
-    payload = await _wikidata(
-        {
-            "action": "wbgetentities",
-            "ids": "|".join(qids),
-            "props": "claims|labels|aliases",
-            "languages": "en",
-        }
-    )
-    if not isinstance(payload, dict) or not isinstance(entities := payload.get("entities"), dict):
-        return []
-    return [entity for qid in qids if (entity := _wikidata_entity(qid, entities.get(qid))) is not None]
+    chunks = [qids[i : i + _WIKIDATA_ENTITY_BATCH] for i in range(0, len(qids), _WIKIDATA_ENTITY_BATCH)]
+    by_qid: dict[str, _WikidataEntity] = {}
+    failures = 0
+
+    async def fetch(chunk: list[str]) -> None:
+        nonlocal failures
+        payload = await _wikidata(
+            {
+                "action": "wbgetentities",
+                "ids": "|".join(chunk),
+                "props": "claims|labels|aliases",
+                "languages": "en",
+            }
+        )
+        if not isinstance(payload, dict) or not isinstance(entities := payload.get("entities"), dict):
+            failures += 1
+            return
+        for qid in chunk:
+            if (entity := _wikidata_entity(qid, entities.get(qid))) is not None:
+                by_qid[qid] = entity
+
+    async with anyio.create_task_group() as tasks:
+        for chunk in chunks:
+            tasks.start_soon(fetch, chunk)
+
+    # Re-ordered against `qids` rather than trusting completion order, so the merge's
+    # first-writer-wins tie-breaks do not depend on which chunk came back first.
+    return [by_qid[qid] for qid in qids if qid in by_qid], failures == 0
 
 
 async def _remote_search(query: str) -> SpeciesSearchResponse:
@@ -715,7 +798,7 @@ async def _remote_search(query: str) -> SpeciesSearchResponse:
     if cached is not None:
         return cached
 
-    collected: list[tuple[list[SpeciesSearchResult], bool]] = []
+    collected: list[_SourceAnswer] = []
 
     async def fetch(source: str, call: Any) -> None:
         try:
@@ -739,22 +822,33 @@ async def _remote_search(query: str) -> SpeciesSearchResponse:
             for source, call in sources:
                 tasks.start_soon(fetch, source, call)
 
-    # Every source either answered or reported nothing. Anything less means one was still in
-    # flight when the budget ran out, which is what keeps a partial answer on the short TTL.
-    complete = len(collected) == len(sources)
+    # **Two different ways of not being complete, and both have to count.** A source can run
+    # out of *time* - still in flight when the budget expired, so it is not in `collected` at
+    # all - or it can come back having *failed*: unreachable, an error status, a body over the
+    # size cap, a body that did not parse. The second kind is the dangerous one, because it
+    # returns fast and looks exactly like "this register had nothing", so an answer missing
+    # half its sources would otherwise be stored for thirty days as though it were the whole
+    # truth. `_SourceAnswer.ok` is what tells them apart.
+    answered = len(collected) == len(sources)
+    complete = answered and all(answer.ok for answer in collected)
     if not complete:
-        logger.info("A species search answered with %d of %d sources inside its budget.", len(collected), len(sources))
+        logger.info(
+            "A species search was incomplete: %d of %d sources answered, %d of those failed.",
+            len(collected),
+            len(sources),
+            sum(1 for answer in collected if not answer.ok),
+        )
 
     # Re-sorted before merging because a task group completes in whatever order the network
     # allowed, and the merge below is first-writer-wins: without this, which register defines
     # a shared row would depend on the weather. WoRMS first, since it owns the taxonomy.
-    collected.sort(key=lambda item: 0 if item[0] and item[0][0].source == "worms" else 1)
+    collected.sort(key=lambda answer: 0 if answer.results and answer.results[0].source == "worms" else 1)
 
     merged: dict[int, SpeciesSearchResult] = {}
     truncated = False
-    for results, page_was_full in collected:
-        truncated = truncated or page_was_full
-        for result in results:
+    for answer in collected:
+        truncated = truncated or answer.page_was_full
+        for result in answer.results:
             _merge_result(merged, result)
 
     ordered = _ordered(list(merged.values()), query)
@@ -972,7 +1066,7 @@ async def _worms_vernaculars(aphia_id: int) -> list[tuple[str, str | None]]:
     Japanese vernacular the UI will never render still earns its row by making カクレクマノミ
     find the clownfish.
     """
-    rows = await _worms(f"/AphiaVernacularsByAphiaID/{aphia_id}")
+    rows = await _worms("AphiaVernacularsByAphiaID", aphia_id)
     if not isinstance(rows, list):
         return []
 
@@ -987,7 +1081,7 @@ async def _worms_vernaculars(aphia_id: int) -> list[tuple[str, str | None]]:
 
 async def _worms_synonyms(aphia_id: int) -> list[str]:
     """Superseded names for a taxon, so a diver who learned *Manta birostris* still finds it."""
-    rows = await _worms(f"/AphiaSynonymsByAphiaID/{aphia_id}")
+    rows = await _worms("AphiaSynonymsByAphiaID", aphia_id)
     if not isinstance(rows, list):
         return []
     return [name for row in rows if isinstance(row, dict) and (name := _text(row.get("scientificname"))) is not None]
@@ -1010,7 +1104,7 @@ async def _wikidata_by_aphia_id(aphia_id: int) -> _WikidataEntity | None:
     qids = _wikidata_qids(payload)
     if not qids:
         return None
-    entities = await _wikidata_entities(qids[:1])
+    entities, _ = await _wikidata_entities(qids[:1])
     return entities[0] if entities else None
 
 
@@ -1078,7 +1172,7 @@ async def resolve_species(db: AsyncSession, aphia_id: int) -> Species:
     # happens to be, so an assignment inside it is not guaranteed to have run.
     taxon: _Taxon | None = None
     with anyio.move_on_after(_RESOLVE_BUDGET_SECONDS):
-        taxon = _worms_taxon(await _worms(f"/AphiaRecordByAphiaID/{aphia_id}"))
+        taxon = _worms_taxon(await _worms("AphiaRecordByAphiaID", aphia_id))
     if taxon is None:
         # A raw `HTTPException`: `core/exceptions/http_exceptions.py` has no class for 503,
         # the same reason `parse_dive` raises 415 and 409 raw. One message for both "the
@@ -1092,7 +1186,7 @@ async def resolve_species(db: AsyncSession, aphia_id: int) -> Species:
             return existing
         valid_taxon: _Taxon | None = None
         with anyio.move_on_after(_RESOLVE_BUDGET_SECONDS):
-            valid_taxon = _worms_taxon(await _worms(f"/AphiaRecordByAphiaID/{taxon.valid_aphia_id}"))
+            valid_taxon = _worms_taxon(await _worms("AphiaRecordByAphiaID", taxon.valid_aphia_id))
         if valid_taxon is None:
             raise HTTPException(status_code=503, detail="Species lookup is temporarily unavailable.")
         taxon = valid_taxon
