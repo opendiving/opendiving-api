@@ -29,7 +29,7 @@
 htmlcov
 
 # ---- runtime artefacts that must never ship ----
-# `src/app/logs/app.log` was being copied into the runtime image. With `RESEND_API_KEY`
+# `src/app/logs/app.log` was being copied into the runtime image. With `SMTP_HOST`
 # unset - the documented local-development setup - that file contains magic-link URLs
 # with live sign-in tokens in them.
 **/*.log

@@ -96,7 +96,7 @@ async def verify_google_id_token(credential: str) -> GoogleUserInfo | None:
         # requests` is built on `requests`), made whenever the library's key cache is cold
         # or stale. Left on the event loop it stalls every other in-flight request for the
         # duration of a round trip to Google, so it goes to a worker thread - the same
-        # treatment `services.email_service` gives Resend's equally blocking client.
+        # treatment `services.email_service` gives its equally blocking SMTP client.
         verified: dict[str, Any] = google_id_token.verify_oauth2_token(
             credential, google_requests.Request(), audience=settings.GOOGLE_CLIENT_ID
         )

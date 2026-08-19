@@ -188,7 +188,7 @@ async def send_gear_service_digests(ctx: dict[Any, Any]) -> str:
     sent_schedules = 0
     async with local_session() as db:
         for bucket in by_user.values():
-            # Send first, mark second. If Resend fails the exception propagates before
+            # Send first, mark second. If delivery fails the exception propagates before
             # the mark, so the worst case is a duplicate email tomorrow rather than a
             # reminder that silently never arrives - for gear safety that's the right
             # way round.

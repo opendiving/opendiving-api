@@ -25,7 +25,8 @@ documented REST API — so your data is never more than one `curl` away.
 - **Certifications** — c-card records with front/back card images.
 - **Full export** — everything out in open formats (UDDF, CSV, and a complete JSON + original-files
   archive) in one request. Owner-only, never cached; the UDDF validates against the 3.2.2 schema.
-- **Passwordless auth** — email magic links (via Resend) and Google Sign-In, with automatic account
+- **Passwordless auth** — email magic links (over SMTP, so any relay or provider works) and Google
+  Sign-In, with automatic account
   linking, short-lived access tokens, and httpOnly refresh cookies. No password storage at all. The
   full design, with sequence diagrams, is in [docs/authentication.md](docs/authentication.md).
 
@@ -35,8 +36,9 @@ documented REST API — so your data is never more than one `curl` away.
   UDDF export), then Shearwater Cloud exports; a pluggable importer layer so every supported format
   is a migration path in.
 - **Self-hosting hardening** — a single compose bundle including the web app and TLS, prebuilt
-  images, SMTP as an alternative to Resend, and Alembic migrations before 1.0 (schema changes are
-  currently applied manually during prototyping — see [DECISIONS.md](DECISIONS.md)).
+  images, and Alembic migrations before 1.0 (schema changes are currently applied manually during
+  prototyping — see [DECISIONS.md](DECISIONS.md)). Email is already vendor-free: it goes out over
+  plain SMTP, so any relay works.
 - **Public share links** — read-only dive/trip pages.
 - **Statistics endpoints** — records, per-year aggregates, site maps, species log.
 
@@ -62,9 +64,17 @@ Everything is configured through `src/.env`, which starts as a copy of
 The parts worth knowing about:
 
 ```bash
-# Magic-link emails via Resend (https://resend.com). Leave unset for local
-# development - the sign-in link is then only logged, not emailed.
-RESEND_API_KEY="re_..."
+# Magic-link emails go out over SMTP. Leave SMTP_HOST unset for local development -
+# the sign-in link is then only logged, not emailed. Point this at any relay you
+# trust (your provider, your host's, your own); don't run your own MTA unless you
+# already know why. Resend users: smtp.resend.com, username "resend", password = the
+# API key. EMAIL_FROM_ADDRESS is required as soon as SMTP_HOST is set - startup
+# fails without it rather than letting an undeliverable address surface hours later.
+SMTP_HOST="smtp.example.com"
+SMTP_PORT=587
+SMTP_TLS_MODE="starttls"       # starttls (587) | tls (465) | none (a local relay only)
+SMTP_USERNAME="..."            # both optional: an anonymous relay needs neither
+SMTP_PASSWORD="..."
 EMAIL_FROM_ADDRESS="noreply@yourdomain.example"
 
 # Used to build magic-link URLs ({FRONTEND_URL}/auth/verify?token=...)
@@ -80,6 +90,26 @@ GOOGLE_CLIENT_ID="your-client-id.apps.googleusercontent.com"
 
 Token lifetimes, rate limits, and the rest have sensible defaults — they're in `src/.env.example`
 commented out, and `src/app/core/config.py` is the authoritative list.
+
+#### Reading outgoing mail locally
+
+With `SMTP_HOST` unset, nothing is sent and the sign-in link is written to `docker compose logs api`
+— that's the intended local flow and it needs nothing running. To see the mail itself rendered
+instead, bring up the opt-in [Mailpit](https://mailpit.axllent.org/) profile and point the app at
+it:
+
+```bash
+docker compose --profile mail up      # inbox at http://localhost:8025
+```
+
+```bash
+SMTP_HOST="mailpit"
+SMTP_PORT=1025
+SMTP_TLS_MODE="none"
+```
+
+Comment `SMTP_HOST` back out when you're done: left set with no Mailpit running, sends fail against
+a dead host and no link is logged either.
 
 ## API overview
 

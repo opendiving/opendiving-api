@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.app.api.v1.contact import router as contact_router
+from src.app.core.config import SMTPTLSMode
 from src.app.core.exceptions.http_exceptions import RateLimitException
 from src.app.services.email_service import send_contact_form_email
 
@@ -128,17 +129,28 @@ class TestSendContactFormEmail:
         "message": "The chart renders nothing for my last dive.",
     }
 
+    @staticmethod
+    def _configure(mock_settings) -> None:
+        mock_settings.SMTP_HOST = "smtp.example.com"
+        mock_settings.SMTP_PORT = 587
+        mock_settings.SMTP_USERNAME = None
+        mock_settings.SMTP_PASSWORD = None
+        mock_settings.SMTP_TLS_MODE = SMTPTLSMode.STARTTLS
+        mock_settings.EMAIL_FROM_ADDRESS = "noreply@mail.opendiving.app"
+        mock_settings.CONTACT_FORM_EMAIL = "contact@opendiving.app"
+
     @pytest.mark.asyncio
-    async def test_noop_when_resend_not_configured(self):
+    async def test_noop_when_no_transport_is_configured(self):
         with (
             patch("src.app.services.email_service.settings") as mock_settings,
-            patch("src.app.services.email_service.resend") as mock_resend,
+            patch("src.app.services.email_service.smtplib") as mock_smtplib,
         ):
-            mock_settings.RESEND_API_KEY = None
+            mock_settings.SMTP_HOST = None
 
             await send_contact_form_email(**self.ARGS)
 
-            mock_resend.Emails.send.assert_not_called()
+            mock_smtplib.SMTP.assert_not_called()
+            mock_smtplib.SMTP_SSL.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_sends_to_the_configured_inbox_replying_to_the_submitter(self):
@@ -146,18 +158,16 @@ class TestSendContactFormEmail:
             patch("src.app.services.email_service.settings") as mock_settings,
             patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
         ):
-            mock_settings.RESEND_API_KEY = "re_test_key"
-            mock_settings.EMAIL_FROM_ADDRESS = "noreply@mail.opendiving.app"
-            mock_settings.CONTACT_FORM_EMAIL = "contact@opendiving.app"
+            self._configure(mock_settings)
 
             await send_contact_form_email(**self.ARGS)
 
-            _send_fn, payload = mock_run_sync.call_args.args
-            assert payload["to"] == "contact@opendiving.app"
+            _send_fn, message = mock_run_sync.call_args.args
+            assert message["To"] == "contact@opendiving.app"
             # Never sent *as* the submitter - only our own address is SPF/DKIM-covered.
-            assert payload["from"] == "noreply@mail.opendiving.app"
-            assert payload["reply_to"] == "jacques@example.com"
-            assert payload["subject"] == "[Bug report] Profile chart is empty"
+            assert message["From"] == "noreply@mail.opendiving.app"
+            assert message["Reply-To"] == "jacques@example.com"
+            assert message["Subject"] == "[Bug report] Profile chart is empty"
 
     @pytest.mark.asyncio
     async def test_escapes_html_in_the_submitted_message(self):
@@ -166,18 +176,17 @@ class TestSendContactFormEmail:
             patch("src.app.services.email_service.settings") as mock_settings,
             patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
         ):
-            mock_settings.RESEND_API_KEY = "re_test_key"
-            mock_settings.EMAIL_FROM_ADDRESS = "noreply@mail.opendiving.app"
-            mock_settings.CONTACT_FORM_EMAIL = "contact@opendiving.app"
+            self._configure(mock_settings)
 
             await send_contact_form_email(
                 **{**self.ARGS, "message": '<a href="https://evil.example">click</a>', "name": "<b>bold</b>"}
             )
 
-            _send_fn, payload = mock_run_sync.call_args.args
-            assert "<a href=" not in payload["html"]
-            assert "&lt;a href=" in payload["html"]
-            assert "<b>bold</b>" not in payload["html"]
+            _send_fn, message = mock_run_sync.call_args.args
+            body = message.get_content()
+            assert "<a href=" not in body
+            assert "&lt;a href=" in body
+            assert "<b>bold</b>" not in body
 
     @pytest.mark.asyncio
     async def test_keeps_line_breaks_readable(self):
@@ -185,11 +194,9 @@ class TestSendContactFormEmail:
             patch("src.app.services.email_service.settings") as mock_settings,
             patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
         ):
-            mock_settings.RESEND_API_KEY = "re_test_key"
-            mock_settings.EMAIL_FROM_ADDRESS = "noreply@mail.opendiving.app"
-            mock_settings.CONTACT_FORM_EMAIL = "contact@opendiving.app"
+            self._configure(mock_settings)
 
             await send_contact_form_email(**{**self.ARGS, "message": "line one\nline two"})
 
-            _send_fn, payload = mock_run_sync.call_args.args
-            assert "line one<br>line two" in payload["html"]
+            _send_fn, message = mock_run_sync.call_args.args
+            assert "line one<br>line two" in message.get_content()

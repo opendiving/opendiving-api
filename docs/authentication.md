@@ -48,7 +48,7 @@ sequenceDiagram
     participant FE as Frontend
     participant API as API
     participant DB as Database
-    participant Mail as Resend
+    participant Mail as SMTP relay
 
     U->>FE: Enters email, clicks Continue
     FE->>API: POST /auth/email/request {email}
@@ -196,7 +196,7 @@ sequenceDiagram
     participant FE as Frontend
     participant API as API
     participant DB as Database
-    participant Mail as Resend
+    participant Mail as SMTP relay
 
     U->>FE: Enters new email in Settings
     FE->>API: POST /user/email-change/request\n{new_email} (authenticated)
@@ -224,13 +224,21 @@ sequenceDiagram
     end
 ```
 
-Magic-link emails are sent via [Resend](https://resend.com). Set these in `src/.env`:
+Magic-link emails go out over SMTP - any relay works, and any provider will give you one. Set these
+in `src/.env`:
 
 ```bash
-# Required to actually deliver magic-link emails - without it, the link is only
-# logged (useful for local development).
-RESEND_API_KEY="re_..._your_key"
-EMAIL_FROM_ADDRESS="onboarding@resend.dev"
+# Required to actually deliver magic-link emails - without SMTP_HOST, the link is
+# only logged (useful for local development). Resend users: smtp.resend.com,
+# username "resend", password = the API key.
+SMTP_HOST="smtp.example.com"
+SMTP_PORT=587
+SMTP_TLS_MODE="starttls"   # starttls (587) | tls (465) | none (a local relay only)
+SMTP_USERNAME="..."        # both optional: an anonymous relay needs neither
+SMTP_PASSWORD="..."
+# Required as soon as SMTP_HOST is set - startup fails without it, since there is no
+# address that is deliverable through an arbitrary relay by default.
+EMAIL_FROM_ADDRESS="noreply@yourdomain.example"
 
 # Used to build the magic-link URL (`{FRONTEND_URL}/auth/verify?token=...`).
 FRONTEND_URL="http://localhost:3000"
