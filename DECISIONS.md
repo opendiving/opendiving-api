@@ -4965,17 +4965,17 @@ both directions.
   species plan assumed UDDF 3.2.2 had none. It has `siteType`'s `<ecology>` (`ecologyType`) and,
   closer to what we hold, `informationafterdive`'s `<observations>` (`observationsType`, which
   extends `ecologyType`), so one dive's sightings do have somewhere to go. What has nowhere to go is
-  a *flat* list: `ecologyType` splits into `fauna`/`flora`, those into `invertebrata`/`vertebrata`,
-  and only then into some twenty taxonomic-group elements (`porifera`, `cnidaria`, `mollusca`,
-  `crustacea`, `chondrichthyes`, `reptilia`, ...), each a `singleLifeFormType` wrapping the
-  `<species>` (`speciesType`) entries. Emitting one means classifying every row into UDDF's own
-  mixed-rank, partly obsolete vocabulary — `coelenterata` beside `cnidaria`, `crustacea` a peer of
-  phyla — out of the WoRMS `phylum`/`class_name` strings `models/species.py` passes through
-  verbatim: a hand-maintained mapping this repo would then own, and get quietly wrong. The census
-  fields `speciesType` offers (`abundance` with `quality`/`occurence`, `dominance`, `lifestage`) are
-  all optional, so the blocker is that classification, not the per-sighting detail `DiveSpecies`
-  deliberately omits. Species go out in `export.json` and `species.csv`; the species feature leaves
-  `services/export/uddf.py` untouched.
+  a *flat* list: `ecologyType` splits into `fauna`/`flora`, `fauna` again into
+  `invertebrata`/`vertebrata`, and only then into some twenty taxonomic-group elements (`porifera`,
+  `cnidaria`, `mollusca`, `crustacea`, `chondrichthyes`, `reptilia`, ...), each a
+  `singleLifeFormType` wrapping the `<species>` (`speciesType`) entries. Emitting one means
+  classifying every row into UDDF's own mixed-rank, partly obsolete vocabulary — `coelenterata`
+  beside `cnidaria`, `crustacea` a peer of phyla — out of the WoRMS `phylum`/`class_name` strings
+  `models/species.py` passes through verbatim: a hand-maintained mapping this repo would then own,
+  and get quietly wrong. The census fields `speciesType` offers (`abundance` with
+  `quality`/`occurence`, `dominance`, `lifestage`) are all optional, so the blocker is that
+  classification, not the per-sighting detail `DiveSpecies` deliberately omits. Species go out in
+  `export.json` and `species.csv`; the species feature leaves `services/export/uddf.py` untouched.
 
 **And two the format forces a choice on:**
 
