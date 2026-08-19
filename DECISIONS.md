@@ -7307,12 +7307,15 @@ account.
 
 ## The attribution string is a wire format, so its shape is part of the API contract
 
-`GeocodeResult.attribution` looks like free text and is not. Both clients parse it —
-`parseAttribution` in `opendiving-web/src/lib/map-tiles.ts` reads one markdown shape,
-`[label](href)`, allows only `http`/`https` hrefs, and degrades to plain text for anything else. So
-the string this API emits is a format with a parser on the other end, and changing its shape without
-the client is a user-visible regression rather than a copy edit: ship a markdown credit to a client
-that still renders plain text and every diver sees the literal
+`GeocodeResult.attribution` looks like free text and is not. `parseAttribution` in
+`opendiving-web/src/lib/map-tiles.ts` reads one markdown shape, `[label](href)`, allows only
+`http`/`https` hrefs, and degrades to plain text for anything else. That parser was written for the
+*tile* credit and, at the time this API change was written, was not yet applied to this field on
+either surface that renders it — the web-side change routing both through it
+(`components/attribution.tsx`) is a companion, not a precondition already met. So the string this
+API emits is a format with a parser on the other end, and changing its shape without the client is a
+user-visible regression rather than a copy edit: ship a markdown credit to a client that still
+renders plain text and every diver sees the literal
 `[© OpenStreetMap contributors](https://…), ODbL 1.0` under the place picker. That is the ordering
 constraint, and it runs API-then-client in only one direction — the client must learn to parse the
 new shape *before* the API starts emitting it, because the parser degrades gracefully and the
@@ -7372,10 +7375,11 @@ follow, so honouring the scheme literally costs a plaintext hop and buys nothing
 is never touched — only the link target, and only `http:` → `https:`.
 
 **The length cap moved to after the fold.** `_ATTRIBUTION_MAX_LENGTH` is 255, the width of the
-schema field, and the fold adds four characters. Checking the provider's length first would let a
-252-character licence clear the guard and then raise a `ValidationError` inside `_normalize` — a 500
-from the one path whose entire job is to degrade quietly. The length *logged* is still the
-provider's, since that is the number an operator would go looking for.
+schema field, and the fold is a net three characters longer (four brackets in, one space out).
+Checking the provider's length first would let a 253-character licence clear the guard and then
+raise a `ValidationError` inside `_normalize` — a 500 from the one path whose entire job is to
+degrade quietly. The length *logged* is still the provider's, since that is the number an operator
+would go looking for.
 
 **Why this beat the two alternatives.** Substituting a fixed markdown credit of our own would have
 produced a shorter, prettier string and quietly credited OpenStreetMap for whatever the operator had

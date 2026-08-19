@@ -463,10 +463,11 @@ def _normalize(row: dict[str, Any], *, with_bounding_box: bool = False) -> Geoco
     # thing this field exists to guarantee. Nominatim's own is about seventy characters, so
     # in practice this only fires for a provider doing something strange.
     #
-    # Measured *after* folding, not before: the fold adds four characters, so checking the
-    # provider's own length would let a 252-character licence through the guard and straight
-    # into a `ValidationError` on `GeocodeResult.attribution`. The length logged is still the
-    # provider's, since that is the number an operator would go looking for.
+    # Measured *after* folding, not before: folding is a net three characters longer (four
+    # brackets in, one space out), so checking the provider's own length would let a
+    # 253-character licence through the guard and straight into a `ValidationError` on
+    # `GeocodeResult.attribution`. The length logged is still the provider's, since that is
+    # the number an operator would go looking for.
     licence = _text(row.get("licence"))
     attribution = None
     if licence is not None:
