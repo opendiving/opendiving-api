@@ -23,7 +23,7 @@ from ipaddress import ip_address, ip_network
 
 from fastapi import Request
 
-from ..config import settings
+from ..config import settings, split_csv
 
 UNKNOWN_CLIENT = "unknown"
 
@@ -34,15 +34,9 @@ def _trusted_networks() -> tuple:
     proxy in Docker or Kubernetes usually has an address from a range rather than a
     fixed one (e.g. `10.0.0.0/8`).
     """
-    networks = []
-    for entry in (settings.TRUSTED_PROXY_IPS or "").split(","):
-        candidate = entry.strip()
-        if not candidate:
-            continue
-        # `strict=False` so a host address with a prefix (10.1.2.3/24) is accepted
-        # rather than raising - operators write those and mean the block.
-        networks.append(ip_network(candidate, strict=False))
-    return tuple(networks)
+    # `strict=False` so a host address with a prefix (10.1.2.3/24) is accepted rather
+    # than raising - operators write those and mean the block.
+    return tuple(ip_network(entry, strict=False) for entry in split_csv(settings.TRUSTED_PROXY_IPS))
 
 
 def _is_trusted(raw: str) -> bool:

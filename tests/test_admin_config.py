@@ -13,10 +13,18 @@ from src.app.core.config import LEGACY_DEFAULT_ADMIN_PASSWORD, EnvironmentOption
 
 
 def _settings(**overrides):
-    """Build a `Settings` without reading the developer's own `src/.env`."""
+    """Build a `Settings` without reading the developer's own `src/.env`.
+
+    The SMTP pair is here because these cases are production ones and
+    `_require_smtp_in_production` refuses to boot a production instance that cannot mail a
+    sign-in link. It is unrelated to the admin panel - it just has to be satisfied to reach
+    the guard under test.
+    """
     base = {
         "SECRET_KEY": "test-secret-key-for-testing-only",
         "ENVIRONMENT": EnvironmentOption.PRODUCTION,
+        "SMTP_HOST": "smtp.example.com",
+        "EMAIL_FROM_ADDRESS": "noreply@opendiving.example",
         "CRUD_ADMIN_ENABLED": True,
         "ADMIN_PASSWORD": "a-real-password",
     }
@@ -35,7 +43,7 @@ class TestAdminPasswordIsRequiredInProduction:
 
     def test_a_real_password_is_accepted(self):
         # The no-allowlist warning is expected here and asserted on its own below.
-        settings = _settings(ADMIN_PASSWORD="a-real-password", CRUD_ADMIN_ALLOWED_IPS_LIST=["203.0.113.7"])
+        settings = _settings(ADMIN_PASSWORD="a-real-password", CRUD_ADMIN_ALLOWED_IPS="203.0.113.7")
 
         assert settings.ADMIN_PASSWORD == "a-real-password"
 
@@ -55,7 +63,7 @@ class TestAdminPasswordIsRequiredInProduction:
         assert settings.ENVIRONMENT == environment
 
     def test_an_enabled_panel_without_an_ip_allowlist_warns(self):
-        with pytest.warns(UserWarning, match="CRUD_ADMIN_ALLOWED_IPS_LIST"):
+        with pytest.warns(UserWarning, match="CRUD_ADMIN_ALLOWED_IPS"):
             _settings()
 
     def test_no_warning_once_an_allowlist_is_set(self):
@@ -63,7 +71,7 @@ class TestAdminPasswordIsRequiredInProduction:
 
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            _settings(CRUD_ADMIN_ALLOWED_IPS_LIST=["203.0.113.7"])
+            _settings(CRUD_ADMIN_ALLOWED_IPS="203.0.113.7")
 
 
 class TestHardDeletedModelsCannotBeDeletedFromThePanel:

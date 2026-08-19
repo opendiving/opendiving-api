@@ -1,0 +1,205 @@
+"""Unit tests for the startup guards and DSN building in `core.config`.
+
+The admin-panel guard has its own module (`test_admin_config.py`) and the from-address one
+`test_email_config.py`; this covers the rest of what a fresh install can get wrong before
+it has served a single request - a `SECRET_KEY` copied out of the template, a production
+instance nobody can sign in to, a password with an `@` in it, and a `LOG_LEVEL` typo.
+"""
+
+import logging
+
+import pytest
+
+from src.app.core.config import (
+    PLACEHOLDER_SECRET_KEYS,
+    EnvironmentOption,
+    Settings,
+    postgres_uri,
+    redis_url,
+    split_csv,
+)
+
+
+def _settings(**overrides):
+    """Build a `Settings` without reading the developer's own `src/.env`."""
+    base = {
+        "SECRET_KEY": "test-secret-key-for-testing-only",
+        "ENVIRONMENT": EnvironmentOption.LOCAL,
+        "CRUD_ADMIN_ENABLED": False,
+        "SMTP_HOST": None,
+        "EMAIL_FROM_ADDRESS": None,
+    }
+    return Settings(**{**base, **overrides})
+
+
+class TestPlaceholderSecretKeysAreRefused:
+    """`SECRET_KEY` signs every access, refresh and onboarding token, so a value published
+    in this repository is not a weak key - it is a key anyone can mint tokens with.
+    """
+
+    @pytest.mark.parametrize("placeholder", sorted(PLACEHOLDER_SECRET_KEYS))
+    def test_each_known_placeholder_fails_startup(self, placeholder: str):
+        with pytest.raises(ValueError, match="SECRET_KEY"):
+            _settings(SECRET_KEY=placeholder)
+
+    def test_the_value_the_template_ships_is_one_of_them(self):
+        """The whole point: `cp src/.env.example src/.env` must not produce a bootable
+        instance. Read out of the template rather than restated, so editing one without
+        the other fails here.
+        """
+        from pathlib import Path
+
+        template = (Path(__file__).resolve().parents[1] / "src" / ".env.example").read_text()
+        shipped = next(line for line in template.splitlines() if line.startswith("SECRET_KEY="))
+
+        assert shipped.split("=", 1)[1].strip('"') in PLACEHOLDER_SECRET_KEYS
+
+    @pytest.mark.parametrize("value", ["CHANGEME", "  change-me  ", "ChangeThis"])
+    def test_casing_and_padding_do_not_get_past_it(self, value: str):
+        with pytest.raises(ValueError, match="SECRET_KEY"):
+            _settings(SECRET_KEY=value)
+
+    def test_an_empty_key_fails_startup(self):
+        with pytest.raises(ValueError, match="SECRET_KEY"):
+            _settings(SECRET_KEY="   ")
+
+    @pytest.mark.parametrize(
+        "environment", [EnvironmentOption.LOCAL, EnvironmentOption.STAGING, EnvironmentOption.PRODUCTION]
+    )
+    def test_every_environment_is_guarded(self, environment):
+        """No `ENVIRONMENT` gate, deliberately: the local instance is the one whose `.env`
+        came straight out of the template, and a staging instance signing tokens with a
+        published key is compromised exactly as a production one is.
+        """
+        with pytest.raises(ValueError, match="SECRET_KEY"):
+            _settings(
+                SECRET_KEY="change-me-openssl-rand-hex-32",
+                ENVIRONMENT=environment,
+                SMTP_HOST="smtp.example.com",
+                EMAIL_FROM_ADDRESS="noreply@opendiving.example",
+            )
+
+    def test_a_generated_key_is_accepted(self):
+        settings = _settings(SECRET_KEY="0f9c2b7a4e1d8c3f6a5b0e2d9c4f7a1b")
+
+        assert settings.SECRET_KEY.get_secret_value() == "0f9c2b7a4e1d8c3f6a5b0e2d9c4f7a1b"
+
+    def test_the_throwaway_key_ci_uses_is_accepted(self):
+        """The guard is a list of published placeholders, not an entropy check - a rule
+        strong enough to reject this would also reject keys people genuinely generated.
+        """
+        assert _settings().SECRET_KEY.get_secret_value() == "test-secret-key-for-testing-only"
+
+
+class TestProductionRequiresARelay:
+    """Sign-in is passwordless. With no relay there is no way to deliver a magic link, so
+    nobody can get in - not even the first user of a fresh install.
+    """
+
+    def test_production_without_smtp_fails_startup(self):
+        with pytest.raises(ValueError, match="SMTP_HOST"):
+            _settings(ENVIRONMENT=EnvironmentOption.PRODUCTION)
+
+    def test_production_with_a_relay_is_accepted(self):
+        settings = _settings(
+            ENVIRONMENT=EnvironmentOption.PRODUCTION,
+            SMTP_HOST="smtp.example.com",
+            EMAIL_FROM_ADDRESS="noreply@opendiving.example",
+        )
+
+        assert settings.SMTP_HOST == "smtp.example.com"
+
+    @pytest.mark.parametrize("environment", [EnvironmentOption.LOCAL, EnvironmentOption.STAGING])
+    def test_the_other_environments_may_log_the_link_instead(self, environment):
+        """The documented local flow, and staging is run the same way on purpose."""
+        settings = _settings(ENVIRONMENT=environment)
+
+        assert settings.SMTP_HOST is None
+
+
+class TestLogLevel:
+    def test_a_level_name_is_normalized(self):
+        assert _settings(LOG_LEVEL=" debug ").LOG_LEVEL == "DEBUG"
+
+    def test_the_default_survives_normalization(self):
+        assert _settings(LOG_LEVEL="INFO").LOG_LEVEL in logging.getLevelNamesMapping()
+
+    def test_an_unknown_level_fails_startup(self):
+        """Rather than raising from inside `configure_logging` at startup, where the
+        traceback points at the logging module instead of at the typo.
+        """
+        with pytest.raises(ValueError, match="LOG_LEVEL"):
+            _settings(LOG_LEVEL="verbose")
+
+
+class TestPostgresCredentialsAreUrlEncoded:
+    """`POSTGRES_URI` is interpolated into a URL, so a password containing URL syntax used
+    to produce a DSN nobody wrote - and an error naming a host nobody configured.
+    """
+
+    def test_an_at_sign_in_the_password_does_not_split_the_dsn(self):
+        assert postgres_uri("postgres", "p@ss", "db", 5432, "opendive") == "postgres:p%40ss@db:5432/opendive"
+
+    @pytest.mark.parametrize("character,encoded", [("@", "%40"), ("/", "%2F"), (":", "%3A"), ("#", "%23")])
+    def test_every_character_that_would_change_the_parse(self, character: str, encoded: str):
+        assert postgres_uri("postgres", f"a{character}b", "db", 5432, "opendive").startswith(f"postgres:a{encoded}b@")
+
+    def test_an_ordinary_password_is_left_alone(self):
+        assert postgres_uri("postgres", "hunter2", "db", 5432, "opendive") == "postgres:hunter2@db:5432/opendive"
+
+    def test_the_username_is_encoded_too(self):
+        assert postgres_uri("open@diving", "pw", "db", 5432, "opendive").startswith("open%40diving:")
+
+
+class TestRedisUrl:
+    def test_no_password_leaves_the_url_bare(self):
+        assert redis_url("redis", 6379, None) == "redis://redis:6379"
+
+    def test_an_empty_password_is_treated_as_none(self):
+        """An unset `REDIS_PASSWORD` reaches this as `""` through some paths, and
+        `redis://:@host` is not the same URL as `redis://host`.
+        """
+        assert redis_url("redis", 6379, "") == "redis://redis:6379"
+
+    def test_a_password_is_encoded(self):
+        assert redis_url("redis", 6379, "p@ss/word") == "redis://:p%40ss%2Fword@redis:6379"
+
+
+class TestSplitCsv:
+    def test_none_and_empty_are_no_entries(self):
+        assert split_csv(None) == []
+        assert split_csv("") == []
+        assert split_csv(" , ,") == []
+
+    def test_entries_are_stripped(self):
+        assert split_csv("203.0.113.7, 10.0.0.0/8 ,,192.0.2.1") == ["203.0.113.7", "10.0.0.0/8", "192.0.2.1"]
+
+    def test_the_admin_allowlists_read_as_lists(self):
+        settings = _settings(CRUD_ADMIN_ALLOWED_IPS="203.0.113.7, 203.0.113.8")
+
+        assert split_csv(settings.CRUD_ADMIN_ALLOWED_IPS) == ["203.0.113.7", "203.0.113.8"]
+
+    def test_a_bare_cidr_block_needs_no_json(self):
+        """The reason these are comma-strings rather than `list[str]`: pydantic-settings
+        parses a complex field type out of the environment itself and expects JSON, so
+        `CRUD_ADMIN_ALLOWED_NETWORKS=10.0.0.0/8` used to be a startup failure.
+        """
+        settings = _settings(CRUD_ADMIN_ALLOWED_NETWORKS="10.0.0.0/8")
+
+        assert split_csv(settings.CRUD_ADMIN_ALLOWED_NETWORKS) == ["10.0.0.0/8"]
+
+
+class TestAuthCookieSecure:
+    def test_it_defaults_to_true(self):
+        """Asserted against the source rather than the live value, for the reason
+        `test_admin_config.TestDefaults` documents: `starlette.config.Config` resolves each
+        default from the developer's own `src/.env` at import time.
+        """
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parents[1] / "src" / "app" / "core" / "config.py").read_text()
+
+        assert 'config("AUTH_COOKIE_SECURE", default=True)' in source
+
+    def test_it_can_be_turned_off_for_a_plain_http_instance(self):
+        assert _settings(AUTH_COOKIE_SECURE=False).AUTH_COOKIE_SECURE is False

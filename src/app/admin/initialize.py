@@ -1,6 +1,6 @@
 from crudadmin import CRUDAdmin
 
-from ..core.config import EnvironmentOption, settings
+from ..core.config import EnvironmentOption, settings, split_csv
 from ..core.db.database import async_get_db
 from .views import register_admin_views
 
@@ -44,10 +44,10 @@ def create_admin_interface() -> CRUDAdmin | None:
         admin_db_url=settings.CRUD_ADMIN_DB_URL,
         session_backend=session_backend,
         redis_config=redis_config,
-        allowed_ips=settings.CRUD_ADMIN_ALLOWED_IPS_LIST if settings.CRUD_ADMIN_ALLOWED_IPS_LIST else None,
-        allowed_networks=settings.CRUD_ADMIN_ALLOWED_NETWORKS_LIST
-        if settings.CRUD_ADMIN_ALLOWED_NETWORKS_LIST
-        else None,
+        # CRUDAdmin reads these as "no restriction" only when they are `None`; an empty
+        # list would be an allowlist matching nobody.
+        allowed_ips=split_csv(settings.CRUD_ADMIN_ALLOWED_IPS) or None,
+        allowed_networks=split_csv(settings.CRUD_ADMIN_ALLOWED_NETWORKS) or None,
         max_sessions_per_user=settings.CRUD_ADMIN_MAX_SESSIONS,
         session_timeout_minutes=settings.CRUD_ADMIN_SESSION_TIMEOUT,
         secure_cookies=settings.SESSION_SECURE_COOKIES,

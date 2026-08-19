@@ -130,7 +130,7 @@ def _load() -> tuple[_Part, ...] | None:
     except (OSError, ValueError, TypeError, KeyError, IndexError) as exc:
         # Loud once, then quiet. `_parts` retries on every lookup, so a genuinely broken
         # deploy would otherwise write this line for every offshore pin for as long as it
-        # stayed broken - and `core.logger` writes to a file on disk.
+        # stayed broken.
         global _warned
         logger.log(
             logging.DEBUG if _warned else logging.WARNING,

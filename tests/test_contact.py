@@ -12,9 +12,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.app.api.v1.contact import router as contact_router
-from src.app.core.config import SMTPTLSMode
+from src.app.core.config import SMTPTLSMode, settings
 from src.app.core.exceptions.http_exceptions import RateLimitException
-from src.app.services.email_service import send_contact_form_email
+from src.app.services.email_service import EmailDeliveryError, send_contact_form_email
 
 VALID_BODY = {
     "name": "Jacques Cousteau",
@@ -29,6 +29,19 @@ def _make_contact_client() -> TestClient:
     app = FastAPI()
     app.include_router(contact_router)
     return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _configured_inbox():
+    """Give every route test an instance that has a contact address.
+
+    `CONTACT_FORM_EMAIL` has no default, and the route 503s without one - so unpatched,
+    these tests would read the developer's own `src/.env` and pass or fail depending on
+    whose machine they run on. The 503 itself is asserted below with this fixture
+    overridden.
+    """
+    with patch.object(settings, "CONTACT_FORM_EMAIL", "contact@opendiving.example"):
+        yield
 
 
 class TestSendContactMessage:
@@ -120,6 +133,37 @@ class TestSendContactMessage:
             assert response.status_code == 422
 
 
+class TestAnInstanceWithNoContactAddress:
+    """`CONTACT_FORM_EMAIL` has no default, so this is the shipped state of a fresh
+    install: the form is off rather than delivering somebody else's support mail to an
+    inbox they never chose.
+    """
+
+    def test_answers_503_without_sending(self):
+        with (
+            patch.object(settings, "CONTACT_FORM_EMAIL", None),
+            patch("src.app.api.v1.contact.send_contact_form_email", new_callable=AsyncMock) as mock_send,
+            patch("src.app.api.v1.contact.enforce_rate_limit", new_callable=AsyncMock),
+        ):
+            response = _make_contact_client().post("/contact", json=VALID_BODY)
+
+            assert response.status_code == 503
+            mock_send.assert_not_awaited()
+
+    def test_does_not_spend_the_rate_limits(self):
+        """The refusal is decided before the buckets are touched, so traffic to a switched
+        off form cannot exhaust the allowance of an instance that later configures one.
+        """
+        with (
+            patch.object(settings, "CONTACT_FORM_EMAIL", None),
+            patch("src.app.api.v1.contact.send_contact_form_email", new_callable=AsyncMock),
+            patch("src.app.api.v1.contact.enforce_rate_limit", new_callable=AsyncMock) as mock_limit,
+        ):
+            _make_contact_client().post("/contact", json=VALID_BODY)
+
+            mock_limit.assert_not_awaited()
+
+
 class TestSendContactFormEmail:
     ARGS = {
         "name": "Jacques Cousteau",
@@ -200,3 +244,22 @@ class TestSendContactFormEmail:
 
             _send_fn, message = mock_run_sync.call_args.args
             assert "line one<br>line two" in message.get_content()
+
+    @pytest.mark.asyncio
+    async def test_raises_rather_than_no_ops_without_a_recipient(self):
+        """The route answers 503 before reaching this, so getting here at all is a bug.
+        Unlike the missing-transport branch above it raises: the value of that log line is
+        that a developer can read what *would* have been sent, and there is no equivalent
+        consolation for mail with nowhere to go.
+        """
+        with (
+            patch("src.app.services.email_service.settings") as mock_settings,
+            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+        ):
+            self._configure(mock_settings)
+            mock_settings.CONTACT_FORM_EMAIL = None
+
+            with pytest.raises(EmailDeliveryError, match="CONTACT_FORM_EMAIL"):
+                await send_contact_form_email(**self.ARGS)
+
+            mock_run_sync.assert_not_called()

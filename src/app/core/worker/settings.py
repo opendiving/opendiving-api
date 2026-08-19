@@ -18,7 +18,7 @@ class WorkerSettings:
         # most runs send nothing at all.
         cron(send_gear_service_digests, hour=settings.GEAR_SERVICE_DIGEST_HOUR, minute=0),
     ]
-    redis_settings = RedisSettings(host=REDIS_QUEUE_HOST, port=REDIS_QUEUE_PORT)
+    redis_settings = RedisSettings(host=REDIS_QUEUE_HOST, port=REDIS_QUEUE_PORT, password=settings.REDIS_PASSWORD)
     # `arq --check` reads a sentinel key that the worker rewrites every
     # `health_check_interval` seconds with a TTL of interval + 1, so the interval is also
     # how stale a passing check may be. Arq's default of an hour would let a dead worker
