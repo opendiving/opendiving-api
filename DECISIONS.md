@@ -7623,6 +7623,25 @@ deleted with the suite green. Both were caught by review rather than by the test
 point worth keeping: **a test whose failure mode is "still passes" is worth mutating on purpose
 before trusting it**, and each of these now fails when its own regression is reintroduced.
 
+The real-pool test (`TestConcurrentResolvesDoNotExhaustThePool`) supplies the other half — the
+ordering tests pin *that* the release happens, this pins what it buys, measured against an actual
+pool: fifteen concurrent resolves, sampling `pool.checkedout()` mid-burst. With the releases removed
+it reads fifteen for the whole window and an unrelated query waits out `pool_timeout` and fails;
+with them it reads zero. It has to use a real engine, because the bug lives entirely in SQLAlchemy's
+checkout lifecycle and a mocked session has no pool to exhaust.
+
+That test *also* failed its own mutation check on the first attempt, for a reason worth naming: it
+resolved a fixed range of AphiaIDs, and those rows persist in the developer's database — so from the
+second run onward every resolve returned early from the local lookup, never went outbound, and the
+test passed while measuring nothing. **A test that writes rows nothing cleans up has to vary the key
+it writes**, or it quietly converts itself into a no-op. Fresh ids from uuid7's random tail, as
+`create_species` does.
+
+And the load shape it holds against is the designed one rather than a pathological burst: the web
+picker keeps its menu open after a pick and deliberately does not serialise resolves, so a diver
+adding a dive's worth of sightings produces several concurrent resolves from one browser as a matter
+of course.
+
 ### The common-name rule, and why it is a prefix test
 
 `species.common_name` is a single English display name, chosen at resolve time as: the English

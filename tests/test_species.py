@@ -29,13 +29,15 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
+import anyio
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 from redis.exceptions import ConnectionError
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import QueuePool
 from uuid6 import uuid7
 
 from src.app.api import router
@@ -1485,3 +1487,93 @@ class TestTheReadTransactionIsReleasedBeforeGoingOutbound:
         assert species is existing
         assert "release" not in calls
         assert "outbound" not in calls
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestConcurrentResolvesDoNotExhaustThePool:
+    """The failure `_release_read_transaction` exists to prevent, against a real pool.
+
+    The ordering tests above pin *that* the release happens; this pins what it buys, which is
+    the only part a reader can check against the symptom. Worth having as a real-pool test
+    rather than a mock because the whole bug lives in SQLAlchemy's checkout lifecycle - a
+    mocked session has no pool to exhaust and would pass either way.
+
+    **Concurrency here is the designed load, not an unlucky burst.** The web picker keeps its
+    menu open after a pick, so a diver adding a dive's worth of sightings fires several
+    resolves within a second or two from one browser; the client deliberately does not
+    serialise them, since that is the interaction the pending rows exist to support.
+    """
+
+    @staticmethod
+    def _record(url: str) -> httpx.Response:
+        aphia_id = int(str(url).rsplit("/", 1)[-1].split("?")[0])
+        return httpx.Response(
+            200,
+            json={
+                "AphiaID": aphia_id,
+                "scientificname": f"zzfixture-concurrent-{aphia_id}",
+                "status": "accepted",
+                "rank": "Species",
+                "valid_AphiaID": aphia_id,
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_pool_is_free_while_every_resolve_is_outbound(self, no_redis: None) -> None:
+        # The engine's own defaults, spelled out so the numbers below are readable.
+        engine = create_async_engine(
+            settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI, pool_size=5, max_overflow=10
+        )
+        sessions = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+        concurrent, outbound_seconds = 15, 0.5  # 15 is exactly the pool ceiling: 5 + 10 overflow
+
+        def build(**kwargs: Any) -> httpx.AsyncClient:
+            async def handle(request: httpx.Request) -> httpx.Response:
+                await anyio.sleep(outbound_seconds)
+                url = str(request.url)
+                if "wikidata" in url:
+                    return httpx.Response(200, json={"query": {"search": []}})
+                if "AphiaRecordByAphiaID" in url:
+                    return TestConcurrentResolvesDoNotExhaustThePool._record(url)
+                return httpx.Response(200, json=[])
+
+            return _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handle), **kwargs)
+
+        # Fresh AphiaIDs every run, from uuid7's random tail like `create_species`. A fixed
+        # base is the trap here: these rows persist in the developer's database, so the second
+        # run finds them all, returns before any outbound call, and the test silently stops
+        # measuring anything while still passing.
+        base = int(uuid7().hex[-6:], 16) * 100
+
+        async def resolve(offset: int) -> None:
+            async with sessions() as db:
+                await species_service.resolve_species(db, base + offset)
+
+        checkouts: list[int] = []
+        # `AsyncEngine.pool` is typed as the base `Pool`, which does not declare the checkout
+        # counters; the pool actually in use here is a queue pool and does.
+        pool = cast(QueuePool, engine.pool)
+
+        async def sample() -> None:
+            for _ in range(int(outbound_seconds * 10)):
+                await anyio.sleep(0.1)
+                checkouts.append(pool.checkedout())
+
+        try:
+            with (
+                patch("src.app.services.species_service.httpx.AsyncClient", side_effect=build),
+                patch("src.app.services.species_service.enforce_rate_limit", new_callable=AsyncMock),
+            ):
+                async with anyio.create_task_group() as tasks:
+                    for offset in range(concurrent):
+                        tasks.start_soon(resolve, offset)
+                    tasks.start_soon(sample)
+        finally:
+            await engine.dispose()
+
+        # Sampled across the middle of the burst, when every resolve is waiting on the
+        # register. Without the release this reads 15 for the whole window and an unrelated
+        # endpoint asking for a connection waits out `pool_timeout` and fails.
+        steady = checkouts[len(checkouts) // 3 : 2 * len(checkouts) // 3]
+        assert steady, "the sampler never ran; the burst finished too fast to measure"
+        assert max(steady) < concurrent, f"connections pinned across the outbound calls: {checkouts}"
