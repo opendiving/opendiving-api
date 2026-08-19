@@ -43,7 +43,9 @@ from uuid6 import uuid7
 from src.app.api import router
 from src.app.api.dependencies import get_current_user
 from src.app.api.v1 import dives as dives_module
+from src.app.api.v1.species import read_species
 from src.app.core.config import settings
+from src.app.core.exceptions.http_exceptions import NotFoundException
 from src.app.core.setup import create_application
 from src.app.crud.crud_dive_species import replace_species_for_dive
 from src.app.models.dive_species import DiveSpecies
@@ -1577,3 +1579,134 @@ class TestConcurrentResolvesDoNotExhaustThePool:
         steady = checkouts[len(checkouts) // 3 : 2 * len(checkouts) // 3]
         assert steady, "the sampler never ran; the burst finished too fast to measure"
         assert max(steady) < concurrent, f"connections pinned across the outbound calls: {checkouts}"
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestLocalSearchAgainstPostgres:
+    """`_local_search`'s statement, executed rather than merely built.
+
+    Every other search test hands `search_species` a mocked session, which is right for the
+    merge and degradation logic but means the SQL itself is constructed in Python and thrown
+    away. That statement is the one non-trivial query in this feature - an outer join, a
+    `CASE`, two aggregates over it, `GROUP BY` on the primary key leaning on Postgres's
+    functional-dependency inference, and an `ORDER BY` naming a string label - and it backs the
+    half of search that is supposed to keep working when both registers are down. A defect in
+    it would surface as a 500 on exactly the path the degradation promise rests on, while
+    `test_both_registers_down_falls_back_to_the_catalog` stayed green, because that test stubs
+    the row shape this query would have produced.
+
+    Names are `zzfixture-*` so the rows these leave behind cannot be reached by a real query -
+    see `create_species`.
+    """
+
+    @staticmethod
+    def _seed(db: Session, *names: tuple[str, str], scientific_name: str | None = None) -> Any:
+        species = create_species(
+            db, scientific_name=scientific_name or f"zzfixture-local-{uuid7().hex[-8:]}", common_name=None
+        )
+        for name, kind in names:
+            db.add(SpeciesName(species_id=species.id, name=name, kind=kind, source="worms"))
+        db.commit()
+        return species
+
+    @pytest.mark.asyncio
+    async def test_a_species_with_several_matching_aliases_comes_back_once(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The `GROUP BY` doing its job. The outer join fans out one row per matching alias, and
+        a diver wants one row per species."""
+        token = f"zzq{uuid7().hex[-8:]}"
+        species = self._seed(db, (f"{token} one", "common"), (f"{token} two", "common"), (f"{token} three", "synonym"))
+
+        results, _ = await species_service._local_search(async_db, token)
+
+        assert [r.uuid for r in results] == [species.uuid]
+
+    @pytest.mark.asyncio
+    async def test_exact_matches_outrank_prefix_which_outranks_substring(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The `CASE`/`min`/`ORDER BY` chain, which is the part that cannot be checked by
+        building the statement alone."""
+        token = f"zzq{uuid7().hex[-8:]}"
+        exact = self._seed(db, (token, "common"))
+        prefix = self._seed(db, (f"{token}tail", "common"))
+        substring = self._seed(db, (f"head{token}tail", "common"))
+
+        results, _ = await species_service._local_search(async_db, token)
+
+        assert [r.uuid for r in results] == [exact.uuid, prefix.uuid, substring.uuid]
+
+    @pytest.mark.asyncio
+    async def test_a_row_is_findable_by_its_own_scientific_name_with_no_aliases(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The reason the join is an *outer* one: a catalog row whose `species_name` rows failed
+        to write must still be findable."""
+        token = f"zzq{uuid7().hex[-8:]}"
+        species = self._seed(db, scientific_name=f"zzfixture-local-{token}")
+
+        results, _ = await species_service._local_search(async_db, token)
+
+        assert [r.uuid for r in results] == [species.uuid]
+
+    @pytest.mark.asyncio
+    async def test_the_matched_name_explains_a_hit_and_is_dropped_when_it_would_not(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        token = f"zzq{uuid7().hex[-8:]}"
+        alias = f"{token} alias"
+        species = self._seed(db, (alias, "synonym"))
+
+        by_alias, _ = await species_service._local_search(async_db, token)
+        assert by_alias[0].matched_name == alias
+
+        # Matched by the row's own scientific name, which the result already shows - so the
+        # hint would be noise and is nulled.
+        by_name, _ = await species_service._local_search(async_db, species.scientific_name.casefold())
+        assert by_name[0].matched_name is None
+
+    @pytest.mark.asyncio
+    async def test_a_wildcard_in_the_query_is_escaped_rather_than_matching_everything(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """`escape_like` against the real `ILIKE ... ESCAPE`, not against a compiled string.
+        Unescaped, `%` would return the whole catalog."""
+        token = f"zzq{uuid7().hex[-8:]}"
+        literal = self._seed(db, (f"{token}%pct", "common"))
+        # The discriminating row: this matches `{token}%pct` only if the `%` is left as a
+        # wildcard. A decoy that simply fails to match either way proves nothing - which is
+        # what the first version of this test did, and it passed with `escape_like` removed.
+        self._seed(db, (f"{token}ANYTHINGpct", "common"))
+
+        results, _ = await species_service._local_search(async_db, f"{token}%pct")
+
+        assert [r.uuid for r in results] == [literal.uuid]
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestReadSpeciesRoute:
+    """`GET /species/{uuid}`, which had no test at all.
+
+    Called directly rather than through `TestClient`, so it runs against a real session - the
+    query and the 404 are the whole of this route, and both need a database to mean anything.
+    The 401 is covered by `TestSearchRoute`'s anonymous case, which needs no session because
+    the dependency rejects before the body runs.
+    """
+
+    @pytest.mark.asyncio
+    async def test_it_returns_the_catalog_row(self, db: Session, async_db: AsyncSession) -> None:
+        species = create_species(db, aphia_id=int(uuid7().hex[-7:], 16), common_name="zzfixture common")
+
+        result = await read_species(uuid=species.uuid, current_user=CURRENT_USER, db=async_db)
+
+        assert result.uuid == species.uuid
+        assert (result.aphia_id, result.scientific_name) == (species.aphia_id, species.scientific_name)
+        assert result.common_name == "zzfixture common"
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_uuid_is_a_404(self, async_db: AsyncSession) -> None:
+        """And it means "not in this catalog" rather than the "not yours" the same status means
+        on every other `/{uuid}` route here - there is no owner to fail against."""
+        with pytest.raises(NotFoundException):
+            await read_species(uuid=uuid7(), current_user=CURRENT_USER, db=async_db)

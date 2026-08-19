@@ -7806,6 +7806,30 @@ Deferring it is also what keeps this feature at **zero manual DDL**: `create_all
 `CREATE EXTENSION`, and all three tables are brand new, so `docker compose restart api` created them
 with their unique constraints and indexes intact. Nothing here needed an `ALTER TABLE`.
 
+### The local search query is tested by executing it, not by building it
+
+`_local_search` is the one non-trivial statement in this feature — an outer join to `species_name`,
+a `CASE`, two aggregates over it, `GROUP BY` on the primary key leaning on Postgres's
+functional-dependency inference, and an `ORDER BY` naming a string label. Every test of
+`search_species` mocks the session, which is right for the merge and degradation logic and means the
+statement was built in Python and thrown away: it was never sent to Postgres by anything.
+
+That gap is worse than it sounds, because of *which* path it covers. The local catalog is the half
+that is supposed to keep answering when both registers are down, so a SQL-level defect would surface
+as a 500 on exactly the path *"search never fails for provider trouble"* rests on — while
+`test_both_registers_down_falls_back_to_the_catalog` stayed green, since it stubs the row shape this
+query would have produced. `TestLocalSearchAgainstPostgres` executes it for real against seeded
+rows, and `TestReadSpeciesRoute` covers `GET /species/{uuid}`, which had nothing at all.
+
+The general rule: **a mocked session tests the code around a query, never the query.** Any statement
+whose correctness lives in the SQL rather than in the Python — a `GROUP BY`, an aggregate, an
+`ESCAPE`, anything relying on a dialect's inference — needs one test that actually runs it.
+
+One of those tests failed its own mutation check, in the way this file keeps finding: the escaping
+case seeded a decoy row that did not match *either way*, so it passed with `escape_like` removed. A
+wildcard test needs a row that matches **only** if the wildcard is live; a decoy that simply fails
+to match proves nothing.
+
 ### `species_seen` is derived at last
 
 The column has existed since the first schema, was on the wire, and was hardcoded to `0` — which is
