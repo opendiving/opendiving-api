@@ -1607,8 +1607,11 @@ class TestConcurrentResolvesDoNotExhaustThePool:
         async def measure() -> None:
             """Read the pool once, with all fifteen resolves held inside their record fetch.
 
-            Nothing in here may escape: the parked resolves are waiting on `measured`, so an
-            exception leaving this task would hang the group instead of failing it.
+            Every path out of here has to set `measured`, which is why it is a `finally` and
+            not a last line - the early return below is the one that would otherwise strand
+            fifteen resolves waiting on an event nothing will ever set. An *exception* is the
+            safe case rather than the dangerous one: the task group cancels its siblings, so
+            the parked resolves unwind instead of hanging.
             """
             nonlocal checked_out, stalled_at, unrelated_error
             try:
