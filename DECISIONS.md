@@ -5869,6 +5869,15 @@ uv run python -c "import ast; ast.parse(open('src/app/services/geocoding_service
 `src/app/core/security.py`, `services/dive_files.py` and `dive_parsers/suunto_xml.py` all carry the
 same form.
 
+**The parentheses come back when the clause binds** — `except (A, B) as exc:` — because PEP 758
+drops them only where there is no `as`. So `dive_parsers/suunto_xml.py` spells it both ways within
+thirty lines, and `services/marine_areas.py` and the `httpx` handler in `geocoding_service.py` are
+parenthesized for that reason alone. The pair reads as an inconsistency and is not one: unifying it
+breaks whichever half gets rewritten — parentheses added to the unbound form fail
+`ruff format --check`, and parentheses removed from the bound form are a genuine `SyntaxError`
+("multiple exception types must be parenthesized when using 'as'"). Check for an `as` before
+concluding anything about a clause here.
+
 ## Trip locations are a value-object child table, and `trip.location` is gone
 
 A trip used to record where it went in one free-text `trip.location` column. Divers do not travel to

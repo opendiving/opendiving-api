@@ -65,6 +65,10 @@ something to look up, not to restate it.
 
 ## Code Style — Python
 
+- **Python 3.14** (`requires-python = "~=3.14.0"`, ruff `target-version = "py314"`). `except A, B:`
+  without parentheses is PEP 758, not the Python 2 form — `ruff format` *removes* the parentheses,
+  so putting them back fails CI. → *"`except ValueError, TypeError:` is valid, and `ruff format`
+  writes it that way"*
 - 4-space indent
 - `snake_case` for functions, variables, files
 - `PascalCase` for classes
