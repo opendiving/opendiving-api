@@ -37,7 +37,9 @@ REVERSE_PAYLOAD = {
     "lon": "34.5372",
     "display_name": "Blue Hole, Dahab, South Sinai, Egypt",
     "name": "Blue Hole",
-    "licence": "Data © OpenStreetMap contributors, ODbL 1.0.",
+    # Nominatim's own string, byte for byte, including the bare `http://` it still sends.
+    # The fold is only worth testing against what a provider actually says.
+    "licence": "Data © OpenStreetMap contributors, ODbL 1.0. http://osm.org/copyright",
     "address": {"suburb": "Blue Hole", "city": "Dahab", "state": "South Sinai", "country": "Egypt"},
 }
 
@@ -172,7 +174,7 @@ class TestReverseRoute:
         assert body["location"] == "Dahab, Egypt"
         assert body["display_name"] == "Blue Hole, Dahab, South Sinai, Egypt"
         assert body["name"] == "Blue Hole"
-        assert body["attribution"] == "Data © OpenStreetMap contributors, ODbL 1.0."
+        assert body["attribution"] == "[Data © OpenStreetMap contributors, ODbL 1.0.](https://osm.org/copyright)"
 
     def test_answers_204_when_the_point_resolves_to_nothing(self, client: TestClient, no_redis: None):
         """Nominatim's "unable to geocode" shape is an answer, not a failure - and having no
@@ -854,6 +856,100 @@ class TestThrottling:
             client.get("/api/v1/geocode/search", params={"q": "dahab"})
 
         assert [call.args[0] for call in slept.await_args_list] == [1.0]
+
+
+class TestAttribution:
+    """The credit is a wire format with a parser on the other end, not display copy.
+
+    The clients read one markdown shape - `[text](url)` - and render anything else as plain
+    text, so what matters here is which provider strings fold and, far more, which ones are
+    left alone. The strings below are the real values those providers send; see
+    `DECISIONS.md`."""
+
+    def test_folds_a_trailing_url_into_a_link(self):
+        """Nominatim's shape, and the only one in reach that folds."""
+        credit = "Data © OpenStreetMap contributors, ODbL 1.0. http://osm.org/copyright"
+
+        assert (
+            geocoding_service._linked_attribution(credit)
+            == "[Data © OpenStreetMap contributors, ODbL 1.0.](https://osm.org/copyright)"
+        )
+
+    def test_upgrades_the_scheme_of_the_href_but_not_the_visible_text(self):
+        """The one part of a provider's string that is rewritten rather than moved: we are
+        minting an href a browser will follow, and `http://osm.org` redirects to TLS anyway."""
+        folded = geocoding_service._linked_attribution("Credit here http://example.com/licence")
+
+        assert folded == "[Credit here](https://example.com/licence)"
+
+    def test_leaves_a_bare_url_alone_rather_than_making_an_empty_label(self):
+        """LocationIQ's entire `licence` is the URL. Folding it would yield
+        `[](https://locationiq.com/attribution)` - a link crediting nobody, which is worse
+        than the bare URL it replaced. This is why the text before the URL is required."""
+        credit = "https://locationiq.com/attribution"
+
+        assert geocoding_service._linked_attribution(credit) == credit
+
+    @pytest.mark.parametrize(
+        ("shape", "credit"),
+        [
+            ("text with no url", "© LocationIQ.com CC BY 4.0, Data © OpenStreetMap contributors, ODbL 1.0"),
+            ("a licence name alone", "ODbL"),
+            (
+                "a url mid-sentence",
+                "NOTICE: © 2026 Mapbox and its suppliers. Terms of Service "
+                "(https://www.mapbox.com/about/maps/). This response is made available.",
+            ),
+            (
+                "html the provider already linked",
+                '<a href="https://www.maptiler.com/copyright/">&copy; MapTiler</a> '
+                '<a href="https://www.openstreetmap.org/copyright">&copy; OpenStreetMap contributors</a>',
+            ),
+        ],
+    )
+    def test_passes_through_every_other_provider_shape(self, shape: str, credit: str):
+        """None of these has a *trailing* bare URL, so none of them matches - by construction
+        rather than by a special case per provider. `GEOCODER_URL` is an operator setting and
+        the string belongs to whoever answered."""
+        assert geocoding_service._linked_attribution(credit) == credit, shape
+
+    def test_keeps_a_sentences_full_stop_out_of_the_href(self):
+        folded = geocoding_service._linked_attribution("Credit, see http://example.com/licence.")
+
+        assert folded == "[Credit, see](https://example.com/licence)."
+
+    def test_folding_is_idempotent(self):
+        """Rows are cached for a month, so a folded value gets re-read and re-normalized. The
+        folded form's URL is preceded by `(` rather than whitespace, so there is nothing left
+        to match - but the cache TTL makes this a requirement, not a happy accident."""
+        once = geocoding_service._linked_attribution(REVERSE_PAYLOAD["licence"])
+
+        assert geocoding_service._linked_attribution(once) == once
+
+    @pytest.mark.parametrize(
+        "credit",
+        [geocoding_service._DEFAULT_ATTRIBUTION, geocoding_service._MARINE_ATTRIBUTION],
+    )
+    def test_the_built_in_credits_are_already_folded(self, credit: str):
+        """The two credits this module supplies itself are written in the shape the fold
+        produces, so a reader cannot tell from the shape whether the provider answered or we
+        fell back. This is what holds the literals and the transform together."""
+        assert geocoding_service._linked_attribution(credit) == credit
+        assert credit.startswith("[") and "](" in credit
+
+    def test_measures_the_length_cap_against_what_actually_ships(self):
+        """The fold adds four characters, so a licence just under the cap would clear the
+        guard and then fail `GeocodeResult`'s own `max_length`. Sized to land in that gap:
+        long enough that folding pushes it over 255, short enough that it starts under."""
+        prefix, url = "Licensed under ", " https://example.com/l"
+        licence = prefix + "x" * (geocoding_service._ATTRIBUTION_MAX_LENGTH - len(prefix) - len(url)) + url
+        assert len(licence) == geocoding_service._ATTRIBUTION_MAX_LENGTH
+        assert len(geocoding_service._linked_attribution(licence)) > geocoding_service._ATTRIBUTION_MAX_LENGTH
+
+        result = geocoding_service._normalize({"lat": "1", "lon": "2", "display_name": "Somewhere", "licence": licence})
+
+        assert result is not None
+        assert result.attribution == geocoding_service._DEFAULT_ATTRIBUTION
 
 
 class TestShortLocation:

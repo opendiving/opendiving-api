@@ -26,6 +26,7 @@ through `enforce_rate_limit`.
 import hashlib
 import json
 import logging
+import re
 from itertools import islice
 from typing import Any, NamedTuple
 
@@ -82,7 +83,7 @@ _MISS_TTL_SECONDS = 60 * 60
 # hold `GeocodeResult`s, not raw provider payloads - re-normalizing on every hit is wasted
 # work - so a change to the normalizer has to invalidate them, and a new key prefix does
 # that without a flush.
-_CACHE_VERSION = "v2"
+_CACHE_VERSION = "v3"
 
 # Mirror `schemas.geocoding.GeocodeResult`'s bounds. Applied by truncating here rather than
 # by letting an over-long provider string raise a ValidationError inside `_normalize`, which
@@ -98,12 +99,31 @@ _LOGGED_VALUE_MAX_LENGTH = 200
 
 # Used when the provider sends no `licence` of its own. The default provider is OSM-backed,
 # and attribution is a condition of using the data - never let a result go out without one.
-_DEFAULT_ATTRIBUTION = "Data © OpenStreetMap contributors, ODbL 1.0. https://osm.org/copyright"
+#
+# Written already folded, in the shape `_linked_attribution` produces, so the credit looks
+# the same whether it came from the provider or from here - which of the two answered is not
+# something a reader should be able to see. `test_the_built_in_credits_are_already_folded`
+# holds the two shapes together.
+_DEFAULT_ATTRIBUTION = "[Data © OpenStreetMap contributors, ODbL 1.0.](https://osm.org/copyright)"
 
 # The offshore fallback's credit. Natural Earth asks for nothing, but the clients render
 # this string verbatim under the suggestion, and "where did this name come from" is a fair
 # question when it did not come from the provider named everywhere else.
-_MARINE_ATTRIBUTION = "Water body names from Natural Earth, public domain. https://www.naturalearthdata.com"
+_MARINE_ATTRIBUTION = "[Water body names from Natural Earth, public domain.](https://www.naturalearthdata.com)"
+
+# A credit that ends in a bare URL, as `<text> <url>` with optional punctuation trailing the
+# URL. Matching on *shape* rather than on anything about OpenStreetMap is the whole point:
+# `GEOCODER_URL` is an operator setting, so the string is whatever answered.
+#
+# The text before the URL is required, not optional, and that is what makes this safe for the
+# other providers in reach: LocationIQ's `licence` is the bare URL
+# `https://locationiq.com/attribution` and nothing else, which under a `\s*` anchor would
+# fold to `[](https://locationiq.com/attribution)` - an empty label crediting nobody.
+#
+# The trailing-punctuation group exists so a provider ending "... see https://example.com/x."
+# does not get the sentence's full stop swallowed into the href. Nominatim's URL is the final
+# token with nothing after it, so in practice this group is empty.
+_TRAILING_CREDIT_URL = re.compile(r"^(?P<text>\S.*?)\s+(?P<url>https?://\S+?)(?P<trailing>[.,;:)]*)$")
 
 # What Nominatim says when a position resolves to nothing - the *only* `error` payload that
 # means "this is the answer" rather than "we are not answering you". Matched on the message
@@ -323,6 +343,39 @@ def _text(value: Any) -> str | None:
     return value.strip() or None if isinstance(value, str) else None
 
 
+def _linked_attribution(credit: str) -> str:
+    """A credit ending in a bare URL, rewritten as the `[text](url)` the clients parse.
+
+    The clients render this string as fine print, and a printed URL is not a link. The OSM
+    Foundation's attribution guidelines ask for a way to *reach* the licence - "for example
+    by making the text a clickable link" - and a bare URL only names it. It is also the
+    widest part of the line: at the 10px the web app draws it, the URL alone is a third of
+    the string, which is what pushed the credit onto a second line in a phone-width dialog.
+
+    Folding rather than substituting a credit of our own, because `GEOCODER_URL` is an
+    operator setting and the string belongs to whoever answered. Nominatim is the only
+    provider in reach that sends text-then-URL; everything else in that shape's neighbourhood
+    is left alone by construction rather than by exception - LocationIQ sends the URL with no
+    text (see `_TRAILING_CREDIT_URL`), Mapbox puts one mid-sentence, MapTiler already sends
+    anchors, and Photon and HERE send no credit at all. None of those has a *trailing* bare
+    URL, so none of them matches.
+
+    Idempotent, which the month-long cache TTL makes a requirement rather than a nicety: the
+    folded form ends in `)` and its URL is preceded by `(` instead of whitespace, so a value
+    re-read and re-normalized has nothing left to fold.
+    """
+    match = _TRAILING_CREDIT_URL.match(credit)
+    if match is None:
+        return credit
+
+    # The one part of the provider's string that is rewritten rather than moved. We are
+    # minting an href a browser will follow, and Nominatim still sends `http://osm.org` -
+    # which redirects to TLS anyway, so honouring the scheme literally costs a plaintext hop
+    # and buys nothing. The visible text is never touched.
+    url = re.sub(r"^http://", "https://", match["url"])
+    return f"[{match['text']}]({url}){match['trailing']}"
+
+
 def _first_present(address: dict[str, Any], keys: tuple[str, ...]) -> str | None:
     for key in keys:
         value = address.get(key)
@@ -409,10 +462,18 @@ def _normalize(row: dict[str, Any], *, with_bounding_box: bool = False) -> Geoco
     # licence notice, and one cut mid-sentence is not attribution at all - which is the
     # thing this field exists to guarantee. Nominatim's own is about seventy characters, so
     # in practice this only fires for a provider doing something strange.
+    #
+    # Measured *after* folding, not before: the fold adds four characters, so checking the
+    # provider's own length would let a 252-character licence through the guard and straight
+    # into a `ValidationError` on `GeocodeResult.attribution`. The length logged is still the
+    # provider's, since that is the number an operator would go looking for.
     licence = _text(row.get("licence"))
-    if licence is not None and len(licence) > _ATTRIBUTION_MAX_LENGTH:
-        logger.warning("Geocoder sent a %d-character licence; falling back to the default credit.", len(licence))
-        licence = None
+    attribution = None
+    if licence is not None:
+        attribution = _linked_attribution(licence)
+        if len(attribution) > _ATTRIBUTION_MAX_LENGTH:
+            logger.warning("Geocoder sent a %d-character licence; falling back to the default credit.", len(licence))
+            attribution = None
 
     box = _bounding_box(row) if with_bounding_box else None
     south, north, west, east = box if box is not None else (None, None, None, None)
@@ -423,7 +484,7 @@ def _normalize(row: dict[str, Any], *, with_bounding_box: bool = False) -> Geoco
         location=location,
         display_name=(_text(row.get("display_name")) or location)[:_DISPLAY_NAME_MAX_LENGTH],
         name=name[:_NAME_MAX_LENGTH] if name else None,
-        attribution=licence or _DEFAULT_ATTRIBUTION,
+        attribution=attribution or _DEFAULT_ATTRIBUTION,
         bbox_south=south,
         bbox_north=north,
         bbox_west=west,

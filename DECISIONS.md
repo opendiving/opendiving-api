@@ -7304,3 +7304,102 @@ That is the whole manual-DDL list for this feature, and the whole API-side surfa
 endpoint's response varies by the preference, so there is no cache key, no invalidation and no
 parser work anywhere in this change. Metric is the default for every existing row and every new
 account.
+
+## The attribution string is a wire format, so its shape is part of the API contract
+
+`GeocodeResult.attribution` looks like free text and is not. Both clients parse it —
+`parseAttribution` in `opendiving-web/src/lib/map-tiles.ts` reads one markdown shape,
+`[label](href)`, allows only `http`/`https` hrefs, and degrades to plain text for anything else. So
+the string this API emits is a format with a parser on the other end, and changing its shape without
+the client is a user-visible regression rather than a copy edit: ship a markdown credit to a client
+that still renders plain text and every diver sees the literal
+`[© OpenStreetMap contributors](https://…), ODbL 1.0` under the place picker. That is the ordering
+constraint, and it runs API-then-client in only one direction — the client must learn to parse the
+new shape *before* the API starts emitting it, because the parser degrades gracefully and the
+renderer does not.
+
+**The string users actually see comes from the provider, not from `_DEFAULT_ATTRIBUTION`.** This is
+the trap, and it cost a design iteration. `_normalize` reads the provider's own `licence` field and
+falls back to the constant only when there isn't one, so on the default deployment the constant is
+never reached: Nominatim always sends a `licence`, and it is
+`Data © OpenStreetMap contributors, ODbL 1.0. http://osm.org/copyright` — bare `http://`, where the
+constant says `https://`. Editing the constant to change what people see would have been a no-op
+nobody noticed until the string failed to move. Anything that has to change the rendered credit has
+to act on the provider's string.
+
+**Folding is a rule about *shape*, never about OpenStreetMap.** `_linked_attribution` rewrites
+`<text> <trailing-url>` into `[<text>](<url>)` and leaves everything else alone. Hardcoding the OSM
+credit was the obvious alternative and is wrong for the reason the whole module is built around:
+`GEOCODER_URL` is an operator setting, and the credit belongs to whoever answered. A self-hoster who
+points it elsewhere and gets an OpenStreetMap credit for someone else's data has a licence problem,
+not a cosmetic one.
+
+The pass-through cases are what make that safe, and they were surveyed against real provider
+responses rather than guessed at:
+
+| Provider              | `licence`                                                       | Folds? |
+| --------------------- | --------------------------------------------------------------- | ------ |
+| Nominatim             | `Data © OpenStreetMap contributors, ODbL 1.0. http://osm.org/…` | yes    |
+| LocationIQ            | `https://locationiq.com/attribution`                            | no     |
+| LocationIQ (alt)      | `© LocationIQ.com CC BY 4.0, Data © OpenStreetMap…, ODbL 1.0`   | no     |
+| Nominatim geocodejson | `ODbL`                                                          | no     |
+| Mapbox                | URL mid-sentence, in parentheses                                | no     |
+| MapTiler              | two `<a href>` anchors                                          | no     |
+| Photon, HERE          | no field at all                                                 | n/a    |
+| Geoapify, OpenCage    | a nested object / a `licenses` array                            | n/a    |
+
+Nominatim is the only one in reach that sends text-then-URL. Every other shape misses by
+construction rather than by a special case per provider, and none of them is a string this code has
+to recognize.
+
+**The text before the URL is required, not optional, and that is the load-bearing part.** LocationIQ
+is the likeliest alternate `GEOCODER_URL` — it is Nominatim-wire-compatible and takes its key as a
+query parameter, which is exactly what `GEOCODER_API_KEY` is for — and its entire `licence` is the
+bare URL. Anchoring the fold on `\s*` instead of `\s+` would turn that into
+`[](https://locationiq.com/attribution)`: a link with an empty label, crediting nobody, which is
+worse than the bare URL it replaced. The two characters are the difference between "fold a credit"
+and "delete a credit".
+
+**Idempotence is a requirement, not a happy accident.** Results are cached for a month and re-read
+through `GeocodeResult(**row)`, so a folded value comes back around. The folded form ends in `)` and
+its URL is preceded by `(` rather than whitespace, so there is nothing left to match — but a `\s*`
+anchor would have mangled a cached value into `[[text](](url))` on the second pass, which is the
+same two characters failing a second way.
+
+**The scheme of the href is the one thing rewritten rather than moved.** Nominatim still sends
+`http://osm.org/copyright`, which redirects to TLS anyway; we are minting an href a browser will
+follow, so honouring the scheme literally costs a plaintext hop and buys nothing. The *visible* text
+is never touched — only the link target, and only `http:` → `https:`.
+
+**The length cap moved to after the fold.** `_ATTRIBUTION_MAX_LENGTH` is 255, the width of the
+schema field, and the fold adds four characters. Checking the provider's length first would let a
+252-character licence clear the guard and then raise a `ValidationError` inside `_normalize` — a 500
+from the one path whose entire job is to degrade quietly. The length *logged* is still the
+provider's, since that is the number an operator would go looking for.
+
+**Why this beat the two alternatives.** Substituting a fixed markdown credit of our own would have
+produced a shorter, prettier string and quietly credited OpenStreetMap for whatever the operator had
+actually configured. A `GEOCODER_ATTRIBUTION` setting would have been correct but adds a knob a
+self-hoster must remember to set in lockstep with `GEOCODER_URL`, with a silent licence violation as
+the failure mode. Folding needs no configuration and cannot credit the wrong party, because it only
+ever rearranges what the provider already said.
+
+**`_CACHE_VERSION` went `v2` → `v3`.** Cached entries hold normalized `GeocodeResult`s and are kept
+for a month, so without the bump every place already looked up would keep handing back the
+*unfolded* credit well into next month — a bare URL arriving at a client that now expects markdown.
+It degrades to plain text rather than breaking, which is exactly what makes this the step easiest to
+forget: nothing fails, locally or in CI, when it is skipped. Same reason as `v1` → `v2` above, and
+the same trap.
+
+**`_MARINE_ATTRIBUTION` and `_DEFAULT_ATTRIBUTION` are written already folded.** Both are ours
+rather than a provider's, so they need no transform — just the literal, in the shape the transform
+produces. Which of the two answered is not something a reader should be able to see in the shape of
+the credit, and `test_the_built_in_credits_are_already_folded` asserts
+`_linked_attribution(credit) == credit` for both, so the literals and the regex cannot drift apart.
+
+**What the string must always still do**, whatever a future edit does to its shape: name the origin,
+name the licence, and offer a way to reach the licence text. The OSM Foundation's
+[attribution guidelines](https://osmfoundation.org/wiki/Licence/Attribution_Guidelines) ask for a
+way to access the origin and licence information — "for example by making the text a clickable link"
+— which a printed URL does not provide. Shortening the credit by dropping any of the three is not a
+shortening, it is a licence breach.

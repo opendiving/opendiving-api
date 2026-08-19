@@ -31,7 +31,19 @@ class GeocodeResult(BaseModel):
     # the data itself, so it travels with the row it describes and survives a provider
     # swap (it is the provider's own `licence` string when it sends one). The client is
     # expected to render it wherever it shows these results.
-    attribution: Annotated[str, Field(max_length=255, examples=["Data © OpenStreetMap contributors, ODbL 1.0."])]
+    #
+    # A wire format, not display copy. A credit ending in a bare URL is folded into the one
+    # markdown shape the clients parse - `[text](url)`, and nothing else - so the licence can
+    # be *reached* rather than merely named; anything unfoldable is passed through and
+    # rendered as plain text. See `services.geocoding_service._linked_attribution`, and
+    # `DECISIONS.md` for why changing this shape is an API change.
+    attribution: Annotated[
+        str,
+        Field(
+            max_length=255,
+            examples=["[Data © OpenStreetMap contributors, ODbL 1.0.](https://osm.org/copyright)"],
+        ),
+    ]
     # The place's extent, when the provider sends one. Four named floats rather than a
     # nested object or a list, because that is how a trip location stores them
     # (`schemas.trip.TripLocationInput`) and a client that picks a result writes it
