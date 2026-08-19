@@ -52,13 +52,23 @@ jobs:
       # The tag is passed through `env` and never interpolated into the script:
       # `${{ inputs.tag }}` written inside `run:` is substituted before bash parses the
       # line, so a value containing backticks or `$(...)` would execute as shell.
+      #
+      # Anchored with bash's `=~`, whose `^` and `$` bind to the whole string. `grep -Eq`
+      # is the obvious spelling and is wrong here: its anchors are per *line* and `-q`
+      # succeeds on any matching line, so a value with an embedded newline passes on the
+      # strength of one legal line and carries the rest through - into `TAGS` below, where
+      # every line becomes another tag pushed to the registry.
+      #
+      # The rejected value is printed with `%q` rather than pasted into the `::error::`
+      # line, where its own newlines would be read as further workflow commands.
       - name: Check the extra tag is a legal image tag
         if: inputs.tag != ''
         env:
           TAG: ${{ inputs.tag }}
         run: |
-          if ! printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$'; then
-            echo "::error::'$TAG' is not a valid image tag - it must start with a letter, digit or '_', then contain only letters, digits, '.', '_' and '-', up to 128 characters."
+          if [[ ! "$TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]]; then
+            printf 'Rejected tag input: %q\n' "$TAG"
+            echo "::error::Not a valid image tag - it must be a single line starting with a letter, digit or '_', then containing only letters, digits, '.', '_' and '-', up to 128 characters."
             exit 1
           fi
 
@@ -87,12 +97,20 @@ jobs:
             TAGS="${TAGS}"$'\n'"${IMAGE}:latest"
           fi
 
+          # A multi-line `$GITHUB_OUTPUT` value ends at the first line equal to the
+          # delimiter, and the runner matches that line before bash ever sees the value.
+          # A fixed `EOF` therefore puts the terminator inside the value's own alphabet:
+          # anything that can smuggle a newline in can close the block early and go on to
+          # set outputs of its own. The check above is what stops that today; this makes
+          # the write safe on its own terms rather than on that step's continued presence.
+          DELIM="EOF_$(openssl rand -hex 8)"
+
           {
             echo "sha=$SHA"
-            echo "tags<<EOF"
+            echo "tags<<$DELIM"
             echo "$TAGS"
-            echo "EOF"
-            echo "labels<<EOF"
+            echo "$DELIM"
+            echo "labels<<$DELIM"
             # `image.source` is what makes the package show up on the repository page and
             # inherit its access settings; the rest is what `docker inspect` reports.
             echo "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}"
@@ -102,7 +120,7 @@ jobs:
             echo "org.opencontainers.image.title=opendiving-api"
             echo "org.opencontainers.image.description=OpenDiving API"
             echo "org.opencontainers.image.licenses=AGPL-3.0-or-later"
-            echo "EOF"
+            echo "$DELIM"
           } >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
