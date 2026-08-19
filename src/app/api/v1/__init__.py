@@ -11,6 +11,7 @@ from .gear_service import router as gear_service_router
 from .gear_sets import router as gear_sets_router
 from .geocoding import router as geocoding_router
 from .health import router as health_router
+from .species import router as species_router
 from .trips import router as trips_router
 from .users import router as users_router
 
@@ -25,6 +26,7 @@ router.include_router(gear_items_router)
 router.include_router(gear_sets_router)
 router.include_router(gear_service_router)
 router.include_router(certifications_router)
+router.include_router(species_router)
 router.include_router(dives_router)
 router.include_router(contact_router)
 router.include_router(export_router)

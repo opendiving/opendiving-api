@@ -171,6 +171,25 @@ class DiveSiteInfo(PublicUUIDSchema):
     longitude: Longitude
 
 
+class SpeciesInfo(PublicUUIDSchema):
+    """Summary of a species spotted on a dive, keyed by its public `uuid`.
+
+    Mirrors `DiveSiteInfo` above: just enough to render a row without a second request per
+    species. Unlike every other summary embedded in a dive, the row behind this one belongs
+    to nobody - the species catalog is global (see `models/species.py`), so two divers' dives
+    embed the identical `uuid`.
+
+    `common_name` is null whenever no source offered an English one, so every client falls
+    back to `scientific_name`. `rank` rides along because a sighting is not always
+    species-rank - "a moray eel" is a family, and a client that renders it as though it were
+    a species is claiming an identification the diver did not make.
+    """
+
+    scientific_name: str
+    common_name: str | None = None
+    rank: str
+
+
 class DiveRead(DiveBase, DiveTechScalars, PublicUUIDSchema):
     """Public representation of a dive, keyed by its opaque `uuid` rather than the
     sequential internal `id` (which is never exposed over the API). Cross-resource
@@ -385,6 +404,17 @@ class DiveActivityPoint(BaseModel):
 
 class DiveReadWithMixtures(DiveRead):
     mixtures: Annotated[list[DiveMixtureRead], Field(default_factory=list)]
+    # Here rather than on `DiveRead` for the reason `source_file` below gives: on the parent
+    # it would land on the paginated list and cost `_cached_read_dives` - the hottest path in
+    # the app - a batched query per page for something only the detail page renders. The
+    # loader is already batched (`get_species_for_dives`) for the day a list surface wants
+    # species chips; move it then, don't fetch per row.
+    #
+    # `default_factory=list` is load-bearing rather than tidy: `user_{id}_dive:{uuid}` entries
+    # live an hour and replay through this schema, so every entry written before this field
+    # existed lacks the key and would fail validation on read. Same lesson as
+    # `TripRead.locations`.
+    species: Annotated[list[SpeciesInfo], Field(default_factory=list)]
     # Deliberately here rather than on `DiveRead`, which `DiveReadWithMixtures` extends:
     # putting it on the parent would inherit it onto the paginated list response too,
     # adding a query to `_cached_read_dives` - the hottest path in the app - for
@@ -578,6 +608,10 @@ class DiveCreateRequest(DiveCreate):
         list[uuid_pkg.UUID],
         Field(default_factory=list, description="Public ids of the gear items used, in the order listed"),
     ]
+    species_uuids: Annotated[
+        list[uuid_pkg.UUID],
+        Field(default_factory=list, description="Public ids of the species spotted, in the order listed"),
+    ]
 
 
 class DiveUpdate(RejectsExplicitNulls):
@@ -622,9 +656,9 @@ class DiveUpdateRequest(DiveUpdate):
     """Request body for updating a dive, including replacing its gas mixtures, dive site(s)
     and gear.
 
-    If `mixtures`/`dive_site_uuids`/`gear_item_uuids` is omitted, the existing
-    mixtures/dive sites/gear are left untouched. If provided (even as an empty list), the
-    existing ones are replaced with the given list.
+    If `mixtures`/`dive_site_uuids`/`gear_item_uuids`/`species_uuids` is omitted, the
+    existing mixtures/dive sites/gear/species are left untouched. If provided (even as an
+    empty list), the existing ones are replaced with the given list.
     """
 
     mixtures: Annotated[list[DiveMixtureCreate] | None, Field(default=None)]
@@ -635,6 +669,10 @@ class DiveUpdateRequest(DiveUpdate):
     gear_item_uuids: Annotated[
         list[uuid_pkg.UUID] | None,
         Field(default=None, description="Public ids of the gear items used, in the order listed"),
+    ]
+    species_uuids: Annotated[
+        list[uuid_pkg.UUID] | None,
+        Field(default=None, description="Public ids of the species spotted, in the order listed"),
     ]
 
 

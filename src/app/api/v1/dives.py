@@ -36,8 +36,13 @@ from ...crud.crud_dive_gear_items import (
 )
 from ...crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
 from ...crud.crud_dive_sites import resolve_dive_site_ids_for_user
+from ...crud.crud_dive_species import (
+    get_species_for_dive,
+    replace_species_for_dive,
+)
 from ...crud.crud_dives import crud_dives
 from ...crud.crud_gear_items import resolve_gear_item_ids_for_user
+from ...crud.crud_species import resolve_species_ids
 from ...crud.crud_trips import get_trip_uuids_by_ids, resolve_trip_id_for_user
 from ...schemas.dive import (
     DiveCreateInternal,
@@ -54,6 +59,7 @@ from ...schemas.dive import (
     DiveSiteInfo,
     DiveStartTime,
     DiveUpdateRequest,
+    SpeciesInfo,
 )
 from ...schemas.dive_mixture import DiveMixtureRead
 from ...schemas.dive_profile import DiveProfileInfo, DiveProfileRead
@@ -120,8 +126,8 @@ _DIVE_CONSTRAINT_MESSAGES = {
 def _fk_error_detail(exc: IntegrityError) -> str:
     """Translate a dive `IntegrityError` into a message worth showing a diver.
 
-    Covers both foreign keys (a trip/site/gear item that vanished between validation and
-    insert) and the domain `CheckConstraint`s. Constraint violations surface from the DB
+    Covers both foreign keys (a trip/site/gear item/species that vanished between
+    validation and insert) and the domain `CheckConstraint`s. Constraint violations surface from the DB
     layer, not Pydantic, so without this the caller would get a raw 500 instead of a
     sentence naming the field.
     """
@@ -132,6 +138,8 @@ def _fk_error_detail(exc: IntegrityError) -> str:
         return "Dive site not found."
     if "gear_item_id_fkey" in msg:
         return "Gear item not found."
+    if "species_id_fkey" in msg:
+        return "Species not found."
     for constraint, detail in _DIVE_CONSTRAINT_MESSAGES.items():
         if constraint in msg:
             return detail
@@ -222,6 +230,7 @@ def _to_public_dive_with_mixtures(
     dive_sites: list[DiveSiteInfo],
     gear_items: list[GearItemInfo],
     mixtures: list[DiveMixtureRead],
+    species: list[SpeciesInfo],
     source_file: DiveFileInfo | None = None,
     profile: DiveProfileInfo | None = None,
     attribution: ProfileGasAttribution | None = None,
@@ -245,6 +254,7 @@ def _to_public_dive_with_mixtures(
         dive_sites=dive_sites,
         gear_items=gear_items,
         mixtures=mixtures,
+        species=species,
         source_file=source_file,
         profile=profile,
         # Both callers of this function (creating a dive, and the cached single-dive
@@ -308,14 +318,16 @@ async def write_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveReadWithMixtures:
-    """Log a dive, together with its gas mixtures, dive sites and gear in one request.
+    """Log a dive, together with its gas mixtures, dive sites, gear and species in one request.
 
     `user_uuid` must be the caller's own (403 otherwise). Every referenced trip, dive site
     and gear item must belong to the caller too: one that doesn't - or doesn't exist - is
     a 422 naming which, not a 403, since from the caller's side the two are the same
-    thing. Dive sites keep the order given; index 0 is the primary site. Values the DB's
-    domain constraints reject (a non-positive duration, a mixture over 100%) also come
-    back as 422 with the offending field named.
+    thing. Species are the exception, and only because the catalog is global: a species
+    uuid needs to exist, but it belongs to nobody, so there is no ownership to fail. Dive
+    sites keep the order given; index 0 is the primary site, and species keep the order
+    they were spotted in. Values the DB's domain constraints reject (a non-positive
+    duration, a mixture over 100%) also come back as 422 with the offending field named.
     """
     if current_user["uuid"] != dive.user_uuid:
         raise ForbiddenException()
@@ -340,8 +352,15 @@ async def write_dive(
         raise UnprocessableEntityException("Gear item not found.")
     gear_item_ids = [gear_id_by_uuid[u] for u in dive.gear_item_uuids]
 
+    # No user filter here, unlike the two above, and deliberately so: the species catalog is
+    # global, so there is no owner to check against. See `resolve_species_ids`.
+    species_id_by_uuid = await resolve_species_ids(db=db, species_uuids=dive.species_uuids)
+    if species_id_by_uuid is None:
+        raise UnprocessableEntityException("Species not found.")
+    species_ids = [species_id_by_uuid[u] for u in dive.species_uuids]
+
     dive_internal_dict = dive.model_dump(
-        exclude={"mixtures", "dive_site_uuids", "gear_item_uuids", "user_uuid", "trip_uuid"}
+        exclude={"mixtures", "dive_site_uuids", "gear_item_uuids", "species_uuids", "user_uuid", "trip_uuid"}
     )
     utc_start_time, utc_offset_minutes = split_start_time(dive.start_time)
     dive_internal_dict["start_time"] = utc_start_time
@@ -371,6 +390,11 @@ async def write_dive(
     except IntegrityError as e:
         await db.rollback()
         raise UnprocessableEntityException(_fk_error_detail(e)) from e
+    try:
+        await replace_species_for_dive(db=db, dive_id=created_dive.id, species_ids=species_ids)
+    except IntegrityError as e:
+        await db.rollback()
+        raise UnprocessableEntityException(_fk_error_detail(e)) from e
     await recalculate_dive_stats(db=db, user_id=current_user["id"])
     await recalculate_gear_dive_counts(db=db, user_id=current_user["id"])
     await invalidate_dive_caches(current_user["id"])
@@ -384,6 +408,7 @@ async def write_dive(
     mixtures = await get_mixtures_for_dive(db=db, dive_id=created_dive.id)
     dive_sites = await get_dive_sites_for_dive(db=db, dive_id=created_dive.id)
     gear_items = await get_gear_items_for_dive(db=db, dive_id=created_dive.id)
+    species = await get_species_for_dive(db=db, dive_id=created_dive.id)
     return _to_public_dive_with_mixtures(
         cast(dict[str, Any], dive_read_internal),
         user_uuid=current_user["uuid"],
@@ -391,6 +416,7 @@ async def write_dive(
         dive_sites=dive_sites,
         gear_items=gear_items,
         mixtures=mixtures,
+        species=species,
     )
 
 
@@ -635,6 +661,7 @@ async def _cached_read_dive(
     mixtures = await get_mixtures_for_dive(db=db, dive_id=db_dive["id"])
     dive_sites = await get_dive_sites_for_dive(db=db, dive_id=db_dive["id"])
     gear_items = await get_gear_items_for_dive(db=db, dive_id=db_dive["id"])
+    species = await get_species_for_dive(db=db, dive_id=db_dive["id"])
     source_files = await get_file_infos_for_dives(db=db, dive_ids=[db_dive["id"]])
     # Written batched though only ever called with one id, matching `get_file_infos_for_dives`.
     profiles = await get_profile_infos_for_dives(db=db, dive_ids=[db_dive["id"]])
@@ -657,6 +684,7 @@ async def _cached_read_dive(
         dive_sites=dive_sites,
         gear_items=gear_items,
         mixtures=mixtures,
+        species=species,
         source_file=source_files.get(db_dive["id"]),
         profile=profiles.get(db_dive["id"]),
         attribution=attribution,
@@ -750,9 +778,9 @@ async def patch_dive(
     """Partially update a dive; omitted fields are left untouched.
 
     404 unless the caller owns it, exactly as for a dive that doesn't exist. The
-    list-valued fields - `mixtures`, `dive_site_uuids`, `gear_item_uuids` - are replaced
-    wholesale when present rather than merged, so sending a shorter list removes the
-    difference and omitting the key entirely leaves it alone. Passing `null` for
+    list-valued fields - `mixtures`, `dive_site_uuids`, `gear_item_uuids`, `species_uuids`
+    - are replaced wholesale when present rather than merged, so sending a shorter list
+    removes the difference and omitting the key entirely leaves it alone. Passing `null` for
     `trip_uuid` detaches the dive from its trip, which is distinct from omitting the key.
     Referencing anything the caller doesn't own is a 422, as are the DB's domain
     constraints.
@@ -761,7 +789,7 @@ async def patch_dive(
     owner_id = db_dive.user_id
 
     update_data = values.model_dump(
-        exclude={"mixtures", "dive_site_uuids", "gear_item_uuids", "trip_uuid"}, exclude_unset=True
+        exclude={"mixtures", "dive_site_uuids", "gear_item_uuids", "species_uuids", "trip_uuid"}, exclude_unset=True
     )
 
     # Keyed off `model_fields_set`, matching the `trip_uuid` branch below, so the two
@@ -801,6 +829,13 @@ async def patch_dive(
             raise UnprocessableEntityException("Gear item not found.")
         gear_item_ids = [gear_id_by_uuid[u] for u in values.gear_item_uuids]
 
+    species_ids: list[int] | None = None
+    if values.species_uuids is not None:
+        species_id_by_uuid = await resolve_species_ids(db=db, species_uuids=values.species_uuids)
+        if species_id_by_uuid is None:
+            raise UnprocessableEntityException("Species not found.")
+        species_ids = [species_id_by_uuid[u] for u in values.species_uuids]
+
     if update_data:
         try:
             await crud_dives.update(db=db, object=update_data, uuid=uuid)
@@ -831,7 +866,20 @@ async def patch_dive(
             await db.rollback()
             raise UnprocessableEntityException(_fk_error_detail(e)) from e
 
-    if update_data or values.mixtures is not None or dive_site_ids is not None or gear_item_ids is not None:
+    if species_ids is not None:
+        try:
+            await replace_species_for_dive(db=db, dive_id=dive_id, species_ids=species_ids)
+        except IntegrityError as e:
+            await db.rollback()
+            raise UnprocessableEntityException(_fk_error_detail(e)) from e
+
+    if (
+        update_data
+        or values.mixtures is not None
+        or dive_site_ids is not None
+        or gear_item_ids is not None
+        or species_ids is not None
+    ):
         await recalculate_dive_stats(db=db, user_id=owner_id)
         await recalculate_gear_dive_counts(db=db, user_id=owner_id)
         await invalidate_dive_caches(owner_id)

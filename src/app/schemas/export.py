@@ -146,6 +146,7 @@ class ExportDive(PublicUUIDSchema):
     trip_uuid: uuid_pkg.UUID | None = None
     dive_site_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In visit order")]
     gear_item_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In the diver's own order")]
+    species_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In spotting order")]
     # `DiveMixtureBase` rather than the API's `DiveMixtureRead`, which carries the
     # internal row `id`. Nothing here references a cylinder, so that id would be the
     # one integer key in the file - see this module's docstring.
@@ -193,6 +194,29 @@ class ExportDiveSite(PublicUUIDSchema):
     latitude: float | None = None
     longitude: float | None = None
     notes: str
+    created_at: datetime
+
+
+class ExportSpecies(PublicUUIDSchema):
+    """One species from the catalog, as far as this diver's dives reference it.
+
+    The odd one out in this file: every other collection here is the diver's own rows, while
+    the species catalog belongs to nobody (see `models/species.py`). What is exported is the
+    slice the logbook points at, which is what makes the file self-contained - a reader
+    resolving `ExportDive.species_uuids` finds every one of them defined here.
+
+    `aphia_id` is the field that matters outside this database. The uuids are this instance's;
+    the AphiaID is the World Register of Marine Species' own identifier, so a reader importing
+    this file elsewhere can re-link every sighting to a real taxon rather than to a name it
+    has to guess at. `wikidata_qid` does the same job for anything that would rather start
+    from Wikidata.
+    """
+
+    aphia_id: int
+    scientific_name: str
+    common_name: str | None = None
+    rank: str
+    wikidata_qid: str | None = None
     created_at: datetime
 
 
@@ -276,6 +300,7 @@ class ExportEnvelope(BaseModel):
     dives: Annotated[list[ExportDive], Field(default_factory=list)]
     trips: Annotated[list[ExportTrip], Field(default_factory=list)]
     dive_sites: Annotated[list[ExportDiveSite], Field(default_factory=list)]
+    species: Annotated[list[ExportSpecies], Field(default_factory=list)]
     gear_items: Annotated[list[ExportGearItem], Field(default_factory=list)]
     gear_sets: Annotated[list[ExportGearSet], Field(default_factory=list)]
     gear_service_schedules: Annotated[list[ExportGearServiceSchedule], Field(default_factory=list)]

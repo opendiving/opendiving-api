@@ -70,6 +70,7 @@ DIVES_HEADER = (
     "altitude_m",
     "trip",
     "dive_sites",
+    "species",
     "cylinders",
     "gas_used_l",
     "rmv_l_per_min",
@@ -156,6 +157,11 @@ def _dive_row(bundle: ExportBundle, dive: Dive) -> tuple[Any, ...]:
         dive.altitude,
         None if trip is None else trip.name,
         "; ".join(site.name for site in bundle.sites_for(dive)),
+        # Scientific names, not the common ones a diver reads on the dive page: they are
+        # unambiguous, every row has one (a common name is often null), and a spreadsheet
+        # cell is where you want the string that can be looked up rather than the friendly
+        # one. `species.csv` carries both.
+        "; ".join(species.scientific_name for species in bundle.species_for(dive)),
         "; ".join(_cylinder_summary(mixture) for mixture in mixtures),
         None if gas_use is None else gas_use.gas_used,
         None if gas_use is None else gas_use.rmv,
@@ -265,6 +271,38 @@ def write_dive_sites_csv(bundle: ExportBundle) -> Iterator[str]:
             )
 
     return _rows_to_csv(DIVE_SITES_HEADER, rows())
+
+
+SPECIES_HEADER = ("scientific_name", "common_name", "rank", "aphia_id", "dives", "species_uuid")
+
+
+def write_species_csv(bundle: ExportBundle) -> Iterator[str]:
+    """One row per species the diver's dives reference, with how many of them saw it.
+
+    The count is over dives rather than over sightings, which is the same distinction
+    `species_seen` makes: a species logged on ten dives is one row reading `10`, because v1
+    stores no per-sighting count for it to mean anything else.
+    """
+    counts: dict[int, int] = {}
+    for species_ids in bundle.species_ids_by_dive.values():
+        # De-duplicated per dive, though the unique constraint on `dive_species` already
+        # guarantees it - the count means "dives", so a shape change that ever allowed the
+        # same species twice on one dive must not silently turn this into a sightings count.
+        for species_id in set(species_ids):
+            counts[species_id] = counts.get(species_id, 0) + 1
+
+    def rows() -> Iterator[tuple[Any, ...]]:
+        for species in bundle.species:
+            yield (
+                species.scientific_name,
+                species.common_name,
+                species.rank,
+                species.aphia_id,
+                counts.get(species.id, 0),
+                str(species.uuid),
+            )
+
+    return _rows_to_csv(SPECIES_HEADER, rows())
 
 
 GEAR_ITEMS_HEADER = (
@@ -419,6 +457,7 @@ CSV_WRITERS = (
     ("mixtures.csv", write_mixtures_csv),
     ("trips.csv", write_trips_csv),
     ("dive-sites.csv", write_dive_sites_csv),
+    ("species.csv", write_species_csv),
     ("gear-items.csv", write_gear_items_csv),
     ("gear-service.csv", write_gear_service_csv),
     ("certifications.csv", write_certifications_csv),

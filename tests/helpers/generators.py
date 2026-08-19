@@ -137,6 +137,35 @@ def create_gear_set(db: Session, user: models.User) -> models.GearSet:
     )
 
 
+def create_species(db: Session, *, aphia_id: int | None = None, **overrides: Any) -> models.Species:
+    """A catalog row.
+
+    No `user` parameter, unlike every other builder here, and that is the whole point: the
+    species catalog is global, so a species belongs to nobody and is shared by every account.
+
+    `aphia_id` is `unique=True` and these rows go into the developer's own database with
+    nothing cleaning them up, so it is drawn from uuid7's random tail by default for the same
+    reason `unique_username` is - a fixed fixture id collides on the second run. Pass one
+    explicitly when a test is *about* the id.
+
+    **The name is deliberately not a plausible taxon**, which matters more here than for any
+    other generator in this file. Every other one writes rows scoped to a fixture `user_id`,
+    so they are invisible to a real account; `species` is global, so a fixture row shows up in
+    the dive form's picker for *every* account on that instance. An earlier version of this
+    used `Amphiprion <hex>` and then `Testudo fixtura <hex>` - both real genera - and a
+    developer searching "amphiprion" got a screenful of test data. `zzfixture` cannot be
+    reached by any query a diver would type, and sorts last if it ever is.
+    """
+    defaults: dict[str, Any] = {
+        "aphia_id": aphia_id if aphia_id is not None else int(uuid7().hex[-7:], 16),
+        "scientific_name": f"zzfixture-species-{uuid7().hex[-8:]}",
+        "rank": "Species",
+        "status": "accepted",
+    }
+    defaults.update(overrides)
+    return _persist(db, models.Species(**defaults))
+
+
 def create_dive(
     db: Session, user: models.User, *, trip: models.Trip | None = None, is_deleted: bool = False
 ) -> models.Dive:

@@ -5558,16 +5558,17 @@ endpoints answer "no suggestion"; pointing it at a self-hosted Nominatim removes
 without removing the feature. Both are documented in `.env.example` next to the setting itself,
 which is where someone auditing this will actually look.
 
-**The geocoding cache keys are the one deliberate exception to "cache keys stay user-scoped."**
-"What is at 28.572, 34.537" has the same answer for everybody, and the whole reason those terms
-tolerate this feature is that one lookup serves every diver who ever pins that spot; keying it per
-user would multiply outbound calls by the number of accounts. They are prefixed `geocode:` so they
-stay clear of the `user_{id}_*` namespace `services.cache_invalidation` sweeps by pattern — nothing
-here is ever collateral damage of a mutation elsewhere, and nothing here needs invalidating, only
-expiring. The prefix carries a version (`geocode:v1:…`) because what is cached is the *normalized*
-`GeocodeResult`, not the raw provider payload: re-normalizing on every hit is wasted work, so a
-change to the normalizer has to invalidate the old entries, and a new prefix does that without a
-flush.
+**The geocoding cache keys are one of two deliberate exceptions to "cache keys stay user-scoped."**
+(The other is `species:` — see *"Species are a global catalog, filled one pick at a time"*, which is
+the same reasoning applied to a different register.) "What is at 28.572, 34.537" has the same answer
+for everybody, and the whole reason those terms tolerate this feature is that one lookup serves
+every diver who ever pins that spot; keying it per user would multiply outbound calls by the number
+of accounts. They are prefixed `geocode:` so they stay clear of the `user_{id}_*` namespace
+`services.cache_invalidation` sweeps by pattern — nothing here is ever collateral damage of a
+mutation elsewhere, and nothing here needs invalidating, only expiring. The prefix carries a version
+(`geocode:v1:…`) because what is cached is the *normalized* `GeocodeResult`, not the raw provider
+payload: re-normalizing on every hit is wasted work, so a change to the normalizer has to invalidate
+the old entries, and a new prefix does that without a flush.
 
 **`{"error": ...}` is two different things wearing one shape, and only one of them is an answer.**
 Nominatim returns it both for "unable to geocode" — a real fact about a real position — and for
@@ -7020,6 +7021,19 @@ things that catch people out on top of it:
 - **The skip count is the only thing on screen that distinguishes the two runs.** Not the pass
   count, which also changes for unrelated reasons.
 
+### Rows these tests write are permanent, and that has bitten twice
+
+Nothing cleans up after them — `unique_username`'s docstring records that as the deliberate trade,
+and it is why every generator draws a unique name from uuid7's tail. Two consequences of it are
+non-obvious enough to have each cost a defect, and both are written up under *"Species are a global
+catalog, filled one pick at a time"* rather than repeated here:
+
+- **A fixture for a table that is not user-scoped is visible to real accounts**, so its name has to
+  be one no real query can return — unique is not the same as unmatchable.
+- **A test that persists what it creates has to vary the key it creates**, or the second run finds
+  its own rows, takes an early-return path, and passes while measuring nothing. The first run
+  passing is what makes it invisible.
+
 ## A deleted gear item's service history has no view, and archiving is the surface that does
 
 **The conclusion survived the hard-delete change and its premise did not**, which is worth stating
@@ -7417,3 +7431,441 @@ name the licence, and offer a way to reach the licence text. The OSM Foundation'
 way to access the origin and licence information — "for example by making the text a clickable link"
 — which a printed URL does not provide. Shortening the credit by dropping any of the three is not a
 shortening, it is a licence breach.
+
+## Species are a global catalog, filled one pick at a time
+
+`species` is the first domain table in this app with **no `user_id`**. Every other one is scoped to
+a diver, because everything else they enter is a fact about their own logbook. A species is a fact
+about the ocean: two divers who both saw *Mobula birostris* saw the same animal, and one row says
+so. That sharing is what makes the sightings count, a future life list, and iteration 2's photos
+possible at all.
+
+The consequences are not incidental, and each one is a thing this codebase normally does that this
+feature deliberately does not:
+
+- **No `OwnedResourceCache`, no `fetch_owned_or_raise`.** Both require `model.user_id`
+  (`core/utils/owned_resource_cache.py`, `api/dependencies.py`). AGENTS.md's rule — "new per-user
+  owned resource → `OwnedResourceCache`" — does not fire, because this is not one.
+- **The endpoints authenticate but never check ownership**, and `GET /species/{uuid}`'s 404 means
+  "not in this catalog" rather than the "not yours" the same status means everywhere else. A species
+  uuid is not an existence oracle for anything private, so there is nothing to protect.
+- **`crud_species.resolve_species_ids` has no user filter**, unlike its gear and dive-site siblings.
+  It checks existence only — which is still what lets `write_dive` answer 422 "Species not found."
+  before writing any join rows.
+- **The export's `species` list is scoped *through* dives** rather than by column
+  (`services/export/loader.py::_referenced_species`), so an export carries the slice of the catalog
+  that diver's dives reference and nothing else. It is the one read in that module that does not go
+  through `_owned`.
+- **`species:` cache keys join `geocode:` as the second exception to "cache keys stay
+  user-scoped".** "What is *Amphiprion ocellaris* called" has one answer for everybody, and one
+  lookup serving every diver is the whole basis on which asking a free public register at type-ahead
+  rates is defensible; keying per user would multiply outbound calls by the number of accounts and
+  buy nobody anything. Both prefixes stay clear of the `user_{id}_*` namespace
+  `services/cache_invalidation.py` sweeps by pattern, so neither is ever collateral damage of a
+  mutation elsewhere, and neither needs invalidating — only expiring.
+
+### Why the catalog cannot be bulk-imported
+
+Checked before designing around it, because "just import the register" is the obvious first idea:
+
+- WoRMS's own full-database download is **proprietary** — institutional-email registration, a vetted
+  application, a "non-exclusive, non-transferable, non-assignable" licence, and an obligation to
+  refresh it at least four times a year.
+- The WoRMS copy on GBIF is CC BY 4.0, but its DwC-A endpoint is marked "Restricted to GBIF".
+- Paging **GBIF's own API** copy is the one lawful bulk route. It is a real pipeline plus a gigabyte
+  or two and a re-sync story, and it is the recorded escalation rather than the v1 design.
+- The WoRMS **REST webservice** is free to use with citation, publishes no rate limit, and asks only
+  "don't use the webservice to harvest WoRMS completely". Resolving one taxon the first time a diver
+  picks it is the opposite of harvesting, which is what makes the on-demand catalog the licensed
+  option rather than merely the cheap one.
+
+### Two registers, because WoRMS alone cannot answer "clownfish"
+
+This is the forcing fact, and it is worth keeping the datum: `AphiaVernacularsByAphiaID/278400`
+(*Amphiprion ocellaris*, the clownfish) returns **exactly one** vernacular, and it is in Japanese. A
+diver typing "clownfish" would not find Nemo. `AphiaRecordsByVernacular/clownfish?like=true` returns
+two records for a genus with about thirty species. GBIF cannot fill the gap either — its
+`species/suggest` matches scientific names only.
+
+Wikidata can, and is licence-clean: property **P850** is the WoRMS AphiaID, so
+`srsearch=clownfish haswbstatement:P850` returns taxa that WoRMS also knows, keyed by the identifier
+both sides share. That shared key is the whole hinge — without it there would be nothing to merge
+two registers *on*. Wikidata content is CC0, and the same entity carries P18 (image), which is why
+`wikidata_qid` is stored now even though nothing renders it: it makes iteration 2's photos nearly
+free.
+
+So the division of labour is fixed: **WoRMS owns the taxonomy** (scientific names, synonyms, the
+accepted-taxon mapping) and **Wikidata owns the common names**. A merged hit is a WoRMS record with
+a Wikidata name on it.
+
+### The timeouts are measured, and copying the geocoder's broke the feature
+
+The first draft took `services/geocoding_service.py`'s constants wholesale — 5 s per read, 10 s
+deadline — because the shape of the two modules is otherwise identical. That produced a feature that
+did not work at all, and it passed every unit test, because the tests mock the transport.
+
+Measured against the live register: `AphiaRecordsByName?like=true` **6.3 s**,
+`AphiaRecordsByVernacular?like=true` **8.6 s**, `AphiaRecordByAphiaID` **11.2 s**, and one name
+search that had still not answered after 40 s. A substring scan over a quarter of a million taxa is
+not a fast query, and `like=true` is the only way to back a type-ahead. Nominatim answers in tens of
+milliseconds; the two providers are not comparable and their timeouts must not be copied between.
+
+What that broke was not search — search degraded quietly to Wikidata-only results, which looks
+plausible — but **`POST /species/resolve`, which 503'd every time**. Resolve is the only way a
+species enters the catalog, so the entire feature was unusable end to end while every test was
+green. Worth remembering as a failure mode: a degradation path that works too well hides the outage
+it is degrading from.
+
+The fix is three separate budgets, because the two endpoints want different things:
+
+- `_SEARCH_BUDGET_SECONDS` (6 s) bounds the whole search fan-out with `anyio.move_on_after`, and
+  **whatever arrived is the answer**. WoRMS will often miss it; that is intended, because a diver
+  gets Wikidata and the local catalog in well under a second instead of the complete answer in
+  eight.
+- `_RESOLVE_BUDGET_SECONDS` (25 s) covers the one call resolve cannot do without. This is a
+  deliberate click with a spinner against it, not a keystroke, and the alternative to waiting is a
+  diver who cannot log what they saw.
+- `_ENRICHMENT_BUDGET_SECONDS` (10 s) covers resolve's synonym/vernacular/Wikidata fan-out, which is
+  not load-bearing: a species that lands with fewer search aliases is still attachable to a dive.
+
+**A partial answer is cached for an hour, not a month** (`_store_search(..., complete=...)`). This
+is the trap the budget creates: if the fan-out loses WoRMS, the merged answer is real, useful and
+taxonomy-less, and storing it under the 30-day hit TTL would let one slow afternoon decide what
+"clownfish" returns until the key expired — including on every later day when WoRMS was answering in
+a second. It is the geocoder's "we could not ask" rule extended to "we could not ask *all* of them",
+a distinction a two-source search has and a one-source one does not.
+
+**`complete` has to mean two different things, and the second one is the dangerous half.** The first
+version of it tracked only the time budget — `len(collected) == len(sources)` — which is correct for
+a source that is still in flight when the budget expires, and silently wrong for one that *fails
+fast*. A connect-refused, an error status, a body over the size cap, a body that does not parse:
+every one of those returns promptly and looks downstream exactly like "this register had nothing for
+you", so the source counted as having answered and the partial result was pinned for thirty days.
+Review caught it, and it was reproducible in seconds — WoRMS refusing the connection while Wikidata
+answered produced a taxonomy-less result cached for the full month.
+
+So each source now returns a `_SourceAnswer` carrying an explicit `ok`, and `complete` is
+`answered and all(ok)`. The general rule worth carrying forward: **`[]` from a provider means
+nothing until you know whether it is an answer or a failure**, and any layer that flattens the two
+into one empty list has thrown away the only thing the cache TTL needed to know.
+
+### `wbgetentities` is asked in chunks of four, because a taxon entity is enormous
+
+`props=claims` returns *every* statement on a Wikidata entity, and a taxon carries a great many —
+dozens of external-database identifiers alone — so one entity runs around 50 KB. The first version
+asked for all ten search hits in one call, which is well-formed and well within the API's fifty-id
+limit, and routinely blew past `_MAX_RESPONSE_BYTES`. Measured against the live API with the exact
+parameters this code sends, for the ids its own search returns: **"shark" 667 KB, "turtle" 642 KB,
+"dolphin" 568 KB**, against a 512 KB cap.
+
+The failure was invisible and inverted: tripping the cap makes `_request` return `None`, which
+emptied the **entire** Wikidata contribution — the common-name layer this whole two-source design
+exists for — and it did so only for the *popular* queries. "clownfish" (284 KB) worked; "shark" did
+not. A feature that breaks harder the more ordinary the input is exactly the kind that ships.
+
+Chunked at four rather than raising the cap: the cap is a bound on what a hostile or broken host can
+make this process buffer, and tuning it up to accommodate an unbounded payload gives that up for a
+payload we can simply ask for in pieces. Four leaves roughly a two-fold margin against the heaviest
+entities measured. The chunks run concurrently and share the provider throttle.
+
+### The WoRMS search term goes in the URL *path*, so it must be percent-encoded
+
+Unlike the geocoder next door — which passes user text as a query parameter, where httpx encodes it
+— WoRMS's routes are `/AphiaRecordsByName/{name}`, with the diver's typed term as a **path
+segment**. Interpolating it raw was a path injection, and review caught it. Verified with the pinned
+httpx: a search for `../../../etc/passwd` builds a URL that httpx normalizes to
+`marinespecies.org/etc/passwd` before sending, so any authenticated user could point this server's
+outbound request at an arbitrary path on that host and have the result cached for a month under
+their own string. The quieter half of the same bug: a `#` or `?` in the term truncates the search
+silently rather than being sent as part of the name.
+
+`_worms` therefore takes the endpoint and the segment as **separate arguments** and quotes the
+segment itself with `quote(segment, safe="")`. Structural rather than a call to remember: there is
+no way to reach `_request` from here with an unencoded segment. `safe=""` because nothing is safe in
+a taxon name — `/` in particular has to be encoded or it silently makes a new path segment.
+
+The general lesson, since this codebase now has one provider of each kind: **check whether user
+input lands in the path or the query string**, because the HTTP client only encodes the second, and
+the geocoder's shape is not transferable to a provider that uses the first.
+
+### The read transaction is released before either endpoint goes outbound
+
+Both `search_species` and `resolve_species` read the local catalog *first* and then spend seconds on
+a third party — six on search, twenty-five on resolve, fifty on the synonym branch that fetches two
+records. `AsyncSession` autobegins on the first `execute()`, so the connection that ran a
+sub-millisecond `SELECT` would sit **idle-in-transaction** for the whole outbound call. The pool is
+`create_async_engine`'s default: five connections plus ten overflow, `pool_timeout` 30 s. On the
+order of fifteen concurrent "add species" clicks park every connection doing nothing, and unrelated
+endpoints then wait out the timeout and fail.
+
+What makes it worth writing down is how *invisible* it is. The event loop is free the entire time —
+that is the whole point of async HTTP — so nothing looks slow, nothing logs, and the symptom when it
+finally appears is 500s on endpoints that have nothing to do with species. It also survived the
+review that produced the budgets: the section above argues at length for making resolve's wait
+*generously long*, which is the right call for the diver and makes this strictly worse.
+
+`_release_read_transaction` is a plain `rollback()` before each outbound step, and the safety
+argument is per-call-site rather than general: it runs only where the preceding lookup returned no
+ORM instance — rows already converted to Pydantic models, or a `None`. **`rollback` expires live ORM
+objects regardless of `expire_on_commit=False`**, which applies to commit only, so the early-return
+path in `resolve_species` (which hands back a live `Species`) deliberately returns *before* the
+release rather than after it. Releasing there would turn the caller's next attribute access into a
+silent reload.
+
+The geocoder this module is otherwise modelled on cannot have this problem, and not by foresight:
+its routes take no `db` dependency at all, so there is no session to hold. That is worth knowing
+before copying its shape again — **"modelled on the geocoder" stops being a safety argument the
+moment a route needs the database**, and this feature needed it for the local catalog.
+
+`services/dive_files.py` already carries the identical helper for the identical reason, reached from
+a `run_in_threadpool` hop instead of an HTTP call — see *"Uploaded files are parsed in a thread, not
+on the event loop"*. Two copies with genuinely different safety arguments is tolerable; a third
+wants a shared util rather than a third docstring. Both are pinned by ordering tests
+(`TestTheReadTransactionIsReleasedBeforeGoingOutbound`,
+`TestProfileExtractionReleasesTheTransaction`), because what regresses is somebody moving a query
+back above the release, and no behavioural test would notice.
+
+**And an ordering test is easy to write so that it does not test the ordering.** The first version
+of this one asserted `calls.index("release") < calls.index("outbound")`, which passes happily while
+the bug is back: `index` returns the *first* occurrence, so a read reinserted between the release
+and the fan-out leaves `["query", "release", "query", "outbound"]` and every comparison still holds.
+The assertion has to be positional — no query anywhere in the window between the last release and
+the outbound call. The same round found the synonym branch's release untested at all, because the
+fixture driving the test has `valid_AphiaID == AphiaID` and never enters it; that release could be
+deleted with the suite green. Both were caught by review rather than by the tests, which is the
+point worth keeping: **a test whose failure mode is "still passes" is worth mutating on purpose
+before trusting it**, and each of these now fails when its own regression is reintroduced.
+
+The real-pool test (`TestConcurrentResolvesDoNotExhaustThePool`) supplies the other half — the
+ordering tests pin *that* the release happens, this pins what it buys, measured against an actual
+pool: fifteen concurrent resolves, sampling `pool.checkedout()` mid-burst. With the releases removed
+it reads fifteen for the whole window and an unrelated query waits out `pool_timeout` and fails;
+with them it reads zero. It has to use a real engine, because the bug lives entirely in SQLAlchemy's
+checkout lifecycle and a mocked session has no pool to exhaust.
+
+That test *also* failed its own mutation check on the first attempt, for a reason worth naming: it
+resolved a fixed range of AphiaIDs, and those rows persist in the developer's database — so from the
+second run onward every resolve returned early from the local lookup, never went outbound, and the
+test passed while measuring nothing. **A test that writes rows nothing cleans up has to vary the key
+it writes**, or it quietly converts itself into a no-op. Fresh ids from uuid7's random tail, as
+`create_species` does.
+
+And the load shape it holds against is the designed one rather than a pathological burst: the web
+picker keeps its menu open after a pick and deliberately does not serialise resolves, so a diver
+adding a dive's worth of sightings produces several concurrent resolves from one browser as a matter
+of course.
+
+### The common-name rule, and why it is a prefix test
+
+`species.common_name` is a single English display name, chosen at resolve time as: the English
+Wikidata **label** if it is not the scientific name, else the first English **alias**, else the
+first English WoRMS **vernacular**, else NULL (every surface falls back to the scientific name). The
+order is forced by what the sources contain — a taxon's English Wikidata label is very often the
+binomial itself, and the alias is what carries the real name ("ocellaris clownfish").
+
+The comparison is a **prefix** test, not equality, and that was found by resolving a real taxon:
+Wikidata labels obscure species with the binomial plus its authority, so AphiaID 125230 came back
+with the label "Leptasterias (Leptasterias) muelleri muelleri (M. Sars, 1846)". Under an equality
+test that is "different from the scientific name" and would have shipped as that taxon's common
+name. A name that *begins* with the binomial is the binomial with decoration on it, not something a
+diver would ever call the animal.
+
+`species_name`, by contrast, keeps **every** WoRMS vernacular in every language plus the English
+Wikidata label and aliases — so カクレクマノミ finds the clownfish even though the UI never shows Japanese.
+English-only display with a multilingual index is the deliberate split; full Wikidata alias
+mirroring waits for the app to have an i18n story.
+
+### Identity is the accepted AphiaID; synonyms are names, not rows
+
+`species.aphia_id` is unique and always points at an *accepted* WoRMS taxon. Handed an unaccepted id
+— a diver picked *Manta birostris* — `resolve_species` follows `valid_AphiaID` and stores the
+accepted taxon (*Mobula birostris*), keeping the superseded name as a `species_name` row so the
+search still finds it. Search folds the same way without a second request, because WoRMS sends
+`valid_AphiaID`/`valid_name` inline on the unaccepted record, and reports the name that matched as
+`matched_name` — which the web picker renders, because a row showing a binomial the diver did not
+type is otherwise baffling.
+
+The unique `aphia_id` is also what turns two divers resolving the same new species at the same
+instant into an `IntegrityError` the service recovers from (rollback, re-select, return the winner's
+row) rather than a duplicate taxon nobody notices.
+
+Ranks are **not** restricted to species. "A moray eel" is an honest log entry, so genus- and
+family-level rows are legal and the rank rides along as picker context — the same call iNaturalist
+made. `rank` and `status` are plain `VARCHAR` passed through rather than `StrEnum`s, deliberately
+unlike `GearItem.type`: those are WoRMS's open vocabularies, they grow without asking us, and a new
+rank must not turn into a failed resolve.
+
+**`"unknown"` is a real value on the wire, and it is ours rather than WoRMS's.** A search hit that
+only Wikidata matched has no WoRMS record behind it, so there is no rank or status to report;
+`_wikidata_result` writes the literal string `"unknown"` for both, and `_worms_taxon` does the same
+for a record that arrived without one. **It is most of a typical page, not a rare edge case** —
+`?q=manta` returns a pile of *Manta* synonyms that Wikidata knows and the WoRMS query for that
+fragment did not.
+
+No count is quoted here on purpose, because the proportion is not a property of the data: it is a
+function of whether WoRMS answered inside `_SEARCH_BUDGET_SECONDS` on that particular request. Two
+sessions measuring the same query hours apart got seven of ten and nine of ten, and both were right
+— the slower WoRMS is, the more of the page is Wikidata-only and therefore rank-less. A figure here
+would be a second place to be wrong about something that legitimately moves between two consecutive
+requests.
+
+Two consequences worth stating, because both were found by a client rendering it:
+
+- **Clients must not display it raw.** "Manta americana, unknown" reads as a claim about the animal
+  rather than about our not having classified the name, so the web picker drops the hint when the
+  rank is `"unknown"`. That is a display decision and belongs on the client — the API's job is to be
+  honest that it does not know, not to guess a rank from an entity's "instance of" claims.
+- **The merge treats it as a placeholder, not a claim** (`_merge_result`): a real rank from either
+  source displaces it, which is what makes a hit both registers matched come out with WoRMS's
+  taxonomy rather than whichever source happened to be written first.
+- **A persisted catalog row can carry it too**, which is the half that gets reasoned away. The
+  tempting inference is "`resolve_species` 503s rather than invent a row, so anything in the catalog
+  came from an authoritative record, so its rank is real" — and the premise is true while the
+  conclusion is not, because the authoritative record itself may omit `rank`, and `_worms_taxon`
+  stores the sentinel rather than refusing the taxon over a missing display field. `resolve_species`
+  passes `taxon.rank` straight through, so `SpeciesRead.rank` and the `SpeciesInfo.rank` embedded in
+  a dive can both be `"unknown"`. A client guard against it on the *detail* card is live code, not
+  defensive padding — this exact inference was made independently on the web side and came within a
+  commit of documenting that guard as unreachable.
+
+The alternative — leaving the fields null — was rejected because both columns are `NOT NULL` on a
+resolved row, and a schema whose optionality differs between a search hit and the catalog row it
+becomes is a worse contract than a sentinel that says the same thing in both places.
+
+### Test fixtures in a global table are visible to real accounts
+
+The suite's Postgres-backed tests write real rows to the developer's own database and nothing cleans
+them up - `unique_username`'s docstring records that as a deliberate trade, and it is fine for every
+table that came before this one, because those rows hang off a fixture `user_id` and no real account
+can see them.
+
+`species` broke that assumption the moment it existed: a fixture row is in *everyone's* picker. This
+was found the boring way — a developer cleared the catalog by hand, the next `pytest` run put thirty
+rows straight back, and `?q=clownfish` was topped by test data.
+
+The fix is naming, not cleanup: `create_species` writes `zzfixture-species-<hex>` and the
+`species_name` fixtures write `zzfixture-name-<hex>`, so no query a diver would type can reach them.
+Two earlier attempts are worth recording because both looked sufficient and were not —
+`Amphiprion <hex>` and `Testudo fixtura <hex>` are both real genera, and uniquifying a fixture name
+to `clownfish <hex>` does nothing at all when the search is `%clownfish%`. **Making a fixture name
+unique is not the same as making it unmatchable**, and only the second one helps here.
+
+Cleanup was considered and rejected as disproportionate: it would diverge from the convention every
+other generator follows, and the rows are harmless once they cannot be found. The rule to carry
+forward is the one-liner, for whatever the next non-user-scoped table turns out to be: **fixtures
+for a global table need names that no real query can return.**
+
+### Persist at pick time, not at dive-save time
+
+`POST /species/resolve` is called when the diver picks a species in the form, so by the time the
+dive is saved every species uuid already exists locally and **saving a dive never blocks on a third
+party**. The cost is catalog rows for picks that are never saved — harmless in a global catalog,
+since they are real species and the next diver's search benefits. The picker owns the resulting
+latency with an explicit pending row rather than leaving synthetic ids in form state for the submit
+path to trip on.
+
+### Rows are immutable in v1, which defers the hard cache problem
+
+Renaming a gear item invalidates that one user's dive caches. A *global* rename cannot be expressed
+as one user's pattern — `services/cache_invalidation.py` speaks only in `user_{id}_*` — and this
+codebase has never needed a cross-user sweep. v1 sidesteps it entirely: no PATCH endpoint, no
+refresh job, and the admin panel registers `Species`/`SpeciesName` **without delete** (deleting one
+would take every `dive_species` row through the FK cascade, silently removing a sighting from other
+people's dives, with no invalidation anywhere). A rename done by hand in psql goes stale in cached
+dive reads for at most the single-dive TTL of 3600 s.
+
+The taxonomy-refresh story — WoRMS moves a species, we re-resolve — is explicitly not being built,
+and cross-user cache invalidation is its prerequisite.
+
+### Species embed on `DiveReadWithMixtures`, not `DiveRead`
+
+The same reasoning every other field on that schema carries: on the parent it would land on the
+paginated list and cost `_cached_read_dives` — the hottest path in the app — a query per page for
+something only the detail page renders. `get_species_for_dives` is written batched for the day that
+changes. Revisit condition: the moment a list surface needs species chips, move it *with* the
+batched loader; do not fetch per row.
+
+`DiveReadWithMixtures.species` has `default_factory=list`, which is load-bearing rather than tidy:
+`user_{id}_dive:{uuid}` entries live an hour and replay through this schema, so every entry written
+before the field existed lacks the key and would fail validation on read. Same lesson as
+`TripRead.locations`.
+
+### ILIKE with no `pg_trgm`, and no manual DDL anywhere
+
+Local search is a plain escaped `ILIKE` through `core/utils/search.py::escape_like`. A
+leading-wildcard pattern cannot use a btree index whatever else is done (see *"Substring search over
+a user's own rows"* above), and the catalog is small by construction — it only grows when a diver
+picks something new. The recorded escalation is:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX ix_species_name_name_trgm ON species_name USING gin (name gin_trgm_ops);
+```
+
+Deferring it is also what keeps this feature at **zero manual DDL**: `create_all` cannot emit
+`CREATE EXTENSION`, and all three tables are brand new, so `docker compose restart api` created them
+with their unique constraints and indexes intact. Nothing here needed an `ALTER TABLE`.
+
+### The local search query is tested by executing it, not by building it
+
+`_local_search` is the one non-trivial statement in this feature — an outer join to `species_name`,
+a `CASE`, two aggregates over it, `GROUP BY` on the primary key leaning on Postgres's
+functional-dependency inference, and an `ORDER BY` naming a string label. Every test of
+`search_species` mocks the session, which is right for the merge and degradation logic and means the
+statement was built in Python and thrown away: it was never sent to Postgres by anything.
+
+That gap is worse than it sounds, because of *which* path it covers. The local catalog is the half
+that is supposed to keep answering when both registers are down, so a SQL-level defect would surface
+as a 500 on exactly the path *"search never fails for provider trouble"* rests on — while
+`test_both_registers_down_falls_back_to_the_catalog` stayed green, since it stubs the row shape this
+query would have produced. `TestLocalSearchAgainstPostgres` executes it for real against seeded
+rows, and `TestReadSpeciesRoute` covers `GET /species/{uuid}`, which had nothing at all.
+
+The general rule: **a mocked session tests the code around a query, never the query.** Any statement
+whose correctness lives in the SQL rather than in the Python — a `GROUP BY`, an aggregate, an
+`ESCAPE`, anything relying on a dialect's inference — needs one test that actually runs it.
+
+Two of those tests failed their own mutation check, both the same way, and the shape is worth naming
+because it recurred immediately after being written up:
+
+- The escaping case seeded a decoy row that did not match *either way*, so it passed with
+  `escape_like` removed. A wildcard test needs a row that matches **only** if the wildcard is live.
+- The `matched_name` case seeded a species with a synonym but no `scientific`-kind name row, so a
+  search for the binomial matched no `species_name` at all, `min(matched_name)` returned SQL NULL,
+  and the assertion held without the Python de-noising branch ever running. `resolve_species` always
+  writes a `scientific` row equal to `Species.scientific_name`, so the fixture was a shape
+  production never produces.
+
+Both are one mistake: **the assertion was satisfied by the absence of the input, not by the
+behaviour**. Seeding a fixture simpler than the real row is how a test ends up proving something no
+code path can violate — and it is invisible, because the test passes and reads as though it covers
+the branch it names. Seed what the writer actually writes.
+
+### `species_seen` is derived at last
+
+The column has existed since the first schema, was on the wire, and was hardcoded to `0` — which is
+why the dashboard tile reading it was deleted ("the tile read '0' for every diver forever", web
+DECISIONS.md). It is now `COUNT(DISTINCT dive_species.species_id)` over the diver's live dives,
+computed in `recalculate_dive_stats`, which already runs on every dive write — so it costs no new
+invalidation surface.
+
+**It is set on both branches of that function**, and the update branch is the one that matters: it
+is the path nearly every real write takes, since the insert runs once per account. The old comment
+said existing values were "preserved", which was correct when nothing derived the field and is
+exactly the sentence that would lead someone to fix only the insert — leaving every existing diver
+at 0 forever. `test_updates_existing_stats_row` now asserts a stale value being *overwritten*, which
+is the opposite of what it asserted before.
+
+It is a second query rather than a fourth column on the aggregate: that one is served by the
+covering index `ix_dive_user_id_stats`, and joining `dive_species` into it would cost every dive
+write the index-only scan that index exists to provide.
+
+### No custom species, and what that costs
+
+Free text would put user-authored rows in a global table (wrong ownership) or demand a per-user
+overlay (a second model). The dive's own `notes` field carries "weird translucent blob, 10 cm" until
+a real identification exists. The accepted consequence: with both registers unreachable *and* the
+species not yet in the catalog, the picker comes up dry and the diver logs the dive and adds the
+species later. That is the one resilience gap against the trip picker's free-text hatch, and it is
+deliberate — a trip location is whatever the diver says it is, while a species is what the register
+says it is.

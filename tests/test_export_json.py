@@ -174,6 +174,39 @@ class TestReferences:
         assert (locations[1]["display_name"], locations[1]["latitude"]) == (None, None)
 
     @pytest.mark.asyncio
+    async def test_the_species_a_dive_saw_are_a_list_of_uuids_the_file_defines(self, monkeypatch):
+        """The catalog is global, so `species` is the one collection here that is not the
+        diver's own rows - it is the slice their dives reference. The point of exporting it
+        at all is that the file stays self-contained: every uuid a dive names is defined in
+        the document, so a reader never has to go looking.
+        """
+        document = await _render(full_bundle(), monkeypatch)
+
+        assert document["dives"][0]["species_uuids"] == [
+            str(UUIDS["species-clownfish"]),
+            str(UUIDS["species-manta"]),
+        ]
+        # The dive with no sightings says so as an empty list rather than by omitting it.
+        assert document["dives"][2]["species_uuids"] == []
+        defined = {species["uuid"] for species in document["species"]}
+        for dive in document["dives"]:
+            assert set(dive["species_uuids"]) <= defined
+
+    @pytest.mark.asyncio
+    async def test_a_species_carries_the_identifier_that_means_something_elsewhere(self, monkeypatch):
+        """The uuids are this instance's; `aphia_id` is the World Register of Marine
+        Species' own, and it is what lets a reader re-link a sighting to a real taxon
+        rather than guess from a name."""
+        document = await _render(full_bundle(), monkeypatch)
+        clownfish, morays = document["species"]
+
+        assert (clownfish["aphia_id"], clownfish["common_name"]) == (278400, "ocellaris clownfish")
+        assert clownfish["wikidata_qid"] == "Q1126155"
+        # A family-rank sighting with no common name: both facts survive, so a reader does
+        # not render "Muraenidae" as though the diver identified a species.
+        assert (morays["rank"], morays["common_name"]) == ("Family", None)
+
+    @pytest.mark.asyncio
     async def test_no_internal_integer_id_leaks(self, monkeypatch):
         """They are an implementation detail of this database and actively misleading in
         a file meant to outlive it."""

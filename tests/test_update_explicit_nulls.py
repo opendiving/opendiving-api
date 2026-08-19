@@ -91,6 +91,12 @@ UNGUARDED_UPDATE_SCHEMAS = (
     "TripLocationUpdate",
     "DiveGearItemUpdate",
     "GearSetItemUpdate",
+    "DiveSpeciesUpdate",
+    "SpeciesNameUpdate",
+    # Admin-panel-only for the same reason, and additionally the only way to edit a catalog
+    # row at all: there is no PATCH endpoint for `species` by design (see `models/species.py`
+    # on why the rows are immutable in v1).
+    "SpeciesUpdate",
     # Server-constructed only - never a request body. The routes build these themselves
     # (`api/v1/auth.py`, `api/v1/users.py`) to stamp `used_at`/`invalidated_at`.
     "AuthenticationProviderUpdate",

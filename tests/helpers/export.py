@@ -23,6 +23,7 @@ from src.app.models.gear_item import GearItem
 from src.app.models.gear_service_record import GearServiceRecord
 from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.gear_set import GearSet
+from src.app.models.species import Species
 from src.app.models.trip import Trip
 from src.app.models.user import User
 from src.app.schemas.certification import CertificationFileInfo, CertificationSide
@@ -58,6 +59,8 @@ UUIDS = {
             "dive-file",
             "card-front",
             "card-back",
+            "species-clownfish",
+            "species-manta",
         )
     )
 }
@@ -105,6 +108,20 @@ def make_dive_site(row_id: int, uuid: uuid_pkg.UUID, **overrides: Any) -> DiveSi
     return _with_id(DiveSite(**defaults, uuid=uuid, created_at=CREATED_AT), row_id)
 
 
+def make_species(row_id: int, uuid: uuid_pkg.UUID, **overrides: Any) -> Species:
+    """A catalog row. No `user_id`, unlike every other builder here - the species catalog is
+    global, which is precisely the thing the export loader has to scope through dives
+    instead of by column."""
+    defaults: dict[str, Any] = {
+        "aphia_id": 200000 + row_id,
+        "scientific_name": "Amphiprion ocellaris",
+        "rank": "Species",
+        "status": "accepted",
+    }
+    defaults.update(overrides)
+    return _with_id(Species(**defaults, uuid=uuid, created_at=CREATED_AT), row_id)
+
+
 def mixture(**overrides: Any) -> DiveMixtureRead:
     defaults: dict[str, Any] = {"id": 1, "volume": 12.0, "oxygen": 21.0, "helium": 0.0}
     defaults.update(overrides)
@@ -117,12 +134,14 @@ def build_bundle(
     mixtures_by_dive: dict[int, list[DiveMixtureRead]] | None = None,
     site_ids_by_dive: dict[int, list[int]] | None = None,
     gear_ids_by_dive: dict[int, list[int]] | None = None,
+    species_ids_by_dive: dict[int, list[int]] | None = None,
     file_by_dive: dict[int, DiveFileInfo | None] | None = None,
     profile_by_dive: dict[int, DiveProfileInfo | None] | None = None,
     trips: list[Trip] | None = None,
     locations_by_trip: dict[int, list[TripLocationRead]] | None = None,
     dive_sites: list[DiveSite] | None = None,
     gear_items: list[GearItem] | None = None,
+    species: list[Species] | None = None,
     gear_sets: list[GearSet] | None = None,
     item_ids_by_set: dict[int, list[int]] | None = None,
     schedules: list[GearServiceSchedule] | None = None,
@@ -156,6 +175,7 @@ def build_bundle(
         mixtures_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(mixtures_by_dive or {})},
         site_ids_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(site_ids_by_dive or {})},
         gear_ids_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(gear_ids_by_dive or {})},
+        species_ids_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(species_ids_by_dive or {})},
         file_by_dive={**dict.fromkeys(dive_ids), **(file_by_dive or {})},
         profile_by_dive={**dict.fromkeys(dive_ids), **(profile_by_dive or {})},
         attribution_by_dive={dive_id: ProfileGasAttribution() for dive_id in dive_ids},
@@ -163,6 +183,7 @@ def build_bundle(
         locations_by_trip={**{trip.id: [] for trip in (trips or [])}, **(locations_by_trip or {})},
         dive_sites=dive_sites or [],
         gear_items=gear_items or [],
+        species=species or [],
         gear_sets=gear_sets or [],
         item_ids_by_set={**{gear_set.id: [] for gear_set in (gear_sets or [])}, **(item_ids_by_set or {})},
         schedules=schedules or [],
@@ -185,6 +206,9 @@ def full_bundle() -> ExportBundle:
       dedup key and the multi-cylinder paths are covered. It carries the stored file.
     - **bare** - no depth, no cylinders, no site, no trip, empty notes: the dive that
       makes UDDF's *mandatory* `<greatestdepth>` a decision rather than a copy.
+
+    Two of the three carry species, one of them two of them, so the shared catalog row and
+    the per-dive count are both exercised.
     """
     reef = make_dive_site(
         1,
@@ -345,6 +369,27 @@ def full_bundle() -> ExportBundle:
     )
     bare = make_dive(3, UUIDS["dive-bare"], dive_number=3, duration=1200)
 
+    # Two species, deliberately unalike, because the pair is what the writers have to tell
+    # apart: one species-rank row with a common name, and one family-rank row with none - the
+    # honest "a moray eel" sighting, which every surface has to render without pretending it
+    # is an identification. Both dives see the clownfish, so `species.csv`'s per-dive count is
+    # exercised rather than assumed.
+    clownfish = make_species(
+        1,
+        UUIDS["species-clownfish"],
+        aphia_id=278400,
+        scientific_name="Amphiprion ocellaris",
+        common_name="ocellaris clownfish",
+        wikidata_qid="Q1126155",
+    )
+    morays = make_species(
+        2,
+        UUIDS["species-manta"],
+        aphia_id=125230,
+        scientific_name="Muraenidae",
+        rank="Family",
+    )
+
     return build_bundle(
         dives=[air, trimix, bare],
         mixtures_by_dive={
@@ -366,6 +411,7 @@ def full_bundle() -> ExportBundle:
         },
         site_ids_by_dive={1: [1, 2], 2: [2]},
         gear_ids_by_dive={1: [1, 2, 3], 2: [1]},
+        species_ids_by_dive={1: [1, 2], 2: [1]},
         file_by_dive={
             2: DiveFileInfo(
                 uuid=UUIDS["dive-file"],
@@ -384,6 +430,8 @@ def full_bundle() -> ExportBundle:
         locations_by_trip={1: trip_locations},
         dive_sites=[reef, wall],
         gear_items=[regulator, second_regulator, suit, untyped],
+        # Ordered by scientific name, matching `load_export_bundle`'s pre-sorted contract.
+        species=[clownfish, morays],
         gear_sets=[gear_set],
         item_ids_by_set={1: [1, 2]},
         schedules=[schedule],

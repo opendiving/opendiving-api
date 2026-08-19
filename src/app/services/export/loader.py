@@ -2,7 +2,7 @@
 
 Every writer in this package (UDDF, CSV, `export.json`) needs the same graph, so it is
 read once into an `ExportBundle` and handed to all three rather than each of them
-issuing its own queries. The read is deliberately flat: a fixed twenty `SELECT`s over
+issuing its own queries. The read is deliberately flat: a fixed twenty-two `SELECT`s over
 whole tables scoped to one `user_id`, with no per-dive query anywhere. A logbook is a few
 hundred dives and a handful of sites, trips and gear items, so "load the lot" costs less
 than the round trips a lazier shape would need - and the archive walks all of it anyway.
@@ -13,6 +13,12 @@ all. Those are fetched one row at a time by whoever actually needs them (`archiv
 for the blobs, `uddf.py`/`envelope.py` for the profile series), so peak memory is one
 file plus one profile rather than a diver's entire history of both. That is the one
 place this module accepts an N+1 on purpose.
+
+**One collection is scoped through the dives rather than by column.** `species` has no
+`user_id` at all - the catalog is global (see `models/species.py`) - so it is loaded by the
+set of species ids this user's live dives actually reference, which is the closest thing to
+"theirs" that exists. That is why it does not go through `_owned`, and why an export is a
+projection of the catalog rather than a copy of it.
 
 **Scoping is "everything the caller can still see".** The `user_id` filter is absolute,
 and the only other filter is soft-delete liveness on the three tables that still have the
@@ -38,11 +44,13 @@ from ...models.dive_dive_site import DiveDiveSite
 from ...models.dive_file import DiveFile
 from ...models.dive_gear_item import DiveGearItem
 from ...models.dive_site import DiveSite
+from ...models.dive_species import DiveSpecies
 from ...models.gear_item import GearItem
 from ...models.gear_service_record import GearServiceRecord
 from ...models.gear_service_schedule import GearServiceSchedule
 from ...models.gear_set import GearSet
 from ...models.gear_set_item import GearSetItem
+from ...models.species import Species
 from ...models.trip import Trip
 from ...models.user import User
 from ...schemas.certification import CertificationFileInfo
@@ -73,6 +81,7 @@ class ExportBundle:
     mixtures_by_dive: dict[int, list[DiveMixtureRead]]
     site_ids_by_dive: dict[int, list[int]]
     gear_ids_by_dive: dict[int, list[int]]
+    species_ids_by_dive: dict[int, list[int]]
     file_by_dive: dict[int, DiveFileInfo | None]
     profile_by_dive: dict[int, DiveProfileInfo | None]
     attribution_by_dive: dict[int, ProfileGasAttribution]
@@ -82,6 +91,10 @@ class ExportBundle:
     locations_by_trip: dict[int, list[TripLocationRead]]
     dive_sites: list[DiveSite]
     gear_items: list[GearItem]
+    # The species this user's live dives reference, and only those. Unlike every other list
+    # here it is not "the user's rows" - there is no such thing for a global table - so an
+    # export carries the slice of the catalog the logbook actually needs.
+    species: list[Species]
     gear_sets: list[GearSet]
     item_ids_by_set: dict[int, list[int]]
     schedules: list[GearServiceSchedule]
@@ -98,6 +111,7 @@ class ExportBundle:
     trip_by_id: dict[int, Trip] = field(init=False)
     dive_site_by_id: dict[int, DiveSite] = field(init=False)
     gear_item_by_id: dict[int, GearItem] = field(init=False)
+    species_by_id: dict[int, Species] = field(init=False)
     schedule_by_id: dict[int, GearServiceSchedule] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -107,6 +121,7 @@ class ExportBundle:
         object.__setattr__(self, "trip_by_id", {trip.id: trip for trip in self.trips})
         object.__setattr__(self, "dive_site_by_id", {site.id: site for site in self.dive_sites})
         object.__setattr__(self, "gear_item_by_id", {item.id: item for item in self.gear_items})
+        object.__setattr__(self, "species_by_id", {species.id: species for species in self.species})
         object.__setattr__(self, "schedule_by_id", {schedule.id: schedule for schedule in self.schedules})
 
     def sites_for(self, dive: Dive) -> list[DiveSite]:
@@ -116,6 +131,18 @@ class ExportBundle:
     def gear_for(self, dive: Dive) -> list[GearItem]:
         """A dive's gear in the order the diver listed it."""
         return [item for item_id in self.gear_ids_by_dive[dive.id] if (item := self.gear_item_by_id.get(item_id))]
+
+    def species_for(self, dive: Dive) -> list[Species]:
+        """A dive's species in the order the diver listed them.
+
+        The `.get()` here cannot miss the way the two above can: `species` is loaded *from*
+        these very join rows, so every id in the map is in the list by construction.
+        """
+        return [
+            species
+            for species_id in self.species_ids_by_dive[dive.id]
+            if (species := self.species_by_id.get(species_id))
+        ]
 
     # Both of the above resolve through `.get()` rather than indexing, and there is exactly
     # one way left to hit the miss: a join row pointing at *another user's* site or item.
@@ -133,18 +160,20 @@ class ExportBundle:
 
 async def _ordered_ids_by_dive(
     db: AsyncSession, dive_ids: list[int]
-) -> tuple[dict[int, list[int]], dict[int, list[int]]]:
-    """The site and gear links for a set of dives, as ordered integer ids.
+) -> tuple[dict[int, list[int]], dict[int, list[int]], dict[int, list[int]]]:
+    """The site, gear and species links for a set of dives, as ordered integer ids.
 
-    The existing `get_dive_sites_for_dives`/`get_gear_items_for_dives` return the
-    *summaries* a dive response embeds, which would mean holding a second copy of every
-    site and item alongside `ExportBundle.dive_sites`/`gear_items`. Export links by id
-    into those lists instead, so it wants the join rows and nothing else.
+    The existing `get_dive_sites_for_dives`/`get_gear_items_for_dives`/
+    `get_species_for_dives` return the *summaries* a dive response embeds, which would mean
+    holding a second copy of every site, item and species alongside
+    `ExportBundle.dive_sites`/`gear_items`/`species`. Export links by id into those lists
+    instead, so it wants the join rows and nothing else.
     """
     sites: dict[int, list[int]] = {dive_id: [] for dive_id in dive_ids}
     gear: dict[int, list[int]] = {dive_id: [] for dive_id in dive_ids}
+    species: dict[int, list[int]] = {dive_id: [] for dive_id in dive_ids}
     if not dive_ids:
-        return sites, gear
+        return sites, gear, species
 
     site_rows = await db.execute(
         select(DiveDiveSite.dive_id, DiveDiveSite.dive_site_id)
@@ -162,7 +191,35 @@ async def _ordered_ids_by_dive(
     for row in gear_rows:
         gear[row.dive_id].append(row.gear_item_id)
 
-    return sites, gear
+    species_rows = await db.execute(
+        select(DiveSpecies.dive_id, DiveSpecies.species_id)
+        .where(DiveSpecies.dive_id.in_(dive_ids))
+        .order_by(DiveSpecies.dive_id, DiveSpecies.position)
+    )
+    for row in species_rows:
+        species[row.dive_id].append(row.species_id)
+
+    return sites, gear, species
+
+
+async def _referenced_species(db: AsyncSession, species_ids_by_dive: dict[int, list[int]]) -> list[Species]:
+    """The catalog rows a diver's dives point at, ordered by scientific name.
+
+    The one read in this module that is **not** scoped by a `user_id` column, because
+    `species` does not have one - it is a global table (see `models/species.py`). Scoping is
+    through the join rows above, which were themselves read from this user's live dives, so
+    an export still contains only what that logbook references and nothing about anybody
+    else's.
+
+    Ordered here rather than by a writer, matching the bundle's pre-sorted contract: `id`
+    breaks ties so two species sharing a name still come out in a stable order run after run.
+    """
+    ids = {species_id for ids in species_ids_by_dive.values() for species_id in ids}
+    if not ids:
+        return []
+
+    rows = await db.execute(select(Species).where(Species.id.in_(ids)).order_by(Species.scientific_name, Species.id))
+    return list(rows.scalars().all())
 
 
 async def _owned(db: AsyncSession, model: Any, *, user_id: int, order_by: Any) -> list[Any]:
@@ -204,7 +261,8 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
     written for - `_owned` used to need every referrer read before the table it referenced,
     so it knew which dead rows to bring back. What is left is ordinary data dependency:
     `dive_ids` comes from `dives`, `item_ids_by_set` from `gear_sets`, `locations_by_trip`
-    from `trips` and `cert_files_by_cert` from `certifications`. Reorder on those, not on
+    from `trips`, `cert_files_by_cert` from `certifications`, and `species` from the join
+    rows `_ordered_ids_by_dive` read. Reorder on those, not on
     the strength of the resurrection having gone.
     """
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
@@ -217,7 +275,7 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
     dives = await _owned(db, Dive, user_id=user_id, order_by=(Dive.start_time, Dive.dive_number, Dive.id))
     dive_ids = [dive.id for dive in dives]
 
-    site_ids_by_dive, gear_ids_by_dive = await _ordered_ids_by_dive(db, dive_ids)
+    site_ids_by_dive, gear_ids_by_dive, species_ids_by_dive = await _ordered_ids_by_dive(db, dive_ids)
 
     gear_sets = await _owned(db, GearSet, user_id=user_id, order_by=(GearSet.name, GearSet.id))
     item_ids_by_set: dict[int, list[int]] = {gear_set.id: [] for gear_set in gear_sets}
@@ -250,6 +308,7 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
         mixtures_by_dive=await get_mixtures_for_dives(db=db, dive_ids=dive_ids),
         site_ids_by_dive=site_ids_by_dive,
         gear_ids_by_dive=gear_ids_by_dive,
+        species_ids_by_dive=species_ids_by_dive,
         file_by_dive=await get_file_infos_for_dives(db=db, dive_ids=dive_ids),
         profile_by_dive=await get_profile_infos_for_dives(db=db, dive_ids=dive_ids),
         attribution_by_dive=await get_gas_attribution_for_dives(db=db, dive_ids=dive_ids),
@@ -258,6 +317,8 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
         locations_by_trip=await get_locations_for_trips(db=db, trip_ids=[trip.id for trip in trips]),
         dive_sites=dive_sites,
         gear_items=gear_items,
+        # After `_ordered_ids_by_dive` above, which is what says which species to read.
+        species=await _referenced_species(db, species_ids_by_dive),
         gear_sets=gear_sets,
         item_ids_by_set=item_ids_by_set,
         schedules=schedules,
