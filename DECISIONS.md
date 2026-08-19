@@ -8117,3 +8117,34 @@ No effect on a fresh cluster beyond a small write overhead, and nothing here rel
 recorded because `pg_upgrade` requires the checksum setting to *match* on both sides, and
 `pg_upgrade` across one volume is the exact scenario the new layout exists for. A cluster created by
 this image is checksummed; a future upgrade target has to be too, or the upgrade refuses.
+
+## The `worker` service inherits `api`'s HTTP healthcheck, and had to be told not to
+
+`worker` and `api` are built from the same `Dockerfile`, which declares a `HEALTHCHECK` that GETs
+`http://127.0.0.1:8000/api/v1/health`. `worker` runs `arq app.core.worker.settings.WorkerSettings`
+and serves no HTTP at all, so the inherited check could never pass: the container sat at
+`(unhealthy)` in `docker compose ps` from the moment its start period ended, forever, while
+connecting to Redis and running its crons perfectly. `docker inspect` showed the failure as a
+`urllib` connection-refused traceback in the health log. This dated to the commit that added the
+`HEALTHCHECK` and had nothing to do with the Postgres 18 upgrade it was noticed alongside.
+
+Nothing gated on it — no service names `worker` in a `depends_on` — so it cost nothing but
+credibility, which is the expensive part: a status column with a permanent false red in it teaches
+you to stop reading the status column.
+
+The fix is a `healthcheck:` override on the `worker` service running arq's own probe,
+`arq --check app.core.worker.settings.WorkerSettings`. Preferred over `test: ["NONE"]` because it
+answers a real question — the worker records a sentinel key in Redis and `--check` exits 0 only if
+it finds one, so a pass means the process is alive *and* still talking to Redis, which is the whole
+of what this service does.
+
+The interval is the catch. Arq rewrites that key every `health_check_interval` seconds with a TTL of
+interval + 1, and the default interval is an hour — so a worker that died at 09:05 would keep
+passing until 10:05. `WorkerSettings.health_check_interval = 15` bounds the lie at 16 seconds, for
+one `SETEX` every 15. Compose then probes every 30s with `retries: 3`, so a real death shows up in
+about a minute and a slow Redis round-trip does not flap the status.
+
+Two notes for whoever adds the next service. Any further non-HTTP service built from this image
+inherits the same broken check and needs its own override — there is a comment on the `HEALTHCHECK`
+saying so. And `admin_init` is exempt for a boring reason: it is a one-shot that exits, and Docker
+does not health-check a container that is not running.

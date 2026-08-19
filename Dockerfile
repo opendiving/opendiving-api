@@ -68,6 +68,10 @@ EXPOSE 8000
 
 # `python -c` rather than curl/wget: neither is installed in the slim base, and adding
 # one just to health-check is a bigger surface than the check is worth.
+#
+# This assumes the container serves HTTP, which only `api` does. Every other service built
+# from this image - `worker` today - inherits the check and fails it forever, so it must
+# override `healthcheck:` in `docker-compose.yml` with something it can actually pass.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=4).status == 200 else 1)"]
 
