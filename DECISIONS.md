@@ -7023,8 +7023,8 @@ things that catch people out on top of it:
 
 ### Rows these tests write are permanent, and that has bitten twice
 
-Nothing cleans up after them — `create_user`'s docstring records that as the deliberate trade, and
-it is why every generator draws a unique name from uuid7's tail. Two consequences of it are
+Nothing cleans up after them — `unique_username`'s docstring records that as the deliberate trade,
+and it is why every generator draws a unique name from uuid7's tail. Two consequences of it are
 non-obvious enough to have each cost a defect, and both are written up under *"Species are a global
 catalog, filled one pick at a time"* rather than repeated here:
 
@@ -7735,7 +7735,7 @@ becomes is a worse contract than a sentinel that says the same thing in both pla
 ### Test fixtures in a global table are visible to real accounts
 
 The suite's Postgres-backed tests write real rows to the developer's own database and nothing cleans
-them up - `create_user`'s docstring records that as a deliberate trade, and it is fine for every
+them up - `unique_username`'s docstring records that as a deliberate trade, and it is fine for every
 table that came before this one, because those rows hang off a fixture `user_id` and no real account
 can see them.
 
