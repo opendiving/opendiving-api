@@ -1456,11 +1456,16 @@ class TestTheReadTransactionIsReleasedBeforeGoingOutbound:
                 return httpx.Response(200, json=MANTA_SYNONYM_RECORD)
             return httpx.Response(200, json=[])
 
-        with _Providers(handle):
-            await species_service.resolve_species(db, 105857)
+        with _Providers(handle) as providers:
+            species = await species_service.resolve_species(db, 105857)
 
-        # Both fetches happened, so the branch really was taken.
-        assert calls.count("outbound") >= 2
+        # That the *fold* happened, not merely that requests were made: `resolve_species`
+        # always fires four (the record, two enrichment calls and a Wikidata search), so a
+        # count of them stays green with the branch ripped out. Two record fetches, and the
+        # accepted taxon coming back, are what only this branch can produce.
+        record_fetches = [url for url in providers.urls() if "AphiaRecordByAphiaID" in url]
+        assert len(record_fetches) == 2, record_fetches
+        assert species.scientific_name == "Mobula birostris"
         # And two separate lookups were released, not just the first.
         assert calls.count("release") >= 2
         self._assert_no_query_is_held_open(calls)
