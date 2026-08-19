@@ -7618,10 +7618,18 @@ rank must not turn into a failed resolve.
 **`"unknown"` is a real value on the wire, and it is ours rather than WoRMS's.** A search hit that
 only Wikidata matched has no WoRMS record behind it, so there is no rank or status to report;
 `_wikidata_result` writes the literal string `"unknown"` for both, and `_worms_taxon` does the same
-for a record that arrived without one. It is not rare — `?q=manta` came back with **nine of ten**
-rows carrying it, because Wikidata knows a pile of *Manta* synonyms that the WoRMS query for that
-fragment did not return. Two consequences worth stating, because both were found by a client
-rendering it:
+for a record that arrived without one. **It is most of a typical page, not a rare edge case** —
+`?q=manta` returns a pile of *Manta* synonyms that Wikidata knows and the WoRMS query for that
+fragment did not.
+
+No count is quoted here on purpose, because the proportion is not a property of the data: it is a
+function of whether WoRMS answered inside `_SEARCH_BUDGET_SECONDS` on that particular request. Two
+sessions measuring the same query hours apart got seven of ten and nine of ten, and both were right
+— the slower WoRMS is, the more of the page is Wikidata-only and therefore rank-less. A figure here
+would be a second place to be wrong about something that legitimately moves between two consecutive
+requests.
+
+Two consequences worth stating, because both were found by a client rendering it:
 
 - **Clients must not display it raw.** "Manta americana, unknown" reads as a claim about the animal
   rather than about our not having classified the name, so the web picker drops the hint when the
