@@ -34,7 +34,9 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 from redis.exceptions import ConnectionError
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import TimeoutError as PoolTimeout
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import QueuePool
@@ -1491,6 +1493,14 @@ class TestTheReadTransactionIsReleasedBeforeGoingOutbound:
         assert "outbound" not in calls
 
 
+# Both bound a *failing* run of `TestConcurrentResolvesDoNotExhaustThePool` and nothing else:
+# on a healthy run the burst assembles in milliseconds and the unrelated connection is handed
+# over immediately. They sum to well under `species_service._RESOLVE_BUDGET_SECONDS`, which is
+# the clock the parked resolves are actually running against.
+_BURST_ASSEMBLY_TIMEOUT = 10.0
+_UNRELATED_QUERY_TIMEOUT = 5.0
+
+
 @pytest.mark.skipif(not db_available(), reason="No database connection available")
 class TestConcurrentResolvesDoNotExhaustThePool:
     """The failure `_release_read_transaction` exists to prevent, against a real pool.
@@ -1522,20 +1532,56 @@ class TestConcurrentResolvesDoNotExhaustThePool:
 
     @pytest.mark.asyncio
     async def test_the_pool_is_free_while_every_resolve_is_outbound(self, no_redis: None) -> None:
-        # The engine's own defaults, spelled out so the numbers below are readable.
+        """Measured at a moment this test *creates*, rather than one it hopes to catch.
+
+        The first version sampled `pool.checkedout()` every 100 ms for the length of one
+        outbound call and asserted over the middle third of the samples. It flaked on CI with
+        `[15, 15, 0, 0, 0]` - `assert 15 < 15`. The sample count was fixed at five by
+        construction, so "the middle third" was always the readings at roughly 200 ms and
+        300 ms; what moved was the burst. Fifteen connections have to be opened before the
+        first resolve can go outbound, and on a loaded runner that ramp-up was still running at
+        300 ms, so the window caught resolves still holding their local read. The release was
+        working the whole time - the later samples read zero - and the assertion was simply
+        looking at the wrong instants. Same lesson as `TestExtractAllSharesOneDecode`, which
+        counts scans rather than timing them: **assert on a signal the test controls, never on
+        a wall clock it only hopes to line up with.**
+
+        So the register now holds every resolve inside its record fetch until all fifteen have
+        arrived there, and nothing is read until they have. What the burst is doing at the
+        moment of the assertion is a fact rather than a hope, and the two timeouts below bound
+        only how long a *failing* run takes.
+        """
         engine = create_async_engine(
-            settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI, pool_size=5, max_overflow=10
+            settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI,
+            # Size and overflow are `create_async_engine`'s own defaults, spelled out so the
+            # numbers below are readable. `pool_timeout` is not - it defaults to 30 s, and
+            # waiting that out is the very failure under test, so a run that reintroduces it
+            # should say so quickly instead of stalling the suite for half a minute.
+            pool_size=5,
+            max_overflow=10,
+            pool_timeout=_UNRELATED_QUERY_TIMEOUT,
         )
         sessions = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-        concurrent, outbound_seconds = 15, 0.5  # 15 is exactly the pool ceiling: 5 + 10 overflow
+        concurrent = 15  # exactly the pool ceiling: 5 + 10 overflow
+
+        all_outbound = anyio.Event()  # every resolve is now parked in its record fetch
+        measured = anyio.Event()  # ...and may go on to finish
+        arrived = 0
 
         def build(**kwargs: Any) -> httpx.AsyncClient:
             async def handle(request: httpx.Request) -> httpx.Response:
-                await anyio.sleep(outbound_seconds)
+                nonlocal arrived
                 url = str(request.url)
                 if "wikidata" in url:
                     return httpx.Response(200, json={"query": {"search": []}})
                 if "AphiaRecordByAphiaID" in url:
+                    # Exactly one of these per resolve, because `_record` reports the taxon as
+                    # its own accepted id and the synonym branch never fires - which is what
+                    # lets the count below be a barrier rather than something that overshoots.
+                    arrived += 1
+                    if arrived == concurrent:
+                        all_outbound.set()
+                    await measured.wait()
                     return TestConcurrentResolvesDoNotExhaustThePool._record(url)
                 return httpx.Response(200, json=[])
 
@@ -1551,15 +1597,37 @@ class TestConcurrentResolvesDoNotExhaustThePool:
             async with sessions() as db:
                 await species_service.resolve_species(db, base + offset)
 
-        checkouts: list[int] = []
         # `AsyncEngine.pool` is typed as the base `Pool`, which does not declare the checkout
         # counters; the pool actually in use here is a queue pool and does.
         pool = cast(QueuePool, engine.pool)
+        checked_out: int | None = None  # None if the burst never assembled and nothing was read
+        stalled_at: int | None = None
+        unrelated_error: str | None = None
 
-        async def sample() -> None:
-            for _ in range(int(outbound_seconds * 10)):
-                await anyio.sleep(0.1)
-                checkouts.append(pool.checkedout())
+        async def measure() -> None:
+            """Read the pool once, with all fifteen resolves held inside their record fetch.
+
+            Nothing in here may escape: the parked resolves are waiting on `measured`, so an
+            exception leaving this task would hang the group instead of failing it.
+            """
+            nonlocal checked_out, stalled_at, unrelated_error
+            try:
+                with anyio.move_on_after(_BURST_ASSEMBLY_TIMEOUT) as scope:
+                    await all_outbound.wait()
+                if scope.cancelled_caught:
+                    stalled_at = arrived
+                    return
+                checked_out = pool.checkedout()
+                # The claim itself, not a proxy for it: an unrelated caller wanting a
+                # connection *now* is served, rather than waiting out `pool_timeout` and 500ing
+                # on an endpoint that has nothing to do with species.
+                try:
+                    async with sessions() as unrelated:
+                        await unrelated.execute(text("SELECT 1"))
+                except PoolTimeout as exc:
+                    unrelated_error = str(exc)
+            finally:
+                measured.set()
 
         try:
             with (
@@ -1569,16 +1637,18 @@ class TestConcurrentResolvesDoNotExhaustThePool:
                 async with anyio.create_task_group() as tasks:
                     for offset in range(concurrent):
                         tasks.start_soon(resolve, offset)
-                    tasks.start_soon(sample)
+                    tasks.start_soon(measure)
         finally:
             await engine.dispose()
 
-        # Sampled across the middle of the burst, when every resolve is waiting on the
-        # register. Without the release this reads 15 for the whole window and an unrelated
-        # endpoint asking for a connection waits out `pool_timeout` and fails.
-        steady = checkouts[len(checkouts) // 3 : 2 * len(checkouts) // 3]
-        assert steady, "the sampler never ran; the burst finished too fast to measure"
-        assert max(steady) < concurrent, f"connections pinned across the outbound calls: {checkouts}"
+        assert checked_out is not None, (
+            f"nothing was measured: only {stalled_at} of {concurrent} resolves reached the "
+            f"register within {_BURST_ASSEMBLY_TIMEOUT}s"
+        )
+        # Zero rather than "fewer than fifteen", which is what the window makes provable: every
+        # resolve released its read before going outbound, so nothing at all is checked out.
+        assert checked_out == 0, f"{checked_out} connections pinned while every resolve was outbound"
+        assert unrelated_error is None, f"an unrelated query could not get a connection: {unrelated_error}"
 
 
 @pytest.mark.skipif(not db_available(), reason="No database connection available")

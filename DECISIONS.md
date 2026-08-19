@@ -7653,10 +7653,36 @@ before trusting it**, and each of these now fails when its own regression is rei
 
 The real-pool test (`TestConcurrentResolvesDoNotExhaustThePool`) supplies the other half — the
 ordering tests pin *that* the release happens, this pins what it buys, measured against an actual
-pool: fifteen concurrent resolves, sampling `pool.checkedout()` mid-burst. With the releases removed
-it reads fifteen for the whole window and an unrelated query waits out `pool_timeout` and fails;
-with them it reads zero. It has to use a real engine, because the bug lives entirely in SQLAlchemy's
+pool: fifteen concurrent resolves, every one of them parked inside its WoRMS record fetch until all
+fifteen have arrived there, and only then is anything read. Two things at that instant —
+`pool.checkedout()` is zero, and a sixteenth session asking for a connection is served immediately.
+With the releases removed the first reads fifteen and the second fails with SQLAlchemy's own
+`QueuePool limit of size 5 overflow 10 reached, connection timed out`, which is the production
+symptom verbatim. It has to use a real engine, because the bug lives entirely in SQLAlchemy's
 checkout lifecycle and a mocked session has no pool to exhaust.
+
+**That barrier replaced a sampler, which flaked on CI.** The first version appended
+`pool.checkedout()` every 100 ms for the length of one outbound call and asserted over the middle
+third of the samples, on the assumption that the middle third of the sampling run sits in the steady
+middle of the burst. Nothing enforced that, and the two halves of it were not even the same kind of
+quantity: the sample count was fixed at five by construction, so the window was always the readings
+at roughly 200 ms and 300 ms, while the burst's *start* was not fixed at all — fifteen pool
+connections have to be opened before the first resolve can go outbound. On a loaded runner that
+ramp-up was still going at 300 ms, and the run failed `assert 15 < 15` on `[15, 15, 0, 0, 0]` — with
+the trailing zeros showing the release had been working the whole time and the assertion reading the
+wrong instants. A re-run of the same commit passed.
+
+The principle was already written down in *"`parse_all` exists so FIT decodes the file once"*, where
+`TestExtractAllSharesOneDecode` counts scans rather than elapsed time for exactly this reason. It
+had simply not been applied here: **an assertion over a wall-clock window is a bet on the machine's
+speed.** The repair is not a wider window or more samples — both only shift the odds — but making
+the moment of measurement something the test *causes*. The mock register now holds every resolve
+until all fifteen are outbound, so the pool is read at a point that is a fact rather than a hope,
+and the `anyio.sleep` that stood in for a slow register is gone with it (the test also went from
+~1.2 s to ~0.2 s, which is incidental but is the usual shape of this fix). The two timeouts left in
+it bound only a *failing* run: how long to wait for a burst that never assembles, and the
+deliberately short `pool_timeout` that makes a reintroduced pin fail in five seconds rather than
+thirty.
 
 That test *also* failed its own mutation check on the first attempt, for a reason worth naming: it
 resolved a fixed range of AphiaIDs, and those rows persist in the developer's database — so from the
