@@ -57,6 +57,18 @@ services:
       context: .
       dockerfile: Dockerfile
     command: arq app.core.worker.settings.WorkerSettings
+    # Overrides the image's HEALTHCHECK, which GETs `/api/v1/health` over localhost. This
+    # service shares `api`'s image but serves no HTTP, so the inherited check can only
+    # ever fail - it reported `(unhealthy)` permanently while the worker ran its crons
+    # fine. Arq's own `--check` reads the sentinel key the worker keeps in Redis (see
+    # `health_check_interval` in app/core/worker/settings.py, which bounds how stale a
+    # pass can be), so this covers both "the process is alive" and "it can reach Redis".
+    healthcheck:
+      test: ["CMD", "arq", "--check", "app.core.worker.settings.WorkerSettings"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     env_file:
       - ./src/.env
     depends_on:
