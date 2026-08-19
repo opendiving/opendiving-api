@@ -109,7 +109,9 @@ SMTP_TLS_MODE="none"
 ```
 
 Comment `SMTP_HOST` back out when you're done: left set with no Mailpit running, sends fail against
-a dead host and no link is logged either.
+a dead host and no link is logged either. Either way, an edit to `src/.env` needs
+`docker compose up -d --force-recreate api` to take effect — a plain `restart` reuses the
+environment the container was created with.
 
 ## API overview
 

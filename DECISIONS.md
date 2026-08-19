@@ -8051,3 +8051,14 @@ the default path, that flow would quietly stop being the one people know. The do
 needs its exit documented too: a leftover `SMTP_HOST=mailpit` with a later plain `docker compose up`
 sends at a dead host and logs no link either, so `.env.example` and the README both say to comment
 it back out.
+
+And the exit has a trap of its own, hit while verifying this change: **`docker compose restart` does
+not re-read `env_file`**. Compose resolves that file into the container's environment at *create*
+time, so editing `src/.env` and restarting leaves the old values in place - the app goes on
+reporting the setting you just deleted, and the obvious conclusion ("my `.env` edit didn't take, or
+this is being read from somewhere else") is the wrong one.
+`docker compose up -d --force-recreate api` is what applies it.
+
+This does not contradict the model-change workflow in `AGENTS.md`, where a plain restart genuinely
+is enough: `src/app` is a bind mount, so *code* changes are already live and only the process needs
+restarting. Environment is the opposite - baked into the container at creation, not mounted.
