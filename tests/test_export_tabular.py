@@ -25,6 +25,7 @@ from src.app.services.export.tabular import (
     DIVES_HEADER,
     GEAR_ITEMS_HEADER,
     GEAR_SERVICE_HEADER,
+    SPECIES_HEADER,
     TRIPS_HEADER,
     _utc_offset,
     write_certifications_csv,
@@ -33,6 +34,7 @@ from src.app.services.export.tabular import (
     write_gear_items_csv,
     write_gear_service_csv,
     write_mixtures_csv,
+    write_species_csv,
     write_trips_csv,
 )
 from tests.helpers.export import UUIDS, build_bundle, full_bundle, make_dive, mixture
@@ -141,6 +143,34 @@ class TestUtcOffset:
         assert _utc_offset(minutes) == expected
 
 
+class TestSpeciesCsv:
+    def test_the_dives_row_folds_the_scientific_names_in_order(self):
+        """Scientific names, not the common ones the dive page shows: they are unambiguous
+        and every row has one, which a common name does not."""
+        rows = _parse(_render(write_dives_csv(full_bundle())))
+
+        assert rows[1][rows[0].index("species")] == "Amphiprion ocellaris; Muraenidae"
+        # The dive that saw nothing gets an empty cell, not the word "None".
+        assert rows[3][rows[0].index("species")] == ""
+
+    def test_the_count_is_dives_not_sightings(self):
+        """The same distinction `species_seen` makes. The clownfish is on two of the three
+        dives and the moray on one, and neither is on the bare dive."""
+        rows = _parse(_render(write_species_csv(full_bundle())))
+
+        assert rows[0] == list(SPECIES_HEADER)
+        assert [(row[0], row[4]) for row in rows[1:]] == [("Amphiprion ocellaris", "2"), ("Muraenidae", "1")]
+
+    def test_a_species_with_no_common_name_leaves_the_cell_empty(self):
+        rows = _parse(_render(write_species_csv(full_bundle())))
+        by_name = {row[0]: row for row in rows[1:]}
+
+        assert by_name["Amphiprion ocellaris"][1] == "ocellaris clownfish"
+        assert by_name["Muraenidae"][1] == ""
+        # The AphiaID is the column that means anything outside this database.
+        assert by_name["Muraenidae"][3] == "125230"
+
+
 class TestTheNormalizedFiles:
     def test_mixtures_carry_one_row_per_cylinder(self):
         rows = _parse(_render(write_mixtures_csv(full_bundle())))
@@ -235,9 +265,9 @@ class TestTheNormalizedFiles:
     def test_every_file_carries_the_byte_order_mark_not_just_dives(self):
         """`dive-sites.csv`, `trips.csv` and `certifications.csv` hold the same free text
         as `dives.csv`, and a diver who unzips the archive and double-clicks one hits the
-        same Excel mojibake. Pinned across all seven so a file added later cannot quietly
+        same Excel mojibake. Pinned across all eight so a file added later cannot quietly
         be the exception."""
         bundle = full_bundle()
-        assert len(CSV_WRITERS) == 7
+        assert len(CSV_WRITERS) == 8
         for filename, writer in CSV_WRITERS:
             assert _render(writer(bundle)).startswith(BOM), filename

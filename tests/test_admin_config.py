@@ -108,6 +108,39 @@ class TestHardDeletedModelsCannotBeDeletedFromThePanel:
             assert '"delete"' in actions, model
 
 
+class TestTheGlobalCatalogCannotBeDeletedFromThePanel:
+    """`Species` and `SpeciesName` are registered without `"delete"` too, but for a
+    different reason than the five hard-deleted models above.
+
+    Those are one diver's rows. A species is **everybody's**: deleting one takes every
+    `dive_species` row pointing at it through the FK cascade, silently removing a sighting
+    from other people's dives - and with no cache invalidation, since that lives on the API
+    routes and there is no route here to hang it on. Nothing in the app deletes a species by
+    design (see `models/species.py`), so the panel does not either.
+
+    Asserted against the source for the same reason the class above is: importing
+    `register_admin_views` means constructing a `CRUDAdmin`, which wants a database.
+    """
+
+    @pytest.mark.parametrize("model", ("Species", "SpeciesName"))
+    def test_the_view_is_registered_without_delete(self, model: str):
+        source = TestHardDeletedModelsCannotBeDeletedFromThePanel._views_source()
+        block = source[source.index(f"model={model},") :]
+        actions = block[block.index("allowed_actions=") : block.index("\n    )")]
+
+        assert '"delete"' not in actions, model
+        assert '"view", "create", "update"' in actions, model
+
+    def test_the_join_table_keeps_its_delete(self):
+        """Unlinking a sighting from a dive is exactly what it should do, and it affects
+        only that dive - so `DiveSpecies` is registered like the other join tables."""
+        source = TestHardDeletedModelsCannotBeDeletedFromThePanel._views_source()
+        block = source[source.index("model=DiveSpecies,") :]
+        actions = block[block.index("allowed_actions=") : block.index("\n    )")]
+
+        assert '"delete"' in actions
+
+
 class TestDefaults:
     """Asserted against the source rather than `Settings.model_fields`, because
     `starlette.config.Config` resolves each field's default from the developer's own

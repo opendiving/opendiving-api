@@ -34,6 +34,9 @@ from src.app.schemas.dive import DiveCreateRequest, DiveUpdate, DiveUpdateReques
 from src.app.schemas.dive_mixture import GasRole
 
 TRIP_UUID = uuid7()
+# The one species uuid the stubbed resolver refuses, so the "not found" branch is reachable
+# without a database.
+UNKNOWN_SPECIES_UUID = uuid7()
 START_TIME = datetime(2026, 4, 4, 10, 4, 47, tzinfo=timezone(timedelta(hours=2)))
 
 
@@ -46,6 +49,16 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """
     seen: dict[str, Any] = {}
 
+    async def _fake_resolve_species(*, db: Any, species_uuids: list[uuid_pkg.UUID]) -> dict | None:
+        """Every uuid resolves, unless a test asked for the unknown-species branch by
+        passing `UNKNOWN_SPECIES_UUID`."""
+        if UNKNOWN_SPECIES_UUID in species_uuids:
+            return None
+        return {value: index + 100 for index, value in enumerate(species_uuids)}
+
+    async def _record_species(*, db: Any, dive_id: int, species_ids: list[int]) -> None:
+        seen["species_ids"] = species_ids
+
     db_dive = MagicMock()
     db_dive.id = 11
     db_dive.user_id = 1
@@ -56,6 +69,8 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(dives_module, "_get_owned_dive", AsyncMock(return_value=db_dive))
     monkeypatch.setattr(dives_module.crud_dives, "update", fake_update)
     monkeypatch.setattr(dives_module, "resolve_trip_id_for_user", AsyncMock(return_value=77))
+    monkeypatch.setattr(dives_module, "resolve_species_ids", AsyncMock(side_effect=_fake_resolve_species))
+    monkeypatch.setattr(dives_module, "replace_species_for_dive", AsyncMock(side_effect=_record_species))
     monkeypatch.setattr(dives_module, "recalculate_dive_stats", AsyncMock())
     monkeypatch.setattr(dives_module, "recalculate_gear_dive_counts", AsyncMock())
     monkeypatch.setattr(dives_module, "invalidate_dive_caches", AsyncMock())
@@ -120,6 +135,63 @@ class TestTripDetach:
             await _patch(DiveUpdateRequest.model_validate({"trip_uuid": str(TRIP_UUID)}))
 
         assert "update_data" not in captured
+
+
+class TestSpeciesReplacement:
+    """`species_uuids` follows the rule the other list-valued fields already follow -
+    omitted leaves them alone, `[]` clears them, a list replaces them wholesale.
+
+    Worth its own class rather than trusting the symmetry, because species arrived last and
+    the branch that gates cache invalidation had to grow a fourth clause. A `species_uuids`
+    edit that skipped it would leave a dive's cached read showing the old sightings for the
+    full hour that key lives.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_list_is_written_in_the_order_given(self, captured: dict[str, Any]) -> None:
+        first, second = uuid7(), uuid7()
+
+        await _patch(DiveUpdateRequest.model_validate({"species_uuids": [str(first), str(second)]}))
+
+        # Resolved to internal ids, in order: the public uuid must never reach the column.
+        assert captured["species_ids"] == [100, 101]
+
+    @pytest.mark.asyncio
+    async def test_an_empty_list_clears_them(self, captured: dict[str, Any]) -> None:
+        """Distinct from omitting the key, and the only way a diver removes their last
+        sighting."""
+        await _patch(DiveUpdateRequest.model_validate({"species_uuids": []}))
+
+        assert captured["species_ids"] == []
+
+    @pytest.mark.asyncio
+    async def test_an_omitted_key_leaves_them_untouched(self, captured: dict[str, Any]) -> None:
+        await _patch(DiveUpdateRequest.model_validate({"notes": "Turtle on the safety stop"}))
+
+        assert "species_ids" not in captured
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_species_is_rejected_before_the_write(self, captured: dict[str, Any]) -> None:
+        """A 422 naming which, like an unknown trip or gear item - not a 403. There is no
+        ownership to fail here (the catalog is global), only existence."""
+        with pytest.raises(UnprocessableEntityException, match="Species not found."):
+            await _patch(DiveUpdateRequest.model_validate({"species_uuids": [str(UNKNOWN_SPECIES_UUID)]}))
+
+        assert "species_ids" not in captured
+
+    @pytest.mark.asyncio
+    async def test_a_species_only_edit_still_invalidates_the_caches(
+        self, captured: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The fourth clause on the invalidation gate. A PATCH carrying nothing but
+        `species_uuids` leaves `update_data` empty, so without it the whole block is skipped
+        and `user_{id}_dive:{uuid}` keeps serving the old sightings for an hour."""
+        invalidate = AsyncMock()
+        monkeypatch.setattr(dives_module, "invalidate_dive_caches", invalidate)
+
+        await _patch(DiveUpdateRequest.model_validate({"species_uuids": [str(uuid7())]}))
+
+        invalidate.assert_awaited_once()
 
 
 class TestNonNullableFields:
