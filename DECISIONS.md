@@ -7612,6 +7612,17 @@ wants a shared util rather than a third docstring. Both are pinned by ordering t
 `TestProfileExtractionReleasesTheTransaction`), because what regresses is somebody moving a query
 back above the release, and no behavioural test would notice.
 
+**And an ordering test is easy to write so that it does not test the ordering.** The first version
+of this one asserted `calls.index("release") < calls.index("outbound")`, which passes happily while
+the bug is back: `index` returns the *first* occurrence, so a read reinserted between the release
+and the fan-out leaves `["query", "release", "query", "outbound"]` and every comparison still holds.
+The assertion has to be positional — no query anywhere in the window between the last release and
+the outbound call. The same round found the synonym branch's release untested at all, because the
+fixture driving the test has `valid_AphiaID == AphiaID` and never enters it; that release could be
+deleted with the suite green. Both were caught by review rather than by the tests, which is the
+point worth keeping: **a test whose failure mode is "still passes" is worth mutating on purpose
+before trusting it**, and each of these now fails when its own regression is reintroduced.
+
 ### The common-name rule, and why it is a prefix test
 
 `species.common_name` is a single English display name, chosen at resolve time as: the English

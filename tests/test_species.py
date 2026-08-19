@@ -1384,6 +1384,28 @@ class TestTheReadTransactionIsReleasedBeforeGoingOutbound:
 
         return _Providers(record)
 
+    @staticmethod
+    def _assert_no_query_is_held_open(calls: list[str]) -> None:
+        """No `query` may sit between a release and the outbound call that follows it.
+
+        Positional rather than `calls.index(...)`, which returns the *first* occurrence and so
+        cannot see the regression this class exists for: a read added back between the release
+        and the fan-out leaves `["query", "release", "query", "outbound"]`, where every
+        index-based comparison still holds while the connection is pinned open again.
+        """
+        assert "outbound" in calls, "nothing went outbound; the test is not exercising the path"
+        assert "release" in calls, "the local read's transaction is never released"
+
+        for position, call in enumerate(calls):
+            if call != "outbound":
+                continue
+            preceding = calls[:position]
+            assert "release" in preceding, f"went outbound at {position} before any release: {calls}"
+            # Everything after the last release, up to this outbound call, must be free of
+            # database work - that window is exactly what would be held idle-in-transaction.
+            window = preceding[len(preceding) - preceding[::-1].index("release") :]
+            assert "query" not in window, f"a query is held open across the outbound call: {calls}"
+
     @pytest.mark.asyncio
     async def test_search_releases_before_the_fan_out(self, no_redis: None) -> None:
         calls: list[str] = []
@@ -1392,10 +1414,8 @@ class TestTheReadTransactionIsReleasedBeforeGoingOutbound:
         with self._marking_providers(calls, by_name=[CLOWNFISH_RECORD]):
             await species_service.search_species(db, "clownfish")
 
-        assert "release" in calls, "the local read's transaction is never released"
-        # The local query, then the release, then anything outbound.
-        assert calls.index("release") < calls.index("outbound")
-        assert calls.index("query") < calls.index("release")
+        assert calls[0] == "query", "the local catalog is read first, or this proves nothing"
+        self._assert_no_query_is_held_open(calls)
 
     @pytest.mark.asyncio
     async def test_resolve_releases_before_asking_worms(self, no_redis: None) -> None:
@@ -1405,7 +1425,45 @@ class TestTheReadTransactionIsReleasedBeforeGoingOutbound:
         with self._marking_providers(calls, record=CLOWNFISH_RECORD):
             await species_service.resolve_species(db, 278400)
 
-        assert calls.index("release") < calls.index("outbound")
+        self._assert_no_query_is_held_open(calls)
+
+    @pytest.mark.asyncio
+    async def test_the_synonym_branch_releases_before_its_second_fetch(self, no_redis: None) -> None:
+        """The branch DECISIONS.md calls the worst case - two record fetches, the second
+        preceded by another local lookup - and the one `CLOWNFISH_RECORD` cannot reach, since
+        its `valid_AphiaID` is its own `AphiaID`. Without this, the third release could be
+        deleted with the whole suite still green.
+        """
+        calls: list[str] = []
+        db = self._tracking_db(calls)
+        valid_id = MANTA_SYNONYM_RECORD["valid_AphiaID"]
+        accepted = {
+            "AphiaID": valid_id,
+            "scientificname": "Mobula birostris",
+            "status": "accepted",
+            "rank": "Species",
+            "valid_AphiaID": valid_id,
+        }
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            calls.append("outbound")
+            url = str(request.url)
+            if "wikidata" in url:
+                return httpx.Response(200, json={"query": {"search": []}})
+            if f"AphiaRecordByAphiaID/{valid_id}" in url:
+                return httpx.Response(200, json=accepted)
+            if "AphiaRecordByAphiaID" in url:
+                return httpx.Response(200, json=MANTA_SYNONYM_RECORD)
+            return httpx.Response(200, json=[])
+
+        with _Providers(handle):
+            await species_service.resolve_species(db, 105857)
+
+        # Both fetches happened, so the branch really was taken.
+        assert calls.count("outbound") >= 2
+        # And two separate lookups were released, not just the first.
+        assert calls.count("release") >= 2
+        self._assert_no_query_is_held_open(calls)
 
     @pytest.mark.asyncio
     async def test_an_already_known_species_is_returned_without_a_release(self, no_redis: None) -> None:
