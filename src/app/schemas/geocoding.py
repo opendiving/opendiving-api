@@ -33,10 +33,11 @@ class GeocodeResult(BaseModel):
     # expected to render it wherever it shows these results.
     #
     # A wire format, not display copy. A credit ending in a bare URL is folded into the one
-    # markdown shape the clients parse - `[text](url)`, and nothing else - so the licence can
-    # be *reached* rather than merely named; anything unfoldable is passed through and
+    # markdown shape the clients can parse - `[text](url)`, and nothing else - so the licence
+    # can be *reached* rather than merely named; anything unfoldable is passed through and
     # rendered as plain text. See `services.geocoding_service._linked_attribution`, and
-    # `DECISIONS.md` for why changing this shape is an API change.
+    # `DECISIONS.md` for why changing this shape is an API change and which client change has
+    # to land first.
     attribution: Annotated[
         str,
         Field(

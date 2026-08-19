@@ -938,9 +938,10 @@ class TestAttribution:
         assert credit.startswith("[") and "](" in credit
 
     def test_measures_the_length_cap_against_what_actually_ships(self):
-        """The fold adds four characters, so a licence just under the cap would clear the
-        guard and then fail `GeocodeResult`'s own `max_length`. Sized to land in that gap:
-        long enough that folding pushes it over 255, short enough that it starts under."""
+        """Folding grows the string by up to four characters, so a licence just under the cap
+        would clear the guard and then fail `GeocodeResult`'s own `max_length`. Sized to land
+        in that gap: long enough that folding pushes it over 255, short enough that it starts
+        under."""
         prefix, url = "Licensed under ", " https://example.com/l"
         licence = prefix + "x" * (geocoding_service._ATTRIBUTION_MAX_LENGTH - len(prefix) - len(url)) + url
         assert len(licence) == geocoding_service._ATTRIBUTION_MAX_LENGTH

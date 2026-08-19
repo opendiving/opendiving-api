@@ -7375,11 +7375,12 @@ follow, so honouring the scheme literally costs a plaintext hop and buys nothing
 is never touched — only the link target, and only `http:` → `https:`.
 
 **The length cap moved to after the fold.** `_ATTRIBUTION_MAX_LENGTH` is 255, the width of the
-schema field, and the fold is a net three characters longer (four brackets in, one space out).
-Checking the provider's length first would let a 253-character licence clear the guard and then
-raise a `ValidationError` inside `_normalize` — a 500 from the one path whose entire job is to
-degrade quietly. The length *logged* is still the provider's, since that is the number an operator
-would go looking for.
+schema field, and folding grows the string by up to four characters — four brackets in, one space
+out, and one more when an `http:` href is upgraded. That last one is easy to miss and is Nominatim's
+case, so +4 is the figure that matters; an already-`https` provider sees +3. Checking the provider's
+length first would let a 252-character licence clear the guard and then raise a `ValidationError`
+inside `_normalize` — a 500 from the one path whose entire job is to degrade quietly. The length
+*logged* is still the provider's, since that is the number an operator would go looking for.
 
 **Why this beat the two alternatives.** Substituting a fixed markdown credit of our own would have
 produced a shorter, prettier string and quietly credited OpenStreetMap for whatever the operator had

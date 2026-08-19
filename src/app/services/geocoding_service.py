@@ -344,7 +344,8 @@ def _text(value: Any) -> str | None:
 
 
 def _linked_attribution(credit: str) -> str:
-    """A credit ending in a bare URL, rewritten as the `[text](url)` the clients parse.
+    """A credit ending in a bare URL, rewritten as the one `[text](url)` shape the clients
+    can parse.
 
     The clients render this string as fine print, and a printed URL is not a link. The OSM
     Foundation's attribution guidelines ask for a way to *reach* the licence - "for example
@@ -463,9 +464,11 @@ def _normalize(row: dict[str, Any], *, with_bounding_box: bool = False) -> Geoco
     # thing this field exists to guarantee. Nominatim's own is about seventy characters, so
     # in practice this only fires for a provider doing something strange.
     #
-    # Measured *after* folding, not before: folding is a net three characters longer (four
-    # brackets in, one space out), so checking the provider's own length would let a
-    # 253-character licence through the guard and straight into a `ValidationError` on
+    # Measured *after* folding, not before. Folding grows the string by up to four: four
+    # brackets in, one space out, and one more when an `http:` href is upgraded - which is
+    # Nominatim's case, so +4 is the figure that matters rather than the +3 an already-`https`
+    # provider would see. Checking the provider's own length would therefore let a
+    # 252-character licence through the guard and straight into a `ValidationError` on
     # `GeocodeResult.attribution`. The length logged is still the provider's, since that is
     # the number an operator would go looking for.
     licence = _text(row.get("licence"))
