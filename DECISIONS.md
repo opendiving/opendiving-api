@@ -4951,7 +4951,7 @@ both directions.
   end-of-dive scalars, not a per-sample series.
 - **Gas `role`, gear sets, service schedules and history, c-card records.** No elements exist.
 
-**Two the plan expected to lose, and the schema allows after all:**
+**Three the plan expected to lose, and the schema allows after all:**
 
 - **`po2_limit` maps to `<mix><maximumpo2>`.** Which is why `_MixKey` includes it: a diver carrying
   the same EAN32 planned to 1.4 on the bottom and 1.6 on the ascent has defined two mixes as far as
@@ -4961,6 +4961,21 @@ both directions.
   `informationbeforedive/link` is `maxOccurs="unbounded"`, so a drift dive's whole itinerary fits.
   An importer that reads only the first link still gets the primary site, because it is first. The
   ordered list is in `export.json` regardless.
+- **Marine life has a slot — two of them — and species still do not reach the UDDF file.** The
+  species plan assumed UDDF 3.2.2 had none. It has `siteType`'s `<ecology>` (`ecologyType`) and,
+  closer to what we hold, `informationafterdive`'s `<observations>` (`observationsType`, which
+  extends `ecologyType`), so one dive's sightings do have somewhere to go. What has nowhere to go is
+  a *flat* list: `ecologyType` splits into `fauna`/`flora`, those into `invertebrata`/`vertebrata`,
+  and only then into some twenty taxonomic-group elements (`porifera`, `cnidaria`, `mollusca`,
+  `crustacea`, `chondrichthyes`, `reptilia`, ...), each a `singleLifeFormType` wrapping the
+  `<species>` (`speciesType`) entries. Emitting one means classifying every row into UDDF's own
+  mixed-rank, partly obsolete vocabulary — `coelenterata` beside `cnidaria`, `crustacea` a peer of
+  phyla — out of the WoRMS `phylum`/`class_name` strings `models/species.py` passes through
+  verbatim: a hand-maintained mapping this repo would then own, and get quietly wrong. The census
+  fields `speciesType` offers (`abundance` with `quality`/`occurence`, `dominance`, `lifestage`) are
+  all optional, so the blocker is that classification, not the per-sighting detail `DiveSpecies`
+  deliberately omits. Species go out in `export.json` and `species.csv`; the species feature leaves
+  `services/export/uddf.py` untouched.
 
 **And two the format forces a choice on:**
 
