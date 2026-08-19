@@ -697,10 +697,11 @@ async def _wikidata_search(query: str) -> _SourceAnswer:
             "srlimit": _WIKIDATA_SEARCH_LIMIT,
         }
     )
-    if payload is None:
-        return _SourceAnswer([], False, ok=False)
-
     qids = _wikidata_qids(payload)
+    if qids is None:
+        # Not a search response at all: transport failure, or a 200 carrying an error. Either
+        # way this source learned nothing, which is not the same as finding nothing.
+        return _SourceAnswer([], False, ok=False)
     if not qids:
         return _SourceAnswer([], False, ok=True)
 
@@ -709,12 +710,35 @@ async def _wikidata_search(query: str) -> _SourceAnswer:
     return _SourceAnswer(results, len(qids) >= _WIKIDATA_SEARCH_LIMIT, ok=entities_ok)
 
 
-def _wikidata_qids(payload: Any) -> list[str]:
+def _wikidata_qids(payload: Any) -> list[str] | None:
+    """The QIDs a search returned, `[]` for a search that matched nothing, or `None` for a
+    response that was not a search result at all.
+
+    **Three outcomes rather than two, and the third is the one worth having.** The Action API
+    reports most failures as **HTTP 200 with an `{"error": ...}` body** - read-only mode, a
+    busy CirrusSearch backend, a malformed query - so a reader that only checks the status
+    code sees a successful request, finds no `query.search` key, and reports "Wikidata has
+    nothing for you". That is indistinguishable downstream from a genuine miss, and it is what
+    let a WoRMS-only answer be cached for thirty days while Wikidata was simply refusing.
+
+    `None` is also what a `None` payload maps to, so the transport failure and the
+    application-level failure travel the same path from here on.
+    """
     if not isinstance(payload, dict):
-        return []
-    search = payload.get("query", {}).get("search") if isinstance(payload.get("query"), dict) else None
+        return None
+    if "error" in payload:
+        error = payload["error"]
+        code = error.get("code") if isinstance(error, dict) else None
+        logger.warning("Wikidata refused a search (%s).", code or "unknown")
+        return None
+
+    query = payload.get("query")
+    search = query.get("search") if isinstance(query, dict) else None
     if not isinstance(search, list):
-        return []
+        # A 200 that is neither an error nor a search result - a proxy, a CDN page rendered as
+        # JSON, or an API change. Not this app's business to interpret, and definitely not an
+        # empty register.
+        return None
     return [title for hit in search if isinstance(hit, dict) and isinstance(title := hit.get("title"), str) and title]
 
 
@@ -1101,6 +1125,8 @@ async def _wikidata_by_aphia_id(aphia_id: int) -> _WikidataEntity | None:
             "srlimit": 1,
         }
     )
+    # `None` and `[]` both mean "no entity to enrich with" on this path - unlike search, resolve
+    # degrades to a row without a qid either way, so the two need no separating here.
     qids = _wikidata_qids(payload)
     if not qids:
         return None

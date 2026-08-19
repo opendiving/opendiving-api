@@ -7522,6 +7522,59 @@ taxonomy-less, and storing it under the 30-day hit TTL would let one slow aftern
 a second. It is the geocoder's "we could not ask" rule extended to "we could not ask *all* of them",
 a distinction a two-source search has and a one-source one does not.
 
+**`complete` has to mean two different things, and the second one is the dangerous half.** The first
+version of it tracked only the time budget — `len(collected) == len(sources)` — which is correct for
+a source that is still in flight when the budget expires, and silently wrong for one that *fails
+fast*. A connect-refused, an error status, a body over the size cap, a body that does not parse:
+every one of those returns promptly and looks downstream exactly like "this register had nothing for
+you", so the source counted as having answered and the partial result was pinned for thirty days.
+Review caught it, and it was reproducible in seconds — WoRMS refusing the connection while Wikidata
+answered produced a taxonomy-less result cached for the full month.
+
+So each source now returns a `_SourceAnswer` carrying an explicit `ok`, and `complete` is
+`answered and all(ok)`. The general rule worth carrying forward: **`[]` from a provider means
+nothing until you know whether it is an answer or a failure**, and any layer that flattens the two
+into one empty list has thrown away the only thing the cache TTL needed to know.
+
+### `wbgetentities` is asked in chunks of four, because a taxon entity is enormous
+
+`props=claims` returns *every* statement on a Wikidata entity, and a taxon carries a great many —
+dozens of external-database identifiers alone — so one entity runs around 50 KB. The first version
+asked for all ten search hits in one call, which is well-formed and well within the API's fifty-id
+limit, and routinely blew past `_MAX_RESPONSE_BYTES`. Measured against the live API with the exact
+parameters this code sends, for the ids its own search returns: **"shark" 667 KB, "turtle" 642 KB,
+"dolphin" 568 KB**, against a 512 KB cap.
+
+The failure was invisible and inverted: tripping the cap makes `_request` return `None`, which
+emptied the **entire** Wikidata contribution — the common-name layer this whole two-source design
+exists for — and it did so only for the *popular* queries. "clownfish" (284 KB) worked; "shark" did
+not. A feature that breaks harder the more ordinary the input is exactly the kind that ships.
+
+Chunked at four rather than raising the cap: the cap is a bound on what a hostile or broken host can
+make this process buffer, and tuning it up to accommodate an unbounded payload gives that up for a
+payload we can simply ask for in pieces. Four leaves roughly a two-fold margin against the heaviest
+entities measured. The chunks run concurrently and share the provider throttle.
+
+### The WoRMS search term goes in the URL *path*, so it must be percent-encoded
+
+Unlike the geocoder next door — which passes user text as a query parameter, where httpx encodes it
+— WoRMS's routes are `/AphiaRecordsByName/{name}`, with the diver's typed term as a **path
+segment**. Interpolating it raw was a path injection, and review caught it. Verified with the pinned
+httpx: a search for `../../../etc/passwd` builds a URL that httpx normalizes to
+`marinespecies.org/etc/passwd` before sending, so any authenticated user could point this server's
+outbound request at an arbitrary path on that host and have the result cached for a month under
+their own string. The quieter half of the same bug: a `#` or `?` in the term truncates the search
+silently rather than being sent as part of the name.
+
+`_worms` therefore takes the endpoint and the segment as **separate arguments** and quotes the
+segment itself with `quote(segment, safe="")`. Structural rather than a call to remember: there is
+no way to reach `_request` from here with an unencoded segment. `safe=""` because nothing is safe in
+a taxon name — `/` in particular has to be encoded or it silently makes a new path segment.
+
+The general lesson, since this codebase now has one provider of each kind: **check whether user
+input lands in the path or the query string**, because the HTTP client only encodes the second, and
+the geocoder's shape is not transferable to a provider that uses the first.
+
 ### The common-name rule, and why it is a prefix test
 
 `species.common_name` is a single English display name, chosen at resolve time as: the English

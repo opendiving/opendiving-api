@@ -596,6 +596,61 @@ class TestCaching:
         assert set(fake_redis.expiries.values()) == {species_service._MISS_TTL_SECONDS}
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("label", "body"),
+        [
+            # The Action API's default error format: a 200 with an error object, which is how
+            # Wikidata reports read-only mode and a busy CirrusSearch backend. Nothing about
+            # the transport says anything went wrong.
+            ("an error body", {"error": {"code": "readonly", "info": "The wiki is read-only."}}),
+            # A 200 that is neither an error nor a search result - a proxy or a CDN page
+            # rendered as JSON. Not an empty register either.
+            ("an unrecognizable shape", {"unexpected": True}),
+        ],
+    )
+    async def test_a_wikidata_200_that_is_not_a_search_result_is_a_failure(
+        self, fake_redis: FakeRedis, label: str, body: dict
+    ):
+        """The gap the first version of `ok` left open, and the reason `_wikidata_qids` has
+        three outcomes rather than two.
+
+        Checking only the status code sees a successful request, finds no `query.search`, and
+        reports "Wikidata has nothing for you" - indistinguishable downstream from a genuine
+        miss, and enough to pin a WoRMS-only answer for thirty days while Wikidata was simply
+        refusing.
+        """
+        db = _empty_db()
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            if "wikidata" in str(request.url):
+                return httpx.Response(200, json=body)
+            return httpx.Response(200, json=[CLOWNFISH_RECORD])
+
+        with _Providers(handle):
+            response = await species_service.search_species(db, "clownfish")
+
+        # WoRMS answered, so there is a real result - which is exactly what makes the wrong
+        # TTL reachable.
+        assert len(response.results) == 1
+        assert set(fake_redis.expiries.values()) == {species_service._MISS_TTL_SECONDS}
+
+    @pytest.mark.asyncio
+    async def test_a_genuinely_empty_wikidata_search_still_earns_the_month(self, fake_redis: FakeRedis):
+        """The distinction the test above rests on: "matched nothing" is an answer, and must
+        not be dragged down to the short TTL along with the failures."""
+        db = _empty_db()
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            if "wikidata" in str(request.url):
+                return httpx.Response(200, json={"query": {"search": []}})
+            return httpx.Response(200, json=[CLOWNFISH_RECORD])
+
+        with _Providers(handle):
+            await species_service.search_species(db, "clownfish")
+
+        assert set(fake_redis.expiries.values()) == {species_service._HIT_TTL_SECONDS}
+
+    @pytest.mark.asyncio
     async def test_a_healthy_fan_out_still_earns_the_month(self, fake_redis: FakeRedis):
         """The other half: the short TTL must be the exception, or nothing is ever cached
         usefully and the registers get asked on every keystroke."""
