@@ -1560,7 +1560,10 @@ the module-level `local_session`, bound to the app's long-lived `async_engine`. 
 each test a fresh event loop and a pooled asyncpg connection belongs to the loop that opened it, so
 the second test inherits the first one's dead-loop connection and fails with "attached to a
 different loop". The class disposes `async_engine` in an autouse fixture's teardown, which runs
-inside the test's own loop - the same constraint `async_db` solves with an engine per test.
+inside the test's own loop - the same constraint `async_db` solves with an engine per test, and the
+same one `test_export_loader.py`'s `_load` solves with a `try/finally` around its own helper. A
+fixture rather than a helper here only because the job is called directly, leaving no wrapper of
+ours to put the `finally` in.
 
 ## The digest's "today" is UTC, and that's fine at date granularity
 

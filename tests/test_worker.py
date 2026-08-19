@@ -314,14 +314,19 @@ class TestSendGearServiceDigestsAgainstPostgres:
     async def _dispose_the_app_engine(self) -> AsyncGenerator[None]:
         """Return the app's own pool to a clean state after each test in this class.
 
-        Unlike the rest of the database-backed suite, these tests can't take the
-        `async_db` fixture and its per-test engine: the job under test opens its own
-        session from the module-level `local_session`, which is bound to the app's
+        These tests can't take the `async_db` fixture and its per-test engine, the way
+        most of the database-backed suite does: the job under test opens its own session
+        from the module-level `local_session`, which is bound to the app's
         session-lifetime `async_engine`. pytest-asyncio gives each test a fresh event
         loop, and a pooled asyncpg connection belongs to the loop that opened it, so
         without this the second test here is handed the first test's dead-loop connection
         and dies with "attached to a different loop". Teardown runs inside the test's own
         loop, which is what makes the close legal.
+
+        `test_export_loader.py`'s `_load` disposes the same engine for the same reason,
+        in a `try/finally` around its own helper. A fixture rather than a helper here
+        because the job is called directly, with no wrapper of ours to put the `finally`
+        in.
         """
         yield
         await async_engine.dispose()
