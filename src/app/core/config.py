@@ -152,10 +152,10 @@ class SMTPTLSMode(Enum):
 
 class EmailSettings(BaseSettings):
     # SMTP is the only transport (see `services.email_service`). Every provider speaks it -
-    # including Resend, which this project's own deployment still sends through as
-    # `SMTP_HOST=smtp.resend.com` with the API key as `SMTP_PASSWORD` - and so does every
-    # relay a self-hoster already has. Unset `SMTP_HOST` is the documented local setup:
-    # nothing is sent and the magic-link URL is logged instead.
+    # Resend included, as `SMTP_HOST=smtp.resend.com` with the API key as `SMTP_PASSWORD` -
+    # and so does every relay a self-hoster already has. Unset `SMTP_HOST` is the documented
+    # local setup, and currently the only one in use: nothing is sent and the magic-link URL
+    # is logged instead.
     SMTP_HOST: str | None = config("SMTP_HOST", default=None)
     SMTP_PORT: int = config("SMTP_PORT", default=587)
     # Independently optional, because an anonymous relay is a legitimate setup (Mailpit, an

@@ -7981,9 +7981,14 @@ actually lost by dropping it is one thing: Resend's HTTP error bodies are more l
 status codes. Everything else survives the switch, which is why this was a cheaper call than it
 first looked. Idempotency keys are a header (`Resend-Idempotency-Key`), webhooks are account-level
 HTTP deliveries that never involved the sending SDK at all, and mail sent over SMTP still appears in
-Resend's dashboard - so the project's own deployment keeps its observability while sending as
-`SMTP_HOST=smtp.resend.com`, username `resend`, password = the same API key that used to be
+Resend's dashboard - so a deployment that wants Resend keeps its observability while sending as
+`SMTP_HOST=smtp.resend.com`, username `resend`, password = whatever would have been
 `RESEND_API_KEY`. **That escape hatch is the point**: dropping the SDK did not drop the provider.
+
+Nothing is deployed anywhere today (`AGENTS.md`), so this cost nothing to switch and there was no
+migration to sequence - worth saying because the reasoning above reads like it was weighed against a
+live sending reputation, and it wasn't. What it was weighed against is the *next* deployment, which
+now has one transport to configure instead of a choice between two.
 
 ### `smtplib` in a thread, not `aiosmtplib`
 

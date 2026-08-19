@@ -7,8 +7,8 @@ digest (see `core.worker.functions.send_gear_service_digests`), and the contact 
 the event loop" plumbing only lives in one place.
 
 SMTP rather than any vendor's HTTP API because it is the one interface every provider
-and every self-hosted relay already speaks - including Resend, which this project's own
-deployment still sends through, as `SMTP_HOST=smtp.resend.com`. `smtplib` from the
+and every self-hosted relay already speaks - Resend included, which is reachable as
+`SMTP_HOST=smtp.resend.com` with the API key as the password. `smtplib` from the
 standard library rather than `aiosmtplib` because it costs no dependency and the
 codebase already standardizes on running blocking clients in a worker thread (see
 `core.security`, which cites this module for the same treatment).
