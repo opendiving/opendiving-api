@@ -7643,6 +7643,29 @@ The alternative — leaving the fields null — was rejected because both column
 resolved row, and a schema whose optionality differs between a search hit and the catalog row it
 becomes is a worse contract than a sentinel that says the same thing in both places.
 
+### Test fixtures in a global table are visible to real accounts
+
+The suite's Postgres-backed tests write real rows to the developer's own database and nothing cleans
+them up - `create_user`'s docstring records that as a deliberate trade, and it is fine for every
+table that came before this one, because those rows hang off a fixture `user_id` and no real account
+can see them.
+
+`species` broke that assumption the moment it existed: a fixture row is in *everyone's* picker. This
+was found the boring way — a developer cleared the catalog by hand, the next `pytest` run put thirty
+rows straight back, and `?q=clownfish` was topped by test data.
+
+The fix is naming, not cleanup: `create_species` writes `zzfixture-species-<hex>` and the
+`species_name` fixtures write `zzfixture-name-<hex>`, so no query a diver would type can reach them.
+Two earlier attempts are worth recording because both looked sufficient and were not —
+`Amphiprion <hex>` and `Testudo fixtura <hex>` are both real genera, and uniquifying a fixture name
+to `clownfish <hex>` does nothing at all when the search is `%clownfish%`. **Making a fixture name
+unique is not the same as making it unmatchable**, and only the second one helps here.
+
+Cleanup was considered and rejected as disproportionate: it would diverge from the convention every
+other generator follows, and the rows are harmless once they cannot be found. The rule to carry
+forward is the one-liner, for whatever the next non-user-scoped table turns out to be: **fixtures
+for a global table need names that no real query can return.**
+
 ### Persist at pick time, not at dive-save time
 
 `POST /species/resolve` is called when the diver picks a species in the form, so by the time the

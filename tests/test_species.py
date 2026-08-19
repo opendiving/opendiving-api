@@ -1132,10 +1132,11 @@ class TestConstraints:
 
     def test_a_species_cannot_carry_the_same_name_twice_for_one_kind(self, db: Session):
         species = create_species(db)
-        # Suffixed like every other fixture name here, and for one extra reason: these rows
-        # go into the developer's own database and nothing cleans them up, so a fixture
-        # named plainly "clownfish" turns up in the dev instance's species picker forever.
-        name = f"clownfish {uuid7().hex[-8:]}"
+        # Not "clownfish", and not merely a *unique* "clownfish <hex>" either - the search
+        # is a substring match, so anything containing a real name still surfaces in the dev
+        # instance's picker, and these rows are global and never cleaned up. See
+        # `create_species` for why that matters here and nowhere else in the suite.
+        name = f"zzfixture-name-{uuid7().hex[-8:]}"
         db.add(SpeciesName(species_id=species.id, name=name, kind="common", source="wikidata"))
         db.commit()
 
@@ -1148,7 +1149,9 @@ class TestConstraints:
         """The constraint is on `(species_id, name, kind)`, not `(species_id, name)`: a
         taxon's accepted binomial can legitimately also be recorded as somebody's synonym."""
         species = create_species(db)
-        name = f"Mobula birostris {uuid7().hex[-8:]}"
+        # The real case this stands for is a binomial that is one taxon's accepted name and
+        # another's synonym; the string itself is synthetic for the reason above.
+        name = f"zzfixture-name-{uuid7().hex[-8:]}"
         db.add(SpeciesName(species_id=species.id, name=name, kind="scientific", source="worms"))
         db.add(SpeciesName(species_id=species.id, name=name, kind="synonym", source="worms"))
         db.commit()
