@@ -25,9 +25,17 @@ def _settings(**overrides):
 
 
 class TestFromAddressIsRequiredWithSMTP:
-    def test_a_relay_with_no_from_address_fails_startup(self):
+    @pytest.mark.parametrize(
+        "environment", [EnvironmentOption.LOCAL, EnvironmentOption.STAGING, EnvironmentOption.PRODUCTION]
+    )
+    def test_a_relay_with_no_from_address_fails_startup(self, environment):
+        """Every environment, deliberately. Unlike the admin-password guard next to it in
+        `core.config`, this one has no `ENVIRONMENT` gate: a staging instance mailing from
+        an address its relay won't send for is broken in exactly the same way a production
+        one is, and finding that out at startup is the whole point.
+        """
         with pytest.raises(ValueError, match="EMAIL_FROM_ADDRESS"):
-            _settings(EMAIL_FROM_ADDRESS=None)
+            _settings(ENVIRONMENT=environment, EMAIL_FROM_ADDRESS=None)
 
     def test_no_relay_needs_no_from_address(self):
         """The documented local setup: nothing is sent, links are logged instead."""
@@ -39,11 +47,3 @@ class TestFromAddressIsRequiredWithSMTP:
         settings = _settings()
 
         assert settings.EMAIL_FROM_ADDRESS == "noreply@opendiving.example"
-
-    def test_the_guard_applies_outside_production_too(self):
-        """Unlike the admin-password guard, this one isn't environment-gated: a staging
-        instance mailing from an address its relay won't send for is broken in exactly
-        the same way, and finding that out at startup is the whole point.
-        """
-        with pytest.raises(ValueError, match="EMAIL_FROM_ADDRESS"):
-            _settings(ENVIRONMENT=EnvironmentOption.PRODUCTION, EMAIL_FROM_ADDRESS=None)
