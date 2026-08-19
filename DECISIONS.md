@@ -7021,6 +7021,19 @@ things that catch people out on top of it:
 - **The skip count is the only thing on screen that distinguishes the two runs.** Not the pass
   count, which also changes for unrelated reasons.
 
+### Rows these tests write are permanent, and that has bitten twice
+
+Nothing cleans up after them — `create_user`'s docstring records that as the deliberate trade, and
+it is why every generator draws a unique name from uuid7's tail. Two consequences of it are
+non-obvious enough to have each cost a defect, and both are written up under *"Species are a global
+catalog, filled one pick at a time"* rather than repeated here:
+
+- **A fixture for a table that is not user-scoped is visible to real accounts**, so its name has to
+  be one no real query can return — unique is not the same as unmatchable.
+- **A test that persists what it creates has to vary the key it creates**, or the second run finds
+  its own rows, takes an early-return path, and passes while measuring nothing. The first run
+  passing is what makes it invisible.
+
 ## A deleted gear item's service history has no view, and archiving is the surface that does
 
 **The conclusion survived the hard-delete change and its premise did not**, which is worth stating
