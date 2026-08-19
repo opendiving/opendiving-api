@@ -7615,6 +7615,26 @@ made. `rank` and `status` are plain `VARCHAR` passed through rather than `StrEnu
 unlike `GearItem.type`: those are WoRMS's open vocabularies, they grow without asking us, and a new
 rank must not turn into a failed resolve.
 
+**`"unknown"` is a real value on the wire, and it is ours rather than WoRMS's.** A search hit that
+only Wikidata matched has no WoRMS record behind it, so there is no rank or status to report;
+`_wikidata_result` writes the literal string `"unknown"` for both, and `_worms_taxon` does the same
+for a record that arrived without one. It is not rare — `?q=manta` came back with **nine of ten**
+rows carrying it, because Wikidata knows a pile of *Manta* synonyms that the WoRMS query for that
+fragment did not return. Two consequences worth stating, because both were found by a client
+rendering it:
+
+- **Clients must not display it raw.** "Manta americana, unknown" reads as a claim about the animal
+  rather than about our not having classified the name, so the web picker drops the hint when the
+  rank is `"unknown"`. That is a display decision and belongs on the client — the API's job is to be
+  honest that it does not know, not to guess a rank from an entity's "instance of" claims.
+- **The merge treats it as a placeholder, not a claim** (`_merge_result`): a real rank from either
+  source displaces it, which is what makes a hit both registers matched come out with WoRMS's
+  taxonomy rather than whichever source happened to be written first.
+
+The alternative — leaving the fields null — was rejected because both columns are `NOT NULL` on a
+resolved row, and a schema whose optionality differs between a search hit and the catalog row it
+becomes is a worse contract than a sentinel that says the same thing in both places.
+
 ### Persist at pick time, not at dive-save time
 
 `POST /species/resolve` is called when the diver picks a species in the form, so by the time the
