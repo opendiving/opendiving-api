@@ -9,11 +9,14 @@ from .dive_gear_item import DiveGearItem
 from .dive_mixture import DiveMixture
 from .dive_profile import DiveProfile
 from .dive_site import DiveSite
+from .dive_species import DiveSpecies
 from .gear_item import GearItem
 from .gear_service_record import GearServiceRecord
 from .gear_service_schedule import GearServiceSchedule
 from .gear_set import GearSet
 from .gear_set_item import GearSetItem
+from .species import Species
+from .species_name import SpeciesName
 from .trip import Trip
 from .trip_location import TripLocation
 from .user import User

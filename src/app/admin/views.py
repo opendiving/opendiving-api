@@ -6,11 +6,14 @@ from ..models.dive_dive_site import DiveDiveSite
 from ..models.dive_gear_item import DiveGearItem
 from ..models.dive_mixture import DiveMixture
 from ..models.dive_site import DiveSite
+from ..models.dive_species import DiveSpecies
 from ..models.gear_item import GearItem
 from ..models.gear_service_record import GearServiceRecord
 from ..models.gear_service_schedule import GearServiceSchedule
 from ..models.gear_set import GearSet
 from ..models.gear_set_item import GearSetItem
+from ..models.species import Species
+from ..models.species_name import SpeciesName
 from ..models.trip import Trip
 from ..models.trip_location import TripLocation
 from ..models.user import User
@@ -30,6 +33,14 @@ from ..schemas.gear_service import (
 )
 from ..schemas.gear_set import GearSetCreateInternal, GearSetUpdate
 from ..schemas.gear_set_item import GearSetItemCreate, GearSetItemUpdate
+from ..schemas.species import (
+    DiveSpeciesCreate,
+    DiveSpeciesUpdate,
+    SpeciesCreate,
+    SpeciesNameCreate,
+    SpeciesNameUpdate,
+    SpeciesUpdate,
+)
 from ..schemas.trip import TripCreateInternal, TripUpdate
 from ..schemas.trip_location import TripLocationCreate, TripLocationUpdate
 from ..schemas.user import UserAdminUpdate, UserCreateInternal
@@ -112,6 +123,41 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         model=TripLocation,
         create_schema=TripLocationCreate,
         update_schema=TripLocationUpdate,
+        allowed_actions={"view", "create", "update", "delete"},
+    )
+
+    # The species catalog and its search index are registered **without** `"delete"`, and for
+    # a different reason than the five above: these tables hard-delete too, but the row is
+    # not one user's. Deleting a species would take every `dive_species` row pointing at it
+    # through the FK cascade - silently removing a sighting from other people's dives, with
+    # no cache invalidation, since that lives on the API routes and there is no route here
+    # to put it on. Nothing in the app deletes a species by design (see `models/species.py`),
+    # so the panel does not either.
+    #
+    # `update` stays, and an edit made here inherits the immutability decision's documented
+    # cost: already-cached dive reads keep the old name until their TTL expires. There is no
+    # way to express "invalidate every user's dives" in `services/cache_invalidation.py`, and
+    # this is the one place that can provoke it.
+    admin.add_view(
+        model=Species,
+        create_schema=SpeciesCreate,
+        update_schema=SpeciesUpdate,
+        allowed_actions={"view", "create", "update"},
+    )
+
+    admin.add_view(
+        model=SpeciesName,
+        create_schema=SpeciesNameCreate,
+        update_schema=SpeciesNameUpdate,
+        allowed_actions={"view", "create", "update"},
+    )
+
+    # The join table, unlike the two above: removing one of these unlinks a sighting from a
+    # dive, which is exactly what it should do and affects only that dive.
+    admin.add_view(
+        model=DiveSpecies,
+        create_schema=DiveSpeciesCreate,
+        update_schema=DiveSpeciesUpdate,
         allowed_actions={"view", "create", "update", "delete"},
     )
 

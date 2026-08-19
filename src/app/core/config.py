@@ -214,6 +214,54 @@ class GeocodingSettings(BaseSettings):
     GEOCODER_PROVIDER_RATE_LIMIT_REQUESTS: int = config("GEOCODER_PROVIDER_RATE_LIMIT_REQUESTS", default=1)
 
 
+class SpeciesSettings(BaseSettings):
+    # The species catalog's two upstream sources, proxied server-side exactly as geocoding is
+    # (see `services.species_service`). Neither takes a key and neither is optional in the
+    # sense `GEOCODER_URL` is: emptying these does not switch the feature off, it degrades
+    # search to whatever is already in the local catalog and makes resolving a *new* species
+    # fail. That asymmetry is deliberate - a diver can type a location by hand, but they
+    # cannot invent an AphiaID.
+    #
+    # WoRMS is the taxonomic authority: scientific names, synonyms, and the accepted-taxon
+    # mapping that gives every catalog row its identity. Its REST webservice is free to use
+    # with citation and asks only that it not be used to harvest the register wholesale,
+    # which is why this app looks things up one pick at a time instead of importing.
+    WORMS_API_URL: str = config("WORMS_API_URL", default="https://www.marinespecies.org/rest")
+    # Wikidata is the common-name layer, keyed to WoRMS by property P850, and CC0. It is here
+    # because WoRMS alone cannot answer "clownfish": *Amphiprion ocellaris* carries exactly
+    # one vernacular in WoRMS, and it is in Japanese.
+    WIKIDATA_API_URL: str = config("WIKIDATA_API_URL", default="https://www.wikidata.org/w/api.php")
+
+    # Wikimedia's policy requires a descriptive `User-Agent` and blocks generic ones; WoRMS
+    # asks to be told who is calling. One string satisfies both. A public deployment that
+    # isn't this project's own should say so here - it is the address either provider's
+    # operators will use before they block you.
+    SPECIES_USER_AGENT: str = config(
+        "SPECIES_USER_AGENT", default="OpenDiving (+https://github.com/opendiving/opendiving-api)"
+    )
+
+    # What one account may spend across `/species/search` and `/species/resolve` together,
+    # and the only limit here that can produce a 429. Sized like the geocoder's for the same
+    # reason: search backs a type-ahead, so an evening of logging a week's dives can honestly
+    # produce hundreds of calls, and it counts cache hits too.
+    SPECIES_RATE_LIMIT_WINDOW_SECONDS: int = config("SPECIES_RATE_LIMIT_WINDOW_SECONDS", default=3600)
+    SPECIES_RATE_LIMIT_PER_USER: int = config("SPECIES_RATE_LIMIT_PER_USER", default=600)
+
+    # What the *instance* may spend on each provider, counted across all users and charged
+    # only to calls that actually leave. Exceeding one is not a 429 - the counter is global,
+    # so raising would mean one diver's search rejecting another's. That provider simply
+    # contributes nothing to the search, and the other one still answers.
+    #
+    # Neither number is published by the provider it throttles. WoRMS states no rate limit at
+    # all, and Wikimedia's applies to anonymous heavy use rather than to a call every few
+    # seconds. Both are self-imposed politeness, set well above what a picker generates, and
+    # a self-hoster with a relationship with either can raise them.
+    SPECIES_WORMS_RATE_LIMIT_WINDOW_SECONDS: int = config("SPECIES_WORMS_RATE_LIMIT_WINDOW_SECONDS", default=60)
+    SPECIES_WORMS_RATE_LIMIT_REQUESTS: int = config("SPECIES_WORMS_RATE_LIMIT_REQUESTS", default=120)
+    SPECIES_WIKIDATA_RATE_LIMIT_WINDOW_SECONDS: int = config("SPECIES_WIKIDATA_RATE_LIMIT_WINDOW_SECONDS", default=60)
+    SPECIES_WIKIDATA_RATE_LIMIT_REQUESTS: int = config("SPECIES_WIKIDATA_RATE_LIMIT_REQUESTS", default=300)
+
+
 class ExportSettings(BaseSettings):
     # Fixed-window rate limit (see `core.utils.rate_limit`) on the three `/export/*`
     # endpoints, keyed per user and shared between them - the budget bounds total export
@@ -337,6 +385,7 @@ class Settings(
     EmailSettings,
     ContactSettings,
     GeocodingSettings,
+    SpeciesSettings,
     ExportSettings,
     ProxySettings,
     FrontendSettings,

@@ -43,6 +43,7 @@ from ...schemas.export import (
     ExportGearServiceSchedule,
     ExportGearSet,
     ExportGenerator,
+    ExportSpecies,
     ExportTrip,
     ExportTripLocation,
     ExportUser,
@@ -127,6 +128,7 @@ def _dive(bundle: ExportBundle, dive: Dive, *, profile: LoadedProfile | None, pa
         trip_uuid=None if trip is None else trip.uuid,
         dive_site_uuids=[site.uuid for site in bundle.sites_for(dive)],
         gear_item_uuids=[item.uuid for item in bundle.gear_for(dive)],
+        species_uuids=[species.uuid for species in bundle.species_for(dive)],
         # `DiveMixtureBase`, not `DiveMixtureRead`: the latter carries the internal row
         # `id`, and nothing in this file references a cylinder by anything.
         mixtures=[_mixture(mixture) for mixture in bundle.mixtures_by_dive[dive.id]],
@@ -212,6 +214,21 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     created_at=site.created_at,
                 )
                 for site in bundle.dive_sites
+            ],
+        ),
+        (
+            "species",
+            [
+                ExportSpecies(
+                    uuid=species.uuid,
+                    aphia_id=species.aphia_id,
+                    scientific_name=species.scientific_name,
+                    common_name=species.common_name,
+                    rank=species.rank,
+                    wikidata_qid=species.wikidata_qid,
+                    created_at=species.created_at,
+                )
+                for species in bundle.species
             ],
         ),
         (
