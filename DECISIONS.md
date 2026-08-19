@@ -7575,6 +7575,43 @@ The general lesson, since this codebase now has one provider of each kind: **che
 input lands in the path or the query string**, because the HTTP client only encodes the second, and
 the geocoder's shape is not transferable to a provider that uses the first.
 
+### The read transaction is released before either endpoint goes outbound
+
+Both `search_species` and `resolve_species` read the local catalog *first* and then spend seconds on
+a third party — six on search, twenty-five on resolve, fifty on the synonym branch that fetches two
+records. `AsyncSession` autobegins on the first `execute()`, so the connection that ran a
+sub-millisecond `SELECT` would sit **idle-in-transaction** for the whole outbound call. The pool is
+`create_async_engine`'s default: five connections plus ten overflow, `pool_timeout` 30 s. On the
+order of fifteen concurrent "add species" clicks park every connection doing nothing, and unrelated
+endpoints then wait out the timeout and fail.
+
+What makes it worth writing down is how *invisible* it is. The event loop is free the entire time —
+that is the whole point of async HTTP — so nothing looks slow, nothing logs, and the symptom when it
+finally appears is 500s on endpoints that have nothing to do with species. It also survived the
+review that produced the budgets: the section above argues at length for making resolve's wait
+*generously long*, which is the right call for the diver and makes this strictly worse.
+
+`_release_read_transaction` is a plain `rollback()` before each outbound step, and the safety
+argument is per-call-site rather than general: it runs only where the preceding lookup returned no
+ORM instance — rows already converted to Pydantic models, or a `None`. **`rollback` expires live ORM
+objects regardless of `expire_on_commit=False`**, which applies to commit only, so the early-return
+path in `resolve_species` (which hands back a live `Species`) deliberately returns *before* the
+release rather than after it. Releasing there would turn the caller's next attribute access into a
+silent reload.
+
+The geocoder this module is otherwise modelled on cannot have this problem, and not by foresight:
+its routes take no `db` dependency at all, so there is no session to hold. That is worth knowing
+before copying its shape again — **"modelled on the geocoder" stops being a safety argument the
+moment a route needs the database**, and this feature needed it for the local catalog.
+
+`services/dive_files.py` already carries the identical helper for the identical reason, reached from
+a `run_in_threadpool` hop instead of an HTTP call — see *"Uploaded files are parsed in a thread, not
+on the event loop"*. Two copies with genuinely different safety arguments is tolerable; a third
+wants a shared util rather than a third docstring. Both are pinned by ordering tests
+(`TestTheReadTransactionIsReleasedBeforeGoingOutbound`,
+`TestProfileExtractionReleasesTheTransaction`), because what regresses is somebody moving a query
+back above the release, and no behavioural test would notice.
+
 ### The common-name rule, and why it is a prefix test
 
 `species.common_name` is a single English display name, chosen at resolve time as: the English

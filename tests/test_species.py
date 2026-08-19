@@ -1338,3 +1338,87 @@ class TestWriteDiveEmbedsSightings:
         # The resolve runs *before* the insert, so a bad uuid costs no write at all.
         create = cast(AsyncMock, dives_module.crud_dives.create)
         create.assert_not_awaited()
+
+
+class TestTheReadTransactionIsReleasedBeforeGoingOutbound:
+    """Every db-touching step here runs *before* the slow part, and `AsyncSession` autobegins
+    on the first `execute()` - so without an explicit release the connection that ran a
+    sub-millisecond `SELECT` sits idle-in-transaction for the whole outbound call: up to six
+    seconds on search and twenty-five on resolve, against a pool of five plus ten overflow.
+    The event loop is free throughout, which is what makes it invisible until the pool runs
+    dry and unrelated endpoints start timing out.
+
+    Ordering tests rather than behavioural ones, matching
+    `test_dive_files.py::TestProfileExtractionReleasesTheTransaction`: what regresses is
+    somebody moving a query back above the release, and nothing else would catch it.
+    """
+
+    @staticmethod
+    def _tracking_db(calls: list[str], *, existing: Any = None) -> MagicMock:
+        result = MagicMock()
+        result.all.return_value = []
+        result.scalar_one_or_none.return_value = existing
+
+        def record_query(*args: Any, **kwargs: Any) -> MagicMock:
+            calls.append("query")
+            return result
+
+        db = MagicMock()
+        db.execute = AsyncMock(side_effect=record_query)
+        db.rollback = AsyncMock(side_effect=lambda: calls.append("release"))
+        db.commit = AsyncMock(side_effect=lambda: calls.append("commit"))
+        db.scalar = AsyncMock(return_value=None)
+        db.add = MagicMock()
+        db.flush = AsyncMock()
+        db.refresh = AsyncMock()
+        return db
+
+    @staticmethod
+    def _marking_providers(calls: list[str], **kwargs: Any) -> _Providers:
+        inner = _registers(**kwargs)
+        handler = inner._handler
+
+        def record(request: httpx.Request) -> httpx.Response:
+            calls.append("outbound")
+            return handler(request)
+
+        return _Providers(record)
+
+    @pytest.mark.asyncio
+    async def test_search_releases_before_the_fan_out(self, no_redis: None) -> None:
+        calls: list[str] = []
+        db = self._tracking_db(calls)
+
+        with self._marking_providers(calls, by_name=[CLOWNFISH_RECORD]):
+            await species_service.search_species(db, "clownfish")
+
+        assert "release" in calls, "the local read's transaction is never released"
+        # The local query, then the release, then anything outbound.
+        assert calls.index("release") < calls.index("outbound")
+        assert calls.index("query") < calls.index("release")
+
+    @pytest.mark.asyncio
+    async def test_resolve_releases_before_asking_worms(self, no_redis: None) -> None:
+        calls: list[str] = []
+        db = self._tracking_db(calls)
+
+        with self._marking_providers(calls, record=CLOWNFISH_RECORD):
+            await species_service.resolve_species(db, 278400)
+
+        assert calls.index("release") < calls.index("outbound")
+
+    @pytest.mark.asyncio
+    async def test_an_already_known_species_is_returned_without_a_release(self, no_redis: None) -> None:
+        """The early-return path holds a live `Species`, and `rollback` expires ORM objects
+        regardless of `expire_on_commit=False` - which applies to commit only. Releasing here
+        would turn the caller's next attribute access into a silent reload."""
+        calls: list[str] = []
+        existing = MagicMock()
+        db = self._tracking_db(calls, existing=existing)
+
+        with self._marking_providers(calls, record=CLOWNFISH_RECORD):
+            species = await species_service.resolve_species(db, 278400)
+
+        assert species is existing
+        assert "release" not in calls
+        assert "outbound" not in calls
