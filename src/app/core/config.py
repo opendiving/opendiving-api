@@ -144,10 +144,33 @@ class MagicLinkSettings(BaseSettings):
     USERNAME_CHANGE_RATE_LIMIT_PER_USER: int = config("USERNAME_CHANGE_RATE_LIMIT_PER_USER", default=5)
 
 
+class SMTPTLSMode(Enum):
+    STARTTLS = "starttls"
+    TLS = "tls"
+    NONE = "none"
+
+
 class EmailSettings(BaseSettings):
-    # https://resend.com - used to deliver the magic-link email (see `services.email_service`).
-    RESEND_API_KEY: str | None = config("RESEND_API_KEY", default=None)
-    EMAIL_FROM_ADDRESS: str = config("EMAIL_FROM_ADDRESS", default="onboarding@resend.dev")
+    # SMTP is the only transport (see `services.email_service`). Every provider speaks it -
+    # Resend included, as `SMTP_HOST=smtp.resend.com` with the API key as `SMTP_PASSWORD` -
+    # and so does every relay a self-hoster already has. Unset `SMTP_HOST` is the documented
+    # local setup, and currently the only one in use: nothing is sent and the magic-link URL
+    # is logged instead.
+    SMTP_HOST: str | None = config("SMTP_HOST", default=None)
+    SMTP_PORT: int = config("SMTP_PORT", default=587)
+    # Independently optional, because an anonymous relay is a legitimate setup (Mailpit, an
+    # internal postfix). The login is attempted only when a username is configured.
+    SMTP_USERNAME: str | None = config("SMTP_USERNAME", default=None)
+    SMTP_PASSWORD: str | None = config("SMTP_PASSWORD", default=None)
+    # `starttls` (587) and `tls` (465) both verify certificates. `none` exists for a relay
+    # on the loopback or the compose network - Mailpit, a local postfix - and nothing else.
+    SMTP_TLS_MODE: SMTPTLSMode = config("SMTP_TLS_MODE", default=SMTPTLSMode.STARTTLS)
+
+    # No default: the old one (`onboarding@resend.dev`) was only ever deliverable on
+    # Resend's sandbox domain, and through an arbitrary relay it is an SPF/DKIM failure at
+    # send time - hours after the misconfiguration, in someone else's spam folder. The
+    # validator on `Settings` turns that into a startup error instead.
+    EMAIL_FROM_ADDRESS: str | None = config("EMAIL_FROM_ADDRESS", default=None)
 
 
 class ContactSettings(BaseSettings):
@@ -397,6 +420,30 @@ class Settings(
     CRUDAdminSettings,
     EnvironmentSettings,
 ):
+    @model_validator(mode="after")
+    def _require_from_address_with_smtp(self) -> Self:
+        """Refuses to boot an instance that has a relay configured but no address to send
+        as.
+
+        `EMAIL_FROM_ADDRESS` used to default to `onboarding@resend.dev`, which was
+        deliverable on exactly one provider's sandbox domain. Through an arbitrary relay
+        that default is not a default at all - it is an SPF/DKIM failure that surfaces
+        hours later, in a recipient's spam folder, with nothing in this app's logs
+        pointing at the cause. Failing startup puts the error where the mistake was made.
+
+        This is why `src/.env.example` ships the from-address *commented out*: the
+        canonical setup is copying that file, so a template with a plausible-looking
+        address active in it would satisfy any check made here and reintroduce exactly
+        the failure this exists to prevent.
+        """
+        if self.SMTP_HOST and not self.EMAIL_FROM_ADDRESS:
+            raise ValueError(
+                "SMTP_HOST is set but EMAIL_FROM_ADDRESS is not. Set it to an address on a "
+                "domain your relay is allowed to send for - there is no safe default, and a "
+                "wrong one fails at delivery time rather than here."
+            )
+        return self
+
     @model_validator(mode="after")
     def _reject_insecure_admin_config(self) -> Self:
         """Refuses to boot a production instance whose admin panel is reachable with a

@@ -203,7 +203,7 @@ class TestSendGearServiceDigests:
 
     @pytest.mark.asyncio
     async def test_marks_the_notify_state_after_sending(self) -> None:
-        # Send first, mark second: a Resend failure must produce a duplicate tomorrow
+        # Send first, mark second: a delivery failure must produce a duplicate tomorrow
         # rather than a reminder that silently never arrives.
         due_on = date(2020, 1, 1)
         session = _RecordingSession([_row(next_due_on=due_on)])

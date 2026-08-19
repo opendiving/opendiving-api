@@ -1,78 +1,159 @@
-"""Transactional email delivery via Resend (https://resend.com).
+"""Transactional email delivery over SMTP.
 
 Used for the magic-link sign-in email (see `api.v1.auth.request_email_link`), the
 email-change confirmation/notification pair (see `api.v1.users`), the gear-service
 digest (see `core.worker.functions.send_gear_service_digests`), and the contact form
-(see `api.v1.contact`), all funneling through `_send` so the "run Resend's blocking
-client off the event loop" plumbing only lives in one place.
+(see `api.v1.contact`), all funneling through `_send` so the "run a blocking client off
+the event loop" plumbing only lives in one place.
+
+SMTP rather than any vendor's HTTP API because it is the one interface every provider
+and every self-hosted relay already speaks - Resend included, which is reachable as
+`SMTP_HOST=smtp.resend.com` with the API key as the password. `smtplib` from the
+standard library rather than `aiosmtplib` because it costs no dependency and the
+codebase already standardizes on running blocking clients in a worker thread (see
+`core.security`, which cites this module for the same treatment).
 """
 
 import html
 import logging
-from typing import Any
+import smtplib
+import ssl
+from email.message import EmailMessage
 
 import anyio
-import resend
 
-from ..core.config import EnvironmentOption, settings
+from ..core.config import EnvironmentOption, SMTPTLSMode, settings
 
 logger = logging.getLogger(__name__)
+
+# A hung relay otherwise pins a worker thread indefinitely - there is no client-side
+# default here the way there was with an HTTP SDK.
+SMTP_TIMEOUT_SECONDS = 10
 
 
 class EmailDeliveryError(RuntimeError):
     """Raised when an email that carries a credential cannot be delivered."""
 
 
-def _send(payload: dict[str, Any]) -> None:
-    resend.api_key = settings.RESEND_API_KEY
-    resend.Emails.send(payload)  # type: ignore[arg-type]
+# Backstop for an invariant the senders and `Settings._require_from_address_with_smtp`
+# already hold: every sender returns early unless `SMTP_HOST` is set, and an instance
+# with `SMTP_HOST` set and no `EMAIL_FROM_ADDRESS` refuses to boot. It is a raise rather
+# than an assert so that a future sender written without the check fails loudly instead
+# of mailing `From: None` through an unresolved host.
+_MISCONFIGURED = "Email is misconfigured: SMTP_HOST and EMAIL_FROM_ADDRESS must both be set to send."
+
+
+def _build_message(to: str, subject: str, html_body: str, reply_to: str | None = None) -> EmailMessage:
+    sender = settings.EMAIL_FROM_ADDRESS
+    if not sender:
+        raise EmailDeliveryError(_MISCONFIGURED)
+
+    message = EmailMessage()
+    message["From"] = sender
+    message["To"] = to
+    message["Subject"] = _header_safe(subject)
+    if reply_to is not None:
+        message["Reply-To"] = reply_to
+    # HTML-only, matching what this module has always sent; a plain-text alternative
+    # would be a change to the mail itself, not to the transport.
+    message.set_content(html_body, subtype="html")
+    return message
+
+
+def _send(message: EmailMessage) -> None:
+    """Opens a connection, sends one message, closes it.
+
+    No pooling: every sender here is human-triggered or one-digest-per-user-per-day, and
+    a connection shared across worker threads buys nothing at that volume while costing
+    real complexity. Exceptions propagate to the caller - `send_gear_service_digests`
+    depends on that (it sends before it marks, so a failure means a duplicate tomorrow
+    rather than a reminder that silently never arrives).
+    """
+    host = settings.SMTP_HOST
+    if not host:
+        raise EmailDeliveryError(_MISCONFIGURED)
+
+    client: smtplib.SMTP
+    if settings.SMTP_TLS_MODE == SMTPTLSMode.TLS:
+        # The context is passed explicitly in both TLS modes: `smtplib` negotiates an
+        # *unverified* connection otherwise, which is a silent downgrade on the one hop
+        # carrying live sign-in tokens.
+        client = smtplib.SMTP_SSL(
+            host, settings.SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS, context=ssl.create_default_context()
+        )
+    else:
+        client = smtplib.SMTP(host, settings.SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS)
+
+    with client:
+        if settings.SMTP_TLS_MODE == SMTPTLSMode.STARTTLS:
+            client.starttls(context=ssl.create_default_context())
+        if settings.SMTP_USERNAME:
+            client.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD or "")
+        client.send_message(message)
+
+
+def _header_safe(value: str) -> str:
+    """Flattens CR/LF so a subject can't blow up message construction.
+
+    `EmailMessage` refuses a header containing a newline - it raises rather than emitting
+    it, so there is no injection to prevent here. The problem is whose error it is: the
+    contact form's `subject` is typed by an unauthenticated stranger and no schema
+    restricts its characters (`schemas.contact`), so a `\\r\\n` in that JSON string would
+    otherwise 500 in our own code before any transport was involved.
+
+    Applied in `_build_message` rather than at that one call site, so a later sender that
+    also carries user-supplied text into a subject doesn't have to remember it.
+    Deliberately *not* applied to the addresses: those are `EmailStr`-validated or
+    server-composed, and a newline in one is a broken configuration that should raise
+    rather than be flattened into a malformed address.
+    """
+    return value.replace("\r", " ").replace("\n", " ")
 
 
 def _refuse_to_log_credential_in_production(what: str) -> None:
-    """Guards the "no API key, so log the link instead" fallback used by the two senders
+    """Guards the "no transport, so log the link instead" fallback used by the two senders
     whose URL embeds a live single-use auth token.
 
     That fallback is a local-development convenience, and a good one - it's how you sign
-    in without a Resend account. But the URL it prints *is* the credential, and
+    in without configuring a relay. But the URL it prints *is* the credential, and
     `core.logger` writes to a rotating file on disk, so the same code path in production
-    would quietly turn a forgotten `RESEND_API_KEY` into sign-in tokens sitting in
+    would quietly turn a forgotten `SMTP_HOST` into sign-in tokens sitting in
     plaintext. Fail loudly there instead: a 500 on a sign-in attempt is recoverable and
     obvious, a leaked token file is neither.
     """
     if settings.ENVIRONMENT == EnvironmentOption.PRODUCTION:
-        raise EmailDeliveryError(f"RESEND_API_KEY is not configured, so {what} cannot be delivered.")
+        raise EmailDeliveryError(f"No email transport is configured (SMTP_HOST), so {what} cannot be delivered.")
 
 
 async def send_magic_link_email(email: str, magic_link_url: str) -> None:
     """Sends the magic-link sign-in email.
 
-    A no-op (logged, not raised) when `RESEND_API_KEY` isn't configured, so local
-    development without a Resend account doesn't hard-fail `POST /auth/email/request`
+    A no-op (logged, not raised) when `SMTP_HOST` isn't configured, so local
+    development without a relay doesn't hard-fail `POST /auth/email/request`
     - the link is still generated and logged so it can be used manually. In production
     that same condition raises instead, since the logged link is a live credential (see
     `_refuse_to_log_credential_in_production`).
     """
-    if not settings.RESEND_API_KEY:
+    if not settings.SMTP_HOST:
         _refuse_to_log_credential_in_production("the magic-link sign-in email")
-        logger.warning("RESEND_API_KEY not configured; magic link for %s: %s", email, magic_link_url)
+        logger.warning("SMTP_HOST not configured; magic link for %s: %s", email, magic_link_url)
         return
 
-    payload = {
-        "from": settings.EMAIL_FROM_ADDRESS,
-        "to": email,
-        "subject": "Your OpenDiving sign-in link",
-        "html": (
+    message = _build_message(
+        to=email,
+        subject="Your OpenDiving sign-in link",
+        html_body=(
             "<p>Click the link below to continue signing in to OpenDiving:</p>"
             f'<p><a href="{magic_link_url}">{magic_link_url}</a></p>'
             f"<p>This link expires in {settings.MAGIC_LINK_TOKEN_EXPIRE_MINUTES} minutes "
             "and can only be used once. If you didn't request this, you can safely "
             "ignore this email.</p>"
         ),
-    }
+    )
 
-    # `resend`'s client makes a blocking HTTP call under the hood - run it off the
-    # event loop thread so a slow/hanging call to Resend doesn't stall other requests.
-    await anyio.to_thread.run_sync(_send, payload)
+    # `smtplib` blocks - run it off the event loop thread so a slow or hanging relay
+    # doesn't stall other requests.
+    await anyio.to_thread.run_sync(_send, message)
 
 
 async def send_email_change_confirmation_email(new_email: str, confirm_url: str) -> None:
@@ -81,16 +162,15 @@ async def send_email_change_confirmation_email(new_email: str, confirm_url: str)
     account's current one, since the whole point is proving the caller actually
     controls the new address before the change takes effect.
     """
-    if not settings.RESEND_API_KEY:
+    if not settings.SMTP_HOST:
         _refuse_to_log_credential_in_production("the email-change confirmation")
-        logger.warning("RESEND_API_KEY not configured; email-change confirmation for %s: %s", new_email, confirm_url)
+        logger.warning("SMTP_HOST not configured; email-change confirmation for %s: %s", new_email, confirm_url)
         return
 
-    payload = {
-        "from": settings.EMAIL_FROM_ADDRESS,
-        "to": new_email,
-        "subject": "Confirm your new OpenDiving email address",
-        "html": (
+    message = _build_message(
+        to=new_email,
+        subject="Confirm your new OpenDiving email address",
+        html_body=(
             "<p>Click the link below to confirm this address as your new OpenDiving "
             "account email:</p>"
             f'<p><a href="{confirm_url}">{confirm_url}</a></p>'
@@ -98,9 +178,9 @@ async def send_email_change_confirmation_email(new_email: str, confirm_url: str)
             "and can only be used once. If you didn't request this, you can safely "
             "ignore this email - your account email won't change.</p>"
         ),
-    }
+    )
 
-    await anyio.to_thread.run_sync(_send, payload)
+    await anyio.to_thread.run_sync(_send, message)
 
 
 async def send_gear_service_digest_email(email: str, lines: list[tuple[str, str, str]]) -> None:
@@ -121,8 +201,8 @@ async def send_gear_service_digest_email(email: str, lines: list[tuple[str, str,
     `send_contact_form_email` below - content a person typed gets escaped, content this
     server composed doesn't.
     """
-    if not settings.RESEND_API_KEY:
-        logger.warning("RESEND_API_KEY not configured; gear service digest for %s: %s", email, lines)
+    if not settings.SMTP_HOST:
+        logger.warning("SMTP_HOST not configured; gear service digest for %s: %s", email, lines)
         return
 
     items = "".join(
@@ -132,19 +212,18 @@ async def send_gear_service_digest_email(email: str, lines: list[tuple[str, str,
     )
     subject = "Your dive gear needs servicing" if len(lines) == 1 else f"{len(lines)} pieces of gear need servicing"
 
-    payload = {
-        "from": settings.EMAIL_FROM_ADDRESS,
-        "to": email,
-        "subject": subject,
-        "html": (
+    message = _build_message(
+        to=email,
+        subject=subject,
+        html_body=(
             "<p>A quick heads-up before your next trip - this gear is due for service:</p>"
             f"<ul>{items}</ul>"
             f'<p><a href="{settings.FRONTEND_URL}/gear">Review your gear</a>, or '
             f'<a href="{settings.FRONTEND_URL}/settings">turn these reminders off</a>.</p>'
         ),
-    }
+    )
 
-    await anyio.to_thread.run_sync(_send, payload)
+    await anyio.to_thread.run_sync(_send, message)
 
 
 async def send_contact_form_email(name: str, email: str, category_label: str, subject: str, message: str) -> None:
@@ -153,20 +232,21 @@ async def send_contact_form_email(name: str, email: str, category_label: str, su
     Every other sender in this module mails content this server composed itself; this
     one mails content a *stranger* typed, so it's the one place that has to escape its
     inputs - an unescaped `<a href=...>` in the message body would otherwise render as
-    a live link in the recipient's mail client.
+    a live link in the recipient's mail client. It's also the only one whose text
+    reaches a *header* - see `_header_safe`, which `_build_message` applies.
 
-    `reply_to` is the submitter's address, so hitting Reply in the inbox answers the
-    diver rather than the no-reply `from` address. The message is never sent *as* them
-    (`from` stays `EMAIL_FROM_ADDRESS`): the domain's SPF/DKIM only covers our own
+    `Reply-To` is the submitter's address, so hitting Reply in the inbox answers the
+    diver rather than the no-reply `From` address. The message is never sent *as* them
+    (`From` stays `EMAIL_FROM_ADDRESS`): the domain's SPF/DKIM only covers our own
     address, and spoofing an arbitrary sender is what gets a domain blocklisted.
 
-    A no-op (logged, not raised) when `RESEND_API_KEY` isn't configured, matching the
+    A no-op (logged, not raised) when `SMTP_HOST` isn't configured, matching the
     rest of this module - the whole submission is written to the log in that case, so a
-    local instance without a Resend account can still see what would have been sent.
+    local instance without a relay can still see what would have been sent.
     """
-    if not settings.RESEND_API_KEY:
+    if not settings.SMTP_HOST:
         logger.warning(
-            "RESEND_API_KEY not configured; contact message from %s <%s> [%s] %s: %s",
+            "SMTP_HOST not configured; contact message from %s <%s> [%s] %s: %s",
             name,
             email,
             category_label,
@@ -176,21 +256,20 @@ async def send_contact_form_email(name: str, email: str, category_label: str, su
         return
 
     body = html.escape(message).replace("\n", "<br>")
-    payload = {
-        "from": settings.EMAIL_FROM_ADDRESS,
-        "to": settings.CONTACT_FORM_EMAIL,
-        "reply_to": email,
-        "subject": f"[{category_label}] {subject}",
-        "html": (
+    mail = _build_message(
+        to=settings.CONTACT_FORM_EMAIL,
+        subject=f"[{category_label}] {subject}",
+        reply_to=email,
+        html_body=(
             f"<p><strong>From:</strong> {html.escape(name)} &lt;{html.escape(email)}&gt;<br>"
             f"<strong>Category:</strong> {html.escape(category_label)}<br>"
             f"<strong>Subject:</strong> {html.escape(subject)}</p>"
             "<hr>"
             f"<p>{body}</p>"
         ),
-    }
+    )
 
-    await anyio.to_thread.run_sync(_send, payload)
+    await anyio.to_thread.run_sync(_send, mail)
 
 
 async def send_email_changed_notification(old_email: str, new_email: str) -> None:
@@ -198,19 +277,18 @@ async def send_email_changed_notification(old_email: str, new_email: str) -> Non
     a change completes, so the previous owner of that inbox finds out even if they
     weren't the one who made the change.
     """
-    if not settings.RESEND_API_KEY:
-        logger.warning("RESEND_API_KEY not configured; email-change notice for %s -> %s", old_email, new_email)
+    if not settings.SMTP_HOST:
+        logger.warning("SMTP_HOST not configured; email-change notice for %s -> %s", old_email, new_email)
         return
 
-    payload = {
-        "from": settings.EMAIL_FROM_ADDRESS,
-        "to": old_email,
-        "subject": "Your OpenDiving account email was changed",
-        "html": (
+    message = _build_message(
+        to=old_email,
+        subject="Your OpenDiving account email was changed",
+        html_body=(
             f"<p>Your OpenDiving account email was just changed to <strong>{html.escape(new_email)}</strong>.</p>"
             "<p>If you made this change, no action is needed. If you didn't, please "
             "contact support immediately.</p>"
         ),
-    }
+    )
 
-    await anyio.to_thread.run_sync(_send, payload)
+    await anyio.to_thread.run_sync(_send, message)

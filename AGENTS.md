@@ -33,7 +33,7 @@ one rather than matching the wrapping by hand.
 - **Auth flow**: Magic-link sign-in URLs appear in `docker compose logs api` (not emailed).
   Copy/paste URL into browser.
 
-- **RESEND_API_KEY**: Unset locally; sign-in links go to logs instead of email.
+- **SMTP_HOST**: Unset locally; sign-in links go to logs instead of email.
 
 - **Admin panel**: CRUDAdmin at `/admin` (`CRUD_ADMIN_MOUNT_PATH`), **off by default** — set
   `CRUD_ADMIN_ENABLED=true` plus `ADMIN_USERNAME`/`ADMIN_PASSWORD` in `src/.env` to use it. The

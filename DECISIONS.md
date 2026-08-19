@@ -683,7 +683,7 @@ Rate limiting (`core.utils.rate_limit.enforce_rate_limit`) is a fixed-window Red
 `/auth/email/verify`/`/auth/google` - see `MagicLinkSettings` in `core/config.py` for the
 limits/window. It's a soft dependency: if `cache.client` is `None` (Redis unreachable/not
 configured), it's a no-op rather than a hard failure, since the actual security boundary is token
-expiry + single-use + `RESEND_API_KEY`-gated sending, not the rate limiter.
+expiry + single-use + `SMTP_HOST`-gated sending, not the rate limiter.
 
 `POST /auth/email/request` always returns the exact same `EmailAuthRequestResponse` message
 regardless of whether the email belongs to an existing account, and - unlike the old
@@ -1499,7 +1499,7 @@ Two ordering/scoping decisions in the job itself:
 
 - **One email per user, never per item.** A diver whose whole kit comes due the same week gets a
   single list.
-- **Send first, mark second.** If Resend fails, the exception propagates before the mark, so the
+- **Send first, mark second.** If delivery fails, the exception propagates before the mark, so the
   worst case is a duplicate email tomorrow rather than a reminder that silently never arrives. For
   gear safety that's the right way round.
 
@@ -2639,8 +2639,8 @@ offer a markers toggle wants the count rather than membership of a list of axes.
 
 `POST /api/v1/contact` (`api/v1/contact.py`) is the only endpoint here that mails a *human* rather
 than a user, and the only one that both accepts anonymous input and sends mail as a result. It
-exists because the frontend is a pure static-ish Next.js client with no mail provider of its own -
-Resend lives here, so the form has to post here.
+exists because the frontend is a pure static-ish Next.js client with no mail transport of its own -
+the SMTP credentials live here, so the form has to post here.
 
 Four things about it are deliberate:
 
@@ -2664,7 +2664,7 @@ should point it at its own operator. It is *not* the same setting as `AppSetting
 which is OpenAPI document metadata shown in `/docs` and nothing else; the two are separate so that
 publishing a maintainer address in the API docs doesn't silently reroute a stranger's support mail.
 
-With `RESEND_API_KEY` unset the send is a logged no-op, like every other sender here - but the whole
+With `SMTP_HOST` unset the send is a logged no-op, like every other sender here - but the whole
 submission is written to the log, so a local instance can still see what would have gone out. The
 endpoint still reports success in that case: it reports that the message was *accepted*, and it
 deliberately never tells an anonymous caller anything about the recipient inbox or downstream
@@ -3170,9 +3170,9 @@ went into an image layer - including the developer's real `src/.env`. Confirmed 
 be correctly untracked by git and still be baked into every image.
 
 This became sharper when the runtime stage started copying the app package in (see above):
-`src/app/logs/app.log` came with it. With `RESEND_API_KEY` unset - the documented local-development
-setup - that file contains magic-link URLs with live sign-in tokens. The copy that happened to be on
-disk had none, which was luck rather than design.
+`src/app/logs/app.log` came with it. With `SMTP_HOST` unset - the documented local-development setup
+\- that file contains magic-link URLs with live sign-in tokens. The copy that happened to be on disk
+had none, which was luck rather than design.
 
 `.dockerignore` now excludes `.env` (but not `.env.example`), logs, `__pycache__`, the local venv
 and the tool caches. Verified after the change: no `.env` in the builder layer, no logs or
@@ -7960,3 +7960,110 @@ species not yet in the catalog, the picker comes up dry and the diver logs the d
 species later. That is the one resilience gap against the trip picker's free-text hatch, and it is
 deliberate — a trip location is whatever the diver says it is, while a species is what the register
 says it is.
+
+## SMTP is the only email transport, and the from-address has no default
+
+The API sent through Resend's SDK, which was the only thing in `pyproject.toml` tying the project to
+a named email vendor. It now speaks plain SMTP and nothing else (`services/email_service.py`).
+
+### Why the SDK went away entirely rather than becoming one of two providers
+
+Every transactional provider exposes SMTP, and so does every relay a self-hoster already has - their
+own postfix, their host's relay, Migadu, SES, Postmark. It is what the trusted self-hosted apps ask
+for (Gitea, Grafana, Nextcloud, Immich, Keycloak) precisely because it is the one interface that
+outlives any particular vendor. Even the "open-source Resend" products sit on SES or SMTP
+underneath, so a self-hoster running one points `SMTP_HOST` at it anyway. There was no product to
+swap in; the move was to speak the protocol everything already speaks.
+
+Keeping the SDK alongside it as a second, preferred provider would have cost about thirty lines that
+already existed - and made every sender written from here on think about two transports. What is
+actually lost by dropping it is one thing: Resend's HTTP error bodies are more legible than SMTP
+status codes. Everything else survives the switch, which is why this was a cheaper call than it
+first looked. Idempotency keys are a header (`Resend-Idempotency-Key`), webhooks are account-level
+HTTP deliveries that never involved the sending SDK at all, and mail sent over SMTP still appears in
+Resend's dashboard - so a deployment that wants Resend keeps its observability while sending as
+`SMTP_HOST=smtp.resend.com`, username `resend`, password = whatever would have been
+`RESEND_API_KEY`. **That escape hatch is the point**: dropping the SDK did not drop the provider.
+
+Nothing is deployed anywhere today (`AGENTS.md`), so this cost nothing to switch and there was no
+migration to sequence - worth saying because the reasoning above reads like it was weighed against a
+live sending reputation, and it wasn't. What it was weighed against is the *next* deployment, which
+now has one transport to configure instead of a choice between two.
+
+### `smtplib` in a thread, not `aiosmtplib`
+
+`aiosmtplib` would be a new dependency to avoid a pattern this codebase already standardizes on.
+`email_service` ran Resend's blocking client through `anyio.to_thread.run_sync`, and `core/security`
+cites that treatment as its own precedent for bcrypt. `smtplib` gets exactly the same treatment and
+costs nothing to add.
+
+Connections are per-send, with no pooling. Five senders, all either human-triggered or one digest
+per user per day; a connection shared across worker threads is a complexity trap with no payoff at
+that volume.
+
+Two things `_send` does that are easy to leave out and hard to notice missing:
+
+- **`ssl.create_default_context()` is passed explicitly in both TLS modes.** `smtplib` will
+  otherwise negotiate an unverified connection, which is a silent downgrade on the one hop carrying
+  live sign-in tokens.
+- **`timeout=` is set** (`SMTP_TIMEOUT_SECONDS`). The HTTP SDK had its own; a raw socket does not,
+  so a hung relay would pin a worker thread indefinitely.
+
+`SMTP_TLS_MODE=none` exists for a relay on the loopback or the compose network - Mailpit, an
+internal postfix - and for nothing else. `SMTP_USERNAME`/`SMTP_PASSWORD` are independently optional
+because an anonymous relay is a legitimate setup; the login is attempted only when a username is
+configured.
+
+### `EMAIL_FROM_ADDRESS` lost its default, and `.env.example` is half the fix
+
+The default was `onboarding@resend.dev` - deliverable on exactly one provider's sandbox domain.
+Through an arbitrary relay that is not a default at all, it is an SPF/DKIM failure that surfaces
+hours later in someone's spam folder with nothing in this app's logs pointing at the cause.
+`Settings._require_from_address_with_smtp` now refuses to boot when `SMTP_HOST` is set without it,
+the same `model_validator(mode="after")` shape as `_reject_insecure_admin_config`.
+
+**The presence check alone would have been theater.** The canonical setup is
+`cp src/.env.example src/.env`, and that template shipped
+`EMAIL_FROM_ADDRESS="onboarding@resend.dev"` *active*. A self-hoster following the README would have
+set `SMTP_HOST`, passed the validator, and sent through their own relay as Resend's sandbox address
+\- the exact failure the validator exists to prevent. So the template ships the from-address
+**commented out**, and that is part of the guard rather than a documentation nicety. Mailpit-based
+local verification cannot catch this either: it accepts any from-address happily.
+
+### `EmailMessage` raises on CR/LF in a header, so the contact subject is flattened first
+
+The JSON API absorbed this silently; the stdlib does not. `_build_message` normalizes CR/LF in the
+subject to spaces before setting the header. There is no injection to prevent - the stdlib refuses
+rather than emits - the point is whose error it is: the contact form's `subject` is typed by an
+unauthenticated stranger and `schemas/contact.py` puts no character restriction on it, so a `\r\n`
+in that JSON string would 500 in our own code before any transport was involved.
+
+It is applied in `_build_message` rather than at the contact sender's call site, so a later sender
+carrying user text into a subject cannot forget it. Deliberately not applied to the addresses: those
+are `EmailStr`-validated or server-composed, and a newline in one is a broken configuration that
+should raise rather than be quietly flattened into a malformed address.
+
+### Mailpit is a compose profile, not a service
+
+`docker compose --profile mail up` brings up [Mailpit](https://mailpit.axllent.org/) (the maintained
+successor to MailHog) with its inbox on `127.0.0.1:8025` - loopback-bound for the same reason the
+Postgres port is, since that inbox holds live sign-in tokens. SMTP 1025 stays unpublished; `api` and
+`worker` reach it over the compose network.
+
+It is opt-in because the documented local sign-in flow is the magic link in
+`docker compose logs api`, which has to keep working with nothing extra running - if Mailpit became
+the default path, that flow would quietly stop being the one people know. The documented dev combo
+needs its exit documented too: a leftover `SMTP_HOST=mailpit` with a later plain `docker compose up`
+sends at a dead host and logs no link either, so `.env.example` and the README both say to comment
+it back out.
+
+And the exit has a trap of its own, hit while verifying this change: **`docker compose restart` does
+not re-read `env_file`**. Compose resolves that file into the container's environment at *create*
+time, so editing `src/.env` and restarting leaves the old values in place - the app goes on
+reporting the setting you just deleted, and the obvious conclusion ("my `.env` edit didn't take, or
+this is being read from somewhere else") is the wrong one.
+`docker compose up -d --force-recreate api` is what applies it.
+
+This does not contradict the model-change workflow in `AGENTS.md`, where a plain restart genuinely
+is enough: `src/app` is a bind mount, so *code* changes are already live and only the process needs
+restarting. Environment is the opposite - baked into the container at creation, not mounted.
