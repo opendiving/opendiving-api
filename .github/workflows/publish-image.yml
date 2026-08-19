@@ -1,0 +1,155 @@
+name: Publish Image
+
+# Manual only. There is deliberately no `push:` or `release:` trigger - images are cut
+# when someone decides to cut one, not on every merge to `main`.
+#
+# `workflow_dispatch` only becomes reachable once this file is on the *default* branch:
+# that is where GitHub looks for the "Run workflow" button and where `gh workflow run`
+# resolves the workflow id. Until this merges to `main` it cannot be run at all, not even
+# from the branch that adds it - the `ref` input below is what selects the commit to
+# build, so that costs nothing.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit SHA, branch or tag to build"
+        required: true
+        default: main
+      tag:
+        description: "Extra image tag, e.g. v0.2.0 or staging (optional)"
+        required: false
+        default: ""
+      latest:
+        description: "Also push :latest"
+        type: boolean
+        default: false
+
+# `packages: write` is the whole point of the job; `contents: read` is what checkout
+# needs. The GITHUB_TOKEN these grant is also what links the resulting package back to
+# this repository, so no personal access token is involved.
+permissions:
+  contents: read
+  packages: write
+
+# Two runs pushing different commits can otherwise race over a shared tag (`:latest`, or
+# the same `tag` typed twice) and leave it pointing at whichever finished last. Queue
+# rather than cancel - a cancelled push can leave the tag on the older image.
+concurrency:
+  group: publish-image
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      # Rejected here rather than by the registry at the end of a multi-minute build.
+      # The tag is passed through `env` and never interpolated into the script:
+      # `${{ inputs.tag }}` written inside `run:` is substituted before bash parses the
+      # line, so a value containing backticks or `$(...)` would execute as shell.
+      - name: Check the extra tag is a legal image tag
+        if: inputs.tag != ''
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if ! printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$'; then
+            echo "::error::'$TAG' is not a valid image tag - it must start with a letter, digit or '_', then contain only letters, digits, '.', '_' and '-', up to 128 characters."
+            exit 1
+          fi
+
+      # `github.sha` is NOT the commit being built: on a manual run it is the tip of
+      # whichever branch the workflow file was launched from. Every SHA below therefore
+      # comes from the working tree after checkout, which also pins a moving `ref` (a
+      # branch name) to the exact commit this image was built from.
+      - name: Work out tags and labels
+        id: meta
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          EXTRA_TAG: ${{ inputs.tag }}
+          PUSH_LATEST: ${{ inputs.latest }}
+        run: |
+          set -euo pipefail
+
+          SHA="$(git rev-parse HEAD)"
+          CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          # One tag per line, which is the format build-push-action wants.
+          TAGS="${IMAGE}:sha-${SHA:0:12}"
+          if [ -n "$EXTRA_TAG" ]; then
+            TAGS="${TAGS}"$'\n'"${IMAGE}:${EXTRA_TAG}"
+          fi
+          if [ "$PUSH_LATEST" = "true" ]; then
+            TAGS="${TAGS}"$'\n'"${IMAGE}:latest"
+          fi
+
+          {
+            echo "sha=$SHA"
+            echo "tags<<EOF"
+            echo "$TAGS"
+            echo "EOF"
+            echo "labels<<EOF"
+            # `image.source` is what makes the package show up on the repository page and
+            # inherit its access settings; the rest is what `docker inspect` reports.
+            echo "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}"
+            echo "org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}"
+            echo "org.opencontainers.image.revision=$SHA"
+            echo "org.opencontainers.image.created=$CREATED"
+            echo "org.opencontainers.image.title=opendiving-api"
+            echo "org.opencontainers.image.description=OpenDiving API"
+            echo "org.opencontainers.image.licenses=AGPL-3.0-or-later"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Needed for the `type=gha` cache below - the default docker driver cannot export
+      # to it.
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # No `platforms:`, so this builds for the runner's architecture (amd64). arm64
+      # needs either `docker/setup-qemu-action` (correct, and slow enough here to matter -
+      # every wheel without an aarch64 build compiles under emulation) or a second job on
+      # an arm runner feeding a manifest list.
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # The dependency layer is `RUN --mount=type=bind` on uv.lock/pyproject.toml, so
+          # its cache key tracks those two files: a commit that only touched `src/` reuses
+          # it and the build is a copy plus a `uv sync --no-editable`.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Buildx would otherwise push a provenance attestation alongside the image,
+          # which turns a single-platform image into an index and renders on the GHCR
+          # package page as a second `unknown/unknown` entry. Drop the `false` if the
+          # attestation is ever worth more than a readable package listing.
+          provenance: false
+
+      - name: Summarise what was pushed
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          SHA: ${{ steps.meta.outputs.sha }}
+        run: |
+          {
+            echo "## Pushed"
+            echo
+            echo "Commit \`$SHA\`, digest \`$DIGEST\`"
+            echo
+            printf '%s\n' "$TAGS" | sed 's/^/- `/; s/$/`/'
+          } >> "$GITHUB_STEP_SUMMARY"
