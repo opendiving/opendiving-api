@@ -54,17 +54,40 @@ from ..schemas.species import SpeciesSearchResponse, SpeciesSearchResult
 
 logger = logging.getLogger(__name__)
 
-# Per-socket-read, and there is no retry, for the reason the geocoder gives: a second attempt
-# spends the caller's remaining patience and a second provider slot on an endpoint whose
-# failure mode is already "the diver adds the species later".
-_TIMEOUT = httpx.Timeout(5.0)
+# **WoRMS is slow, and these numbers are measured rather than inherited.** The geocoder next
+# door uses a 5 s read timeout against Nominatim, which answers in tens of milliseconds; the
+# first draft of this module copied that figure and the result was a feature that did not
+# work at all. Measured against the live register: `AphiaRecordsByName?like=true` 6.3 s,
+# `AphiaRecordsByVernacular?like=true` 8.6 s, `AphiaRecordByAphiaID` 11.2 s, and one name
+# search that had not answered after 40 s. A substring scan over a quarter of a million taxa
+# is simply not a fast query, and `like=true` is the only way to back a type-ahead.
+#
+# So the bounds are set where WoRMS can actually answer, and the *callers* below decide how
+# long they are each willing to wait - search on a keystroke budget, resolve on a much longer
+# one. There is still no retry, for the reason the geocoder gives.
+_TIMEOUT = httpx.Timeout(15.0)
 
-# The bounds that actually hold. `_TIMEOUT` bounds each read; a host that dribbles bytes
-# forever is bounded by these two and nothing else. A search fans out to three of these
-# concurrently, so the deadline is per call rather than per endpoint - the slowest provider
-# sets the wall clock, not the sum.
-_DEADLINE_SECONDS = 10.0
+# The per-request hard cap: `_TIMEOUT` bounds each socket read, so a host that dribbles one
+# byte at a time never trips it and would hold the request open forever. Above the longest
+# budget below, so it only ever fires for a host behaving pathologically rather than slowly.
+_DEADLINE_SECONDS = 30.0
 _MAX_RESPONSE_BYTES = 512 * 1024
+
+# What the whole search fan-out is willing to spend before answering with whatever arrived.
+# A picker is typed into, so this is a human-patience number, not a provider number - and on
+# the measurements above WoRMS will often miss it. That is the intended outcome: Wikidata and
+# the local catalog answer in well under a second, and a diver gets those now rather than the
+# complete answer in eight seconds. What must not happen is the *incomplete* answer being
+# cached as though it were complete - see `_store_search`.
+_SEARCH_BUDGET_SECONDS = 6.0
+
+# What `resolve_species` is willing to spend on the one call it cannot do without. Far longer,
+# because this is a deliberate "add this species" click with a spinner against it rather than
+# a keystroke, and because the alternative to waiting is a 503 that leaves the diver unable to
+# log what they saw. The enrichment fan-out that follows gets its own, shorter budget: names
+# and a Wikidata id are worth a moment, not a stall.
+_RESOLVE_BUDGET_SECONDS = 25.0
+_ENRICHMENT_BUDGET_SECONDS = 10.0
 
 # What a picker can usefully show before "keep typing" is better advice than another row.
 _MAX_RESULTS = 25
@@ -209,11 +232,25 @@ async def _cached_search(key: str) -> SpeciesSearchResponse | None:
         return None
 
 
-async def _store_search(key: str, response: SpeciesSearchResponse) -> None:
+async def _store_search(key: str, response: SpeciesSearchResponse, *, complete: bool) -> None:
+    """Cache a search answer, for a month or for an hour.
+
+    `complete` is the flag that keeps a slow day from poisoning a month. WoRMS regularly
+    misses `_SEARCH_BUDGET_SECONDS` (see the measurements at the top of this module), and the
+    answer that comes back without it is real, useful and *partial* - Wikidata common names
+    with no taxonomy behind them. Storing that under the month-long hit TTL would mean one
+    slow afternoon deciding what "clownfish" returns until the key expired, including on every
+    later day when WoRMS was answering in a second.
+
+    So a partial answer keeps the short TTL and is re-asked within the hour. The same
+    principle the geocoder applies to "we could not ask at all", extended to "we could not ask
+    all of them" - which is a distinction a two-source search has and a one-source one does
+    not.
+    """
     if cache.client is None:
         return
 
-    ttl = _HIT_TTL_SECONDS if response.results else _MISS_TTL_SECONDS
+    ttl = _HIT_TTL_SECONDS if response.results and complete else _MISS_TTL_SECONDS
     try:
         await cache.client.set(key, response.model_dump_json(), ex=ttl)
     except RedisError as exc:
@@ -541,14 +578,24 @@ def _choose_common_name(
     come last because their English coverage is the thin part; they are still tried, because
     a taxon Wikidata has never heard of may well have one.
 
-    Comparison is case-insensitive: "Amphiprion Ocellaris" as a label is the scientific name
-    wearing a capital, not a common name.
+    Comparison is case-insensitive, and it is a *prefix* test rather than equality. Both
+    halves of that were forced by real answers. "Amphiprion Ocellaris" as a label is the
+    scientific name wearing a capital; and Wikidata labels obscure taxa with the binomial plus
+    its authority - resolving one returned the label
+    "Leptasterias (Leptasterias) muelleri muelleri (M. Sars, 1846)", which under an equality
+    test is "different from the scientific name" and would have been displayed as that taxon's
+    common name. A name that begins with the binomial is the binomial with decoration on it,
+    not something a diver would ever call the animal.
     """
     folded = scientific_name.casefold()
-    if label is not None and label.casefold() != folded:
+
+    def is_vernacular(candidate: str) -> bool:
+        return not candidate.casefold().startswith(folded)
+
+    if label is not None and is_vernacular(label):
         return label
     for candidate in (*aliases, *vernaculars):
-        if candidate.casefold() != folded:
+        if is_vernacular(candidate):
             return candidate
     return None
 
@@ -646,6 +693,17 @@ async def _remote_search(query: str) -> SpeciesSearchResponse:
     group, turning one register's bad day into a search that finds nothing. Every failure
     mode below therefore degrades to "this source contributed nothing".
 
+    **The whole fan-out is bounded by `_SEARCH_BUDGET_SECONDS`, and whatever arrived is the
+    answer.** This is the difference between a picker and a report. WoRMS routinely takes six
+    to twelve seconds on the `like=true` endpoints this needs (measurements at the top of the
+    module), and waiting for it would make every keystroke feel broken while Wikidata and the
+    local catalog sat finished. `move_on_after` cancels the stragglers; the tasks append to
+    `collected` as they finish, so everything already in hand survives the cancellation.
+
+    What that costs is completeness, and the cost is *recorded* rather than swallowed: a
+    fan-out that lost a source is cached for an hour instead of a month, so a slow afternoon
+    cannot decide what a query returns until the key expires. See `_store_search`.
+
     A cached entry holds the merged remote list with no `uuid` on any row. That is
     deliberate: whether a species is in the local catalog is a fact that changes the moment
     somebody resolves it, and freezing it into a month-long cache entry would have the
@@ -666,12 +724,26 @@ async def _remote_search(query: str) -> SpeciesSearchResponse:
             # `_request` already swallows every network and parse failure, so reaching here
             # means a provider sent a shape the normalizers did not expect. Same treatment:
             # this source contributed nothing, and the search still answers.
+            #
+            # Cancellation does not land here: `move_on_after` raises the backend's cancelled
+            # exception, which descends from `BaseException` rather than from any of these.
             logger.warning("Discarding the %s results: the response could not be normalized.", source, exc_info=True)
 
-    async with anyio.create_task_group() as tasks:
-        tasks.start_soon(fetch, _PROVIDER_WORMS, _worms_by_name)
-        tasks.start_soon(fetch, _PROVIDER_WORMS, _worms_by_vernacular)
-        tasks.start_soon(fetch, _PROVIDER_WIKIDATA, _wikidata_search)
+    sources = (
+        (_PROVIDER_WORMS, _worms_by_name),
+        (_PROVIDER_WORMS, _worms_by_vernacular),
+        (_PROVIDER_WIKIDATA, _wikidata_search),
+    )
+    with anyio.move_on_after(_SEARCH_BUDGET_SECONDS):
+        async with anyio.create_task_group() as tasks:
+            for source, call in sources:
+                tasks.start_soon(fetch, source, call)
+
+    # Every source either answered or reported nothing. Anything less means one was still in
+    # flight when the budget ran out, which is what keeps a partial answer on the short TTL.
+    complete = len(collected) == len(sources)
+    if not complete:
+        logger.info("A species search answered with %d of %d sources inside its budget.", len(collected), len(sources))
 
     # Re-sorted before merging because a task group completes in whatever order the network
     # allowed, and the merge below is first-writer-wins: without this, which register defines
@@ -687,7 +759,7 @@ async def _remote_search(query: str) -> SpeciesSearchResponse:
 
     ordered = _ordered(list(merged.values()), query)
     response = SpeciesSearchResponse(results=ordered[:_MAX_RESULTS], has_more=truncated or len(ordered) > _MAX_RESULTS)
-    await _store_search(key, response)
+    await _store_search(key, response, complete=complete)
     return response
 
 
@@ -992,12 +1064,21 @@ async def resolve_species(db: AsyncSession, aphia_id: int) -> Species:
 
     Handed a synonym's id - a diver picked *Manta birostris* - it follows `valid_AphiaID` and
     stores the accepted taxon, re-checking for an existing row under the accepted id first.
+
+    **This is allowed to be slow, and has to be.** `AphiaRecordByAphiaID` was measured at
+    eleven seconds against the live register, so a keystroke-sized budget here does not mean
+    a fast endpoint - it means an endpoint that always 503s and a catalog that can never be
+    filled. The client is showing a spinner against a deliberate click, which is the one
+    place in this feature where waiting is the right answer.
     """
     if (existing := await _species_by_aphia_id(db, aphia_id)) is not None:
         return existing
 
-    record = await _worms(f"/AphiaRecordByAphiaID/{aphia_id}")
-    taxon = _worms_taxon(record)
+    # Initialized before the scope, not after it: `move_on_after` cancels the body wherever it
+    # happens to be, so an assignment inside it is not guaranteed to have run.
+    taxon: _Taxon | None = None
+    with anyio.move_on_after(_RESOLVE_BUDGET_SECONDS):
+        taxon = _worms_taxon(await _worms(f"/AphiaRecordByAphiaID/{aphia_id}"))
     if taxon is None:
         # A raw `HTTPException`: `core/exceptions/http_exceptions.py` has no class for 503,
         # the same reason `parse_dive` raises 415 and 409 raw. One message for both "the
@@ -1009,8 +1090,9 @@ async def resolve_species(db: AsyncSession, aphia_id: int) -> Species:
     if taxon.valid_aphia_id is not None and taxon.valid_aphia_id != taxon.aphia_id:
         if (existing := await _species_by_aphia_id(db, taxon.valid_aphia_id)) is not None:
             return existing
-        valid_record = await _worms(f"/AphiaRecordByAphiaID/{taxon.valid_aphia_id}")
-        valid_taxon = _worms_taxon(valid_record)
+        valid_taxon: _Taxon | None = None
+        with anyio.move_on_after(_RESOLVE_BUDGET_SECONDS):
+            valid_taxon = _worms_taxon(await _worms(f"/AphiaRecordByAphiaID/{taxon.valid_aphia_id}"))
         if valid_taxon is None:
             raise HTTPException(status_code=503, detail="Species lookup is temporarily unavailable.")
         taxon = valid_taxon
@@ -1018,26 +1100,33 @@ async def resolve_species(db: AsyncSession, aphia_id: int) -> Species:
     # Enrichment, all three concurrently and none of it load-bearing: a failure in any of
     # them costs names or a qid, never the row. Each collects into its own slot rather than
     # returning, since a task group's tasks cannot return values.
+    #
+    # Budgeted well below the record fetch above, and separately from it: the diver is already
+    # several seconds into a spinner by the time this runs, and a synonym list is not worth
+    # another twenty. Whatever arrived is what gets indexed - a species that lands with fewer
+    # search aliases is still a species the diver can attach to the dive.
     synonyms: list[str] = []
     vernaculars: list[tuple[str, str | None]] = []
     entity: _WikidataEntity | None = None
+    accepted_id = taxon.aphia_id
 
     async def load_synonyms() -> None:
         nonlocal synonyms
-        synonyms = await _worms_synonyms(taxon.aphia_id)
+        synonyms = await _worms_synonyms(accepted_id)
 
     async def load_vernaculars() -> None:
         nonlocal vernaculars
-        vernaculars = await _worms_vernaculars(taxon.aphia_id)
+        vernaculars = await _worms_vernaculars(accepted_id)
 
     async def load_entity() -> None:
         nonlocal entity
-        entity = await _wikidata_by_aphia_id(taxon.aphia_id)
+        entity = await _wikidata_by_aphia_id(accepted_id)
 
-    async with anyio.create_task_group() as tasks:
-        tasks.start_soon(load_synonyms)
-        tasks.start_soon(load_vernaculars)
-        tasks.start_soon(load_entity)
+    with anyio.move_on_after(_ENRICHMENT_BUDGET_SECONDS):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(load_synonyms)
+            tasks.start_soon(load_vernaculars)
+            tasks.start_soon(load_entity)
 
     common_name = _choose_common_name(
         scientific_name=taxon.scientific_name,

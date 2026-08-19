@@ -398,6 +398,29 @@ class TestChoosingTheDisplayName:
     def test_nothing_offered_means_falling_back_to_the_scientific_name(self):
         assert species_service._choose_common_name(scientific_name="Muraenidae", label=None, aliases=()) is None
 
+    def test_a_label_that_is_the_binomial_plus_its_authority_is_not_a_common_name(self):
+        """Found by resolving a real taxon: Wikidata labels obscure species with the binomial
+        and its authority, and an equality test calls that "different from the scientific
+        name" and ships it as the common name. A prefix test is what rejects it."""
+        assert (
+            species_service._choose_common_name(
+                scientific_name="Leptasterias (Leptasterias) muelleri muelleri",
+                label="Leptasterias (Leptasterias) muelleri muelleri (M. Sars, 1846)",
+                aliases=(),
+            )
+            is None
+        )
+
+    def test_a_real_common_name_is_not_caught_by_the_prefix_test(self):
+        """The prefix rule must not be so eager that it rejects genuine names. Neither
+        "ocellaris clownfish" nor "Giant oceanic manta ray" begins with its binomial."""
+        assert (
+            species_service._choose_common_name(
+                scientific_name="Amphiprion ocellaris", label=None, aliases=("ocellaris clownfish",)
+            )
+            == "ocellaris clownfish"
+        )
+
     def test_the_comparison_ignores_case(self):
         """ "Amphiprion Ocellaris" is the scientific name wearing a capital, not a common
         name, and shipping it would put the same string in both columns."""
@@ -933,10 +956,14 @@ class TestConstraints:
 
     def test_a_species_cannot_carry_the_same_name_twice_for_one_kind(self, db: Session):
         species = create_species(db)
-        db.add(SpeciesName(species_id=species.id, name="clownfish", kind="common", source="wikidata"))
+        # Suffixed like every other fixture name here, and for one extra reason: these rows
+        # go into the developer's own database and nothing cleans them up, so a fixture
+        # named plainly "clownfish" turns up in the dev instance's species picker forever.
+        name = f"clownfish {uuid7().hex[-8:]}"
+        db.add(SpeciesName(species_id=species.id, name=name, kind="common", source="wikidata"))
         db.commit()
 
-        db.add(SpeciesName(species_id=species.id, name="clownfish", kind="common", source="worms"))
+        db.add(SpeciesName(species_id=species.id, name=name, kind="common", source="worms"))
         with pytest.raises(IntegrityError, match="ux_species_name_species_id_name_kind"):
             db.commit()
         db.rollback()
@@ -945,8 +972,9 @@ class TestConstraints:
         """The constraint is on `(species_id, name, kind)`, not `(species_id, name)`: a
         taxon's accepted binomial can legitimately also be recorded as somebody's synonym."""
         species = create_species(db)
-        db.add(SpeciesName(species_id=species.id, name="Mobula birostris", kind="scientific", source="worms"))
-        db.add(SpeciesName(species_id=species.id, name="Mobula birostris", kind="synonym", source="worms"))
+        name = f"Mobula birostris {uuid7().hex[-8:]}"
+        db.add(SpeciesName(species_id=species.id, name=name, kind="scientific", source="worms"))
+        db.add(SpeciesName(species_id=species.id, name=name, kind="synonym", source="worms"))
         db.commit()
 
         assert db.query(SpeciesName).filter(SpeciesName.species_id == species.id).count() == 2

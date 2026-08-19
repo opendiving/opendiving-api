@@ -150,7 +150,7 @@ def create_species(db: Session, *, aphia_id: int | None = None, **overrides: Any
     """
     defaults: dict[str, Any] = {
         "aphia_id": aphia_id if aphia_id is not None else int(uuid7().hex[-7:], 16),
-        "scientific_name": f"Amphiprion {uuid7().hex[-8:]}",
+        "scientific_name": f"Testudo fixtura {uuid7().hex[-8:]}",
         "rank": "Species",
         "status": "accepted",
     }
