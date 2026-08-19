@@ -8067,3 +8067,53 @@ this is being read from somewhere else") is the wrong one.
 This does not contradict the model-change workflow in `AGENTS.md`, where a plain restart genuinely
 is enough: `src/app` is a bind mount, so *code* changes are already live and only the process needs
 restarting. Environment is the opposite - baked into the container at creation, not mounted.
+
+## Postgres is pinned to 18, and the volume mounts one level up from where it used to
+
+The compose pin was `postgres:13`, which went EOL in November 2025; CI ran `postgres:16`. Two pins
+that disagreed with each other and with what a self-hoster would end up with. They are now both
+`postgres:18`, and **they move together from now on** — `docker-compose.yml` and
+`.github/workflows/tests.yml` name the same major, because CI running the full suite against the
+shipped version is the only thing making "tested" and "shipped" the same claim.
+
+18 rather than 16 or 17 because this is the one moment the choice is free. Nothing is deployed
+anywhere and the only data is a disposable local dev database, so there is no installed base to
+carry forward; every future self-hosted instance is born on whatever we ship, and a major upgrade is
+the most painful operation a Docker-Postgres self-hoster faces. Born on 16 they owe it by November
+2028, on 18 by November 2030, for no benefit in between. Nothing in the schema anchors a version
+either: plain Postgres through SQLAlchemy/asyncpg, no PostGIS (the marine polygons are a GeoJSON in
+the repo, `services/marine_areas.py`), no pgvector, no extensions at all, and the two `LargeBinary`
+upload columns are plain `bytea`. The locked `asyncpg 0.31.0` tests against Postgres 18 in its own
+CI matrix, and PG18's incompatibility list (COPY `\.`, VACUUM inheritance, AFTER-trigger roles, FTS
+collation) touches nothing here — no triggers, no full-text search, no `COPY`.
+
+### The volume moved because 18 changed the image layout, and a wrong mount fails loudly
+
+The official 18 image moved its `VOLUME` from `/var/lib/postgresql/data` to `/var/lib/postgresql`
+and made `PGDATA` version-specific — `/var/lib/postgresql/18/docker`
+([docker-library/postgres #1259](https://github.com/docker-library/postgres/pull/1259)). The point
+is `pg_upgrade --link` at the next major: both clusters live under one volume, side by side, instead
+of needing two mounts wired up by hand at exactly the wrong moment. So the compose mount is
+`postgres-data:/var/lib/postgresql`, with a comment on it, because it reads like a typo to anyone
+who knows the old path.
+
+Getting it wrong is not silent, which is the part worth writing down. The entrypoint scans
+`/var/lib/postgresql`, `/var/lib/postgresql/data` and `/var/lib/postgresql/*/docker` for stray
+`PG_VERSION` files — and flags even an *empty* old-style `.../data` mount as unused — then prints an
+error naming the paths it found and exits 1. That safeguard shipped inside the layout-change PR
+itself, so every published 18 image has it. There is no "the database came up empty and I lost
+everything" failure mode in either direction; there is a container that will not start until the
+mount is right.
+
+The same mechanism is what a dev machine with a 13-era `postgres-data` volume hits on the first
+`docker compose up` after this change: the old cluster sits at the volume root, the scan finds its
+`PG_VERSION`, `db` exits 1 naming `/var/lib/postgresql`, and every `depends_on: service_healthy`
+dependent stays down. The fix is a wipe — `docker compose down` and remove the `postgres-data`
+volume — because dev data is disposable by decree; `pg_dumpall` first if you want to keep yours.
+
+### PG18's `initdb` turns on data checksums by default
+
+No effect on a fresh cluster beyond a small write overhead, and nothing here relies on it. It is
+recorded because `pg_upgrade` requires the checksum setting to *match* on both sides, and
+`pg_upgrade` across one volume is the exact scenario the new layout exists for. A cluster created by
+this image is checksummed; a future upgrade target has to be too, or the upgrade refuses.
