@@ -12,6 +12,7 @@ used to sit in their own `login.py`/`logout.py` modules under a stale `"login"` 
 left over from the old password-based flow.
 """
 
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
@@ -32,6 +33,8 @@ from ...core.security import (
     generate_secure_token,
     hash_token,
     oauth2_scheme,
+    revocation_time,
+    token_subject,
     verify_google_id_token,
     verify_onboarding_token,
     verify_token,
@@ -57,6 +60,8 @@ from ...services.auth_service import AuthenticatedUser, OnboardingRequired, issu
 from ...services.email_service import send_magic_link_email
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+logger = logging.getLogger(__name__)
 
 # Always the exact same response regardless of whether the email belongs to an
 # existing account - see `EmailAuthRequestResponse`.
@@ -340,6 +345,56 @@ async def complete_profile(
     return AuthOutcome(status="authenticated", **tokens)
 
 
+def _elapsed(since: datetime) -> str:
+    """How long ago `since` was, phrased to stay readable at both ends of the range
+    `_warn_if_revoked` has to cover.
+
+    Milliseconds are what separate a tab race from a replay, and a replay can arrive days
+    after the theft - at which point `518400.000s` is a number nobody reads at a glance.
+    So: seconds under a minute, `timedelta`'s own rendering above it.
+    """
+    seconds = (datetime.now(UTC) - since).total_seconds()
+    if seconds < 60:
+        return f"{seconds:.3f}s"
+    return str(timedelta(seconds=round(seconds)))
+
+
+async def _warn_if_revoked(refresh_token: str, db: AsyncSession) -> None:
+    """Log a refresh token that failed verification *because it had been revoked*, which
+    is the strongest evidence available that a refresh cookie has been stolen.
+
+    `verify_token` can't report that difference and shouldn't have to - see
+    `core.security.revocation_time` for why - so the question is asked again here, on a
+    path that has already decided to answer 401. A malformed cookie is noise and stays
+    silent; only a token this server actually issued and then spent gets a line.
+
+    `WARNING` rather than `info`, and the level is load-bearing: the app configures no
+    logging of its own beyond `configure_logging`, and `uvicorn` configures only its own
+    loggers, so anything below `WARNING` is dropped on the floor in exactly the session
+    where someone is trying to work out what happened. Same reasoning, at more length, on
+    `api.dependencies.fetch_owned_or_raise`.
+
+    **The elapsed time is the point, and it is why `token_blacklist.revoked_at` exists.**
+    Rotation's documented two-tab race (see `refresh_access_token`) lands the losing tab
+    on this exact branch, so an unconditional "your token was stolen" would cry wolf on a
+    benign and not-especially-rare event. That race resolves in milliseconds; a stolen
+    cookie is replayed minutes or hours later. The line therefore reports the gap and what
+    it means, and leaves the reading to whoever is looking - both are live, and nothing
+    the server can see distinguishes them beyond this.
+    """
+    revoked_at = await revocation_time(refresh_token, db)
+    if revoked_at is None:
+        return
+
+    logger.warning(
+        "A revoked refresh token was presented (subject: %s) %s after it was revoked. Under a second is "
+        "the two-tab rotation race POST /auth/refresh documents; a longer gap is worth investigating as "
+        "a stolen cookie.",
+        token_subject(refresh_token) or "unknown",
+        _elapsed(revoked_at),
+    )
+
+
 @router.post("/refresh")
 async def refresh_access_token(
     request: Request, response: Response, db: AsyncSession = Depends(async_get_db)
@@ -354,6 +409,12 @@ async def refresh_access_token(
     with rotation, the theft has a much shorter useful life and a second use of the same
     token fails outright. The trade-off is that two tabs refreshing at the exact same
     moment will race, and the loser gets a 401 - see `DECISIONS.md`.
+
+    That second use is also the loudest signal this app gets that a cookie has been
+    stolen, so it is logged: `_warn_if_revoked` separates "a token we revoked, presented
+    again" from "garbage", which the 401 deliberately does not. The *response* is
+    identical either way - it must never become an oracle for whether a token was ever
+    real.
     """
     await enforce_rate_limit(
         f"auth:refresh:ip:{client_ip(request)}",
@@ -367,6 +428,8 @@ async def refresh_access_token(
 
     user_data = await verify_token(refresh_token, TokenType.REFRESH, db)
     if not user_data:
+        # Only reached on a failure, so the extra lookup costs nothing on the happy path.
+        await _warn_if_revoked(refresh_token, db)
         raise UnauthorizedException("Invalid refresh token.")
 
     # Spend the presented token before minting its replacement, so a crash between the
