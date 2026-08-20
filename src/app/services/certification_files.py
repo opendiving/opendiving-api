@@ -1,14 +1,16 @@
 """Storage for certification card images and PDFs.
 
-The **only** module that reads or writes `certification_file.data`. Routes go through
-these functions and never see bytes-in-a-column, so moving the payload to object storage
-later means rewriting this file (and adding a `storage_key` column) rather than touching
-every call site.
+The **only** module that knows a certification card has stored bytes at all. Routes go
+through these functions and never see where those bytes are, which is what let the payload
+move out of a `bytea` column and onto the files volume without a single call site
+changing.
 
-Deliberately no abstract `FileStorage` base class or runtime-selected backend: there is
-exactly one implementation and no configuration that would choose between two. The
-module boundary is the seam; an interface with a single implementor would be
-scaffolding for a migration that hasn't happened yet.
+`services/blob_store.py` is the layer below: it owns the filesystem, and this module owns
+what is stored, under which key, against which row. Deliberately no abstract `FileStorage`
+base class or runtime-selected backend at either level - there is exactly one
+implementation and no configuration that would choose between two. The module boundary is
+the seam; an interface with a single implementor would be scaffolding for a migration that
+hasn't happened yet.
 """
 
 import hashlib
@@ -16,19 +18,25 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from fastapi import UploadFile
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import undefer
 from uuid6 import uuid7
 
 from ..core.utils.uploads import read_upload_within_limit, safe_filename
 from ..models.certification_file import CertificationFile
 from ..schemas.certification import CertificationFileInfo, CertificationSide
+from . import blob_store
+
+# The key prefix every card file is stored under. A "kind" rather than a directory, so a
+# later kind (dive photos, species images) can pick its own layout without moving anything
+# already written - see `blob_store.build_key`.
+KEY_KIND = "certification-files"
 
 # Phone photos of a card run 2-4 MB; a flatbed scan of one can reach 8. Ten is generous
-# headroom over both while still bounding what a single request can push into the
-# database - which, with the bytes living in Postgres, is the resource actually at risk.
+# headroom over both while still bounding what a single request buffers in memory -
+# `read_upload_within_limit` holds the whole upload, and so does the download that serves
+# it back.
 MAX_CARD_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 # Leading-byte signatures for the formats we accept, checked instead of trusting the
@@ -98,6 +106,12 @@ async def store_certification_file(
     unique index rather than a read-then-insert-or-update: re-uploading a side is the
     normal case (a diver retaking a blurry photo), and two uploads racing must not be
     able to leave two rows for the same side.
+
+    **The file is written before the row, and the replaced file is unlinked after the
+    commit.** That ordering is the whole consistency story now that the two live in
+    different stores: a crash between the two strands an unreferenced file, which is
+    harmless and swept, where the reverse order would leave a committed row pointing at
+    bytes that do not exist.
     """
     data = await read_upload_within_limit(upload, MAX_CARD_FILE_SIZE)
     if not data:
@@ -108,6 +122,31 @@ async def store_certification_file(
     digest = hashlib.sha256(data).hexdigest()
     now = datetime.now(UTC)
 
+    # A narrow read of what this side currently holds, purely so the replaced file can be
+    # unlinked afterwards and so the new key carries the row's *existing* uuid rather than
+    # a fresh one. Re-feeding a live row the same bytes therefore mints the identical key,
+    # which is what makes the whole `PUT` idempotent down to the filesystem: nothing is
+    # scheduled for unlinking, and the write lands byte-identically on the file already
+    # there.
+    #
+    # It does not make the upsert below any less atomic - that is still one statement
+    # against the unique index. In the vanishingly rare case where a concurrent insert wins
+    # between this read and that statement, the `DO UPDATE` fires and the stored key
+    # carries a uuid7 minted here instead of the row's. Still unique, still never reusable,
+    # and the loser's own file is simply an orphan for the sweeper.
+    existing = (
+        await db.execute(
+            select(CertificationFile.uuid, CertificationFile.storage_key).where(
+                CertificationFile.certification_id == certification_id,
+                CertificationFile.side == side.value,
+            )
+        )
+    ).one_or_none()
+
+    row_uuid = existing.uuid if existing is not None else uuid7()
+    key = blob_store.build_key(KEY_KIND, row_uuid=row_uuid, sha256=digest)
+    await blob_store.put(key, data)
+
     # Just the parts a replacement changes. Everything identifying the row -
     # `certification_id`, `side`, `uuid`, `created_at` - is set on insert only, so
     # re-photographing a card swaps its bytes without the file changing identity.
@@ -116,7 +155,7 @@ async def store_certification_file(
         "byte_size": len(data),
         "original_filename": filename,
         "sha256": digest,
-        "data": data,
+        "storage_key": key,
     }
     stmt = (
         pg_insert(CertificationFile)
@@ -127,7 +166,7 @@ async def store_certification_file(
             # is a dataclass-level default, applied when the ORM constructs an instance,
             # and this Core-level INSERT never constructs one. Without it Postgres gets a
             # NULL and rejects the row.
-            uuid=uuid7(),
+            uuid=row_uuid,
             created_at=now,
             **payload,
         )
@@ -141,6 +180,11 @@ async def store_certification_file(
     )
     result = await db.execute(stmt)
     row = result.one()
+    # Guarded on inequality, and that guard is load-bearing rather than an optimization:
+    # the same row re-fed the same bytes produces the same key, and unlinking it would
+    # delete the file just written.
+    if existing is not None and existing.storage_key != key:
+        blob_store.delete_after_commit(db, existing.storage_key)
     await db.commit()
 
     return CertificationFileInfo(
@@ -158,32 +202,30 @@ async def load_certification_file(
 ) -> LoadedCardFile | None:
     """Fetch one side's bytes, or `None` if that side has no file.
 
-    The only place `data` is ever loaded - hence the explicit `undefer`, which is what
-    makes every *other* query against this table cheap by default.
+    `None` means *this side has no row*. A row whose file is missing from the volume
+    raises `blob_store.BlobMissingError` instead, and every caller has to decide what to do
+    with that: the download route 500s, the export archive skips the member, a backfill
+    counts it failed. Collapsing the two into `None` here would turn data loss into a 404,
+    which is precisely the report that would stop anyone investigating.
     """
-    stmt = (
-        select(CertificationFile)
-        .where(
-            CertificationFile.certification_id == certification_id,
-            CertificationFile.side == side.value,
-        )
-        .options(undefer(CertificationFile.data))
+    stmt = select(
+        CertificationFile.storage_key,
+        CertificationFile.content_type,
+        CertificationFile.original_filename,
+        CertificationFile.sha256,
+    ).where(
+        CertificationFile.certification_id == certification_id,
+        CertificationFile.side == side.value,
     )
-    file = (await db.execute(stmt)).scalar_one_or_none()
-    if file is None:
+    row = (await db.execute(stmt)).one_or_none()
+    if row is None:
         return None
 
-    # Detached before returning, for the same reason as `load_dive_file`: everything worth
-    # having is copied out below and what stays behind is megabytes. The full export walks
-    # every card a diver holds in one session (`services/export/archive.py`), which is the
-    # run that makes this matter rather than merely tidy.
-    db.expunge(file)
-
     return LoadedCardFile(
-        data=file.data,
-        content_type=file.content_type,
-        original_filename=file.original_filename,
-        sha256=file.sha256,
+        data=await blob_store.get(row.storage_key),
+        content_type=row.content_type,
+        original_filename=row.original_filename,
+        sha256=row.sha256,
     )
 
 
@@ -208,21 +250,31 @@ async def delete_certification_file(
 ) -> bool:
     """Hard-delete one side's file. Returns whether there was one to delete.
 
-    Hard, not soft: a soft-deleted blob keeps occupying its bytes forever with nothing
-    able to read it. The metadata it would preserve isn't worth the storage.
+    Hard, not soft: a soft-deleted row keeps a file nothing can read. The metadata it would
+    preserve isn't worth the storage.
+
+    Row first, file after the commit - the mirror of the write ordering in
+    `store_certification_file`, and for the same reason. `commit=False` callers get the
+    unlink riding *their* transaction: `erase_certification` removes the card files and
+    soft-deletes the certification together, and a rollback there must leave the files
+    where they are.
     """
-    file = (
-        await db.execute(
-            select(CertificationFile).where(
-                CertificationFile.certification_id == certification_id,
-                CertificationFile.side == side.value,
+    keys = list(
+        (
+            await db.execute(
+                delete(CertificationFile)
+                .where(
+                    CertificationFile.certification_id == certification_id,
+                    CertificationFile.side == side.value,
+                )
+                .returning(CertificationFile.storage_key)
             )
-        )
-    ).scalar_one_or_none()
-    if file is None:
+        ).scalars()
+    )
+    if not keys:
         return False
 
-    await db.delete(file)
+    blob_store.delete_after_commit(db, keys)
     if commit:
         await db.commit()
     return True
@@ -237,14 +289,22 @@ async def delete_files_for_certification(db: AsyncSession, *, certification_id: 
     `delete_files_for_dive` in `services/dive_files.py`. `gear_service_schedule` used to
     need a third copy of this and no longer does: `gear_item` is hard-deleted, so its
     cascades fire on their own.
+
+    Note the gap this does *not* close: a hard delete of a `Certification` from the admin
+    panel fires the FK's cascade with no service layer in the way, so the rows go and the
+    files stay. They are unreferenced files at that point, which is exactly what
+    `src/scripts/sweep_orphaned_files.py` reclaims.
     """
-    files = (
-        (await db.execute(select(CertificationFile).where(CertificationFile.certification_id == certification_id)))
-        .scalars()
-        .all()
+    keys = list(
+        (
+            await db.execute(
+                delete(CertificationFile)
+                .where(CertificationFile.certification_id == certification_id)
+                .returning(CertificationFile.storage_key)
+            )
+        ).scalars()
     )
-    for file in files:
-        await db.delete(file)
+    blob_store.delete_after_commit(db, keys)
     if commit:
         await db.commit()
 
@@ -256,8 +316,10 @@ async def get_file_infos_for_certifications(
 
     Every row in the list view shows whether it has a front and a back, so fetching this
     per row would be an N+1 on the hot path - the same reasoning (and shape) as
-    `get_schedules_for_gear_items`. Selects explicit columns rather than whole entities
-    so the `bytea` cannot be dragged along even by accident.
+    `get_schedules_for_gear_items`. Selects explicit columns rather than whole entities,
+    which is now habit rather than necessity: it predates the payload leaving Postgres,
+    where a `select(CertificationFile)` would have been one careless `undefer` from
+    dragging megabytes through a list view.
     """
     if not certification_ids:
         return {}

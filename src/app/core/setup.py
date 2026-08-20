@@ -17,6 +17,8 @@ from ..api.dependencies import get_current_superuser
 from ..middleware.client_cache_middleware import ClientCacheMiddleware
 from ..middleware.security_headers_middleware import SecurityHeadersMiddleware
 from ..models import *  # noqa: F403
+from ..services import blob_store
+from ..services.blob_store import ensure_root_writable
 from .config import (
     AppSettings,
     ClientSideCacheSettings,
@@ -31,8 +33,6 @@ from .config import (
 from .db.database import async_engine as engine
 from .db.migrations import upgrade_to_head
 from .utils import cache
-from ..services import blob_store
-from ..services.blob_store import ensure_root_writable
 
 # -------------- logging --------------
 configure_logging(settings.LOG_LEVEL)
@@ -104,9 +104,7 @@ async def warn_if_files_volume_looks_empty() -> None:
         async with engine.begin() as conn:
             rows = (
                 await conn.execute(
-                    text(
-                        "SELECT (SELECT count(*) FROM dive_file) + (SELECT count(*) FROM certification_file) AS n"
-                    )
+                    text("SELECT (SELECT count(*) FROM dive_file) + (SELECT count(*) FROM certification_file) AS n")
                 )
             ).scalar_one()
     except Exception:

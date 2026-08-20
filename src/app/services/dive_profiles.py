@@ -53,6 +53,7 @@ from ..schemas.dive_profile import (
     ParsedProfileSchema,
     ProfileEventType,
 )
+from .blob_store import BlobMissingError
 from .dive_parsers import DiveParseError, DiveParser
 
 logger = logging.getLogger(__name__)
@@ -1003,7 +1004,15 @@ async def backfill_profiles(
                 skipped += 1
                 continue
 
-        file = await load_dive_file(db, dive_id=row.dive_id)
+        try:
+            file = await load_dive_file(db, dive_id=row.dive_id)
+        except BlobMissingError:
+            # The row is there and its file is not - data loss or an unmounted volume,
+            # not a race. Counted rather than raised, so a run over a half-restored volume
+            # reports how many dives are in this state instead of dying on the first.
+            logger.error("Skipping dive %s: its stored file is missing from the volume", row.dive_id)
+            failed += 1
+            continue
         if file is None:
             logger.warning("Skipping dive %s: its stored file vanished mid-run", row.dive_id)
             failed += 1

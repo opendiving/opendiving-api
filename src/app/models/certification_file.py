@@ -1,5 +1,5 @@
-from sqlalchemy import ForeignKey, Index, Integer, LargeBinary, String
-from sqlalchemy.orm import Mapped, declared_attr, deferred, mapped_column
+from sqlalchemy import ForeignKey, Index, Integer, String
+from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
 from ..core.db.models import PublicUUIDMixin, TimestampMixin
@@ -8,21 +8,23 @@ from ..core.db.models import PublicUUIDMixin, TimestampMixin
 class CertificationFile(Base, PublicUUIDMixin, TimestampMixin):
     """One stored image or PDF of a certification card - its front or its back.
 
-    The bytes live in Postgres (`data`, a `bytea`) rather than in object storage. At this
-    scale that is the right trade: a diver has well under ten cards of a few hundred KB
-    to a few MB each, so the existing database and its backups cover the lot with no new
-    infrastructure, no credentials to manage and no orphaned-object cleanup. Every read
-    and write goes through `services/certification_files.py`, which is the seam to
-    replace if a future feature (dive photo galleries) makes object storage worth it.
+    The bytes live on the files volume, not in this table: the row carries a
+    `storage_key` and `services/blob_store.py` holds the file. Every read and write still
+    goes through `services/certification_files.py`, which is the module that knows a card
+    has a file at all - see *"File payloads live on the files volume, not in Postgres"* in
+    `DECISIONS.md` for why they left Postgres, and the superseded section it names for the
+    trade that held before photo-scale storage was on the roadmap.
 
-    A separate table rather than two blob columns on `certification`: even `deferred()`
-    columns are easy to load by accident from a `get_multi` or an admin view, and putting
-    them out of reach makes that structurally impossible. It also means front and back
-    get identical handling instead of duplicated column pairs.
+    A separate table rather than two columns on `certification`: it keeps front and back
+    identically handled instead of duplicating column pairs, and keeps a `get_multi` or an
+    admin view over certifications from touching file rows at all. That reasoning predates
+    the move (it was about `deferred()` blobs being easy to load by accident) and survives
+    it.
 
-    No `SoftDeleteMixin`. Soft-deleting a blob leaves it occupying its bytes in the table
-    forever with nothing able to read it; these are hard-deleted, including when their
-    parent certification is soft-deleted (see `erase_certification`).
+    No `SoftDeleteMixin`. A soft-deleted row holds a file nothing can read; these are
+    hard-deleted, including when their parent certification is soft-deleted (see
+    `erase_certification`). The stored file goes with the row, unlinked after the deleting
+    transaction commits.
     """
 
     __tablename__ = "certification_file"
@@ -40,18 +42,20 @@ class CertificationFile(Base, PublicUUIDMixin, TimestampMixin):
     content_type: Mapped[str] = mapped_column(String(64))
     byte_size: Mapped[int] = mapped_column(Integer)
     original_filename: Mapped[str] = mapped_column(String(255))
-    # Hex SHA-256 of `data`. Serves as the `ETag` on the download endpoint (so a card the
-    # diver opens repeatedly re-validates with a 304 instead of re-sending megabytes) and
-    # as an integrity check against the stored bytes.
+    # Hex SHA-256 of the stored bytes. Serves as the `ETag` on the download endpoint (so a
+    # card the diver opens repeatedly re-validates with a 304 instead of re-sending
+    # megabytes), as an integrity check against the stored file, and as half of
+    # `storage_key`.
     sha256: Mapped[str] = mapped_column(String(64))
-    # `deferred` so that any query for a file row - including one written later by
-    # someone who has not read this file - returns metadata only unless the bytes are
-    # asked for explicitly with `undefer`.
+    # Where the bytes are, on the files volume:
+    # `certification-files/{sha256[:2]}/{uuid}_{sha256}`, minted by `blob_store.build_key`.
+    # Opaque to everything but that module - a valid S3 object key as much as a relative
+    # path.
     #
-    # `nullable=False` is spelled out because wrapping the column in `deferred()` hides
-    # the `Mapped[bytes]` annotation from SQLAlchemy's nullability inference, which would
-    # otherwise emit a nullable column - and a file row with no bytes is meaningless.
-    data: Mapped[bytes] = deferred(mapped_column(LargeBinary, nullable=False))
+    # Replacing a side's photo mints a new key (new content, same row uuid), which is what
+    # keeps stored files immutable: a reader mid-replacement can never be handed new bytes
+    # under the old metadata.
+    storage_key: Mapped[str] = mapped_column(String(255))
 
     @declared_attr.directive
     @classmethod
@@ -67,4 +71,7 @@ class CertificationFile(Base, PublicUUIDMixin, TimestampMixin):
                 "side",
                 unique=True,
             ),
+            # One row per stored file, for the same reason as `dive_file`'s: two rows
+            # naming one key would let either one's deletion unlink the other's bytes.
+            Index("ux_certification_file_storage_key", "storage_key", unique=True),
         )
