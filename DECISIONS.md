@@ -9147,3 +9147,96 @@ The same applies to the copy that has to exist in `opendiving-web` — the polic
 released in lockstep, and a finder who lands on the frontend repo needs the same instructions. An
 org-level `.github` repository would serve both from one file and is the better answer if a third
 repo ever wants it; two copies are the cheaper one while there are two.
+
+## Security headers are the app's, not the proxy's
+
+`deploy/Caddyfile` routes five paths — `/api/v1*`, `/admin*`, `/docs`, `/redoc`, `/openapi.json` —
+straight to `api:8000`, so nothing the web container sets reaches any of them. The comment on the
+`web` handler directly below said the web app "sets its own security headers, HSTS included … so
+there is nothing to add here", which was true of that handler and read as if it covered the site.
+Nothing filled the gap on the API side either: CRUDAdmin ships no security headers at all (grep the
+installed package — there are none), the API set none globally, and Caddy adds none by default. So
+`/admin`, a full create/update/delete interface over `User`, `Dive`, `GearItem` and everything else
+in `admin/views.py`, was served framable.
+
+**Not urgent, and the PR should not be read as though it were.** Two things already blunt it. First,
+CRUDAdmin's session cookie is `SameSite=strict` outside debug mode (`crudadmin/session/manager.py`'s
+`PROD_SAMESITE`), so a cross-site frame carries no cookie and renders a logged-out panel —
+clickjacking is neutered today by a third-party default we do not control, which is the argument for
+having a header of our own rather than against it. Second, HSTS is recorded per *host*, not per
+path, so one page load anywhere on the domain pins `/admin` too; the only visitor who misses it is
+an operator whose first-ever request to the domain is `/admin` itself, from a bookmark. And `/docs`,
+`/redoc` and `/openapi.json` are absent on `ENVIRONMENT=production` (the `EnvironmentSettings` block
+in `core/setup.py` gates the whole docs router), so on a production install `/admin*` is the only
+HTML behind that matcher at all.
+
+**The fix is `SecurityHeadersMiddleware`, not a `header` block in the Caddyfile**, and the choice is
+the substance of this section. The obvious move is the proxy: it is where headers conventionally
+live, and `deploy/Caddyfile` is a release artifact that ships on the next tag anyway. It was
+rejected because it fixes one deployment shape. The bundled Caddy is under the `proxy` profile and
+plenty of installs run nginx, Traefik or NPM instead — `docs/self-hosting/reverse-proxy.md` exists
+for exactly those — and a config file this repository never sees cannot be given a header by a
+change made here. A doc paragraph is guidance, not a control, and most installs will not read it.
+
+The counter-argument is that the app is asserting policy about a surface it does not own, and it
+does not hold up: `/admin` is mounted on this FastAPI app in `main.py` and `/docs` is a route in
+`core/setup.py`. These are the app's own responses. The precedent was already in the tree, too —
+`dives.py`, `certifications.py` and `export.py` have each sent `X-Content-Type-Options` and a
+per-response CSP on binary downloads since those endpoints were written. The middleware generalises
+an existing habit rather than introducing a new one, and unlike a proxy config it is covered by the
+test suite.
+
+So the Caddyfile change is comments only: the `web` handler's now says what it does and does not
+cover, and the `@api` block records that the absent `header` block is a decision, so nobody adds one
+later and ends up with two definitions of one policy.
+
+**What it sends, and what it deliberately doesn't.**
+
+- `Content-Security-Policy: frame-ancestors 'none'` — the whole policy, on purpose. A `default-src`
+  here would break CRUDAdmin's own templates, which style themselves inline and pull `htmx.min.js`
+  and a favicon from `/admin/static` and a webfont from `fonts.googleapis.com`; `frame-ancestors`
+  restricts framing only and constrains none of that. Verified by loading the panel: it renders
+  fully styled, htmx and the webfont load, the console is clean, and a cross-origin page trying to
+  frame `http://127.0.0.1:8001/admin/login` gets
+  `Framing … violates the following Content Security Policy directive: "frame-ancestors 'none'". The request has been blocked.`
+- `X-Frame-Options: DENY` — redundant in every browser that supports `frame-ancestors` (Chrome 40,
+  Firefox 33, Safari 10), which is every browser that can run the panel. Sent anyway for parity with
+  the web app, which made the same call in `next.config.js` for the same reason, and because an
+  absent one is a finding in the scanners self-hosters point at their own boxes. Where both are
+  present the browser uses the CSP, so it cannot conflict.
+- `X-Content-Type-Options: nosniff` — the one with real breakage potential, since a wrong
+  `Content-Type` stops being forgiven. The panel's entire asset surface is two files,
+  `/admin/static/htmx.min.js` (`text/javascript`) and `/admin/static/favicon.png`, plus inline
+  styles; both were checked.
+- **No `Strict-Transport-Security`.** It is host-scoped, so the web app's header already covers
+  `/admin` for anyone who has loaded a page of the site, and the residual case above closes on the
+  first one. Sending it from here as well would put two controls on one behaviour — and the
+  off-switch, `WEB_HSTS`, lives in the other repository, so an API-side copy would ignore it. That
+  matters concretely rather than tidily: `WEB_HSTS=off` is what a plain-HTTP LAN instance uses, and
+  a pin it cannot honour makes the instance unreachable.
+
+**Handlers keep their own headers**, the same contract `ClientCacheMiddleware` keeps with
+`Cache-Control`. That protects the three binary-download responses, whose
+`default-src 'none'; sandbox` is far stricter than the default here. They now spell out
+`frame-ancestors 'none'` themselves, because it does **not** fall back to `default-src`: a policy
+that omits it grants framing however strict the rest of it is, so opting out of the middleware's CSP
+would otherwise have meant opting out of frame protection.
+
+**Registration order is load-bearing.** `add_middleware` inserts at the front of the stack, so the
+last one registered is the outermost — which is what puts this outside `CORSMiddleware`, the one
+piece that answers a request itself (an `OPTIONS` preflight) rather than calling through. Registered
+before it, those responses would never be seen. Routed responses, the mounted admin panel included,
+are covered either way: a mount lives in the router, inside all of it. The one response that escapes
+is the 500 Starlette synthesises for an unhandled exception, which `ServerErrorMiddleware` produces
+*outside* all user middleware — recorded in the tests rather than fixed, since that body is
+Starlette's own `Internal Server Error` string with nothing worth framing, and reaching outside
+`ServerErrorMiddleware` means not using `add_middleware` at all.
+
+**The bring-your-own-proxy half is documentation, and it now tells operators to do nothing.**
+`docs/self-hosting/reverse-proxy.md` covered forwarded headers thoroughly and said nothing about
+response headers. Its new step 6 says both containers set their own and lists the three ways to undo
+that, all of which take deliberate typing: `proxy_hide_header`, an `add_header` of your own — nginx
+*appends* rather than replaces, so a well-meant `add_header X-Frame-Options SAMEORIGIN;` arrives as
+the conflicting `DENY, SAMEORIGIN` that browsers discard — and losing `X-Forwarded-Proto`, without
+which the web app never emits HSTS at all. An operator who would rather own HSTS at the proxy sets
+`WEB_HSTS=off` and sends it there; the point is that one thing sends it.

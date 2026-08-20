@@ -62,6 +62,33 @@ the cookie flag concerns.
 app, so it needs a second upstream: `/admin*` → `api:8000`. Leave it alone otherwise; the panel is
 off by default.
 
+**6. Leave the response headers alone.** There is nothing to add here, and that is the point of this
+step: both containers set their own, so a proxy that simply passes responses through — which is the
+default behaviour of every proxy on this page — gets it right without being configured.
+
+The API sends `Content-Security-Policy: frame-ancestors 'none'`, `X-Frame-Options: DENY` and
+`X-Content-Type-Options: nosniff` on every response. `/admin` is the reason: it is a full
+create/update/delete interface over every table, and CRUDAdmin ships no headers of its own. The web
+app sets a per-request, nonce-based CSP plus `Referrer-Policy`, `Permissions-Policy` and the same
+two above.
+
+Three ways to undo that, all of them things you have to type:
+
+- **Hiding them.** `proxy_hide_header` in nginx, or its equivalent elsewhere. There is no reason to
+  reach for it against either upstream.
+- **Adding your own copy.** nginx's `add_header` *appends*, it does not replace, so a well-meant
+  `add_header X-Frame-Options SAMEORIGIN;` reaches the browser as `DENY, SAMEORIGIN` — a conflicting
+  value, which browsers treat as malformed and drop entirely. Set site-wide security headers on your
+  other vhosts, not on this one.
+- **Losing `X-Forwarded-Proto`.** HSTS is the one header this stack will not send unprompted: the
+  web app emits it only on a request that already arrived over HTTPS, and behind a proxy that
+  terminates TLS the sole evidence of that is the header from step 3. Without it, no HSTS on any
+  page of the site.
+
+If you would rather your proxy own HSTS — one place for every site on the box, which is a reasonable
+way to run a machine — set `WEB_HSTS=off` and send `Strict-Transport-Security` yourself. Pick one or
+the other; two things sending it is how they end up disagreeing about `max-age`.
+
 ## Snippets
 
 Adapt the upstream host to however your proxy reaches the stack.
@@ -83,6 +110,9 @@ server {
     # enforces it.
     client_max_body_size 12m;
 
+    # No `add_header` here, deliberately - see step 6. Both upstreams set their own
+    # security headers, and nginx's `add_header` appends rather than replaces, so a
+    # second `X-Frame-Options` arrives as a conflicting value the browser discards.
     location / {
         proxy_pass http://127.0.0.1:3000;   # the `web` container
         proxy_http_version 1.1;
@@ -125,6 +155,10 @@ limit (1 MB) needs raising in *Advanced* for card uploads:
 ```nginx
 client_max_body_size 12m;
 ```
+
+Leave the *HSTS* toggles on the SSL tab off unless you also set `WEB_HSTS=off`, and keep any
+`add_header` you use elsewhere out of that *Advanced* box — both for the reasons in step 6. *Block
+Common Exploits* is unrelated to any of this and safe to leave however you have it.
 
 ## LAN, or no domain at all
 
