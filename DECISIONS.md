@@ -9375,16 +9375,18 @@ scrape them is worth recording because it failed in a way that reads as safe.
 after the branch has been chosen and before `gh issue comment`, `gh issue edit` and `gh issue close`
 run. The issue is left open, uncommented, still carrying the stale vulnerable fingerprint: precisely
 the state the rewrite above exists to prevent, reintroduced by the code meant to preserve the
-record, and the `else` branch written to handle "no ids found" is unreachable for the same reason it
-is needed. It is reachable — a human filing or relabelling an `image-cve` issue, or a Trivy id
-outside the CVE/GHSA shape (`DSA-`, `DLA-`, `PYSEC-`). The general rule, since this repository's
-workflows are full of `set -euo pipefail`: **`grep` in a command substitution is a conditional
-wearing a pipeline's clothes.** Inside an `if` it is fine, which is why the label check further up
-the same step is; assigned to a variable it is a failure path. `jq` and `sed` do not have this shape
-— both exit 0 on no match — which is the other half of why copying beat scraping. Scraping was also
-capped by construction: it could only ever recover ids that survived the report's 50-row table cut,
-so the comment would have read as a complete accounting of what was fixed while silently dropping
-the rest, whereas the body carries its own "…and N more rows" caveat along with the table.
+record. The `else` branch written to handle "no ids found" never runs either: the assignment aborts
+the step first, so the one condition that would select that branch is the condition that stops it
+being reached. The *case* it was written for is real, though — a human filing or relabelling an
+`image-cve` issue, or a Trivy id outside the CVE/GHSA shape (`DSA-`, `DLA-`, `PYSEC-`). The general
+rule, since this repository's workflows are full of `set -euo pipefail`: **`grep` in a command
+substitution is a conditional wearing a pipeline's clothes.** Inside an `if` it is fine, which is
+why the label check further up the same step is; assigned to a variable it is a failure path. `jq`
+and `sed` do not have this shape — both exit 0 on no match — which is the other half of why copying
+beat scraping. Scraping was also capped by construction: it could only ever recover ids that
+survived the report's 50-row table cut, so the comment would have read as a complete accounting of
+what was fixed while silently dropping the rest, whereas the body carries its own "…and N more rows"
+caveat along with the table.
 
 **Findings fail the PR check but never the scheduled job.** Different jobs, different answers, both
 on purpose. The scheduled job's output is an issue, so a red X would add nothing and would train
