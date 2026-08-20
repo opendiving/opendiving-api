@@ -9673,3 +9673,102 @@ OAuth2 password-grant constants, and the CSRF token is issued as a cookie by the
 rather than embedded in the page. If a future version puts a per-session token in that HTML this
 stops being true, and the mount path becomes the right check after all — worth re-reading the
 template when bumping `crudadmin`.
+
+## Two properties are guarded by enumeration, not by review
+
+The security audit that closed seven defects closed them one at a time. Every fix was correct and
+none of them stopped the eighth: the cache-labelling defect in *"`public` requires the absence of
+every credential"* above is the same mistake as the one before it, wearing a different credential,
+and it came back because nothing enumerated the thing it got wrong. This repo already answers that
+shape three times — `test_every_update_schema_is_accounted_for`,
+`test_no_token_minting_route_is_a_safe_method`, `test_every_credential_header_is_named` — and the
+two properties most worth the treatment had no such guard at all:
+
+- **Every `/api/v1` route requires authentication** — `tests/test_route_authentication.py`.
+- **Every `/{uuid}` route resolves ownership** — `TestEveryUuidRouteIsAccountedFor` in
+  `tests/test_ownership.py`, over the tables the behavioural tests in that file are parametrized
+  from.
+
+Both walk the app's real route table and fail on a route that is not accounted for. Neither is a
+lint rule over source text: the auth guard reads the resolved dependency graph, and the ownership
+tables are the input to tests that drive all 33 routes over HTTP.
+
+**An allowlist entry is a decision, not paperwork.** Both guards take a dict keyed by route with a
+sentence of justification as the value, rather than a bare list, and the sentence is the whole point
+— it is what a reviewer reads when a PR proposes the twelfth anonymous route or the second ownerless
+resource. "It has to be anonymous" is not one of the reasons; "the caller has no token yet by
+definition", "the caller may be locked out and that is the point", "the caller is a monitor" and
+"the link's token is the credential, because it may be opened on another device" are. Adding an
+entry should feel like arguing for it, because the failure mode of both properties is fail-open and
+silent — the route works perfectly for everyone, including the person it should not.
+
+Each guard is paired with a stale-entry test pointing the other way, for the same reason
+`test_every_declared_field_exists_on_the_schema` sits beside its own sweep. An entry whose route was
+renamed or has since grown a real check guards nothing, and worse, it sits there pre-approving the
+path for whatever gets registered there next. Those tests double as the vacuity check: if the route
+walk ever stops finding routes, every entry goes stale at once and says so, rather than letting the
+sweeps pass over an empty set.
+
+### The ownership guard is behavioural, and one family of routes is checked differently
+
+Both readings were available — assert each handler's source mentions a known ownership helper, or
+drive the route and assert the response. The source check is cheaper and would have been the wrong
+one to ship: it is fooled by a rename, it proves nothing about the *status code*, and 404-for-both
+is the actual invariant (`fetch_owned_or_raise` explains at length why a 403 on an addressed
+resource is itself a disclosure). A guard that overstates what it checks is worse than no guard,
+because it stops people looking.
+
+Behavioural here costs nothing, because `test_ownership.py` already had the harness: its own app
+with `apply_migrations_on_start=False`, `get_current_user` overridden, and the crud singleton's
+`get` stubbed. So "somebody else's row" is a stub returning a row with the wrong `user_id`, not a
+second `User` in Postgres — which also keeps the whole guard out of the `db_available()`-gated
+subset. That matters more than it sounds: those modules **skip silently** without
+`POSTGRES_SERVER=localhost` (see CONTRIBUTING.md), and a guard whose failure mode is silent absence
+is the last thing that should be skippable. CI would catch it; a developer's green local run would
+not.
+
+The six gear-service routes get their own class, because their seam is genuinely different.
+`resolve_schedule_for_user`/`resolve_record_for_user` filter on `user_id` in the `WHERE` clause and
+return `None` for both "absent" and "not yours", so at that seam the two cases are *already* one and
+stubbing it can only prove `None` becomes a 404 — which a resolver that never filtered by owner
+would pass just as well. The assertion carrying the weight there is that the route handed the
+resolver its caller's own `user_id`.
+
+`GET /api/v1/species/{uuid}` is the one ownerless route. The catalog is global (`models/species.py`)
+— every row is a fact about the ocean that every account may reference, so there is nothing to
+compare a caller against and a species uuid is an existence oracle for nothing private.
+`crud/crud_species.py` documents why the `user_id` filter its siblings carry is an omission on
+purpose.
+
+### Walking the route table needs `iter_route_contexts`, not `app.routes`
+
+Both guards go through `tests/helpers/routes.py`, and it exists because the obvious approach stopped
+working. Since FastAPI 0.141 `include_router` stores a lazy `_IncludedRouter` wrapper rather than
+copying routes, so `app.routes` is not a flat list of `APIRoute` any more: iterating it here finds
+three objects — two wrappers and the admin `Mount` — and the *effective* routes, the ones carrying
+the `/api` and `/v1` prefixes, are composed on demand. `iter_route_contexts` is the public flattener
+FastAPI's own `get_openapi` uses, which is why the guards use it instead of reaching into the
+private wrapper.
+
+It also hands back the **merged** dependant, which a route's own `route.dependant` is not — a
+dependency attached at `include_router(..., dependencies=[...])` lives on the include context alone.
+Nothing does that today, but a walk that missed it would report a protected route as anonymous and
+send whoever hit it hunting for a bug in the route.
+
+One more thing moved in the same release, and it is the reason `test_the_bearer_scheme_alone_counts`
+exists. `Dependant.security_requirements` is gone; a security scheme is now an ordinary
+sub-dependency whose `call` *is* the scheme instance, so `oauth2_scheme` turns up in a plain walk of
+`.dependencies` like anything else. It has to count as authentication: it is built `auto_error=True`
+(`core/security.py`), so a missing `Authorization` header is a 401 before the handler runs.
+`POST /auth/logout` depends on it and on nothing else, so if a future version moves security schemes
+somewhere the walk does not look, that route is the first — and for a while the only — one to go
+quiet. A single unexplained failure in the sweep reads like a routing mistake rather than a broken
+walk, so the canary asserts the mechanism directly.
+
+The walk is scoped to `/api/v1`, and the scope is part of what the guards mean. `/docs`, `/redoc`
+and `/openapi.json` are registered conditionally on `ENVIRONMENT` (`core/setup.py`) — absent on
+production, superuser-gated on staging, wide open on local, which is what the suite runs as. They
+would otherwise read as anonymous and need allowlisting for a reason that is really "this is a
+different property". Mounts are skipped explicitly rather than left to fall out of
+`CRUD_ADMIN_ENABLED` defaulting false: the admin panel carries its own session auth, and a guard
+that only holds on one configuration is not a guard.
