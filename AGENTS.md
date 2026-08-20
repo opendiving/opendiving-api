@@ -23,19 +23,27 @@ one rather than matching the wrapping by hand.
 - Runs in: Docker Compose — `db` (postgres), `redis`, `api`, `worker` (arq), and `admin_init`
   (one-shot, seeds the admin panel before `api` starts)
 
-- **Schema changes**: Never write Alembic migrations — `src/alembic.ini` and `src/migrations/` exist
-  but are deliberately unused. `Base.metadata.create_all()` runs on startup and creates **brand-new
-  tables only**; it never alters an existing one. To add a column to a table that already exists:
+- **Schema changes**: every one ships an Alembic revision. `alembic upgrade head` runs in the API's
+  lifespan (`core/setup.py`), so a schema change reaches a database — yours or a self-hoster's — by
+  the container starting, and nothing else. `create_all()` is gone from the app; the only place it
+  survives is `tests/conftest.py`, which builds the test schema straight from the models. To change
+  the schema:
 
   1. Add the field to the model in `src/app/models/` and the schema in `src/app/schemas/`.
-  2. `docker compose restart api` — this picks up the model and creates any brand-new tables.
-  3. Apply the change to the existing table by hand:
-     `docker compose exec -T db psql -U postgres -d opendive -c "ALTER TABLE ... ADD COLUMN ..."`
+  2. `cd src && uv run alembic revision --autogenerate -m "what changed"`, then **read the generated
+     file** — autogenerate is a first draft, not an answer, and it does not see a data backfill at
+     all.
+  3. `docker compose restart api` to apply it — `src/migrations` is bind-mounted, so the new
+     revision is already inside the container and the lifespan runs it. (`restart` reuses the
+     existing container, so it is *not* enough after editing `docker-compose.yml` or the
+     `Dockerfile`; that needs `docker compose up -d api`.)
 
-  The same applies to `CheckConstraint`s declared in `__table_args__`: they bind only to newly
-  created tables, so an existing dev DB needs the matching `ALTER TABLE ... ADD CONSTRAINT` by hand.
-  See *"Schema changes have no migration tool"* and *"Domain `CheckConstraint`s need a manual
-  `ALTER TABLE`"* in `DECISIONS.md` — the latter lists the exact statements.
+  `CheckConstraint`s in `__table_args__` are picked up by autogenerate like anything else — the
+  hand-written `ALTER TABLE ... ADD CONSTRAINT` era is over. CI fails a PR whose models and
+  revisions disagree (`alembic check`). See *"Migrations run on startup, and every schema change
+  ships one"* in `DECISIONS.md`, and *"Schema changes have no migration tool"* for the era before it
+  — a database created then needs one `alembic stamp head` plus an `alembic check`, per
+  `CONTRIBUTING.md`.
 
 - **Auth flow**: Magic-link sign-in URLs appear in `docker compose logs api` (not emailed).
   Copy/paste URL into browser.
