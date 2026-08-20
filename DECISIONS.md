@@ -69,6 +69,20 @@ whenever `CRUD_ADMIN_DB_URL` points at the app's Postgres, which is what the dep
 they are declared on CRUDAdmin's `DeclarativeBase`, so autogenerate would write four more
 `drop_table`s. An `include_name` hook filters the `admin_` prefix.
 
+**Why the DSN bypasses the Alembic config.** `env.py` imports `DATABASE_URL` from
+`core/db/database.py` and hands it straight to `create_async_engine`, rather than the conventional
+`config.set_main_option("sqlalchemy.url", ...)` + `async_engine_from_config`. Alembic keeps main
+options in a `configparser.ConfigParser` with `BasicInterpolation`, which rejects a bare `%` *when
+the option is set* - and `POSTGRES_URI` percent-encodes the credentials, so any password containing
+a character outside `[A-Za-z0-9_.~-]` (`@`, `!`, `/`, `:`, a space) raised
+`ValueError: invalid interpolation syntax` before a connection was attempted. With migrations in the
+lifespan that is a startup crash, and it took `stamp`/`check`/`current` with it - failing for
+precisely the passwords the percent-encoding was introduced to support. Escaping to `%%` would also
+work; keeping the credential out of an interpolating parser is the version that cannot be
+reintroduced by someone re-adding the conventional line. `alembic.ini` therefore carries no
+`sqlalchemy.url` at all, and `tests/test_migrations.py` runs the offline render in a subprocess with
+an awkward password to keep it that way.
+
 **What guards this in CI.** `.github/workflows/tests.yml` runs `alembic upgrade head` against the
 job's empty Postgres and then `alembic check`, before pytest. That ordering is load-bearing: the
 suite builds its schema with `create_all` (`tests/conftest.py`), so running it first would leave
@@ -1003,12 +1017,14 @@ with credentials, and this doesn't do that. `lifespan_factory`'s and `create_app
 `settings` parameter type unions both gained `FrontendSettings` to match (mypy caught the missing
 one from the other, since both now need to accept the same combined `Settings` instance).
 
-`tests/test_cors.py` builds its own app via `create_application(..., create_tables_on_start=False)`
-rather than using `conftest.py`'s `client` fixture (session-scoped `TestClient(app)` importing
-`src.app.main`), since that fixture's app runs the real startup lifespan (`create_tables()` against
-`POSTGRES_URI`, which resolves to the `db` docker-compose hostname) and isn't otherwise used by any
-existing test - not worth requiring a live Postgres connection just to check middleware headers on
-an `OPTIONS` request.
+`tests/test_cors.py` builds its own app via
+`create_application(..., apply_migrations_on_start=False)` rather than using `conftest.py`'s
+`client` fixture (session-scoped `TestClient(app)` importing `src.app.main`), since that fixture's
+app runs the real startup lifespan (`alembic upgrade head` against `POSTGRES_URI`, which resolves to
+the `db` docker-compose hostname) and isn't otherwise used by any existing test - not worth
+requiring a live Postgres connection just to check middleware headers on an `OPTIONS` request. (The
+parameter was `create_tables_on_start` when this was written; it and the `create_all()` behind it
+were renamed when migrations landed.)
 
 ## `/dive/parse-xml` renamed to `/dive/parse`, added a Suunto JSON parser
 

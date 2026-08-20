@@ -7,19 +7,23 @@ from alembic import context
 from alembic.runtime.environment import NameFilterParentNames, NameFilterType
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import async_engine_from_config
+from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.core.config import settings
-from app.core.db.database import Base
+# The app's own DSN, used directly rather than written into the config as `sqlalchemy.url`
+# and read back out. Alembic keeps main options in a `configparser.ConfigParser` with
+# `BasicInterpolation`, which rejects a bare `%` *at set time* - and `POSTGRES_URI`
+# percent-encodes the credentials (`core.config.postgres_uri`), so every password
+# containing anything outside `[A-Za-z0-9_.~-]` arrives here as `p%40ss` and raises
+# `ValueError: invalid interpolation syntax` before a connection is attempted. With
+# migrations running in the lifespan that is a startup crash, for exactly the passwords the
+# percent-encoding exists to support, and it takes `stamp`/`check`/`current` with it.
+# Escaping to `%%` would work; not routing a credential through an interpolating parser at
+# all is the fix that cannot be reintroduced by accident.
+from app.core.db.database import DATABASE_URL, Base
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
-
-# `POSTGRES_URI` rather than interpolating the parts by hand: it percent-encodes the
-# credentials (see `core.config.postgres_uri`), so a password containing `@` or `/` builds
-# the DSN the operator meant rather than one naming a host nobody configured.
-config.set_main_option("sqlalchemy.url", f"{settings.POSTGRES_ASYNC_PREFIX}{settings.POSTGRES_URI}")
 
 # Only when driven by `alembic.ini` - the CLI. The app runs migrations on startup through a
 # programmatic `Config` with no file (see `core.db.migrations`), and `fileConfig` would
@@ -41,8 +45,10 @@ import_models("app.models")
 # Nothing else in this file's import graph reaches it, and a table missing from
 # `target_metadata` is not merely skipped: autogenerate sees it in the database, doesn't
 # see it in the models, and writes `op.drop_table("token_blacklist")` into the revision.
-# `tests/test_migrations.py` re-checks this coverage in a subprocess, since inside the test
-# process the app has already imported everything.
+# `tests/test_migrations.py` guards it from the other side: it renders the revisions' own
+# DDL (`alembic upgrade head --sql`, no database needed) and asserts every table in
+# `Base.metadata` appears in it, so a table this file cannot see never reaches a revision
+# and the assertion fails.
 importlib.import_module("app.core.db.token_blacklist")
 
 target_metadata = Base.metadata
@@ -72,9 +78,8 @@ def run_migrations_offline() -> None:
 
     Calls to context.execute() here emit the given string to the script output.
     """
-    url = config.get_main_option("sqlalchemy.url")
     context.configure(
-        url=url,
+        url=DATABASE_URL,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -95,11 +100,7 @@ def do_run_migrations(connection: Connection) -> None:
 async def run_async_migrations() -> None:
     """In this scenario we need to create an Engine and associate a connection with the context."""
 
-    connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    connectable = create_async_engine(DATABASE_URL, poolclass=pool.NullPool)
 
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)

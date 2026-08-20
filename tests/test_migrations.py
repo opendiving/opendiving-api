@@ -8,7 +8,11 @@ allowed to create tables in and the suite's is the developer's own.
 
 import contextlib
 import io
+import os
 import re
+import subprocess
+import sys
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -91,6 +95,43 @@ class TestMigrationsCoverEveryModel:
         stopped matching and the assertion above went vacuous.
         """
         assert "alembic_version" in _offline_upgrade_sql()
+
+
+class TestCredentialsWithReservedCharacters:
+    #: Every class `core.config.postgres_uri` percent-encodes, in one password: `@` and `:`
+    #: and `/` break DSN parsing, and a space and `!` are what a generator emits.
+    AWKWARD_PASSWORD = "p@ss w:rd/!"
+
+    def test_a_percent_encoded_password_does_not_break_the_migration_run(self):
+        """Regression: the DSN used to be written into the Alembic config as
+        `sqlalchemy.url`, and Alembic keeps main options in a `ConfigParser` with
+        `BasicInterpolation` - which rejects a bare `%` when the option is *set*. Since
+        `POSTGRES_URI` percent-encodes the credentials, every password outside
+        `[A-Za-z0-9_.~-]` raised `ValueError: invalid interpolation syntax` out of the
+        lifespan before any connection was attempted, i.e. the API would not boot.
+
+        A subprocess because `settings` is built once at import and this has to be the
+        value `migrations/env.py` reads. No database: `--sql` renders the DDL instead of
+        running it, and the failure this guards happened well before any connection.
+        """
+        script = (
+            "import contextlib, io, sys;"
+            "sys.path.insert(0, 'src');"
+            "from alembic import command;"
+            "from app.core.db.migrations import alembic_config;"
+            "buf = io.StringIO();"
+            "contextlib.redirect_stdout(buf).__enter__();"
+            'command.upgrade(alembic_config(), "head", sql=True)'
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=Path(__file__).resolve().parents[1],
+            env={**os.environ, "POSTGRES_PASSWORD": self.AWKWARD_PASSWORD},
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, result.stderr
 
 
 class TestApplyMigrationsOnStartup:
