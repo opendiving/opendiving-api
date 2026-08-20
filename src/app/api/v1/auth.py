@@ -39,7 +39,7 @@ from ...core.security import (
 from ...core.utils.client_ip import client_ip
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...crud.crud_authentication_providers import crud_authentication_providers
-from ...crud.crud_authentication_requests import crud_authentication_requests
+from ...crud.crud_authentication_requests import claim_authentication_request, crud_authentication_requests
 from ...crud.crud_users import crud_users
 from ...schemas.auth import (
     AuthOutcome,
@@ -233,9 +233,12 @@ async def verify_email_link(
     if expires_at < datetime.now(UTC):
         raise UnauthorizedException("This sign-in link has expired.")
 
-    await crud_authentication_requests.update(
-        db=db, object=AuthenticationRequestUpdate(used_at=datetime.now(UTC)), id=auth_request["id"]
-    )
+    # The authoritative single-use gate, sitting immediately before the session gets
+    # minted: the `used_at` check above is a read, and a read plus a later write is two
+    # statements two concurrent submissions can both walk through. See
+    # `claim_authentication_request` for why this can't be a filtered FastCRUD `update`.
+    if not await claim_authentication_request(db, request_id=auth_request["id"]):
+        raise UnauthorizedException("This sign-in link has already been used.")
 
     outcome = await resolve_identity(db=db, provider="email", email=auth_request["email"])
     return await _start_onboarding_or_sign_in(response, outcome)

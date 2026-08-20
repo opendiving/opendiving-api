@@ -9012,3 +9012,89 @@ lines in its `ci.yml` and `code-quality.yml` first. The two repos are meant to s
 for the same reason `publish-image.yml` and `pr-title.yml` mirror each other. What differs is only
 what has to: the tools these jobs run, and the fact that nothing here is a commented-out
 PR-commenting step waiting to want `pull-requests: write`.
+
+## A filter on a FastCRUD `update` is a `count()`, not an atomic condition
+
+`verify_email_link` and `verify_email_change` both rejected an already-spent magic-link token by
+reading `used_at` and then, several statements later, writing it. Two concurrent submissions of the
+same live link both read `used_at IS NULL`, both passed the gate, and both went on to do whatever
+verifying that link does - for sign-in, minting a second week-long refresh cookie from a link whose
+own validity is measured in minutes.
+
+This is not a new vulnerability: a replay reaches the same account either way, and the security
+argument for rejecting one at all is the section *"A spent sign-in link is a spent sign-in link"*
+above, which this does not change. What it changes is that the argument became true. That section's
+docstring says the token is "strictly single-use" and `AuthenticationRequest.used_at`'s comment says
+it "is what makes a token single-use"; under contention neither was. The invariant was made to hold
+rather than the claims weakened.
+
+**The obvious fix does not work, and looks like it does.** The natural move is to push the condition
+into the write - `crud.update(..., id=X, used_at=None)` - and catch the `NoResultFound` FastCRUD
+raises when nothing matches. That is not an atomic conditional update. FastCRUD 0.22.3 implements
+the zero-match check as a *separate count query issued before* the UPDATE
+(`validate_update_delete_operation` in `fastcrud/crud/validation.py`):
+
+```python
+total_count = await count_func(db, **kwargs)
+if total_count == 0:
+    raise NoResultFound(f"No record found to {operation_name}.")
+```
+
+and `fast_crud.py`'s `update` then builds its statement and discards the result's `rowcount`
+entirely. So the filtered call is itself check-then-act - the same race in a narrower window, which
+is worse than the wide one for being invisible. **No FastCRUD filter makes an operation atomic**,
+here or anywhere else in this codebase that wants a conditional write; the filter is a precondition
+assertion, not a guard. The same mechanic is behind `request_email_link`'s existing
+`pending_count`-before-`update` guard and its comment about `NoResultFound` - that one is using the
+behaviour deliberately, for "is there anything to invalidate", where a race changes nothing.
+
+**What works.** `claim_authentication_request` in `crud/crud_authentication_requests.py` drops to a
+Core statement and gates on `rowcount`:
+
+```python
+update(AuthenticationRequest)
+.where(AuthenticationRequest.id == request_id, AuthenticationRequest.used_at.is_(None))
+.values(used_at=datetime.now(UTC))
+```
+
+`rowcount == 0` is a correct and sufficient race-lost signal under Postgres's default READ
+COMMITTED, and that is worth stating because it is not obvious: the loser blocks on the winner's row
+lock, and when the winner commits it re-evaluates the `WHERE` predicate against the committed new
+row version, matches nothing, and reports zero. No `SELECT ... FOR UPDATE`, no isolation-level
+change, no advisory lock. Dropping to Core for this is unremarkable in this repo - most of `crud/`
+builds Core statements and calls `db.execute` directly, and `services/dive_files.py` already reads a
+`CursorResult.rowcount` the same way.
+
+The read-based `used_at` check stays, as a fast path: it gives the caller the right error without a
+pointless write, and preserves the most-specific-reason-first ordering (superseded beats used, used
+beats expired) that the section above describes. The claim is the *authoritative* gate, and it sits
+immediately before the thing it authorizes - `resolve_identity` for sign-in, the email UPDATE for a
+change.
+
+**The loser branches differ, because the endpoints do.** Sign-in's loser is a 401, full stop.
+`verify_email_change` deliberately tolerates a replay while the change the token represents is still
+the account's current email, so losing the claim there is *not* automatically an error: it re-reads
+the account's email and applies the identical rule, rejecting only on a genuine mismatch. Copying
+sign-in's branch verbatim would have turned a double click into a hard error and undone the
+reasoning two sections up. Both arrival paths - an already-`used_at` row and a lost claim - now go
+through one `_replay_result_or_reject` so the rule cannot drift between them.
+
+**Adjacent, same function: the two writes were two transactions.** `verify_email_change` wrote the
+new email and then stamped `used_at`, each through a FastCRUD `update` that commits by default. A
+crash between them left the account's email changed with its confirmation token still unused and
+live. Both now pass `commit=False` and share one `db.commit()`, with the claim going first so losing
+costs nothing to undo - the pattern `complete_profile` in `api/v1/auth.py` already sets. The
+`except IntegrityError: await db.rollback()` handler still covers both writes; it now rolls back the
+claim alongside the email, which is right - the change did not apply, so the token should not read
+as spent.
+
+**Testing it.** The endpoint tests mock the session, so `db.execute` had to grow a result carrying a
+`rowcount` (`stub_claim` in `tests/helpers/mocks.py`). Note the failure mode that made a helper
+worth writing: a bare `Mock(spec=AsyncSession)` returns a child mock for `rowcount`, which compares
+unequal to `0` and so reads as *won* by accident - `won=False` is the only way to reach the
+race-lost branches at all. Those tests pin what each caller does with the answer.
+`tests/test_authentication_request_claim.py` pins that the answer is right, against real Postgres,
+including two claims on two connections under `asyncio.gather` - the one assertion in this whole
+change that executes the concurrency argument rather than restating it. It is Postgres-backed and
+therefore skips itself when `POSTGRES_SERVER` names a host the test process cannot reach, which is
+why it is not the only coverage.
