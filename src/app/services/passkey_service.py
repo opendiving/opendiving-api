@@ -300,7 +300,13 @@ def _presented_sign_count(credential: dict[str, Any]) -> int | None:
 
 
 def _raw_credential_id(credential: dict[str, Any]) -> bytes | None:
-    """The credential's raw id, decoded from the base64url the browser sends."""
+    """The credential's raw id, decoded from the base64url the browser sends.
+
+    `None` means the field was absent, which is the only shape worth a distinct branch:
+    py_webauthn's decoder is deliberately lenient - it pads and decodes almost any string -
+    so a *malformed* id becomes bytes that match no row, and arrives at the same 401 one
+    lookup later.
+    """
     try:
         return base64url_to_bytes(credential["rawId"])
     except KeyError, TypeError, ValueError:
