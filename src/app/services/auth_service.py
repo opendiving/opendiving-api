@@ -28,8 +28,9 @@ async def issue_tokens(response: Response, user_uuid: uuid_pkg.UUID) -> dict[str
     name. A username is editable (`PATCH /user`) and is released for anyone to claim
     the instant it changes, with no cooldown - so a username subject is a session whose
     identity someone else can assume simply by taking the name, and `/auth/refresh`
-    (which re-mints whatever subject it's handed, without resolving it to a live user)
-    keeps such a token alive indefinitely. The same defect signed the *renaming* user
+    re-mints whatever subject it's handed, keeping such a token alive indefinitely - the
+    liveness check that endpoint now makes does not close that, because the stolen name
+    resolves perfectly well to whoever holds it. The same defect signed the *renaming* user
     out permanently. See DECISIONS.md.
     """
     subject = str(user_uuid)
