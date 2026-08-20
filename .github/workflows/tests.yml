@@ -6,6 +6,21 @@ on:
       - main
   pull_request:
 
+# The job only reads *this repository*: it checks out, installs, migrates the throwaway Postgres in
+# the `services:` block below, and runs the suite. `contents: read` is what checkout needs and the
+# whole of what it needs, and saying so keeps the token off whatever the repository default happens
+# to grant. That matters more than it looks, and more here than in the other two: this job installs
+# the dev dependency tree and then executes it outright - `alembic upgrade head` imports the app,
+# and pytest runs the suite against it. `persist-credentials: false` on the checkout is the other
+# half: without it the token is left behind in `.git/config`, in that same workspace.
+#
+# Nothing in the job wants more than read. `alembic upgrade head` writes to the service container's
+# database, which is thrown away with the runner, and the coverage summary is written to
+# `$GITHUB_STEP_SUMMARY` - a file on the runner, collected by the Actions runtime token rather than
+# by any `GITHUB_TOKEN` scope.
+permissions:
+  contents: read
+
 jobs:
   tests:
     runs-on: ubuntu-latest
@@ -59,6 +74,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0

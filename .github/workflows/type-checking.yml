@@ -6,12 +6,24 @@ on:
       - main
   pull_request:
 
+# The job only reads: it checks out, installs, and runs mypy three times. `contents: read` is what
+# checkout needs and the whole of what it needs, and saying so keeps the token off whatever the
+# repository default happens to grant. That matters more than it looks - `uv sync --extra dev`
+# installs the whole dev dependency tree into the workspace and mypy then runs out of it, plugin
+# included (`plugins = ["pydantic.mypy"]` is imported and executed), so anything the token can do a
+# compromised transitive dependency can do too. `persist-credentials: false` on the checkout is the
+# other half: without it the token is left behind in `.git/config`, in that same workspace.
+permissions:
+  contents: read
+
 jobs:
   type-check:
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
