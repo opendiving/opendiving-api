@@ -42,7 +42,8 @@ def strip_heredoc_bodies(command: str) -> str:
     Commit messages and docs travel as heredocs, and a good number of them
     have to quote the very thing this hook rejects. The opening line is kept
     (a real `git -c ... commit -F - <<'EOF'` puts the flag there, not in the
-    body).
+    body). An opener whose terminator never arrives is not a heredoc at all -
+    `1 << bits` reads as one - so nothing is dropped in that case.
     """
     lines = command.split("\n")
     kept: list[str] = []
@@ -55,16 +56,24 @@ def strip_heredoc_bodies(command: str) -> str:
         if not match:
             continue
         terminator = match.group(2)
-        while index < len(lines) and lines[index].strip() != terminator:
-            index += 1
-        index += 1  # the terminator line itself
+        end = index
+        while end < len(lines) and lines[end].strip() != terminator:
+            end += 1
+        if end == len(lines):
+            continue  # no terminator: `1 << bits` is a shift, not a heredoc
+        index = end + 1  # skip the body and the terminator line
     return "\n".join(kept)
 
 
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
-    except json.JSONDecodeError, UnicodeDecodeError:
+    except ValueError:
+        # One type, not the `except A, B:` pair this repo's style would write: the
+        # file runs under whatever `python3` a shell resolves, not the pinned 3.14,
+        # and PEP 758 syntax on an older one is a SyntaxError - which exits 1, which
+        # the hook system treats as non-blocking. The guard would fail *open*.
+        # (JSONDecodeError and a UnicodeDecodeError off stdin are both ValueErrors.)
         return 0  # a payload we cannot read is not a payload we should judge
     command = (payload.get("tool_input") or {}).get("command") or ""
     if not OFF.search(strip_heredoc_bodies(command)):

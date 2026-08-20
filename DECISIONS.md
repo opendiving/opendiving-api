@@ -10047,6 +10047,19 @@ command and this repo has to write about the flag it forbids - `CONTRIBUTING.md`
 this section all quote it, and all of them were written through a heredoc. Only the command line
 itself is judged, which is where a real invocation puts the flag anyway.
 
+**The guard's Python is not this repo's Python, and that governs how it is written.** `except A, B:`
+is house style here and `ruff format` writes it that way - see *"`except ValueError, TypeError:` is
+valid, and `ruff format` writes it that way"* - but that rule earns its keep because `src/` runs on
+the pinned 3.14 in the container. `.claude/hooks/no-unsigned-commits.py` does not: it is executed by
+whatever `python3` a contributor's shell resolves, and PEP 758 is a `SyntaxError` on 3.13 or on the
+macOS system 3.9. The consequence is worse than a broken hook. A hook that cannot parse exits 1, and
+the hook system treats any exit that is not 2 as a non-blocking error, so the command runs and the
+guard vanishes without a word - failing open, in the one file whose entire job is to fail closed. It
+therefore catches a single `ValueError`, which covers both `json.JSONDecodeError` and a
+`UnicodeDecodeError` off stdin, and leaves no tuple for the formatter to unparenthesize. CI would
+not have caught the regression either way: `ruff format --check` runs on `src tests scripts`, and
+`.claude/` is in none of them.
+
 None of this survives someone determined: `git push --no-verify` skips the push hook, a commit made
 outside the Bash tool never meets the other one, and both files are editable by anything that can
 edit the repo. They are speed bumps against a habit, and the habit is the actual failure mode. The
