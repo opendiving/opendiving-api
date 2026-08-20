@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from typing import cast
 
 from fastcrud import FastCRUD
-from sqlalchemy import CursorResult, update
+from sqlalchemy import CursorResult, case, null, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.authentication_request import AuthenticationRequest
@@ -62,3 +62,39 @@ async def claim_authentication_request(db: AsyncSession, *, request_id: int, com
     if commit:
         await db.commit()
     return claimed
+
+
+async def register_failed_code_attempt(db: AsyncSession, *, request_id: int, max_attempts: int) -> None:
+    """Charge one wrong guess against a row's sign-in code, and spend the code outright
+    once `max_attempts` of them have been charged.
+
+    The attempt cap is the *only* thing standing between a six-digit code and whoever
+    holds the `request_id` it belongs to, so it has to hold under concurrency. Read the
+    counter, decide, then write it back and two simultaneous guesses both read the same
+    number and both store `n + 1` - an attacker firing guesses in parallel is charged for
+    a fraction of them, which is precisely the shape that turns a 5-in-a-million bound
+    into no bound at all. One `UPDATE` that increments and nulls in the same expression
+    has no window to lose: Postgres evaluates `code_attempts + 1` against the row version
+    it holds the lock on, so concurrent statements queue and each is counted.
+
+    Nulling `code_hash` kills **the code and nothing else**. The link in the same email is
+    untouched, on purpose: it carries 256 bits delivered to a mailbox and needs no
+    protection from code guessing, whereas voiding it here would hand anyone who can
+    reach this endpoint a way to cancel a sign-in they cannot complete - aimed squarely at
+    the accounts whose only method is email.
+
+    No `WHERE code_hash IS NOT NULL`: the caller has already established there is a live
+    code, and a row whose code is spent is one the caller rejects before reaching here.
+    """
+    await db.execute(
+        update(AuthenticationRequest)
+        .where(AuthenticationRequest.id == request_id)
+        .values(
+            code_attempts=AuthenticationRequest.code_attempts + 1,
+            code_hash=case(
+                (AuthenticationRequest.code_attempts + 1 >= max_attempts, null()),
+                else_=AuthenticationRequest.code_hash,
+            ),
+        )
+    )
+    await db.commit()

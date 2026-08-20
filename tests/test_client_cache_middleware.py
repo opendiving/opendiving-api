@@ -177,7 +177,13 @@ class TestTheRealAuthRoutes:
     def test_no_token_minting_route_is_a_safe_method(self):
         from src.app.api.v1.auth import router
 
-        minting = {"/auth/email/verify", "/auth/google", "/auth/complete", "/auth/refresh"}
+        minting = {
+            "/auth/email/verify",
+            "/auth/email/verify-code",
+            "/auth/google",
+            "/auth/complete",
+            "/auth/refresh",
+        }
         for route in router.routes:
             if getattr(route, "path", None) in minting:
                 assert route.methods == {"POST"}, f"{route.path} is no longer POST-only - re-check its caching"

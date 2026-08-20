@@ -1,12 +1,13 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import DateTime, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.db.database import Base
+from ..core.db.models import PublicUUIDMixin
 
 
-class AuthenticationRequest(Base):
+class AuthenticationRequest(Base, PublicUUIDMixin):
     """A short-lived email magic-link token.
 
     Deliberately separate from `User`/`AuthenticationProvider`: proving ownership of an
@@ -19,6 +20,12 @@ class AuthenticationRequest(Base):
     confirmation (`purpose="email_change"`, see `POST /user/email-change/request`/
     `POST /user/email-change/verify` in `api.v1.users`) - the mechanics (hashed token,
     short expiry) are identical, only what "verifying" it does differs.
+
+    One `purpose="sign_in"` row backs *two* credentials, not one: the link in the email
+    and the six-digit code printed beside it (`code_hash`). Either completes the sign-in
+    and whichever is used first consumes the row, because both end at the same
+    `claim_authentication_request`. They are deliberately unequal in strength, and
+    `code_hash`'s comment says how that asymmetry is contained.
     """
 
     __tablename__ = "authentication_request"
@@ -34,6 +41,25 @@ class AuthenticationRequest(Base):
     token_hash: Mapped[str] = mapped_column(String, unique=True, index=True)
 
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    # SHA-256 hex digest of the six-digit sign-in code printed in the same email as the
+    # link (`POST /auth/email/verify-code`). Only ever set for `purpose="sign_in"`: an
+    # email change is confirmed by opening the link in the new mailbox, and a code typed
+    # into the tab that asked would prove nothing about that mailbox.
+    #
+    # The hash is hygiene, not protection. Six digits is a space an offline attacker
+    # walks in milliseconds, so what actually defends the code is `code_attempts` below;
+    # hashing only keeps a live credential out of logs, dumps and admin-panel views, the
+    # same reason `token_hash` is a hash.
+    #
+    # `NULL` also means "spent": nulled once `code_attempts` reaches
+    # `SIGN_IN_CODE_ATTEMPTS_MAX`, which kills the code while deliberately leaving the
+    # link in this same row alive - see `register_failed_code_attempt`.
+    code_hash: Mapped[str | None] = mapped_column(String(64), default=None)
+
+    # Wrong guesses against `code_hash` so far. Incremented in the same statement that
+    # reads it, never by a read followed by a write - see `register_failed_code_attempt`.
+    code_attempts: Mapped[int] = mapped_column(Integer, default=0)
 
     # Timestamp of the first successful verification, and what makes a token
     # single-use - though "used" means something slightly different per `purpose`.
