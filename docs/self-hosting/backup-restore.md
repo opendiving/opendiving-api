@@ -32,6 +32,11 @@ Nightly, out of cron:
 Keep the backups somewhere that is not this machine, and keep more than one — a corrupt database
 faithfully dumped every night is a corrupt database in every file you have.
 
+Somewhere private, too. The dump carries every account's c-card scans — ID-like documents with a
+diver's name, photo and certification number on them — not just their dive dates. If it is going
+anywhere off hardware you control, a cloud bucket or a sync folder included, encrypt it before it
+leaves.
+
 Worth copying alongside them: your `.env`. It is not secret from you, it is short, and without
 `SECRET_KEY` and `POSTGRES_PASSWORD` a restore is a stranger's database.
 
@@ -82,3 +87,6 @@ byte-for-byte, the backup covers everything — because that file lived in the d
 Copy the dump and `.env`, install per [install.md](install.md), restore before the first sign-in.
 Nothing is tied to the old host: no absolute paths, no machine-bound keys. If the domain changes,
 change `DOMAIN` too — sessions survive, but emailed links point at whatever it says.
+
+Delete the copies once the restore checks out. The move leaves that dump on two machines and on
+whatever you staged it through in between, each of them the whole logbook.
