@@ -8780,14 +8780,15 @@ sharing one variable. `client_ip._trusted_networks` parses with `ip_network(entr
 purpose - "operators write those and mean the block" - while gunicorn's
 `validate_string_to_addr_list` is strict by an equally deliberate comment of its own, and it runs at
 config load, before the app is imported. So `TRUSTED_PROXY_IPS=172.29.0.1/16` is a value this app
-documents as fine that exits the `api` container with `Error: 172.29.0.1/16 has host bits set`,
-naming a variable the operator never set. Measured against the pinned gunicorn 26.0.0: a host-bits
-CIDR exits 1, while `172.29.0.0/16`, a bare `10.1.2.3` and an empty value all exit 0. Normalizing
-the value would need an entrypoint of the bundle's own between the image's `CMD` and gunicorn - a
-second copy of that command line to keep in step, for a shape nobody writes by accident twice - so
-the narrow fix is that the compose file, `example.env`, the reverse-proxy doc and the
-troubleshooting page all name the shape and the exact error. `worker` and `admin_init` override the
-command and never reach gunicorn's parser, so this is `api` alone.
+documents as fine that exits the `api` container with `Error: 172.29.0.1/16 has host bits set` - a
+message that names the value and no setting at all, so nothing in it points back at the variable the
+operator did edit. Measured against the pinned gunicorn 26.0.0: a host-bits CIDR exits 1, while
+`172.29.0.0/16`, a bare `10.1.2.3` and an empty value all exit 0. Normalizing the value would need
+an entrypoint of the bundle's own between the image's `CMD` and gunicorn - a second copy of that
+command line to keep in step, for a shape nobody writes by accident twice - so the narrow fix is
+that the compose file, `example.env`, the reverse-proxy doc and the troubleshooting page all name
+the shape and the exact error. `worker` and `admin_init` override the command and never reach
+gunicorn's parser, so this is `api` alone.
 
 Per-IP rate limits are unaffected by the change, which was worth measuring rather than assuming,
 since `client_ip` now reads a `request.client` that has already been rewritten. Through Caddy with a

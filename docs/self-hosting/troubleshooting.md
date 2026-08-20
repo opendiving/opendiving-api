@@ -86,8 +86,8 @@ callers forge the header and skip the limits entirely. List the proxy, not the w
 An entry in `TRUSTED_PROXY_IPS` is a host address carrying a network prefix — `10.1.2.3/8`. That
 value also configures which peers may set the forwarded headers, and that parser is strict about
 what this one is lenient about. Write the entry as `10.1.2.3` if you mean that address, or
-`10.0.0.0/8` if you mean the block. The error names `FORWARDED_ALLOW_IPS`, which is derived from
-`TRUSTED_PROXY_IPS` in `docker-compose.yml` and is not a variable you set.
+`10.0.0.0/8` if you mean the block. The message quotes the offending value and names no setting at
+all, which is why it looks unrelated to anything you edited.
 
 ## `/admin` redirects forever, or 403s me
 
