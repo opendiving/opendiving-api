@@ -15,6 +15,17 @@ logger = logging.getLogger(__name__)
 
 
 async def create_first_user(session: AsyncSession) -> None:
+    """Creates the `is_superuser` account this instance's operator signs in as.
+
+    `ADMIN_EMAIL` has no default on purpose (`core.config.FirstUserSettings`), so unset is
+    a configuration mistake rather than a shape to work around: sign-in is passwordless
+    and keyed on the address, and a superuser row created against a guessed one hands its
+    magic link to whoever owns that domain.
+    """
+    if not settings.ADMIN_EMAIL:
+        logger.error("ADMIN_EMAIL is not set; no admin user created. Sign-in is keyed on it, so there is no default.")
+        return
+
     try:
         name = settings.ADMIN_NAME
         email = settings.ADMIN_EMAIL

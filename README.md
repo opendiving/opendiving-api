@@ -106,8 +106,9 @@ anyone can read. Change `POSTGRES_PASSWORD` too. The parts worth knowing about:
 # already know why. Resend users: smtp.resend.com, username "resend", password = the
 # API key. EMAIL_FROM_ADDRESS is required as soon as SMTP_HOST is set - startup
 # fails without it rather than letting an undeliverable address surface hours later.
-# SMTP_HOST itself is required on ENVIRONMENT=production: sign-in is passwordless,
-# so a production instance with no relay cannot let anybody in at all.
+# SMTP_HOST itself is required on any ENVIRONMENT but local: sign-in is passwordless,
+# so a deployed instance with no relay cannot let anybody in at all, and the logged-link
+# fallback would put a working sign-in link in whatever collects that instance's logs.
 SMTP_HOST="smtp.example.com"
 SMTP_PORT=587
 SMTP_TLS_MODE="starttls"       # starttls (587) | tls (465) | none (a local relay only)

@@ -18,7 +18,8 @@ published in this repository, so anyone could mint a token for any account with 
 
 **`ENVIRONMENT is production but SMTP_HOST is not set`** — sign-in is passwordless, so an instance
 with no relay cannot let anybody in, including you on the first day. Configure the `SMTP_*` block,
-or run `ENVIRONMENT=local` while you are still poking at it.
+or run `ENVIRONMENT=local` while you are still poking at it. The same message names `staging` on a
+staging instance: `local` is the only value that does without a relay.
 
 **`SMTP_HOST is set but EMAIL_FROM_ADDRESS is not`** — the from-address has no safe default: it has
 to be an address on a domain your relay may send for, and a wrong one fails hours later in
@@ -65,8 +66,10 @@ app one nine times in ten.
   docker compose logs api | grep "magic link"
   ```
 
-  That is the local development flow, and it is deliberately unavailable in production — the logged
-  link is a live credential, so the API raises there rather than writing one to the log.
+  That is the local development flow, and it is deliberately unavailable on every other
+  `ENVIRONMENT`, `staging` included — the logged link is a live credential, and anyone who can read
+  the logs could sign in as any address that asked for one. The API raises there rather than writing
+  one to the log.
 
 ## Everyone shares one rate-limit bucket
 

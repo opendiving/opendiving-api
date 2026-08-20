@@ -151,8 +151,18 @@ LEGACY_DEFAULT_ADMIN_PASSWORD = "!Ch4ng3Th1sP4ssW0rd!"
 
 
 class FirstUserSettings(BaseSettings):
+    # A display name, not an identity - nothing is keyed on it and nothing is delivered
+    # to it - so unlike `ADMIN_EMAIL` below it keeps its default.
     ADMIN_NAME: str = config("ADMIN_NAME", default="admin")
-    ADMIN_EMAIL: str = config("ADMIN_EMAIL", default="admin@admin.com")
+
+    # No default, for the same reason `CONTACT_FORM_EMAIL` and `EMAIL_FROM_ADDRESS` have
+    # none. It used to be `admin@admin.com`, a domain belonging to a stranger: sign-in is
+    # passwordless and keyed on the email, so `scripts.create_first_superuser` would have
+    # created an `is_superuser` account whose magic link is delivered to whoever runs
+    # that domain. No address is right for somebody else's install, so unset means the
+    # script exits without creating anything rather than guessing.
+    ADMIN_EMAIL: str | None = config("ADMIN_EMAIL", default=None)
+
     ADMIN_USERNAME: str = config("ADMIN_USERNAME", default="admin")
     # No default: the admin panel grants full create/update/delete over every model
     # (see `admin.views`), so an unset password must mean "no admin account", never
@@ -580,25 +590,31 @@ class Settings(
         return self
 
     @model_validator(mode="after")
-    def _require_smtp_in_production(self) -> Self:
-        """Refuses to boot a production instance that cannot send mail.
+    def _require_smtp_outside_local(self) -> Self:
+        """Refuses to boot a deployed instance that cannot send mail.
 
         Sign-in is passwordless: without a relay there is no way to deliver a magic link,
         so *nobody* can get in - not even the first user, on a freshly installed instance.
         The failure is otherwise invisible until someone tries, and then it is a 500 from
-        `POST /auth/email/request` (`services.email_service` refuses to log a live token in
-        production, deliberately) with a message about email transport on a page about
+        `POST /auth/email/request` (`services.email_service` refuses to log a live token
+        off `local`, deliberately) with a message about email transport on a page about
         signing in.
 
-        Only production. Local development with `SMTP_HOST` unset is the documented flow -
-        the link is written to the logs instead - and staging is close enough to local to
-        be run the same way on purpose.
+        Every environment except `local`. `local` is the one where the logged-link
+        fallback *is* the documented sign-in flow - the developer reads the link out of
+        `docker compose logs api` - and anything else is a deployment someone other than
+        the developer can reach. This used to be scoped to `production` alone, on the
+        argument that staging is close enough to local to be run the same way on purpose;
+        that holds only while staging is a second laptop. A staging box more than one
+        person can reach is a real deployment, and the sign-in links in its logs are real
+        credentials.
         """
-        if self.ENVIRONMENT == EnvironmentOption.PRODUCTION and not self.SMTP_HOST:
+        if self.ENVIRONMENT != EnvironmentOption.LOCAL and not self.SMTP_HOST:
             raise ValueError(
-                "ENVIRONMENT is production but SMTP_HOST is not set. Sign-in is passwordless, so "
-                "without a mail relay nobody can sign in at all - including the first user. Point "
-                "SMTP_* at any relay you trust, or run this instance as ENVIRONMENT=local."
+                f"ENVIRONMENT is {self.ENVIRONMENT.value} but SMTP_HOST is not set. Sign-in is "
+                "passwordless, so without a mail relay nobody can sign in at all - including the "
+                "first user. Point SMTP_* at any relay you trust, or run this instance as "
+                "ENVIRONMENT=local."
             )
         return self
 

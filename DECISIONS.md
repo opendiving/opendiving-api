@@ -5797,7 +5797,7 @@ caught alongside `httpx.HTTPError` for the same reason: it descends from `Except
 a timeout, a 5xx, a non-JSON body, or `GEOCODER_URL` set to `""` all produce `null`/`[]` and a
 logged warning. A diver can always type the location in, and a 502 would make the site form look
 broken over an optional convenience. Unlike `email_service` there is no
-`_refuse_to_log_credential_in_production` equivalent, because nothing here is a credential — but for
+`_refuse_to_log_credential_outside_local` equivalent, because nothing here is a credential — but for
 the same underlying reason (this app's logs are read by `docker compose logs` and shipped wherever
 they are collected) the failure log names the request *path* and never the built URL, which carries
 `GEOCODER_API_KEY` as a query parameter.
@@ -8290,14 +8290,17 @@ refuses to be a configuration:
 - **The admin block ships commented out**, so enabling the panel is an edit rather than an
   inheritance. This is the same argument `EMAIL_FROM_ADDRESS` already made in "SMTP is the only
   email transport": a presence check is theater when the template pre-satisfies it.
-- **`ENVIRONMENT=production` without `SMTP_HOST` fails at startup** (`_require_smtp_in_production`).
-  Sign-in is passwordless, so a production instance with no relay cannot let *anybody* in, including
-  its own first user. Before this the discovery was a 500 from `POST /auth/email/request` —
-  `_refuse_to_log_credential_in_production` refusing to write a live token to the logs — carrying a
-  message about email transport on a page about signing in. Local and staging are left alone: the
-  logged-link flow is the documented local setup.
+- **An `ENVIRONMENT` other than `local` without `SMTP_HOST` fails at startup**
+  (`_require_smtp_outside_local`). Sign-in is passwordless, so such an instance cannot let *anybody*
+  in, including its own first user. Before this the discovery was a 500 from
+  `POST /auth/email/request` — `_refuse_to_log_credential_outside_local` refusing to write a live
+  token to the logs — carrying a message about email transport on a page about signing in. Only
+  `local` is left alone, where the logged-link flow is the documented setup. This guard was
+  originally scoped to `production` alone, with staging counted as local-like; "Staging is a
+  deployment, so the relay guards stopped being about production" below is why that was
+  reconsidered, and where the names come from.
 
-That last guard makes `_refuse_to_log_credential_in_production` belt-and-braces rather than
+That last guard makes `_refuse_to_log_credential_outside_local` belt-and-braces rather than
 redundant, and it stays: it guards the code path rather than the configuration, and a relay that
 *is* set can still be the wrong one.
 
@@ -8794,3 +8797,103 @@ Per-IP rate limits are unaffected by the change, which was worth measuring rathe
 since `client_ip` now reads a `request.client` that has already been rewritten. Through Caddy with a
 forged `X-Forwarded-For: 9.9.9.9`, the limiter still keyed on the true peer; from inside the network
 with a legitimate chain, on the client the chain names. Both are the same answers as before.
+
+## Staging is a deployment, so the relay guards stopped being about production
+
+Two guards protected against "no mail relay configured", and both asked whether `ENVIRONMENT` was
+`production`. They now ask whether it is anything other than `local`, and their names say so:
+`core.config.Settings._require_smtp_outside_local` and
+`services.email_service._refuse_to_log_credential_outside_local`.
+
+### What the old scoping let through
+
+Sign-in is passwordless. With `SMTP_HOST` unset, the two senders whose URL embeds a live single-use
+token — `send_magic_link_email` and `send_email_change_confirmation_email` — log that whole URL at
+WARNING and return, and the URL *is* the credential. That is the documented way to sign in during
+development, which is why the fallback exists at all.
+
+Scoped to `production`, neither guard fired on `ENVIRONMENT=staging`. So a staging instance with no
+relay booted cleanly and wrote working sign-in links into whatever collects its logs —
+`docker logs`, a shipped collector, whatever the operator's host retains. Anyone with read access to
+those has a sign-in link for every address that requested one, for as long as the link's 30 minutes
+last. There was nothing loud about it: the instance came up, sign-in "worked" for whoever was
+watching the logs, and the failure looks like a feature.
+
+### Why "staging is close enough to local" was reconsidered
+
+That was the stated reason for the old scoping, and it holds exactly as long as staging is a second
+laptop. The moment a staging box is reachable by more than one person — a shared VM, a preview
+environment, anything with a hostname — it is a real deployment, its logs have a real audience, and
+a credential in them is a real credential. Nothing about the string `staging` makes the token in the
+log line less usable.
+
+The counter-argument is convenience: staging is where you want to poke at things without standing up
+a relay. It does not survive contact with what the convenience costs, and it has an exit that costs
+nothing — a throwaway instance can run `ENVIRONMENT=local`, which is what the error message says.
+The only thing `local` gives up relative to `staging` is that `/docs` is open rather than behind a
+superuser, which is not a property anyone chose `staging` for.
+
+This is the same shape of argument `_reject_placeholder_secret_key` and
+`_require_from_address_with_smtp` already made, both of which are ungated for exactly this reason: a
+staging instance signing tokens with a published key, or mailing from an address its relay won't
+send for, is broken in precisely the way a production one is.
+
+### The line is `local`, not "not production"
+
+Stated positively, because the negative framing is what produced the bug. `local` is the one
+environment where reading the link out of the logs is the *documented sign-in flow* — `README.md`
+and `docs/self-hosting/troubleshooting.md` both tell you to `docker compose logs api | grep`. Every
+other value is a deployment someone other than the developer can reach. A new `EnvironmentOption`
+added later therefore inherits the safe side by default, which the old `== PRODUCTION` shape would
+not have.
+
+The startup error interpolates the configured environment
+(`ENVIRONMENT is staging but SMTP_HOST is not set`) rather than saying `production`. Whoever hits
+this first is a staging operator for whom this used to work, and a message naming an environment
+they did not configure reads as a bug in the app.
+
+### This is a breaking change, and that is the point
+
+An existing staging instance with no relay stops booting. Nothing is deployed anywhere yet
+(`AGENTS.md`), so there is no instance to migrate today — but the deploy bundle ships to
+self-hosters, so it is worth being explicit that the fix is to configure `SMTP_*` or to set
+`ENVIRONMENT=local`, and that a startup failure is the intended outcome rather than a regression.
+
+`tests/test_config_safety.py` and `tests/test_email_service.py` parametrise both guards over
+`production` *and* `staging`, so the scoping cannot quietly narrow again. The email-service side
+also pins that nothing is logged on the way out: the raise happens before the warning, and a token
+that reaches the log has leaked whether or not the caller also got a 500.
+
+## `ADMIN_EMAIL` had a default, and `admin.com` belongs to somebody else
+
+`ADMIN_EMAIL` defaulted to `admin@admin.com`. That is a real domain with a real owner, and
+`scripts/create_first_superuser.py` creates a row with `is_superuser=True` keyed on whatever it
+reads. Sign-in is passwordless and keyed on the email, so the magic link for that superuser account
+is delivered to whoever controls `admin.com`.
+
+**The impact was limited, and worth stating rather than overstating.** `is_superuser` gates exactly
+one thing in this codebase — the `/docs`, `/redoc` and `/openapi.json` router on non-local
+non-production environments (`core/setup.py`) — and grants no access to anyone's dives. The script
+is not in the published image either (`.dockerignore` excludes `scripts/`, and the Dockerfile copies
+only `src/app` and `src/migrations`) and its compose service is commented out. So this is not a live
+hole; it is the third instance of a default that is wrong in somebody else's install, after
+`EMAIL_FROM_ADDRESS` and `CONTACT_FORM_EMAIL`, and it is fixed the same way both of those were.
+
+`ADMIN_EMAIL` is now `str | None` with no default, `src/.env.example` ships it **commented out** —
+the same half-of-the-fix argument as the from-address, since a template value that is active
+pre-satisfies any check — and `create_first_user` exits early with a message naming the setting
+rather than letting `None` reach the insert. Unset means no admin account, which is what
+`ADMIN_PASSWORD` already means for the admin panel.
+
+**`ADMIN_NAME` keeps its `"admin"` default, deliberately.** It is a display name on the row: nothing
+is keyed on it, nothing is delivered to it, and no default value of it can send anything anywhere.
+The question the other three settings answer — "is there an address here that belongs to somebody
+who did not ask for it?" — does not apply.
+
+The test for this had to be written carefully. `config()` resolves its default at *import* time
+against the developer's own `src/.env`, so asserting `settings.ADMIN_EMAIL is None` off the imported
+module proves only what that developer's file happens to say — it would pass on CI and fail for
+anyone who has the setting locally, or vice versa. `tests/test_config_safety.py` loads a second,
+independent copy of `core/config.py` under another name with `starlette.config.Config` pointed at a
+file that does not exist. `config.py` imports nothing from this package, so that copy touches
+neither `sys.modules` nor the `settings` object every other module is already holding.

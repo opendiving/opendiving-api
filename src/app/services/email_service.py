@@ -110,23 +110,29 @@ def _header_safe(value: str) -> str:
     return value.replace("\r", " ").replace("\n", " ")
 
 
-def _refuse_to_log_credential_in_production(what: str) -> None:
+def _refuse_to_log_credential_outside_local(what: str) -> None:
     """Guards the "no transport, so log the link instead" fallback used by the two senders
     whose URL embeds a live single-use auth token.
 
     That fallback is a local-development convenience, and a good one - it's how you sign
     in without configuring a relay. But the URL it prints *is* the credential, and this
     app's logs are read by `docker compose logs` and shipped to whatever collects them, so
-    the same code path in production would quietly turn a forgotten `SMTP_HOST` into
-    sign-in tokens sitting in plaintext wherever those end up. Fail loudly there instead:
-    a 500 on a sign-in attempt is recoverable and obvious, leaked tokens are neither.
+    the same code path on a deployed instance would quietly turn a forgotten `SMTP_HOST`
+    into sign-in tokens sitting in plaintext wherever those end up. Fail loudly there
+    instead: a 500 on a sign-in attempt is recoverable and obvious, leaked tokens are
+    neither.
 
-    Belt and braces as of the `_require_smtp_in_production` validator in `core.config`,
-    which refuses to boot a production instance with no relay at all - this stays because
-    it guards the code path rather than the configuration, and because a relay that is
-    *set* can still be the wrong one.
+    The line is `local`, not `production`: `local` is the one environment where reading
+    the link out of the logs is the documented way to sign in, and anything else is a
+    deployment whose logs more than one person can read. Whoever holds them would get a
+    working sign-in link for every address that asked for one.
+
+    Belt and braces as of the `_require_smtp_outside_local` validator in `core.config`,
+    which refuses to boot such an instance with no relay at all - this stays because it
+    guards the code path rather than the configuration, and because a relay that is *set*
+    can still be the wrong one.
     """
-    if settings.ENVIRONMENT == EnvironmentOption.PRODUCTION:
+    if settings.ENVIRONMENT != EnvironmentOption.LOCAL:
         raise EmailDeliveryError(f"No email transport is configured (SMTP_HOST), so {what} cannot be delivered.")
 
 
@@ -135,12 +141,12 @@ async def send_magic_link_email(email: str, magic_link_url: str) -> None:
 
     A no-op (logged, not raised) when `SMTP_HOST` isn't configured, so local
     development without a relay doesn't hard-fail `POST /auth/email/request`
-    - the link is still generated and logged so it can be used manually. In production
-    that same condition raises instead, since the logged link is a live credential (see
-    `_refuse_to_log_credential_in_production`).
+    - the link is still generated and logged so it can be used manually. Anywhere but
+    `local` that same condition raises instead, since the logged link is a live credential
+    (see `_refuse_to_log_credential_outside_local`).
     """
     if not settings.SMTP_HOST:
-        _refuse_to_log_credential_in_production("the magic-link sign-in email")
+        _refuse_to_log_credential_outside_local("the magic-link sign-in email")
         logger.warning("SMTP_HOST not configured; magic link for %s: %s", email, magic_link_url)
         return
 
@@ -168,7 +174,7 @@ async def send_email_change_confirmation_email(new_email: str, confirm_url: str)
     controls the new address before the change takes effect.
     """
     if not settings.SMTP_HOST:
-        _refuse_to_log_credential_in_production("the email-change confirmation")
+        _refuse_to_log_credential_outside_local("the email-change confirmation")
         logger.warning("SMTP_HOST not configured; email-change confirmation for %s: %s", new_email, confirm_url)
         return
 
