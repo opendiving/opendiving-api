@@ -12,6 +12,7 @@ is exercised end to end by hand (see DECISIONS.md), not here.
 import hashlib
 import io
 import uuid as uuid_pkg
+from dataclasses import astuple
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatch
 from types import SimpleNamespace
@@ -32,7 +33,11 @@ from src.app.schemas.dive import DiveFileInfo, DiveTechScalars
 from src.app.schemas.dive_mixture import DiveMixtureRead, GasRole
 from src.app.schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from src.app.services import dive_parsers as parsers_module
+from src.app.services.blob_store import build_key
 from src.app.services.cache_invalidation import invalidate_dive_caches
+from src.app.services.dive_files import (
+    KEY_KIND as DIVE_FILE_KIND,
+)
 from src.app.services.dive_files import (
     MAX_DIVE_FILE_SIZE,
     TECH_SCALAR_FIELDS,
@@ -74,15 +79,19 @@ def _digest(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def _existing(*, dive_id: int) -> _ExistingRow:
+def _existing(*, dive_id: int, content: bytes = VALID_SUUNTO_XML) -> _ExistingRow:
+    row_uuid = uuid7()
     return _ExistingRow(
         id=1,
         dive_id=dive_id,
-        uuid=uuid7(),
+        uuid=row_uuid,
         content_type="application/xml",
-        byte_size=len(VALID_SUUNTO_XML),
+        byte_size=len(content),
         original_filename="export.xml",
         parser_key="suunto_xml",
+        # The real key for this row and these bytes, so the `noop` branch's self-heal
+        # rewrites the file the row actually names rather than an invented path.
+        storage_key=build_key(DIVE_FILE_KIND, row_uuid=row_uuid, sha256=_digest(content)),
         updated_at=None,
     )
 
@@ -710,18 +719,9 @@ class TestReExtractionFailureDoesNotFailTheRequest:
     def _session_for_reupload() -> AsyncMock:
         """A session whose dedupe lookup already holds this dive's file, so the attach
         takes the `noop` branch."""
-        existing = _existing(dive_id=7)
+        existing = _existing(dive_id=7, content=TestReExtractionFailureDoesNotFailTheRequest.XML)
         result = MagicMock()
-        result.one_or_none.return_value = (
-            existing.id,
-            existing.dive_id,
-            existing.uuid,
-            existing.content_type,
-            existing.byte_size,
-            existing.original_filename,
-            existing.parser_key,
-            existing.updated_at,
-        )
+        result.one_or_none.return_value = astuple(existing)
 
         db = AsyncMock()
         db.execute = AsyncMock(return_value=result)

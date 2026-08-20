@@ -223,7 +223,8 @@ def delete_after_commit(db: AsyncSession, keys: str | list[str]) -> None:
 
 
 def _take_pending(session: Session) -> list[str]:
-    return session.info.pop(_PENDING_DELETES, [])
+    keys: list[str] = session.info.pop(_PENDING_DELETES, [])
+    return keys
 
 
 @event.listens_for(Session, "after_commit")
