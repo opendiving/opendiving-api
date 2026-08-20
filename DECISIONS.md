@@ -10051,11 +10051,22 @@ guesses issued in parallel all read `0` and all store `1`, which is the differen
 five-guess bound and no bound at all — and rate limiting cannot be the answer, since it fails open
 on a Redis outage (see *"Rate limiting fails open on a Redis *outage*"*).
 
-The residual exposure, stated plainly: the only party holding a `request_id` for someone else's
-address is one who requested it, every such request emails the victim, requests are capped at 3 per
-address per window, and each yields 5 guesses in 10⁶. That is roughly one expected success per
-eleven days of maximum-rate attack that fills the victim's inbox throughout. Bounded, noisy, and the
-same exposure the services above accept. Eight digits is the lever if observation ever disagrees.
+The residual exposure, with the arithmetic shown rather than asserted — because the plan this came
+from asserted it and was wrong by a factor of sixty. The only party holding a `request_id` for
+someone else's address is one who requested it, and every such request emails the victim.
+`MAGIC_LINK_REQUEST_RATE_LIMIT_PER_EMAIL` allows 3 requests per address per
+`MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS` (900 s), each minting a fresh code worth 5 guesses in a 10⁶
+space: 15 guesses per quarter hour, or one a minute, sustained. An expected success therefore needs
+on the order of 10⁶ guesses ≈ 694 days of uninterrupted maximum-rate attack, which fills the
+victim's inbox with 288 unrequested sign-in emails a day for two years. Bounded, and impossible to
+run quietly.
+
+Eight digits is the lever if observation ever disagrees, but the per-email request cap is the term
+that dominates: at 3 per window it is what makes the horizon years rather than days, and lowering it
+buys more than lengthening the code would. That the plan's "eleven days" survived into a first draft
+here is worth recording, because it is the shape of error a quantified security claim invites — the
+figure reads as authoritative precisely because it is specific, and the rate it implies (~1
+guess/second) is one the per-email cap never permits.
 
 ### Everything else is the shape already there
 
