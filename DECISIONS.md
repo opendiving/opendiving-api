@@ -3147,11 +3147,11 @@ per-process steps. Both are fixed; recording them because the shape recurs.
 **Admin panel setup.** `admin.initialize()` (create the panel's tables, seed the initial admin) ran
 in a custom lifespan in `main.py`. Four workers raced it, and the losers died with
 `table admin_user already exists` or `UNIQUE constraint failed: admin_user.username`, taking the
-container with them. It is now a one-shot, `src/scripts/initialize_admin.py`, wired into
-`docker-compose.yml` as the `admin_init` service that `api` waits on via
-`service_completed_successfully` - so local development still needs no manual step. Constructing
-`CRUDAdmin` still registers all its routes (`__init__` calls the synchronous `setup()`), so every
-worker can mount the panel without any of them touching the database.
+container with them. It is now a one-shot, `app.admin.initialize`'s `main()`, wired into both
+compose files as the `admin_init` service that `api` waits on via `service_completed_successfully` -
+so local development still needs no manual step. Constructing `CRUDAdmin` still registers all its
+routes (`__init__` calls the synchronous `setup()`), so every worker can mount the panel without any
+of them touching the database.
 
 **`Base.metadata.create_all()`.** The same per-worker problem, and not admin-specific at all: on a
 *cold* database four workers call `create_all` at once, and `checkfirst=True` does not save you - it
@@ -8637,3 +8637,160 @@ The type list lives once, in the workflow's top-level `env`, and both jobs read 
 enforces it and the array of labels the job owns. It is already written out in prose in
 `CONTRIBUTING.md`, which is a copy that a person reads and notices; two copies inside one file would
 have been the pair that drifts unread.
+
+## The deploy bundle is three files, and the development compose file is not one of them
+
+`deploy/docker-compose.yml`, `deploy/Caddyfile` and `deploy/example.env` are what an installation
+is: three `curl`s and `docker compose up -d`, the shape Immich, Linkwarden and Wanderer all
+converged on. They are uploaded as **release artifacts** by `publish-image.yml`, so
+`releases/latest/download/docker-compose.yml` is a stable URL that always names the newest published
+release - a repository path would be a `main` that may be ahead of every published image.
+
+The template is `deploy/example.env`, not the `deploy/.env.example` that would match `src/`, because
+**GitHub renames a release asset whose name begins with a dot**: uploaded as `.env.example` it is
+stored as `default.env.example`, the workflow goes green, and the documented
+`.../download/.env.example` URL 404s on the first release that ships it. Confirmed by uploading one
+to a scratch repository and fetching both URLs. Immich's `example.env` is the same workaround, which
+is worth knowing before someone renames it back for consistency.
+
+The root `docker-compose.yml` was never going to become that file. It builds from source,
+bind-mounts `./src` over the image, runs `uvicorn --reload`, and publishes the API on every
+interface and Postgres on the loopback - four properties that are right for development and wrong
+the moment anyone else can reach the machine. Trying to serve both audiences from one file means a
+comment saying "delete these six stanzas before deploying", which nobody does. Two files, each
+honest about what it is, and `AGENTS.md` carries the obligation to change both when the
+configuration contract moves.
+
+**Nothing runs but Caddy's ports.** `web`, `api`, `db` and `redis` are `expose`d to the compose
+network only. Caddy holds 80, 443 and 443/udp, gets its certificate from `DOMAIN`, and routes
+`/api/v1*`, `/admin*`, `/docs`, `/redoc` and `/openapi.json` to `api:8000` with everything else to
+`web:3000`. The four API-side paths beyond `/api/v1` are the ones a plain "everything to the web
+app" file hides: they mount on the *API*, so an enabled admin panel and the OpenAPI docs would 404
+with nothing to suggest why.
+
+**Caddy sits under a `proxy` profile, activated by `COMPOSE_PROFILES=proxy` in the shipped `.env`.**
+A box already running Traefik or Nginx Proxy Manager cannot have this bundle binding 80/443, and
+that is a first-class setup rather than an edge case - so the escape hatch is commenting out one
+line, not editing the compose file. What a BYO-proxy user points at is `web:3000` alone: the web
+container carries `/api/v1` through to the API itself, so it is a complete single upstream and there
+is no path-splitting to get wrong. The two things they *do* have to do are in
+`docs/self-hosting/reverse-proxy.md`: add their proxy to `TRUSTED_PROXY_IPS`, and route `/admin`
+themselves if they turn the panel on.
+
+**`FRONTEND_URL` is derived from `DOMAIN`, not asked for twice.** Five user-facing URL builders hang
+off it - the magic link, the email-change confirmation, three links in the gear digest - plus the
+API's single allowed CORS origin, and its built-in default is `http://localhost:3000`. An install
+that left it alone would email sign-in links pointing at the recipient's own laptop, which is not a
+degraded instance but a dead one, since sign-in is passwordless. `SITE_URL` for the web container is
+derived the same way. Both stay overridable in `.env`, because the LAN/plain-HTTP instance is the
+case where `https://${DOMAIN}` is wrong in both halves. Verified end to end: with
+`DOMAIN=dives.example.com` and no `FRONTEND_URL`, the logged link reads
+`https://dives.example.com/auth/verify?token=…`.
+
+**The network's subnet is pinned to `172.29.0.0/16`, and `TRUSTED_PROXY_IPS` names it.** The API
+believes `X-Forwarded-For` only from an address it was told to trust, so the preset has to match the
+network the bundled Caddy actually sits on - and Docker's default pool assigns that per machine.
+Measured both ways on the running bundle: with the preset, the magic-link limiter keys on the real
+client address; with `TRUSTED_PROXY_IPS` commented out, every caller keys on `172.29.0.7`, Caddy's
+own container address - one shared bucket for the whole instance, which is the failure "Per-IP rate
+limits need to know which proxy to believe" above describes. Forging the header from outside is
+still refused: Caddy appends the true peer, that entry is not in the trusted range, and the walk
+stops there. An operator whose host already uses that subnet changes it in two places, and the
+compose file says so where the subnet is written.
+
+**Third-party images are digest-pinned; the two OpenDiving ones are not.** `postgres:18`,
+`redis:8-alpine` and `caddy:2.10-alpine` carry `@sha256:…`, which is what makes
+`docker compose pull` fetch the bytes this bundle was tested against rather than whatever the tag
+moved to - the Immich precedent, and what keeps Renovate/Watchtower users safe. The api and web
+images move on `${OPENDIVING_VERSION:-latest}` instead, because *that* is the version the operator
+is choosing; pinning them by digest would make an upgrade an edit to the compose file rather than to
+`.env`.
+
+**Only `api`, `worker` and `admin_init` get `env_file: .env`.** `web` and `db` are handed the
+variables they need, one by one, through `environment:`. The file holds `SECRET_KEY`,
+`POSTGRES_PASSWORD` and `SMTP_PASSWORD`; the Node process has no use for any of them, and a
+compromised one should not be able to read the database credentials out of its own environment. The
+cost is a list to maintain in the compose file when the web app gains a setting, which `AGENTS.md`
+names as an obligation. Blank is treated as unset on that side (`runtime-config.ts` trims and falls
+through), so `MAP_TILE_URL: ${MAP_TILE_URL:-}` on an install that set nothing leaves the built-in
+default in place rather than clearing it.
+
+**`CRUD_ADMIN_DB_URL` is derived unconditionally**, pointing the panel's own tables at the app's
+Postgres. Left unset it is a SQLite file inside one container, which four gunicorn workers cannot
+share - the panel then looks initialized and every login fails. Deriving it costs nothing when the
+panel is off, which is the default. The one sharp edge is that this URL is built by string
+interpolation rather than by the percent-encoding `postgres_uri()` applies, so a `POSTGRES_PASSWORD`
+containing `@`, `/`, `:` or `#` has to be encoded by hand; both the compose file and
+`deploy/example.env` say so where the value is set.
+
+## `admin_init` moved into the app package, because `src/` is not in the image
+
+The one-shot that creates the admin panel's tables ran as `python -m src.scripts.initialize_admin`,
+and the shipped image contains neither `src/scripts/` nor `src/app/` - only the installed `app`
+package at `/code/app` and the migrations beside it. The command worked in development for one
+reason: the development compose file bind-mounts `./src` over the container. Pointed at a published
+image it fails with `No module named src`, which is exactly what `deploy/docker-compose.yml` would
+have done on its first run.
+
+So `main()` moved to `app/admin/initialize.py`, next to the `create_admin_interface()` it calls, and
+both compose files now run `python -m app.admin.initialize`. The maintenance scripts that remain in
+`src/scripts/` (`backfill_dive_profiles`, `backfill_dive_tech_fields`, `create_first_superuser`) are
+unaffected and stay there: they are run by a developer against a bind-mounted tree, not by a
+container an installer starts. That is the line - **anything a compose file names as a `command:`
+has to be reachable from the installed package**, and anything reached as `src.scripts.*` is a
+development tool by construction.
+
+Verified on the bundle running the published-image layout: `admin_init` created the four `admin_*`
+tables in the app's Postgres, seeded the initial admin, logged
+`Admin interface initialized (tables ready, initial admin ensured)`, exited 0, and `/admin/login`
+answered 200 through Caddy. That first check ran on `ENVIRONMENT=local`, which is exactly the
+configuration that hides the next section's bug - the panel only enforces HTTPS in production, so a
+local run cannot see the redirect loop. Verifying a *deployment* concern against anything but the
+shipped `ENVIRONMENT=production` is a check that agrees with you for the wrong reason.
+
+## The panel needs forwarded headers, and `TRUSTED_PROXY_IPS` is the one knob for them
+
+`deploy/docker-compose.yml` sets `FORWARDED_ALLOW_IPS` from `TRUSTED_PROXY_IPS`. Gunicorn reads that
+variable from the environment and hands it to uvicorn's `ProxyHeadersMiddleware`, which rewrites the
+request's `scheme` from `X-Forwarded-Proto` and its `client` from `X-Forwarded-For` - for peers on
+that list only. Without it the app sees every request as plain `http` from Caddy's own address, and
+the admin panel breaks in two ways that look like anything but a proxy problem:
+
+- **An infinite redirect.** `create_admin_interface()` passes `enforce_https=True` on
+  `ENVIRONMENT=production`, which installs CRUDAdmin's `HTTPSRedirectMiddleware`. It 301s any
+  request whose scheme is `http` to the same URL under `https` - which Caddy terminates and proxies
+  back as `http`, forever. Measured before the fix: `/admin/` 301 → `https://api:8000/admin/`,
+  *including* when the request carried `X-Forwarded-Proto: https`, because the header was not
+  believed. After: 303 → `/admin/login`, 200.
+- **An allowlist that matches the proxy.** CRUDAdmin's `IPRestrictionMiddleware` compares
+  `request.client.host` and never reads `X-Forwarded-For` itself - unlike `core/utils/client_ip.py`,
+  which this app wrote precisely because that comparison is wrong behind a proxy. So
+  `CRUD_ADMIN_ALLOWED_IPS=203.0.113.7` matched nobody and 403'd the operator, while the only value
+  that let anything through was the compose subnet - i.e. the entire internet, since every request
+  arrives through Caddy. Measured after the fix, with that setting in place: caller `203.0.113.7` →
+  200, caller `198.51.100.9` → 403.
+
+**One setting, not two,** because "who is in front of this app?" is one fact and two knobs for it
+are two knobs that will disagree. The two consumers happen to agree on the algorithm as well: both
+uvicorn's `_TrustedHosts.get_trusted_client_address` (0.52.1) and this app's `client_ip` take the
+right-most entry that no trusted proxy vouched for, and both accept CIDR blocks.
+
+They do **not** agree on what shape a block may be written in, and that asymmetry is the price of
+sharing one variable. `client_ip._trusted_networks` parses with `ip_network(entry, strict=False)` on
+purpose - "operators write those and mean the block" - while gunicorn's
+`validate_string_to_addr_list` is strict by an equally deliberate comment of its own, and it runs at
+config load, before the app is imported. So `TRUSTED_PROXY_IPS=172.29.0.1/16` is a value this app
+documents as fine that exits the `api` container with `Error: 172.29.0.1/16 has host bits set` - a
+message that names the value and no setting at all, so nothing in it points back at the variable the
+operator did edit. Measured against the pinned gunicorn 26.0.0: a host-bits CIDR exits 1, while
+`172.29.0.0/16`, a bare `10.1.2.3` and an empty value all exit 0. Normalizing the value would need
+an entrypoint of the bundle's own between the image's `CMD` and gunicorn - a second copy of that
+command line to keep in step, for a shape nobody writes by accident twice - so the narrow fix is
+that the compose file, `example.env`, the reverse-proxy doc and the troubleshooting page all name
+the shape and the exact error. `worker` and `admin_init` override the command and never reach
+gunicorn's parser, so this is `api` alone.
+
+Per-IP rate limits are unaffected by the change, which was worth measuring rather than assuming,
+since `client_ip` now reads a `request.client` that has already been rewritten. Through Caddy with a
+forged `X-Forwarded-For: 9.9.9.9`, the limiter still keyed on the true peer; from inside the network
+with a legitimate chain, on the client the chain names. Both are the same answers as before.

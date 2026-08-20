@@ -1,6 +1,9 @@
+import asyncio
+import logging
+
 from crudadmin import CRUDAdmin
 
-from ..core.config import EnvironmentOption, settings, split_csv
+from ..core.config import EnvironmentOption, configure_logging, settings, split_csv
 from ..core.db.database import async_get_db
 from .views import register_admin_views
 
@@ -17,7 +20,7 @@ def create_admin_interface() -> CRUDAdmin | None:
     `CRUDAdmin.__init__` calls `setup()`, which is synchronous route registration, while
     all the schema-creating and admin-user-seeding work lives in the separate,
     `await`-able `initialize()`. That split is the whole reason the panel can now run
-    multi-worker - see `scripts.initialize_admin`.
+    multi-worker - see `main` below.
     """
     if not settings.CRUD_ADMIN_ENABLED:
         return None
@@ -62,3 +65,59 @@ def create_admin_interface() -> CRUDAdmin | None:
     register_admin_views(admin)
 
     return admin
+
+
+async def main() -> None:
+    """One-shot setup for the panel's own tables and its initial admin user.
+
+    Run before the API starts:
+
+        python -m app.admin.initialize
+
+    Both compose files wire this up as the `admin_init` service, which `api` waits on via
+    `service_completed_successfully`, so neither local development nor an install needs a
+    manual step.
+
+    It lives in this package rather than in `src/scripts/` - where it started - because
+    the shipped image contains only the installed `app` package: `src/scripts/` and
+    `src/app/` are both absent from it, so a `python -m src.scripts.initialize_admin`
+    entrypoint could only ever run against a bind-mounted source tree. That was invisible
+    while the only compose file was the development one, which mounts `./src`, and became
+    a broken `admin_init` service the moment `deploy/docker-compose.yml` ran the published
+    image instead.
+
+    Why this isn't in the app's lifespan: it used to be, and the lifespan runs once *per
+    worker*. Under `gunicorn -w 4` the four workers raced to create the same tables and
+    insert the same initial admin row; the losers crashed and took the container with
+    them. Creating a schema and seeding a row is a deployment step, not something each
+    process should attempt on boot - the same reasoning that keeps
+    `create_first_superuser` out of the lifespan.
+
+    A no-op (exit 0) when `CRUD_ADMIN_ENABLED` is false, so it can sit unconditionally in
+    a compose file or entrypoint without the panel having to be turned on.
+    """
+    configure_logging(settings.LOG_LEVEL)
+    logger = logging.getLogger(__name__)
+
+    admin = create_admin_interface()
+    if admin is None:
+        logger.info("CRUD_ADMIN_ENABLED is false - nothing to initialize.")
+        return
+
+    if settings.CRUD_ADMIN_DB_URL is None:
+        # The default SQLite file is created relative to *this* process's working
+        # directory, so in a one-shot container it lands somewhere the API container
+        # cannot read. Worth saying out loud rather than leaving someone to wonder why
+        # their admin login fails against an apparently-initialized panel.
+        logger.warning(
+            "CRUD_ADMIN_DB_URL is unset, so the panel is using a local SQLite file. "
+            "That is single-process only: set it to a shared database (e.g. the app's "
+            "Postgres) if the API runs more than one worker or container."
+        )
+
+    await admin.initialize()
+    logger.info("Admin interface initialized (tables ready, initial admin ensured).")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

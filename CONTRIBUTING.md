@@ -304,10 +304,14 @@ Then, in both repos:
    whose name disagrees with the manifest version is refused the same way, before anything is built
    — so nothing was published, and the fix is to delete the tag, correct the bump, and re-cut it.
 
-4. The api workflow opens a **draft** release with generated notes. Write the headline paragraph and
-   confirm the **Breaking** section: say "None" in so many words when it is empty, because generated
-   notes simply omit an empty category and silence is not an answer someone deciding whether to
-   upgrade can use.
+4. The api workflow opens a **draft** release with generated notes, and attaches
+   `deploy/docker-compose.yml`, `deploy/Caddyfile` and `deploy/example.env` to it — those three
+   files *are* the install, and `releases/latest/download/<name>` is the URL the docs tell people to
+   `curl`. Check they are there. Write the headline paragraph and confirm the **Breaking** section:
+   say "None" in so many words when it is empty, because generated notes simply omit an empty
+   category and silence is not an answer someone deciding whether to upgrade can use. A change to
+   the deploy bundle that an existing install has to copy — a new required variable, a new service —
+   belongs in that section, since `docker compose pull` does not update the compose file.
 
 5. Before publishing, check that `ghcr.io/opendiving/opendiving-web:0.4.0` exists, or that its
    workflow is green. Tagging the api and forgetting the web repo breaks every pinned install of

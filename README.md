@@ -7,6 +7,38 @@ Your dive history should outlive any app. This API keeps it in your own Postgres
 the original dive-computer export alongside every imported dive, and serves it all over a clean,
 documented REST API — so your data is never more than one `curl` away.
 
+## Install it
+
+One command, once you have edited six values — a domain, a key, a database password and a mail
+relay:
+
+```bash
+mkdir opendiving && cd opendiving
+curl -LO https://github.com/opendiving/opendiving-api/releases/latest/download/docker-compose.yml
+curl -LO https://github.com/opendiving/opendiving-api/releases/latest/download/Caddyfile
+curl -Lo .env https://github.com/opendiving/opendiving-api/releases/latest/download/example.env
+$EDITOR .env
+docker compose up -d
+```
+
+That is the whole product — the API, the web app, PostgreSQL, Redis, the background worker, and
+Caddy terminating TLS with a certificate it gets itself. Prebuilt images for amd64 and arm64, so a
+Raspberry Pi runs the same bytes as a VPS; migrations apply themselves on startup, so an upgrade is
+`docker compose pull && docker compose up -d`; and one `pg_dump` is a complete backup, because the
+uploaded dive-computer files live in Postgres too.
+
+| Guide                                                   |                                                |
+| ------------------------------------------------------- | ---------------------------------------------- |
+| [Install](docs/self-hosting/install.md)                 | The four commands, what you need, what starts  |
+| [Configuration](docs/self-hosting/configuration.md)     | Every setting, grouped — and which six matter  |
+| [Reverse proxy](docs/self-hosting/reverse-proxy.md)     | Bring your own, or run on a LAN with no domain |
+| [Backup & restore](docs/self-hosting/backup-restore.md) | The one-command dump, and the drill            |
+| [Upgrade](docs/self-hosting/upgrade.md)                 | Pull, up, done — and the stance on downgrades  |
+| [Troubleshooting](docs/self-hosting/troubleshooting.md) | Certificates, mail, rate limits, starting over |
+
+The bundle itself is [`deploy/`](deploy/) in this repository; releases publish those three files as
+artifacts, which is what the `curl` lines above fetch.
+
 ## What it does
 
 - **Dive log API** — dives with gas mixtures (O₂/He, pressures), multiple ordered dive sites per
@@ -35,14 +67,14 @@ documented REST API — so your data is never more than one `curl` away.
 - **More parsers** — Subsurface XML and UDDF (which also admits Apple Watch dives via Oceanic+'s
   UDDF export), then Shearwater Cloud exports; a pluggable importer layer so every supported format
   is a migration path in.
-- **Self-hosting hardening** — a single compose bundle including the web app and TLS, and prebuilt
-  images. Migrations have landed: the API runs `alembic upgrade head` on startup, so upgrading an
-  instance is `docker compose pull && docker compose up -d`. Email is already vendor-free: it goes
-  out over plain SMTP, so any relay works.
 - **Public share links** — read-only dive/trip pages.
 - **Statistics endpoints** — records, per-year aggregates, site maps, species log.
 
-## Quickstart
+## Running it from source
+
+For working on it, rather than for running it — this compose file builds from `./src`, mounts it for
+live reload, and publishes the API and Postgres on the host. To *use* OpenDiving, install it with
+the bundle above instead.
 
 ```bash
 git clone https://github.com/opendiving/opendiving-api.git
@@ -52,14 +84,16 @@ openssl rand -hex 32           # put this in SECRET_KEY, and change POSTGRES_PAS
 docker compose up
 ```
 
-That's the whole stack: the API on [http://localhost:8000](http://localhost:8000) (interactive docs
-at `/docs`), PostgreSQL, Redis, and an [arq](https://arq-docs.helpmanual.io/) worker for emails and
+That's the backend: the API on [http://localhost:8000](http://localhost:8000) (interactive docs at
+`/docs`), PostgreSQL, Redis, and an [arq](https://arq-docs.helpmanual.io/) worker for emails and
 scheduled jobs. Pair it with [opendiving-web](https://github.com/opendiving/opendiving-web) for the
 frontend.
 
 ### Configuration
 
-Everything is configured through `src/.env`, which starts as a copy of
+An *installed* instance is configured through the `.env` beside its compose file —
+[docs/self-hosting/configuration.md](docs/self-hosting/configuration.md) is the reference for that
+one. From source, everything is configured through `src/.env`, which starts as a copy of
 [`src/.env.example`](src/.env.example) — every setting is listed and commented there. `SECRET_KEY`
 is not optional: it signs every token the API issues, the template's value is published in this
 repository, and the app **refuses to start** on it rather than letting a deployment run on a key

@@ -45,6 +45,9 @@ crudadmin_data
 docs
 *.md
 !README.md
+# The deploy bundle describes how to *run* the published image; it has no business inside
+# one.
+deploy
 # Regenerates `src/app/data/`, by hand and over the network. The generated file ships; the
 # generator has no business in a runtime image.
 scripts
