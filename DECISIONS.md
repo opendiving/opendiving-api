@@ -9236,7 +9236,10 @@ Starlette's own `Internal Server Error` string with nothing worth framing, and r
 `docs/self-hosting/reverse-proxy.md` covered forwarded headers thoroughly and said nothing about
 response headers. Its new step 6 says both containers set their own and lists the three ways to undo
 that, all of which take deliberate typing: `proxy_hide_header`, an `add_header` of your own — nginx
-*appends* rather than replaces, so a well-meant `add_header X-Frame-Options SAMEORIGIN;` arrives as
-the conflicting `DENY, SAMEORIGIN` that browsers discard — and losing `X-Forwarded-Proto`, without
-which the web app never emits HSTS at all. An operator who would rather own HSTS at the proxy sets
-`WEB_HSTS=off` and sends it there; the point is that one thing sends it.
+*appends* rather than replaces, and while a duplicated `X-Frame-Options` fails closed (a conflicting
+value blocks the frame rather than being discarded, so the danger there is getting a policy you did
+not type), a duplicated `Content-Security-Policy` is enforced *alongside* the app's rather than
+instead of it, which is how a site-wide `default-src 'self'` at the proxy blocks the admin panel's
+webfont — and losing `X-Forwarded-Proto`, without which the web app never emits HSTS at all. An
+operator who would rather own HSTS at the proxy sets `WEB_HSTS=off` and sends it there; the point is
+that one thing sends it.

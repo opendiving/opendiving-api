@@ -77,9 +77,13 @@ Three ways to undo that, all of them things you have to type:
 - **Hiding them.** `proxy_hide_header` in nginx, or its equivalent elsewhere. There is no reason to
   reach for it against either upstream.
 - **Adding your own copy.** nginx's `add_header` *appends*, it does not replace, so a well-meant
-  `add_header X-Frame-Options SAMEORIGIN;` reaches the browser as `DENY, SAMEORIGIN` — a conflicting
-  value, which browsers treat as malformed and drop entirely. Set site-wide security headers on your
-  other vhosts, not on this one.
+  `add_header X-Frame-Options SAMEORIGIN;` reaches the browser as `DENY, SAMEORIGIN`. Frame
+  protection survives that — a conflicting value fails *closed*, and the browser blocks the frame —
+  but you do not get the policy you typed, which is worth knowing if you had a reason to want
+  `SAMEORIGIN`. The one that actually breaks something is CSP: duplicate `Content-Security-Policy`
+  headers are enforced *together* rather than resolved, so a site-wide `default-src 'self'` added
+  here stacks on top of the API's `frame-ancestors 'none'` and blocks the admin panel's webfont.
+  Keep site-wide security headers on your other vhosts, not on this one.
 - **Losing `X-Forwarded-Proto`.** HSTS is the one header this stack will not send unprompted: the
   web app emits it only on a request that already arrived over HTTPS, and behind a proxy that
   terminates TLS the sole evidence of that is the header from step 3. Without it, no HSTS on any
@@ -111,8 +115,8 @@ server {
     client_max_body_size 12m;
 
     # No `add_header` here, deliberately - see step 6. Both upstreams set their own
-    # security headers, and nginx's `add_header` appends rather than replaces, so a
-    # second `X-Frame-Options` arrives as a conflicting value the browser discards.
+    # security headers, and nginx's `add_header` appends rather than replaces: a second
+    # `Content-Security-Policy` is enforced alongside theirs, not instead of it.
     location / {
         proxy_pass http://127.0.0.1:3000;   # the `web` container
         proxy_http_version 1.1;
