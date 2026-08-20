@@ -190,6 +190,8 @@ curl http://localhost:8000/api/v1/dive/{uuid}/profile -H "Authorization: Bearer 
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) — setup, the checks CI runs, and how to add a dive-computer
   parser.
+- [SECURITY.md](SECURITY.md) — how to report a vulnerability privately. Please don't open a public
+  issue for one.
 - `docs/authentication.md` — the auth design, with sequence diagrams for every flow.
 - `DECISIONS.md` — non-obvious choices and gotchas (schema-change workflow, check constraints,
   caching strategy…). Read it before your first PR.
