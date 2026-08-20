@@ -106,8 +106,19 @@ def _ensure_tables() -> None:
     """Create any missing tables once per session, for the database-backed modules.
 
     So those modules don't depend on the `api` service having already run its startup
-    `create_tables()` lifespan hook. Idempotent, and a no-op when nothing is listening, so
-    it costs an unreachable connection attempt on a mocked-only run.
+    `alembic upgrade head` (`core.setup.apply_migrations`). Idempotent, and a no-op when
+    nothing is listening, so it costs an unreachable connection attempt on a mocked-only
+    run.
+
+    Still `create_all` rather than a migration run, deliberately. The database these tests
+    write to is whatever `POSTGRES_*` resolves to - the developer's own dev database by
+    default - and `alembic upgrade head` against one that predates migrations dies on the
+    first `CREATE TABLE`, turning "you have not stamped your dev database" into a suite
+    that cannot start. `create_all` is also what makes this fixture idempotent and free.
+    The cost is that a model change with no matching revision passes here; CI closes that
+    gap by running `alembic upgrade head` from empty and then `alembic check` before the
+    suite (.github/workflows/tests.yml), which is the run that has a disposable database
+    to do it in.
 
     This is now the only definition - the seven modules that had grown their own
     module-scoped copy of it and of `db_available` all use these. Keep it that way: a

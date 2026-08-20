@@ -27,7 +27,7 @@ class CertificationFile(Base, PublicUUIDMixin, TimestampMixin):
 
     __tablename__ = "certification_file"
 
-    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, unique=True, primary_key=True, init=False)
+    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
     certification_id: Mapped[int] = mapped_column(ForeignKey("certification.id", ondelete="CASCADE"), index=True)
     # "front" | "back" - see `CertificationSide` in `schemas/certification.py`. Cards are
     # two-sided and both matter: the front carries the diver's name and level, the back

@@ -23,7 +23,7 @@ class AuthenticationRequest(Base):
 
     __tablename__ = "authentication_request"
 
-    id: Mapped[int] = mapped_column(autoincrement=True, nullable=False, unique=True, primary_key=True, init=False)
+    id: Mapped[int] = mapped_column(autoincrement=True, nullable=False, primary_key=True, init=False)
 
     # For `purpose="sign_in"`, the (unverified-until-now) email being signed in with.
     # For `purpose="email_change"`, the *new* address `user_id` wants to change to.

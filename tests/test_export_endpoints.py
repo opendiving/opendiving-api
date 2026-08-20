@@ -35,13 +35,13 @@ CURRENT_USER = {"id": 1, "uuid": full_bundle().user.uuid, "username": "ada", "is
 
 @pytest.fixture(scope="module")
 def export_app() -> Any:
-    """Its own app with `create_tables_on_start=False`, like `test_cors.py`.
+    """Its own app with `apply_migrations_on_start=False`, like `test_cors.py`.
 
     The shared `client` fixture opens `src.app.main`'s app, whose startup hook connects
     to Postgres - which would make these route tests part of the database-backed subset
     for no reason: nothing below the route is real here anyway.
     """
-    return create_application(router=router, settings=settings, create_tables_on_start=False)
+    return create_application(router=router, settings=settings, apply_migrations_on_start=False)
 
 
 @pytest.fixture

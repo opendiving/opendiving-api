@@ -41,7 +41,7 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
 
     __tablename__ = "dive_file"
 
-    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, unique=True, primary_key=True, init=False)
+    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
     # The owner is denormalized off `dive` rather than joined for it, because the dedupe
     # index below is per-user and has to be enforceable in one table.
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id"))

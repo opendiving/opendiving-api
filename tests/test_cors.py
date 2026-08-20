@@ -11,7 +11,7 @@ CORS-safelisted headers unless `expose_headers` names more, which is why the
 download filename needs a test of its own.
 
 Builds its own app via `create_application` (rather than importing `src.app.main`'s
-`app`/using the `client` fixture from `conftest.py`) with `create_tables_on_start=
+`app`/using the `client` fixture from `conftest.py`) with `apply_migrations_on_start=
 False`, so this doesn't require a live Postgres connection just to exercise
 middleware registration.
 """
@@ -33,7 +33,7 @@ _PREFLIGHT_HEADERS = {
 
 @pytest.fixture(scope="module")
 def cors_client() -> Generator[TestClient]:
-    app = create_application(router=router, settings=settings, create_tables_on_start=False)
+    app = create_application(router=router, settings=settings, apply_migrations_on_start=False)
     with TestClient(app) as client:
         yield client
 

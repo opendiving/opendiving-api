@@ -64,6 +64,14 @@ WORKDIR /code
 # live editing; it is now a convenience rather than a requirement.
 COPY --from=builder --chown=app:app /app/src/app /code/app
 
+# The migrations, and the config the `alembic` CLI needs to find them. The API runs
+# `alembic upgrade head` on startup through a config built in code (`core.db.migrations`),
+# which locates this directory relative to `/code/app` and needs no ini at all - but an
+# operator running `alembic stamp head`, `alembic current` or `alembic downgrade` inside
+# the container gets the CLI's usual `alembic.ini` behaviour, resolved from this WORKDIR.
+COPY --from=builder --chown=app:app /app/src/migrations /code/migrations
+COPY --from=builder --chown=app:app /app/src/alembic.ini /code/alembic.ini
+
 EXPOSE 8000
 
 # `python -c` rather than curl/wget: neither is installed in the slim base, and adding

@@ -28,7 +28,7 @@ class SpeciesName(Base):
 
     __tablename__ = "species_name"
 
-    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, unique=True, primary_key=True, init=False)
+    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
     # Indexed on its own because every read of this table is "the names of this species" -
     # unlike the dive join tables, there is no position to order by and so no composite
     # index whose leading column would already cover it. The FK's cascade is the only way a

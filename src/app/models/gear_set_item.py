@@ -15,7 +15,7 @@ class GearSetItem(Base):
 
     __tablename__ = "gear_set_item"
 
-    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, unique=True, primary_key=True, init=False)
+    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
     # No standalone index on gear_set_id - the composite index below covers it, see
     # the same note on `DiveGearItem`.
     gear_set_id: Mapped[int] = mapped_column(ForeignKey("gear_set.id", ondelete="CASCADE"))

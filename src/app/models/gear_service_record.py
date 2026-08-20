@@ -19,7 +19,7 @@ class GearServiceRecord(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
 
     __tablename__ = "gear_service_record"
 
-    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, unique=True, primary_key=True, init=False)
+    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
     # Denormalized owner, same reasoning as on `GearServiceSchedule`.
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id"), index=True)
     gear_item_id: Mapped[int] = mapped_column(ForeignKey("gear_item.id", ondelete="CASCADE"))

@@ -53,7 +53,7 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
 
     __tablename__ = "dive_profile"
 
-    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, unique=True, primary_key=True, init=False)
+    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
     dive_id: Mapped[int] = mapped_column(ForeignKey("dive.id", ondelete="CASCADE"))
 
     # Idempotency key for extraction. `source_sha256` is the `dive_file.sha256` these
