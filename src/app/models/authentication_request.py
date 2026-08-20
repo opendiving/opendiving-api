@@ -35,14 +35,14 @@ class AuthenticationRequest(Base):
 
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
-    # Timestamp of the first successful verification - purely informational/for
-    # observability. Deliberately does *not* block a link from being opened again:
-    # a mail client's link-preview/security-scanning feature can "detonate" a link
-    # before a human clicks it, and re-verifying an already-used-but-not-invalidated
-    # token just re-confirms the exact same outcome (same account signed in, or the
-    # same email-change re-applied), so treating it as an error would only produce
-    # confusing failures for something that, in fact, already worked. See
-    # `invalidated_at` for what actually revokes a token.
+    # Timestamp of the first successful verification, and what makes a token
+    # single-use - though "used" means something slightly different per `purpose`.
+    # `"sign_in"` rejects a replay outright: `verify_email_link` mints a refresh
+    # cookie, so a repeat hands out a whole new session rather than re-confirming
+    # the old one. `"email_change"` still tolerates one, but only while the change
+    # this token represents is the account's *current* email - re-applying that
+    # grants nothing. See `invalidated_at` for the separate case of a token revoked
+    # by a newer request superseding it.
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
     # Set when a *newer* request supersedes this one (see `POST /auth/email/request`/

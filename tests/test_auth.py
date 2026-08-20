@@ -174,10 +174,10 @@ class TestCheckEmailLink:
 
     @pytest.mark.asyncio
     async def test_already_used_token_is_invalid(self, mock_db):
-        """This is what actually keeps a human from re-triggering sign-in after
-        already following the link once (e.g. via the browser's back button) -
-        unlike `verify_email_link`'s idempotent-reuse leniency, this precheck must
-        treat an already-used token as invalid so no button is even shown."""
+        """`verify_email_link` rejects a used token too, so this precheck isn't the
+        security boundary - it's what turns that rejection into an error message on
+        page load instead of a button that looks clickable and then 401s (e.g. after
+        the browser's back button lands a user back on an already-followed link)."""
         auth_request = {
             "id": 1,
             "email": "a@example.com",
@@ -251,9 +251,9 @@ class TestVerifyEmailLink:
 
     @pytest.mark.asyncio
     async def test_invalidated_token_raises_unauthorized(self, mock_db):
-        """Superseded by a newer request (see `request_email_link`) - a hard reject,
-        unlike a merely-already-used-but-still-live token (see the idempotent-reuse
-        test below)."""
+        """Superseded by a newer request (see `request_email_link`). Checked before
+        `used_at`, so a link that is both superseded and used reports the supersession
+        - the one of the two that tells the user a newer link is waiting for them."""
         auth_request = {
             "id": 1,
             "email": "a@example.com",
@@ -289,11 +289,12 @@ class TestVerifyEmailLink:
                 await verify_email_link(_request(), EmailVerifyRequest(token="expired"), Mock(), mock_db)
 
     @pytest.mark.asyncio
-    async def test_already_used_but_live_token_succeeds_again(self, mock_db):
-        """Re-opening the same link (e.g. a mail client's link-preview/security-
-        scanning feature having already "detonated" it, or the user clicking twice)
-        must not error - it just re-confirms the same outcome, and shouldn't
-        re-touch `used_at` a second time."""
+    async def test_already_used_but_live_token_raises_unauthorized(self, mock_db):
+        """The link is single-use even while it is still inside its expiry window.
+        Accepting the replay would mint a second refresh cookie outliving the link
+        by `REFRESH_TOKEN_EXPIRE_DAYS`, so whoever reads the mail after the recipient
+        clicked it - a shared mailbox, an archive, a retaining gateway - would get a
+        session of their own. No session is issued and `used_at` is left alone."""
         auth_request = {
             "id": 1,
             "email": "existing@example.com",
@@ -301,23 +302,41 @@ class TestVerifyEmailLink:
             "invalidated_at": None,
             "expires_at": datetime.now(UTC) + timedelta(minutes=10),
         }
-        db_user = {"id": 1, "uuid": USER_UUID, "username": "existinguser", "email": "existing@example.com"}
 
         with (
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
-            patch("src.app.services.auth_service.crud_authentication_providers") as mock_providers,
-            patch("src.app.services.auth_service.crud_users") as mock_users,
         ):
             mock_requests.get = AsyncMock(return_value=auth_request)
             mock_requests.update = AsyncMock(return_value=None)
-            mock_users.get = AsyncMock(return_value=db_user)
-            mock_providers.exists = AsyncMock(return_value=True)
 
-            outcome = await verify_email_link(_request(), EmailVerifyRequest(token="already-used"), Mock(), mock_db)
+            response = Mock()
+            with pytest.raises(UnauthorizedException, match="already been used"):
+                await verify_email_link(_request(), EmailVerifyRequest(token="already-used"), response, mock_db)
 
-            assert outcome.status == "authenticated"
             mock_requests.update.assert_not_called()
+            response.set_cookie.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_used_token_is_rejected_as_used_not_expired(self, mock_db):
+        """Ordering check: a token that is both used and expired reports "used", the
+        more specific of the two - the order `check_email_link` evaluates them in."""
+        auth_request = {
+            "id": 1,
+            "email": "existing@example.com",
+            "used_at": datetime.now(UTC) - timedelta(hours=2),
+            "invalidated_at": None,
+            "expires_at": datetime.now(UTC) - timedelta(minutes=1),
+        }
+
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
+        ):
+            mock_requests.get = AsyncMock(return_value=auth_request)
+
+            with pytest.raises(UnauthorizedException, match="already been used"):
+                await verify_email_link(_request(), EmailVerifyRequest(token="used-and-expired"), Mock(), mock_db)
 
     @pytest.mark.asyncio
     async def test_existing_user_is_authenticated_and_token_marked_used(self, mock_db):
