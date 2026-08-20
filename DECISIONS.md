@@ -9251,6 +9251,19 @@ somebody already read and closed. The fingerprint is the sorted set of *fixable 
 deliberately not the image digests: a rebuild that fails to clear a CVE changes every digest without
 changing the problem, and keying on digests would file that as news every time.
 
+**The clean-scan close rewrites the body before closing, and that one line is what keeps the
+suppression honest.** Closing without it leaves the issue carrying the fingerprint of the last
+*vulnerable* scan, which makes this workflow's own close byte-for-byte indistinguishable from a
+human dismissal — so the identical CVE set reappearing later (a rebuild that regressed, an alias
+that moved back, a fix upstream withdrawn) would match, take the "leaving it closed" branch, and
+never alert again. A silently suppressed alert is the precise failure this file exists to prevent,
+arrived at through the mechanism added to prevent a different one. Writing the clean report in first
+sets the fingerprint to the hash of an empty set, which cannot collide with any real finding, so a
+recurrence always opens a fresh issue while a genuine dismissal — whose body still holds the
+vulnerable fingerprint — still stays closed. The cost is that the body stops being the record of
+what was fixed, so the cleared ids are read out of the old body and put in the closing comment,
+where the thread keeps them.
+
 **Findings fail the PR check but never the scheduled job.** Different jobs, different answers, both
 on purpose. The scheduled job's output is an issue, so a red X would add nothing and would train
 someone to ignore a red X on a security workflow; genuine errors still fail it, and it fails loudly
