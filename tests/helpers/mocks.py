@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, Mock
 from fastapi.encoders import jsonable_encoder
 
 from src.app import models
-from src.app.core.schemas import TokenBlacklistCreate
+from src.app.core.schemas import TokenBlacklistCreate, TokenBlacklistRead
 from tests.conftest import fake
 
 
@@ -40,16 +40,31 @@ class FakeTokenBlacklist:
 
     Enough to exercise revocation end to end - mint, spend, replay - without a database,
     which is what it takes to catch a token colliding with one already blacklisted.
+
+    Whole rows rather than a bare set of strings, because `core.security.revocation_time`
+    reads `revoked_at` back off the row: a fake that only remembered *whether* a token was
+    revoked could not exercise the reuse warning at all.
     """
 
     def __init__(self) -> None:
-        self.tokens: set[str] = set()
+        self.entries: dict[str, TokenBlacklistRead] = {}
+
+    @property
+    def tokens(self) -> set[str]:
+        """The token strings on file, for the tests that only ask "is this revoked?"."""
+        return set(self.entries)
 
     async def exists(self, db: Any, token: str) -> bool:
-        return token in self.tokens
+        return token in self.entries
 
     async def create(self, db: Any, object: TokenBlacklistCreate) -> None:
-        self.tokens.add(object.token)
+        self.entries[object.token] = TokenBlacklistRead(id=len(self.entries) + 1, **object.model_dump())
+
+    async def get(self, db: Any, token: str, **kwargs: Any) -> TokenBlacklistRead | None:
+        """`**kwargs` swallows FastCRUD's `schema_to_select`/`return_as_model`, which the
+        caller passes and which this fake has no use for - it only ever holds one shape.
+        """
+        return self.entries.get(token)
 
 
 def get_current_user(user: models.User) -> dict[str, Any]:
