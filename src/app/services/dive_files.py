@@ -338,9 +338,10 @@ async def store_dive_file(
         # Re-uploading is the natural repair after a partial loss of the files volume, and
         # this is what makes it actually work: without it the row says "already stored",
         # the download 500s forever, and the server refuses the very bytes that would fix
-        # it. Costs one `stat` on the normal path. The write is safe because the key is
-        # derived from this row's uuid and these bytes' hash, so it can only ever recreate
-        # the file this row already names.
+        # it. Costs one `stat` on the normal path. The write is safe because it re-`put`s
+        # the key the row already carries rather than minting one - and a `put` of a key
+        # whose name ends in these bytes' hash is byte-identical to what was there, so it
+        # can only ever recreate the file this row already names.
         if not await blob_store.has(existing.storage_key):
             logger.warning("Rewriting the missing stored file for dive %s from a re-upload", dive_id)
             await blob_store.put(existing.storage_key, data)

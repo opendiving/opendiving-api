@@ -151,8 +151,9 @@ async def store_certification_file(
     key = blob_store.new_key(KEY_KIND, sha256=digest)
     # Before the write, not after: `blob_store.put` is a threadpool hop with an `fsync` in
     # it, and the lookup above autobegan a transaction that would otherwise be held open
-    # across the whole of it. The `Row` of two scalars survives the rollback - see
-    # `release_read_transaction` for why that precondition is the caller's to check.
+    # across the whole of it. What that lookup returned is a bare `str | None`, not an ORM
+    # entity, so it is trivially safe across the rollback - see `release_read_transaction`
+    # for why that precondition is the caller's to check.
     await release_read_transaction(db)
     await blob_store.put(key, data)
 

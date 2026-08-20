@@ -12,9 +12,8 @@ images live on the files volume rather than in the database at all now (this rea
 their `storage_key`-bearing rows' scalar columns), and `dive_profile.data` stays
 `deferred`. Those are fetched one row at a time by whoever actually needs them
 (`archive.py` for the blobs, `uddf.py`/`envelope.py` for the profile series), so peak
-memory is one
-file plus one profile rather than a diver's entire history of both. That is the one
-place this module accepts an N+1 on purpose.
+memory is one file plus one profile rather than a diver's entire history of both. That
+is the one place this module accepts an N+1 on purpose.
 
 **One collection is scoped through the dives rather than by column.** `species` has no
 `user_id` at all - the catalog is global (see `models/species.py`) - so it is loaded by the

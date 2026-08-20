@@ -103,7 +103,9 @@ class TestDiveFileWriteOrdering:
         assert when_committed == [True]
 
     @pytest.mark.asyncio
-    async def test_the_stored_key_names_the_row_and_the_content(self, volume: Path) -> None:
+    async def test_the_stored_key_names_the_kind_the_shard_and_the_content(self, volume: Path) -> None:
+        """Not the row: the uuid in a key is a per-write nonce, deliberately not the owning
+        row's - see `blob_store.new_key`."""
         db = self._session()
         token, user_uuid = _token()
         await store_dive_file(
