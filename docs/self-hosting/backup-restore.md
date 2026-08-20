@@ -42,6 +42,10 @@ docker run --rm -v opendiving_files-data:/files:ro -v "$PWD":/out alpine \
 `opendiving_files-data` is the volume's full name: the compose project (`opendiving`, set by `name:`
 at the top of the compose file) plus the volume name. `docker volume ls` will confirm it.
 
+Keep the `-C /files .` shape rather than `tar czf … /files`. It puts the directory itself in the
+archive as `./`, carrying its ownership — which is what makes a restore into a brand-new volume land
+owned by the container's user instead of by root, whichever order you do the steps in.
+
 Nightly, out of cron — same order, both artifacts:
 
 ```bash
