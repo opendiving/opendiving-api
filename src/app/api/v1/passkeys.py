@@ -42,6 +42,12 @@ logger = logging.getLogger(__name__)
 
 _NOT_FOUND = "Passkey not found"
 
+# How many rows `GET /user/passkeys` will return. Deliberately *above*
+# `PASSKEY_MAX_CREDENTIALS_PER_USER` rather than equal to it: an operator who lowers that
+# setting after people have registered would otherwise make the excess rows invisible in
+# the UI, and a passkey nobody can see is a passkey nobody can revoke.
+_LIST_LIMIT = 100
+
 
 _PasskeyNotice = Callable[..., Awaitable[None]]
 
@@ -101,7 +107,7 @@ async def passkey_registration_verify(
     `excludeCredentials` will not produce, and one that ignores it should not be able to
     duplicate.
     """
-    created = await finish_registration(db=db, user=current_user, credential=body.credential, name=body.name.strip())
+    created = await finish_registration(db=db, user=current_user, credential=body.credential, name=body.name)
 
     await _notify(send_passkey_added_email, email=current_user["email"], passkey_name=created.name, what="added")
 
@@ -128,7 +134,7 @@ async def read_passkeys(
         return_as_model=True,
         sort_columns="created_at",
         sort_orders="asc",
-        limit=settings.PASSKEY_MAX_CREDENTIALS_PER_USER,
+        limit=_LIST_LIMIT,
     )
     return list(rows["data"])
 

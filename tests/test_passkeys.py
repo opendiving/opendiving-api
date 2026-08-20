@@ -666,7 +666,9 @@ class TestManagement:
             rows = await read_passkeys(_user(), mock_db)
 
         assert crud.get_multi.call_args.kwargs["user_id"] == 7
-        assert crud.get_multi.call_args.kwargs["limit"] == settings.PASSKEY_MAX_CREDENTIALS_PER_USER
+        # Above the cap, not equal to it: lowering the setting must not hide rows someone
+        # registered under the old one, since a passkey nobody can see is one nobody can revoke.
+        assert crud.get_multi.call_args.kwargs["limit"] > settings.PASSKEY_MAX_CREDENTIALS_PER_USER
         assert len(rows) == 1
 
     @pytest.mark.asyncio
