@@ -5,15 +5,21 @@ route in `api/v1` - dives, dive sites, trips, gear items, gear sets and certific
 all reach it through a thin per-entity wrapper. It used to be seven hand-rolled copies,
 so these tests exist to keep the one that replaced them honest.
 
-Mostly unit tests of the function, plus one class that drives the six real routes over
-HTTP. That last one is not redundant: "someone else's row is indistinguishable from a
-missing one" is a security contract, and a contract asserted only one layer below the
-wire is one a route can quietly stop honouring.
+Mostly unit tests of the function, plus the classes at the bottom that drive every real
+`{uuid}` route over HTTP. Those are not redundant: "someone else's row is
+indistinguishable from a missing one" is a security contract, and a contract asserted only
+one layer below the wire is one a route can quietly stop honouring.
+
+`TestEveryUuidRouteIsAccountedFor` is the structural guard over the lot - it enumerates the
+app's real route table and fails on a route that names a resource by uuid without being
+listed here. See its docstring for what that catches that the rest of this file does not.
 """
 
+import importlib
 import logging
 import uuid as uuid_pkg
 from collections.abc import Generator
+from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -26,6 +32,8 @@ from src.app.api.dependencies import fetch_owned_or_raise, get_current_user
 from src.app.core.config import settings
 from src.app.core.exceptions.http_exceptions import NotFoundException
 from src.app.core.setup import create_application
+from src.app.main import app
+from tests.helpers.routes import iter_api_routes
 
 
 class _Row(BaseModel):
@@ -250,20 +258,162 @@ class TestEveryOwnedRouteUsesIt:
         assert offenders == [], f"hand-rolled ownership check(s) still in: {offenders}"
 
 
-# (route path, the module whose `crud_*` singleton backs it, its not-found wording).
-OWNED_ROUTES = [
-    ("/api/v1/dive/{uuid}", "src.app.api.v1.dives", "crud_dives", "Dive not found"),
-    ("/api/v1/dive-site/{uuid}", "src.app.api.v1.dive_sites", "crud_dive_sites", "Dive site not found"),
-    ("/api/v1/trip/{uuid}", "src.app.api.v1.trips", "crud_trips", "Trip not found"),
-    ("/api/v1/gear-item/{uuid}", "src.app.api.v1.gear_items", "crud_gear_items", "Gear item not found"),
-    ("/api/v1/gear-set/{uuid}", "src.app.api.v1.gear_sets", "crud_gear_sets", "Gear set not found"),
-    (
-        "/api/v1/certification/{uuid}",
-        "src.app.api.v1.certifications",
-        "crud_certifications",
+@dataclass(frozen=True)
+class OwnedRoute:
+    """One `{uuid}` route, and how to make its ownership lookup come back empty.
+
+    `crud` names the module-level FastCRUD singleton the route's lookup goes through;
+    stubbing its `get` is what stands in for both "no such row" and "somebody else's row"
+    without a database. `extra` is whatever it takes to get *past body validation* and
+    reach the handler at all - FastAPI validates the body before calling it, so a `PUT`
+    with no multipart part answers 422 and never exercises the check.
+    """
+
+    method: str
+    path: str
+    crud: str
+    detail: str
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return self.method, self.path
+
+    def __str__(self) -> str:
+        return f"{self.method} {self.path}"
+
+    def url(self, uuid: uuid_pkg.UUID) -> str:
+        return self.path.replace("{uuid}", str(uuid)).replace("{side}", "front")
+
+    def crud_singleton(self) -> Any:
+        module, _, name = self.crud.partition(":")
+        return getattr(importlib.import_module(module), name)
+
+
+# The three methods every owned resource exposes, and what each needs to get past body
+# validation. An empty `PATCH` is enough: every update schema is all-optional, and the
+# ownership check runs before any field is looked at.
+_CRUD_METHODS: tuple[tuple[str, dict[str, Any]], ...] = (("GET", {}), ("PATCH", {"json": {}}), ("DELETE", {}))
+
+# A file part small enough to be free and well-formed enough to validate. Its *content*
+# never matters: every route below raises on ownership before looking at it.
+_A_FILE = {"file": ("export.xml", b"<dive/>", "text/xml")}
+
+# Every `{uuid}` route whose ownership goes through `fetch_owned_or_raise`.
+FETCH_OWNED_ROUTES = [
+    *(
+        OwnedRoute(method, "/api/v1/dive/{uuid}", "src.app.api.v1.dives:crud_dives", "Dive not found", extra)
+        for method, extra in _CRUD_METHODS
+    ),
+    OwnedRoute("GET", "/api/v1/dive/{uuid}/neighbors", "src.app.api.v1.dives:crud_dives", "Dive not found"),
+    OwnedRoute("GET", "/api/v1/dive/{uuid}/profile", "src.app.api.v1.dives:crud_dives", "Dive not found"),
+    OwnedRoute("GET", "/api/v1/dive/{uuid}/file", "src.app.api.v1.dives:crud_dives", "Dive not found"),
+    OwnedRoute(
+        "PUT",
+        "/api/v1/dive/{uuid}/file",
+        "src.app.api.v1.dives:crud_dives",
+        "Dive not found",
+        {"files": _A_FILE, "data": {"file_token": "not-looked-at"}},
+    ),
+    OwnedRoute("DELETE", "/api/v1/dive/{uuid}/file", "src.app.api.v1.dives:crud_dives", "Dive not found"),
+    *(
+        OwnedRoute(
+            method,
+            "/api/v1/dive-site/{uuid}",
+            "src.app.api.v1.dive_sites:crud_dive_sites",
+            "Dive site not found",
+            extra,
+        )
+        for method, extra in _CRUD_METHODS
+    ),
+    *(
+        OwnedRoute(method, "/api/v1/trip/{uuid}", "src.app.api.v1.trips:crud_trips", "Trip not found", extra)
+        for method, extra in _CRUD_METHODS
+    ),
+    *(
+        OwnedRoute(
+            method,
+            "/api/v1/gear-item/{uuid}",
+            "src.app.api.v1.gear_items:crud_gear_items",
+            "Gear item not found",
+            extra,
+        )
+        for method, extra in _CRUD_METHODS
+    ),
+    *(
+        OwnedRoute(
+            method, "/api/v1/gear-set/{uuid}", "src.app.api.v1.gear_sets:crud_gear_sets", "Gear set not found", extra
+        )
+        for method, extra in _CRUD_METHODS
+    ),
+    *(
+        OwnedRoute(
+            method,
+            "/api/v1/certification/{uuid}",
+            "src.app.api.v1.certifications:crud_certifications",
+            "Certification not found",
+            extra,
+        )
+        for method, extra in _CRUD_METHODS
+    ),
+    OwnedRoute(
+        "GET",
+        "/api/v1/certification/{uuid}/file/{side}",
+        "src.app.api.v1.certifications:crud_certifications",
+        "Certification not found",
+    ),
+    OwnedRoute(
+        "PUT",
+        "/api/v1/certification/{uuid}/file/{side}",
+        "src.app.api.v1.certifications:crud_certifications",
+        "Certification not found",
+        {"files": _A_FILE},
+    ),
+    OwnedRoute(
+        "DELETE",
+        "/api/v1/certification/{uuid}/file/{side}",
+        "src.app.api.v1.certifications:crud_certifications",
         "Certification not found",
     ),
 ]
+
+# The other family. These six resolve ownership in SQL rather than through
+# `fetch_owned_or_raise` - `resolve_schedule_for_user`/`resolve_record_for_user` filter on
+# `user_id` in the `WHERE` clause and answer `None` for both "absent" and "not yours" (see
+# their docstrings). That collapse is the whole design, and it is also why they need their
+# own assertions: at this seam the two cases are already one, so the thing worth checking
+# is that the route hands the resolver the *caller's own* id.
+RESOLVER_OWNED_ROUTES = [
+    *(
+        OwnedRoute(
+            method,
+            "/api/v1/gear-service-schedule/{uuid}",
+            "src.app.api.v1.gear_service:resolve_schedule_for_user",
+            "Service schedule not found",
+            extra,
+        )
+        for method, extra in _CRUD_METHODS
+    ),
+    *(
+        OwnedRoute(
+            method,
+            "/api/v1/gear-service-record/{uuid}",
+            "src.app.api.v1.gear_service:resolve_record_for_user",
+            "Service record not found",
+            extra,
+        )
+        for method, extra in _CRUD_METHODS
+    ),
+]
+
+# The one intentional exception, and the only kind of entry that belongs here. The species
+# catalog is global (`models/species.py`): every row is a fact about the ocean that every
+# account may reference, so there is no owner to compare a caller against and a species
+# uuid is an existence oracle for nothing private. `crud/crud_species.py` documents why the
+# `user_id` filter its siblings carry is an omission on purpose rather than an oversight.
+UNOWNED_ROUTES: dict[tuple[str, str], str] = {
+    ("GET", "/api/v1/species/{uuid}"): "The species catalog is global - there is no owner to compare against.",
+}
 
 OWNER_ID = 7
 SOMEONE_ELSE_ID = 8
@@ -279,6 +429,11 @@ def owned_app() -> Any:
     below the route runs here anyway: every one of these raises before it reaches its
     cached read helper, which is the ordering `TestEveryOwnedRouteUsesIt` exists to
     protect.
+
+    Worth saying plainly, since the guard below is one whose silent absence is the failure
+    mode: this is *not* one of the `db_available()`-gated modules. It needs no database, so
+    it runs on a cold checkout and in CI alike, and it cannot be skipped into passing the
+    way `POSTGRES_SERVER` unset skips the Postgres-backed suites (see CONTRIBUTING.md).
     """
     return create_application(router=router, settings=settings, apply_migrations_on_start=False)
 
@@ -301,38 +456,102 @@ class TestSomeoneElsesRowIsIndistinguishableOverHTTP:
     A 403 here would confirm that an opaque uuid names a real row belonging to *someone*.
     Both the status **and** the body have to match a genuinely missing row - a distinct
     `detail` would be the same oracle wearing a 404.
+
+    Every method of every route, not just the reads. The mutating ones are the likeliest
+    to grow a bespoke pre-check later, and the sub-resources (`/file`, `/profile`,
+    `/neighbors`) are the likeliest to be added without one at all - a new verb on an
+    existing resource looks like it inherits the parent's guard and does not.
     """
 
-    @pytest.mark.parametrize("method", ("GET", "PATCH", "DELETE"))
-    @pytest.mark.parametrize(("path", "module", "crud_name", "detail"), OWNED_ROUTES)
+    @pytest.mark.parametrize("route", FETCH_OWNED_ROUTES, ids=str)
     def test_a_row_owned_by_someone_else_reads_as_a_missing_one(
-        self,
-        signed_in_client: TestClient,
-        monkeypatch: Any,
-        method: str,
-        path: str,
-        module: str,
-        crud_name: str,
-        detail: str,
+        self, signed_in_client: TestClient, monkeypatch: Any, route: OwnedRoute
     ):
-        """All three methods, not just the read.
-
-        The mutating routes are the ones most likely to grow a bespoke pre-check later,
-        and an empty `PATCH` body is enough: every update schema is all-optional, and the
-        ownership check runs before any field is looked at.
-        """
-        import importlib
-
-        crud = getattr(importlib.import_module(module), crud_name)
-        url = path.format(uuid=uuid_pkg.uuid4())
-        body: dict[str, Any] | None = {} if method == "PATCH" else None
+        crud = route.crud_singleton()
+        url = route.url(uuid_pkg.uuid4())
 
         monkeypatch.setattr(crud, "get", AsyncMock(return_value=None))
-        absent = signed_in_client.request(method, url, json=body)
+        absent = signed_in_client.request(route.method, url, **route.extra)
 
         monkeypatch.setattr(crud, "get", AsyncMock(return_value=_Row(id=1, user_id=SOMEONE_ELSE_ID)))
-        someone_elses = signed_in_client.request(method, url, json=body)
+        someone_elses = signed_in_client.request(route.method, url, **route.extra)
 
         assert absent.status_code == 404
         assert someone_elses.status_code == absent.status_code
-        assert someone_elses.json() == absent.json() == {"detail": detail}
+        assert someone_elses.json() == absent.json() == {"detail": route.detail}
+
+
+class TestTheResolverRoutesScopeToTheCaller:
+    """The gear-service half, where the owner filter is in the `WHERE` clause.
+
+    Stubbing the resolver can only prove that `None` becomes a 404, which on its own would
+    pass just as well for a resolver that never filtered by owner. So the assertion that
+    carries the weight is the second one: the route passed *its caller's* `user_id` down.
+    A route that resolved the row unscoped and compared afterwards - or not at all - fails
+    it.
+    """
+
+    @pytest.mark.parametrize("route", RESOLVER_OWNED_ROUTES, ids=str)
+    def test_the_resolver_is_called_with_the_callers_id_and_none_is_a_404(
+        self, signed_in_client: TestClient, monkeypatch: Any, route: OwnedRoute
+    ):
+        module_name, _, resolver_name = route.crud.partition(":")
+        resolver = AsyncMock(return_value=None)
+        monkeypatch.setattr(importlib.import_module(module_name), resolver_name, resolver)
+
+        response = signed_in_client.request(route.method, route.url(uuid_pkg.uuid4()), **route.extra)
+
+        assert response.status_code == 404
+        assert response.json() == {"detail": route.detail}
+        assert resolver.await_args is not None, "the route answered 404 without consulting the resolver at all"
+        assert resolver.await_args.kwargs["user_id"] == OWNER_ID
+
+
+class TestEveryUuidRouteIsAccountedFor:
+    """The drift guard one level up, and the reason the two tables above are exhaustive.
+
+    `TestEveryOwnedRouteUsesIt` catches a route that hand-rolls the check. Neither it nor
+    the behavioural tests above notice a route that resolves no ownership *at all* - a new
+    `GET /dive/{uuid}/something` that reads by uuid and never asks whose it is is covered
+    by nothing, which is precisely how a hand-audited list goes stale. 33 of these routes
+    were verified by hand once; this is what keeps the 34th honest.
+
+    Enumerated from the app's real route table rather than from a list, because a list is
+    the thing being checked - the same shape as
+    `test_every_update_schema_is_accounted_for`.
+    """
+
+    def test_every_uuid_route_resolves_ownership(self) -> None:
+        covered = {route.key for route in FETCH_OWNED_ROUTES} | {route.key for route in RESOLVER_OWNED_ROUTES}
+        covered |= UNOWNED_ROUTES.keys()
+
+        unaccounted = sorted(
+            route.key for route in iter_api_routes(app) if "{uuid}" in route.path and route.key not in covered
+        )
+
+        assert not unaccounted, (
+            "these routes name a resource by uuid and nothing here checks whose it is:\n"
+            + "\n".join(f"  {method:6} {path}" for method, path in unaccounted)
+            + "\n\nResolve ownership in the handler (`fetch_owned_or_raise`, or a `user_id`-scoped"
+            + "\nresolver) and add the route to `FETCH_OWNED_ROUTES` or `RESOLVER_OWNED_ROUTES`."
+            + "\nOnly a resource with no owner at all belongs in `UNOWNED_ROUTES`, with the reason."
+        )
+
+    def test_no_entry_names_a_route_that_no_longer_exists(self) -> None:
+        """Stale entries in either direction. A covered route that was renamed leaves a
+        parametrized case that passes against nothing, and a stale `UNOWNED_ROUTES` entry
+        is worse - it pre-approves the path for whatever is registered there next.
+
+        Also what fails if `iter_api_routes` ever stops finding routes, which would
+        otherwise let the sweep above pass vacuously.
+        """
+        registered = {route.key for route in iter_api_routes(app) if "{uuid}" in route.path}
+        listed = (
+            {route.key for route in FETCH_OWNED_ROUTES}
+            | {route.key for route in RESOLVER_OWNED_ROUTES}
+            | UNOWNED_ROUTES.keys()
+        )
+
+        stale = sorted(listed - registered)
+
+        assert not stale, f"these entries no longer name a registered `{{uuid}}` route: {stale}"
