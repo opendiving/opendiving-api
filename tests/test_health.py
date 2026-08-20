@@ -232,6 +232,44 @@ class TestReadiness:
         assert response.json()["detail"] == "Not ready: redis unreachable"
         assert elapsed < _HANG_SECONDS / 2
 
+    def test_two_hanging_datastores_still_cost_one_bound(self):
+        """The probes run concurrently, so the request's budget is one timeout, not two.
+
+        The caller this protects is the image's `HEALTHCHECK`: `urlopen(timeout=4)` under
+        Docker's `--timeout=5s`. Sequential probes would put the both-hang case at 6s, and
+        the check would die on its socket instead of on the 503 that names the failures -
+        a green-to-red transition with no cause in the health log.
+        """
+        probe_starts: list[float] = []
+
+        async def hangs(*args: Any, **kwargs: Any) -> None:
+            probe_starts.append(perf_counter())
+            await asyncio.sleep(_HANG_SECONDS)
+
+        db = AsyncMock()
+        db.execute.side_effect = hangs
+        redis_client = AsyncMock()
+        redis_client.ping.side_effect = hangs
+        client = _make_health_client(db=db)
+
+        with (
+            patch("src.app.core.utils.cache.client", redis_client),
+            patch("src.app.api.v1.health._PROBE_TIMEOUT_SECONDS", _BOUND),
+        ):
+            started = perf_counter()
+            response = client.get("/health/ready")
+            elapsed = perf_counter() - started
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == "Not ready: database unreachable, redis unreachable"
+        # The discriminator, and it doesn't depend on how loaded the machine is: both
+        # probes were in flight at once. Awaited one after the other, the second could not
+        # start until the first had spent its whole bound, so the gap would be at least
+        # `_BOUND` rather than the handful of microseconds `gather` costs.
+        assert len(probe_starts) == 2
+        assert probe_starts[1] - probe_starts[0] < _BOUND / 2
+        assert elapsed < _HANG_SECONDS / 2
+
 
 class TestReadinessIsNeverCached:
     def test_no_store_when_ready(self, reachable_redis: AsyncMock):

@@ -29,6 +29,12 @@ router = APIRouter(tags=["health"])
 # is. A dependency that hangs instead of refusing would otherwise hold this request - and
 # the worker serving it - for as long as it takes the caller to give up, which is the one
 # failure mode a readiness endpoint exists to make legible.
+#
+# The probes run concurrently, so this is the whole request's bound and not half of it.
+# That matters because the caller with the tightest budget is the image's `HEALTHCHECK`:
+# `urlopen(timeout=4)` inside Docker's `--timeout=5s`. Awaited one after the other, both
+# datastores hanging costs 6s - and the check dies on its socket rather than on the 503
+# that names which one is down, losing exactly the answer this endpoint exists to give.
 _PROBE_TIMEOUT_SECONDS = 3.0
 
 # Health answers are never cacheable. Without this `ClientCacheMiddleware` labels both of
@@ -65,7 +71,10 @@ async def readiness_check(response: Response, db: Annotated[AsyncSession, Depend
     """
     response.headers.update(_NO_STORE)
 
-    problems = [problem for problem in (await _database_problem(db), await _redis_problem()) if problem]
+    # `gather` rather than two awaits: both checks always run either way, but concurrently
+    # the request is bounded by one probe timeout instead of two. `gather` preserves
+    # argument order, so the detail always names the database before Redis.
+    problems = [problem for problem in await asyncio.gather(_database_problem(db), _redis_problem()) if problem]
     if problems:
         # Raw `HTTPException`, as in `api/v1/contact.py`: there is no 503 class in
         # `core/exceptions/http_exceptions.py`. The header goes on the exception because

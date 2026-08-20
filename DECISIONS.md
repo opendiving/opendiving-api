@@ -8365,11 +8365,21 @@ Both checks run even when the first one fails, so one request gives the full pic
 peeling the fault back one restart at a time. And each is wrapped in `asyncio.timeout(3)`: a
 datastore that *hangs* rather than refusing would otherwise hold this request, and the worker
 serving it, for as long as the caller is willing to wait — which is precisely the failure a
-readiness endpoint exists to make legible. A configured-but-absent Redis client
-(`cache.client is None`, i.e. the lifespan never built the pool) is reported as
-`redis is not configured` rather than `unreachable`, the same distinction `enforce_rate_limit` draws
-and for the same reason: `Redis.from_pool` connects lazily, so a dead server looks like an ordinary
-object until you touch it.
+readiness endpoint exists to make legible.
+
+**They run concurrently, through `asyncio.gather`, and that is a budget decision rather than a
+performance one.** Awaited one after the other, two hanging datastores cost `2 × 3s`, and the
+tightest caller is the image's own `HEALTHCHECK`: `urlopen(timeout=4)` inside Docker's
+`--timeout=5s`. So the exact case the bounds exist for — everything hanging at once — would end with
+the check dying on its socket, and Docker recording a health-check timeout instead of the 503 naming
+both dependencies. Green goes to red with no cause anywhere in the health log, which is the outcome
+this whole endpoint was written to prevent. `gather` makes 3s the bound on the *request* rather than
+on each probe, and preserves argument order, so the detail still names the database before Redis.
+Anything added as a third check has to join the same `gather` for the arithmetic to keep holding. A
+configured-but-absent Redis client (`cache.client is None`, i.e. the lifespan never built the pool)
+is reported as `redis is not configured` rather than `unreachable`, the same distinction
+`enforce_rate_limit` draws and for the same reason: `Redis.from_pool` connects lazily, so a dead
+server looks like an ordinary object until you touch it.
 
 ## Dev compose restarts, and its third-party tags are pinned
 
