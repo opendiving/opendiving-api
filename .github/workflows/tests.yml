@@ -31,7 +31,11 @@ jobs:
           --health-retries 5
 
       redis:
-        image: redis:7
+        # Same major as `docker-compose.yml`'s `redis:8-alpine`, and moved with it: CI has
+        # to run the suite against the Redis the compose file ships, or "tested" and
+        # "shipped" stop being the same claim. This was `redis:7` while compose floated on
+        # `redis:alpine` - which had already become 8 - so the two disagreed silently.
+        image: redis:8-alpine
         ports:
           - 6379:6379
         options: >-

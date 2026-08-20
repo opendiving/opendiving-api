@@ -132,6 +132,7 @@ All endpoints are mounted under `/api/v1`; the live OpenAPI docs at `/docs` are 
 | Certifications | `/certification(s)`, `/certification/{uuid}/file/{side}`                                                       |
 | Export         | `/export/uddf`, `/export/csv`, `/export/archive` — the caller's whole logbook, owner-only, never cached        |
 | Contact        | `/contact` (unauthenticated, rate-limited; forwards to `CONTACT_FORM_EMAIL`)                                   |
+| Health         | `/health` (the process is up), `/health/ready` (Postgres and Redis answered — 503 otherwise)                   |
 
 A typical import flow:
 

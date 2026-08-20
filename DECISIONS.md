@@ -8127,12 +8127,13 @@ this image is checksummed; a future upgrade target has to be too, or the upgrade
 ## The `worker` service inherits `api`'s HTTP healthcheck, and had to be told not to
 
 `worker` and `api` are built from the same `Dockerfile`, which declares a `HEALTHCHECK` that GETs
-`http://127.0.0.1:8000/api/v1/health`. `worker` runs `arq app.core.worker.settings.WorkerSettings`
-and serves no HTTP at all, so the inherited check could never pass: the container sat at
-`(unhealthy)` in `docker compose ps` from the moment its start period ended, forever, while
-connecting to Redis and running its crons perfectly. `docker inspect` showed the failure as a
-`urllib` connection-refused traceback in the health log. This dated to the commit that added the
-`HEALTHCHECK` and had nothing to do with the Postgres 18 upgrade it was noticed alongside.
+`http://127.0.0.1:8000/api/v1/health/ready` (`/api/v1/health` when this was written — see *"There
+are two health endpoints"*). `worker` runs `arq app.core.worker.settings.WorkerSettings` and serves
+no HTTP at all, so the inherited check could never pass: the container sat at `(unhealthy)` in
+`docker compose ps` from the moment its start period ended, forever, while connecting to Redis and
+running its crons perfectly. `docker inspect` showed the failure as a `urllib` connection-refused
+traceback in the health log. This dated to the commit that added the `HEALTHCHECK` and had nothing
+to do with the Postgres 18 upgrade it was noticed alongside.
 
 Nothing gated on it — no service names `worker` in a `depends_on` — so it cost nothing but
 credibility, which is the expensive part: a status column with a permanent false red in it teaches
@@ -8152,8 +8153,9 @@ about a minute and a slow Redis round-trip does not flap the status.
 
 Two notes for whoever adds the next service. Any further non-HTTP service built from this image
 inherits the same broken check and needs its own override — there is a comment on the `HEALTHCHECK`
-saying so. And `admin_init` is exempt for a boring reason: it is a one-shot that exits, and Docker
-does not health-check a container that is not running.
+saying so. And `admin_init` looked exempt for a boring reason — it is a one-shot that exits, and
+Docker does not health-check a container that is not running — which turned out to be luck rather
+than a rule; see the same section for why it now disables the check explicitly.
 
 ## The config template stopped being a working configuration
 
@@ -8314,3 +8316,105 @@ nothing in any log on either side — one of the more expensive hours available 
 anything, and turning it off is a deliberate edit with the reason written next to it in
 `.env.example`. `SESSION_SECURE_COOKIES` already did this for the admin panel's own cookie; this is
 the same escape hatch for the application's.
+
+## There are two health endpoints, and the container check runs the strict one
+
+`GET /api/v1/health` answers for the process. `GET /api/v1/health/ready` round-trips Postgres
+(`SELECT 1`) and Redis (`PING`) and answers 503 naming whichever one failed. The split is the
+liveness/readiness distinction, and it exists because collapsing it makes one of the two answers
+wrong.
+
+A single endpoint that checks its datastores reports a Postgres outage as "the API is dead", which
+is what an orchestrator restarting on a failed probe acts on — it kills a perfectly healthy process
+repeatedly while the actual fault is in another container. A single endpoint that checks nothing
+reports "up" for an instance that 500s every request, which is what `/api/v1/health` did: it
+returned `{"status": "healthy"}` from a process that could not reach either datastore.
+
+**The image's `HEALTHCHECK` runs `/health/ready`.** That is the check `docker compose ps` reports
+and the one a `depends_on: condition: service_healthy` waits on, and a dependent asking that
+question wants "can serve", not "has a process" — the deploy bundle's web container gating on `api`
+is exactly this. Docker has no restart-on-unhealthy policy, so the strict check cannot produce the
+restart loop that argues against it: a datastore outage surfaces as a red status column and nothing
+else. `/health` is what stays correct for anything that *does* restart on failure, which is why it
+survives rather than being replaced.
+
+### Both refuse to be cached, and the 503 needs its own header to do it
+
+`ClientCacheMiddleware` labels a safe method with no `Authorization` header `public, max-age=60`,
+and both of these are anonymous GETs — so without an opt-out, a proxy in front of the instance may
+serve a monitor a 200 for a minute after the app stopped being able to produce one. A cached health
+answer is worse than no health endpoint, because it is believed.
+
+The middleware never overwrites a `Cache-Control` an endpoint set itself, so `no-store` on the
+response is the whole opt-out — on the success path. The 503 path cannot use it: raising discards
+the injected `Response`, and the response the client sees is built by FastAPI's exception handler.
+Hence `HTTPException(..., headers={"Cache-Control": "no-store"})`, which the handler copies onto its
+`JSONResponse` and the middleware then leaves alone. It is the same header set twice through two
+different mechanisms, and the error path — the one that most needs not to be cached — is the one
+that would silently lose it.
+
+### The failure detail names the dependency and nothing else
+
+`{"detail": "Not ready: redis unreachable"}`, not the exception. The underlying `OperationalError`
+carries the host, port and user from the connection string, and this endpoint answers anyone who can
+reach it — on a LAN instance that is everyone on the LAN. The operator gets the exception from the
+logs (`logger.warning`, at `%r` so that a bare `TimeoutError` still names its type); the monitor
+gets which of the two datastores is down, which is the whole of what it can act on.
+
+Both checks run even when the first one fails, so one request gives the full picture rather than
+peeling the fault back one restart at a time. And each is wrapped in `asyncio.timeout(3)`: a
+datastore that *hangs* rather than refusing would otherwise hold this request, and the worker
+serving it, for as long as the caller is willing to wait — which is precisely the failure a
+readiness endpoint exists to make legible.
+
+**They run concurrently, through `asyncio.gather`, and that is a budget decision rather than a
+performance one.** Awaited one after the other, two hanging datastores cost `2 × 3s`, and the
+tightest caller is the image's own `HEALTHCHECK`: `urlopen(timeout=4)` inside Docker's
+`--timeout=5s`. So the exact case the bounds exist for — everything hanging at once — would end with
+the check dying on its socket, and Docker recording a health-check timeout instead of the 503 naming
+both dependencies. Green goes to red with no cause anywhere in the health log, which is the outcome
+this whole endpoint was written to prevent. `gather` makes 3s the bound on the *request* rather than
+on each probe, and preserves argument order, so the detail still names the database before Redis.
+Anything added as a third check has to join the same `gather` for the arithmetic to keep holding. A
+configured-but-absent Redis client (`cache.client is None`, i.e. the lifespan never built the pool)
+is reported as `redis is not configured` rather than `unreachable`, the same distinction
+`enforce_rate_limit` draws and for the same reason: `Redis.from_pool` connects lazily, so a dead
+server looks like an ordinary object until you touch it.
+
+## Dev compose restarts, and its third-party tags are pinned
+
+Three small things that were all the same omission: `docker-compose.yml` was written as a
+scratch-the-itch dev file and never as a description of how this software runs.
+
+**`restart: unless-stopped` on every long-runner** (`api`, `worker`, `db`, `redis`, `mailpit`).
+There was no `restart:` on anything, so a laptop that slept, a Docker daemon that restarted, or a
+container that died overnight left a stack that had to be brought up by hand. `unless-stopped`
+rather than `always` so `docker compose stop` stays stopped across a daemon restart. `admin_init`
+keeps `restart: "no"`: it is a one-shot whose whole contract is to exit, and a restart policy on it
+is a boot loop.
+
+The one thing that policy must not reach is `docker-compose.test.yml`, whose `api` service is the
+same one-shot shape: it overrides `command` to `pytest tests/ -v` and exits when the suite does.
+Compose merges service definitions field by field across `-f` files, so a scalar the overlay doesn't
+mention is inherited rather than reset — `restart: unless-stopped` from the base file would have the
+daemon restart the container the instant pytest exits, whatever the exit code, racing
+`--abort-on-container-exit`'s teardown and looping forever without it. The overlay therefore says
+`restart: "no"` explicitly. Anything else added to the base `api` service is inherited by the test
+overlay the same way; `docker compose -f docker-compose.yml -f docker-compose.test.yml config` is
+the check, and CI never runs this overlay (it uses GitHub Actions service containers), so nothing
+catches a mistake here but a person.
+
+**`redis:alpine` → `redis:8-alpine`, `axllent/mailpit` → `axllent/mailpit:v1.30`.** A bare
+`alpine`/`latest` tag is a floating pin: it resolves to whatever major is current on the day someone
+pulls, so two machines a year apart run different Redis and neither knows it. This is the same
+argument the Postgres pin made, and it comes with the same obligation — CI's `redis` service moves
+with the compose file. It was on `redis:7` while compose floated on `redis:alpine`, which had
+already become 8, so CI was testing against a major nobody ran. Both now say 8. Mailpit publishes no
+bare-major tag, so `v1.30` is the widest pin available for it.
+
+**`admin_init` disables the inherited healthcheck.** It is built from `api`'s image and so inherits
+the HTTP check, which it can no more pass than `worker` can. It never *showed* as unhealthy only
+because it exits inside the check's 20-second start period — a coincidence of how fast seeding is,
+not a property of one-shots, and untrue the moment a database is slow enough.
+`healthcheck: disable: true` says what is meant: a container that serves no HTTP has no business
+being asked for an HTTP status.
