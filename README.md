@@ -47,7 +47,8 @@ documented REST API — so your data is never more than one `curl` away.
 ```bash
 git clone https://github.com/opendiving/opendiving-api.git
 cd opendiving-api
-cp src/.env.example src/.env   # then set SECRET_KEY and the passwords
+cp src/.env.example src/.env
+openssl rand -hex 32           # put this in SECRET_KEY, and change POSTGRES_PASSWORD
 docker compose up
 ```
 
@@ -59,9 +60,10 @@ frontend.
 ### Configuration
 
 Everything is configured through `src/.env`, which starts as a copy of
-[`src/.env.example`](src/.env.example) — every setting is listed and commented there. Change
-`SECRET_KEY`, `POSTGRES_PASSWORD` and `ADMIN_PASSWORD` before you go anywhere near a public network.
-The parts worth knowing about:
+[`src/.env.example`](src/.env.example) — every setting is listed and commented there. `SECRET_KEY`
+is not optional: it signs every token the API issues, the template's value is published in this
+repository, and the app **refuses to start** on it rather than letting a deployment run on a key
+anyone can read. Change `POSTGRES_PASSWORD` too. The parts worth knowing about:
 
 ```bash
 # Magic-link emails go out over SMTP. Leave SMTP_HOST unset for local development -
@@ -70,6 +72,8 @@ The parts worth knowing about:
 # already know why. Resend users: smtp.resend.com, username "resend", password = the
 # API key. EMAIL_FROM_ADDRESS is required as soon as SMTP_HOST is set - startup
 # fails without it rather than letting an undeliverable address surface hours later.
+# SMTP_HOST itself is required on ENVIRONMENT=production: sign-in is passwordless,
+# so a production instance with no relay cannot let anybody in at all.
 SMTP_HOST="smtp.example.com"
 SMTP_PORT=587
 SMTP_TLS_MODE="starttls"       # starttls (587) | tls (465) | none (a local relay only)
@@ -80,9 +84,10 @@ EMAIL_FROM_ADDRESS="noreply@yourdomain.example"
 # Used to build magic-link URLs ({FRONTEND_URL}/auth/verify?token=...)
 FRONTEND_URL="http://localhost:3000"
 
-# Where the frontend's contact form (POST /api/v1/contact) delivers to. Point this
-# at your own inbox when self-hosting - the default is the project's own address.
-CONTACT_FORM_EMAIL="contact@opendiving.app"
+# Where the frontend's contact form (POST /api/v1/contact) delivers to. No default:
+# unset, that endpoint answers 503 and the form is simply off, which beats mailing
+# your users' support requests to somebody else's inbox.
+CONTACT_FORM_EMAIL="you@example.com"
 
 # Optional: Google Sign-In (must match the frontend's NEXT_PUBLIC_GOOGLE_CLIENT_ID)
 GOOGLE_CLIENT_ID="your-client-id.apps.googleusercontent.com"
@@ -152,7 +157,11 @@ curl http://localhost:8000/api/v1/dive/{uuid}/profile -H "Authorization: Bearer 
 - `docs/authentication.md` — the auth design, with sequence diagrams for every flow.
 - `DECISIONS.md` — non-obvious choices and gotchas (schema-change workflow, check constraints,
   caching strategy…). Read it before your first PR.
-- Tests: `docker compose -f docker-compose.test.yml up` or `pytest` against `tests/`.
+- Tests: `uv run pytest`, or containerised —
+  `docker compose -f docker-compose.yml -f docker-compose.test.yml up --build --abort-on-container-exit api`.
+  `docker-compose.test.yml` is an overlay and does nothing on its own. Note that the Postgres-backed
+  tests skip themselves unless the test process can reach the database; see
+  [CONTRIBUTING.md](CONTRIBUTING.md).
 - Re-extract profiles after a parser fix:
   `docker compose exec api python -m src.scripts.backfill_dive_profiles --parser-key suunto_xml`
 

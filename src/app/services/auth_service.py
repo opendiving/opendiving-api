@@ -60,7 +60,15 @@ async def issue_tokens(response: Response, user_uuid: uuid_pkg.UUID) -> dict[str
     max_age = settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
 
     response.set_cookie(
-        key="refresh_token", value=refresh_token, httponly=True, secure=True, samesite="lax", max_age=max_age
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        # `AUTH_COOKIE_SECURE` (default true) rather than a literal: a LAN instance with no
+        # certificate serves plain HTTP, where the browser drops a `Secure` cookie without
+        # a word - the user is signed out on the next reload and nothing logs why.
+        secure=settings.AUTH_COOKIE_SECURE,
+        samesite="lax",
+        max_age=max_age,
     )
 
     return {"access_token": access_token, "token_type": "bearer"}

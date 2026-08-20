@@ -20,12 +20,13 @@ from ...services.gear_service import (
     service_status,
     should_notify,
 )
+from ..config import configure_logging, settings
 from ..db.crud_token_blacklist import crud_token_blacklist
 from ..db.database import local_session
 
 asyncio.set_event_loop(uvloop.new_event_loop())
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+configure_logging(settings.LOG_LEVEL)
 
 
 # -------- background tasks --------

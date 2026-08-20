@@ -17,7 +17,8 @@ The whole stack runs from Docker:
 ```bash
 git clone https://github.com/opendiving/opendiving-api.git
 cd opendiving-api
-cp src/.env.example src/.env   # defaults are fine for local work
+cp src/.env.example src/.env
+openssl rand -hex 32           # SECRET_KEY; the rest of the defaults are fine locally
 docker compose up
 ```
 
@@ -53,8 +54,11 @@ import it), and asking it to check both roots at once fails with "source file fo
 different module names". `scripts` is third only because it sits under neither root — it imports
 nothing from the app, and needs no environment either.
 
-mypy and pytest need `ENVIRONMENT=local` and a `SECRET_KEY` in the environment (any value — CI uses
-a throwaway one).
+mypy and pytest need `ENVIRONMENT=local` and a `SECRET_KEY` in the environment. Any value except a
+placeholder: `Settings._reject_placeholder_secret_key` rejects the one `src/.env.example` ships and
+a handful of stock stand-ins (`changeme`, `secret`, …), in every environment, so a deployment cannot
+run on a published key. CI uses a throwaway `test-secret-key-for-testing-only`, which is fine — the
+guard is a list of known placeholders, not an entropy check.
 
 **The suite runs without a database.** Almost every test mocks the session (`mock_db`), so a cold
 checkout with nothing else running gives you a green run in under a second. The exceptions are the

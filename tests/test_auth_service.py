@@ -62,6 +62,23 @@ class TestIssueTokens:
         assert kwargs["key"] == "refresh_token"
         assert kwargs["httponly"] is True
         assert kwargs["samesite"] == "lax"
+        assert kwargs["secure"] is True
+
+    @pytest.mark.asyncio
+    async def test_the_cookie_can_be_issued_without_secure_for_a_plain_http_instance(self):
+        """`AUTH_COOKIE_SECURE=false` is the escape hatch for a LAN instance with no
+        certificate, where a `Secure` cookie is dropped by the browser without a word and
+        the symptom is "signed out on every reload" with nothing in any log.
+        """
+        response = Mock()
+
+        with patch("src.app.services.auth_service.settings") as mock_settings:
+            mock_settings.REFRESH_TOKEN_EXPIRE_DAYS = 7
+            mock_settings.AUTH_COOKIE_SECURE = False
+
+            await issue_tokens(response, uuid_pkg.uuid4())
+
+        assert response.set_cookie.call_args.kwargs["secure"] is False
 
     @pytest.mark.asyncio
     async def test_both_tokens_are_subjected_to_the_user_uuid(self):

@@ -23,6 +23,7 @@ from .config import (
     EnvironmentSettings,
     FrontendSettings,
     RedisCacheSettings,
+    configure_logging,
     settings,
 )
 from .db.database import Base
@@ -30,15 +31,17 @@ from .db.database import async_engine as engine
 from .utils import cache
 
 # -------------- logging --------------
+configure_logging(settings.LOG_LEVEL)
+
 # httpx logs every request it makes at INFO as `HTTP Request: GET <full url> "..."`, and
 # `services.geocoding_service` - the app's only outbound HTTP client - sends
 # `GEOCODER_API_KEY` as a query parameter, which is where Nominatim-compatible mirrors want
 # it. So at INFO the key is written into whatever collects this app's logs, defeating the
 # care that service takes to log the request *path* and never the built URL.
 #
-# Applied here rather than in `core.logger`, which is where it belongs on paper but which
-# nothing currently imports; a hazard guarded only in dead configuration is not guarded.
-# WARNING rather than off, so a genuine httpx problem is still visible.
+# Pinned after `configure_logging` and independently of `LOG_LEVEL`, so that turning the app
+# up to DEBUG to chase a problem does not also start writing the key out. WARNING rather
+# than off, so a genuine httpx problem is still visible.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # -------------- database --------------

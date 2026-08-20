@@ -115,11 +115,16 @@ def _refuse_to_log_credential_in_production(what: str) -> None:
     whose URL embeds a live single-use auth token.
 
     That fallback is a local-development convenience, and a good one - it's how you sign
-    in without configuring a relay. But the URL it prints *is* the credential, and
-    `core.logger` writes to a rotating file on disk, so the same code path in production
-    would quietly turn a forgotten `SMTP_HOST` into sign-in tokens sitting in
-    plaintext. Fail loudly there instead: a 500 on a sign-in attempt is recoverable and
-    obvious, a leaked token file is neither.
+    in without configuring a relay. But the URL it prints *is* the credential, and this
+    app's logs are read by `docker compose logs` and shipped to whatever collects them, so
+    the same code path in production would quietly turn a forgotten `SMTP_HOST` into
+    sign-in tokens sitting in plaintext wherever those end up. Fail loudly there instead:
+    a 500 on a sign-in attempt is recoverable and obvious, leaked tokens are neither.
+
+    Belt and braces as of the `_require_smtp_in_production` validator in `core.config`,
+    which refuses to boot a production instance with no relay at all - this stays because
+    it guards the code path rather than the configuration, and because a relay that is
+    *set* can still be the wrong one.
     """
     if settings.ENVIRONMENT == EnvironmentOption.PRODUCTION:
         raise EmailDeliveryError(f"No email transport is configured (SMTP_HOST), so {what} cannot be delivered.")
@@ -243,7 +248,16 @@ async def send_contact_form_email(name: str, email: str, category_label: str, su
     A no-op (logged, not raised) when `SMTP_HOST` isn't configured, matching the
     rest of this module - the whole submission is written to the log in that case, so a
     local instance without a relay can still see what would have been sent.
+
+    An unset `CONTACT_FORM_EMAIL` raises rather than no-ops, and `api.v1.contact` answers
+    503 before it ever gets here: there is no inbox to fall back to, and the value of the
+    log line above is that a developer can read what *would* have been sent - there is no
+    equivalent consolation for mail with no recipient.
     """
+    recipient = settings.CONTACT_FORM_EMAIL
+    if not recipient:
+        raise EmailDeliveryError("CONTACT_FORM_EMAIL is not set, so there is nowhere to forward this submission.")
+
     if not settings.SMTP_HOST:
         logger.warning(
             "SMTP_HOST not configured; contact message from %s <%s> [%s] %s: %s",
@@ -257,7 +271,7 @@ async def send_contact_form_email(name: str, email: str, category_label: str, su
 
     body = html.escape(message).replace("\n", "<br>")
     mail = _build_message(
-        to=settings.CONTACT_FORM_EMAIL,
+        to=recipient,
         subject=f"[{category_label}] {subject}",
         reply_to=email,
         html_body=(

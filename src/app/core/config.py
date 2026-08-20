@@ -1,7 +1,10 @@
+import logging
 import os
 import warnings
 from enum import Enum
+from importlib import metadata
 from typing import Self
+from urllib.parse import quote
 
 from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings
@@ -12,16 +15,72 @@ env_path = os.path.join(current_file_dir, "..", "..", ".env")
 config = Config(env_path)
 
 
+def split_csv(raw: str | None) -> list[str]:
+    """Parse one of this app's comma-separated list settings.
+
+    Several settings are lists of addresses or networks, and every one of them is typed
+    `str | None` rather than `list[str]`: for a complex field type pydantic-settings
+    parses the environment variable itself and expects JSON, so `TRUSTED_PROXY_IPS=
+    172.16.0.0/12` fails validation at startup no matter what `cast=` does at the field.
+    Shared so the three of them agree on what "empty" and "spaces after the comma" mean.
+    """
+    return [entry.strip() for entry in (raw or "").split(",") if entry.strip()]
+
+
+def _installed_version() -> str | None:
+    """This distribution's version, from `pyproject.toml` by way of the installed
+    metadata.
+
+    `APP_VERSION` used to be duplicated into `src/.env.example`, which meant a released
+    image reported whatever version the operator's own `.env` happened to carry - the
+    template's, usually, frozen at whenever they copied it. Reading it here makes
+    `pyproject.toml` the single source, and the setting an override rather than the
+    definition. It reaches `/api/v1/health`, the JSON export's `generator` block and the
+    UDDF `<version>` element, all of which are how someone reports a bug against a
+    specific build.
+
+    `None` when the app is run from a source tree that was never installed - the same
+    thing an unset `APP_VERSION` produced before, and every consumer already handles it.
+    """
+    try:
+        return metadata.version("opendiving-api")
+    except metadata.PackageNotFoundError:
+        return None
+
+
 class AppSettings(BaseSettings):
     APP_NAME: str = config("APP_NAME", default="FastAPI app")
     APP_DESCRIPTION: str | None = config("APP_DESCRIPTION", default=None)
-    APP_VERSION: str | None = config("APP_VERSION", default=None)
+    APP_VERSION: str | None = config("APP_VERSION", default=_installed_version())
     LICENSE_NAME: str | None = config("LICENSE", default=None)
     # OpenAPI document metadata only ("who maintains this API", shown in `/docs`) -
     # *not* where the frontend's contact form delivers to. That's
     # `ContactSettings.CONTACT_FORM_EMAIL` below.
     CONTACT_NAME: str | None = config("CONTACT_NAME", default=None)
     CONTACT_EMAIL: str | None = config("CONTACT_EMAIL", default=None)
+
+
+# `SECRET_KEY` values that stand for "I have not set this yet": the one `src/.env.example`
+# ships, and the stock stand-ins people type in its place. Every one of them is a published
+# string, so it signs *anybody's* access, refresh and onboarding tokens - which is not a
+# weak key, it is no key at all. Treated exactly like `LEGACY_DEFAULT_ADMIN_PASSWORD` below,
+# and matched case-insensitively after stripping.
+#
+# An explicit list rather than an entropy heuristic on purpose: the failure this guards is
+# "the template's own value reached a deployment", not "the operator chose badly", and a
+# heuristic that rejects a key someone genuinely generated is a worse bug than the one it
+# prevents. CI's `test-secret-key-for-testing-only` is deliberately not in here.
+PLACEHOLDER_SECRET_KEYS = frozenset(
+    {
+        "change-me-openssl-rand-hex-32",
+        "change-me",
+        "changeme",
+        "changethis",
+        "secret",
+        "your-secret-key",
+        "your_secret_key",
+    }
+)
 
 
 class CryptSettings(BaseSettings):
@@ -42,27 +101,29 @@ class CryptSettings(BaseSettings):
     # already parsed for that same user.
     DIVE_FILE_TOKEN_EXPIRE_MINUTES: int = config("DIVE_FILE_TOKEN_EXPIRE_MINUTES", default=1440)
 
+    # The refresh cookie is `Secure` everywhere it should be, which is everywhere reached
+    # over HTTPS. The escape hatch exists for the one deployment shape that cannot have
+    # that - an instance on a LAN address with no certificate - where a `Secure` cookie is
+    # simply dropped by the browser and the symptom is "signed out on every reload" with
+    # nothing in any log. Default `true`, so turning it off is a decision someone makes.
+    AUTH_COOKIE_SECURE: bool = config("AUTH_COOKIE_SECURE", default=True)
+
 
 class DatabaseSettings(BaseSettings):
     pass
 
 
-class SQLiteSettings(DatabaseSettings):
-    SQLITE_URI: str = config("SQLITE_URI", default="./sql_app.db")
-    SQLITE_SYNC_PREFIX: str = config("SQLITE_SYNC_PREFIX", default="sqlite:///")
-    SQLITE_ASYNC_PREFIX: str = config("SQLITE_ASYNC_PREFIX", default="sqlite+aiosqlite:///")
+def postgres_uri(user: str, password: str, server: str, port: int, database: str) -> str:
+    """The `user:password@host:port/db` half of the DSN, with the credentials
+    percent-encoded.
 
-
-class MySQLSettings(DatabaseSettings):
-    MYSQL_USER: str = config("MYSQL_USER", default="username")
-    MYSQL_PASSWORD: str = config("MYSQL_PASSWORD", default="password")
-    MYSQL_SERVER: str = config("MYSQL_SERVER", default="localhost")
-    MYSQL_PORT: int = config("MYSQL_PORT", default=5432)
-    MYSQL_DB: str = config("MYSQL_DB", default="dbname")
-    MYSQL_URI: str = f"{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_SERVER}:{MYSQL_PORT}/{MYSQL_DB}"
-    MYSQL_SYNC_PREFIX: str = config("MYSQL_SYNC_PREFIX", default="mysql://")
-    MYSQL_ASYNC_PREFIX: str = config("MYSQL_ASYNC_PREFIX", default="mysql+aiomysql://")
-    MYSQL_URL: str | None = config("MYSQL_URL", default=None)
+    They are user-chosen strings dropped into a URL, so a password containing `@`, `/`,
+    `:` or `#` - all of them ordinary in a generated password, and `@` is what most
+    generators reach for first - silently produces a different DSN than the operator
+    wrote. `p@ss@db:5432/opendive` parses with `p` as the user and `ss` as the host, and
+    the resulting error names a host nobody configured.
+    """
+    return f"{quote(user, safe='')}:{quote(password, safe='')}@{server}:{port}/{database}"
 
 
 class PostgresSettings(DatabaseSettings):
@@ -73,8 +134,7 @@ class PostgresSettings(DatabaseSettings):
     POSTGRES_DB: str = config("POSTGRES_DB", default="postgres")
     POSTGRES_SYNC_PREFIX: str = config("POSTGRES_SYNC_PREFIX", default="postgresql://")
     POSTGRES_ASYNC_PREFIX: str = config("POSTGRES_ASYNC_PREFIX", default="postgresql+asyncpg://")
-    POSTGRES_URI: str = f"{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_SERVER}:{POSTGRES_PORT}/{POSTGRES_DB}"
-    POSTGRES_URL: str | None = config("POSTGRES_URL", default=None)
+    POSTGRES_URI: str = postgres_uri(POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_SERVER, POSTGRES_PORT, POSTGRES_DB)
 
 
 # The password the upstream boilerplate shipped as `ADMIN_PASSWORD`'s default. It is
@@ -174,11 +234,15 @@ class EmailSettings(BaseSettings):
 
 
 class ContactSettings(BaseSettings):
-    # Inbox the frontend's contact form (`POST /api/v1/contact`) delivers to. A
-    # self-hosted instance should point this at its own operator - the default is the
-    # address for the project's own deployment, and mail sent there about someone
-    # else's server is not something we can act on.
-    CONTACT_FORM_EMAIL: str = config("CONTACT_FORM_EMAIL", default="contact@opendiving.app")
+    # Inbox the frontend's contact form (`POST /api/v1/contact`) delivers to.
+    #
+    # No default, for the same reason `EMAIL_FROM_ADDRESS` has none. It used to default to
+    # the address for *this project's* own deployment, so a self-hosted instance quietly
+    # routed its users' support mail - password trouble, lost dives, whatever they typed -
+    # to an inbox belonging to strangers who can neither see that server nor help them.
+    # There is no address we can guess that is right for somebody else's install, so unset
+    # means the endpoint answers 503 (`api.v1.contact`) rather than delivering somewhere.
+    CONTACT_FORM_EMAIL: str | None = config("CONTACT_FORM_EMAIL", default=None)
 
     # Fixed-window rate limits (see `core.utils.rate_limit`), keyed separately by the
     # submitted email and by client IP, mirroring the magic-link limits above. The
@@ -312,8 +376,9 @@ class ProxySettings(BaseSettings):
     # A plain string, split in `core.utils.client_ip`, rather than a `list[str]`: for a
     # complex field type pydantic-settings parses the environment variable itself and
     # expects JSON, so `TRUSTED_PROXY_IPS=172.16.0.0/12` fails validation at startup no
-    # matter what `cast=` does here (that only produces the default). Same reason
-    # `CRUD_ADMIN_ALLOWED_IPS_LIST` below is a bare annotation with no `config()` call.
+    # matter what `cast=` does here (that only produces the default). `split_csv` at the
+    # top of this file parses all three settings that took this trade - this one and the
+    # two `CRUD_ADMIN_ALLOWED_*` below.
     TRUSTED_PROXY_IPS: str | None = config("TRUSTED_PROXY_IPS", default=None)
 
 
@@ -333,17 +398,36 @@ class GearServiceSettings(BaseSettings):
 class TestSettings(BaseSettings): ...
 
 
-class RedisCacheSettings(BaseSettings):
+# One password for both Redis pools. The bundled `redis` container needs none and the
+# default is unset, but a managed Redis - or any server with `requirepass` - always wants
+# one, and the cache and the arq queue are the same server in every configuration this app
+# ships. Two variables would be two ways to get one thing half-right.
+_REDIS_PASSWORD: str | None = config("REDIS_PASSWORD", default=None)
+
+
+def redis_url(host: str, port: int, password: str | None) -> str:
+    """A `redis://` DSN, percent-encoding the password for the same reason
+    `postgres_uri` encodes its credentials.
+    """
+    credentials = f":{quote(password, safe='')}@" if password else ""
+    return f"redis://{credentials}{host}:{port}"
+
+
+class RedisSettings(BaseSettings):
+    REDIS_PASSWORD: str | None = _REDIS_PASSWORD
+
+
+class RedisCacheSettings(RedisSettings):
     REDIS_CACHE_HOST: str = config("REDIS_CACHE_HOST", default="localhost")
     REDIS_CACHE_PORT: int = config("REDIS_CACHE_PORT", default=6379)
-    REDIS_CACHE_URL: str = f"redis://{REDIS_CACHE_HOST}:{REDIS_CACHE_PORT}"
+    REDIS_CACHE_URL: str = redis_url(REDIS_CACHE_HOST, REDIS_CACHE_PORT, _REDIS_PASSWORD)
 
 
 class ClientSideCacheSettings(BaseSettings):
     CLIENT_CACHE_MAX_AGE: int = config("CLIENT_CACHE_MAX_AGE", default=60)
 
 
-class RedisQueueSettings(BaseSettings):
+class RedisQueueSettings(RedisSettings):
     REDIS_QUEUE_HOST: str = config("REDIS_QUEUE_HOST", default="localhost")
     REDIS_QUEUE_PORT: int = config("REDIS_QUEUE_PORT", default=6379)
 
@@ -352,7 +436,8 @@ class CRUDAdminSettings(BaseSettings):
     # Off by default. The panel is mounted at a fixed, guessable path and bypasses the
     # whole `api.v1` authorization story (it talks to the models directly), so it has
     # to be something an operator turns on deliberately rather than something a fresh
-    # deploy inherits. `src/.env.example` enables it for local development.
+    # deploy inherits. `src/.env.example` ships the whole block commented out, local
+    # development included: turning the panel on is an edit, never an inheritance.
     CRUD_ADMIN_ENABLED: bool = config("CRUD_ADMIN_ENABLED", default=False)
     CRUD_ADMIN_MOUNT_PATH: str = config("CRUD_ADMIN_MOUNT_PATH", default="/admin")
 
@@ -366,8 +451,18 @@ class CRUDAdminSettings(BaseSettings):
     # container can never see. Point this at Postgres and all of that goes away.
     CRUD_ADMIN_DB_URL: str | None = config("CRUD_ADMIN_DB_URL", default=None)
 
-    CRUD_ADMIN_ALLOWED_IPS_LIST: list[str] | None = None
-    CRUD_ADMIN_ALLOWED_NETWORKS_LIST: list[str] | None = None
+    # Who may reach the panel at all, comma-separated and parsed by `split_csv`, e.g.
+    # CRUD_ADMIN_ALLOWED_IPS="203.0.113.7,203.0.113.8" or
+    # CRUD_ADMIN_ALLOWED_NETWORKS="10.0.0.0/8". Unset means "from anywhere the API is
+    # reachable", which is what `_reject_insecure_admin_config` warns about in production.
+    #
+    # These were `list[str] | None` bare annotations with no `config()` call, for the
+    # pydantic-settings reason `split_csv` documents - which made them settable only as
+    # JSON, and only through an *exported* environment variable rather than the `src/.env`
+    # file every other setting here comes from and the docs teach. Comma-strings make them
+    # configurable the same way as `TRUSTED_PROXY_IPS`, which had already made this trade.
+    CRUD_ADMIN_ALLOWED_IPS: str | None = config("CRUD_ADMIN_ALLOWED_IPS", default=None)
+    CRUD_ADMIN_ALLOWED_NETWORKS: str | None = config("CRUD_ADMIN_ALLOWED_NETWORKS", default=None)
     CRUD_ADMIN_MAX_SESSIONS: int = config("CRUD_ADMIN_MAX_SESSIONS", default=10)
     CRUD_ADMIN_SESSION_TIMEOUT: int = config("CRUD_ADMIN_SESSION_TIMEOUT", default=1440)
     SESSION_SECURE_COOKIES: bool = config("SESSION_SECURE_COOKIES", default=True)
@@ -397,9 +492,41 @@ class EnvironmentSettings(BaseSettings):
     ENVIRONMENT: EnvironmentOption = config("ENVIRONMENT", default=EnvironmentOption.LOCAL)
 
 
+LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+
+class LoggingSettings(BaseSettings):
+    # Any level name the stdlib knows (DEBUG, INFO, WARNING, ERROR, CRITICAL), case
+    # insensitive. Applied by `configure_logging` below; validated at startup rather than
+    # left for `logging.basicConfig` to raise on, so a typo names itself.
+    LOG_LEVEL: str = config("LOG_LEVEL", default="INFO")
+
+
+def configure_logging(level: str) -> None:
+    """Point the root logger at stderr at `level`.
+
+    Called by both entrypoints - `core.setup` for the API, `core.worker.functions` for the
+    worker - because there is no third place both of them already import. `core.logger`
+    used to be that place, and was imported by nothing at all: it configured a rotating
+    file handler that never existed in any running process, while `core.setup` had to pin
+    the httpx logger by hand with a comment explaining that a hazard guarded only in dead
+    configuration is not guarded. This module owns `LOG_LEVEL`, so it owns applying it.
+
+    stderr rather than stdout because that is `basicConfig`'s default stream and there is
+    no reason to fight it: both are captured identically by `docker compose logs` and by
+    every collector, and `uvicorn` and `arq` already log there.
+
+    The level is set on the root logger explicitly as well as passed to `basicConfig`,
+    which does nothing at all when the root logger already has a handler - under a server
+    that installed its own, `LOG_LEVEL` would otherwise be exactly the dead configuration
+    described above.
+    """
+    logging.basicConfig(level=level, format=LOG_FORMAT)
+    logging.getLogger().setLevel(level)
+
+
 class Settings(
     AppSettings,
-    SQLiteSettings,
     PostgresSettings,
     CryptSettings,
     FirstUserSettings,
@@ -419,7 +546,70 @@ class Settings(
     RedisQueueSettings,
     CRUDAdminSettings,
     EnvironmentSettings,
+    LoggingSettings,
 ):
+    @model_validator(mode="after")
+    def _reject_placeholder_secret_key(self) -> Self:
+        """Refuses to boot on a `SECRET_KEY` that is published somewhere.
+
+        `SECRET_KEY` signs every access, refresh and onboarding token this app issues, so
+        a value anyone can read is a key anyone can mint tokens with - full impersonation
+        of any account, including a superuser's. The canonical setup is
+        `cp src/.env.example src/.env`, and that template has to carry *something* in the
+        slot, so the value it carries must not be one an instance can run with.
+
+        Every environment, with no `ENVIRONMENT` gate: a staging instance signing tokens
+        with a published key is compromised in exactly the way a production one is, and
+        the local instance is the one whose `.env` came straight from the template.
+        """
+        secret = self.SECRET_KEY.get_secret_value().strip()
+
+        if not secret or secret.lower() in PLACEHOLDER_SECRET_KEYS:
+            raise ValueError(
+                "SECRET_KEY is unset or still a placeholder from src/.env.example. It signs every "
+                "token this app issues, so a published value lets anyone mint one for any account. "
+                "Generate your own: openssl rand -hex 32"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_smtp_in_production(self) -> Self:
+        """Refuses to boot a production instance that cannot send mail.
+
+        Sign-in is passwordless: without a relay there is no way to deliver a magic link,
+        so *nobody* can get in - not even the first user, on a freshly installed instance.
+        The failure is otherwise invisible until someone tries, and then it is a 500 from
+        `POST /auth/email/request` (`services.email_service` refuses to log a live token in
+        production, deliberately) with a message about email transport on a page about
+        signing in.
+
+        Only production. Local development with `SMTP_HOST` unset is the documented flow -
+        the link is written to the logs instead - and staging is close enough to local to
+        be run the same way on purpose.
+        """
+        if self.ENVIRONMENT == EnvironmentOption.PRODUCTION and not self.SMTP_HOST:
+            raise ValueError(
+                "ENVIRONMENT is production but SMTP_HOST is not set. Sign-in is passwordless, so "
+                "without a mail relay nobody can sign in at all - including the first user. Point "
+                "SMTP_* at any relay you trust, or run this instance as ENVIRONMENT=local."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _normalize_log_level(self) -> Self:
+        """Rejects a `LOG_LEVEL` the stdlib doesn't know, rather than letting
+        `configure_logging` raise from inside application startup where the traceback
+        points at logging rather than at the typo.
+        """
+        level = self.LOG_LEVEL.strip().upper()
+
+        if level not in logging.getLevelNamesMapping():
+            known = ", ".join(sorted(logging.getLevelNamesMapping()))
+            raise ValueError(f"LOG_LEVEL={self.LOG_LEVEL!r} is not a logging level. Use one of: {known}.")
+
+        self.LOG_LEVEL = level
+        return self
+
     @model_validator(mode="after")
     def _require_from_address_with_smtp(self) -> Self:
         """Refuses to boot an instance that has a relay configured but no address to send
@@ -466,12 +656,12 @@ class Settings(
                 "to not expose the admin panel at all."
             )
 
-        if not self.CRUD_ADMIN_ALLOWED_IPS_LIST and not self.CRUD_ADMIN_ALLOWED_NETWORKS_LIST:
+        if not split_csv(self.CRUD_ADMIN_ALLOWED_IPS) and not split_csv(self.CRUD_ADMIN_ALLOWED_NETWORKS):
             # Advisory rather than fatal: plenty of deployments put the panel behind a
             # VPN or bastion instead, and hard-failing would break those.
             warnings.warn(
-                "The admin panel is enabled in production with no CRUD_ADMIN_ALLOWED_IPS_LIST or "
-                "CRUD_ADMIN_ALLOWED_NETWORKS_LIST. It is reachable from anywhere that can reach the API.",
+                "The admin panel is enabled in production with no CRUD_ADMIN_ALLOWED_IPS or "
+                "CRUD_ADMIN_ALLOWED_NETWORKS. It is reachable from anywhere that can reach the API.",
                 stacklevel=2,
             )
 

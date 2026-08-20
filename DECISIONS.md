@@ -2659,10 +2659,11 @@ Four things about it are deliberate:
   (then turns newlines into `<br>`). If you add another sender that carries user-supplied text, do
   the same.
 
-`CONTACT_FORM_EMAIL` (default `contact@opendiving.app`) is the recipient - a self-hosted instance
-should point it at its own operator. It is *not* the same setting as `AppSettings.CONTACT_EMAIL`,
-which is OpenAPI document metadata shown in `/docs` and nothing else; the two are separate so that
-publishing a maintainer address in the API docs doesn't silently reroute a stranger's support mail.
+`CONTACT_FORM_EMAIL` is the recipient, and it has **no default** - see "The contact form has no
+default recipient, and no recipient means 503" below. It is *not* the same setting as
+`AppSettings.CONTACT_EMAIL`, which is OpenAPI document metadata shown in `/docs` and nothing else;
+the two are separate so that publishing a maintainer address in the API docs doesn't silently
+reroute a stranger's support mail.
 
 With `SMTP_HOST` unset the send is a logged no-op, like every other sender here - but the whole
 submission is written to the log, so a local instance can still see what would have gone out. The
@@ -2970,14 +2971,16 @@ Two things it deliberately did *not* change:
   both halves of that are load-bearing.
 
   `warning` for the wrong-owner line, because it has to survive the default level and nothing
-  guarantees a lower one will. The app configures no logging of its own — `core/logger.py` exists
-  but nothing imports it — so the level is whatever the server in front sets. `uvicorn`, which
-  `docker-compose.yml` runs, configures only its own `uvicorn*` loggers and leaves root at
-  `WARNING`; an `info` call is dropped on the floor. Worse, it is dropped *asymmetrically*:
-  gunicorn's `CONFIG_DEFAULTS` puts root at `INFO`, so the line would survive in production and
-  vanish in exactly the local `docker compose logs api` session where someone is working out why a
-  client sees a 404. `services/email_service.py` logs the magic link at `warning` for the same
-  reason, and `CLAUDE.md` documents that one as appearing in the logs.
+  guarantees a lower one will. When this was written the app configured no logging at all — the
+  level was whatever the server in front happened to set, which `uvicorn` left at `WARNING` (it
+  configures only its own `uvicorn*` loggers) while gunicorn's `CONFIG_DEFAULTS` put root at `INFO`.
+  An `info` call therefore vanished in exactly the local `docker compose logs api` session where
+  someone was working out why a client saw a 404, and survived in production. `configure_logging` in
+  `core/config.py` has since closed that asymmetry — root is pinned to `LOG_LEVEL`, `INFO` by
+  default, in both entrypoints — but `warning` stays right: an operator who raises `LOG_LEVEL` on a
+  noisy instance should not lose the line that makes a 404 debuggable. `services/email_service.py`
+  logs the magic link at `warning` for the same reason, and `CLAUDE.md` documents that one as
+  appearing in the logs.
 
   `debug` for the absent line, because it carries nothing the 404 response doesn't, and because it
   is *caller-paced*: at `warning` an authenticated client looping over random uuids emits one
@@ -3138,9 +3141,11 @@ keyed on the real peer, still capped at 15.
 `TRUSTED_PROXY_IPS` is a comma-separated *string*, not a `list[str]`. For a complex field type
 pydantic-settings parses the environment variable itself and expects JSON, so
 `TRUSTED_PROXY_IPS=172.16.0.0/12` failed validation at startup regardless of the `cast=` passed to
-`config()` - which only produces the default. `CRUD_ADMIN_ALLOWED_IPS_LIST` above it is a bare
-annotation with no `config()` call for the same reason. Unit tests that patch the attribute directly
-cannot catch this; `TestTheSettingParsesFromTheEnvironment` goes through `Settings`.
+`config()` - which only produces the default. `CRUD_ADMIN_ALLOWED_IPS` and
+`CRUD_ADMIN_ALLOWED_NETWORKS` are comma-separated strings for the same reason; they were bare
+`list[str] | None` annotations with no `config()` call until "Comma-separated strings are how this
+app takes a list" below made all three agree. Unit tests that patch the attribute directly cannot
+catch this; `TestTheSettingParsesFromTheEnvironment` goes through `Settings`.
 
 ## `ClientCacheMiddleware` inferred "not user-specific" from the wrong signal
 
@@ -5691,8 +5696,9 @@ a timeout, a 5xx, a non-JSON body, or `GEOCODER_URL` set to `""` all produce `nu
 logged warning. A diver can always type the location in, and a 502 would make the site form look
 broken over an optional convenience. Unlike `email_service` there is no
 `_refuse_to_log_credential_in_production` equivalent, because nothing here is a credential — but for
-the same underlying reason (`core.logger` writes to a file on disk) the failure log names the
-request *path* and never the built URL, which carries `GEOCODER_API_KEY` as a query parameter.
+the same underlying reason (this app's logs are read by `docker compose logs` and shipped wherever
+they are collected) the failure log names the request *path* and never the built URL, which carries
+`GEOCODER_API_KEY` as a query parameter.
 
 **`location` is composed from the provider's structured `address`, not trimmed out of
 `display_name`.** Place plus country — "Dahab, Egypt" — is what dive logs actually contain, where
@@ -5774,7 +5780,7 @@ could have produced that is closed off rather than tolerated: `docker-compose.ym
 `scripts/build_marine_areas.py` therefore stages its output and `os.replace`s it into position. What
 is left is a genuinely broken deploy, where retrying costs a re-read per lookup on a path already
 reached only after a provider miss — so the failure is logged at WARNING once and at DEBUG
-afterwards, since `core.logger` writes to a file on disk.
+afterwards rather than once per offshore pin for as long as the deploy stays broken.
 
 **It is a fallback, never a replacement, and that is the part most likely to be got wrong.** Coastal
 water already works: `-8.9, 115.5` off Bali returns "Bali, Indonesia", because territorial waters
@@ -8148,3 +8154,163 @@ Two notes for whoever adds the next service. Any further non-HTTP service built 
 inherits the same broken check and needs its own override — there is a comment on the `HEALTHCHECK`
 saying so. And `admin_init` is exempt for a boring reason: it is a one-shot that exits, and Docker
 does not health-check a container that is not running.
+
+## The config template stopped being a working configuration
+
+`cp src/.env.example src/.env` used to produce a bootable instance, and that was the problem. What
+it produced was an instance with `SECRET_KEY="change-me-openssl-rand-hex-32"` — a string published
+in this repository, signing every access, refresh and onboarding token the app issues — an enabled
+admin panel (`CRUD_ADMIN_ENABLED=true`) behind `ADMIN_PASSWORD="change-me"`, and a contact form
+delivering to the upstream project's own inbox. The production guard that would have caught the
+first two never fired, because the same template shipped `ENVIRONMENT="local"` and
+`_reject_insecure_admin_config` short-circuits on it.
+
+Every one of those is a template value that *works*, which is exactly what makes it dangerous: a
+setting nobody had to touch to get a running server is a setting nobody touched. So the template now
+refuses to be a configuration:
+
+- **`SECRET_KEY` is startup-fatal on a placeholder**, in every environment
+  (`Settings._reject_placeholder_secret_key`). The rejected set is an explicit list —
+  `PLACEHOLDER_SECRET_KEYS` — matched case-insensitively after stripping, not an entropy heuristic.
+  A heuristic strong enough to catch a hand-typed `changeme` also rejects keys people genuinely
+  generated, and a guard that refuses a good key is a worse bug than the one it prevents. CI's
+  `test-secret-key-for-testing-only` is deliberately outside the set, and
+  `tests/test_config_safety.py` reads the shipped value straight out of `.env.example` so that
+  editing one file without the other fails the suite.
+- **The admin block ships commented out**, so enabling the panel is an edit rather than an
+  inheritance. This is the same argument `EMAIL_FROM_ADDRESS` already made in "SMTP is the only
+  email transport": a presence check is theater when the template pre-satisfies it.
+- **`ENVIRONMENT=production` without `SMTP_HOST` fails at startup** (`_require_smtp_in_production`).
+  Sign-in is passwordless, so a production instance with no relay cannot let *anybody* in, including
+  its own first user. Before this the discovery was a 500 from `POST /auth/email/request` —
+  `_refuse_to_log_credential_in_production` refusing to write a live token to the logs — carrying a
+  message about email transport on a page about signing in. Local and staging are left alone: the
+  logged-link flow is the documented local setup.
+
+That last guard makes `_refuse_to_log_credential_in_production` belt-and-braces rather than
+redundant, and it stays: it guards the code path rather than the configuration, and a relay that
+*is* set can still be the wrong one.
+
+**`POSTGRES_PASSWORD` is the deliberate exception, and the template says so out loud.** Compose
+feeds `src/.env` to the `db` container as well as to the app, so those values are simultaneously the
+connection settings and the credentials Postgres initializes itself with — which means a startup
+rejection would not protect anything, it would stop the local stack coming up at all. `change-me` is
+therefore a live password from the first `docker compose up`, survivable only because
+`docker-compose.yml` binds Postgres to `127.0.0.1`. An earlier draft of the template header claimed
+"nothing in this file is a working credential", which was the one sentence in it that was false; it
+now names this exception and says what makes it survivable. The deploy bundle is where this stops
+being acceptable, and it gets its own template.
+
+While that section was being reworked, `APP_VERSION="0.1.0"` came out of it — **but the setting now
+defaults from `importlib.metadata.version("opendiving-api")`**, not from nothing. Deleting the line
+alone would have been a silent regression: `APP_VERSION` reaches `/api/v1/health` (`"unknown"`), the
+JSON export's `generator.version` (`null`) and the UDDF `<version>` element (omitted entirely),
+which are exactly how someone reports a bug against a specific build. Reading the installed metadata
+makes `pyproject.toml` the single source and the env var an override, so a released image can no
+longer report whatever version the operator's `.env` was copied from. `PackageNotFoundError` — a
+source tree that was never installed — falls back to `None`, which is what an unset `APP_VERSION`
+already produced and every consumer already handles.
+
+## The contact form has no default recipient, and no recipient means 503
+
+`CONTACT_FORM_EMAIL` defaulted to `contact@opendiving.app`. On a self-hosted instance that meant a
+diver's "I can't sign in" went to an inbox belonging to people who cannot see that server, cannot
+reset anything on it, and did not ask to receive it — while the operator, who could have helped,
+never heard about it. The setting was documented as one to change, which is not the same as being
+one you must.
+
+There is no address that is right for somebody else's install, so there is no default. Unset,
+`POST /api/v1/contact` answers **503** — a raw `HTTPException`, since
+`core/exceptions/http_exceptions.py` has no class for it, the same way `species.resolve` raises its
+own. The check runs **before** the two rate limiters, so traffic to a switched-off form cannot spend
+the buckets of an instance that configures an address later.
+
+`send_contact_form_email` raises rather than no-ops on a missing recipient, unlike its
+missing-`SMTP_HOST` branch one line below, which logs the whole submission and returns. The
+asymmetry is deliberate: the value of that log line is that a developer can read what *would* have
+been sent, and there is no equivalent consolation for mail with nowhere to go.
+
+The route tests are the trap here, and it is worth naming because it is invisible until someone
+else's machine runs the suite. They build a minimal app around the contact router and mock the
+*sender*, so they never touched settings — which means the new guard would read real, unmocked
+config and pass or fail depending on whether the developer running them happens to have
+`CONTACT_FORM_EMAIL` in their own `src/.env`. `tests/test_contact.py` has an autouse fixture pinning
+it, and the 503 cases override that fixture rather than relying on its absence.
+
+## Comma-separated strings are how this app takes a list
+
+`TRUSTED_PROXY_IPS` had already discovered this: for a complex field type, pydantic-settings parses
+the environment variable itself and expects JSON, so `TRUSTED_PROXY_IPS=172.16.0.0/12` fails
+validation at startup no matter what `cast=` does at the field — see "Per-IP rate limits need to
+know which proxy to believe". `CRUD_ADMIN_ALLOWED_IPS_LIST` and `CRUD_ADMIN_ALLOWED_NETWORKS_LIST`
+ducked the same problem differently, as bare `list[str] | None` annotations with no `config()` call
+at all. That left them settable only as JSON, and only through an *exported* environment variable
+rather than the `src/.env` file every other setting in this app comes from and every doc teaches —
+inconsistent rather than impossible, but inconsistent in a way nobody discovers except by an
+allowlist that silently isn't there.
+
+Both are now comma-separated strings named `CRUD_ADMIN_ALLOWED_IPS` and
+`CRUD_ADMIN_ALLOWED_NETWORKS`, parsed by `split_csv` in `core/config.py` — one function, so the
+three settings agree about surrounding whitespace and empty entries. `admin/initialize.py` passes
+`split_csv(...) or None`, because CRUDAdmin reads `None` as "no restriction" while an empty list
+would be an allowlist matching nobody.
+
+## `POSTGRES_URI` is built by percent-encoding, not by f-string
+
+`f"{user}:{password}@{server}:{port}/{db}"` is fine until a password contains URL syntax, and `@` is
+the character most password generators reach for first. `p@ss` produced
+`postgres:p@ss@db:5432/opendive`, which parses with `ss` as the *host* — so the failure is a
+connection error naming a host nobody configured, on an instance where the operator can see their
+password is correct. `/`, `:` and `#` break it in their own ways.
+
+`postgres_uri()` percent-encodes the user and the password with `quote(..., safe="")` and leaves
+host, port and database alone. `redis_url()` does the same for `REDIS_PASSWORD`, and treats an empty
+password as no password: `redis://:@host` is not the same URL as `redis://host`.
+
+Two things that came out along the way. `POSTGRES_URL` was dead — `db/database.py` builds only from
+`POSTGRES_URI` — as were the `SQLiteSettings` and `MySQLSettings` mixins inherited from the upstream
+boilerplate, which no code path has ever read. `DatabaseSettings` stays as the base class, because
+`core/setup.py` dispatches on it.
+
+## `core/logger.py` is gone, and `LOG_LEVEL` configures logging for real
+
+The module set up a `RotatingFileHandler` writing to `src/app/logs/app.log` and was imported by
+nothing. Its own closing comment said as much, and drew the right conclusion: "a hazard guarded only
+in dead configuration is not guarded" — which is why `core/setup.py` pinned the httpx logger to
+`WARNING` by hand, in the file that actually runs, rather than in the file where it belonged on
+paper. It also offered the choice, "wire this module up or delete it". Deleted, along with the stale
+`app.log` sitting next to it.
+
+What replaces it is `configure_logging(level)` in `core/config.py`, called by both entrypoints —
+`core/setup.py` for the API, `core/worker/functions.py` for the worker, which had its own hardcoded
+`basicConfig(level=logging.INFO)`. `core/config.py` is where it lives because it owns `LOG_LEVEL`
+and is the one module both entrypoints already import; `core/setup.py` would drag FastAPI, the
+routers and the models into the worker's import graph for two lines of logging setup.
+
+The one-shot scripts in `src/scripts/` deliberately keep their own `basicConfig(level=INFO)`. They
+are run by a person to watch something happen — a backfill's progress, whether the admin seed did
+anything — and a `LOG_LEVEL=WARNING` instance should not turn that into a silent command.
+
+Two details worth keeping. `logging.basicConfig` **does nothing at all** when the root logger
+already has a handler, so `configure_logging` sets the level on the root logger explicitly as well —
+otherwise `LOG_LEVEL` under a server that installed its own handler would be exactly the dead
+configuration this replaces. And the httpx pin stays *after* the call and independent of
+`LOG_LEVEL`, so turning the app up to `DEBUG` to chase a problem does not start writing
+`GEOCODER_API_KEY` into the logs along the way.
+
+An unrecognised level is rejected by `Settings._normalize_log_level` rather than by `basicConfig`,
+so the error names the typo instead of pointing at the logging module from inside startup. The
+validator also uppercases, so `LOG_LEVEL=debug` works.
+
+## `AUTH_COOKIE_SECURE` exists for the LAN instance with no certificate
+
+The refresh cookie was `secure=True` literally. That is right for every deployment reached over
+HTTPS, and it is exactly wrong for the one shape a self-hoster reaches for first: the app on a LAN
+address over plain HTTP, where the browser accepts the `Set-Cookie` and then silently declines to
+store it. The symptom is that sign-in appears to work and the next page load is signed out, with
+nothing in any log on either side — one of the more expensive hours available to a new self-hoster.
+
+`AUTH_COOKIE_SECURE` defaults to `true`, so the safe posture is the one you get without deciding
+anything, and turning it off is a deliberate edit with the reason written next to it in
+`.env.example`. `SESSION_SECURE_COOKIES` already did this for the admin panel's own cookie; this is
+the same escape hatch for the application's.
