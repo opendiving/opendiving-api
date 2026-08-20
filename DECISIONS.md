@@ -10061,12 +10061,17 @@ on the order of 10⁶ guesses ≈ 694 days of uninterrupted maximum-rate attack,
 victim's inbox with 288 unrequested sign-in emails a day for two years. Bounded, and impossible to
 run quietly.
 
-Eight digits is the lever if observation ever disagrees, but the per-email request cap is the term
-that dominates: at 3 per window it is what makes the horizon years rather than days, and lowering it
-buys more than lengthening the code would. That the plan's "eleven days" survived into a first draft
-here is worth recording, because it is the shape of error a quantified security claim invites — the
-figure reads as authoritative precisely because it is specific, and the rate it implies (~1
-guess/second) is one the per-email cap never permits.
+Eight digits is the lever if observation ever disagrees, and the derivation says why it is the right
+one rather than the obvious alternative. The horizon is the code space over the guess rate, so
+lengthening the code from 6 digits to 8 multiplies it by 100 — while the request cap has only 3 → 1
+of headroom before sign-in stops working at all, which is 3× at best and is paid for by every diver
+whose first email never arrived. The cap is what makes today's horizon years rather than days; it is
+not where the next order of magnitude is.
+
+That the plan's "eleven days" survived into a first draft here is worth recording, because it is the
+shape of error a quantified security claim invites — the figure reads as authoritative precisely
+because it is specific, and the rate it implies (~1 guess/second) is one the per-email cap never
+permits.
 
 ### Everything else is the shape already there
 
