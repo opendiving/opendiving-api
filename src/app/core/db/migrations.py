@@ -25,8 +25,11 @@ def alembic_config() -> Config:
     `[loggers]` block that `env.py` feeds to `fileConfig`, which *resets* the root logger.
     Running it inside the API process would silently undo `configure_logging(LOG_LEVEL)` -
     the app would come up logging at the ini's `WARN` no matter what `LOG_LEVEL` says.
-    `env.py` skips `fileConfig` when there is no file, which is the only difference that
-    matters here; the URL it sets from `settings` either way.
+    `env.py` skips `fileConfig` when there is no file, which is the only behavioural
+    difference between the two. The database URL is not one: `env.py` imports it from
+    `core/db/database.py` and connects with it directly, so neither this config nor
+    `alembic.ini` carries a `sqlalchemy.url` - see the comment on that import for why a
+    credential must not go through Alembic's `Config` at all.
 
     The CLI (`alembic upgrade head`, `alembic check`, `alembic stamp head`) still goes
     through `alembic.ini` as normal, where reconfiguring logging is the right behaviour.
