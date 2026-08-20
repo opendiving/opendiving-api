@@ -32,7 +32,11 @@ couple of minutes, and there is no shared deployment worth pointing a scanner at
 
 - **Don't open a public issue, pull request, or discussion** for a suspected vulnerability. Every
   self-hosted instance is exposed for as long as it takes to cut a release, and a public issue
-  starts that clock before the fix exists.
+  starts that clock before the fix exists. (You may see an open issue labelled `image-cve` naming
+  CVEs in the published image. That is not an exception to this rule: those are advisories Debian
+  and NVD published first, filed by our own scanner so the base-image rebuild gets done, and running
+  `trivy image` against the same public tag tells you the same thing. This rule is about a defect in
+  *our* code that nobody has disclosed yet — that still goes to the private channel above.)
 - **Don't use the in-app contact form.** It has a *Security* category, and it is still the wrong
   route: `POST /api/v1/contact` delivers to whoever runs *that* instance, not to this project, and
   on most instances it delivers nowhere at all — `CONTACT_FORM_EMAIL` has no default, and unset the
