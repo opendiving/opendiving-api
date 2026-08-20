@@ -100,14 +100,23 @@ def ensure_root_writable() -> None:
     bytes out of Postgres writes files itself. Fail-fast beats four gunicorn workers each
     discovering an unwritable volume on their first upload, hours later, one diver at a
     time.
+
+    Those same four workers are why the probe carries the pid and tolerates an already-gone
+    file. The lifespan runs once *per worker* - that is what `apply_migrations` takes an
+    advisory lock for - so all four reach this within milliseconds of each other at
+    container start. On a shared filename the second worker to finish unlinks a file the
+    first already took, raising `FileNotFoundError` - an `OSError` - which this would turn
+    into a fatal "not writable" against a volume that is perfectly healthy. A flaky startup
+    failure accusing the wrong thing is worse than no check at all. `_write_atomically`
+    below already names its temp files per-pid, for the same reason.
     """
     root = storage_root()
     tmp = root / TMP_DIRNAME
     try:
         tmp.mkdir(parents=True, exist_ok=True)
-        probe = tmp / ".writable"
+        probe = tmp / f".writable-{os.getpid()}"
         probe.write_bytes(b"")
-        probe.unlink()
+        probe.unlink(missing_ok=True)
     except OSError as exc:
         raise RuntimeError(
             f"The files volume at {root} is not writable ({exc}). Uploaded dive-computer exports "

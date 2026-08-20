@@ -13,6 +13,7 @@ Three things are worth pinning and the rest is plumbing:
 """
 
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -157,6 +158,48 @@ class TestEnsureRootWritable:
         blob_store.ensure_root_writable()
         assert list((volume / blob_store.TMP_DIRNAME).iterdir()) == []
 
+    def test_concurrent_workers_do_not_fail_each_other(self, volume: Path) -> None:
+        """The shipped image runs `gunicorn -w 4` and the lifespan runs once per worker, so
+        all four reach this within milliseconds of each other at container start.
+
+        With a shared probe filename the second worker to finish unlinks a file the first
+        already took, and the `FileNotFoundError` - an `OSError` - is reported as a volume
+        that "is not writable". A flaky startup failure accusing the wrong thing. Threads
+        rather than processes here because the failure is a filesystem race, not a process
+        one; what matters is several calls interleaving over the same directory.
+        """
+        errors: list[BaseException] = []
+
+        def probe() -> None:
+            try:
+                for _ in range(40):
+                    blob_store.ensure_root_writable()
+            except BaseException as exc:  # noqa: BLE001 - recorded, then re-raised by the assert
+                errors.append(exc)
+
+        threads = [threading.Thread(target=probe) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert not errors, f"a healthy volume was reported unwritable: {errors[0]}"
+
+    def test_the_probe_is_named_per_process(self, volume: Path, monkeypatch) -> None:
+        """The property the test above rests on, asserted directly - because that one passes
+        for the wrong reason if the race window simply never opens on a fast machine."""
+        written: list[str] = []
+        real_write_bytes = Path.write_bytes
+
+        def spy(self: Path, data: bytes) -> int:
+            written.append(self.name)
+            return real_write_bytes(self, data)
+
+        monkeypatch.setattr(Path, "write_bytes", spy)
+        blob_store.ensure_root_writable()
+
+        assert written == [f".writable-{os.getpid()}"]
+
     def test_an_unwritable_root_fails_loudly_and_names_the_setting(self, tmp_path: Path, monkeypatch) -> None:
         """Fail-fast at startup beats four gunicorn workers each discovering this
         per-upload, hours later, one diver at a time - and the message has to name the
@@ -274,6 +317,51 @@ class TestDeleteAfterCommit:
         already gone would fail a request whose database work is done."""
         blob_store.delete_after_commit(sync_session, "dive-files/zz/never-existed")
         sync_session.commit()
+
+
+@pytest.mark.skipif(not db_available(), reason="Postgres not reachable")
+class TestTheHookFiresThroughARealAsyncSession:
+    """The one path every production caller actually takes.
+
+    `delete_after_commit` writes into `db.info`, and the listeners are registered on the
+    *sync* `Session` class - so the entire delete path rests on `AsyncSession.info` being
+    the same dict object the listener pops from. It is (SQLAlchemy proxies it to
+    `sync_session.info`), but that is a fact about a library, and the tests above assert it
+    only through a sync `Session` while the service tests use `AsyncMock`s whose `info` is a
+    plain dict no listener ever sees. Between them, that arrangement would stay green while
+    every dive file and card leaked its blob on disk. This is the test that would not.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_commit_on_an_async_session_unlinks(self, volume: Path, async_db) -> None:
+        await blob_store.put(KEY, DATA)
+        await async_db.execute(select(1))
+
+        blob_store.delete_after_commit(async_db, KEY)
+        assert (volume / KEY).is_file(), "registering must not unlink anything on its own"
+
+        await async_db.commit()
+        assert not (volume / KEY).exists()
+
+    @pytest.mark.asyncio
+    async def test_a_rollback_on_an_async_session_keeps_the_file(self, volume: Path, async_db) -> None:
+        await blob_store.put(KEY, DATA)
+        await async_db.execute(select(1))
+
+        blob_store.delete_after_commit(async_db, KEY)
+        await async_db.rollback()
+
+        await async_db.execute(select(1))
+        await async_db.commit()
+
+        assert (volume / KEY).is_file()
+
+    @pytest.mark.asyncio
+    async def test_async_session_info_is_the_dict_the_listener_reads(self, volume: Path, async_db) -> None:
+        """The proxy relationship itself, named rather than left implicit - so a SQLAlchemy
+        upgrade that broke it fails here, pointing at the cause, instead of failing the two
+        tests above and pointing at the hook."""
+        assert async_db.info is async_db.sync_session.info
 
 
 @pytest.mark.skipif(not db_available(), reason="Postgres not reachable")
