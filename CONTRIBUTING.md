@@ -345,22 +345,29 @@ the vulnerable digest. What tells you there is a CVE to rebuild for is the next 
 The rebuild above is the *response*. Two things are wired up to raise the alarm in the first place,
 and they watch different objects — neither substitutes for the other.
 
-**The published images.** `.github/workflows/vulnerability-scan.yml` scans them every morning with
-Trivy: `latest` plus every live `X.Y` alias, resolved to digests so the same image behind two tags
-is scanned once. It reports HIGH and CRITICAL findings in both halves of the image — the Debian
-packages that come from `python:3.14-slim-bookworm`, and the Python distributions `uv` installed —
-which is the same pair a rebuild fixes. This is the job that closes the loop with the paragraph
-above, because the case it catches is a release that was clean the day it shipped and grew a CVE
-three weeks later, with no PR in flight and nobody looking.
+**The published images.** `.github/workflows/vulnerability-scan.yml` scans the newest release every
+morning with Trivy — its `X.Y.Z`, `X.Y`, bare major and `latest`, which are one image under four
+names, resolved to a digest so it is scanned once. It reports HIGH and CRITICAL findings in both
+halves of that image: the Debian packages that come from `python:3.14-slim-bookworm`, and the Python
+distributions `uv` installed. This is the job that closes the loop with the paragraph above, because
+the case it catches is a release that was clean the day it shipped and grew a CVE three weeks later,
+with no PR in flight and nobody looking.
 
-**The alert is a GitHub issue** labelled `image-cve`, and you are the one who acts on it: rebuild
-the newest affected version per the drill above. The issue body is the table of what moved and
-where. One issue, edited in place for as long as the finding persists — so a CVE that takes upstream
-a fortnight to patch does not generate a fortnight of notifications. The workflow closes it once a
+**The alert is a GitHub issue** labelled `image-cve`, and you are the one who acts on it. The body
+names the exact `v` tag to dispatch at and splits the findings by what actually fixes them, because
+the two are not the same remedy:
+
+- **OS package** — the rebuild above. One dispatch recomputes every alias the scan covers, which is
+  why the scan covers exactly those and no more.
+- **Python package** — *not* fixable by a rebuild at any tag. That version comes from the `uv.lock`
+  committed at the tag, and the rebuild checks that tag out and runs `uv sync --locked` against it,
+  so it reinstalls the identical version no matter how many bumps have since landed on `main`. Merge
+  the bump and **cut a new patch release** — the ordinary flow above, not the in-place rebuild.
+
+One issue, edited in place for as long as the finding persists, so a CVE that takes upstream a
+fortnight to patch does not generate a fortnight of notifications. The workflow closes it once a
 scan comes back clean, and will not reopen it for a set of CVEs you already read and closed; a
-*different* CVE opens a fresh one. A finding under **Python package** is the exception to the
-rebuild: that version comes from `uv.lock`, so it needs a merged bump before a rebuild has anything
-new to install.
+*different* CVE opens a fresh one.
 
 **Proposed changes.** The same workflow runs a second, much cheaper job on every PR — Trivy over
 `uv.lock`, no image built — which *fails the check* on a HIGH or CRITICAL that has a fix available.
@@ -386,11 +393,16 @@ together, and Renovate can only reach the last three — an auto-opened PR would
 construction. So that update is grouped and held behind a checkbox on the **Dependency Dashboard**
 issue: it tells you 3.15 exists and waits for a person.
 
-**What none of this watches**, stated so it is not mistaken for coverage: an exact `X.Y.Z` older
-than the newest patch in its minor (immutable by policy, and rebuilt only by dispatching Publish
-Image at that tag by hand); the `linux/arm64` image, on the assumption that it installs the same
-Debian packages as `linux/amd64`; and vulnerabilities with no fix published upstream, which are
-counted in the issue but drive nothing, since no rebuild collects a package that does not exist.
+**What none of this watches**, stated so it is not mistaken for coverage:
+
+- **Any release but the newest.** A dispatch only ever repoints the aliases of the version it names,
+  and there is no support policy here for old minors — so scanning `0.2` would produce an alert with
+  no move attached, recurring forever. Someone pinned to an older `OPENDIVING_VERSION` is answered
+  by upgrading, and if an old minor ever does have to be rebuilt, it is a dispatch at its own tag.
+- **The `linux/arm64` image**, on the assumption that it installs the same Debian packages as
+  `linux/amd64`. If that ever stops holding, the scan step is where a `--platform` pass goes.
+- **Vulnerabilities with no fix published upstream.** They are counted in the issue but drive
+  nothing, since no rebuild collects a package that does not exist.
 
 ## License
 

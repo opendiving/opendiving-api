@@ -9130,3 +9130,30 @@ rather than assumed.
 **It skips cleanly when nothing has been published.** There are no `v*` tags yet and no package on
 GHCR, so a scheduled job that assumed either would have been red from the day it merged, and a check
 that is red from day one is a check somebody turns off. No `vX.Y.Z` tags means a logged skip.
+
+**Only the newest release is scanned, and widening that would make the workflow worse.** The first
+draft scanned `latest` plus every live `X.Y` alias — every minor ever released — on the reasoning
+that more coverage is more safety. It is not, and the reason is the same one this whole change is
+built on: an alert nobody can act on is not detection, it is training people to ignore the channel.
+A Publish Image dispatch recomputes the aliases of *the one version it names* and no others (see
+`prepare` in `publish-image.yml`), and this project offers no support policy for old minors. So a
+finding on `0.2` would survive every rebuild the documentation describes, return on the next
+morning's scan, and — because an image nobody rebuilds keeps accruing *new* advisories — open a
+brand-new issue each time the previous one was closed, since the fingerprint is a set of CVE ids and
+a new id is legitimately new. The result is a channel that cycles forever on something structurally
+unaddressable. Scanning exactly the alias set one dispatch repoints (`X.Y.Z`, `X.Y`, the bare major,
+`latest` — one image under four names) makes the instruction in the issue body true as written, and
+puts the omission in `CONTRIBUTING.md`'s "what none of this watches" list where an operator on an
+old pin is told to upgrade. Widening it back means also answering what to do about the findings, and
+that is a support policy, not a workflow change.
+
+**The two remedies in the report are genuinely different, and conflating them was a real bug in the
+first draft.** It told the reader that a *Python* package finding "needs a merged bump first",
+implying merge-then-rebuild. That cannot work, and the mechanism is worth stating because it is
+non-obvious: a dispatch checks out `ref` (`inputs.ref || github.ref`), the `Dockerfile` installs
+with `uv sync --locked` from the `uv.lock` bind-mounted out of *that* tree, and the tag/manifest
+guard refuses to publish `main` under an already-used version. So a rebuild at `v0.4.0` reinstalls
+`v0.4.0`'s exact dependency set however many bumps have landed since, publishes a fresh digest,
+moves every alias, and reports success while fixing nothing — the same shape of silent failure as
+digest-pinning the base image, arrived at from the other direction. The only remedy for a Python
+finding is a new patch release, and the issue body now says so per row rather than in a footnote.
