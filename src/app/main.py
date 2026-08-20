@@ -12,7 +12,7 @@ admin = create_admin_interface()
 # `UNIQUE constraint failed: admin_user.username` - taking the whole container down.
 #
 # It is a one-shot schema-and-seed step, not per-process state, so it lives in
-# `scripts.initialize_admin` and runs once before the API starts (see the `admin_init`
+# `admin.initialize`'s `main()` and runs once before the API starts (see the `admin_init`
 # service in `docker-compose.yml`). Constructing the interface above still registers all
 # its routes, so mounting works in every worker without any of them touching the DB.
 app = create_application(router=router, settings=settings, lifespan=lifespan_factory(settings))

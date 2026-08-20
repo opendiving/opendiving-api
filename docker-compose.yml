@@ -12,11 +12,11 @@ services:
     # command: gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000
     env_file:
       - ./src/.env
-    # -------- replace with comment if you are using nginx --------
+    # Development only: the API on the host, on every interface. A deployment publishes
+    # nothing but the proxy - see `deploy/docker-compose.yml`, where this service is
+    # `expose`d to the compose network and reached through Caddy.
     ports:
       - "8000:8000"
-    # expose:
-    #   - "8000"
     # Wait for the datastores to answer, not merely to have been started - otherwise the
     # app's startup `alembic upgrade head` races an initializing Postgres. `admin_init` is
     # a one-shot that must finish before any worker serves `/admin`.
@@ -44,14 +44,14 @@ services:
 
   # One-shot: creates the admin panel's own tables and seeds its initial admin, then
   # exits. Runs to completion before `api` starts, so the four gunicorn workers in the
-  # production image never race each other doing it (see src/scripts/initialize_admin.py).
+  # production image never race each other doing it (see src/app/admin/initialize.py).
   # Exits 0 immediately when CRUD_ADMIN_ENABLED is false, so it costs nothing when the
   # panel is off.
   admin_init:
     build:
       context: .
       dockerfile: Dockerfile
-    command: python -m src.scripts.initialize_admin
+    command: python -m app.admin.initialize
     restart: "no"
     # Same inherited-HTTP-healthcheck problem as `worker` below, with a different ending:
     # this container exits inside the image check's 20s start period, so the check never
@@ -67,7 +67,9 @@ services:
       db:
         condition: service_healthy
     volumes:
-      - ./src:/code/src
+      # `app.admin.initialize` is served from the image at /code/app like everything else;
+      # mounted over so an edit on the host applies without a rebuild.
+      - ./src/app:/code/app
       - ./src/.env:/code/.env
 
   worker:
@@ -174,16 +176,6 @@ services:
   #     - ./src/.env
   #   depends_on:
   #     - db
-
-  #-------- uncomment to run with nginx --------
-  # nginx:
-  #   image: nginx:latest
-  #   ports:
-  #     - "80:80"
-  #   volumes:
-  #     - ./default.conf:/etc/nginx/conf.d/default.conf
-  #   depends_on:
-  #     - api
 
   #-------- uncomment to create first superuser --------
   # create_superuser:

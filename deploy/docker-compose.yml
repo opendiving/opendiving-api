@@ -1,0 +1,242 @@
+# OpenDiving - the whole product, as it is meant to be installed.
+#
+#   mkdir opendiving && cd opendiving
+#   curl -LO   https://github.com/opendiving/opendiving-api/releases/latest/download/docker-compose.yml
+#   curl -LO   https://github.com/opendiving/opendiving-api/releases/latest/download/Caddyfile
+#   curl -Lo .env https://github.com/opendiving/opendiving-api/releases/latest/download/.env.example
+#   $EDITOR .env          # six values
+#   docker compose up -d
+#
+# Nothing here is built: every image is pulled. The two OpenDiving images are published
+# from this repository and from opendiving-web on the same version tag; the three
+# third-party ones are pinned to a digest, so `docker compose pull` fetches exactly the
+# bytes this file was tested against and a rebuilt upstream tag cannot change what runs
+# under you. Renovate and friends update the digest with the tag, in a diff you can read.
+#
+# Full documentation: docs/self-hosting/ in the opendiving-api repository.
+#
+# This is NOT the development compose file. That one lives at the repository root, builds
+# from source, bind-mounts `./src`, publishes the API and Postgres on the host, and is
+# wrong for anything reachable from outside your machine.
+name: opendiving
+
+# Everything the API and the worker need that is *this compose file's* business rather
+# than the operator's: service names on the internal network, and the two values derived
+# from `DOMAIN` so a correct install needs neither of them typed twice. The rest arrives
+# through `env_file: .env` below.
+x-api-environment: &api-environment
+  POSTGRES_SERVER: db
+  POSTGRES_PORT: 5432
+  POSTGRES_USER: ${POSTGRES_USER:-opendiving}
+  POSTGRES_DB: ${POSTGRES_DB:-opendiving}
+  REDIS_CACHE_HOST: redis
+  REDIS_CACHE_PORT: 6379
+  REDIS_QUEUE_HOST: redis
+  REDIS_QUEUE_PORT: 6379
+  # Every user-facing URL this instance emails - the magic link that is the only way to
+  # sign in, the email-change confirmation, the gear-service digest's links - is built
+  # from FRONTEND_URL, and it doubles as the API's single allowed CORS origin. Its
+  # built-in default is `http://localhost:3000`, so an install that left it alone would
+  # email sign-in links pointing at the recipient's own laptop. Derived from DOMAIN here
+  # rather than asked for again: on the default (bundled-Caddy, TLS) install they are the
+  # same fact. Set FRONTEND_URL in `.env` to override it - a LAN instance on plain HTTP
+  # is the case that has to.
+  FRONTEND_URL: ${FRONTEND_URL:-https://${DOMAIN:?set DOMAIN in .env - it is the address this instance is reached at}}
+  # The admin panel's own tables (`admin_user`, `admin_session`, …) live in the app's
+  # Postgres rather than in a per-container SQLite file, which is single-process only and
+  # so cannot work behind `gunicorn -w 4`. Harmless when the panel is off, which is the
+  # default. A POSTGRES_PASSWORD containing `@`, `/`, `:` or `#` has to be
+  # percent-encoded here - unlike POSTGRES_URI, which the app builds itself and encodes.
+  CRUD_ADMIN_DB_URL: postgresql+asyncpg://${POSTGRES_USER:-opendiving}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-opendiving}
+
+services:
+  # The front door: TLS, HTTP/3, and the only service that publishes a port.
+  #
+  # Under a profile so that a box already running Traefik, nginx or Nginx Proxy Manager
+  # can turn it off - two containers cannot both hold 80/443. `.env` ships
+  # `COMPOSE_PROFILES=proxy`, so the default install runs it and a bring-your-own-proxy
+  # user comments out one line. See docs/self-hosting/reverse-proxy.md.
+  caddy:
+    image: caddy:2.10-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    profiles: ["proxy"]
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      # HTTP/3. Harmless if your firewall drops it - browsers fall back to TCP.
+      - "443:443/udp"
+    environment:
+      # The site address Caddy answers on. `DOMAIN` on the default install, which is what
+      # makes the certificate automatic; a LAN instance with no domain sets
+      # `CADDY_SITE_ADDRESS=:80` in `.env` and gets plain HTTP.
+      CADDY_SITE_ADDRESS: ${CADDY_SITE_ADDRESS:-${DOMAIN}}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and their private keys. Losing this volume means re-issuing on next
+      # start, which is fine until you hit Let's Encrypt's rate limits - back it up or at
+      # least don't `docker compose down -v` casually.
+      - caddy-data:/data
+      - caddy-config:/config
+    healthcheck:
+      # Caddy's admin API, which listens on loopback inside the container by default. The
+      # alpine image carries busybox `wget` and no curl.
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      web:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  # The web app, and the only thing a reverse proxy needs to point at: it carries its own
+  # `/api/v1` proxy through to `api:8000` (API_INTERNAL_URL, whose default is exactly
+  # that), so it is a complete single upstream. Nothing here is baked into the browser
+  # bundle - every value below is read on the server at request time, which is what lets
+  # one published image serve any domain.
+  web:
+    image: ghcr.io/opendiving/opendiving-web:${OPENDIVING_VERSION:-latest}
+    restart: unless-stopped
+    # Deliberately NOT `env_file: .env`: that file holds SECRET_KEY, POSTGRES_PASSWORD and
+    # SMTP_PASSWORD, none of which this process has any use for. Each variable it does use
+    # is named here instead, so a compromised Node process cannot read the database
+    # credentials out of its own environment.
+    environment:
+      SITE_URL: ${SITE_URL:-https://${DOMAIN}}
+      CONTACT_EMAIL: ${CONTACT_EMAIL:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GRAVATAR_ENABLED: ${GRAVATAR_ENABLED:-}
+      MAP_TILE_URL: ${MAP_TILE_URL:-}
+      MAP_TILE_URL_DARK: ${MAP_TILE_URL_DARK:-}
+      MAP_TILE_ATTRIBUTION: ${MAP_TILE_ATTRIBUTION:-}
+      WEB_HSTS: ${WEB_HSTS:-}
+      WEB_NOINDEX: ${WEB_NOINDEX:-}
+    expose:
+      - "3000"
+    # The image carries its own healthcheck (`GET /healthz`).
+    depends_on:
+      api:
+        condition: service_healthy
+
+  api:
+    image: ghcr.io/opendiving/opendiving-api:${OPENDIVING_VERSION:-latest}
+    restart: unless-stopped
+    env_file: .env
+    environment: *api-environment
+    expose:
+      - "8000"
+    # The image's own healthcheck asks `/api/v1/health/ready`, which round-trips Postgres
+    # and Redis - so `service_healthy` here means "can serve", not "has a process".
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      admin_init:
+        condition: service_completed_successfully
+
+  # Scheduled email (the gear-service digest) and background jobs. Same image, no HTTP.
+  worker:
+    image: ghcr.io/opendiving/opendiving-api:${OPENDIVING_VERSION:-latest}
+    command: arq app.core.worker.settings.WorkerSettings
+    restart: unless-stopped
+    env_file: .env
+    environment: *api-environment
+    # Overrides the image's HTTP check, which this container could never pass. Arq's own
+    # `--check` reads the sentinel key the worker keeps in Redis, so it covers both "the
+    # process is alive" and "it can reach Redis".
+    healthcheck:
+      test: ["CMD", "arq", "--check", "app.core.worker.settings.WorkerSettings"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # One-shot: creates the admin panel's own tables and seeds its initial admin, then
+  # exits. Exits 0 immediately when CRUD_ADMIN_ENABLED is false - which is the default -
+  # so it costs a second of startup and nothing else. It exists because the panel's setup
+  # is a deployment step: the four gunicorn workers in `api` would otherwise race it.
+  admin_init:
+    image: ghcr.io/opendiving/opendiving-api:${OPENDIVING_VERSION:-latest}
+    command: python -m app.admin.initialize
+    restart: "no"
+    env_file: .env
+    environment: *api-environment
+    # A container that serves no HTTP has no business being asked for an HTTP status.
+    healthcheck:
+      disable: true
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:18@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941
+    restart: unless-stopped
+    # Not `env_file: .env`, for the same reason as `web`: this container needs three
+    # values from it, not thirty. POSTGRES_PASSWORD initializes the cluster on first
+    # start, and changing it in `.env` afterwards does NOT change the stored password -
+    # see docs/self-hosting/troubleshooting.md.
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-opendiving}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-opendiving}
+    volumes:
+      # Every dive, every uploaded dive-computer file and every c-card image is in here:
+      # the originals live in Postgres, not on a separate media volume, which is why one
+      # `pg_dump` is the whole backup (docs/self-hosting/backup-restore.md).
+      #
+      # Postgres 18+ images store the cluster in a version-specific PGDATA
+      # (/var/lib/postgresql/18/docker) under this mount, so the volume goes one level up
+      # from the old .../data path - do not "fix" it back, the entrypoint refuses to start
+      # either way.
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    expose:
+      - "5432"
+
+  # Cache and job queue. Nothing durable lives here: losing it costs cache warmth and
+  # resets the open rate-limit windows, and nothing else.
+  redis:
+    image: redis:8-alpine@sha256:978f0e01593e65eed801f2402944efcd936d43b5027e4908a7897baf88ed6241
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    expose:
+      - "6379"
+
+volumes:
+  postgres-data:
+  redis-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  # Pinned so that `TRUSTED_PROXY_IPS` in `.env` can name it. The API believes an
+  # `X-Forwarded-For` header only from an address in that setting; with the subnet left to
+  # Docker's pool it would change between machines, and a preset that doesn't match is the
+  # bad half of a coin flip - either every caller shares one rate-limit bucket, or the
+  # header is trusted from somewhere it shouldn't be.
+  #
+  # If `docker compose up` reports an overlapping address pool, this subnet is already in
+  # use on your host: change it here AND in `TRUSTED_PROXY_IPS` together.
+  default:
+    ipam:
+      config:
+        - subnet: 172.29.0.0/16

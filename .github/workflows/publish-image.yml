@@ -400,16 +400,35 @@ jobs:
       contents: write
 
     steps:
-      # Nothing is checked out here, so `gh` is told which repository it is talking to.
-      - name: Open a draft release
+      # The deploy bundle is attached to the release, so the commit it was built from has
+      # to be on disk. The resolved sha rather than the ref, for the reason `build` uses
+      # it: what ships beside an image must be what that image was built from.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+
+      # An install is `curl` of these three files and `docker compose up -d`, so they are
+      # release *artifacts* rather than paths in a repository someone has to find and
+      # match to a version: `releases/latest/download/<name>` is a stable URL that always
+      # names the newest published release, and `releases/download/vX.Y.Z/<name>` pins one.
+      # The compose file's default image tag is `latest`, which is why pinning the
+      # download matters less than pinning `OPENDIVING_VERSION` in `.env` - both are
+      # documented in docs/self-hosting/.
+      #
+      # Uploaded before the notes are written, so a draft that is sitting there waiting for
+      # its Breaking section already carries them.
+      - name: Open a draft release with the deploy bundle attached
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           TAG: v${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
+          ASSETS=(deploy/docker-compose.yml deploy/Caddyfile deploy/.env.example)
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists - leaving it as it is."
+            echo "Release $TAG already exists - refreshing its deploy bundle only."
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
             exit 0
           fi
-          gh release create "$TAG" --draft --generate-notes --title "$TAG"
+          gh release create "$TAG" --draft --generate-notes --title "$TAG" "${ASSETS[@]}"

@@ -59,7 +59,7 @@ def include_name(name: str | None, type_: NameFilterType, parent_names: NameFilt
 
     CRUDAdmin owns `admin_user`, `admin_session`, `admin_event_log` and `admin_audit_log`,
     declares them on its own `DeclarativeBase`, and creates them itself
-    (`scripts.initialize_admin`). They are only visible here when `CRUD_ADMIN_DB_URL` points
+    (`admin.initialize.main`). They are only visible here when `CRUD_ADMIN_DB_URL` points
     at the app's own Postgres, which is what the deploy bundle does - and then they look to
     autogenerate exactly like tables someone deleted the models for, so a revision generated
     on such a machine would carry four `drop_table` calls. No table of this app's own starts
