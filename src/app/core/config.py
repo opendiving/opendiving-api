@@ -2,6 +2,7 @@ import logging
 import os
 import warnings
 from enum import Enum
+from importlib import metadata
 from typing import Self
 from urllib.parse import quote
 
@@ -26,10 +27,31 @@ def split_csv(raw: str | None) -> list[str]:
     return [entry.strip() for entry in (raw or "").split(",") if entry.strip()]
 
 
+def _installed_version() -> str | None:
+    """This distribution's version, from `pyproject.toml` by way of the installed
+    metadata.
+
+    `APP_VERSION` used to be duplicated into `src/.env.example`, which meant a released
+    image reported whatever version the operator's own `.env` happened to carry - the
+    template's, usually, frozen at whenever they copied it. Reading it here makes
+    `pyproject.toml` the single source, and the setting an override rather than the
+    definition. It reaches `/api/v1/health`, the JSON export's `generator` block and the
+    UDDF `<version>` element, all of which are how someone reports a bug against a
+    specific build.
+
+    `None` when the app is run from a source tree that was never installed - the same
+    thing an unset `APP_VERSION` produced before, and every consumer already handles it.
+    """
+    try:
+        return metadata.version("opendiving-api")
+    except metadata.PackageNotFoundError:
+        return None
+
+
 class AppSettings(BaseSettings):
     APP_NAME: str = config("APP_NAME", default="FastAPI app")
     APP_DESCRIPTION: str | None = config("APP_DESCRIPTION", default=None)
-    APP_VERSION: str | None = config("APP_VERSION", default=None)
+    APP_VERSION: str | None = config("APP_VERSION", default=_installed_version())
     LICENSE_NAME: str | None = config("LICENSE", default=None)
     # OpenAPI document metadata only ("who maintains this API", shown in `/docs`) -
     # *not* where the frontend's contact form delivers to. That's
@@ -354,8 +376,9 @@ class ProxySettings(BaseSettings):
     # A plain string, split in `core.utils.client_ip`, rather than a `list[str]`: for a
     # complex field type pydantic-settings parses the environment variable itself and
     # expects JSON, so `TRUSTED_PROXY_IPS=172.16.0.0/12` fails validation at startup no
-    # matter what `cast=` does here (that only produces the default). Same reason
-    # `CRUD_ADMIN_ALLOWED_IPS_LIST` below is a bare annotation with no `config()` call.
+    # matter what `cast=` does here (that only produces the default). `split_csv` at the
+    # top of this file parses all three settings that took this trade - this one and the
+    # two `CRUD_ADMIN_ALLOWED_*` below.
     TRUSTED_PROXY_IPS: str | None = config("TRUSTED_PROXY_IPS", default=None)
 
 
@@ -413,7 +436,8 @@ class CRUDAdminSettings(BaseSettings):
     # Off by default. The panel is mounted at a fixed, guessable path and bypasses the
     # whole `api.v1` authorization story (it talks to the models directly), so it has
     # to be something an operator turns on deliberately rather than something a fresh
-    # deploy inherits. `src/.env.example` enables it for local development.
+    # deploy inherits. `src/.env.example` ships the whole block commented out, local
+    # development included: turning the panel on is an edit, never an inheritance.
     CRUD_ADMIN_ENABLED: bool = config("CRUD_ADMIN_ENABLED", default=False)
     CRUD_ADMIN_MOUNT_PATH: str = config("CRUD_ADMIN_MOUNT_PATH", default="/admin")
 
@@ -479,7 +503,7 @@ class LoggingSettings(BaseSettings):
 
 
 def configure_logging(level: str) -> None:
-    """Point the root logger at stdout at `level`.
+    """Point the root logger at stderr at `level`.
 
     Called by both entrypoints - `core.setup` for the API, `core.worker.functions` for the
     worker - because there is no third place both of them already import. `core.logger`
@@ -487,6 +511,10 @@ def configure_logging(level: str) -> None:
     file handler that never existed in any running process, while `core.setup` had to pin
     the httpx logger by hand with a comment explaining that a hazard guarded only in dead
     configuration is not guarded. This module owns `LOG_LEVEL`, so it owns applying it.
+
+    stderr rather than stdout because that is `basicConfig`'s default stream and there is
+    no reason to fight it: both are captured identically by `docker compose logs` and by
+    every collector, and `uvicorn` and `arq` already log there.
 
     The level is set on the root logger explicitly as well as passed to `basicConfig`,
     which does nothing at all when the root logger already has a handler - under a server

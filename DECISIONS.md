@@ -8191,6 +8191,26 @@ That last guard makes `_refuse_to_log_credential_in_production` belt-and-braces 
 redundant, and it stays: it guards the code path rather than the configuration, and a relay that
 *is* set can still be the wrong one.
 
+**`POSTGRES_PASSWORD` is the deliberate exception, and the template says so out loud.** Compose
+feeds `src/.env` to the `db` container as well as to the app, so those values are simultaneously the
+connection settings and the credentials Postgres initializes itself with — which means a startup
+rejection would not protect anything, it would stop the local stack coming up at all. `change-me` is
+therefore a live password from the first `docker compose up`, survivable only because
+`docker-compose.yml` binds Postgres to `127.0.0.1`. An earlier draft of the template header claimed
+"nothing in this file is a working credential", which was the one sentence in it that was false; it
+now names this exception and says what makes it survivable. The deploy bundle is where this stops
+being acceptable, and it gets its own template.
+
+While that section was being reworked, `APP_VERSION="0.1.0"` came out of it — **but the setting now
+defaults from `importlib.metadata.version("opendiving-api")`**, not from nothing. Deleting the line
+alone would have been a silent regression: `APP_VERSION` reaches `/api/v1/health` (`"unknown"`), the
+JSON export's `generator.version` (`null`) and the UDDF `<version>` element (omitted entirely),
+which are exactly how someone reports a bug against a specific build. Reading the installed metadata
+makes `pyproject.toml` the single source and the env var an override, so a released image can no
+longer report whatever version the operator's `.env` was copied from. `PackageNotFoundError` — a
+source tree that was never installed — falls back to `None`, which is what an unset `APP_VERSION`
+already produced and every consumer already handles.
+
 ## The contact form has no default recipient, and no recipient means 503
 
 `CONTACT_FORM_EMAIL` defaulted to `contact@opendiving.app`. On a self-hosted instance that meant a

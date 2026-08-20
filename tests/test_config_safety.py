@@ -7,6 +7,8 @@ instance nobody can sign in to, a password with an `@` in it, and a `LOG_LEVEL` 
 """
 
 import logging
+from importlib import metadata
+from unittest.mock import patch
 
 import pytest
 
@@ -14,6 +16,7 @@ from src.app.core.config import (
     PLACEHOLDER_SECRET_KEYS,
     EnvironmentOption,
     Settings,
+    _installed_version,
     postgres_uri,
     redis_url,
     split_csv,
@@ -203,3 +206,40 @@ class TestAuthCookieSecure:
 
     def test_it_can_be_turned_off_for_a_plain_http_instance(self):
         assert _settings(AUTH_COOKIE_SECURE=False).AUTH_COOKIE_SECURE is False
+
+
+class TestAppVersionComesFromPackageMetadata:
+    """`APP_VERSION` used to be duplicated into `src/.env.example`, so a released image
+    reported whatever version the operator's `.env` happened to carry. It reaches
+    `/api/v1/health`, the JSON export's `generator` block and the UDDF `<version>`
+    element, all of which are how someone reports a bug against a specific build.
+    """
+
+    def test_it_matches_the_installed_distribution(self):
+        from importlib import metadata
+
+        assert _installed_version() == metadata.version("opendiving-api")
+
+    def test_it_matches_pyproject(self):
+        """The point of reading the metadata at all: one source of truth."""
+        from pathlib import Path
+
+        pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+        declared = next(line for line in pyproject.splitlines() if line.startswith("version = "))
+
+        assert _installed_version() == declared.split("=", 1)[1].strip().strip('"')
+
+    def test_an_uninstalled_source_tree_falls_back_to_none(self):
+        """The same thing an unset `APP_VERSION` produced before, which every consumer
+        already handles - `health.py` answers "unknown", the UDDF writer omits the
+        element.
+        """
+        with patch("src.app.core.config.metadata.version", side_effect=metadata.PackageNotFoundError):
+            assert _installed_version() is None
+
+    def test_the_template_no_longer_carries_a_copy(self):
+        from pathlib import Path
+
+        template = (Path(__file__).resolve().parents[1] / "src" / ".env.example").read_text()
+
+        assert not any(line.startswith("APP_VERSION") for line in template.splitlines())
