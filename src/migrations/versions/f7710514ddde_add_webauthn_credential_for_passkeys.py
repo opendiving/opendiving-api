@@ -11,7 +11,7 @@ needs no edit for this table: a credential that outlived its account would still
 sign-in path.
 
 Revision ID: f7710514ddde
-Revises: c3c2c4dd4c27
+Revises: 60ec1a2894ea
 Create Date: 2026-08-20 22:31:10.412262
 
 """

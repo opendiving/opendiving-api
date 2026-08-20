@@ -1059,6 +1059,41 @@ class TestMalformedInput:
         assert _aaguid_from(None) is None  # type: ignore[arg-type]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("sent", "expected"),
+        [
+            (["internal", "hybrid"], ["internal", "hybrid"]),
+            (["x" * 33], None),
+            (["internal", "x" * 33, "hybrid"], ["internal", "hybrid"]),
+            (["internal"] * 40, ["internal"]),
+            ([f"t{n}" for n in range(40)], [f"t{n}" for n in range(10)]),
+            ([None, 7, "internal"], ["internal"]),
+        ],
+        ids=["ordinary", "too-long", "long-one-dropped", "duplicates", "too-many", "non-strings"],
+    )
+    async def test_stored_transports_are_bounded(self, mock_db, redis_client, sent, expected):
+        """The one client-supplied value this app stores with no size limit in front of it:
+        the credential body is unvalidated JSON, `read_upload_within_limit` bounds uploads
+        only, and the bundled Caddy sets no body-size limit. Without a cap an authenticated
+        caller could park a large blob in a JSON column that every later options call reads
+        back and walks.
+        """
+        device = SoftAuthenticator(rp_id=RP_ID, origin=ORIGIN)
+        with patch("src.app.services.passkey_service.crud_webauthn_credentials") as crud:
+            crud.get_multi = AsyncMock(return_value={"data": []})
+            crud.create = AsyncMock(return_value=_stored())
+            options = (await passkey_registration_options(_user(), mock_db)).options
+            attestation = device.register(options)
+            attestation["response"]["transports"] = sent
+
+            with patch("src.app.api.v1.passkeys.send_passkey_added_email", new_callable=AsyncMock):
+                await passkey_registration_verify(
+                    PasskeyRegistrationVerifyRequest(credential=attestation, name="iPhone"), _user(), mock_db
+                )
+
+        assert crud.create.call_args.kwargs["object"].transports == expected
+
+    @pytest.mark.asyncio
     async def test_an_all_zero_aaguid_is_still_stored_as_one(self, mock_db, redis_client):
         """Self-attested credentials report all zeros, which is a legal uuid and the
         overwhelmingly common case - nothing reads the column in v1 either way.

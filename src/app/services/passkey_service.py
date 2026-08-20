@@ -58,6 +58,12 @@ _SIGN_IN_FAILED = "That passkey could not be used to sign in."
 # that check cannot see - which must be indistinguishable to the caller.
 _ALREADY_REGISTERED_DETAIL = "That passkey is already registered."
 
+# Bounds on the one client-supplied value this app stores without a size limit in front of
+# it - see `_transports_from`. The spec defines seven transports, the longest ten
+# characters, so real authenticators sit far below both.
+_MAX_TRANSPORTS = 10
+_MAX_TRANSPORT_LENGTH = 32
+
 
 def _registration_selection() -> AuthenticatorSelectionCriteria:
     """Discoverable credentials, user verification preferred.
@@ -354,17 +360,38 @@ def _raw_credential_id(credential: dict[str, Any]) -> bytes | None:
 
 
 def _transports_from(credential: dict[str, Any]) -> list[str] | None:
-    """The client's transport hints, taken from the response as strings.
+    """The client's transport hints, taken from the response as strings, deduplicated and
+    bounded.
 
     Read off the raw credential rather than off `VerifiedRegistration`, which does not
-    carry them, and stored unvalidated: they are advisory metadata for
-    `excludeCredentials`, and a value from a browser newer than this library is exactly
-    the case `_known_transports` filters at use time rather than losing at write time.
+    carry them, and *not* narrowed to values this library knows: a hint from a browser
+    newer than py_webauthn is exactly what `_known_transports` filters at use time rather
+    than losing at write time.
+
+    Bounded here because this is the one place the app stores a client-supplied value with
+    nothing in front of it: `credential` is unvalidated JSON (the ceremony's own parser is
+    what validates it, and it ignores this field), `read_upload_within_limit` bounds every
+    *upload* but no layer bounds a JSON body, and the bundled Caddy sets no
+    `client_max_body_size` on the strength of that app-side enforcement. Without a cap, an
+    authenticated caller could park an arbitrarily large blob in a `JSON` column that
+    `start_registration` then re-reads and walks on every subsequent options call.
+
+    The spec defines seven transports and the longest is ten characters, so the limits are
+    generous enough that no real authenticator can reach them - anything that does is not a
+    hint worth keeping.
     """
     transports = credential.get("response", {}).get("transports")
     if not isinstance(transports, list):
         return None
-    return [value for value in transports if isinstance(value, str)] or None
+
+    kept: list[str] = []
+    for value in transports:
+        if not isinstance(value, str) or len(value) > _MAX_TRANSPORT_LENGTH or value in kept:
+            continue
+        kept.append(value)
+        if len(kept) == _MAX_TRANSPORTS:
+            break
+    return kept or None
 
 
 def _aaguid_from(aaguid: str) -> uuid_pkg.UUID | None:
