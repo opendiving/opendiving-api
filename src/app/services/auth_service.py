@@ -4,7 +4,6 @@ unified auth flow - used by both `POST /auth/email/verify` and `POST /auth/googl
 signs a user in (`issue_tokens`).
 """
 
-import re
 import uuid as uuid_pkg
 from dataclasses import dataclass
 from datetime import timedelta
@@ -18,25 +17,6 @@ from ..core.security import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token, cr
 from ..crud.crud_authentication_providers import crud_authentication_providers
 from ..crud.crud_users import crud_users
 from ..schemas.authentication_provider import AuthenticationProviderCreate
-
-
-async def generate_unique_username(base: str, db: AsyncSession) -> str:
-    """Derives a unique, schema-valid username (see `UserBase.username`) from `base`
-    (typically the local part of an email address), appending a numeric suffix if
-    needed to avoid colliding with an existing user.
-    """
-    sanitized = re.sub(r"[^a-z0-9]", "", base.lower())[:20]
-    if len(sanitized) < 2:
-        sanitized = (sanitized + "user")[:20]
-
-    candidate = sanitized
-    suffix = 0
-    while await crud_users.exists(db=db, username=candidate):
-        suffix += 1
-        suffix_str = str(suffix)
-        candidate = f"{sanitized[: 20 - len(suffix_str)]}{suffix_str}"
-
-    return candidate
 
 
 async def issue_tokens(response: Response, user_uuid: uuid_pkg.UUID) -> dict[str, str]:
