@@ -9644,8 +9644,15 @@ next minute. So the public branch appends `Vary: Cookie, Authorization`.
 
 `MutableHeaders.add_vary_header` rather than assignment, because `CORSMiddleware` has already set
 `Vary: Origin` by the time this runs — `add_middleware` inserts at the front of the stack, so the
-later-registered `ClientCacheMiddleware` is the outer one and sees the CORS headers on the way out.
-Assigning would drop `Origin` and let a cache serve one origin's CORS headers to another.
+later-registered `ClientCacheMiddleware` sits *outside* `CORSMiddleware` and sees its headers on the
+way out. Assigning would drop `Origin` and let a cache serve one origin's CORS headers to another.
+Measured on a cross-origin anonymous read: `Vary: Origin, Cookie, Authorization`.
+
+That is the same registration-order rule *"Security headers are the app's, not the proxy's"* above
+depends on, and `SecurityHeadersMiddleware` has since been registered after both, which makes it the
+outermost of the three. It only fills in headers a response lacks, so it neither reads nor disturbs
+what this one decided — but the ordering is now load-bearing in two sections, and anything inserted
+into that stack has to keep `ClientCacheMiddleware` outside `CORSMiddleware`.
 
 This does not fragment the cache: only requests with neither header get a public response, so every
 public entry shares the same vary key. And there is no matching `Vary` on the `private, no-store`
