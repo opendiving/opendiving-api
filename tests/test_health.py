@@ -6,7 +6,9 @@ datastores. The split matters because the image's `HEALTHCHECK` runs the readine
 worse, a green one over a broken instance.
 """
 
+import asyncio
 from collections.abc import Generator
+from time import perf_counter
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -42,6 +44,17 @@ def _make_health_client(*, db: AsyncMock | None = None, with_cache_middleware: b
 
 def _healthy_db() -> AsyncMock:
     return AsyncMock()
+
+
+#: What a hung datastore does, and the bound the probe is held to while it does it. The
+#: gap between them is the whole assertion: the request has to end on the bound, so any
+#: elapsed time near `_HANG_SECONDS` means no bound was applied.
+_HANG_SECONDS = 10.0
+_BOUND = 0.05
+
+
+async def _never_answers(*args: Any, **kwargs: Any) -> None:
+    await asyncio.sleep(_HANG_SECONDS)
 
 
 def _unreachable_db() -> AsyncMock:
@@ -179,16 +192,45 @@ class TestReadiness:
         assert "5432" not in response.text
         assert "postgres" not in response.text
 
-    def test_a_hanging_datastore_answers_rather_than_blocking(self, reachable_redis: AsyncMock):
-        """The probe is bounded, so a hung dependency reports not-ready instead of hanging."""
+    def test_a_hanging_database_is_cut_off_rather_than_waited_on(self, reachable_redis: AsyncMock):
+        """The probe is bounded, so a hung dependency reports not-ready instead of hanging.
+
+        The hang is real rather than an injected `TimeoutError`: that would be a caught
+        exception type with or without the `asyncio.timeout` block, so it would pass
+        against code that has no bound at all. Here nothing but the bound can end the
+        request, and the elapsed assertion is what says so - without it, a missing bound
+        turns this into a ten-second wait for a wrong answer rather than a fast failure.
+        """
         db = AsyncMock()
-        db.execute.side_effect = TimeoutError
+        db.execute.side_effect = _never_answers
         client = _make_health_client(db=db)
 
-        response = client.get("/health/ready")
+        with patch("src.app.api.v1.health._PROBE_TIMEOUT_SECONDS", _BOUND):
+            started = perf_counter()
+            response = client.get("/health/ready")
+            elapsed = perf_counter() - started
 
         assert response.status_code == 503
         assert response.json()["detail"] == "Not ready: database unreachable"
+        assert elapsed < _HANG_SECONDS / 2
+
+    def test_a_hanging_redis_is_cut_off_too(self):
+        """Its own `asyncio.timeout` block, so its own test."""
+        redis_client = AsyncMock()
+        redis_client.ping.side_effect = _never_answers
+        client = _make_health_client(db=_healthy_db())
+
+        with (
+            patch("src.app.core.utils.cache.client", redis_client),
+            patch("src.app.api.v1.health._PROBE_TIMEOUT_SECONDS", _BOUND),
+        ):
+            started = perf_counter()
+            response = client.get("/health/ready")
+            elapsed = perf_counter() - started
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == "Not ready: redis unreachable"
+        assert elapsed < _HANG_SECONDS / 2
 
 
 class TestReadinessIsNeverCached:

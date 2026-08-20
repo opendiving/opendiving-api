@@ -16,6 +16,13 @@ services:
       # the image's site-packages - both gone now.
       target: test
     command: pytest tests/ -v
+    # Cancels the base file's `restart: unless-stopped`. Compose merges service
+    # definitions field by field across `-f` files, so a scalar the overlay doesn't
+    # mention is inherited rather than reset - and inheriting it here turns a test run
+    # into a loop: the daemon restarts the container the moment pytest exits, whatever
+    # the exit code, so the suite races `--abort-on-container-exit`'s teardown and runs
+    # forever without it. Same reason `admin_init` sets it in the base file.
+    restart: "no"
     volumes:
       - ./tests:/code/tests
       - ./src:/code/src

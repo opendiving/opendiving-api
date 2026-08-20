@@ -8383,6 +8383,17 @@ rather than `always` so `docker compose stop` stays stopped across a daemon rest
 keeps `restart: "no"`: it is a one-shot whose whole contract is to exit, and a restart policy on it
 is a boot loop.
 
+The one thing that policy must not reach is `docker-compose.test.yml`, whose `api` service is the
+same one-shot shape: it overrides `command` to `pytest tests/ -v` and exits when the suite does.
+Compose merges service definitions field by field across `-f` files, so a scalar the overlay doesn't
+mention is inherited rather than reset — `restart: unless-stopped` from the base file would have the
+daemon restart the container the instant pytest exits, whatever the exit code, racing
+`--abort-on-container-exit`'s teardown and looping forever without it. The overlay therefore says
+`restart: "no"` explicitly. Anything else added to the base `api` service is inherited by the test
+overlay the same way; `docker compose -f docker-compose.yml -f docker-compose.test.yml config` is
+the check, and CI never runs this overlay (it uses GitHub Actions service containers), so nothing
+catches a mistake here but a person.
+
 **`redis:alpine` → `redis:8-alpine`, `axllent/mailpit` → `axllent/mailpit:v1.30`.** A bare
 `alpine`/`latest` tag is a floating pin: it resolves to whatever major is current on the day someone
 pulls, so two machines a year apart run different Redis and neither knows it. This is the same
