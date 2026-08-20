@@ -20,7 +20,6 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from uuid6 import uuid7
 
 from src.app.services import blob_store
 from tests.conftest import db_available
@@ -42,41 +41,38 @@ def volume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 class TestKeys:
-    def test_a_key_carries_the_kind_the_shard_the_row_and_the_content(self) -> None:
-        row_uuid = uuid7()
+    def test_a_key_carries_the_kind_the_shard_and_the_content(self) -> None:
         digest = "ff" + "0" * 62
-        assert blob_store.build_key("dive-files", row_uuid=row_uuid, sha256=digest) == (
-            f"dive-files/ff/{row_uuid}_{digest}"
-        )
+        kind, shard, name = blob_store.new_key("dive-files", sha256=digest).split("/")
+        assert (kind, shard) == ("dive-files", "ff")
+        assert name.endswith(f"_{digest}")
 
-    def test_the_shard_comes_from_the_hash_not_the_uuid(self) -> None:
-        """uuid7's leading hex is a millisecond timestamp, so sharding on it would put
-        every key minted in one month in a handful of directories. sha256's first byte is
+    def test_the_shard_comes_from_the_hash_not_the_nonce(self) -> None:
+        """uuid7's leading hex is a millisecond timestamp, so sharding on it would put every
+        key minted in one month in a handful of directories. sha256's first byte is
         uniformly random."""
-        row_uuid = uuid7()
-        shards = {
-            blob_store.build_key("dive-files", row_uuid=row_uuid, sha256=f"{n:02x}" + "0" * 62).split("/")[1]
-            for n in range(256)
-        }
+        shards = {blob_store.new_key("dive-files", sha256=f"{n:02x}" + "0" * 62).split("/")[1] for n in range(256)}
         assert len(shards) == 256
 
-    def test_a_retired_key_can_never_be_re_minted(self) -> None:
-        """The property the post-commit unlink rests on: the same bytes stored against a
-        new row get a new key, so an unlink scheduled for the old one cannot destroy the
-        new one's file."""
-        digest = "ab" + "0" * 62
-        first = blob_store.build_key("dive-files", row_uuid=uuid7(), sha256=digest)
-        second = blob_store.build_key("dive-files", row_uuid=uuid7(), sha256=digest)
-        assert first != second
+    def test_the_same_content_never_mints_the_same_key_twice(self) -> None:
+        """The invariant the whole post-commit unlink rests on: a retired key can never be
+        minted again, so an unlink scheduled for it cannot destroy a file some concurrent
+        write has since put there.
 
-    def test_the_same_row_and_the_same_bytes_give_the_same_key(self) -> None:
-        """Which is what makes a re-`PUT` of already-stored bytes a true no-op: nothing is
-        scheduled for unlinking, and a rewrite lands byte-identically."""
-        row_uuid = uuid7()
+        This is why `new_key` is deliberately impure. It used to take the owning row's uuid,
+        which was per-write for dive files (each content change inserts a new row) but *not*
+        for cards, whose row survives replacement - so a card key was really keyed on (slot,
+        content) and was re-mintable.
+        """
         digest = "ab" + "0" * 62
-        assert blob_store.build_key("dive-files", row_uuid=row_uuid, sha256=digest) == blob_store.build_key(
-            "dive-files", row_uuid=row_uuid, sha256=digest
-        )
+        keys = {blob_store.new_key("certification-files", sha256=digest) for _ in range(200)}
+        assert len(keys) == 200
+
+    def test_the_kind_is_the_only_thing_a_caller_chooses(self) -> None:
+        """Kinds are separate prefixes so a later one (dive photos, species images) can pick
+        its own layout without moving anything already stored."""
+        digest = "ab" + "0" * 62
+        assert blob_store.new_key("species-images", sha256=digest).startswith("species-images/ab/")
 
 
 class TestRoundTrip:

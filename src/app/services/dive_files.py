@@ -44,7 +44,7 @@ from .dive_profiles import (
 
 logger = logging.getLogger(__name__)
 
-# The key prefix every stored export is written under - see `blob_store.build_key`.
+# The key prefix every stored export is written under - see `blob_store.new_key`.
 KEY_KIND = "dive-files"
 
 # Matches the cap `/dive/parse` reads under, since the same file makes both trips: a
@@ -377,12 +377,11 @@ async def store_dive_file(
     # state therefore names bytes that exist; the only thing a crash between the two can
     # produce is an unreferenced file, which is harmless until the sweeper reclaims it.
     #
-    # The uuid is minted here rather than left to the INSERT so the key can carry it: a key
-    # that embeds a never-reused row uuid can never be re-minted after being retired, which
-    # is what makes the post-commit unlink below safe against a concurrent re-upload of the
-    # same bytes without any locking.
+    # The key carries a nonce minted per write, which is what makes the post-commit unlink
+    # below safe against a concurrent re-upload of the same bytes without any locking - a
+    # retired key can never be minted again. See `blob_store.new_key`.
     row_uuid = uuid7()
-    storage_key = blob_store.build_key(KEY_KIND, row_uuid=row_uuid, sha256=digest)
+    storage_key = blob_store.new_key(KEY_KIND, sha256=digest)
     await blob_store.put(storage_key, data)
 
     try:
@@ -413,8 +412,7 @@ async def store_dive_file(
                 # Spelled out rather than left to `PublicUUIDMixin`'s `default_factory`:
                 # that is a dataclass-level default applied when the ORM constructs an
                 # instance, and this Core-level INSERT never constructs one. Without it
-                # Postgres gets a NULL and rejects the row - and here it also has to match
-                # the uuid `storage_key` was built from.
+                # Postgres gets a NULL and rejects the row.
                 uuid=row_uuid,
                 created_at=now,
             )
@@ -448,9 +446,8 @@ async def store_dive_file(
         # rare; a retry is a better answer than a lock on the hot path.
         #
         # The file written above is left on the volume: no row references it, so it is an
-        # orphan for the sweeper. Unlinking it here would be wrong on a retry that lands on
-        # the same bytes - the retry mints a *new* uuid and so a new key, but a crash
-        # between the two leaves nothing worse than the same orphan either way.
+        # orphan for the sweeper. A retry mints a new key and writes again, so nothing here
+        # depends on cleaning this one up.
         await db.rollback()
         raise DiveFileConflictError(
             "The source file for this dive changed while this upload was in flight. Please try again."

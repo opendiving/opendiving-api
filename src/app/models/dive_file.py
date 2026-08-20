@@ -61,9 +61,10 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
     # the file at import time - not a promise the same parser would still claim it - so
     # that a later backfill can select the subset it knows how to re-read.
     parser_key: Mapped[str] = mapped_column(String(32))
-    # Where the bytes are, on the files volume: `dive-files/{sha256[:2]}/{uuid}_{sha256}`,
-    # minted by `blob_store.build_key`. Opaque to everything but that module - a valid S3
-    # object key as much as a relative path.
+    # Where the bytes are, on the files volume: `dive-files/{sha256[:2]}/{nonce}_{sha256}`,
+    # minted by `blob_store.new_key`. Opaque to everything but that module - a valid S3
+    # object key as much as a relative path. The nonce is per *write*, not the row's uuid:
+    # that is what stops a retired key ever being minted again.
     #
     # The key is *data*, not a rule: a future kind (dive photos, species images) can pick a
     # different layout without moving anything already stored.
@@ -87,8 +88,8 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
             # single-column index on it is needed.
             Index("ux_dive_file_user_id_sha256", "user_id", "sha256", unique=True),
             # One row per stored file. Two rows naming one key would let either one's
-            # deletion unlink the other's bytes - impossible by construction while keys
-            # embed the row uuid, and asserted here anyway because that is a property of
-            # `build_key`, which is a function, not of the schema.
+            # deletion unlink the other's bytes - impossible while every key carries a
+            # freshly minted nonce, and asserted here anyway because that is a property of
+            # `blob_store.new_key`, which is a function, not of the schema.
             Index("ux_dive_file_storage_key", "storage_key", unique=True),
         )

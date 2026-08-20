@@ -9865,27 +9865,42 @@ The whole filesystem lives in `services/blob_store.py`, so the S3 backend is a r
 rather than an interface with a single implementor. Triggers to build it: a hosted offering, a
 multi-node deployment, or real self-hoster demand.
 
-### The key embeds the row uuid, and that is what makes the unlink safe
+### Every key carries a per-write nonce, and that is what makes the unlink safe
 
-Keys are `{kind}/{sha256[:2]}/{row_uuid}_{sha256}` — `dive-files/…` and `certification-files/…`.
+Keys are `{kind}/{sha256[:2]}/{uuid7}_{sha256}` — `dive-files/…` and `certification-files/…` — and
+`blob_store.new_key` mints them. It is **deliberately impure**: the same arguments give a different
+key every call.
 
-The **row uuid** is the load-bearing half, and it is not obvious. Blobs and rows now live in two
-stores, so the ordering rule is: write the file, then commit the row; delete the row, then unlink
-after that commit. With keys derived from content and slot alone, that second rule is a data-loss
-bug rather than an orphan: delete a card while the same photo is concurrently re-uploaded, and the
-delete's post-commit unlink destroys the blob the re-upload just wrote, leaving a committed row
-pointing at nothing. Row uuids are never reused, so a retired key can never be re-minted and an
-unlink can never name a live row's file. It closes the sweeper's TOCTOU by the same construction: a
-key the sweep walked cannot be re-minted while it deliberates.
+That nonce is the load-bearing half, and it is not obvious. Blobs and rows live in two stores, so
+the ordering rule is: write the file, then commit the row; delete the row, then unlink after that
+commit. With keys that can be re-derived, that second rule is a data-loss bug rather than an orphan:
+one request's post-commit unlink destroys a blob a concurrent request has since written and
+committed a row against. A nonce minted per write makes a retired key unrepeatable, so an unlink can
+never name a live row's file. It closes the sweeper's TOCTOU by the same construction: a key the
+sweep walked cannot be re-minted while it deliberates.
 
-The **content hash** keeps writes idempotent (a retried write lands byte-identically on the same
-path), keeps blobs immutable (replacing a card mints a new key, so a reader mid-replacement can
-never get new bytes under old metadata), and lets an operator verify any file with `sha256sum`.
+**This was got wrong once, in the way that looked right.** The first version keyed on the *owning
+row's uuid*. For dive files that is safe by accident — a content change deletes the row and inserts
+a fresh one, so the row uuid is already per-write — but a card's row survives replacement on
+purpose: the `ON CONFLICT DO UPDATE` preserves its uuid so that re-photographing a card does not
+change the file's identity. Its key was therefore keyed on (slot, content) and *was* re-mintable,
+and the interleaving is real: request A replaces photo0 with photo1 and schedules an unlink of A's
+old key; request B concurrently re-uploads photo0, computes the identical old key, writes the file
+and blocks on the row lock; A commits and unlinks it; B's upsert then commits a row pointing at a
+file that no longer exists. Caught in review, not by a test — the mock-session test asserting the
+old "identical re-upload schedules no unlink" behaviour was asserting the bug's premise.
 
-Sharded on the hash prefix, not the uuid's: `PublicUUIDMixin` uses uuid7, whose leading hex is a
-millisecond timestamp, so uuid-sharding would put every key minted in a month in a handful of
-directories. One level of 256 — git's and the OCI registry's fanout — is plenty for thousands of
-files.
+What the fix costs: re-uploading a card's existing bytes is no longer a filesystem no-op. It writes
+a new file and retires the old one. The request was never a true no-op anyway — the upsert moves
+`updated_at` on every `PUT` — so what is lost is one avoided write, against a data-loss window.
+
+The **content hash** still earns its place: it keeps blobs immutable (new content always means a new
+key, so a reader mid-replacement can never get new bytes under old metadata), and it lets an
+operator verify any file with `sha256sum`.
+
+Sharded on the hash prefix, not the nonce's: uuid7's leading hex is a millisecond timestamp, so
+sharding on it would put every key minted in a month in a handful of directories. One level of 256 —
+git's and the OCI registry's fanout — is plenty for thousands of files.
 
 **No cross-row blob sharing.** A pure content-addressed store would dedupe across rows and users,
 and buy reference counting, a GC-versus-insert race and "does a bare hash leak that someone else has

@@ -95,10 +95,10 @@ something to look up, not to restate it.
 - **List endpoints clamp pagination.** → `clamp_pagination`
 - **Binary reads use `ETag`/`If-None-Match` → 304.**
 - **Uploaded payloads go on the files volume, never in a column.** `services/blob_store.py` is the
-  only module that touches a filesystem; keys come from `build_key` and are stored on the row. The
-  ordering rule is not optional: write the file, *then* commit the row; delete the row, *then*
-  unlink after the commit (`delete_after_commit`). → *"File payloads live on the files volume, not
-  in Postgres"*
+  only module that touches a filesystem; keys come from `new_key` (a fresh nonce per write, never
+  derived from the row) and are stored on the row. The ordering rule is not optional: write the
+  file, *then* commit the row; delete the row, *then* unlink after the commit
+  (`delete_after_commit`). → *"File payloads live on the files volume, not in Postgres"*
 
 ## Code Style — Python
 

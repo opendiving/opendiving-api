@@ -33,7 +33,7 @@ from src.app.schemas.dive import DiveFileInfo, DiveTechScalars
 from src.app.schemas.dive_mixture import DiveMixtureRead, GasRole
 from src.app.schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from src.app.services import dive_parsers as parsers_module
-from src.app.services.blob_store import build_key
+from src.app.services.blob_store import new_key
 from src.app.services.cache_invalidation import invalidate_dive_caches
 from src.app.services.dive_files import (
     KEY_KIND as DIVE_FILE_KIND,
@@ -89,9 +89,9 @@ def _existing(*, dive_id: int, content: bytes = VALID_SUUNTO_XML) -> _ExistingRo
         byte_size=len(content),
         original_filename="export.xml",
         parser_key="suunto_xml",
-        # The real key for this row and these bytes, so the `noop` branch's self-heal
-        # rewrites the file the row actually names rather than an invented path.
-        storage_key=build_key(DIVE_FILE_KIND, row_uuid=row_uuid, sha256=_digest(content)),
+        # A real key for these bytes, so the `noop` branch's self-heal rewrites the file
+        # the row actually names rather than an invented path.
+        storage_key=new_key(DIVE_FILE_KIND, sha256=_digest(content)),
         updated_at=None,
     )
 

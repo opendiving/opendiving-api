@@ -121,7 +121,7 @@ class TestDiveFileWriteOrdering:
     async def test_the_replaced_file_is_registered_for_unlinking_and_not_unlinked_yet(self, volume: Path) -> None:
         """Registered before the commit, because the hook fires *on* the commit - and the
         old file has to survive a rollback, since the row referencing it would too."""
-        old_key = blob_store.build_key(DIVE_KIND, row_uuid=uuid7(), sha256="cd" + "0" * 62)
+        old_key = blob_store.new_key(DIVE_KIND, sha256="cd" + "0" * 62)
         await blob_store.put(old_key, b"the previous export")
 
         db = self._session(replaced_keys=[old_key])
@@ -152,7 +152,7 @@ class TestDiveFileWriteOrdering:
         without this it does nothing: the row already says "stored", so the download keeps
         500ing while the server refuses the very bytes that would fix it."""
         row_uuid = uuid7()
-        key = blob_store.build_key(DIVE_KIND, row_uuid=row_uuid, sha256=XML_DIGEST)
+        key = blob_store.new_key(DIVE_KIND, sha256=XML_DIGEST)
         existing = (1, 7, row_uuid, "application/xml", len(XML), "export.xml", "suunto_xml", key, None)
 
         db = self._session(existing_row=existing)
@@ -167,7 +167,7 @@ class TestDiveFileWriteOrdering:
     async def test_a_re_upload_leaves_an_intact_file_alone(self, volume: Path, no_reextraction) -> None:
         """The normal `noop` path costs one `stat` and touches nothing."""
         row_uuid = uuid7()
-        key = blob_store.build_key(DIVE_KIND, row_uuid=row_uuid, sha256=XML_DIGEST)
+        key = blob_store.new_key(DIVE_KIND, sha256=XML_DIGEST)
         await blob_store.put(key, XML)
         before = (volume / key).stat().st_mtime_ns
 
@@ -183,9 +183,11 @@ class TestDiveFileWriteOrdering:
 
 class TestCardFileWriteOrdering:
     @staticmethod
-    def _session(*, existing: object | None = None) -> AsyncMock:
+    def _session(*, existing: str | None = None) -> AsyncMock:
+        """`existing` is the `storage_key` the side currently holds, which is all the upsert
+        path reads about it."""
         result = MagicMock()
-        result.one_or_none.return_value = existing
+        result.scalar_one_or_none.return_value = existing
         result.one.return_value = SimpleNamespace(uuid=uuid7(), updated_at=None)
 
         db = AsyncMock()
@@ -207,33 +209,41 @@ class TestCardFileWriteOrdering:
 
     @pytest.mark.asyncio
     async def test_replacing_a_side_retires_the_old_key(self, volume: Path) -> None:
-        row_uuid = uuid7()
-        old_key = blob_store.build_key(CARD_KIND, row_uuid=row_uuid, sha256="ef" + "0" * 62)
+        old_key = blob_store.new_key(CARD_KIND, sha256="ef" + "0" * 62)
         await blob_store.put(old_key, b"the blurry one")
 
-        db = self._session(existing=SimpleNamespace(uuid=row_uuid, storage_key=old_key))
+        db = self._session(existing=old_key)
         await store_certification_file(
             db, certification_id=3, side=CertificationSide.FRONT, upload=_upload(JPEG, "card.jpg")
         )
 
         assert db.info[blob_store._PENDING_DELETES] == [old_key]
-        # And the new file is already there, under a key carrying the *same* row uuid.
-        assert (volume / blob_store.build_key(CARD_KIND, row_uuid=row_uuid, sha256=JPEG_DIGEST)).is_file()
+        # The new file is already on the volume, under a key of its own.
+        written = [k for k in blob_store.iter_keys() if k != old_key]
+        assert len(written) == 1 and written[0].endswith(f"_{JPEG_DIGEST}")
 
     @pytest.mark.asyncio
-    async def test_re_uploading_identical_bytes_schedules_no_unlink(self, volume: Path) -> None:
-        """Same row, same content, same key - so the unlink would delete the file just
-        written. This guard is correctness, not an optimization."""
-        row_uuid = uuid7()
-        key = blob_store.build_key(CARD_KIND, row_uuid=row_uuid, sha256=JPEG_DIGEST)
+    async def test_re_uploading_identical_bytes_mints_a_new_key_and_retires_the_old(self, volume: Path) -> None:
+        """The case that used to be a filesystem no-op, and had to stop being one.
 
-        db = self._session(existing=SimpleNamespace(uuid=row_uuid, storage_key=key))
+        Deriving the key from the row made re-uploading a card's existing bytes reproduce the
+        key it already had - which meant a *retired* key could be minted again, and a
+        concurrent replacement's post-commit unlink could then delete the file this write had
+        just put there. Now every write mints its own key, so the old one is unambiguously
+        retired and the new one is unambiguously live.
+        """
+        old_key = blob_store.new_key(CARD_KIND, sha256=JPEG_DIGEST)
+        await blob_store.put(old_key, JPEG)
+
+        db = self._session(existing=old_key)
         await store_certification_file(
             db, certification_id=3, side=CertificationSide.FRONT, upload=_upload(JPEG, "card.jpg")
         )
 
-        assert blob_store._PENDING_DELETES not in db.info
-        assert (volume / key).read_bytes() == JPEG
+        assert db.info[blob_store._PENDING_DELETES] == [old_key]
+        written = [k for k in blob_store.iter_keys() if k != old_key]
+        assert len(written) == 1, "the re-upload must land under a key of its own, not the retired one"
+        assert (volume / written[0]).read_bytes() == JPEG
 
 
 class TestTheReadTransactionIsReleasedBeforeTheBlobWrite:
@@ -252,9 +262,9 @@ class TestTheReadTransactionIsReleasedBeforeTheBlobWrite:
     """
 
     @staticmethod
-    def _tracking_session(calls: list[str], *, existing: object | None = None) -> AsyncMock:
+    def _tracking_session(calls: list[str], *, existing: str | None = None) -> AsyncMock:
         result = MagicMock()
-        result.one_or_none.return_value = existing
+        result.scalar_one_or_none.return_value = existing
         result.one.return_value = SimpleNamespace(uuid=uuid7(), updated_at=None)
 
         def record_query(*args: object, **kwargs: object) -> MagicMock:
@@ -319,11 +329,7 @@ class TestTheReadTransactionIsReleasedBeforeTheBlobWrite:
     async def test_a_replacement_releases_before_writing_too(self, volume: Path, recording_put: list[str]) -> None:
         """The branch where the lookup actually found something, and so has a `Row` that has
         to survive the rollback."""
-        row_uuid = uuid7()
-        existing = SimpleNamespace(
-            uuid=row_uuid, storage_key=blob_store.build_key(CARD_KIND, row_uuid=row_uuid, sha256="ef" + "0" * 62)
-        )
-        db = self._tracking_session(recording_put, existing=existing)
+        db = self._tracking_session(recording_put, existing=blob_store.new_key(CARD_KIND, sha256="ef" + "0" * 62))
 
         await store_certification_file(
             db, certification_id=3, side=CertificationSide.FRONT, upload=_upload(JPEG, "card.jpg")

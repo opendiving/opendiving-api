@@ -19,7 +19,6 @@ when there is a caller that can use it.
 
 import logging
 import os
-import uuid as uuid_pkg
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -27,6 +26,7 @@ import anyio.to_thread
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
+from uuid6 import uuid7
 
 from ..core.config import settings
 
@@ -58,30 +58,38 @@ class BlobMissingError(Exception):
         super().__init__(f"No stored file for key {key!r}")
 
 
-def build_key(kind: str, *, row_uuid: uuid_pkg.UUID, sha256: str) -> str:
-    """The key one row's payload is stored under: `{kind}/{sha256[:2]}/{uuid}_{sha256}`.
+def new_key(kind: str, *, sha256: str) -> str:
+    """Mint a key for one write: `{kind}/{sha256[:2]}/{uuid7}_{sha256}`.
 
-    Both halves earn their place.
+    **Deliberately not a pure function.** Every call returns a different key for the same
+    arguments, and that is the entire point: the uuid is a nonce, minted fresh per write and
+    never reused, which is what makes the post-commit unlink in `delete_after_commit` safe
+    without any locking. A key that has been retired can never be minted again, so an unlink
+    scheduled for it cannot destroy a file some concurrent write has since put there.
 
-    The **row uuid** makes a retired key unrepeatable, which is what lets a post-commit
-    unlink be safe without a lock. Keyed on content alone, deleting a card while the same
-    photo is concurrently re-uploaded would have the delete's unlink destroy the blob the
-    re-upload just wrote - a committed row pointing at nothing, i.e. data loss rather than
-    an orphan. Row uuids are never reused, so an unlink can only ever name a file no live
-    row references. It also removes the sweeper's TOCTOU: a key the sweep walked cannot be
-    re-minted while it deliberates.
+    It used to take the owning row's uuid instead, which was wrong in a way worth recording
+    because it *looked* right. For dive files it happened to be safe - each content change
+    inserts a fresh row, so the row uuid was already per-write - but a card's row survives
+    replacement by design (`ON CONFLICT DO UPDATE` preserves its uuid), so its key was really
+    keyed on (slot, content) and *was* re-mintable. Replace a card while a concurrent request
+    re-uploads the photo being replaced, and the replacement's unlink deletes the file the
+    re-upload just wrote, leaving a committed row pointing at nothing. Minting here removes
+    the chance to get that wrong at a call site.
 
-    The **content hash** keeps writes idempotent (a retried write of the same row and
-    content lands byte-identically on the same path), keeps blobs immutable (replacing a
-    card mints a new key, so a reader mid-replacement can never get new bytes under old
-    metadata), and lets an operator verify any file in the tree with `sha256sum`.
+    What it costs: re-uploading a card's existing bytes now writes a new file and retires the
+    old one rather than landing byte-identically on the same path. Cheap, and the row's
+    `updated_at` moved on that request anyway.
 
-    Sharded on the hash prefix rather than the uuid's: `PublicUUIDMixin` uses uuid7, whose
-    leading hex is a millisecond timestamp, so every key minted in one month would land in
-    a handful of directories. sha256's first byte is uniformly random. One level of 256 is
-    plenty for a corpus of thousands - the same fanout git and the OCI registry use.
+    The **content hash** still earns its place - it lets an operator verify any file in the
+    tree with `sha256sum`, and it keeps blobs immutable, since new content always means a new
+    key and a reader mid-replacement can never be handed new bytes under old metadata.
+
+    Sharded on the hash prefix rather than the uuid's: uuid7's leading hex is a millisecond
+    timestamp, so uuid-sharding would put every key minted in one month in a handful of
+    directories. sha256's first byte is uniformly random. One level of 256 is plenty for a
+    corpus of thousands - the same fanout git and the OCI registry use.
     """
-    return f"{kind}/{sha256[:2]}/{row_uuid}_{sha256}"
+    return f"{kind}/{sha256[:2]}/{uuid7()}_{sha256}"
 
 
 def storage_root() -> Path:

@@ -31,7 +31,7 @@ from . import blob_store
 
 # The key prefix every card file is stored under. A "kind" rather than a directory, so a
 # later kind (dive photos, species images) can pick its own layout without moving anything
-# already written - see `blob_store.build_key`.
+# already written - see `blob_store.new_key`.
 KEY_KIND = "certification-files"
 
 # Phone photos of a card run 2-4 MB; a flatbed scan of one can reach 8. Ten is generous
@@ -113,6 +113,11 @@ async def store_certification_file(
     different stores: a crash between the two strands an unreferenced file, which is
     harmless and swept, where the reverse order would leave a committed row pointing at
     bytes that do not exist.
+
+    Re-uploading a side's existing bytes is idempotent in what it *means* - same row, same
+    content, same everything the API reports - but not on the filesystem: it writes a new
+    file and retires the old one, because every key is minted fresh. See `blob_store.new_key`
+    for why that is the safe direction to err in.
     """
     data = await read_upload_within_limit(upload, MAX_CARD_FILE_SIZE)
     if not data:
@@ -123,29 +128,27 @@ async def store_certification_file(
     digest = hashlib.sha256(data).hexdigest()
     now = datetime.now(UTC)
 
-    # A narrow read of what this side currently holds, purely so the replaced file can be
-    # unlinked afterwards and so the new key carries the row's *existing* uuid rather than
-    # a fresh one. Re-feeding a live row the same bytes therefore mints the identical key,
-    # which is what makes the whole `PUT` idempotent down to the filesystem: nothing is
-    # scheduled for unlinking, and the write lands byte-identically on the file already
-    # there.
-    #
-    # It does not make the upsert below any less atomic - that is still one statement
-    # against the unique index. In the vanishingly rare case where a concurrent insert wins
-    # between this read and that statement, the `DO UPDATE` fires and the stored key
-    # carries a uuid7 minted here instead of the row's. Still unique, still never reusable,
-    # and the loser's own file is simply an orphan for the sweeper.
-    existing = (
+    # A narrow read of the key this side currently holds, purely so the file it names can be
+    # unlinked once the replacement is committed. It does not make the upsert below any less
+    # atomic - that is still one statement against the unique index - and a concurrent
+    # insert winning between this read and that statement costs nothing worse than an orphan
+    # for the sweeper.
+    existing_key = (
         await db.execute(
-            select(CertificationFile.uuid, CertificationFile.storage_key).where(
+            select(CertificationFile.storage_key).where(
                 CertificationFile.certification_id == certification_id,
                 CertificationFile.side == side.value,
             )
         )
-    ).one_or_none()
+    ).scalar_one_or_none()
 
-    row_uuid = existing.uuid if existing is not None else uuid7()
-    key = blob_store.build_key(KEY_KIND, row_uuid=row_uuid, sha256=digest)
+    # Minted fresh, never derived from the row. This row *survives* replacement by design -
+    # the `DO UPDATE` below deliberately preserves its uuid - so a key built from that uuid
+    # would be keyed on (slot, content) and could be minted again after being retired. Two
+    # requests, one replacing the photo and one re-uploading the photo being replaced, would
+    # then have the first one's post-commit unlink delete the file the second just wrote.
+    # See `blob_store.new_key`, which is where that reasoning lives.
+    key = blob_store.new_key(KEY_KIND, sha256=digest)
     # Before the write, not after: `blob_store.put` is a threadpool hop with an `fsync` in
     # it, and the lookup above autobegan a transaction that would otherwise be held open
     # across the whole of it. The `Row` of two scalars survives the rollback - see
@@ -172,7 +175,7 @@ async def store_certification_file(
             # is a dataclass-level default, applied when the ORM constructs an instance,
             # and this Core-level INSERT never constructs one. Without it Postgres gets a
             # NULL and rejects the row.
-            uuid=row_uuid,
+            uuid=uuid7(),
             created_at=now,
             **payload,
         )
@@ -186,11 +189,12 @@ async def store_certification_file(
     )
     result = await db.execute(stmt)
     row = result.one()
-    # Guarded on inequality, and that guard is load-bearing rather than an optimization:
-    # the same row re-fed the same bytes produces the same key, and unlinking it would
-    # delete the file just written.
-    if existing is not None and existing.storage_key != key:
-        blob_store.delete_after_commit(db, existing.storage_key)
+    # Unconditional, because `key` is freshly minted and so can never be the key just read.
+    # An earlier version guarded on inequality to make an identical re-upload a filesystem
+    # no-op; that guard only existed because keys were derived from the row, which is the
+    # bug above.
+    if existing_key is not None:
+        blob_store.delete_after_commit(db, existing_key)
     await db.commit()
 
     return CertificationFileInfo(

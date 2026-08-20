@@ -48,13 +48,16 @@ class CertificationFile(Base, PublicUUIDMixin, TimestampMixin):
     # `storage_key`.
     sha256: Mapped[str] = mapped_column(String(64))
     # Where the bytes are, on the files volume:
-    # `certification-files/{sha256[:2]}/{uuid}_{sha256}`, minted by `blob_store.build_key`.
+    # `certification-files/{sha256[:2]}/{nonce}_{sha256}`, minted by `blob_store.new_key`.
     # Opaque to everything but that module - a valid S3 object key as much as a relative
     # path.
     #
-    # Replacing a side's photo mints a new key (new content, same row uuid), which is what
-    # keeps stored files immutable: a reader mid-replacement can never be handed new bytes
-    # under the old metadata.
+    # **The nonce is per write, deliberately not this row's uuid.** This row survives
+    # replacement (the upsert preserves its uuid), so a key derived from it would be keyed
+    # on (slot, content) and could be re-minted after being retired - see
+    # `blob_store.new_key`. Every replacement therefore mints a new key, which also keeps
+    # stored files immutable: a reader mid-replacement can never be handed new bytes under
+    # the old metadata.
     storage_key: Mapped[str] = mapped_column(String(255))
 
     @declared_attr.directive
