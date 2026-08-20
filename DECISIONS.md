@@ -2982,6 +2982,9 @@ standard fix is a short reuse-detection window (accept a just-rotated token once
 The token is spent before its replacement is minted, so a crash between the two leaves the caller
 signed out rather than holding two live refresh tokens.
 
+Rotation also creates a signal, which took a second change to actually read - see *"A reused refresh
+token is a `WARNING`, and `revoked_at` is what makes it legible"* below.
+
 That two-tab race is a genuine concurrency loss and is not the same thing as the same-second token
 *collision* described in the next section, which looked identical from the outside (a random logout)
 but happened with a single tab and had nothing to do with concurrency.
@@ -3024,6 +3027,108 @@ Two things worth knowing:
 The frontend carried a workaround for this: `sleepPastTheSecond()` in
 `opendiving-web/scripts/screenshots.mjs`, and *"The one-second refresh-token collision"* in
 `opendiving-web/DECISIONS.md`. Both can go once this is deployed.
+
+## A reused refresh token is a `WARNING`, and `revoked_at` is what makes it legible
+
+Rotation was already correct: `/auth/refresh` spends the presented cookie before minting its
+replacement, so a replay fails closed. What was missing was the *signal*. A reuse attempt is the
+strongest evidence this app ever gets that a refresh cookie has been stolen, and it produced nothing
+an operator could see.
+
+`verify_token` is why. It collapses two very different outcomes into one `None` - "a token we issued
+and then deliberately revoked, presented again" and "unparseable garbage" - and
+`refresh_access_token` turned both into the same `UnauthorizedException("Invalid refresh token.")`.
+The first is a security event. The second is noise.
+
+**`verify_token`'s signature did not change.** It runs on every authenticated request through
+`api.dependencies.get_current_user`, and widening its return type into a discriminated result would
+reshape the hottest path in the app for the benefit of one rare branch. Instead the question is
+asked a second time on the failure path only, by `core.security.revocation_time` - one indexed
+lookup (`token_blacklist.token` is unique) on a path that has already decided to answer 401, and no
+cost at all on any request that succeeds.
+
+`WARNING`, not `info`, for the reason `fetch_owned_or_raise` documents at length: nothing here
+configures logging below `configure_logging`, `uvicorn` configures only its own loggers, and an
+`info` call would be dropped on the floor in exactly the session where someone is trying to work out
+what happened. The level is load-bearing, and `tests/test_auth_refresh.py` asserts it rather than
+merely asserting that *something* was logged.
+
+### The hard part: telling theft from the documented race
+
+Rotation's own trade-off (above) is that **two tabs refreshing at the same instant race, and the
+loser gets a 401** - and the loser reaches precisely this branch. A naive reuse warning therefore
+fires on a benign, expected and not-especially-rare event, and an alert that cries wolf is worse
+than no alert at all.
+
+The signal that separates them is **elapsed time since the token was spent**: a tab race resolves in
+milliseconds, a stolen cookie is replayed minutes or hours later. The old schema could not supply
+it. `token_blacklist` stored only `token` and `expires_at`, and `expires_at` is copied from the
+token's own `exp` - so it says when the token was *issued*, never when it was revoked.
+
+Hence `token_blacklist.revoked_at`, and the migration that adds it. That is the whole schema change:
+one timestamp column, stamped by `core.security._blacklist_one` from the same clock as everything
+else in that module (so a test can freeze it), with a `server_default` of `now()` because the column
+is NOT NULL and existing rows need backfilling.
+
+That backfill is worth stating out loud, because it is a lie the column tells exactly once: every
+row that predates the migration gets the moment the migration ran, not the moment it was actually
+revoked. So immediately after upgrading, a query like
+`WHERE revoked_at > now() - interval '10 minutes'` matches the *entire* pre-existing table rather
+than the handful of rows someone meant. It is harmless for the log line - those rows are all older
+than any live session's rotation - and it stops being true once the first `purge_expired_tokens` run
+clears them, but it is a real foot-gun in the window between. (Written from experience, in that
+window.)
+
+The log line reports the gap and says what it means rather than asserting theft, because only the
+reader can tell the two apart:
+
+> A revoked refresh token was presented (subject: …) 0.004s after it was revoked. Under a second is
+> the two-tab rotation race POST /auth/refresh documents; a longer gap is worth investigating as a
+> stolen cookie.
+
+The elapsed figure is rendered as seconds below a minute and as a `timedelta` above it. Both ends of
+the range matter: milliseconds are what distinguish the race, and a replay can arrive days later,
+where `518400.000s` is a number nobody reads at a glance.
+
+### What was deliberately not done
+
+**Tier 1 - log unconditionally, no schema change.** Honest and cheaper, and there is a real argument
+for it: a self-hosted single-user instance has nobody watching logs anyway. Rejected because a
+warning that fires on the documented race and cannot say which case it is leaves the reader with the
+same "was this real?" question they started with. One column is a small price for a line that is
+actually actionable.
+
+**Tier 3 - family revocation.** The textbook response to reuse is to revoke the whole descendant
+chain of the reused token. That needs a lineage identifier propagated across rotations, and no such
+thing exists: `_new_jti` identifies one issuance at a time, deliberately, and every rotation mints
+an unrelated token. Building it means a second column, threading the family id through
+`create_refresh_token`/`issue_tokens`/`refresh_access_token`, and a revocation path that deletes by
+family rather than by value. It is the right direction if this ever matters; it is out of scope for
+making the event *visible*, which is what was actually missing. Recorded here rather than left
+unmentioned so the next person knows it was considered.
+
+**Automatic sign-out on reuse.** Not done for the same reason as the wording above: the tab race
+reaches this branch, and signing a user out because two of their tabs refreshed together would turn
+a harmless collision into a real logout. The 401 the replay already gets is the whole response.
+
+**Anything visible in the response.** The 401 and its `detail` are byte-identical whether the token
+was revoked or was never a token at all. Diverging would make the response an oracle for whether a
+given cookie was ever real, which is exactly the thing the single message exists to avoid. There is
+a test for it.
+
+### The purge ends the detection window, and that is fine
+
+`purge_expired_tokens` (hourly, `core/worker/functions.py`) deletes blacklist rows once `expires_at`
+has passed, which also ends the window in which a reuse of that token is detectable. That is
+consistent rather than a hole: `expires_at` *is* the token's own `exp`, so past it the token fails
+on expiry in `jwt.decode` regardless of any blacklist row, and there is no longer a usable
+credential to detect the theft of. The detection window and the token's useful life are the same
+window by construction.
+
+One seam worth knowing about, between a token's `exp` and the next hourly purge: the row still
+exists, so a presentation still logs, but `jwt.decode` now raises on expiry and `token_subject`
+degrades to reporting an unknown subject. That is deliberate - the alternative is decoding with
+`verify_exp` off, and there is no reason to read claims off an expired token to garnish a log line.
 
 ## Blacklist expiries are UTC-aware, and so is the purge that reads them
 

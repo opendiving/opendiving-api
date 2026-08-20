@@ -122,6 +122,7 @@ class DiveFileTokenData(BaseModel):
 class TokenBlacklistBase(BaseModel):
     token: str
     expires_at: datetime
+    revoked_at: datetime
 
 
 class TokenBlacklistRead(TokenBlacklistBase):

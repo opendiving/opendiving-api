@@ -17,7 +17,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .config import settings
 from .db.crud_token_blacklist import crud_token_blacklist
 from .exceptions.http_exceptions import UnauthorizedException
-from .schemas import DiveFileTokenData, GoogleUserInfo, OnboardingTokenData, TokenBlacklistCreate, TokenData
+from .schemas import (
+    DiveFileTokenData,
+    GoogleUserInfo,
+    OnboardingTokenData,
+    TokenBlacklistCreate,
+    TokenBlacklistRead,
+    TokenData,
+)
 
 SECRET_KEY: SecretStr = settings.SECRET_KEY
 ALGORITHM = settings.ALGORITHM
@@ -199,6 +206,52 @@ async def verify_token(token: str, expected_token_type: TokenType, db: AsyncSess
         return None
 
 
+async def revocation_time(token: str, db: AsyncSession) -> datetime | None:
+    """When `token` was deliberately revoked, or `None` if it never was.
+
+    `verify_token` above deliberately declines to say. "A token we issued and then
+    revoked, presented again" and "unparseable garbage" both come back as `None`, and
+    that is the right trade for it: it runs on every authenticated request via
+    `api.dependencies.get_current_user`, and widening its return type into a
+    discriminated result would change the shape of the hottest path in the app for the
+    benefit of one rare branch. Callers that need the distinction ask the question a
+    second time, here - `api.v1.auth.refresh_access_token` is the only one, and only
+    after it has already decided to answer 401.
+
+    So this costs nothing on any path that succeeds, and one indexed lookup on one that
+    doesn't (`TokenBlacklist.token` is unique and indexed).
+
+    Not an authorization decision: a `None` here means "not revoked", which is a long way
+    from "valid". Nothing may treat it as the latter.
+    """
+    row = await crud_token_blacklist.get(db, token=token, schema_to_select=TokenBlacklistRead, return_as_model=True)
+    return row.revoked_at if isinstance(row, TokenBlacklistRead) else None
+
+
+def token_subject(token: str) -> str | None:
+    """The `sub` claim of a token whose fate has already been decided elsewhere, for a log
+    line that can name the account involved.
+
+    Every check `verify_token` makes is skipped bar the signature and expiry that
+    `jwt.decode` enforces on its own, so this must never become an authorization
+    decision - it exists to make a `WARNING` legible, and nothing more.
+
+    `None` covers every way a token can fail to yield a subject, expiry included. The case
+    this exists for is unaffected: a token being *reused* rather than expired is by
+    definition still inside its own `exp`, so it decodes. Between a token's `exp` and
+    `purge_expired_tokens` clearing its blacklist row there is a window where a revoked
+    token no longer decodes, and the caller degrades to reporting an unknown subject
+    rather than letting an exception escape a path that is already returning a 401.
+    """
+    try:
+        payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+
+    subject = payload.get("sub")
+    return subject if isinstance(subject, str) else None
+
+
 # -------------- onboarding tokens --------------
 async def create_onboarding_token(data: OnboardingTokenData) -> str:
     """Creates a short-lived (`settings.ONBOARDING_TOKEN_EXPIRE_MINUTES`) JWT carrying a
@@ -328,6 +381,11 @@ async def _blacklist_one(token: str, db: AsyncSession) -> None:
     tzinfo would render that in the *host's* local zone and store the result in a
     `DateTime(timezone=True)` column - so a server in UTC+2 would file every entry two
     hours late and `purge_expired_tokens` would delete each one two hours early.
+
+    `revoked_at` is stamped here rather than left to the column's `server_default`, so that
+    it comes from the same clock as everything else in this module and can be frozen in a
+    test alongside them. It answers a question `expires_at` cannot - see the column's own
+    comment, and `api.v1.auth._warn_if_revoked`, which is its only reader.
     """
     try:
         payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
@@ -337,7 +395,10 @@ async def _blacklist_one(token: str, db: AsyncSession) -> None:
     exp_timestamp = payload.get("exp")
     if exp_timestamp is not None:
         expires_at = datetime.fromtimestamp(exp_timestamp, UTC)
-        await crud_token_blacklist.create(db, object=TokenBlacklistCreate(token=token, expires_at=expires_at))
+        await crud_token_blacklist.create(
+            db,
+            object=TokenBlacklistCreate(token=token, expires_at=expires_at, revoked_at=datetime.now(UTC)),
+        )
 
 
 async def blacklist_tokens(access_token: str, refresh_token: str, db: AsyncSession) -> None:
