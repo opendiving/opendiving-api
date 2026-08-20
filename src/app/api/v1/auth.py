@@ -588,6 +588,10 @@ async def refresh_access_token(
     again" from "garbage", which the 401 deliberately does not. The *response* is
     identical either way - it must never become an oracle for whether a token was ever
     real.
+
+    A token that verifies is not the same thing as an account that still exists, so the
+    subject is resolved before a replacement pair is minted, and a deleted account 401s
+    here. Same message as every other failure, for the same oracle reason.
     """
     await enforce_rate_limit(
         f"auth:refresh:ip:{client_ip(request)}",
@@ -603,6 +607,18 @@ async def refresh_access_token(
     if not user_data:
         # Only reached on a failure, so the extra lookup costs nothing on the happy path.
         await _warn_if_revoked(refresh_token, db)
+        raise UnauthorizedException("Invalid refresh token.")
+
+    # Neither `verify_token` nor `issue_tokens` touches the `user` table, so without this
+    # a refresh cookie outlives its own user row: `DELETE /user` blacklists only the two
+    # tokens presented on that call, and every *other* signed-in device goes on rotating
+    # its cookie indefinitely. `get_current_user` filters `is_deleted=False` on every
+    # read, so this is the one path where "the account is gone" didn't already mean 401.
+    #
+    # Asked before the token is spent, so a request that answers 401 writes nothing - and
+    # so a soft delete that is reversed leaves the account's other sessions intact, having
+    # made them inert rather than destroyed them.
+    if not await crud_users.exists(db=db, uuid=user_data.user_uuid, is_deleted=False):
         raise UnauthorizedException("Invalid refresh token.")
 
     # Spend the presented token before minting its replacement, so a crash between the

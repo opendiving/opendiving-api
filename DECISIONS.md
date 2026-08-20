@@ -3675,6 +3675,12 @@ without that, every token minted before this change - and every forged `sub` - w
 than a 401. Those older tokens are all invalidated by the cutover, which is why this was worth doing
 pre-launch rather than after.
 
+Two asides above - that `/auth/refresh` re-mints its subject without ever asking whether it still
+resolves - described the endpoint accurately and went on doing so after the subject became a uuid.
+An immutable subject cannot come to name a *different* account, but it can name a **deleted** one,
+which is the other half and is fixed separately: see *"A refresh token is only as alive as its
+account"* below.
+
 The tempting smaller fix - blacklist the caller's tokens inside `patch_user`, mirroring `erase_user`
 \- is **not** sufficient. It closes (1) and (2), but not (3): the attacker's orphaned refresh token
 lives in a separate cookie jar and is simply never presented on the rename request, so there is
@@ -10390,3 +10396,55 @@ None of this survives someone determined: `git push --no-verify` skips the push 
 outside the Bash tool never meets the other one, and both files are editable by anything that can
 edit the repo. They are speed bumps against a habit, and the habit is the actual failure mode. The
 guard that holds against everything else is the ruleset above, the day the repo is public.
+
+## A refresh token is only as alive as its account
+
+`verify_token` checks four things - not blacklisted, unexpired, correctly signed, right `token_type`
+\- and none of them is a database row belonging to a person. `issue_tokens` doesn't ask either; it
+mints a pair for whatever uuid it is handed. So `POST /auth/refresh` took a cookie, verified it, and
+minted a replacement without anything on that path ever resolving the subject to a live user.
+
+Every *read* is fine, and that is what hid this. `get_current_user` filters `is_deleted=False`, so
+the instant `DELETE /user` flips the flag every route that reads anything 401s. Every *other* way to
+obtain a session goes through `resolve_identity` or a credential row, both of which name an account.
+`/auth/refresh` is the one that hands out a session on the strength of a signature alone, and it was
+the one that never looked.
+
+The consequence is not subtle. `erase_user` blacklists the access and refresh tokens **presented on
+that request** and nothing else, because they are the only two it can see. A second signed-in device
+keeps a refresh cookie that returns 200, rotates itself, and goes on doing so for the whole
+`REFRESH_TOKEN_EXPIRE_DAYS` window - and, since nobody re-resolves the `sub`, it would keep doing so
+after the row itself was gone. "Delete my account" therefore meant "this browser is signed out",
+which is not what the button says and is precisely wrong for the case that motivates deletion: the
+stolen phone, the shared laptop, the ex-buddy who still has a session open.
+`plans/account-deletion.md` §1 rests the whole grace-period design on the account going dark
+immediately, and that claim was false everywhere except the device that pressed the button.
+
+The fix is one `crud_users.exists(db=db, uuid=..., is_deleted=False)` between the verify and the
+rotation. Three details in it are decisions rather than mechanics:
+
+- **The 401 is the same 401.** A distinguishable message would turn the endpoint into an oracle for
+  whether a given uuid ever had an account, which is the rule the reuse logging already follows - "a
+  token we revoked" and "unparseable garbage" answer identically too, and only the log tells them
+  apart.
+- **Nothing is logged.** A deleted account's other devices refresh on their own schedule for as long
+  as their cookies live, so a line here would be a recurring, expected event - the opposite of the
+  reused-token warning, which is rare and means something.
+- **The lookup happens *before* the presented token is spent**, so a request that answers 401 writes
+  nothing. That mirrors the existing refusal to blacklist a token that failed to verify, and it has
+  a second consequence worth stating: a soft delete that gets reversed leaves the account's other
+  sessions working, because they were made inert rather than destroyed. `POST /auth/restore` in
+  `plans/account-deletion.md` §5 depends on that, and a restore that silently signed every other
+  device out would be a worse answer than the one this gives.
+
+The cost is one indexed lookup on an endpoint that already does two, on a path that runs once per
+access-token lifetime per device.
+
+`tests/test_auth_refresh.py` pins it twice over. The unit tests use a fake `crud_users` that applies
+its keyword filters the way FastCRUD does, so a filter naming a column `User` doesn't carry fails
+there rather than passing; the Postgres-backed class then runs the real query, which is the only
+place a filter that is wrong as *SQL* can show up. That class also exists because of what the mocked
+session does on its own: `Mock(spec=AsyncSession)` answers `execute` with another mock, which
+`exists` reads as a row found - so every pre-existing test in that file kept passing after the check
+was added, and would keep passing if it were deleted. They now state the live account explicitly
+(`SignedInAccount`) instead of inheriting one from a truthy mock.
