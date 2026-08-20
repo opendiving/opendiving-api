@@ -274,9 +274,10 @@ the first api-only fix and then has to be forced back by hand at every release a
 | Any user-visible feature                                                                       | minor   | minor      |
 | Fixes and internals only                                                                       | patch   | patch      |
 
-"Breaking" is about the operator's experience, not the code's. A schema change counts today, because
-applying it is a manual `ALTER TABLE` on someone else's database; that stops being true when
-migrations run on startup.
+"Breaking" is about the operator's experience, not the code's — which is why a schema change on its
+own is *not* breaking: migrations run themselves on startup, and the upgrade drill is what keeps
+that claim honest. What counts is anything the operator has to do by hand before the new version
+will run: an edited `.env`, a changed config contract, a removed behaviour they depended on.
 
 Every PR title is a conventional commit subject, so the breaking half of that table has a scanner:
 
