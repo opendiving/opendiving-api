@@ -6,13 +6,20 @@ on:
     # corrected, so a failing PR goes green without an empty commit to push.
     types: [opened, edited, reopened]
 
-# Nothing is checked out and no API call is made - the title arrives in the
-# event payload - so the job needs no token at all.
-permissions: {}
+# The one list of types, read by both jobs below: the check that enforces them
+# and the labels that carry them into the release notes. CONTRIBUTING.md spells
+# the same list out in prose - keep the two in step.
+env:
+  TYPES: feat|fix|refactor|docs|test|chore|perf|ci|build|revert
 
 jobs:
   semantic-title:
     runs-on: ubuntu-latest
+
+    # Nothing is checked out and no API call is made - the title arrives in the
+    # event payload - so this job needs no token at all. Labelling does need one,
+    # which is why it is a separate job rather than a step here.
+    permissions: {}
 
     steps:
       # PRs here are squash-merged, so this title becomes the commit subject on
@@ -27,7 +34,7 @@ jobs:
         env:
           TITLE: ${{ github.event.pull_request.title }}
         run: |
-          PATTERN='^(feat|fix|refactor|docs|test|chore|perf|ci|build|revert)(\([a-z0-9._-]+\))?!?: .+'
+          PATTERN="^($TYPES)(\([a-z0-9._-]+\))?!?: .+"
 
           if printf '%s' "$TITLE" | grep -Eq "$PATTERN"; then
             echo "OK: $TITLE"
@@ -38,7 +45,7 @@ jobs:
           echo "    $TITLE"
           echo
           echo "Expected: <type>[(scope)][!]: <description>"
-          echo "Types:    feat, fix, refactor, docs, test, chore, perf, ci, build, revert"
+          echo "Types:    ${TYPES//|/, }"
           echo
           echo "Examples: feat: extract and serve per-sample dive profiles"
           echo "          fix(dives): reject a profile with no samples"
@@ -46,3 +53,98 @@ jobs:
           echo
           echo "Edit the title - this check re-runs on edit, no push needed."
           exit 1
+
+  # The label is what `.github/release.yml` files the PR under when the release
+  # notes are generated. Deriving it from the title rather than asking for it by
+  # hand means the two can never disagree.
+  label:
+    needs: semantic-title
+
+    # A fork's `GITHUB_TOKEN` is read-only whatever a workflow asks for, so this
+    # would fail on every external contribution. Skipping it there is why it is
+    # its own job: the title check above is the *required* one, and a red X on
+    # every outside PR is the last thing this repository needs the week it goes
+    # public. Fork PRs get labelled by hand, or by a maintainer retitling them.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      # `pull-requests: write` applies the label. `issues: write` is what creates
+      # one that doesn't exist yet - labels are an issues-API resource, and
+      # `gh pr edit --add-label` fails outright on a name the repository has
+      # never seen, which is every name until the first PR of that type.
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Label the PR with its type
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+
+          # The title matched the pattern above, so this extracts from a known
+          # shape - and the result can only ever be one of `$TYPES`, which is
+          # what keeps a title from naming an arbitrary label.
+          TYPE="$(printf '%s' "$TITLE" | sed -nE "s/^($TYPES)(\([a-z0-9._-]+\))?!?:.*/\1/p")"
+          if [ -z "$TYPE" ]; then
+            echo "::error::Could not read a type out of the title, which should not be possible after the check above."
+            exit 1
+          fi
+
+          want=("$TYPE")
+          if printf '%s' "$TITLE" | grep -Eq "^($TYPES)(\([a-z0-9._-]+\))?!:"; then
+            want+=(breaking)
+          fi
+
+          # Everything this job owns. A `feat!:` retitled to `fix:` has to lose
+          # both of its old labels, or the PR stays in the Breaking section of
+          # notes generated weeks later - and nobody re-reads a merged PR's
+          # labels to catch that.
+          IFS='|' read -r -a managed <<< "$TYPES"
+          managed+=(breaking)
+
+          mapfile -t existing < <(gh label list --limit 200 --json name --jq '.[].name')
+          mapfile -t current < <(gh pr view "$PR" --json labels --jq '.labels[].name')
+
+          contains() {
+            local needle="$1"
+            shift
+            local item
+            for item in "$@"; do
+              if [ "$item" = "$needle" ]; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          args=()
+          for label in "${want[@]}"; do
+            # Created on demand rather than seeded once by hand, so a fresh clone
+            # of this workflow into another repository needs no setup step. Only
+            # ever created, never updated: a colour someone tuned in the UI is
+            # theirs to keep.
+            if ! contains "$label" "${existing[@]}"; then
+              case "$label" in
+                breaking) colour=b60205 ;;
+                feat) colour=0e8a16 ;;
+                fix) colour=1d76db ;;
+                *) colour=ededed ;;
+              esac
+              gh label create "$label" --color "$colour" --description "Set from the PR title by pr-title.yml" >/dev/null
+            fi
+            args+=(--add-label "$label")
+          done
+
+          for label in "${current[@]}"; do
+            if contains "$label" "${managed[@]}" && ! contains "$label" "${want[@]}"; then
+              args+=(--remove-label "$label")
+            fi
+          done
+
+          gh pr edit "$PR" "${args[@]}"

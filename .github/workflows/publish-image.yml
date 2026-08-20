@@ -1,14 +1,33 @@
 name: Publish Image
 
-# Manual only. There is deliberately no `push:` or `release:` trigger - images are cut
-# when someone decides to cut one, not on every merge to `main`.
+# Two ways in, and they mean different things.
+#
+# A `v*` tag push is the release path: it publishes the whole alias set for that version
+# and opens a draft release. Tags are cut deliberately - by hand, after bumping
+# `pyproject.toml`, which the guard below insists on - and that is why there is still no
+# `push: branches:` trigger: self-hosters consume releases as events, and a version per
+# merge trains people onto `:latest` instead of reading what changed.
+#
+# `workflow_dispatch` is everything else: a staging build off a branch, or rebuilding an
+# already-released version because its base image grew a CVE. That second case is why a
+# dispatch pointed at a `v*` tag recomputes the *full* alias set rather than the one tag
+# somebody remembered to type - a hand-typed subset leaves everyone following `X.Y` on the
+# vulnerable digest.
 #
 # `workflow_dispatch` only becomes reachable once this file is on the *default* branch:
 # that is where GitHub looks for the "Run workflow" button and where `gh workflow run`
-# resolves the workflow id. Until this merges to `main` it cannot be run at all, not even
-# from the branch that adds it - the `ref` input below is what selects the commit to
-# build, so that costs nothing.
+# resolves the workflow id. The `ref` input below selects the commit to build, so being
+# launched from `main` costs nothing.
+#
+# This is modelled on `opendiving-web`'s workflow of the same name, deliberately: the two
+# repos release in lockstep on one version, so the tag set, the guard and the failure
+# modes want to be the same thing said twice rather than two things that resemble each
+# other. What differs between the two files is only what has to: the manifest read for the
+# version check, the title and description, and what emulating the other architecture would
+# cost. Anything else that drifts apart is a port owed one way or the other.
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       ref:
@@ -16,7 +35,7 @@ on:
         required: true
         default: main
       tag:
-        description: "Extra image tag, e.g. v0.2.0 or staging (optional)"
+        description: "Extra image tag, e.g. staging (optional)"
         required: false
         default: ""
       latest:
@@ -26,7 +45,8 @@ on:
 
 # `packages: write` is the whole point of the job; `contents: read` is what checkout
 # needs. The GITHUB_TOKEN these grant is also what links the resulting package back to
-# this repository, so no personal access token is involved.
+# this repository, so no personal access token is involved. The draft release needs
+# `contents: write`, which is granted to that job alone rather than to everything.
 permissions:
   contents: read
   packages: write
@@ -38,16 +58,21 @@ concurrency:
   group: publish-image
   cancel-in-progress: false
 
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
 jobs:
-  build-and-push:
+  # Everything decided once, so the two build jobs and the merge cannot disagree about
+  # what they are building or what to call it.
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.meta.outputs.sha }}
+      tags: ${{ steps.meta.outputs.tags }}
+      labels: ${{ steps.meta.outputs.labels }}
+      version: ${{ steps.meta.outputs.version }}
 
     steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ref }}
-          persist-credentials: false
-
       # Rejected here rather than by the registry at the end of a multi-minute build.
       # The tag is passed through `env` and never interpolated into the script:
       # `${{ inputs.tag }}` written inside `run:` is substituted before bash parses the
@@ -72,6 +97,12 @@ jobs:
             exit 1
           fi
 
+      - uses: actions/checkout@v7
+        with:
+          # On a tag push `inputs.ref` is empty and this falls through to the tag itself.
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
       # `github.sha` is NOT the commit being built: on a manual run it is the tip of
       # whichever branch the workflow file was launched from. Every SHA below therefore
       # comes from the working tree after checkout, which also pins a moving `ref` (a
@@ -79,17 +110,87 @@ jobs:
       - name: Work out tags and labels
         id: meta
         env:
-          IMAGE: ghcr.io/${{ github.repository }}
+          # The ref as a human named it, which is what decides whether this is a release
+          # build. `github.ref_name` on a tag push is the bare tag; on a dispatch it is
+          # the branch the workflow was launched from, so the input wins there.
+          SOURCE_REF: ${{ inputs.ref || github.ref_name }}
           EXTRA_TAG: ${{ inputs.tag }}
           PUSH_LATEST: ${{ inputs.latest }}
+          IS_TAG_PUSH: ${{ github.ref_type == 'tag' && github.event_name == 'push' }}
         run: |
           set -euo pipefail
 
           SHA="$(git rev-parse HEAD)"
           CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          VERSION=""
 
-          # One tag per line, which is the format build-push-action wants.
+          # A dispatch may name a tag either way round. Left as `refs/tags/v1.2.3` the
+          # version check below would not recognise it and the build would quietly publish
+          # a `sha-` image with none of its aliases - the exact silent outcome the guard
+          # exists to prevent.
+          SOURCE_REF="${SOURCE_REF#refs/tags/}"
+          SOURCE_REF="${SOURCE_REF#refs/heads/}"
+
+          # One tag per line, which is the format the merge step wants.
           TAGS="${IMAGE}:sha-${SHA:0:12}"
+
+          # The tag<->manifest guard. A two-repo release ritual will eventually tag the
+          # wrong commit, and the failure mode is silent: images published under a version
+          # whose manifest says something else. Recovery when this fires is cheap because
+          # nothing has been pushed yet - delete the tag, fix, re-tag.
+          #
+          # Every tag push enters this block, because the trigger is `v*` and anything
+          # under that glob which cannot be aliased has to fail rather than publish a bare
+          # `sha-` image nobody asked for. A dispatch is a human naming a ref, so it enters
+          # on `v` plus a digit - close enough to catch `v1.42` typed for `v1.4.2`, and far
+          # enough from the `feat/`-shaped branch names this repo actually uses.
+          if [ "$IS_TAG_PUSH" = "true" ] || [[ "$SOURCE_REF" =~ ^v[0-9] ]]; then
+            # Shape first, so `vnext` is told what is wrong with it rather than being told
+            # it disagrees with a manifest it was never going to match. Nothing here can
+            # alias a pre-release, and PEP 440 spells one without the hyphen SemVer wants
+            # (`0.2.0rc1`), so the shape that is refused is every shape but `vX.Y.Z`.
+            if [[ ! "$SOURCE_REF" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              echo "::error::${SOURCE_REF} is not a vX.Y.Z tag. Pre-releases and other shapes are not something this pipeline knows how to alias."
+              exit 1
+            fi
+            MAJOR="${BASH_REMATCH[1]}"
+            MINOR="${BASH_REMATCH[2]}"
+            VERSION="${SOURCE_REF#v}"
+
+            MANIFEST="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+            if [ "$VERSION" != "$MANIFEST" ]; then
+              echo "::error::Tag ${SOURCE_REF} does not match the pyproject.toml version ${MANIFEST}. Bump the manifest, or re-tag the commit that has it."
+              exit 1
+            fi
+
+            TAGS="${TAGS}"$'\n'"${IMAGE}:${VERSION}"$'\n'"${IMAGE}:${MAJOR}.${MINOR}"
+            # A bare `0` alias would invite pinning to "any 0.x" - exactly the range whose
+            # minors are allowed to break - so the major alias starts at 1.0.0.
+            if [ "$MAJOR" -ge 1 ]; then
+              TAGS="${TAGS}"$'\n'"${IMAGE}:${MAJOR}"
+            fi
+            # A tag push is by definition the newest version. A dispatch at an old tag is
+            # a CVE rebuild, where `latest` must stay where it is - hence the checkbox
+            # rather than an assumption.
+            if [ "$IS_TAG_PUSH" = "true" ]; then
+              PUSH_LATEST=true
+            fi
+          fi
+
+          # The extra tag is for names like `staging`. A version typed into it would be
+          # published without any of the aliases that version is supposed to carry, and
+          # off whatever commit `ref` happens to name - the guard above never sees it.
+          #
+          # The `v` is optional on purpose, and that is the half that matters: the aliases
+          # this workflow publishes are bare (`0.4.0`, `0.4`), so `tag=0.4.0` would point a
+          # real release alias at an unchecked commit, where `tag=v0.4.0` merely invents a
+          # name nothing else uses. Reserving every leading digit is the cheap way to say
+          # it - a `staging`-shaped input never starts with one.
+          if [[ "$EXTRA_TAG" =~ ^v?[0-9] ]]; then
+            echo "::error::${EXTRA_TAG} looks like a version. Point 'ref' at the tag instead, which publishes the whole alias set and checks it against the manifest."
+            exit 1
+          fi
+
           if [ -n "$EXTRA_TAG" ]; then
             TAGS="${TAGS}"$'\n'"${IMAGE}:${EXTRA_TAG}"
           fi
@@ -107,6 +208,7 @@ jobs:
 
           {
             echo "sha=$SHA"
+            echo "version=$VERSION"
             echo "tags<<$DELIM"
             echo "$TAGS"
             echo "$DELIM"
@@ -120,8 +222,40 @@ jobs:
             echo "org.opencontainers.image.title=opendiving-api"
             echo "org.opencontainers.image.description=OpenDiving API"
             echo "org.opencontainers.image.licenses=AGPL-3.0-or-later"
+            if [ -n "$VERSION" ]; then
+              echo "org.opencontainers.image.version=$VERSION"
+            fi
             echo "$DELIM"
           } >> "$GITHUB_OUTPUT"
+
+  # One native runner per architecture. `linux/arm64` under QEMU is the alternative, and
+  # not a near thing here: every dependency without an aarch64 wheel compiles from source
+  # under emulation, on every release. Each job pushes an untagged, single-platform image
+  # and reports its digest; `merge` is what turns the pair into the multi-arch manifest
+  # list the tags actually point at.
+  build:
+    needs: prepare
+    strategy:
+      # Both architectures reported, rather than the first failure cancelling the other.
+      # The pushes are by digest and untagged, so a half-finished round names nothing.
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The resolved commit, not the ref: a branch can move between these jobs, and
+          # that would put two architectures of different code behind one manifest.
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -135,39 +269,147 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
-      # No `platforms:`, so this builds for the runner's architecture (amd64). arm64
-      # needs either `docker/setup-qemu-action` (correct, and slow enough here to matter -
-      # every wheel without an aarch64 build compiles under emulation) or a second job on
-      # an arm runner feeding a manifest list.
-      - name: Build and push
+      - name: Build and push by digest
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          platforms: ${{ matrix.platform }}
+          labels: ${{ needs.prepare.outputs.labels }}
+          # `push-by-digest` pushes the image with no tag at all and hands back its
+          # digest. Tagging happens once, in `merge`, on the manifest list - tagging here
+          # would leave each architecture briefly overwriting the other's tag.
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           # The dependency layer is `RUN --mount=type=bind` on uv.lock/pyproject.toml, so
           # its cache key tracks those two files: a commit that only touched `src/` reuses
-          # it and the build is a copy plus a `uv sync --no-editable`.
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # it and the build is a copy plus a `uv sync --no-editable`. Scoped per
+          # architecture, because one shared scope has the two jobs evicting each other's
+          # layers on every build, which costs more than the cache saves.
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
           # Buildx would otherwise push a provenance attestation alongside the image,
-          # which turns a single-platform image into an index and renders on the GHCR
-          # package page as a second `unknown/unknown` entry. Drop the `false` if the
-          # attestation is ever worth more than a readable package listing.
+          # which renders on the GHCR package page as an extra `unknown/unknown` entry
+          # next to the two real architectures. Drop the `false` if the attestation is
+          # ever worth more than a readable package listing.
           provenance: false
+
+      # An empty file named after the digest, because that is all the merge step needs and
+      # an artifact cannot carry a bare string. The name is the digest without its
+      # `sha256:` prefix, which is what `imagetools` wants to be handed back.
+      - name: Export the digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload the digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download the digests
+        uses: actions/download-artifact@v7
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # Every tag is created in this one call, so all of them name the same manifest list
+      # and the same digest. That is what makes the CVE-rebuild story work: recomputing
+      # `X.Y.Z`, `X.Y` and `latest` together cannot leave an alias behind on an older
+      # digest.
+      #
+      # Labels live on the per-architecture images that `build` pushed; an index carries
+      # annotations instead, and GHCR reads `image.source` from there when it decides
+      # which repository a package belongs to.
+      - name: Create the manifest list
+        working-directory: /tmp/digests
+        env:
+          TAGS: ${{ needs.prepare.outputs.tags }}
+          LABELS: ${{ needs.prepare.outputs.labels }}
+        run: |
+          set -euo pipefail
+
+          ARGS=()
+          while IFS= read -r TAG; do
+            if [ -n "$TAG" ]; then ARGS+=(--tag "$TAG"); fi
+          done <<< "$TAGS"
+          while IFS= read -r LABEL; do
+            if [ -n "$LABEL" ]; then ARGS+=(--annotation "index:$LABEL"); fi
+          done <<< "$LABELS"
+
+          # Without `nullglob` an empty directory leaves the pattern itself in the loop,
+          # and `image@sha256:*` is a source docker would have to be told is nonsense.
+          shopt -s nullglob
+          SOURCES=()
+          for DIGEST in *; do
+            SOURCES+=("${IMAGE}@sha256:${DIGEST}")
+          done
+          if [ "${#SOURCES[@]}" -eq 0 ]; then
+            echo "::error::No digests were downloaded - nothing to merge."
+            exit 1
+          fi
+
+          docker buildx imagetools create "${ARGS[@]}" "${SOURCES[@]}"
 
       - name: Summarise what was pushed
         env:
-          TAGS: ${{ steps.meta.outputs.tags }}
-          DIGEST: ${{ steps.build.outputs.digest }}
-          SHA: ${{ steps.meta.outputs.sha }}
+          TAGS: ${{ needs.prepare.outputs.tags }}
+          SHA: ${{ needs.prepare.outputs.sha }}
         run: |
+          set -euo pipefail
+          DIGEST="$(docker buildx imagetools inspect "${IMAGE}:sha-${SHA:0:12}" --format '{{.Manifest.Digest}}')"
           {
             echo "## Pushed"
             echo
-            echo "Commit \`$SHA\`, digest \`$DIGEST\`"
+            echo "Commit \`$SHA\`, digest \`$DIGEST\`, \`linux/amd64\` + \`linux/arm64\`"
             echo
             printf '%s\n' "$TAGS" | sed 's/^/- `/; s/$/`/'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # This is the release self-hosters read, so the draft is opened for every version build
+  # and finished by hand: `.github/release.yml` sorts the PRs by the labels `pr-title.yml`
+  # applies, and the headline paragraph and the Breaking section are written before it is
+  # published. The ritual is in CONTRIBUTING.md. It runs after `merge`, so a build that
+  # failed leaves no release behind and the tag is free to be deleted and re-cut.
+  draft-release:
+    needs: [prepare, merge]
+    if: needs.prepare.outputs.version != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      # Nothing is checked out here, so `gh` is told which repository it is talking to.
+      - name: Open a draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: v${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists - leaving it as it is."
+            exit 0
+          fi
+          gh release create "$TAG" --draft --generate-notes --title "$TAG"
