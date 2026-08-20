@@ -11,8 +11,9 @@ That is the whole procedure. Database migrations run themselves: the API execute
 cannot race each other, and only then begins serving. A schema change is therefore not a manual step
 and never has been one for an installed instance.
 
-Take a backup first anyway — [backup-restore.md](backup-restore.md), one command — because the one
-thing that is not automatic is going back.
+Take a backup first anyway — [backup-restore.md](backup-restore.md), the database dump *and* the
+files volume, since neither is a backup without the other — because the one thing that is not
+automatic is going back.
 
 ## Read the release notes
 

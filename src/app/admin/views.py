@@ -215,11 +215,15 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         allowed_actions={"view", "create", "update", "delete"},
     )
 
-    # `CertificationFile` is deliberately *not* registered. Its rows are mostly one
-    # multi-megabyte `bytea` column, which the admin's generic list and detail views
-    # would try to render as text, and there is no create/update form that could
-    # meaningfully accept a file upload. Card files are managed through
-    # `PUT`/`DELETE /certification/{uuid}/file/{side}` instead. Note that deleting a
-    # `Certification` from this panel leaves its files behind if the delete is a soft
-    # one: only the API's `erase_certification` removes them explicitly (an
-    # application-level `is_deleted` never fires the FK cascade).
+    # `CertificationFile` is deliberately *not* registered. There is no create/update form
+    # that could meaningfully accept a file upload, and its rows are metadata plus a
+    # `storage_key` naming a file on the volume - a panel that let you edit that key would
+    # be a panel that lets you point a row at somebody else's card. Card files are managed
+    # through `PUT`/`DELETE /certification/{uuid}/file/{side}` instead.
+    #
+    # Two gaps worth knowing when deleting a `Certification` from here. A *soft* delete
+    # leaves its file rows behind entirely: only the API's `erase_certification` removes
+    # them, because an application-level `is_deleted` never fires the FK cascade. A *hard*
+    # delete does fire the cascade, which takes the rows and leaves their files on the
+    # volume with nothing referencing them - reclaimed by
+    # `src/scripts/sweep_orphaned_files.py`, and one of the reasons that script exists.

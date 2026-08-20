@@ -47,14 +47,16 @@ file to the service names and are not yours to change. `POSTGRES_USER` and `POST
 default to `opendiving` and can be overridden in `.env` before the first start (afterwards they name
 a database that already exists under a different name).
 
-| Variable           | Default  | What it does                                                                                                                                                                                      |
-| ------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MIGRATE_ON_START` | `true`   | Runs `alembic upgrade head` as the API starts, which is what makes an upgrade `pull` + `up -d`. Turn it off only if you'd rather run `docker compose run --rm api alembic upgrade head` yourself. |
-| `REDIS_PASSWORD`   | *(none)* | For pointing the app at a managed Redis instead of the bundled one. The bundled one needs no password and is not reachable outside the compose network.                                           |
+| Variable           | Default       | What it does                                                                                                                                                                                                                                                                                                        |
+| ------------------ | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MIGRATE_ON_START` | `true`        | Runs `alembic upgrade head` as the API starts, which is what makes an upgrade `pull` + `up -d`. Turn it off only if you'd rather run `docker compose run --rm api alembic upgrade head` yourself.                                                                                                                   |
+| `REDIS_PASSWORD`   | *(none)*      | For pointing the app at a managed Redis instead of the bundled one. The bundled one needs no password and is not reachable outside the compose network.                                                                                                                                                             |
+| `FILE_STORAGE_DIR` | `/data/files` | Where uploaded dive-computer exports and c-card images are written inside the container. The compose file mounts the `files-data` volume there, so there is nothing to set unless you replaced that volume with a bind mount — and then the host directory has to be owned by uid 1000 or the API refuses to start. |
 
 Redis holds cache entries and open rate-limit windows only. Losing it costs a cold cache; nothing
-durable lives there. Everything durable — including every uploaded dive-computer file and c-card
-image — is in Postgres, which is why one `pg_dump` is the whole backup.
+durable lives there. What is durable lives in two places, and a backup has to cover both: the
+records are in Postgres, and the uploaded files themselves are on the `files-data` volume. See
+[backup-restore.md](backup-restore.md).
 
 ## Optional features
 

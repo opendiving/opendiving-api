@@ -1800,6 +1800,11 @@ alone would fail against any non-empty table.
 
 ## Certification card files live in Postgres, not object storage
 
+**Superseded.** The payloads moved onto a filesystem volume before the first release; see *"File
+payloads live on the files volume, not in Postgres"*. The reasoning below is kept because it names
+the expiry condition that actually fired, and because the seam it describes is what made the move a
+two-file rewrite.
+
 The whole point of storing c-cards is to remove a reason to keep PADI's or SSI's app installed. We
 can't *issue* certifications, but we can hold a photo of the card.
 
@@ -9772,3 +9777,144 @@ would otherwise read as anonymous and need allowlisting for a reason that is rea
 different property". Mounts are skipped explicitly rather than left to fall out of
 `CRUD_ADMIN_ENABLED` defaulting false: the admin panel carries its own session auth, and a guard
 that only holds on one configuration is not a guard.
+
+## File payloads live on the files volume, not in Postgres
+
+Uploaded dive-computer exports (`dive_file`) and c-card images (`certification_file`) used to be
+`bytea` columns. They are now ordinary files under `FILE_STORAGE_DIR` (`/data/files`, a Docker named
+volume), named by a `storage_key` the row carries. This reverses *"Certification card files live in
+Postgres, not object storage"*, which recorded its own expiry condition — "when photo galleries
+arrive … blobs in Postgres become a real problem for backup size and restore time" — and the move
+happened *before* photos rather than with them, for one reason above all others: **no release has
+been tagged, so no instance anywhere holds data.** After the first release this becomes a real data
+migration for strangers; today it is one revision against a dev database that is disposable anyway.
+
+### A filesystem volume, not an object store
+
+No bundled S3 server and no S3 backend code. On a single node the S3 API buys nothing the filesystem
+does not already give — no replication, no durability, no multi-writer story this app needs — while
+costing a container, a credential pair, a failure mode in `docker compose up` and a second data
+directory to back up, all to write bytes to the same disk. The self-hosted apps this project
+measures itself against agree unanimously: Immich, Nextcloud, Paperless-ngx, Forgejo, Mastodon,
+Outline and PhotoPrism all default to local disk, none bundles an object store, and Outline — which
+*required* S3 — reversed it in 2023 because setting up MinIO was the hardest part of hosting it. The
+ground moved underneath the obvious answer as well: MinIO went to maintenance mode in December 2025
+and its repository was archived in April 2026, and its successor is proprietary freeware.
+
+No `FILE_STORAGE_BACKEND` setting either, because a setting with one valid value is a lie about
+choice. The shape that would take a second backend is the shape that is built: opaque string keys
+that are also valid S3 object keys, bytes in and bytes out, and no caller anywhere holding a `Path`.
+The whole filesystem lives in `services/blob_store.py`, so the S3 backend is a rewrite of one module
+rather than an interface with a single implementor. Triggers to build it: a hosted offering, a
+multi-node deployment, or real self-hoster demand.
+
+### The key embeds the row uuid, and that is what makes the unlink safe
+
+Keys are `{kind}/{sha256[:2]}/{row_uuid}_{sha256}` — `dive-files/…` and `certification-files/…`.
+
+The **row uuid** is the load-bearing half, and it is not obvious. Blobs and rows now live in two
+stores, so the ordering rule is: write the file, then commit the row; delete the row, then unlink
+after that commit. With keys derived from content and slot alone, that second rule is a data-loss
+bug rather than an orphan: delete a card while the same photo is concurrently re-uploaded, and the
+delete's post-commit unlink destroys the blob the re-upload just wrote, leaving a committed row
+pointing at nothing. Row uuids are never reused, so a retired key can never be re-minted and an
+unlink can never name a live row's file. It closes the sweeper's TOCTOU by the same construction: a
+key the sweep walked cannot be re-minted while it deliberates.
+
+The **content hash** keeps writes idempotent (a retried write lands byte-identically on the same
+path), keeps blobs immutable (replacing a card mints a new key, so a reader mid-replacement can
+never get new bytes under old metadata), and lets an operator verify any file with `sha256sum`.
+
+Sharded on the hash prefix, not the uuid's: `PublicUUIDMixin` uses uuid7, whose leading hex is a
+millisecond timestamp, so uuid-sharding would put every key minted in a month in a handful of
+directories. One level of 256 — git's and the OCI registry's fanout — is plenty for thousands of
+files.
+
+**No cross-row blob sharing.** A pure content-addressed store would dedupe across rows and users,
+and buy reference counting, a GC-versus-insert race and "does a bare hash leak that someone else has
+this file" with it. The dedupe that matters is already a *row* constraint
+(`ux_dive_file_user_id_sha256`). One row owns one file; deletion is `DELETE … RETURNING storage_key`
+into `delete_after_commit`.
+
+### Orphans are the only failure product, and there is a script for them
+
+A crash between `put()` and the commit strands an unreferenced file. So does a racing replacement, a
+restore whose rows were deleted after the dump, and a hard delete of a `Certification` from the
+admin panel — whose FK cascade removes the file rows with no service layer in the way to unlink
+anything. All of them are harmless until swept, and `src/scripts/sweep_orphaned_files.py` sweeps
+them: dry-run by default, 24-hour mtime grace so an online sweep cannot race an upload in flight,
+and a refusal — overridable only by `--force` — when the numbers look like a wrong database rather
+than real orphans. That refusal is the actual lesson of Gitea's 2025 `doctor --fix` bug, which
+deleted 818 valid LFS files because the database it compared against *looked* empty. An mtime grace
+does nothing against that; only an absolute sanity check does. No arq cron, for the same reason:
+scheduled deletion machinery is precisely what that tale warns against automating.
+
+### Startup fails loudly if it cannot write, and shouts if the volume looks unmounted
+
+`ensure_root_writable` runs in the lifespan **before** `apply_migrations`, because the revision that
+moves the payloads writes files itself. Four gunicorn workers each discovering an unwritable volume
+on their first upload, hours later, one diver at a time, is the alternative. After the migrations a
+second check counts file rows against the tree and logs CRITICAL if there are rows and no files —
+not a refusal, because the documented restore order (database first, files second) has a legitimate
+window where that is true on purpose.
+
+This check runs in the test suite and in CI too, because `TestClient` enters the real lifespan. That
+is why `tests/conftest.py` pins `FILE_STORAGE_DIR` to a temp directory **before** it imports
+`src.app.main` — settings are read at import — and why `.github/workflows/tests.yml` sets the same
+variable in its `env:` block for the `alembic upgrade head` step, which imports the app as well.
+
+### What did not change, and one thing that did by accident
+
+The download routes are byte-identical in contract: same ownership check, same narrow sha256 query,
+same `ETag`/`If-None-Match` 304, same headers — including the `frame-ancestors 'none'` in their own
+CSP, which is load-bearing because a response that sets its own policy opts out of
+`SecurityHeadersMiddleware`'s default. `FileResponse` was deliberately not adopted: it sets an
+mtime-derived ETag that collides with the sha256 contract, its 304 handling lives in `StaticFiles`
+rather than in `FileResponse` itself, and it brings Range support this contract never promised.
+`opendiving-web` needed no change at all — it fetches through its API client into object URLs and
+never sees where bytes live.
+
+What did change by accident is the test suite's relationship with the app's connection pool. The
+lifespan now opens the shared `async_engine` twice at startup rather than once, and the two helpers
+that use that engine from `pytest-asyncio` tests (`test_export_loader.py`'s `_load`,
+`test_worker.py`'s `_dispose_the_app_engine`) were disposing it only on the way *out* — which
+protects the next test and not the current one. A pooled asyncpg connection belongs to the loop that
+opened it, and `TestClient`'s portal loop is not any test's loop, so both now dispose on both sides.
+Worth knowing because the symptom is `asyncpg … another operation is in progress` raised from a
+query that has nothing to do with files.
+
+### The trade that was given up
+
+*"One `pg_dump` is the whole logbook"* is gone, and it was a real story. It is replaced by a
+two-artifact one that stays honest: dump the database first, copy the files volume second. Files are
+written before their rows commit and never mutated, so a copy taken after the dump is a superset of
+what the dump references — except a file *deleted* between the two steps, which leaves one dangling
+row in the restore. That window is named in `docs/self-hosting/backup-restore.md`, with "stop the
+stack first" as the exactness option. Same order Immich documents, for the same reason.
+
+Also given up: single-transaction atomicity between bytes and rows, replaced by the ordering rule
+and the sweeper above.
+
+### The migration
+
+One hand-written revision (`c3c2c4dd4c27`). Autogenerate drafted the DDL and cannot see a data
+backfill at all. Three constraints shaped it, and each one is a way it would otherwise have broken:
+
+- **It must survive offline rendering.** `tests/test_migrations.py` runs
+  `alembic upgrade head --sql` against no database, so the move is guarded with
+  `context.is_offline_mode()`.
+- **Every filesystem touch is lazy, per row written** — at zero rows it must not create so much as a
+  directory, because CI runs `alembic upgrade head` on a bare runner where `/data/files` is not
+  creatable.
+- **The key layout and the atomic-write helper are inlined, not imported.** A revision is frozen
+  history; importing live layout code would let a future refactor rewrite the past.
+  `FILE_STORAGE_DIR` is the one exception and comes from live settings, because *where the volume
+  is* has to match what the app will read.
+
+It is retry-safe because the whole revision is one transaction: a mid-move failure rolls back every
+`storage_key` and both column adds, leaving only files already written, which the retry rewrites
+byte-identically to the same deterministic keys. `downgrade` raises `NotImplementedError` — bytes
+back into `bytea` is a path nobody will run, and pretending otherwise ships untested code.
+
+Postgres does not reclaim the dropped columns' pages without a `VACUUM FULL`. Not automated: a
+rewrite of both tables under an exclusive lock is the operator's call, not a migration's.

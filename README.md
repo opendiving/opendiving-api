@@ -24,15 +24,15 @@ docker compose up -d
 That is the whole product — the API, the web app, PostgreSQL, Redis, the background worker, and
 Caddy terminating TLS with a certificate it gets itself. Prebuilt images for amd64 and arm64, so a
 Raspberry Pi runs the same bytes as a VPS; migrations apply themselves on startup, so an upgrade is
-`docker compose pull && docker compose up -d`; and one `pg_dump` is a complete backup, because the
-uploaded dive-computer files live in Postgres too.
+`docker compose pull && docker compose up -d`; and a backup is two artifacts — a `pg_dump` and a tar
+of the files volume the uploaded dive-computer exports and c-card images live on.
 
 | Guide                                                   |                                                |
 | ------------------------------------------------------- | ---------------------------------------------- |
 | [Install](docs/self-hosting/install.md)                 | The four commands, what you need, what starts  |
 | [Configuration](docs/self-hosting/configuration.md)     | Every setting, grouped — and which six matter  |
 | [Reverse proxy](docs/self-hosting/reverse-proxy.md)     | Bring your own, or run on a LAN with no domain |
-| [Backup & restore](docs/self-hosting/backup-restore.md) | The one-command dump, and the drill            |
+| [Backup & restore](docs/self-hosting/backup-restore.md) | The dump, the files volume, and the drill      |
 | [Upgrade](docs/self-hosting/upgrade.md)                 | Pull, up, done — and the stance on downgrades  |
 | [Troubleshooting](docs/self-hosting/troubleshooting.md) | Certificates, mail, rate limits, starting over |
 
