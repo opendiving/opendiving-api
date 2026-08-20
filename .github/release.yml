@@ -1,0 +1,27 @@
+# Categories for the notes GitHub generates when the publish workflow opens a draft
+# release (`gh release create --draft --generate-notes`). PRs are squash-merged with the
+# title as the subject, and `pr-title.yml` puts a label on each one from that title's
+# conventional-commit type - which is the only reason these categories have anything to
+# match on.
+#
+# Order is load-bearing: a PR lands in the *first* category whose labels it carries, so
+# `breaking` has to come before `feat`, or a `feat!:` change would be filed as a feature
+# and the one section self-hosters read before upgrading would be empty.
+#
+# The catch-all keeps everything else in one section rather than one per type. Splitting
+# `refactor`/`docs`/`chore`/… out is a matter of adding categories above it; the labels
+# are applied whether or not a category names them.
+changelog:
+  categories:
+    - title: Breaking changes
+      labels:
+        - breaking
+    - title: Features
+      labels:
+        - feat
+    - title: Fixes
+      labels:
+        - fix
+    - title: Other changes
+      labels:
+        - "*"
