@@ -9813,6 +9813,28 @@ different property". Mounts are skipped explicitly rather than left to fall out 
 `CRUD_ADMIN_ENABLED` defaulting false: the admin panel carries its own session auth, and a guard
 that only holds on one configuration is not a guard.
 
+## Onboarding demands a username rather than suggesting one, so nothing generates one
+
+`generate_unique_username` is gone from `services/auth_service.py`, along with its three tests. It
+derived a username from an email's local part — sanitized to `UserBase.username`'s `^[a-z0-9]+$`,
+truncated to 20, and given a numeric suffix on collision — and it was written for the pre-unified
+flow described in *"Google sign in/up shares one endpoint"* above, where a first Google sign-in
+created the `User` row itself and therefore had to invent a name for it. That flow is Superseded,
+and the helper outlived it by a while with no caller at all.
+
+Under the current flow the username is always typed by the person: `POST /auth/complete`
+(`api/v1/auth.py`) is the only place a `User` row is created, it takes `username` on
+`ProfileCompletionRequest`, and it checks availability itself before inserting. There is no code
+path left that needs a username the user did not choose.
+
+Suggesting a default in the onboarding form — prefilling `jane.doe@example.com` as `janedoe` and
+letting them edit it — is a plausible product change, and it is the one thing that would want this
+helper back. It stays deleted anyway rather than being kept warm behind a docstring, because the
+suggestion belongs on the client (it wants to prefill a field as the user types, not on submit), and
+the availability check it would need is already an endpoint concern with its own rate limit — see
+the docstring on `complete_profile` for why that oracle is throttled. Reviving the server-side
+generator would be the wrong half of that feature.
+
 ## File payloads live on the files volume, not in Postgres
 
 Uploaded dive-computer exports (`dive_file`) and c-card images (`certification_file`) used to be
