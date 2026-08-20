@@ -16,7 +16,7 @@ def _settings(**overrides):
     """Build a `Settings` without reading the developer's own `src/.env`.
 
     The SMTP pair is here because these cases are production ones and
-    `_require_smtp_in_production` refuses to boot a production instance that cannot mail a
+    `_require_smtp_outside_local` refuses to boot a production instance that cannot mail a
     sign-in link. It is unrelated to the admin panel - it just has to be satisfied to reach
     the guard under test.
     """

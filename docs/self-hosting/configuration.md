@@ -20,7 +20,7 @@ self-hoster normally touches, and any setting from that file can be added to `.e
 | `DOMAIN`                         | *(none — required)* | The hostname this instance answers on. Drives the certificate, the emailed links and the web app's own origin.  |
 | `SECRET_KEY`                     | *(none — required)* | Signs every token the API issues. `openssl rand -hex 32`. Startup **fails** on the published placeholder value. |
 | `POSTGRES_PASSWORD`              | *(none — required)* | The database password, read once when the volume is first created.                                              |
-| `SMTP_HOST`, `SMTP_PORT`         | *(none)*            | The mail relay. Required when `ENVIRONMENT=production`, because sign-in is passwordless.                        |
+| `SMTP_HOST`, `SMTP_PORT`         | *(none)*            | The mail relay. Required on any `ENVIRONMENT` but `local`, because sign-in is passwordless.                     |
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | *(none)*            | Its credentials. Both optional and independent — a relay that authenticates by IP needs neither.                |
 | `EMAIL_FROM_ADDRESS`             | *(none)*            | The address mail is sent as. Required as soon as `SMTP_HOST` is set; startup fails without it.                  |
 
@@ -31,7 +31,7 @@ self-hoster normally touches, and any setting from that file can be added to `.e
 | `COMPOSE_PROFILES`   | `proxy`             | Runs the bundled Caddy. Comment it out to bring your own proxy — [reverse-proxy.md](reverse-proxy.md).                                                                                      |
 | `CADDY_SITE_ADDRESS` | `${DOMAIN}`         | The address Caddy answers on. `:80` for a LAN instance with no certificate.                                                                                                                 |
 | `TRUSTED_PROXY_IPS`  | `172.29.0.0/16`     | Whose `X-Forwarded-For` and `X-Forwarded-Proto` the API believes. Every per-IP rate limit depends on it, as do the admin panel's HTTPS enforcement and its IP allowlist.                    |
-| `ENVIRONMENT`        | `production`        | `production` hides `/docs` and makes `SMTP_HOST` mandatory. `staging` puts the docs behind a superuser; `local` opens them and logs sign-in links instead of emailing them.                 |
+| `ENVIRONMENT`        | `production`        | `production` hides `/docs`. `staging` puts them behind a superuser; both require `SMTP_HOST`. `local` opens the docs and logs sign-in links instead of emailing them.                       |
 | `FRONTEND_URL`       | `https://${DOMAIN}` | Where emailed links point, and the API's single allowed CORS origin. Override for a plain-HTTP instance.                                                                                    |
 | `SITE_URL`           | `https://${DOMAIN}` | The web app's own origin, used for link previews. Override alongside `FRONTEND_URL`.                                                                                                        |
 | `AUTH_COOKIE_SECURE` | `true`              | The refresh cookie's `Secure` flag. `false` only for plain HTTP, where the browser otherwise drops it and every reload signs the user out.                                                  |

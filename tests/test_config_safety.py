@@ -3,14 +3,18 @@
 The admin-panel guard has its own module (`test_admin_config.py`) and the from-address one
 `test_email_config.py`; this covers the rest of what a fresh install can get wrong before
 it has served a single request - a `SECRET_KEY` copied out of the template, a production
-instance nobody can sign in to, a password with an `@` in it, and a `LOG_LEVEL` typo.
+instance nobody can sign in to, an admin address belonging to a stranger, a password with
+an `@` in it, and a `LOG_LEVEL` typo.
 """
 
+import importlib.util
 import logging
 from importlib import metadata
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import starlette.config
 
 from src.app.core.config import (
     PLACEHOLDER_SECRET_KEYS,
@@ -33,6 +37,30 @@ def _settings(**overrides):
         "EMAIL_FROM_ADDRESS": None,
     }
     return Settings(**{**base, **overrides})
+
+
+def _config_loaded_without_an_env_file(tmp_path, monkeypatch):
+    """A second, independent copy of `core.config` whose `Config` reads a file that isn't
+    there, so every setting falls back to the default declared in the source.
+
+    Needed because `config()` resolves its default at import time against the developer's
+    own `src/.env`: reading a value off the already-imported module reports what that file
+    happens to say, not what the code declares. `config.py` imports nothing from this
+    package, so executing it under another name leaves `sys.modules` - and every module
+    already holding the real `settings` - untouched.
+    """
+    monkeypatch.setenv("SECRET_KEY", "test-secret-key-for-testing-only")
+    monkeypatch.setenv("ENVIRONMENT", "local")
+
+    original = starlette.config.Config
+    monkeypatch.setattr(starlette.config, "Config", lambda *_args, **_kwargs: original(tmp_path / "absent.env"))
+
+    source = Path(__file__).resolve().parents[1] / "src" / "app" / "core" / "config.py"
+    spec = importlib.util.spec_from_file_location("_config_without_an_env_file", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    return module
 
 
 class TestPlaceholderSecretKeysAreRefused:
@@ -94,30 +122,68 @@ class TestPlaceholderSecretKeysAreRefused:
         assert _settings().SECRET_KEY.get_secret_value() == "test-secret-key-for-testing-only"
 
 
-class TestProductionRequiresARelay:
+class TestEveryDeployedEnvironmentRequiresARelay:
     """Sign-in is passwordless. With no relay there is no way to deliver a magic link, so
-    nobody can get in - not even the first user of a fresh install.
+    nobody can get in - not even the first user of a fresh install - and the fallback that
+    logs the link instead writes a live credential to whatever collects the logs.
     """
 
-    def test_production_without_smtp_fails_startup(self):
+    @pytest.mark.parametrize("environment", [EnvironmentOption.PRODUCTION, EnvironmentOption.STAGING])
+    def test_a_deployed_environment_without_smtp_fails_startup(self, environment):
         with pytest.raises(ValueError, match="SMTP_HOST"):
-            _settings(ENVIRONMENT=EnvironmentOption.PRODUCTION)
+            _settings(ENVIRONMENT=environment)
 
-    def test_production_with_a_relay_is_accepted(self):
+    @pytest.mark.parametrize("environment", [EnvironmentOption.PRODUCTION, EnvironmentOption.STAGING])
+    def test_a_deployed_environment_with_a_relay_is_accepted(self, environment):
         settings = _settings(
-            ENVIRONMENT=EnvironmentOption.PRODUCTION,
+            ENVIRONMENT=environment,
             SMTP_HOST="smtp.example.com",
             EMAIL_FROM_ADDRESS="noreply@opendiving.example",
         )
 
         assert settings.SMTP_HOST == "smtp.example.com"
 
-    @pytest.mark.parametrize("environment", [EnvironmentOption.LOCAL, EnvironmentOption.STAGING])
-    def test_the_other_environments_may_log_the_link_instead(self, environment):
-        """The documented local flow, and staging is run the same way on purpose."""
-        settings = _settings(ENVIRONMENT=environment)
+    def test_the_error_names_the_environment_that_was_configured(self):
+        """`staging` used to be allowed through here, so an operator hitting this for the
+        first time needs the message to name their own value rather than `production`.
+        """
+        with pytest.raises(ValueError, match="staging"):
+            _settings(ENVIRONMENT=EnvironmentOption.STAGING)
+
+    def test_local_may_log_the_link_instead(self):
+        """The one environment where reading the link out of the logs is the documented
+        way to sign in.
+        """
+        settings = _settings(ENVIRONMENT=EnvironmentOption.LOCAL)
 
         assert settings.SMTP_HOST is None
+
+
+class TestTheFirstSuperuserAddressHasNoDefault:
+    """`ADMIN_EMAIL` used to default to `admin@admin.com`, a real domain belonging to
+    somebody else. Sign-in is passwordless and keyed on the address, so
+    `scripts.create_first_superuser` would have created an `is_superuser` row whose magic
+    link is delivered to whoever runs that domain.
+    """
+
+    def test_unset_is_a_configuration_the_app_accepts(self):
+        """It was typed `str`, so an install that deliberately set nothing used to get the
+        stranger's address rather than no account.
+        """
+        assert _settings(ADMIN_EMAIL=None).ADMIN_EMAIL is None
+
+    def test_nothing_configuring_it_leaves_it_unset(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("ADMIN_EMAIL", raising=False)
+
+        assert _config_loaded_without_an_env_file(tmp_path, monkeypatch).settings.ADMIN_EMAIL is None
+
+    def test_the_display_name_keeps_its_default(self, tmp_path, monkeypatch):
+        """`ADMIN_NAME` is a label on a row - nothing is keyed on it and nothing is
+        delivered to it - so it is not the same question.
+        """
+        monkeypatch.delenv("ADMIN_NAME", raising=False)
+
+        assert _config_loaded_without_an_env_file(tmp_path, monkeypatch).settings.ADMIN_NAME == "admin"
 
 
 class TestLogLevel:

@@ -199,11 +199,15 @@ class TestSendOverSMTP:
 class TestSendMagicLinkEmail:
     @pytest.mark.asyncio
     async def test_noop_when_no_transport_is_configured(self):
+        """`ENVIRONMENT` is pinned rather than left to the mock: the credential guard now
+        raises on everything but `local`, and a `MagicMock` attribute is not `local`.
+        """
         with (
             patch("src.app.services.email_service.settings") as mock_settings,
             patch("src.app.services.email_service.smtplib") as mock_smtplib,
         ):
             mock_settings.SMTP_HOST = None
+            mock_settings.ENVIRONMENT = EnvironmentOption.LOCAL
 
             await send_magic_link_email("user@example.com", "https://app.example.com/auth/verify?token=abc")
 
@@ -350,13 +354,15 @@ class TestContactFormHeaders:
             assert message["Bcc"] is None
 
 
-class TestCredentialBearingEmailsInProduction:
+class TestCredentialBearingEmailsOutsideLocal:
     """No transport configured makes the magic-link and email-change senders log the
     full URL - which embeds a live, single-use auth token - to a rotating file on disk.
-    That is the right trade locally and the wrong one in production.
+    That is the right trade on `local` and the wrong one on any instance somebody other
+    than the developer can reach, staging included.
     """
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("environment", [EnvironmentOption.PRODUCTION, EnvironmentOption.STAGING])
     @pytest.mark.parametrize(
         ("sender", "args"),
         [
@@ -367,16 +373,32 @@ class TestCredentialBearingEmailsInProduction:
             ),
         ],
     )
-    async def test_raises_instead_of_logging_the_token(self, sender, args):
+    async def test_raises_instead_of_logging_the_token(self, sender, args, environment):
         with patch("src.app.services.email_service.settings") as mock_settings:
             mock_settings.SMTP_HOST = None
-            mock_settings.ENVIRONMENT = EnvironmentOption.PRODUCTION
+            mock_settings.ENVIRONMENT = environment
 
             with pytest.raises(EmailDeliveryError):
                 await sender(*args)
 
     @pytest.mark.asyncio
-    async def test_still_logs_the_link_outside_production(self, caplog):
+    @pytest.mark.parametrize("environment", [EnvironmentOption.PRODUCTION, EnvironmentOption.STAGING])
+    async def test_nothing_is_logged_on_the_way_out(self, caplog, environment):
+        """The raise has to happen *before* the warning, not alongside it - a token that
+        reaches the log has leaked whether or not the caller also got a 500.
+        """
+        with patch("src.app.services.email_service.settings") as mock_settings:
+            mock_settings.SMTP_HOST = None
+            mock_settings.ENVIRONMENT = environment
+
+            with caplog.at_level(logging.WARNING, logger="src.app.services.email_service"):
+                with pytest.raises(EmailDeliveryError):
+                    await send_magic_link_email("user@example.com", "https://app.example.com/auth/verify?token=secret")
+
+            assert "token=secret" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_still_logs_the_link_on_local(self, caplog):
         with patch("src.app.services.email_service.settings") as mock_settings:
             mock_settings.SMTP_HOST = None
             mock_settings.ENVIRONMENT = EnvironmentOption.LOCAL
