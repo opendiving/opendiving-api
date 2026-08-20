@@ -1,0 +1,76 @@
+#!/bin/sh
+#
+# Refuse to push a commit that carries no signature.
+#
+# Enable once per clone - linked worktrees share the setting, so the agent
+# checkouts under .claude/worktrees/ are covered by the same command:
+#
+#     git config core.hooksPath .githooks
+#
+# Only "N" - no signature at all - is fatal. Every squash-merge on main is
+# signed by GitHub's own key, which is in nobody's local keyring, so those
+# commits report "E": unverifiable here, not unsigned. Failing on "E" would
+# reject any branch that has main in it, which is every branch.
+
+set -u
+
+only_zeros() {
+    case "$1" in
+        *[!0]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# $1 local sha, $2 the sha the remote advertised. That second one arrives over
+# the wire rather than from a remote-tracking ref, so it can name a commit this
+# clone has never fetched - someone advancing the branch in the GitHub UI is
+# enough, and a --force push then gets past the non-fast-forward refusal that
+# would otherwise stop this. `rev-list a..b` with an unknown `a` writes nothing
+# and exits 128, which as a bare command substitution is indistinguishable from
+# "nothing to push". Ask first, and fall back to the whole unpushed set.
+list_unpushed() {
+    if git cat-file -e "$2^{commit}" 2>/dev/null; then
+        git rev-list "$2..$1"
+    else
+        git rev-list "$1" --not --remotes
+    fi
+}
+
+failed=0
+
+while read -r _local_ref local_sha remote_ref remote_sha; do
+    only_zeros "$local_sha" && continue    # deleting a branch pushes a null sha
+
+    # A brand-new branch advertises the null sha, which no `cat-file` resolves,
+    # so it takes the same fallback as an unknown one.
+    if ! revs=$(list_unpushed "$local_sha" "$remote_sha"); then
+        echo "pre-push: cannot tell what $remote_ref would receive; refusing" >&2
+        failed=1
+        continue
+    fi
+    [ -z "$revs" ] && continue
+
+    unsigned=$(printf '%s\n' "$revs" |
+        git log --stdin --no-walk --format='%H %G?' |
+        awk '$2 == "N" { print $1 }')
+    [ -z "$unsigned" ] && continue
+
+    echo "pre-push: $remote_ref carries commits with no signature:" >&2
+    printf '%s\n' "$unsigned" | git log --stdin --no-walk --format='  %h  %s' >&2
+    failed=1
+done
+
+if [ "$failed" -ne 0 ]; then
+    cat >&2 <<'MSG'
+
+Sign them, then push again:
+
+    git rebase --exec 'git commit --amend --no-edit -S' origin/main
+
+An agent that lands here has almost certainly turned signing off on the git
+command line, which overrides every config file. Do not: signing works on
+this machine with no passphrase prompt, and CONTRIBUTING.md says so.
+MSG
+fi
+
+exit "$failed"

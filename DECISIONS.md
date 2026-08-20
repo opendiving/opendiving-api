@@ -10273,3 +10273,87 @@ ceremony, so a fixture can only ever be replayed against a challenge pinned to m
 the test could never exercise the challenge check it most wants to. Every ceremony test here signs
 whatever it is given and runs through the real verifier; only Redis, the CRUD singletons and the
 rate limiter are stood in for.
+
+## Signing is enforced by two local hooks, because GitHub cannot do it yet
+
+Every commit in this repo is meant to be signed, and for a while roughly half of them were. The tell
+was two pull requests opened minutes apart from the same machine by the same identity: this repo's
+showed three commits `verified: true`, the web repo's showed four
+`verified: false, reason: unsigned`. Nothing about the environment differed. What differed was the
+command - the unsigned ones were committed with signing switched off inline,
+`git -c commit.gpgsign=<falsy> commit`, the shape an agent reaches for when it expects a commit to
+hang on a passphrase prompt. There is no prompt to dodge here:
+`gpg --batch --pinentry-mode error --clearsign` returns 0, so the workaround only ever cost
+provenance.
+
+**No git setting can prevent this,** which is the part worth internalising before reaching for one.
+A `-c key=value` on the command line outranks every config file by design, and `commit.gpgsign` is a
+*default*, not a constraint - git has no "refuse to make an unsigned commit" switch for the config
+to hold. Enforcement therefore has to live outside config resolution entirely: before the command
+runs, or at the push.
+
+**The real enforcement is a GitHub ruleset, and it is not available to us.** Both repos are private
+under a free organisation, so `GET /repos/{owner}/{repo}/rulesets` and the branch-protection
+endpoint each answer `403 Upgrade to GitHub Pro or make this repository public`. When the repos go
+public - which is the plan - add a ruleset with `required_signatures` and **target every branch, not
+`main`**. A `main`-only rule is theatre: pull requests here are squash-merged, and GitHub creates
+and signs that commit with its own web-flow key, so `main` is already 100% verified while the branch
+behind it can be entirely unsigned. That gap is the exact state this section exists to describe.
+
+Until then, two local hooks:
+
+- `.githooks/pre-push` refuses a push containing a commit whose `%G?` is `N`. It has to be `N`
+  specifically, not "anything other than good". A commit GitHub signed reports `E` - signature
+  cannot be checked, because GitHub's key is in nobody's local keyring - and since every commit on
+  `main` is one of those, failing on `E` would reject every branch that contains `main`, which is
+  all of them. `N` means no signature at all, and that is the only thing being claimed here.
+  Enabling it is one `git config core.hooksPath .githooks` per clone, in `CONTRIBUTING.md`; linked
+  worktrees read the same config, so agent checkouts are covered by the same command.
+- `.claude/hooks/no-unsigned-commits.py`, a `PreToolUse` hook on Bash, rejects the command itself
+  and tells the agent why. Catching it here means there is nothing to rewrite later.
+
+**The Claude hook is committed even though `.claude/` is ignored, and that is deliberate.** Agents
+work in fresh checkouts under `.claude/worktrees/`, so a rule that lives only in the main clone's
+working tree reaches none of the sessions it is meant to constrain - the only copy that arrives is
+the committed one. Re-including it required rewriting the ignore pattern from `.claude/` to
+`.claude/*`: git will not re-include a path whose parent directory is excluded, so a
+`!.claude/settings.json` line underneath `.claude/` matches nothing and fails silently, which looks
+exactly like a working config until you check `git status`. Note also that Claude Code snapshots
+hooks when a session starts, so the session that *adds* one is not governed by it.
+
+**The hook strips heredoc bodies before matching,** because it matches on the text of a shell
+command and this repo has to write about the flag it forbids - `CONTRIBUTING.md`, `AGENTS.md` and
+this section all quote it, and all of them were written through a heredoc. Only the command line
+itself is judged, which is where a real invocation puts the flag anyway.
+
+**The guard's Python is not this repo's Python, and that governs how it is written.** `except A, B:`
+is house style here and `ruff format` writes it that way - see *"`except ValueError, TypeError:` is
+valid, and `ruff format` writes it that way"* - but that rule earns its keep because `src/` runs on
+the pinned 3.14 in the container. `.claude/hooks/no-unsigned-commits.py` does not: it is executed by
+whatever `python3` a contributor's shell resolves, and PEP 758 is a `SyntaxError` on 3.13 or on the
+macOS system 3.9. The consequence is worse than a broken hook. A hook that cannot parse exits 1, and
+the hook system treats any exit that is not 2 as a non-blocking error, so the command runs and the
+guard vanishes without a word - failing open, in the one file whose entire job is to fail closed. It
+therefore catches a single `ValueError`, which covers both `json.JSONDecodeError` and a
+`UnicodeDecodeError` off stdin, and leaves no tuple for the formatter to unparenthesize. CI would
+not have caught the regression either way: `ruff format --check` runs on `src tests scripts`, and
+`.claude/` is in none of them.
+
+**A bare command substitution hides a failure, and here that failure read as "nothing to push".**
+The `remote_sha` a pre-push hook is handed comes off the wire in the ref advertisement, not from a
+remote-tracking ref, so it can name a commit this clone has never fetched - someone advancing the
+branch in the GitHub UI is enough, and a `--force` push then gets past the non-fast-forward refusal
+that would otherwise stop it first. `git rev-list <unknown>..<local>` prints nothing and exits 128,
+but `revs=$(...)` keeps only the empty stdout, and the `[ -z "$revs" ] && continue` on the next line
+reads that as an empty range and skips the signature check entirely. Reproduced end to end before
+fixing it: an unsigned commit landed on a remote with the hook installed and `git push` exiting 0.
+The hook now resolves the advertised sha with `cat-file -e` first and falls back to everything not
+already on a remote-tracking ref - the same path a brand-new branch takes, since the null sha
+resolves no better - and refuses the push outright if the listing itself fails. The lesson
+generalises past this file: in a guard, a command substitution whose exit status nobody reads is a
+pass waiting to happen.
+
+None of this survives someone determined: `git push --no-verify` skips the push hook, a commit made
+outside the Bash tool never meets the other one, and both files are editable by anything that can
+edit the repo. They are speed bumps against a habit, and the habit is the actual failure mode. The
+guard that holds against everything else is the ruleset above, the day the repo is public.

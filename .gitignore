@@ -198,4 +198,10 @@ cython_debug/
 
 # Claude Code working directory (agent worktrees, launch config). Hundreds of MB
 # of scratch checkouts - never wanted in a commit or a Docker build context.
-.claude/
+# The hook config is the exception: agents work in fresh worktree checkouts, so a
+# rule that stays uncommitted never reaches the sessions it is meant to constrain.
+# That is also why the pattern is `.claude/*` - git cannot re-include a path whose
+# parent directory is excluded outright.
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
