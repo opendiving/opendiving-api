@@ -6,6 +6,14 @@ for the endpoints that mint credentials - `POST /auth/email/verify`, `/auth/goog
 `/auth/complete`, `/auth/refresh` are unauthenticated by nature, since the caller has no
 token yet, and each returns one in the body. All four were being labelled
 `public, max-age=60`.
+
+And its second shape, which is what the `Cookie` cases below are for: a bearer token is
+not the only credential the app takes. The CRUDAdmin panel authenticates with a
+`session_id` cookie, so every signed-in request to it is a safe method with no
+`Authorization` header. Its model pages were saved by CRUDAdmin setting `no-store` on
+them itself, which is not a thing to depend on - it skips its own header on the login
+path, on `/static/` and on every redirect, and those were going out `public, max-age=60`
+to a signed-in admin.
 """
 
 import pytest
@@ -42,6 +50,25 @@ def client() -> TestClient:
     @app.get("/echoes-auth")
     async def echoes_auth(request: Request) -> dict[str, bool]:
         return {"authenticated": "Authorization" in request.headers}
+
+    @app.get("/sets-its-own-vary")
+    async def sets_its_own_vary(response: Response) -> dict[str, str]:
+        """Stands in for the CORS middleware, which adds `Vary: Origin` on the way out."""
+        response.headers["Vary"] = "Origin"
+        return {"ok": "yes"}
+
+    # Shaped like the admin panel: a sub-application mounted on the outer app, so it is
+    # behind this middleware exactly as `main.app.mount(CRUD_ADMIN_MOUNT_PATH, ...)` is,
+    # and authenticated by a cookie rather than a header.
+    panel = FastAPI()
+
+    @panel.get("/user")
+    async def panel_user_list(request: Request) -> dict[str, str]:
+        if "session_id" not in request.cookies:
+            return {"page": "login"}
+        return {"page": "users", "row": "diver@example.com"}
+
+    app.mount("/admin", panel)
 
     return TestClient(app)
 
@@ -87,6 +114,49 @@ class TestExplicitHeadersWin:
         response = client.get("/opts-out")
 
         assert response.headers["Cache-Control"] == "private, no-store"
+
+
+class TestCookieAuthenticatedRequests:
+    """The regression this file grew for: `Cookie` is a credential too."""
+
+    def test_a_cookie_makes_a_get_private(self, client: TestClient):
+        response = client.get("/public-thing", headers={"Cookie": "session_id=abc"})
+
+        assert response.headers["Cache-Control"] == "private, no-store"
+
+    def test_a_signed_in_admin_page_is_not_publicly_cacheable(self, client: TestClient):
+        response = client.get("/admin/user", headers={"Cookie": "session_id=abc"})
+
+        assert "diver@example.com" in response.text
+        assert response.headers["Cache-Control"] == "private, no-store"
+
+    def test_the_whole_cookie_header_counts_not_a_list_of_names(self, client: TestClient):
+        """A known-session-cookie-names allowlist would be one more thing to keep in step
+        with every auth surface, and getting it wrong fails open. This errs the other way.
+        """
+        response = client.get("/public-thing", headers={"Cookie": "theme=dark"})
+
+        assert response.headers["Cache-Control"] == "private, no-store"
+
+
+class TestPublicResponsesDeclareWhatTheyVaryOn:
+    """The decision is made from request headers, so a shared cache has to be told which
+    ones - otherwise it answers a credentialed request from the anonymous entry it stored
+    for the same URL.
+    """
+
+    def test_vary_names_both_credential_headers(self, client: TestClient):
+        vary = client.get("/public-thing").headers["Vary"]
+
+        assert "Cookie" in vary
+        assert "Authorization" in vary
+
+    def test_an_existing_vary_is_merged_not_overwritten(self, client: TestClient):
+        """`Vary: Origin` arrives from the CORS middleware on every cross-origin read."""
+        vary = client.get("/sets-its-own-vary").headers["Vary"]
+
+        assert "Origin" in vary
+        assert "Cookie" in vary
 
 
 class TestTheRealAuthRoutes:
