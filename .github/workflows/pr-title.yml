@@ -7,8 +7,8 @@ on:
     types: [opened, edited, reopened]
 
 # The one list of types, read by both jobs below: the check that enforces them
-# and the labels that carry them into the release notes. Kept in step with
-# CONTRIBUTING.md and the umbrella CLAUDE.md, which say the same thing in prose.
+# and the labels that carry them into the release notes. CONTRIBUTING.md spells
+# the same list out in prose - keep the two in step.
 env:
   TYPES: feat|fix|refactor|docs|test|chore|perf|ci|build|revert
 

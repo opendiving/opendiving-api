@@ -201,11 +201,94 @@ docker compose exec api python -m src.scripts.backfill_dive_profiles --parser-ke
   `docs`, `test`, `chore`, `perf`, `ci`, `build`, `revert`. A CI check enforces this, and re-runs
   when you edit the title, so a rejected PR needs no new commit. PRs are squash-merged, so the title
   becomes the commit subject on `main` — commits within your branch can say whatever is useful while
-  working. (Older history mixes prefixed and plain subjects; new PRs need the prefix.)
+  working. (Older history mixes prefixed and plain subjects; new PRs need the prefix.) The same
+  workflow puts the type on the PR as a label, which is what files it under the right heading when a
+  release's notes are generated — so a retitle is all it takes to move it.
 - Say in the description what you changed, why, and anything a reviewer has to do by hand (schema
   SQL, new env vars, a backfill script).
 - If the change affects the API contract, mention whether the web or iOS client needs a matching
   change.
+
+## Cutting a release
+
+Releases are cut deliberately, never minted per merge. A version is an event self-hosters read
+before they pull, and a stream of releases whose notes are one PR title each trains people onto
+`latest` — the tag you least want someone following. Accumulate until the window tells a coherent
+story, until a fix somebody is waiting on lands, or until anything needs a pinnable reference:
+pre-launch that means "whenever useful", after launch expect every one to four weeks.
+
+Versions move in lockstep with [opendiving-web](https://github.com/opendiving/opendiving-web): one
+product version, tagged in both repos, so `opendiving-api:0.4.0` and `opendiving-web:0.4.0` are
+always a matched pair. That is also why no release tool runs here — semantic-release and
+release-please both compute a version per repo from that repo's own commits, which drifts apart on
+the first api-only fix and then has to be forced back by hand at every release afterwards.
+
+**Pick the number** by looking at both repos' windows together:
+
+| The window contains                                                                            | Pre-1.0 | From 1.0.0 |
+| ---------------------------------------------------------------------------------------------- | ------- | ---------- |
+| Anything breaking — a changed config or env contract, removed behaviour, a manual upgrade step | minor   | major      |
+| Any user-visible feature                                                                       | minor   | minor      |
+| Fixes and internals only                                                                       | patch   | patch      |
+
+"Breaking" is about the operator's experience, not the code's. A schema change counts today, because
+applying it is a manual `ALTER TABLE` on someone else's database; that stops being true when
+migrations run on startup.
+
+Every PR title is a conventional commit subject, so the breaking half of that table has a scanner:
+
+```bash
+git log --format=%s v0.3.0..main | grep -E '^[a-z]+(\([^)]+\))?!:'
+```
+
+Then, in both repos:
+
+1. Bump `version` in `pyproject.toml` (and `package.json` in the web repo) — one small PR each,
+   titled `chore: release v0.4.0`. Nothing else carries a version number: the API reads its own from
+   the installed package metadata.
+
+2. Tag the bump commit and push the tag:
+
+   ```bash
+   git tag v0.4.0 && git push origin v0.4.0
+   ```
+
+3. The tag push runs **Publish Image**, which builds amd64 and arm64 on native runners and pushes
+   `0.4.0`, `0.4`, `latest` and `sha-<12>` (plus a bare `0` once this is past 1.0.0). A tag whose
+   name disagrees with the manifest version fails the workflow before it builds anything — so
+   nothing was published, and the fix is to delete the tag, correct the bump, and re-cut it.
+
+4. The api workflow opens a **draft** release with generated notes. Write the headline paragraph and
+   confirm the **Breaking** section: say "None" in so many words when it is empty, because generated
+   notes simply omit an empty category and silence is not an answer someone deciding whether to
+   upgrade can use.
+
+5. Before publishing, check that `ghcr.io/opendiving/opendiving-web:0.4.0` exists, or that its
+   workflow is green. Tagging the api and forgetting the web repo breaks every pinned install of
+   that version, and no per-repo check can catch it.
+
+6. Publish. The web repo's release is plumbing — self-hosters read this one — so it can go out as
+   generated.
+
+The first release cut this way is `v0.2.0`. Both manifests already read `0.1.0`, and `v0.1.0` is
+spoken for: it is the clock-starter for
+[awesome-selfhosted](https://github.com/awesome-selfhosted/awesome-selfhosted-data)'s
+first-released-more-than-four-months-ago rule, not something anyone is meant to install. With no
+earlier *release* to generate notes against, that first draft enumerates the whole history — throw
+it away and recreate it with an explicit floor:
+
+```bash
+gh release delete v0.2.0 --yes
+gh release create v0.2.0 --draft --generate-notes --notes-start-tag v0.1.0
+```
+
+**A published version is never repointed.** A bad release gets a successor, not a rewrite.
+Immutability starts at *publish*, so a tag whose build failed before pushing anything published
+nothing and may be deleted and re-cut. The one sanctioned reason to rebuild a released version is a
+CVE in a base image: run **Publish Image** by hand with `ref` set to the `v` tag, and tick **Also
+push :latest** if that version is still the newest. One run recomputes the version's whole alias
+set, which is the point — a hand-picked subset would leave everyone following `latest` or `0.4` on
+the vulnerable digest.
 
 ## License
 

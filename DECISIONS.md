@@ -8418,3 +8418,91 @@ because it exits inside the check's 20-second start period — a coincidence of 
 not a property of one-shots, and untrue the moment a database is slow enough.
 `healthcheck: disable: true` says what is meant: a container that serves no HTTP has no business
 being asked for an HTTP status.
+
+## A release is a tag push, and the image is built twice on two architectures
+
+`publish-image.yml` grew a `push: tags: ["v*"]` trigger alongside the `workflow_dispatch` it was
+born with, and the two paths publish different things on purpose. A tag push is a *release*: it puts
+the whole alias set for that version behind one build — `X.Y.Z`, `X.Y`, `latest`, and a bare `X`
+only from 1.0.0 on. A dispatch is everything else: a scratch build off a branch, a `staging` tag, or
+a rebuild of an already-released version because its base image grew a CVE. There is still no
+`push: branches:` trigger, and the reason is unchanged — images are cut when someone decides to cut
+one.
+
+**`X` is withheld below 1.0.0.** A `0` alias reads as "any 0.x", which is exactly the range whose
+minors are allowed to break. Prereleases get their version tag and nothing else: no `X.Y` (which
+`docker/metadata-action` withholds by itself) and no `latest` (which the workflow withholds).
+
+**The full alias set is recomputed on a rebuild, never hand-picked.** A CVE rebuild is a dispatch
+pointed at the `v*` tag, and it re-pushes `X.Y.Z`, `X.Y` and — when the operator ticks the input
+saying so — `latest`, all from one build. Pushing a subset would leave everyone following an alias
+on the vulnerable digest, and two builds would put two digests behind aliases of the same version.
+That is also why `latest` is decided by the workflow rather than by metadata-action's `latest=auto`,
+which keys off the event being a tag push and would silently drop it from exactly this case.
+
+**Native arm64 runners, not QEMU.** `matrix.include` pairs `linux/amd64` with `ubuntu-latest` and
+`linux/arm64` with `ubuntu-24.04-arm`. Emulating aarch64 on an amd64 runner works and is slow enough
+here to matter: every dependency without an aarch64 wheel would compile under QEMU. It stays the
+fallback if hosted arm64 runners ever go away.
+
+**Two builds, one manifest, and nothing tagged until both land.** Each architecture pushes *by
+digest* (`push-by-digest=true,name-canonical=true`) — a manifest with no tag pointing at it — and a
+third job runs `docker buildx imagetools create` to point every tag at a list of the two. Tagging in
+the matrix jobs instead would have whichever finished second overwrite the first, which is the
+single-architecture image this replaced. The useful side effect is that a half-finished matrix
+leaves untagged blobs and no image anyone can pull by name, so a failed build is a non-event.
+
+**The tag has to agree with `pyproject.toml`.** Both repos are tagged by hand, in lockstep, on the
+same version — so tagging a commit whose manifest still reads the old version is the slip the ritual
+will eventually make. A `v*` build (the tag trigger, or a dispatch pointed at a `v*` ref or extra
+tag) reads the version out of `pyproject.toml` with `tomllib` and fails before a layer is built if
+they disagree. Failing *there* is what makes recovery trivial: nothing was published, so the tag can
+be deleted, the bump fixed, and the tag re-cut. Immutability starts at publish. What the guard
+cannot catch — a tag on any commit at or after the bump — is inherent and accepted.
+
+**A `v*` value in the extra-tag input publishes the version, it does not push `v0.2.0` as a tag.**
+The image tag vocabulary is a bare `0.2.0`; a parallel `v`-prefixed one would only split what
+consumers pin to. So a `v*` extra tag is folded into the version and disappears; anything else
+(`staging`) is pushed verbatim, which is what the input is for.
+
+**metadata-action supplies the tags and nothing else.** The labels are still assembled by hand,
+because `org.opencontainers.image.revision` has to name the commit that was checked out and
+metadata-action reads `github.sha` — on a dispatch, the tip of whichever branch the run was launched
+from, not the ref being built. `type=sha` is wrong for the same reason, so the `sha-<12>` tag is a
+`type=raw` built from the value read off the worktree, and `DOCKER_METADATA_SHORT_SHA_LENGTH` is
+absent because nothing uses `type=sha`. What the action is worth having for is the semver parsing:
+`{{major}}.{{minor}}` extraction and prerelease handling. The same trap is why the matrix jobs check
+out `needs.prepare.outputs.sha` rather than the ref — a branch that moves between jobs would
+otherwise put two architectures of different code behind one manifest.
+
+**The draft release is created by the workflow, and published by a person.**
+`gh release create --draft --generate-notes` runs after the manifest exists, so a failed build never
+produces a release. What it produces is a skeleton categorised by `.github/release.yml`; the
+headline paragraph and the **Breaking** section are written by hand before it goes out (see the
+release checklist in `CONTRIBUTING.md`). It is the one job here that needs `contents: write` — the
+others are `packages: write` and `contents: read`, granted per job rather than once at the top of
+the file.
+
+## The PR title becomes a label, in a job of its own
+
+Generated release notes categorise by label, and the labels come from the PR title's
+conventional-commit type: `feat`, `fix`, `breaking` for the `!` variant, and one per remaining type.
+Deriving them rather than asking for them by hand is what keeps the two from disagreeing, and a
+retitle is enough to move a PR between sections — the step removes the labels it owns that the new
+title no longer implies, so a `feat!:` corrected to `fix:` does not stay in the Breaking section of
+notes generated weeks later. Labels it does not own are left alone.
+
+**It is a separate job from the title check, and gated to same-repo PRs.** A fork's `GITHUB_TOKEN`
+is read-only whatever the workflow asks for, so labelling fails on every external contribution. The
+title check is the *required* one, and it keeps `permissions: {}` and stays green; the label job
+carries `pull-requests: write` (to apply) and `issues: write` (to create) and simply doesn't run on
+forks. A red X on every outside PR is the last thing this repository needs the week it goes public.
+
+**Labels are created on demand.** `gh pr edit --add-label` fails outright on a name the repository
+has never seen, which is every name until the first PR of that type — hence `issues: write` and a
+create-if-missing step. Only ever created, never updated, so a colour tuned in the UI stays tuned.
+
+The type list lives once, in the workflow's top-level `env`, and both jobs read it: the regex that
+enforces it and the array of labels the job owns. It is already written out in prose in
+`CONTRIBUTING.md`, which is a copy that a person reads and notices; two copies inside one file would
+have been the pair that drifts unread.
