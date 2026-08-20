@@ -9098,3 +9098,37 @@ including two claims on two connections under `asyncio.gather` - the one asserti
 change that executes the concurrency argument rather than restating it. It is Postgres-backed and
 therefore skips itself when `POSTGRES_SERVER` names a host the test process cannot reach, which is
 why it is not the only coverage.
+
+## The disclosure policy leads with GitHub, because the mailbox is the half that can fail silently
+
+`SECURITY.md` exists so a finder has somewhere private to go, which makes it the one document whose
+value is entirely in whether its channels are real. It names two, and the order is deliberate.
+
+**GitHub private vulnerability reporting is first.** It needs no mail infrastructure, the thread
+lives on the repository where the fix will land, and GitHub keys the "Report a vulnerability" button
+off this file's existence. What it still needs is a per-repository toggle — Settings → Code security
+→ Private vulnerability reporting — which committing a `SECURITY.md` does *not* flip, and which is
+unavailable while the repository is private. So the button is off today and stays off until somebody
+turns it on, at the same moment the repo goes public.
+
+**`security@opendiving.app` is second, and is the one to check before trusting.**
+`opendiving-web/DECISIONS.md`'s *"The contact form posts to the API, and the page it lives on claims
+only what exists"* records `security@` — along with `community@` and `docs@` — as an **invented**
+mailbox, removed from the contact page precisely because it did not exist. That section's reasoning
+is the reason this one exists: a contact route that silently discards messages is worse than no
+route at all, and a *security* route that does it is worse still, because the sender believes they
+have disclosed responsibly and stops there. `conduct@` in `CODE_OF_CONDUCT.md` was never on that
+list, so the domain having one role address is not evidence it has this one.
+
+Hence the ordering rather than a hedge in the prose. A policy that qualifies its own address ("if
+this bounces…") is not a policy, so the file states both channels plainly and this section carries
+the caveat instead. Two things have to happen before the repository is public, neither of which is a
+code change:
+
+1. Enable private vulnerability reporting in the repository settings.
+2. Provision `security@opendiving.app`, or change the address in `SECURITY.md` to one that is real.
+
+The same applies to the copy that has to exist in `opendiving-web` — the policy covers a product
+released in lockstep, and a finder who lands on the frontend repo needs the same instructions. An
+org-level `.github` repository would serve both from one file and is the better answer if a third
+repo ever wants it; two copies are the cheaper one while there are two.

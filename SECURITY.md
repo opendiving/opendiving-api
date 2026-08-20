@@ -10,11 +10,13 @@ release, and credit in the release notes if you want it.
 
 ## Reporting a vulnerability
 
-**Email security@opendiving.app.** Reports are read only by the project maintainers.
+**Use GitHub's private vulnerability reporting:** the **Security** tab of this repository, then
+**Report a vulnerability**. It opens a thread visible only to you and the maintainers, it keeps the
+whole exchange attached to the repository, and it can become a published advisory with a CVE once
+the fix is out.
 
-If you would rather not use email, or your report concerns a maintainer, use GitHub's private
-vulnerability reporting instead: the **Security** tab of the repository, then **Report a
-vulnerability**. It opens a private thread visible only to maintainers.
+If you have no GitHub account, or your report concerns a maintainer, **email
+security@opendiving.app** instead. Reports there are read only by the project maintainers.
 
 Whatever you can tell us helps, but the four things that speed a fix up most are:
 
