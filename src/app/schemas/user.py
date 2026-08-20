@@ -39,13 +39,14 @@ class UserRead(PublicUUIDSchema):
     username: Annotated[str, Field(min_length=2, max_length=20, pattern=r"^[a-z0-9]+$", examples=["userson"])]
     email: Annotated[EmailStr, Field(examples=["user.userson@example.com"])]
     profile_image_url: str
-    # Feeds the settings page's gear-reminder toggle. Defaults to `True` so this still
-    # validates against a database where the column hasn't been added by hand yet (see
-    # DECISIONS.md's "no migration tool" workflow).
+    # Feeds the settings page's gear-reminder toggle. The `= True` is what `/openapi.json`
+    # publishes as the field's default; it is *not* a fallback for a database missing the
+    # column, which is what this said for a while. `get_current_user` selects every mapped
+    # column, so such a database raises `UndefinedColumn` and the request 500s before
+    # Pydantic sees a row at all (see DECISIONS.md).
     gear_service_emails: bool = True
     # Feeds the settings page's units toggle, and every measurement the web app renders.
-    # Defaults for the same reason as its neighbour above - this still has to validate
-    # against a database where the column hasn't been added by hand yet.
+    # Same note as its neighbour above on what the default is and isn't for.
     units: UnitSystem = UnitSystem.METRIC
 
 

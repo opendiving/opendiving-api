@@ -1714,10 +1714,17 @@ keeps a service history, and the gear delete dialog has always said so.
 Opt-*out*, not opt-in: a reminder nobody switched on is a reminder that never arrives, and the
 entire point of the feature is reaching a diver who isn't currently in the app.
 
-It has to be added to **both** `UserRead` (so `GET /user` feeds the settings toggle; the `= True`
-default also covers reading a database that does not have the column yet) and `UserUpdate`. Missing
-the second is the easy mistake: `UserUpdate` is `extra="forbid"`, so the toggle would 422 rather
-than save.
+It has to be added to **both** `UserRead` (so `GET /user` feeds the settings toggle) and
+`UserUpdate`. Missing the second is the easy mistake: `UserUpdate` is `extra="forbid"`, so the
+toggle would 422 rather than save.
+
+**What `UserRead`'s `= True` does not do**, though this section and the `units` one below both
+claimed it: it is not a fallback for a database that does not have the column yet.
+`get_current_user` calls `crud_users.get` with no `schema_to_select` (`api/dependencies.py`), so
+FastCRUD selects every mapped column and Postgres raises `UndefinedColumn` there - the request 500s
+at the database layer, and the response model the default belongs to is never reached. The hedge
+never worked, under the hand-applied-DDL workflow it was written for or since. What the default is
+actually for is `/openapi.json`, which publishes it.
 
 **The DDL below is archaeology.** Written under "Schema changes have no migration tool", this was
 the hand-applied step for an existing local DB, and the whole manual-DDL list for the feature - both
@@ -7473,15 +7480,14 @@ as a sentence at the point of use - `"units": "imperial"` - and the settings row
 **Both schemas, and the null guard.** This is the `gear_service_emails` template exactly (see
 *"`user.gear_service_emails` is the only new column on an existing table"*): the field goes on
 `UserRead` **and** `UserUpdate`, because `UserUpdate` is `extra="forbid"` and missing the second
-422s the settings toggle instead of saving it. `UserRead`'s `= UnitSystem.METRIC` default is what
-lets `GET /user` answer against a database that does not have the column yet. `UserAdminUpdate`
-inherits both the field and the guard with no separate edit. The column is `NOT NULL`, so `"units"`
-joins `UserUpdate.NON_NULLABLE_FIELDS` - and
+422s the settings toggle instead of saving it. `UserRead`'s `= UnitSystem.METRIC` default is not a
+fallback for a database missing the column either - see the correction in that section.
+`UserAdminUpdate` inherits both the field and the guard with no separate edit. The column is
+`NOT NULL`, so `"units"` joins `UserUpdate.NON_NULLABLE_FIELDS` - and
 `test_update_explicit_nulls.py::test_the_declared_fields_match_the_table` reads that list back off
 the SQLAlchemy metadata, so forgetting it fails the build rather than quietly reopening the
 explicit-null hole (see *"Update schemas refuse an explicit null for a `NOT NULL` column"*). When
-this was written, what no test could catch was the forgotten hand-applied `ALTER` that would leave a
-database in exactly that state.
+this was written, what no test could catch was a forgotten hand-applied `ALTER`.
 
 **The DDL below is archaeology**, for the same reason as in the `gear_service_emails` section this
 one is modelled on. Under "Schema changes have no migration tool" this was the manual step on any
