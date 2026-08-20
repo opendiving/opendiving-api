@@ -10138,11 +10138,17 @@ atomic condition"*.
 
 ### `GET /user/passkeys` is not cached, which makes it the fifth `OwnedResourceCache` opt-out
 
-Every other owned resource goes through that factory. This one is unpaginated, capped at
-`PASSKEY_MAX_CREDENTIALS_PER_USER` rows, and embedded by nothing anywhere — so there is no page
-worth caching and no invalidation obligation to get wrong. Caching it would be inventing a thing
-that can go stale. The other four opt out for the opposite reason (their reads enrich rows with a
-second query); the class docstring lists all five.
+Every other owned resource goes through that factory. This one is unpaginated, a handful of rows,
+and embedded by nothing anywhere — so there is no page worth caching and no invalidation obligation
+to get wrong. Caching it would be inventing a thing that can go stale. The other four opt out for
+the opposite reason (their reads enrich rows with a second query); the class docstring lists all
+five.
+
+The list's own `limit` is `_LIST_LIMIT`, deliberately *above* `PASSKEY_MAX_CREDENTIALS_PER_USER`
+rather than equal to it. The cap is enforced at registration, so lowering the setting afterwards
+leaves accounts holding more rows than it allows — and a limit equal to the setting would hide
+exactly those, which is the one failure that matters here: a passkey nobody can see is a passkey
+nobody can revoke.
 
 ### The test authenticator is vendored, not depended on
 

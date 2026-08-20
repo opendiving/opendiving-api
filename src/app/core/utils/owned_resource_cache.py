@@ -38,10 +38,10 @@ class OwnedResourceCache[InternalT, PublicT]:
       constructs one of these for `list_cache_key_prefix` and `invalidate_list`, so its
       hand-rolled helpers keep the key shapes this factory defines.
     - `passkeys.py` - the odd one out, and for the opposite reason: it is not *enriched*, it
-      is not cached at all. `GET /user/passkeys` is unpaginated and capped at
-      `PASSKEY_MAX_CREDENTIALS_PER_USER` rows, and nothing anywhere embeds a credential - so
-      there is no page to cache and no invalidation obligation to get wrong. Caching it would
-      be inventing a thing that can go stale.
+      is not cached at all. `GET /user/passkeys` is unpaginated and returns the handful of
+      rows registration lets an account accumulate, and nothing anywhere embeds a credential
+      - so there is no page to cache and no invalidation obligation to get wrong. Caching it
+      would be inventing a thing that can go stale.
 
     In each of the first four the enrichment is a second query whose results have to be
     zipped back into the page before conversion, which is precisely the step this factory has

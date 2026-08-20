@@ -17,6 +17,7 @@ from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from fastapi import HTTPException
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from src.app.api.v1.auth import passkey_sign_in_options, passkey_sign_in_verify
@@ -30,7 +31,6 @@ from src.app.api.v1.passkeys import (
 from src.app.core.config import settings
 from src.app.core.exceptions.http_exceptions import (
     BadRequestException,
-    DuplicateValueException,
     NotFoundException,
     UnauthorizedException,
 )
@@ -281,13 +281,17 @@ class TestRegistration:
         assert "relay is down" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_the_eleventh_credential_is_refused(self, mock_db, redis_client):
+    async def test_the_eleventh_credential_is_refused_with_a_409(self, mock_db, redis_client):
+        """409, not 422: the request is well-formed, the account's state is the conflict -
+        which is the line `AGENTS.md` draws between the two codes."""
         at_the_cap = [_stored(credential_id=f"key-{n}".encode()) for n in range(10)]
         with patch("src.app.services.passkey_service.crud_webauthn_credentials") as crud:
             crud.get_multi = AsyncMock(return_value={"data": at_the_cap})
 
-            with pytest.raises(DuplicateValueException):
+            with pytest.raises(HTTPException) as exc_info:
                 await passkey_registration_options(_user(), mock_db)
+
+        assert exc_info.value.status_code == 409
 
     @pytest.mark.asyncio
     async def test_the_cap_is_re_checked_after_verification(self, mock_db, redis_client):
@@ -303,13 +307,14 @@ class TestRegistration:
             )
             crud.create = AsyncMock()
 
-            with pytest.raises(DuplicateValueException):
+            with pytest.raises(HTTPException) as exc_info:
                 await passkey_registration_verify(
                     PasskeyRegistrationVerifyRequest(credential=device.register(options), name="iPhone"),
                     _user(),
                     mock_db,
                 )
 
+            assert exc_info.value.status_code == 409
             crud.create.assert_not_called()
 
     @pytest.mark.asyncio
@@ -365,10 +370,41 @@ class TestRegistration:
 
             crud.get_multi = AsyncMock(return_value={"data": [_stored(credential_id=device.credential_id)]})
 
-            with pytest.raises(DuplicateValueException):
+            with pytest.raises(HTTPException) as exc_info:
                 await passkey_registration_verify(
                     PasskeyRegistrationVerifyRequest(credential=attestation, name="iPhone"), _user(), mock_db
                 )
+
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail == "That passkey is already registered."
+
+    @pytest.mark.asyncio
+    async def test_a_collision_with_another_account_is_the_same_409(self, mock_db, redis_client):
+        """`credential_id` is unique across all users, and the per-user check above can only
+        see this caller's rows - so a collision with somebody else's arrives as the unique
+        constraint firing. Practically unreachable, but the alternative to handling it is a
+        500, and the caller must not be able to tell the two conflicts apart either.
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        device = SoftAuthenticator(rp_id=RP_ID, origin=ORIGIN)
+        mock_db.rollback = AsyncMock()
+        with patch("src.app.services.passkey_service.crud_webauthn_credentials") as crud:
+            crud.get_multi = AsyncMock(return_value={"data": []})
+            crud.create = AsyncMock(side_effect=IntegrityError("INSERT", {}, Exception("duplicate key")))
+            options = (await passkey_registration_options(_user(), mock_db)).options
+
+            with pytest.raises(HTTPException) as exc_info:
+                await passkey_registration_verify(
+                    PasskeyRegistrationVerifyRequest(credential=device.register(options), name="iPhone"),
+                    _user(),
+                    mock_db,
+                )
+
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail == "That passkey is already registered."
+        # Without the rollback the session is unusable for anything that follows.
+        mock_db.rollback.assert_awaited_once()
 
 
 @pytest.mark.usefixtures("no_rate_limits")

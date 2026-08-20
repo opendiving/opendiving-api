@@ -122,10 +122,11 @@ async def read_passkeys(
 ) -> list[WebauthnCredentialRead]:
     """Every passkey on the caller's account, oldest first.
 
-    Unpaginated and not Redis-cached, unlike every other owned resource. It is at most
-    `PASSKEY_MAX_CREDENTIALS_PER_USER` rows and nothing anywhere embeds a credential, so
-    there is no invalidation obligation to get wrong - the fifth of the documented opt-outs
-    on `OwnedResourceCache`.
+    Unpaginated and not Redis-cached, unlike every other owned resource. Registration holds
+    it to `PASSKEY_MAX_CREDENTIALS_PER_USER` rows, and this reads up to `_LIST_LIMIT` so a
+    lowered cap cannot strand one - either way it is a handful of rows that nothing anywhere
+    embeds, so there is no invalidation obligation to get wrong. The fifth of the documented
+    opt-outs on `OwnedResourceCache`.
     """
     rows = await crud_webauthn_credentials.get_multi(
         db=db,

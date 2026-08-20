@@ -10,6 +10,8 @@ import logging
 import uuid as uuid_pkg
 from typing import Any, cast
 
+from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from webauthn import (
     generate_authentication_options,
@@ -28,7 +30,7 @@ from webauthn.helpers.structs import (
 )
 
 from ..core.config import settings
-from ..core.exceptions.http_exceptions import BadRequestException, DuplicateValueException, UnauthorizedException
+from ..core.exceptions.http_exceptions import BadRequestException, UnauthorizedException
 from ..crud.crud_users import crud_users
 from ..crud.crud_webauthn_credentials import crud_webauthn_credentials, record_assertion
 from ..schemas.webauthn_credential import (
@@ -51,6 +53,11 @@ logger = logging.getLogger(__name__)
 # questions - does this credential exist, does that account still - that a caller holding
 # a failed assertion has no business asking.
 _SIGN_IN_FAILED = "That passkey could not be used to sign in."
+
+# Raised from two places - the per-user check, and the unique constraint that catches what
+# that check cannot see. One object because it carries no per-call state and the two paths
+# must be indistinguishable to the caller.
+_ALREADY_REGISTERED = HTTPException(status_code=409, detail="That passkey is already registered.")
 
 
 def _registration_selection() -> AuthenticatorSelectionCriteria:
@@ -88,6 +95,18 @@ def _known_transports(transports: list[str] | None) -> list[AuthenticatorTranspo
     return [AuthenticatorTransport(value) for value in transports if value in known] or None
 
 
+def _at_the_cap() -> HTTPException:
+    """409, not 422: the request body is fine, the *account's state* is what conflicts -
+    which is the line `AGENTS.md` draws between the two codes. A raw `HTTPException` for
+    the same reason `POST /dive/{uuid}/file`'s conflicts are raw ones:
+    `core/exceptions/http_exceptions.py` has no class for 409.
+    """
+    return HTTPException(
+        status_code=409,
+        detail=f"You already have {settings.PASSKEY_MAX_CREDENTIALS_PER_USER} passkeys. Remove one to add another.",
+    )
+
+
 async def start_registration(*, db: AsyncSession, user: dict[str, Any]) -> dict[str, Any]:
     """Mint creation options for a signed-in user and store the challenge.
 
@@ -101,9 +120,7 @@ async def start_registration(*, db: AsyncSession, user: dict[str, Any]) -> dict[
     """
     existing = await _credentials_for_user(db, user["id"])
     if len(existing) >= settings.PASSKEY_MAX_CREDENTIALS_PER_USER:
-        raise DuplicateValueException(
-            f"You already have {settings.PASSKEY_MAX_CREDENTIALS_PER_USER} passkeys. Remove one to add another."
-        )
+        raise _at_the_cap()
 
     challenge = await store_registration_challenge(user["id"])
 
@@ -157,27 +174,37 @@ async def finish_registration(
 
     existing = await _credentials_for_user(db, user["id"])
     if len(existing) >= settings.PASSKEY_MAX_CREDENTIALS_PER_USER:
-        raise DuplicateValueException(
-            f"You already have {settings.PASSKEY_MAX_CREDENTIALS_PER_USER} passkeys. Remove one to add another."
-        )
+        raise _at_the_cap()
     if any(row.credential_id == verified.credential_id for row in existing):
-        raise DuplicateValueException("That passkey is already registered on this account.")
+        raise _ALREADY_REGISTERED
 
-    created = await crud_webauthn_credentials.create(
-        db=db,
-        object=WebauthnCredentialCreateInternal(
-            user_id=user["id"],
-            credential_id=verified.credential_id,
-            public_key=verified.credential_public_key,
-            name=name,
-            sign_count=verified.sign_count,
-            transports=_transports_from(credential),
-            aaguid=_aaguid_from(verified.aaguid),
-            backed_up=verified.credential_backed_up,
-        ),
-        schema_to_select=WebauthnCredentialReadInternal,
-        return_as_model=True,
-    )
+    try:
+        created = await crud_webauthn_credentials.create(
+            db=db,
+            object=WebauthnCredentialCreateInternal(
+                user_id=user["id"],
+                credential_id=verified.credential_id,
+                public_key=verified.credential_public_key,
+                name=name,
+                sign_count=verified.sign_count,
+                transports=_transports_from(credential),
+                aaguid=_aaguid_from(verified.aaguid),
+                backed_up=verified.credential_backed_up,
+            ),
+            schema_to_select=WebauthnCredentialReadInternal,
+            return_as_model=True,
+        )
+    except IntegrityError:
+        # `credential_id` is unique across *all* users, and the check above only sees this
+        # one's rows - so a collision with somebody else's credential arrives here instead.
+        # Practically unreachable (authenticators mint a fresh credential per registration,
+        # and an attestation cannot be replayed past the single-use challenge), but the
+        # alternative to handling it is a 500, and the same conflict deserves the same 409
+        # either way. Rolled back for the same reason `complete_profile` does: the session
+        # is unusable afterwards otherwise.
+        await db.rollback()
+        raise _ALREADY_REGISTERED from None
+
     return cast(WebauthnCredentialReadInternal, created)
 
 

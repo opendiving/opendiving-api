@@ -416,8 +416,9 @@ class FrontendSettings(BaseSettings):
     #
     # Changing its hostname orphans every registered passkey, because browsers scope a
     # credential to the RP ID it was created under and will not offer it to another. The
-    # magic link is the recovery path when that happens; `docs/self-hosting/configuration.md`
-    # says so where an operator reads about this setting.
+    # magic link is the recovery path when that happens. `src/.env.example` carries the same
+    # warning where an operator sets this; `docs/self-hosting/configuration.md` does not yet
+    # mention passkeys at all, and gains its section when the web client ships the feature.
     FRONTEND_URL: str = config("FRONTEND_URL", default="http://localhost:3000")
 
     @property
