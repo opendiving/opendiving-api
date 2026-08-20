@@ -9,7 +9,11 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi import Response
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
+from uuid6 import uuid7
 
 from src.app.api.v1.users import check_email_change_link, request_email_change, verify_email_change
 from src.app.core.exceptions.http_exceptions import (
@@ -19,13 +23,27 @@ from src.app.core.exceptions.http_exceptions import (
     RateLimitException,
     UnauthorizedException,
 )
+from src.app.core.security import hash_token
+from src.app.models.authentication_request import AuthenticationRequest
+from src.app.models.user import User
 from src.app.schemas.email_change import EmailChangeRequest, EmailChangeVerifyRequest
+from tests.conftest import db_available, unique_email
+from tests.helpers.mocks import claimed_used_at_sql, stub_claim
 
 
 def _request(ip: str = "1.2.3.4") -> Mock:
     request = Mock()
     request.client = Mock(host=ip)
     return request
+
+
+def _used_at(db: Session, request_id: int) -> datetime | None:
+    """The committed `used_at` of one request row, read fresh.
+
+    A column select rather than `db.get`, which would hand back whatever the sync
+    session already has in its identity map - the stale `None` it wrote itself.
+    """
+    return db.scalar(select(AuthenticationRequest.used_at).where(AuthenticationRequest.id == request_id))
 
 
 class TestRequestEmailChange:
@@ -294,11 +312,13 @@ class TestVerifyEmailChange:
         ):
             mock_crud.get = AsyncMock(return_value=auth_request)
             mock_users.get = AsyncMock(return_value={"id": 7, "email": "new@example.com"})
+            stub_claim(mock_db)
 
             result = await verify_email_change(_request(), EmailChangeVerifyRequest(token="already-used"), mock_db)
 
             assert result.email == "new@example.com"
             mock_users.update.assert_not_called()
+            mock_db.execute.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_reused_token_with_mismatched_email_raises_unauthorized(self, mock_db):
@@ -323,6 +343,101 @@ class TestVerifyEmailChange:
 
             with pytest.raises(UnauthorizedException, match="already been used"):
                 await verify_email_change(_request(), EmailChangeVerifyRequest(token="stale-used"), mock_db)
+
+    @pytest.mark.asyncio
+    async def test_losing_the_claim_reports_the_change_that_landed(self, mock_db):
+        """Two verifications of the same still-live link race, and this one loses the
+        conditional `used_at` UPDATE. Deliberately *not* the 401 sign-in's loser gets:
+        the winner applied exactly the change this token asked for, so re-reading the
+        account's email lands on the same tolerated-replay rule as an already-used row.
+        The second `crud_users.get` is the read that happens after the winner committed."""
+        auth_request = {
+            "id": 1,
+            "email": "new@example.com",
+            "user_id": 7,
+            "used_at": None,
+            "invalidated_at": None,
+            "expires_at": datetime.now(UTC) + timedelta(minutes=10),
+        }
+        with (
+            patch("src.app.api.v1.users.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.users.crud_authentication_requests") as mock_requests,
+            patch("src.app.api.v1.users.crud_users") as mock_users,
+            patch("src.app.api.v1.users.send_email_changed_notification", new_callable=AsyncMock) as mock_notify,
+        ):
+            mock_requests.get = AsyncMock(return_value=auth_request)
+            mock_users.get = AsyncMock(
+                side_effect=[{"id": 7, "email": "old@example.com"}, {"id": 7, "email": "new@example.com"}]
+            )
+            mock_users.exists = AsyncMock(return_value=False)
+            mock_users.update = AsyncMock(return_value=None)
+            stub_claim(mock_db, won=False)
+
+            result = await verify_email_change(_request(), EmailChangeVerifyRequest(token="raced"), mock_db)
+
+            assert result.email == "new@example.com"
+            mock_users.update.assert_not_called()
+            # The winner already sent it; a second one would tell the old address twice.
+            mock_notify.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_losing_the_claim_rejects_when_the_account_moved_on(self, mock_db):
+        """Same race, but the account's email is no longer what this token asked for -
+        a later change request won instead. That is a genuine reuse, and the leniency
+        above must not swallow it."""
+        auth_request = {
+            "id": 1,
+            "email": "new@example.com",
+            "user_id": 7,
+            "used_at": None,
+            "invalidated_at": None,
+            "expires_at": datetime.now(UTC) + timedelta(minutes=10),
+        }
+        with (
+            patch("src.app.api.v1.users.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.users.crud_authentication_requests") as mock_requests,
+            patch("src.app.api.v1.users.crud_users") as mock_users,
+        ):
+            mock_requests.get = AsyncMock(return_value=auth_request)
+            mock_users.get = AsyncMock(
+                side_effect=[{"id": 7, "email": "old@example.com"}, {"id": 7, "email": "newer@example.com"}]
+            )
+            mock_users.exists = AsyncMock(return_value=False)
+            mock_users.update = AsyncMock(return_value=None)
+            stub_claim(mock_db, won=False)
+
+            with pytest.raises(UnauthorizedException, match="already been used"):
+                await verify_email_change(_request(), EmailChangeVerifyRequest(token="raced"), mock_db)
+
+            mock_users.update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_losing_the_claim_to_a_deleted_account_is_not_found(self, mock_db):
+        """Hard-deleting a user cascades to their `authentication_request` rows, so the
+        claim can lose to the row simply going away. The re-read has to be checked rather
+        than reusing the email fetched before it - reporting success for an account that
+        no longer exists is the one answer that would be wrong."""
+        auth_request = {
+            "id": 1,
+            "email": "new@example.com",
+            "user_id": 7,
+            "used_at": None,
+            "invalidated_at": None,
+            "expires_at": datetime.now(UTC) + timedelta(minutes=10),
+        }
+        with (
+            patch("src.app.api.v1.users.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.users.crud_authentication_requests") as mock_requests,
+            patch("src.app.api.v1.users.crud_users") as mock_users,
+        ):
+            mock_requests.get = AsyncMock(return_value=auth_request)
+            mock_users.get = AsyncMock(side_effect=[{"id": 7, "email": "old@example.com"}, None])
+            mock_users.exists = AsyncMock(return_value=False)
+            mock_users.update = AsyncMock(return_value=None)
+            stub_claim(mock_db, won=False)
+
+            with pytest.raises(NotFoundException):
+                await verify_email_change(_request(), EmailChangeVerifyRequest(token="raced"), mock_db)
 
     @pytest.mark.asyncio
     async def test_expired_token_raises_unauthorized(self, mock_db):
@@ -406,17 +521,21 @@ class TestVerifyEmailChange:
             patch("src.app.api.v1.users.send_email_changed_notification", new_callable=AsyncMock) as mock_notify,
         ):
             mock_requests.get = AsyncMock(return_value=auth_request)
-            mock_requests.update = AsyncMock(return_value=None)
             mock_users.get = AsyncMock(return_value={"id": 7, "email": "old@example.com"})
             mock_users.exists = AsyncMock(return_value=False)
             mock_users.update = AsyncMock(return_value=None)
+            stub_claim(mock_db)
 
             result = await verify_email_change(_request(), EmailChangeVerifyRequest(token="good"), mock_db)
 
             assert result.email == "new@example.com"
-            mock_users.update.assert_called_once_with(db=mock_db, object={"email": "new@example.com"}, id=7)
-            mock_requests.update.assert_called_once()
-            assert mock_requests.update.call_args.kwargs["id"] == 1
+            mock_users.update.assert_called_once_with(
+                db=mock_db, object={"email": "new@example.com"}, id=7, commit=False
+            )
+            assert "used_at IS NULL" in claimed_used_at_sql(mock_db)
+            # One transaction covering both writes: neither writer commits for itself, so
+            # the token can never be spent without the email having moved with it.
+            mock_db.commit.assert_awaited_once()
             mock_notify.assert_called_once_with(old_email="old@example.com", new_email="new@example.com")
 
     @pytest.mark.asyncio
@@ -442,8 +561,85 @@ class TestVerifyEmailChange:
             mock_users.exists = AsyncMock(return_value=False)
             mock_users.update = AsyncMock(side_effect=IntegrityError("update", {}, Exception("duplicate key")))
             mock_db.rollback = AsyncMock(return_value=None)
+            stub_claim(mock_db)
 
             with pytest.raises(DuplicateValueException):
                 await verify_email_change(_request(), EmailChangeVerifyRequest(token="good"), mock_db)
 
             mock_db.rollback.assert_called_once()
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestVerifyEmailChangeAgainstPostgres:
+    """The half of `verify_email_change` a mocked session cannot judge: whether the two
+    writes it makes actually land, and land together.
+
+    Both now go through `commit=False` and share one `db.commit()`, so a mock can only
+    confirm the arguments were spelled right - it will happily report success for a
+    transaction that was never committed, or for one that committed half of itself. See
+    *"A filter on a FastCRUD `update` is a `count()`, not an atomic condition"* in
+    `DECISIONS.md` for what the pairing is protecting against.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_email_and_the_used_stamp_commit_together(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        new_email = unique_email()
+        raw_token = "e2e-change-" + uuid7().hex
+        request_row = AuthenticationRequest(
+            email=new_email,
+            token_hash=hash_token(raw_token),
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            purpose="email_change",
+            user_id=diver.id,
+        )
+        db.add(request_row)
+        db.commit()
+
+        with (
+            patch("src.app.api.v1.users.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.users.send_email_changed_notification", new_callable=AsyncMock),
+        ):
+            result = await verify_email_change(_request(), EmailChangeVerifyRequest(token=raw_token), async_db)
+
+        assert result.email == new_email
+
+        # Read on a connection of its own - the sync session the fixtures use - so this
+        # asserts against committed state rather than against `async_db`'s own view of an
+        # open transaction.
+        assert db.scalar(select(User.email).where(User.id == diver.id)) == new_email
+        assert _used_at(db, request_row.id) is not None
+
+    @pytest.mark.asyncio
+    async def test_a_second_verification_reports_the_change_without_rewriting_it(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        """The tolerated replay, end to end: `used_at` keeps the timestamp the first
+        verification wrote rather than being restamped."""
+        new_email = unique_email()
+        raw_token = "e2e-replay-" + uuid7().hex
+        request_row = AuthenticationRequest(
+            email=new_email,
+            token_hash=hash_token(raw_token),
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            purpose="email_change",
+            user_id=diver.id,
+        )
+        db.add(request_row)
+        db.commit()
+
+        with (
+            patch("src.app.api.v1.users.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.users.send_email_changed_notification", new_callable=AsyncMock) as mock_notify,
+        ):
+            await verify_email_change(_request(), EmailChangeVerifyRequest(token=raw_token), async_db)
+            first_stamp = _used_at(db, request_row.id)
+
+            result = await verify_email_change(_request(), EmailChangeVerifyRequest(token=raw_token), async_db)
+
+            assert result.email == new_email
+            # Only the first verification tells the old address it moved.
+            mock_notify.assert_called_once()
+
+        assert _used_at(db, request_row.id) == first_stamp

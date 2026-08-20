@@ -10,6 +10,9 @@ API surface, since [opendiving-web](https://github.com/opendiving/opendiving-web
 
 Participation is covered by our [Code of Conduct](CODE_OF_CONDUCT.md).
 
+Found a security vulnerability? Don't open an issue — [SECURITY.md](SECURITY.md) says where to send
+it privately.
+
 ## Getting set up
 
 The whole stack runs from Docker:
@@ -395,10 +398,14 @@ issue: it tells you 3.15 exists and waits for a person.
 
 **What none of this watches**, stated so it is not mistaken for coverage:
 
-- **Any release but the newest.** A dispatch only ever repoints the aliases of the version it names,
-  and there is no support policy here for old minors — so scanning `0.2` would produce an alert with
-  no move attached, recurring forever. Someone pinned to an older `OPENDIVING_VERSION` is answered
-  by upgrading, and if an old minor ever does have to be rebuilt, it is a dispatch at its own tag.
+- **Any release but the newest.** This is not a gap so much as the scan agreeing with
+  [SECURITY.md](SECURITY.md), whose supported-versions table is "the most recent release: yes;
+  anything older: no — upgrade to the newest". A dispatch only ever repoints the aliases of the
+  version it names, so scanning `0.2` would produce an alert with no supported move attached,
+  recurring forever. The four aliases that *are* scanned — `X.Y.Z`, `X.Y`, the bare major and
+  `latest` — are every form in which someone can be pinned to the supported release, which is why
+  SECURITY.md can promise that `docker compose pull` is the whole fix for a base-image CVE even with
+  a version pinned. If an old minor ever does have to be rebuilt, it is a dispatch at its own tag.
 - **The `linux/arm64` image**, on the assumption that it installs the same Debian packages as
   `linux/amd64`. If that ever stops holding, the scan step is where a `--platform` pass goes.
 - **Vulnerabilities with no fix published upstream.** They are counted in the issue but drive

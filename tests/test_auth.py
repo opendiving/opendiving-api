@@ -21,6 +21,7 @@ from src.app.api.v1.auth import (
 from src.app.core.exceptions.http_exceptions import DuplicateValueException, RateLimitException, UnauthorizedException
 from src.app.core.schemas import GoogleUserInfo, OnboardingTokenData
 from src.app.schemas.auth import EmailAuthRequest, EmailVerifyRequest, GoogleAuthRequest, ProfileCompletionRequest
+from tests.helpers.mocks import claimed_used_at_sql, stub_claim
 
 # Every sign-in path subjects its tokens to this, not to the account's username - see
 # `services.auth_service.issue_tokens`.
@@ -308,13 +309,13 @@ class TestVerifyEmailLink:
             patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
         ):
             mock_requests.get = AsyncMock(return_value=auth_request)
-            mock_requests.update = AsyncMock(return_value=None)
+            stub_claim(mock_db)
 
             response = Mock()
             with pytest.raises(UnauthorizedException, match="already been used"):
                 await verify_email_link(_request(), EmailVerifyRequest(token="already-used"), response, mock_db)
 
-            mock_requests.update.assert_not_called()
+            mock_db.execute.assert_not_called()
             response.set_cookie.assert_not_called()
 
     @pytest.mark.asyncio
@@ -339,6 +340,35 @@ class TestVerifyEmailLink:
                 await verify_email_link(_request(), EmailVerifyRequest(token="used-and-expired"), Mock(), mock_db)
 
     @pytest.mark.asyncio
+    async def test_losing_the_claim_to_a_concurrent_verification_raises_unauthorized(self, mock_db):
+        """The `used_at` read above cannot settle this on its own - two submissions of the
+        same still-live link both see it null. The conditional `UPDATE ... WHERE used_at
+        IS NULL` is the gate that decides, and the loser (`rowcount == 0`) must stop
+        before `resolve_identity`, let alone before a refresh cookie."""
+        auth_request = {
+            "id": 1,
+            "email": "existing@example.com",
+            "used_at": None,
+            "invalidated_at": None,
+            "expires_at": datetime.now(UTC) + timedelta(minutes=10),
+        }
+
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
+            patch("src.app.api.v1.auth.resolve_identity", new_callable=AsyncMock) as mock_resolve,
+        ):
+            mock_requests.get = AsyncMock(return_value=auth_request)
+            stub_claim(mock_db, won=False)
+
+            response = Mock()
+            with pytest.raises(UnauthorizedException, match="already been used"):
+                await verify_email_link(_request(), EmailVerifyRequest(token="raced"), response, mock_db)
+
+            mock_resolve.assert_not_called()
+            response.set_cookie.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_existing_user_is_authenticated_and_token_marked_used(self, mock_db):
         auth_request = {
             "id": 1,
@@ -356,9 +386,9 @@ class TestVerifyEmailLink:
             patch("src.app.services.auth_service.crud_users") as mock_users,
         ):
             mock_requests.get = AsyncMock(return_value=auth_request)
-            mock_requests.update = AsyncMock(return_value=None)
             mock_users.get = AsyncMock(return_value=db_user)
             mock_providers.exists = AsyncMock(return_value=True)
+            stub_claim(mock_db)
 
             response = Mock()
             outcome = await verify_email_link(_request(), EmailVerifyRequest(token="good"), response, mock_db)
@@ -366,10 +396,9 @@ class TestVerifyEmailLink:
             assert outcome.status == "authenticated"
             assert outcome.access_token is not None
             response.set_cookie.assert_called_once()
-            mock_requests.update.assert_called_once()
-            update_kwargs = mock_requests.update.call_args.kwargs
-            assert update_kwargs["id"] == 1
-            assert update_kwargs["object"].used_at is not None
+            mock_db.execute.assert_called_once()
+            assert "used_at IS NULL" in claimed_used_at_sql(mock_db)
+            mock_db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_new_user_gets_onboarding_session(self, mock_db):
@@ -387,8 +416,8 @@ class TestVerifyEmailLink:
             patch("src.app.services.auth_service.crud_users") as mock_users,
         ):
             mock_requests.get = AsyncMock(return_value=auth_request)
-            mock_requests.update = AsyncMock(return_value=None)
             mock_users.get = AsyncMock(return_value=None)
+            stub_claim(mock_db)
 
             outcome = await verify_email_link(_request(), EmailVerifyRequest(token="good"), Mock(), mock_db)
 

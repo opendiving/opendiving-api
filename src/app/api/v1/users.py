@@ -18,7 +18,7 @@ from ...core.security import blacklist_token, blacklist_tokens, generate_secure_
 from ...core.utils.cache import cache
 from ...core.utils.client_ip import client_ip
 from ...core.utils.rate_limit import enforce_rate_limit
-from ...crud.crud_authentication_requests import crud_authentication_requests
+from ...crud.crud_authentication_requests import claim_authentication_request, crud_authentication_requests
 from ...crud.crud_user_dive_stats import crud_user_dive_stats
 from ...crud.crud_users import crud_users
 from ...schemas.auth import LinkCheckResponse
@@ -43,6 +43,23 @@ router = APIRouter(tags=["user"])
 # already been verified. There is no separate signup flow.
 
 _EMAIL_CHANGE_REQUEST_RESPONSE = EmailChangeRequestResponse()
+
+
+def _replay_result_or_reject(*, current_email: str, new_email: str) -> EmailChangeVerifyResponse:
+    """Decide what a *second* verification of an email-change token gets back.
+
+    Tolerated only while the change the token represents is the account's current email:
+    re-applying that grants nothing, so a mail scanner detonating the link or a user
+    clicking twice reports success rather than an error. A mismatch means the account has
+    moved on since (a later change request), which makes this a genuine reuse.
+
+    Shared by the two ways a caller can arrive second - reading an already-`used_at` row,
+    and losing the conditional claim to a request still in flight - so the rule can't
+    drift between them.
+    """
+    if current_email == new_email:
+        return EmailChangeVerifyResponse(email=new_email)
+    raise UnauthorizedException("This confirmation link has already been used.")
 
 
 # Note: there is no `GET /users` here (yet) either - a public-facing listing of
@@ -226,6 +243,11 @@ async def verify_email_change(
     genuine, rejected reuse) is an error. `check_email_change_link` is what actually
     keeps a human from re-triggering this in the first place after the first use -
     this leniency is just a safety net for races (e.g. a double click).
+
+    Two submissions genuinely racing meet that same rule from the other side: the
+    `used_at` read above can't decide it on its own, so only whoever wins the conditional
+    claim (`claim_authentication_request`) applies the change, and the loser re-reads the
+    account's email and takes the identical tolerated-replay-or-reject decision.
     """
     await enforce_rate_limit(
         f"email-change-verify:ip:{client_ip(request)}",
@@ -252,9 +274,7 @@ async def verify_email_change(
     current_email = db_user["email"] if isinstance(db_user, dict) else db_user.email
 
     if auth_request["used_at"] is not None:
-        if current_email == new_email:
-            return EmailChangeVerifyResponse(email=new_email)
-        raise UnauthorizedException("This confirmation link has already been used.")
+        return _replay_result_or_reject(current_email=current_email, new_email=new_email)
 
     expires_at = auth_request["expires_at"]
     if expires_at.tzinfo is None:
@@ -266,13 +286,28 @@ async def verify_email_change(
         raise DuplicateValueException("Email is already registered to another account")
 
     try:
-        await crud_users.update(db=db, object={"email": new_email}, id=user_id)
-        await crud_authentication_requests.update(
-            db=db, object=AuthenticationRequestUpdate(used_at=datetime.now(UTC)), id=auth_request["id"]
-        )
+        # Claimed first, and `commit=False` throughout so the claim and the email land in
+        # one transaction. Claiming first means losing the race costs nothing to undo;
+        # committing separately (FastCRUD's `update` does by default) would leave a window
+        # where the account's email has changed but its confirmation token is still live.
+        claimed = await claim_authentication_request(db, request_id=auth_request["id"], commit=False)
+        if claimed:
+            await crud_users.update(db=db, object={"email": new_email}, id=user_id, commit=False)
+        await db.commit()
     except IntegrityError:
         await db.rollback()
         raise DuplicateValueException("Email is already registered to another account") from None
+
+    if not claimed:
+        # Another verification of this same token got there first. Unlike sign-in that
+        # isn't automatically a rejection here - re-reading the account's email applies
+        # the same rule as the `used_at` fast path above, so a double click that lost the
+        # race still reports the change it asked for rather than erroring.
+        db_user = await crud_users.get(db=db, id=user_id, is_deleted=False)
+        if db_user is None:
+            raise NotFoundException("User not found")
+        current_email = db_user["email"] if isinstance(db_user, dict) else db_user.email
+        return _replay_result_or_reject(current_email=current_email, new_email=new_email)
 
     await send_email_changed_notification(old_email=current_email, new_email=new_email)
 

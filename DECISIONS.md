@@ -9013,6 +9013,141 @@ for the same reason `publish-image.yml` and `pr-title.yml` mirror each other. Wh
 what has to: the tools these jobs run, and the fact that nothing here is a commented-out
 PR-commenting step waiting to want `pull-requests: write`.
 
+## A filter on a FastCRUD `update` is a `count()`, not an atomic condition
+
+`verify_email_link` and `verify_email_change` both rejected an already-spent magic-link token by
+reading `used_at` and then, several statements later, writing it. Two concurrent submissions of the
+same live link both read `used_at IS NULL`, both passed the gate, and both went on to do whatever
+verifying that link does - for sign-in, minting a second week-long refresh cookie from a link whose
+own validity is measured in minutes.
+
+This is not a new vulnerability: a replay reaches the same account either way, and the security
+argument for rejecting one at all is the section *"A spent sign-in link is a spent sign-in link"*
+above, which this does not change. What it changes is that the argument became true. That section's
+docstring says the token is "strictly single-use" and `AuthenticationRequest.used_at`'s comment says
+it "is what makes a token single-use"; under contention neither was. The invariant was made to hold
+rather than the claims weakened.
+
+**The obvious fix does not work, and looks like it does.** The natural move is to push the condition
+into the write - `crud.update(..., id=X, used_at=None)` - and catch the `NoResultFound` FastCRUD
+raises when nothing matches. That is not an atomic conditional update. FastCRUD 0.22.3 implements
+the zero-match check as a *separate count query issued before* the UPDATE
+(`validate_update_delete_operation` in `fastcrud/crud/validation.py`):
+
+```python
+total_count = await count_func(db, **kwargs)
+if total_count == 0:
+    raise NoResultFound(f"No record found to {operation_name}.")
+```
+
+and `fast_crud.py`'s `update` then builds its statement and discards the result's `rowcount`
+entirely. So the filtered call is itself check-then-act - the same race in a narrower window, which
+is worse than the wide one for being invisible. **No FastCRUD filter makes an operation atomic**,
+here or anywhere else in this codebase that wants a conditional write; the filter is a precondition
+assertion, not a guard. The same mechanic is behind `request_email_link`'s existing
+`pending_count`-before-`update` guard and its comment about `NoResultFound` - that one is using the
+behaviour deliberately, for "is there anything to invalidate", where a race changes nothing.
+
+**What works.** `claim_authentication_request` in `crud/crud_authentication_requests.py` drops to a
+Core statement and gates on `rowcount`:
+
+```python
+update(AuthenticationRequest)
+.where(AuthenticationRequest.id == request_id, AuthenticationRequest.used_at.is_(None))
+.values(used_at=datetime.now(UTC))
+```
+
+`rowcount == 0` is a correct and sufficient race-lost signal under Postgres's default READ
+COMMITTED, and that is worth stating because it is not obvious: the loser blocks on the winner's row
+lock, and when the winner commits it re-evaluates the `WHERE` predicate against the committed new
+row version, matches nothing, and reports zero. No `SELECT ... FOR UPDATE`, no isolation-level
+change, no advisory lock. Dropping to Core for this is unremarkable in this repo - most of `crud/`
+builds Core statements and calls `db.execute` directly, and `services/dive_files.py` already reads a
+`CursorResult.rowcount` the same way.
+
+The read-based `used_at` check stays, as a fast path: it gives the caller the right error without a
+pointless write, and preserves the most-specific-reason-first ordering (superseded beats used, used
+beats expired) that the section above describes. The claim is the *authoritative* gate, and it sits
+immediately before the thing it authorizes - `resolve_identity` for sign-in, the email UPDATE for a
+change.
+
+**The loser branches differ, because the endpoints do.** Sign-in's loser is a 401, full stop.
+`verify_email_change` deliberately tolerates a replay while the change the token represents is still
+the account's current email, so losing the claim there is *not* automatically an error: it re-reads
+the account's email and applies the identical rule, rejecting only on a genuine mismatch. Copying
+sign-in's branch verbatim would have turned a double click into a hard error and undone the
+reasoning two sections up. Both arrival paths - an already-`used_at` row and a lost claim - now go
+through one `_replay_result_or_reject` so the rule cannot drift between them.
+
+**Adjacent, same function: the two writes were two transactions.** `verify_email_change` wrote the
+new email and then stamped `used_at`, each through a FastCRUD `update` that commits by default. A
+crash between them left the account's email changed with its confirmation token still unused and
+live. Both now pass `commit=False` and share one `db.commit()`, with the claim going first so losing
+costs nothing to undo - the pattern `complete_profile` in `api/v1/auth.py` already sets. The
+`except IntegrityError: await db.rollback()` handler still covers both writes; it now rolls back the
+claim alongside the email, which is right - the change did not apply, so the token should not read
+as spent.
+
+**Testing it.** The endpoint tests mock the session, so `db.execute` had to grow a result carrying a
+`rowcount` (`stub_claim` in `tests/helpers/mocks.py`). Note the failure mode that made a helper
+worth writing: a bare `Mock(spec=AsyncSession)` returns a child mock for `rowcount`, which compares
+unequal to `0` and so reads as *won* by accident - `won=False` is the only way to reach the
+race-lost branches at all. Those tests pin what each caller does with the answer.
+`tests/test_authentication_request_claim.py` pins that the answer is right, against real Postgres,
+including two claims on two connections under `asyncio.gather` - the one assertion in this whole
+change that executes the concurrency argument rather than restating it. It is Postgres-backed and
+therefore skips itself when `POSTGRES_SERVER` names a host the test process cannot reach, which is
+why it is not the only coverage.
+
+## The disclosure policy names two channels, and neither was live when it was written
+
+`SECURITY.md` exists so a finder has somewhere private to go, which makes it the one document whose
+value is entirely in whether its channels are real. It names two, and the order is deliberate.
+
+**GitHub private vulnerability reporting is first.** It needs no mail infrastructure, the thread
+lives on the repository where the fix will land, it can become a published advisory with a CVE, and
+GitHub keys the "Report a vulnerability" button off this file's existence. What it still needs is a
+per-repository toggle — Settings → Advanced Security → Private vulnerability reporting — which
+committing a `SECURITY.md` does *not* flip.
+
+**The toggle is public-repositories-only**, so while `opendiving-api` is private it is not merely
+off, it does not render at all. That is worth writing down because the absence looks like a
+permissions or plan problem and is neither: the org is on the free plan and the maintainer is an org
+admin, and both are irrelevant. The account-level "private vulnerability reporting" switch in
+personal settings is a different thing — a default for repositories owned by *that user*, not by the
+`opendiving` org — so finding that one and not this one is the expected experience, not a
+misconfiguration to debug. The setting appears the moment the repository goes public, which is the
+sitting to enable it in: that is the only window where the policy is readable and the button it
+names is missing. The org-wide equivalent is a custom security configuration under the
+organization's Code security settings, which is worth it once three repos want the same answer and
+not before.
+
+**`security@opendiving.app` is second, and had to be checked before it could be trusted.** The
+mailbox was created on 2026-08-20, when this policy landed. It needed checking because
+`opendiving-web/DECISIONS.md`'s *"The contact form posts to the API, and the page it lives on claims
+only what exists"* records `security@` — along with `community@` and `docs@` — as an **invented**
+mailbox, removed from the contact page precisely because it did not exist. That section's reasoning
+is the reason this one exists: a contact route that silently discards messages is worse than no
+route at all, and a *security* route that does it is worse still, because the sender believes they
+have disclosed responsibly and stops there. `conduct@` in `CODE_OF_CONDUCT.md` was never on that
+list, so the domain having one role address is not evidence it has this one.
+
+Hence the ordering rather than a hedge in the prose. A policy that qualifies its own address ("if
+this bounces…") is not a policy, so the file states both channels plainly and this section carries
+whatever caveat is outstanding instead. One thing still has to happen, and it is not a code change:
+**enable private vulnerability reporting once the repository is public.** Until then the mailbox is
+the only live route, which is the right way round for it to fail — mail that arrives beats a button
+that isn't there.
+
+Anyone adding a role address to a document here should read that web section first. The rule it
+implies is that a published address is a claim about infrastructure, and the only way to keep the
+two honest is to create the mailbox in the same change that names it.
+
+The same applies to the copy that has to exist in `opendiving-web` — the policy covers a product
+released in lockstep, and a finder who lands on the frontend repo needs the same instructions. An
+org-level `.github` repository would serve both from one file and is the better answer if a third
+repo ever wants it; two copies are the cheaper one while there are two.
+
 ## A pin is a promise to renew, and nothing here was renewing them
 
 `deploy/docker-compose.yml` pins `postgres:18`, `redis:8-alpine` and `caddy:2.10-alpine` to digests,
@@ -9137,16 +9272,39 @@ draft scanned `latest` plus every live `X.Y` alias — every minor ever released
 that more coverage is more safety. It is not, and the reason is the same one this whole change is
 built on: an alert nobody can act on is not detection, it is training people to ignore the channel.
 A Publish Image dispatch recomputes the aliases of *the one version it names* and no others (see
-`prepare` in `publish-image.yml`), and this project offers no support policy for old minors. So a
-finding on `0.2` would survive every rebuild the documentation describes, return on the next
-morning's scan, and — because an image nobody rebuilds keeps accruing *new* advisories — open a
-brand-new issue each time the previous one was closed, since the fingerprint is a set of CVE ids and
-a new id is legitimately new. The result is a channel that cycles forever on something structurally
-unaddressable. Scanning exactly the alias set one dispatch repoints (`X.Y.Z`, `X.Y`, the bare major,
-`latest` — one image under four names) makes the instruction in the issue body true as written, and
-puts the omission in `CONTRIBUTING.md`'s "what none of this watches" list where an operator on an
-old pin is told to upgrade. Widening it back means also answering what to do about the findings, and
-that is a support policy, not a workflow change.
+`prepare` in `publish-image.yml`). So a finding on `0.2` would survive every rebuild the
+documentation describes, return on the next morning's scan, and — because an image nobody rebuilds
+keeps accruing *new* advisories — open a brand-new issue each time the previous one was closed,
+since the fingerprint is a set of CVE ids and a new id is legitimately new. The result is a channel
+that cycles forever on something structurally unaddressable.
+
+`SECURITY.md` settles what would otherwise be a judgement call here. Its supported-versions table is
+"the most recent release: yes; anything older: no — upgrade to the newest", so the scan set is not a
+pragmatic truncation of a wider ideal — it *is* the supported surface, and the four aliases it
+covers (`X.Y.Z`, `X.Y`, the bare major, `latest`, one image under four names) are every form in
+which someone can be pinned to that release. That is also what makes SECURITY.md's own promise hold:
+"in that case `docker compose pull` is the whole fix even with a version pinned" is only true for a
+version whose base-image CVEs something is watching for. Widening the scan back means first widening
+the support policy, and that is a decision in `SECURITY.md`, not a line in a workflow.
+
+**The tracking issue is public, and `SECURITY.md` says not to open public issues for
+vulnerabilities. Both are right, and the line between them is worth stating** — because the next
+person to notice will otherwise either delete the workflow or quietly loosen the policy. That rule
+protects an *undisclosed defect in code this project ships*: opening an issue for one starts the
+exposure clock before a fix exists, which is exactly the harm it names. A base-image finding is the
+other thing entirely. It carries a CVE id because Debian and NVD published it first — Trivy has no
+way to report a vulnerability that has not already been disclosed upstream, since matching an
+installed version against a public advisory database is the whole of what it does. The issue
+therefore discloses nothing a reader could not get by running `trivy image` against the same public
+tag themselves, and the clock it is accused of starting started upstream, days earlier, without us.
+What the issue adds is not disclosure but *notification* — the maintainer learning that a
+published-and-supported image now needs the rebuild `CONTRIBUTING.md` documents. Route that through
+private vulnerability reporting instead and it lands in a channel designed for a human finder
+awaiting a human reply, on a daily cron, for facts that are already public: noise in the one inbox
+that must not be noisy. The distinction to preserve, if this is ever revisited: **already-public
+advisory about shipped bytes → issue; undisclosed defect in our own code → the private channel in
+`SECURITY.md`.** A scan that ever starts reporting the second kind — a `--scanners secret` pass
+finding a committed credential, say — has crossed the line and needs a different destination.
 
 **The two remedies in the report are genuinely different, and conflating them was a real bug in the
 first draft.** It told the reader that a *Python* package finding "needs a merged bump first",

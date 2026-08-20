@@ -42,7 +42,9 @@ class AuthenticationRequest(Base):
     # the old one. `"email_change"` still tolerates one, but only while the change
     # this token represents is the account's *current* email - re-applying that
     # grants nothing. See `invalidated_at` for the separate case of a token revoked
-    # by a newer request superseding it.
+    # by a newer request superseding it. Stamped only through
+    # `crud_authentication_requests.claim_authentication_request`, whose conditional
+    # UPDATE is what holds that "single-use" up when two verifications race.
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
     # Set when a *newer* request supersedes this one (see `POST /auth/email/request`/
