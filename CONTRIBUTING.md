@@ -10,6 +10,9 @@ API surface, since [opendiving-web](https://github.com/opendiving/opendiving-web
 
 Participation is covered by our [Code of Conduct](CODE_OF_CONDUCT.md).
 
+Found a security vulnerability? Don't open an issue — [SECURITY.md](SECURITY.md) says where to send
+it privately.
+
 ## Getting set up
 
 The whole stack runs from Docker:

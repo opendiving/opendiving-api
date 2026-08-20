@@ -9098,3 +9098,52 @@ including two claims on two connections under `asyncio.gather` - the one asserti
 change that executes the concurrency argument rather than restating it. It is Postgres-backed and
 therefore skips itself when `POSTGRES_SERVER` names a host the test process cannot reach, which is
 why it is not the only coverage.
+
+## The disclosure policy names two channels, and neither was live when it was written
+
+`SECURITY.md` exists so a finder has somewhere private to go, which makes it the one document whose
+value is entirely in whether its channels are real. It names two, and the order is deliberate.
+
+**GitHub private vulnerability reporting is first.** It needs no mail infrastructure, the thread
+lives on the repository where the fix will land, it can become a published advisory with a CVE, and
+GitHub keys the "Report a vulnerability" button off this file's existence. What it still needs is a
+per-repository toggle — Settings → Advanced Security → Private vulnerability reporting — which
+committing a `SECURITY.md` does *not* flip.
+
+**The toggle is public-repositories-only**, so while `opendiving-api` is private it is not merely
+off, it does not render at all. That is worth writing down because the absence looks like a
+permissions or plan problem and is neither: the org is on the free plan and the maintainer is an org
+admin, and both are irrelevant. The account-level "private vulnerability reporting" switch in
+personal settings is a different thing — a default for repositories owned by *that user*, not by the
+`opendiving` org — so finding that one and not this one is the expected experience, not a
+misconfiguration to debug. The setting appears the moment the repository goes public, which is the
+sitting to enable it in: that is the only window where the policy is readable and the button it
+names is missing. The org-wide equivalent is a custom security configuration under the
+organization's Code security settings, which is worth it once three repos want the same answer and
+not before.
+
+**`security@opendiving.app` is second, and had to be checked before it could be trusted.** The
+mailbox was created on 2026-08-20, when this policy landed. It needed checking because
+`opendiving-web/DECISIONS.md`'s *"The contact form posts to the API, and the page it lives on claims
+only what exists"* records `security@` — along with `community@` and `docs@` — as an **invented**
+mailbox, removed from the contact page precisely because it did not exist. That section's reasoning
+is the reason this one exists: a contact route that silently discards messages is worse than no
+route at all, and a *security* route that does it is worse still, because the sender believes they
+have disclosed responsibly and stops there. `conduct@` in `CODE_OF_CONDUCT.md` was never on that
+list, so the domain having one role address is not evidence it has this one.
+
+Hence the ordering rather than a hedge in the prose. A policy that qualifies its own address ("if
+this bounces…") is not a policy, so the file states both channels plainly and this section carries
+whatever caveat is outstanding instead. One thing still has to happen, and it is not a code change:
+**enable private vulnerability reporting once the repository is public.** Until then the mailbox is
+the only live route, which is the right way round for it to fail — mail that arrives beats a button
+that isn't there.
+
+Anyone adding a role address to a document here should read that web section first. The rule it
+implies is that a published address is a claim about infrastructure, and the only way to keep the
+two honest is to create the mailbox in the same change that names it.
+
+The same applies to the copy that has to exist in `opendiving-web` — the policy covers a product
+released in lockstep, and a finder who lands on the frontend repo needs the same instructions. An
+org-level `.github` repository would serve both from one file and is the better answer if a third
+repo ever wants it; two copies are the cheaper one while there are two.
