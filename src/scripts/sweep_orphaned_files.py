@@ -50,8 +50,15 @@ _GRACE_SECONDS = 24 * 60 * 60
 
 # Above this share of the tree unreferenced, `--delete` refuses without `--force`. A real
 # orphan population is a handful of files; a quarter of the volume unreferenced means the
-# database being compared against is not the one these files belong to.
+# database being compared against is probably not the one these files belong to.
 _SUSPICIOUS_FRACTION = 0.25
+
+# ...but only once there are enough files for a fraction to mean anything. On a tree of
+# four, one orphan is 25% and says nothing at all, and a guard that fired there would train
+# whoever runs this to reach for `--force` - which is precisely the habit that makes the
+# guard worthless on the day it matters. The absolute "the database references nothing"
+# check below has no floor, because that one is never noise.
+_SUSPICIOUS_MIN_FILES = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +133,7 @@ def _refusal(referenced: set[str], orphans: list[str], on_disk: int) -> str | No
             "That is what a wrong POSTGRES_* target or a half-finished restore looks like, not "
             "an orphan population."
         )
-    if orphans and on_disk and len(orphans) / on_disk > _SUSPICIOUS_FRACTION:
+    if on_disk >= _SUSPICIOUS_MIN_FILES and len(orphans) / on_disk > _SUSPICIOUS_FRACTION:
         return (
             f"{len(orphans)} of {on_disk} files on the volume are unreferenced "
             f"({len(orphans) / on_disk:.0%}), which is far more than the rare cases that produce "

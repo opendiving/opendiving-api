@@ -1,0 +1,281 @@
+"""What the two file services promise now that the payload lives outside the database.
+
+The contract these pin is an ordering one, and it is the whole consistency story: the file
+is written before the row that references it, and the retired file is unlinked after the
+transaction that stopped referencing it commits. Every database-visible state therefore
+names bytes that exist, and the only thing a crash can leave behind is an unreferenced
+file - harmless, and swept.
+
+The sessions here are mocks, which is deliberate rather than a shortcut: it means these
+tests assert what the service *does*, in what order, without the commit hook firing at all.
+`tests/test_blob_store.py` exercises the hook against a real session, and that split is the
+same one `delete_after_commit` is shaped for.
+"""
+
+import hashlib
+import io
+import uuid as uuid_pkg
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from fastapi import UploadFile
+from uuid6 import uuid7
+
+from src.app.core.security import create_dive_file_token
+from src.app.schemas.certification import CertificationSide
+from src.app.services import blob_store
+from src.app.services.certification_files import (
+    KEY_KIND as CARD_KIND,
+)
+from src.app.services.certification_files import (
+    load_certification_file,
+    store_certification_file,
+)
+from src.app.services.dive_files import (
+    KEY_KIND as DIVE_KIND,
+)
+from src.app.services.dive_files import (
+    load_dive_file,
+    store_dive_file,
+)
+from src.app.services.dive_parsers.suunto_xml import SuuntoXmlParser
+
+# The namespace `SuuntoXmlParser` matches on, copied from `tests/test_dive_files.py`.
+SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
+
+XML = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}"><MaxDepth>25.5</MaxDepth><Duration>1800</Duration></Dive>
+""".encode()
+XML_DIGEST = hashlib.sha256(XML).hexdigest()
+
+JPEG = b"\xff\xd8\xff" + b"a card, notionally"
+JPEG_DIGEST = hashlib.sha256(JPEG).hexdigest()
+
+
+@pytest.fixture
+def volume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setattr(blob_store.settings, "FILE_STORAGE_DIR", str(tmp_path))
+    return tmp_path
+
+
+def _upload(content: bytes, filename: str) -> UploadFile:
+    return UploadFile(filename=filename, file=io.BytesIO(content))
+
+
+def _token() -> tuple[str, uuid_pkg.UUID]:
+    user_uuid = uuid7()
+    return create_dive_file_token(user_uuid=user_uuid, sha256=XML_DIGEST, parser_key=SuuntoXmlParser.key), user_uuid
+
+
+class TestDiveFileWriteOrdering:
+    @staticmethod
+    def _session(*, existing_row: tuple | None = None, replaced_keys: list[str] | None = None) -> AsyncMock:
+        """A session whose dedupe lookup returns `existing_row` and whose `DELETE ...
+        RETURNING` hands back `replaced_keys`."""
+        result = MagicMock()
+        result.one_or_none.return_value = existing_row
+        result.one.return_value = SimpleNamespace(uuid=uuid7(), updated_at=None)
+        result.scalars.return_value = replaced_keys or []
+        # `delete_profile_for_dive` reads `rowcount`; one result object answers every
+        # statement here, so it has to be plausible for all of them.
+        result.rowcount = 0
+
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=result)
+        db.info = {}
+        return db
+
+    @pytest.mark.asyncio
+    async def test_the_file_is_on_the_volume_before_the_commit(self, volume: Path) -> None:
+        """The ordering rule itself. A crash after this point leaves an unreferenced file;
+        the reverse order would leave a committed row naming bytes that never existed."""
+        when_committed: list[bool] = []
+        db = self._session()
+        db.commit = AsyncMock(side_effect=lambda: when_committed.append(any(volume.rglob("dive-files/*/*"))))
+
+        token, user_uuid = _token()
+        await store_dive_file(
+            db, user_id=1, user_uuid=user_uuid, dive_id=7, upload=_upload(XML, "export.xml"), file_token=token
+        )
+
+        assert when_committed == [True]
+
+    @pytest.mark.asyncio
+    async def test_the_stored_key_names_the_row_and_the_content(self, volume: Path) -> None:
+        db = self._session()
+        token, user_uuid = _token()
+        await store_dive_file(
+            db, user_id=1, user_uuid=user_uuid, dive_id=7, upload=_upload(XML, "export.xml"), file_token=token
+        )
+
+        written = list(blob_store.iter_keys())
+        assert len(written) == 1
+        kind, shard, name = written[0].split("/")
+        assert kind == DIVE_KIND
+        assert shard == XML_DIGEST[:2]
+        assert name.endswith(f"_{XML_DIGEST}")
+
+    @pytest.mark.asyncio
+    async def test_the_replaced_file_is_registered_for_unlinking_and_not_unlinked_yet(self, volume: Path) -> None:
+        """Registered before the commit, because the hook fires *on* the commit - and the
+        old file has to survive a rollback, since the row referencing it would too."""
+        old_key = blob_store.build_key(DIVE_KIND, row_uuid=uuid7(), sha256="cd" + "0" * 62)
+        await blob_store.put(old_key, b"the previous export")
+
+        db = self._session(replaced_keys=[old_key])
+        token, user_uuid = _token()
+        await store_dive_file(
+            db, user_id=1, user_uuid=user_uuid, dive_id=7, upload=_upload(XML, "export.xml"), file_token=token
+        )
+
+        assert db.info[blob_store._PENDING_DELETES] == [old_key]
+        assert (volume / old_key).is_file()
+
+    @pytest.fixture
+    def no_reextraction(self, monkeypatch: pytest.MonkeyPatch):
+        """Switch off the `noop` branch's opportunistic profile re-extraction.
+
+        One mock result answers every statement on these sessions, so `get_existing_profile`
+        would otherwise be handed the dedupe lookup's row. That branch has its own tests in
+        `tests/test_dive_files.py`; what these two are about is the file on the volume.
+        """
+        monkeypatch.setattr("src.app.services.dive_files.should_extract", lambda *a, **k: "skip")
+        monkeypatch.setattr("src.app.services.dive_files.get_existing_profile", AsyncMock(return_value=None))
+
+    @pytest.mark.asyncio
+    async def test_a_re_upload_of_the_same_bytes_rewrites_a_file_that_went_missing(
+        self, volume: Path, no_reextraction
+    ) -> None:
+        """ "Just upload it again" is the natural repair after a partial volume loss, and
+        without this it does nothing: the row already says "stored", so the download keeps
+        500ing while the server refuses the very bytes that would fix it."""
+        row_uuid = uuid7()
+        key = blob_store.build_key(DIVE_KIND, row_uuid=row_uuid, sha256=XML_DIGEST)
+        existing = (1, 7, row_uuid, "application/xml", len(XML), "export.xml", "suunto_xml", key, None)
+
+        db = self._session(existing_row=existing)
+        token, user_uuid = _token()
+        await store_dive_file(
+            db, user_id=1, user_uuid=user_uuid, dive_id=7, upload=_upload(XML, "export.xml"), file_token=token
+        )
+
+        assert (volume / key).read_bytes() == XML
+
+    @pytest.mark.asyncio
+    async def test_a_re_upload_leaves_an_intact_file_alone(self, volume: Path, no_reextraction) -> None:
+        """The normal `noop` path costs one `stat` and touches nothing."""
+        row_uuid = uuid7()
+        key = blob_store.build_key(DIVE_KIND, row_uuid=row_uuid, sha256=XML_DIGEST)
+        await blob_store.put(key, XML)
+        before = (volume / key).stat().st_mtime_ns
+
+        existing = (1, 7, row_uuid, "application/xml", len(XML), "export.xml", "suunto_xml", key, None)
+        db = self._session(existing_row=existing)
+        token, user_uuid = _token()
+        await store_dive_file(
+            db, user_id=1, user_uuid=user_uuid, dive_id=7, upload=_upload(XML, "export.xml"), file_token=token
+        )
+
+        assert (volume / key).stat().st_mtime_ns == before
+
+
+class TestCardFileWriteOrdering:
+    @staticmethod
+    def _session(*, existing: object | None = None) -> AsyncMock:
+        result = MagicMock()
+        result.one_or_none.return_value = existing
+        result.one.return_value = SimpleNamespace(uuid=uuid7(), updated_at=None)
+
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=result)
+        db.info = {}
+        return db
+
+    @pytest.mark.asyncio
+    async def test_the_file_is_on_the_volume_before_the_commit(self, volume: Path) -> None:
+        when_committed: list[bool] = []
+        db = self._session()
+        db.commit = AsyncMock(side_effect=lambda: when_committed.append(any(volume.rglob(f"{CARD_KIND}/*/*"))))
+
+        await store_certification_file(
+            db, certification_id=3, side=CertificationSide.FRONT, upload=_upload(JPEG, "card.jpg")
+        )
+
+        assert when_committed == [True]
+
+    @pytest.mark.asyncio
+    async def test_replacing_a_side_retires_the_old_key(self, volume: Path) -> None:
+        row_uuid = uuid7()
+        old_key = blob_store.build_key(CARD_KIND, row_uuid=row_uuid, sha256="ef" + "0" * 62)
+        await blob_store.put(old_key, b"the blurry one")
+
+        db = self._session(existing=SimpleNamespace(uuid=row_uuid, storage_key=old_key))
+        await store_certification_file(
+            db, certification_id=3, side=CertificationSide.FRONT, upload=_upload(JPEG, "card.jpg")
+        )
+
+        assert db.info[blob_store._PENDING_DELETES] == [old_key]
+        # And the new file is already there, under a key carrying the *same* row uuid.
+        assert (volume / blob_store.build_key(CARD_KIND, row_uuid=row_uuid, sha256=JPEG_DIGEST)).is_file()
+
+    @pytest.mark.asyncio
+    async def test_re_uploading_identical_bytes_schedules_no_unlink(self, volume: Path) -> None:
+        """Same row, same content, same key - so the unlink would delete the file just
+        written. This guard is correctness, not an optimization."""
+        row_uuid = uuid7()
+        key = blob_store.build_key(CARD_KIND, row_uuid=row_uuid, sha256=JPEG_DIGEST)
+
+        db = self._session(existing=SimpleNamespace(uuid=row_uuid, storage_key=key))
+        await store_certification_file(
+            db, certification_id=3, side=CertificationSide.FRONT, upload=_upload(JPEG, "card.jpg")
+        )
+
+        assert blob_store._PENDING_DELETES not in db.info
+        assert (volume / key).read_bytes() == JPEG
+
+
+class TestAMissingFileIsNotAMissingRow:
+    """`None` means "no row"; a row whose file is gone raises.
+
+    Collapsing the two would report data loss as a 404, which is the one answer that stops
+    anyone investigating. The read routes turn the exception into a 500 by not catching it;
+    the export writer and both backfills catch it and carry on.
+    """
+
+    @staticmethod
+    def _session(row: object | None) -> AsyncMock:
+        result = MagicMock()
+        result.one_or_none.return_value = row
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=result)
+        return db
+
+    @pytest.mark.asyncio
+    async def test_no_row_reads_as_none_for_a_dive_file(self, volume: Path) -> None:
+        assert await load_dive_file(self._session(None), dive_id=7) is None
+
+    @pytest.mark.asyncio
+    async def test_no_row_reads_as_none_for_a_card(self, volume: Path) -> None:
+        card = await load_certification_file(self._session(None), certification_id=3, side=CertificationSide.FRONT)
+        assert card is None
+
+    @pytest.mark.asyncio
+    async def test_a_row_whose_file_is_gone_raises_for_a_dive_file(self, volume: Path) -> None:
+        row = SimpleNamespace(
+            storage_key="dive-files/ab/gone", content_type="application/xml", original_filename="x", sha256="ab"
+        )
+        with pytest.raises(blob_store.BlobMissingError):
+            await load_dive_file(self._session(row), dive_id=7)
+
+    @pytest.mark.asyncio
+    async def test_a_row_whose_file_is_gone_raises_for_a_card(self, volume: Path) -> None:
+        row = SimpleNamespace(
+            storage_key="certification-files/ab/gone",
+            content_type="image/jpeg",
+            original_filename="card.jpg",
+            sha256="ab",
+        )
+        with pytest.raises(blob_store.BlobMissingError):
+            await load_certification_file(self._session(row), certification_id=3, side=CertificationSide.FRONT)

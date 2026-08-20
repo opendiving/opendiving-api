@@ -197,7 +197,7 @@ async def has(key: str) -> bool:
     return await anyio.to_thread.run_sync(exists, key)
 
 
-def delete_after_commit(db: AsyncSession, keys: str | list[str]) -> None:
+def delete_after_commit(db: AsyncSession | Session, keys: str | list[str]) -> None:
     """Schedule an unlink for when the session's *current* transaction commits.
 
     This is what keeps every existing `commit: bool = False` composition working
@@ -213,6 +213,17 @@ def delete_after_commit(db: AsyncSession, keys: str | list[str]) -> None:
     Failures are logged, not raised: the row is already gone, the transaction has already
     committed, and the leftover file is an orphan the sweeper reclaims
     (`src/scripts/sweep_orphaned_files.py`).
+
+    **Call this immediately after the statement that retired the rows**, not before it.
+    SQLAlchemy autobegins on the first statement, so a `rollback()` on a session with no
+    transaction open fires no event and would leave the registration standing for whatever
+    that session committed next. Every caller here registers straight after its `DELETE`
+    (or, in the cert upsert, its `INSERT ... ON CONFLICT`), which is what makes the
+    rollback path clear itself.
+
+    Takes either kind of session because it only ever touches `info`, and the listeners are
+    on the sync `Session` in both cases - `AsyncSession.info` is a proxy to exactly that
+    dict. Nothing in the app registers from a sync session; the tests do.
     """
     if isinstance(keys, str):
         keys = [keys]
