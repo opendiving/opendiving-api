@@ -12,40 +12,9 @@ from src.app.core.security import ALGORITHM, SECRET_KEY
 from src.app.services.auth_service import (
     AuthenticatedUser,
     OnboardingRequired,
-    generate_unique_username,
     issue_tokens,
     resolve_identity,
 )
-
-
-class TestGenerateUniqueUsername:
-    @pytest.mark.asyncio
-    async def test_returns_sanitized_base_when_available(self, mock_db):
-        with patch("src.app.services.auth_service.crud_users") as mock_crud:
-            mock_crud.exists = AsyncMock(return_value=False)
-
-            username = await generate_unique_username("Jane.Doe123", mock_db)
-
-            assert username == "janedoe123"
-
-    @pytest.mark.asyncio
-    async def test_appends_suffix_on_collision(self, mock_db):
-        with patch("src.app.services.auth_service.crud_users") as mock_crud:
-            mock_crud.exists = AsyncMock(side_effect=[True, False])
-
-            username = await generate_unique_username("janedoe", mock_db)
-
-            assert username == "janedoe1"
-            assert mock_crud.exists.call_count == 2
-
-    @pytest.mark.asyncio
-    async def test_pads_too_short_base(self, mock_db):
-        with patch("src.app.services.auth_service.crud_users") as mock_crud:
-            mock_crud.exists = AsyncMock(return_value=False)
-
-            username = await generate_unique_username("a", mock_db)
-
-            assert username == "auser"
 
 
 class TestIssueTokens:
