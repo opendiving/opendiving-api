@@ -8960,8 +8960,10 @@ unless somebody has narrowed it in the Actions settings. None of them has ever n
 between them they check out, `uv sync --extra dev`, run ruff and mdformat in check mode, run mypy
 three times, run alembic and pytest against service containers, and write a coverage table to the
 step summary. Nothing writes to the repository, comments on a PR, or touches a package. All three
-now declare `contents: read` at workflow level, which is what `publish-image.yml` and `pr-title.yml`
-were already doing.
+now declare `contents: read` at workflow level, which is what `publish-image.yml` already does.
+`pr-title.yml` had answered the same question in the narrower form a later paragraph here comes back
+to — no workflow-level block, but every job in it carrying one of its own — so these three were the
+only workflows left inheriting whatever the default happened to be.
 
 Narrowing the scope is only half of it. `actions/checkout` writes the `GITHUB_TOKEN` into
 `.git/config` in the workspace unless told not to, and each of these jobs then installs the whole
