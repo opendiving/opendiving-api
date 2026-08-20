@@ -11,8 +11,14 @@ a superset of everything the dump points at. The one gap is a file *deleted* bet
 which leaves a row in the restore pointing at a file the copy no longer has. If you want exactness
 rather than "one dangling row in the unlucky case", stop the stack first.
 
-Nothing else in the stack holds anything durable: Redis is cache and open rate-limit windows, and
-Caddy's volume holds certificates that re-issue themselves.
+Nothing else in the stack holds anything durable: Redis is cache, open rate-limit windows and
+passkey challenges that expire in minutes, and Caddy's volume holds certificates that re-issue
+themselves.
+
+Registered passkeys are ordinary rows, so the dump carries them — but they are bound to the hostname
+in `FRONTEND_URL`, and a restore that comes up under a different one leaves every passkey unusable.
+Signing in by email still works, which is how everyone gets back in and re-adds one. See
+[configuration.md](configuration.md#sign-in).
 
 ## Back up
 

@@ -101,6 +101,30 @@ the proxy itself: the panel redirects to the HTTPS URL it is already on, and any
 value matches nobody. Fix the list, not the panel, and make sure your proxy sends
 `X-Forwarded-Proto` — the bundled Caddy does, and the shipped value already names it.
 
+## No passkey option, or a passkey that never works
+
+Passkeys are offered by the browser, not by a setting — there is no switch to check. Where they are
+missing or failing, it is one of four things, in order of likelihood:
+
+- **The instance is on plain HTTP.** Browsers expose WebAuthn only in a secure context, so the
+  option is correctly absent. Email sign-in is unaffected.
+
+- **`FRONTEND_URL` is an IP address.** `https://192.168.1.10` *is* a secure context, so the browser
+  offers the ceremony and then refuses it — an IP is not a valid passkey domain. It needs a
+  hostname; a different certificate will not help.
+
+- **`FRONTEND_URL` does not match the address the visitor actually typed.** The ceremony is checked
+  against the origin derived from that setting, so reaching the same instance by a second name fails
+  while the emailed link keeps working. One canonical name, and `SITE_URL` alongside it.
+
+- **Redis is down.** The passkey endpoints answer 503 rather than verifying a ceremony without its
+  challenge — see [configuration.md](configuration.md#sign-in). `docker compose ps` says whether it
+  is up.
+
+**And after a domain change, every existing passkey is gone.** Browsers scope a credential to the
+hostname it was created under, so moving `FRONTEND_URL` to a new one silently orphans them all.
+Everyone signs in by email once and adds a passkey again; nobody is locked out.
+
 ## Signing in works, then a reload signs me out
 
 The refresh cookie is `Secure`, so a browser will not send it back over plain HTTP. On an instance
