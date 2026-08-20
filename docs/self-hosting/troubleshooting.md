@@ -81,6 +81,14 @@ proxy, add its address; see step 3 of [reverse-proxy.md](reverse-proxy.md).
 The reverse error is quieter and worse: trusting a network that is *not* in front of the app lets
 callers forge the header and skip the limits entirely. List the proxy, not the world.
 
+## `api` exits with "has host bits set"
+
+An entry in `TRUSTED_PROXY_IPS` is a host address carrying a network prefix — `10.1.2.3/8`. That
+value also configures which peers may set the forwarded headers, and that parser is strict about
+what this one is lenient about. Write the entry as `10.1.2.3` if you mean that address, or
+`10.0.0.0/8` if you mean the block. The error names `FORWARDED_ALLOW_IPS`, which is derived from
+`TRUSTED_PROXY_IPS` in `docker-compose.yml` and is not a variable you set.
+
 ## `/admin` redirects forever, or 403s me
 
 Both are the same setting. The panel enforces HTTPS on `ENVIRONMENT=production` and applies its IP

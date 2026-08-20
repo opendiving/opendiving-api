@@ -48,6 +48,14 @@ x-api-environment: &api-environment
   # is the same question - "who is in front of this app?" - asked by a second piece of
   # machinery, and two knobs for one fact is how they end up disagreeing.
   #
+  # The one place the two consumers differ is what they accept: gunicorn validates this at
+  # startup with a *strict* `ip_network()`, so `172.29.0.1/16` - a host address with a
+  # prefix, which `client_ip.py` deliberately accepts and reads as the block - exits the
+  # container with `Error: 172.29.0.1/16 has host bits set`, naming a variable nobody set.
+  # Bare addresses (`10.1.2.3`) and network addresses (`10.0.0.0/8`) are both fine, which
+  # is every shape `TRUSTED_PROXY_IPS` is documented with; the docs say so where an
+  # operator edits it.
+  #
   # Without it the app sees every request as plain `http` from Caddy's own address, and
   # two things break in ways that look unrelated to a proxy: the admin panel's
   # HTTPS-enforcing middleware redirects every `/admin` request to the https URL it is

@@ -8640,7 +8640,7 @@ have been the pair that drifts unread.
 
 ## The deploy bundle is three files, and the development compose file is not one of them
 
-`deploy/docker-compose.yml`, `deploy/Caddyfile` and `deploy/.env.example` are what an installation
+`deploy/docker-compose.yml`, `deploy/Caddyfile` and `deploy/example.env` are what an installation
 is: three `curl`s and `docker compose up -d`, the shape Immich, Linkwarden and Wanderer all
 converged on. They are uploaded as **release artifacts** by `publish-image.yml`, so
 `releases/latest/download/docker-compose.yml` is a stable URL that always names the newest published
@@ -8721,7 +8721,7 @@ share - the panel then looks initialized and every login fails. Deriving it cost
 panel is off, which is the default. The one sharp edge is that this URL is built by string
 interpolation rather than by the percent-encoding `postgres_uri()` applies, so a `POSTGRES_PASSWORD`
 containing `@`, `/`, `:` or `#` has to be encoded by hand; both the compose file and
-`deploy/.env.example` say so where the value is set.
+`deploy/example.env` say so where the value is set.
 
 ## `admin_init` moved into the app package, because `src/` is not in the image
 
@@ -8774,6 +8774,20 @@ the admin panel breaks in two ways that look like anything but a proxy problem:
 are two knobs that will disagree. The two consumers happen to agree on the algorithm as well: both
 uvicorn's `_TrustedHosts.get_trusted_client_address` (0.52.1) and this app's `client_ip` take the
 right-most entry that no trusted proxy vouched for, and both accept CIDR blocks.
+
+They do **not** agree on what shape a block may be written in, and that asymmetry is the price of
+sharing one variable. `client_ip._trusted_networks` parses with `ip_network(entry, strict=False)` on
+purpose - "operators write those and mean the block" - while gunicorn's
+`validate_string_to_addr_list` is strict by an equally deliberate comment of its own, and it runs at
+config load, before the app is imported. So `TRUSTED_PROXY_IPS=172.29.0.1/16` is a value this app
+documents as fine that exits the `api` container with `Error: 172.29.0.1/16 has host bits set`,
+naming a variable the operator never set. Measured against the pinned gunicorn 26.0.0: a host-bits
+CIDR exits 1, while `172.29.0.0/16`, a bare `10.1.2.3` and an empty value all exit 0. Normalizing
+the value would need an entrypoint of the bundle's own between the image's `CMD` and gunicorn - a
+second copy of that command line to keep in step, for a shape nobody writes by accident twice - so
+the narrow fix is that the compose file, `example.env`, the reverse-proxy doc and the
+troubleshooting page all name the shape and the exact error. `worker` and `admin_init` override the
+command and never reach gunicorn's parser, so this is `api` alone.
 
 Per-IP rate limits are unaffected by the change, which was worth measuring rather than assuming,
 since `client_ip` now reads a `request.client` that has already been rewritten. Through Caddy with a

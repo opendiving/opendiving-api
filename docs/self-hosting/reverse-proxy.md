@@ -42,6 +42,11 @@ wrong in either direction and something breaks quietly:
 Add the address your proxy connects *from*. If it joins the compose network, that is already covered
 by the shipped `172.29.0.0/16`.
 
+Write each entry as a bare address (`10.1.2.3`) or as a network with its host bits zeroed
+(`10.0.0.0/8`). `10.1.2.3/8` is the shape to avoid: the app would read it as the block, but the same
+value also configures the server's forwarded-header trust, which rejects it — and the `api`
+container exits at startup with `Error: 10.1.2.3/8 has host bits set`.
+
 Two consequences beyond the rate limits, both admin-panel-only and both invisible until you turn the
 panel on: the app decides whether a request arrived over HTTPS from the same forwarded headers, so a
 proxy it hasn't been told about makes `/admin` redirect to the HTTPS URL it is already on, forever;
