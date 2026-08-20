@@ -3,6 +3,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # Dev matches deploy semantics: a laptop that sleeps, a Docker daemon that restarts,
+    # a container that dies at 3am - all come back. `unless-stopped` rather than `always`
+    # so `docker compose stop` stays stopped across a daemon restart.
+    restart: unless-stopped
     # -------- replace with comment to run with gunicorn --------
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     # command: gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000
@@ -43,6 +47,14 @@ services:
       dockerfile: Dockerfile
     command: python -m src.scripts.initialize_admin
     restart: "no"
+    # Same inherited-HTTP-healthcheck problem as `worker` below, with a different ending:
+    # this container exits inside the image check's 20s start period, so the check never
+    # got as far as reporting `(unhealthy)` and nothing had to be done about it. That is a
+    # coincidence of how fast seeding is, not a property of a one-shot - a slow database
+    # makes it untrue. Disabled outright, since a container that serves no HTTP has no
+    # business being asked for an HTTP status.
+    healthcheck:
+      disable: true
     env_file:
       - ./src/.env
     depends_on:
@@ -57,7 +69,8 @@ services:
       context: .
       dockerfile: Dockerfile
     command: arq app.core.worker.settings.WorkerSettings
-    # Overrides the image's HEALTHCHECK, which GETs `/api/v1/health` over localhost. This
+    restart: unless-stopped
+    # Overrides the image's HEALTHCHECK, which GETs `/api/v1/health/ready` over localhost. This
     # service shares `api`'s image but serves no HTTP, so the inherited check can only
     # ever fail - it reported `(unhealthy)` permanently while the worker ran its crons
     # fine. Arq's own `--check` reads the sentinel key the worker keeps in Redis (see
@@ -82,6 +95,7 @@ services:
 
   db:
     image: postgres:18
+    restart: unless-stopped
     env_file:
       - ./src/.env
     volumes:
@@ -105,7 +119,14 @@ services:
       - "127.0.0.1:5432:5432"
 
   redis:
-    image: redis:alpine
+    # Pinned to a major for the same reason `db` is, and kept in step with the `redis`
+    # service in .github/workflows/tests.yml - CI running the suite against the version
+    # the compose file ships is what makes "tested" and "shipped" the same claim. `alpine`
+    # on its own is a floating `latest`: it resolves to whatever major is current on the
+    # day someone pulls, so two machines a year apart run different Redis and neither
+    # knows it.
+    image: redis:8-alpine
+    restart: unless-stopped
     volumes:
       - redis-data:/data
     healthcheck:
@@ -122,7 +143,9 @@ services:
   # an inbox. Point `SMTP_HOST=mailpit`, `SMTP_PORT=1025`, `SMTP_TLS_MODE=none` at it
   # (see src/.env.example), and comment `SMTP_HOST` back out when you're done.
   mailpit:
-    image: axllent/mailpit
+    # Mailpit publishes no bare-major tag, so `v1.30` is the widest pin available.
+    image: axllent/mailpit:v1.30
+    restart: unless-stopped
     profiles: ["mail"]
     # The web inbox only. It holds live sign-in tokens, so it is bound to the loopback
     # for the same reason the Postgres port above is. 1025 stays unpublished: `api` and

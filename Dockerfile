@@ -69,11 +69,22 @@ EXPOSE 8000
 # `python -c` rather than curl/wget: neither is installed in the slim base, and adding
 # one just to health-check is a bigger surface than the check is worth.
 #
+# `/health/ready` rather than `/health`: this is the check `docker compose ps` reports and
+# the one a `depends_on: condition: service_healthy` waits on, and a dependent asking that
+# question wants "can serve", not "has a process". `/health` answers the latter and stays
+# the probe for anything that restarts on failure. Nothing here restarts on unhealthy -
+# Docker has no such policy - so a Postgres or Redis outage shows up as a red status
+# rather than as a container being killed, which is the honest reading of it.
+#
+# A 503 raises `HTTPError` out of `urlopen` and exits non-zero on the traceback, which is
+# the intended result; `docker inspect` shows the status line in the health log.
+#
 # This assumes the container serves HTTP, which only `api` does. Every other service built
 # from this image - `worker` today - inherits the check and fails it forever, so it must
-# override `healthcheck:` in `docker-compose.yml` with something it can actually pass.
+# override `healthcheck:` in `docker-compose.yml` with something it can actually pass, or
+# disable it (`admin_init`).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=4).status == 200 else 1)"]
+    CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/ready', timeout=4).status == 200 else 1)"]
 
 # Multi-worker and no autoreload: this is the image that ships. `--reload` runs a single
 # worker plus a filesystem watcher and restarts on any write, which is what you want
