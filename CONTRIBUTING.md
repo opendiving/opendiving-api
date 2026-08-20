@@ -338,7 +338,59 @@ nothing and may be deleted and re-cut. The one sanctioned reason to rebuild a re
 CVE in a base image: run **Publish Image** by hand with `ref` set to the `v` tag, and tick **Also
 push :latest** if that version is still the newest. One run recomputes the version's whole alias
 set, which is the point — a hand-picked subset would leave everyone following `latest` or `0.4` on
-the vulnerable digest.
+the vulnerable digest. What tells you there is a CVE to rebuild for is the next section.
+
+## Staying on top of CVEs
+
+The rebuild above is the *response*. Two things are wired up to raise the alarm in the first place,
+and they watch different objects — neither substitutes for the other.
+
+**The published images.** `.github/workflows/vulnerability-scan.yml` scans them every morning with
+Trivy: `latest` plus every live `X.Y` alias, resolved to digests so the same image behind two tags
+is scanned once. It reports HIGH and CRITICAL findings in both halves of the image — the Debian
+packages that come from `python:3.14-slim-bookworm`, and the Python distributions `uv` installed —
+which is the same pair a rebuild fixes. This is the job that closes the loop with the paragraph
+above, because the case it catches is a release that was clean the day it shipped and grew a CVE
+three weeks later, with no PR in flight and nobody looking.
+
+**The alert is a GitHub issue** labelled `image-cve`, and you are the one who acts on it: rebuild
+the newest affected version per the drill above. The issue body is the table of what moved and
+where. One issue, edited in place for as long as the finding persists — so a CVE that takes upstream
+a fortnight to patch does not generate a fortnight of notifications. The workflow closes it once a
+scan comes back clean, and will not reopen it for a set of CVEs you already read and closed; a
+*different* CVE opens a fresh one. A finding under **Python package** is the exception to the
+rebuild: that version comes from `uv.lock`, so it needs a merged bump before a rebuild has anything
+new to install.
+
+**Proposed changes.** The same workflow runs a second, much cheaper job on every PR — Trivy over
+`uv.lock`, no image built — which *fails the check* on a HIGH or CRITICAL that has a fix available.
+That is about a change you are proposing rather than about what is deployed, so it stays out of the
+issue. It ignores findings with no fix published, because there is no move to make on those.
+
+**Version bumps.** `.github/renovate.json5` is the other half: it watches `uv.lock` and
+`pyproject.toml`, both `Dockerfile` base images, the three digest-pinned images in
+`deploy/docker-compose.yml`, the development compose file, and every pinned GitHub Action. Routine
+updates arrive in one batch on Monday morning; a vulnerability-driven one ignores the schedule and
+is titled `fix(deps):`, so it lands in the Fixes section of the release notes rather than among the
+chores.
+
+> **Renovate has to be enabled once, by hand, and until it is that file does nothing.** Install the
+> [Renovate GitHub App](https://github.com/apps/renovate) on the `opendiving` org — it reads
+> `.github/renovate.json5` on its next run and needs no further setup — or run it self-hosted on a
+> schedule with a PAT. Nothing in this repository can do it, and nothing warns you it hasn't been
+> done, which is why it is written here.
+
+One thing Renovate will not do on its own is move Python. `requires-python` in `pyproject.toml`,
+ruff's `target-version`, `.python-version` and the two `Dockerfile` base tags all have to move
+together, and Renovate can only reach the last three — an auto-opened PR would be wrong by
+construction. So that update is grouped and held behind a checkbox on the **Dependency Dashboard**
+issue: it tells you 3.15 exists and waits for a person.
+
+**What none of this watches**, stated so it is not mistaken for coverage: an exact `X.Y.Z` older
+than the newest patch in its minor (immutable by policy, and rebuilt only by dispatching Publish
+Image at that tag by hand); the `linux/arm64` image, on the assumption that it installs the same
+Debian packages as `linux/amd64`; and vulnerabilities with no fix published upstream, which are
+counted in the issue but drive nothing, since no rebuild collects a package that does not exist.
 
 ## License
 
