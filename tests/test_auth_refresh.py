@@ -1,13 +1,17 @@
-"""Unit tests for the `POST /auth/refresh` endpoint (now part of `api.v1.auth` - see
+"""Tests for the `POST /auth/refresh` endpoint (now part of `api.v1.auth` - see
 `tests/test_auth.py` for the unified email/Google/onboarding flow, and `DECISIONS.md`
 for why `/refresh`/`/logout` moved under `/auth`, and for why the presented refresh
 token is rotated rather than reused).
+
+Mostly unit tests over a mocked session; the last class is Postgres-backed, because the
+liveness check the endpoint makes is a real query and a fake cannot fail the way it can.
 """
 
 import logging
 import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
 from http.cookies import SimpleCookie
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -17,6 +21,7 @@ from src.app.api.v1.auth import _elapsed, refresh_access_token
 from src.app.core.exceptions.http_exceptions import UnauthorizedException
 from src.app.core.schemas import TokenData
 from src.app.services.auth_service import issue_tokens
+from tests.conftest import db_available
 from tests.helpers.mocks import FakeTokenBlacklist, FrozenSecurityClock
 
 USER_UUID = uuid_pkg.uuid4()
@@ -43,7 +48,42 @@ def _refresh_cookie(response: Response) -> str:
     return jar["refresh_token"].value
 
 
-class TestRefreshAccessToken:
+class FakeUsers:
+    """Stand-in for `crud_users` holding exactly one account, applied the way FastCRUD's
+    `exists` applies its keyword filters: every one has to match.
+
+    An unknown column compares against `None` and so fails, which is the point - a lookup
+    that filtered on a field the row doesn't carry would quietly answer "no such account"
+    against real Postgres too, and this fake refuses it rather than passing.
+    """
+
+    def __init__(self, user_uuid: uuid_pkg.UUID, is_deleted: bool = False) -> None:
+        self.row: dict[str, Any] = {"uuid": user_uuid, "is_deleted": is_deleted}
+        self.filters: list[dict[str, Any]] = []
+
+    async def exists(self, db: Any, **filters: Any) -> bool:
+        self.filters.append(filters)
+        return all(self.row.get(field) == value for field, value in filters.items())
+
+
+class SignedInAccount:
+    """Refreshing is now a question about the account, not just about the token, so every
+    test that expects a *successful* exchange has to supply a live one.
+
+    `mock_db` would supply it by accident: a spec'd `AsyncSession` answers every call
+    with another mock, which FastCRUD's `exists` reads as a row - and leaves an
+    un-awaited coroutine behind while doing it. Tests that pass because a mock is truthy
+    would also pass with the liveness check deleted, so the account is stated here
+    instead.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _live_account(self):
+        with patch("src.app.api.v1.auth.crud_users", FakeUsers(USER_UUID)):
+            yield
+
+
+class TestRefreshAccessToken(SignedInAccount):
     @pytest.mark.asyncio
     async def test_missing_cookie_raises_unauthorized(self, mock_db):
         with pytest.raises(UnauthorizedException, match="Refresh token missing."):
@@ -118,7 +158,7 @@ class TestRefreshAccessToken:
             mock_blacklist.assert_called_once_with("good-token", mock_db)
 
 
-class TestRefreshRotationWithRealTokens:
+class TestRefreshRotationWithRealTokens(SignedInAccount):
     """Rotation driven end to end over the real helpers: tokens are genuinely minted,
     verified and blacklisted, with only the blacklist *table* swapped for an in-memory
     set.
@@ -209,7 +249,7 @@ class TestRefreshRotationWithRealTokens:
             assert _refresh_cookie(still_valid) not in blacklist.tokens
 
 
-class TestRefreshTokenReuseLogging:
+class TestRefreshTokenReuseLogging(SignedInAccount):
     """Presenting a refresh token that was already spent is the strongest evidence this
     app gets that a cookie has been stolen, and until it was logged it produced nothing an
     operator could ever see - `verify_token` answers `None` for a revoked token and for
@@ -316,3 +356,184 @@ class TestRefreshTokenReuseLogging:
         assert _elapsed(now - timedelta(milliseconds=12)).endswith("s")
         assert float(_elapsed(now - timedelta(milliseconds=12)).rstrip("s")) < 1
         assert "day" in _elapsed(now - timedelta(days=3))
+
+
+class TestRefreshRequiresALiveAccount:
+    """The subject of a refresh token is an immutable uuid, which stops it naming a
+    *different* account - but nothing stopped it naming a **deleted** one.
+
+    `verify_token` never touches the `user` table and neither does `issue_tokens`, so a
+    cookie held by any device other than the one that called `DELETE /user` kept rotating
+    itself indefinitely: that call blacklists only the two tokens presented to it. Every
+    read 401s through `get_current_user`'s `is_deleted=False` filter from the same
+    instant; this endpoint was the exception, and the one that mattered, because it is
+    what keeps a session alive.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_deleted_account_cannot_refresh(self, mock_db):
+        with (
+            patch("src.app.api.v1.auth.verify_token", new_callable=AsyncMock) as mock_verify,
+            patch("src.app.api.v1.auth.crud_users", FakeUsers(USER_UUID, is_deleted=True)),
+        ):
+            mock_verify.return_value = TokenData(user_uuid=USER_UUID)
+
+            with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
+                await refresh_access_token(_request({"refresh_token": "good-token"}), Mock(), mock_db)
+
+    @pytest.mark.asyncio
+    async def test_a_subject_with_no_row_at_all_cannot_refresh(self, mock_db):
+        """The purge in `plans/account-deletion.md` removes the row outright, and a
+        pre-purge cookie names a uuid nothing resolves. Same answer as a deleted row.
+        """
+        with (
+            patch("src.app.api.v1.auth.verify_token", new_callable=AsyncMock) as mock_verify,
+            patch("src.app.api.v1.auth.crud_users", FakeUsers(uuid_pkg.uuid4())),
+        ):
+            mock_verify.return_value = TokenData(user_uuid=USER_UUID)
+
+            with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
+                await refresh_access_token(_request({"refresh_token": "good-token"}), Mock(), mock_db)
+
+    @pytest.mark.asyncio
+    async def test_the_account_is_looked_up_by_the_token_subject(self, mock_db):
+        """Both halves of the filter are load-bearing and neither is visible in a passing
+        happy-path test: the uuid has to be the one the *token* named, and `is_deleted`
+        has to be there at all.
+        """
+        users = FakeUsers(USER_UUID)
+
+        with (
+            patch("src.app.api.v1.auth.verify_token", new_callable=AsyncMock) as mock_verify,
+            patch("src.app.api.v1.auth.crud_users", users),
+            patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock),
+        ):
+            mock_verify.return_value = TokenData(user_uuid=USER_UUID)
+
+            await refresh_access_token(_request({"refresh_token": "good-token"}), Mock(), mock_db)
+
+        assert users.filters == [{"uuid": USER_UUID, "is_deleted": False}]
+
+    @pytest.mark.asyncio
+    async def test_a_rejected_token_is_not_spent(self, mock_db):
+        """The 401 writes nothing, for the same reason the malformed-token 401 doesn't -
+        and so a soft delete that gets reversed leaves the account's other sessions
+        working, having made them inert rather than destroyed them.
+        """
+        with (
+            patch("src.app.api.v1.auth.verify_token", new_callable=AsyncMock) as mock_verify,
+            patch("src.app.api.v1.auth.crud_users", FakeUsers(USER_UUID, is_deleted=True)),
+            patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock) as mock_blacklist,
+            patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as mock_issue,
+        ):
+            mock_verify.return_value = TokenData(user_uuid=USER_UUID)
+
+            with pytest.raises(UnauthorizedException):
+                await refresh_access_token(_request({"refresh_token": "good-token"}), Mock(), mock_db)
+
+            mock_blacklist.assert_not_called()
+            mock_issue.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_the_response_says_nothing_about_why(self, mock_db):
+        """A distinguishable 401 would turn the endpoint into an oracle for whether a
+        given uuid ever had an account - the same rule the reuse logging follows.
+        """
+        with (
+            patch("src.app.core.security.crud_token_blacklist", FakeTokenBlacklist()),
+            patch("src.app.api.v1.auth.verify_token", new_callable=AsyncMock) as mock_verify,
+            patch("src.app.api.v1.auth.crud_users", FakeUsers(USER_UUID, is_deleted=True)),
+        ):
+            mock_verify.return_value = TokenData(user_uuid=USER_UUID)
+
+            with pytest.raises(UnauthorizedException) as deleted:
+                await refresh_access_token(_request({"refresh_token": "good-token"}), Mock(), mock_db)
+
+        with patch("src.app.core.security.crud_token_blacklist", FakeTokenBlacklist()):
+            with pytest.raises(UnauthorizedException) as garbage:
+                await refresh_access_token(_request({"refresh_token": "not-a-jwt"}), Mock(), mock_db)
+
+        assert deleted.value.detail == garbage.value.detail
+        assert deleted.value.status_code == garbage.value.status_code
+
+
+@pytest.mark.skipif(not db_available(), reason="Postgres is not reachable")
+class TestRefreshLivenessAgainstPostgres:
+    """The same rule against a real database, because the fake above cannot fail the way
+    this would: `crud_users.exists` turns its keyword arguments into SQL, and a filter
+    naming a column `User` doesn't carry raises there and nowhere else.
+
+    Only the blacklist table is faked, so `async_db` answers exactly the one query this
+    change added. Skipped when no database is reachable - `POSTGRES_SERVER=localhost` on
+    a developer's machine, per CONTRIBUTING.md.
+    """
+
+    @pytest.mark.asyncio
+    async def test_deleting_the_account_ends_the_sessions_it_never_saw(self, db, async_db, diver):
+        """`DELETE /user` blacklists the two tokens on that request and nothing else, so
+        this is the cookie on the *other* device - the stolen phone the grace period in
+        `plans/account-deletion.md` exists for.
+        """
+        blacklist = FakeTokenBlacklist()
+
+        with patch("src.app.core.security.crud_token_blacklist", blacklist):
+            phone = Response()
+            await issue_tokens(phone, diver.uuid)
+
+            rotated = Response()
+            await refresh_access_token(_request({"refresh_token": _refresh_cookie(phone)}), rotated, async_db)
+            cookie = _refresh_cookie(rotated)
+
+            diver.is_deleted = True
+            diver.deleted_at = datetime.now(UTC).replace(tzinfo=None)
+            db.commit()
+
+            with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
+                await refresh_access_token(_request({"refresh_token": cookie}), Response(), async_db)
+
+    @pytest.mark.asyncio
+    async def test_a_reversed_deletion_leaves_those_sessions_working(self, db, async_db, diver):
+        """The documented consequence of checking before spending the token: the account
+        went dark rather than losing its sessions, so clearing the flag brings them back.
+        This is what `POST /auth/restore` will rely on.
+        """
+        blacklist = FakeTokenBlacklist()
+
+        with patch("src.app.core.security.crud_token_blacklist", blacklist):
+            phone = Response()
+            await issue_tokens(phone, diver.uuid)
+            cookie = _refresh_cookie(phone)
+
+            diver.is_deleted = True
+            diver.deleted_at = datetime.now(UTC).replace(tzinfo=None)
+            db.commit()
+
+            with pytest.raises(UnauthorizedException):
+                await refresh_access_token(_request({"refresh_token": cookie}), Response(), async_db)
+
+            diver.is_deleted = False
+            diver.deleted_at = None
+            db.commit()
+
+            restored = Response()
+            result = await refresh_access_token(_request({"refresh_token": cookie}), restored, async_db)
+
+            assert result["token_type"] == "bearer"
+            assert _refresh_cookie(restored) != cookie
+
+    @pytest.mark.asyncio
+    async def test_a_subject_with_no_row_cannot_refresh(self, async_db):
+        """What a cookie minted before the purge names once the row is gone. Nothing has
+        ever resolved that uuid, so this is the first thing that notices.
+        """
+        blacklist = FakeTokenBlacklist()
+
+        with patch("src.app.core.security.crud_token_blacklist", blacklist):
+            never_existed = Response()
+            await issue_tokens(never_existed, uuid_pkg.uuid4())
+
+            with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
+                await refresh_access_token(
+                    _request({"refresh_token": _refresh_cookie(never_existed)}), Response(), async_db
+                )
