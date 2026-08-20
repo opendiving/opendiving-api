@@ -1,7 +1,8 @@
 """Transactional email delivery over SMTP.
 
 Used for the magic-link sign-in email (see `api.v1.auth.request_email_link`), the
-email-change confirmation/notification pair (see `api.v1.users`), the gear-service
+email-change confirmation/notification pair (see `api.v1.users`), the passkey
+added/removed security notices (see `api.v1.passkeys`), the gear-service
 digest (see `core.worker.functions.send_gear_service_digests`), and the contact form
 (see `api.v1.contact`), all funneling through `_send` so the "run a blocking client off
 the event loop" plumbing only lives in one place.
@@ -205,6 +206,58 @@ async def send_email_change_confirmation_email(new_email: str, confirm_url: str)
             f"<p>This link expires in {settings.EMAIL_CHANGE_TOKEN_EXPIRE_MINUTES} minutes "
             "and can only be used once. If you didn't request this, you can safely "
             "ignore this email - your account email won't change.</p>"
+        ),
+    )
+
+    await anyio.to_thread.run_sync(_send, message)
+
+
+async def send_passkey_added_email(email: str, passkey_name: str) -> None:
+    """Best-effort security notice that a passkey was added to an account.
+
+    A passkey is a standalone sign-in method, so registering one is exactly the kind of
+    change whose victim should hear about it in a channel the attacker may not hold. It
+    carries no link and no token, which is why - unlike the magic-link and email-change
+    senders - a missing `SMTP_HOST` just logs everywhere rather than raising outside
+    `local`: there is no credential here to leak into a log.
+
+    Every caller wraps this so a delivery failure is logged rather than raised. A
+    registered passkey with a failed notification email must not roll back the
+    registration - the user completed a biometric prompt and would be told it failed.
+    """
+    if not settings.SMTP_HOST:
+        logger.warning("SMTP_HOST not configured; passkey-added notice for %s: %s", email, passkey_name)
+        return
+
+    message = _build_message(
+        to=email,
+        subject="A passkey was added to your OpenDiving account",
+        html_body=(
+            f"<p>A passkey named <strong>{html.escape(passkey_name)}</strong> was just added to your "
+            "OpenDiving account, and can now be used to sign in.</p>"
+            f'<p>If this wasn\'t you, <a href="{settings.FRONTEND_URL}/settings">remove it</a> and '
+            "contact support.</p>"
+        ),
+    )
+
+    await anyio.to_thread.run_sync(_send, message)
+
+
+async def send_passkey_removed_email(email: str, passkey_name: str) -> None:
+    """The other half of `send_passkey_added_email`: someone quietly stripping an
+    account's passkeys is as much a signal as someone adding one.
+    """
+    if not settings.SMTP_HOST:
+        logger.warning("SMTP_HOST not configured; passkey-removed notice for %s: %s", email, passkey_name)
+        return
+
+    message = _build_message(
+        to=email,
+        subject="A passkey was removed from your OpenDiving account",
+        html_body=(
+            f"<p>The passkey named <strong>{html.escape(passkey_name)}</strong> was just removed from your "
+            "OpenDiving account, and can no longer be used to sign in.</p>"
+            "<p>If this wasn't you, please contact support.</p>"
         ),
     )
 

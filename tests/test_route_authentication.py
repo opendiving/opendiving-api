@@ -49,6 +49,13 @@ ANONYMOUS_BY_DESIGN: dict[tuple[str, str], str] = {
         "POST",
         "/api/v1/auth/refresh",
     ): "Trades a refresh token for an access token, which an expired session has instead.",
+    ("POST", "/api/v1/auth/passkey/options"): (
+        "Hands out a challenge to sign in with; naming an account first is exactly what "
+        "discoverable credentials exist to avoid."
+    ),
+    ("POST", "/api/v1/auth/passkey/verify"): (
+        "Redeems a passkey assertion - the signature is the credential, same position in the flow as email/verify."
+    ),
     # 2. The caller may be locked out, and that is the point.
     ("POST", "/api/v1/contact"): "A diver who cannot sign in is precisely who needs to reach a human.",
     # 3. The caller is a monitor or an orchestrator, holding no account at all.

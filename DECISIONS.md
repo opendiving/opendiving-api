@@ -10104,3 +10104,172 @@ left behind would drift silently rather than being caught by `alembic check`. Th
 `gen_random_uuid()` rather than `uuidv7()`: the column is only ever looked up by equality, and every
 row it touches expires within the hour. Nothing backfills `code_hash` — a request created before
 this ran was emailed no code, and `NULL` is the truth about it.
+
+## Passkeys are a third *first* factor, not a second one
+
+WebAuthn passkeys sit beside the magic link and Google as a third way in
+(`POST /auth/passkey/options`/`verify` in `api/v1/auth.py`, everything `/user/passkey*` in
+`api/v1/passkeys.py`). They are deliberately **not** a second factor, and the reasoning is worth
+keeping because "add passkeys as 2FA" is the shape almost every tutorial has.
+
+A second factor backstops a first factor that can be phished or leaked — a password. This system has
+none. Both existing methods are already possession proofs (the inbox, the Google session), and the
+email path is also the account-recovery path of last resort, so any second factor that can be
+answered with "use the magic link instead" is theater: an attacker who owns the inbox walks around
+it. Making it *real* would mean letting users switch email sign-in off, which imports the whole
+lockout-and-recovery-codes problem into a dive logbook. Meanwhile a passkey ceremony with user
+verification is already two factors in one gesture (the authenticator, plus the biometric or PIN
+that unlocks it) and is origin-bound, so as a *first* factor it is strictly stronger than the magic
+link it sits beside.
+
+The architecture agrees: `resolve_identity` → `_start_onboarding_or_sign_in` → `issue_tokens` is a
+"verified identity in, session out" pipeline with no step-up concept anywhere. A third identity
+proof drops in; a factor system would be a new invention.
+
+**The posture, stated honestly:** account security stays bounded by the security of the user's email
+account, exactly as before. Passkeys raise day-to-day security (unphishable, no token in any inbox)
+and speed; they deliberately do not raise the floor. TOTP and backup codes get revisited only if
+this ever guards something worth more than the recovery inbox.
+
+### The passkey path skips `resolve_identity` entirely
+
+Every other entry point asks "which account owns this email, and is this provider linked to it yet".
+An assertion carries no email, so there is nothing to ask. The credential row *is* the link, and it
+can only exist because a signed-in user registered it — so `finish_sign_in` resolves `credential_id`
+→ `user_id` directly and hands an `AuthenticatedUser` to the shared funnel.
+
+Two consequences. First, **no auto-linking decision exists** here. Google's silent link-by-email
+(`auth_service.resolve_identity`) is defended by Google's `email_verified`; a passkey asserts
+nothing to link *by*, and never needs to. Second, this is **a resolve site that
+`plans/account-deletion.md`'s edit list does not know about** — that plan enumerates the
+`resolve_identity` call sites when teaching every path a `deletion_pending` outcome, and this one is
+not among them. The interim is the `is_deleted=False` filter on the user lookup, which fails closed
+into the same generic 401 as everything else. Whichever lands second owns the joint.
+
+### No `authentication_provider` row for passkeys, and its own table instead
+
+`uq_authentication_provider_user_provider` allows one row per `(user_id, provider)`; passkeys are
+many-per-user and each carries state that table has no column for (public key, signature counter,
+transports). So they get `webauthn_credential`.
+
+And no `provider="passkey"` *marker* row alongside it. Nothing reads `authentication_provider`
+except `resolve_identity`'s provider-link branch, which a passkey never traverses. A marker would
+need create-on-first / delete-on-last bookkeeping — two more write paths to get wrong — to stay
+truthful, while `webauthn_credential` already answers "does this user have passkeys" as the single
+source of truth.
+
+### Challenges live in Redis, and this is the one place it fails *closed*
+
+`core/utils/rate_limit.py` fails **open** on a Redis outage because throttling is defense-in-depth
+(see *"Rate limiting fails open on a Redis outage, not just a missing client"*). The challenge store
+(`services/passkey_challenges.py`) is the opposite: the challenge *is* the anti-replay guarantee, so
+an unreachable Redis returns 503 rather than proceeding without one. That is a designed property,
+not a gap — the failure domains stay independent, and a Redis outage that stops passkeys leaves the
+magic link (pure Postgres) working:
+
+| Down       | Magic link           | Passkey                    | Google |
+| ---------- | -------------------- | -------------------------- | ------ |
+| SMTP relay | ✗                    | ✓                          | ✓      |
+| Redis      | ✓ (limits fail open) | ✗ (challenges fail closed) | ✓      |
+| Google     | ✓                    | ✓                          | ✗      |
+
+Redis rather than an `authentication_request` row because conditional UI arms on every signed-out
+page view that supports it, landing hero included — so challenges are minted at *page-view*
+frequency. A Postgres row per view is the unbounded-personal-data-table shape
+`plans/account-deletion.md` §2 caught `authentication_request` in; a TTL key cleans itself with no
+sweep job. Consumed with `GETDEL` on the verify **attempt**, so it is single-use even when
+verification then fails — a captured response must not be retriable against a still-live challenge.
+
+Registration challenges are keyed per user, so two tabs racing both fail: the second tab's `options`
+call overwrites the challenge the first tab's `verify` then presents. Named and accepted — it
+self-heals on retry, and the alternative is unbounded keys for a ceremony nobody runs twice.
+
+### `FRONTEND_URL` is the passkey domain, and the origin must be *rebuilt* from it
+
+`FrontendSettings.passkey_rp_id` and `passkey_origin` both come from one `urlparse(FRONTEND_URL)`.
+Derived rather than configured, so there is no second place to be wrong — the same reasoning that
+rejected a `PASSKEYS_ENABLED` knob (the browser's capability detection *is* the switch).
+
+**The origin is `f"{scheme}://{netloc}"`, never the raw setting**, and that is not a nicety.
+Browsers put a bare `scheme://host[:port]` in `clientDataJSON.origin`, so a trailing slash in
+`FRONTEND_URL` — the most ordinary way to write a URL variable — would 401 *every* ceremony while
+magic links (plain concatenation, `auth.py`) kept working, pointing nowhere near the cause.
+`TestDerivedRelyingParty` in `tests/test_passkeys.py` pins both halves.
+
+Two operational consequences: changing `FRONTEND_URL`'s **hostname** silently orphans every
+registered passkey (browsers scope credentials by RP ID, and the email path is the recovery), and an
+**IP-address** `FRONTEND_URL` is never a valid RP ID — even over HTTPS with a private CA, the
+browser offers WebAuthn (secure context) and then throws `SecurityError` at every ceremony. Plain
+HTTP gets no WebAuthn at all, so a LAN instance self-hides the UI; `localhost` is exempt, which is
+why local development works unchanged.
+
+### `resident_key: "required"`, `user_verification: "preferred"`
+
+Discoverable credentials only. That is what makes sign-in usernameless — the assertion carries the
+credential id and the row names the user — so there is one code path, browser autofill falls out of
+it, and no "does this email have a passkey" oracle exists anywhere. It costs pre-resident-key
+security keys (old U2F YubiKeys), which cannot register; accepted, because the alternative is an
+email-first `allowCredentials` flow that leaks exactly that.
+
+UV `preferred` rather than `required` keeps a PIN-less key usable. A passkey asserted without UV is
+a bare possession proof — precisely the strength of the magic link beside it — so nothing is lost
+against the current floor, and the UV flag comes back in every assertion if a stricter policy is
+ever wanted.
+
+### A counter regression is a `WARNING`, and the app does the comparison itself
+
+Synced passkeys report `0` forever and `0 → 0` passes; a *regression* (stored > 0, presented ≤
+stored) is the cloned-authenticator signal, and rejecting it blocks the clone while the real device
+— whose counter is ahead — keeps working.
+
+py_webauthn already raises on exactly that comparison inside `verify_authentication_response`, so
+the app's job is only the log line. `_warn_if_counter_regressed` earns it by re-doing the
+stored-vs-presented comparison against the assertion's own `authenticatorData`, **never** by parsing
+the library's exception message — that string is a thing any release can reword, and a security log
+that goes quiet on a dependency bump is worse than none. `WARNING` for the same reason refresh-token
+reuse is one (see *"A reused refresh token is a `WARNING`"*): the app configures no logging of its
+own and `uvicorn` configures only its own loggers, so anything below it is dropped on the floor in
+exactly the session where someone is trying to work out what happened.
+
+### One 401 for every way an assertion can fail
+
+Unknown credential, tombstoned owner, expired or already-spent challenge, wrong origin, wrong RP ID
+and bad signature are one indistinguishable message. Telling them apart would answer "does this
+credential exist" and "does that account still" for whoever holds a failed assertion. Pinned by
+`test_every_failure_answers_identically`, which collects the messages into a set and asserts there
+is one.
+
+`record_assertion` (`crud/crud_webauthn_credentials.py`) is the same conditional-UPDATE trick as
+`claim_authentication_request`, for the same reason: verification runs against the counter read
+*before* it, so the write is predicated on that value still being current. Exactly one of two racing
+submissions of one assertion advances the row, and only that one mints a session. FastCRUD's
+filtered `update` cannot express it — see *"A filter on a FastCRUD `update` is a `count()`, not an
+atomic condition"*.
+
+### `GET /user/passkeys` is not cached, which makes it the fifth `OwnedResourceCache` opt-out
+
+Every other owned resource goes through that factory. This one is unpaginated, a handful of rows,
+and embedded by nothing anywhere — so there is no page worth caching and no invalidation obligation
+to get wrong. Caching it would be inventing a thing that can go stale. The other four opt out for
+the opposite reason (their reads enrich rows with a second query); the class docstring lists all
+five.
+
+The list's own `limit` is `_LIST_LIMIT`, deliberately *above* `PASSKEY_MAX_CREDENTIALS_PER_USER`
+rather than equal to it. The cap is enforced at registration, so lowering the setting afterwards
+leaves accounts holding more rows than it allows — and a limit equal to the setting would hide
+exactly those, which is the one failure that matters here: a passkey nobody can see is a passkey
+nobody can revoke.
+
+### The test authenticator is vendored, not depended on
+
+`tests/helpers/webauthn.py` is ~130 lines that emulate `navigator.credentials` well enough to sign
+real ceremonies. The obvious package is `soft-webauthn`, whose last release was 2022 and which pins
+`fido2 <1.0.0` — that would drag a five-year-old copy of a security library into the dev environment
+and cap it there. The vendored version leans only on `cbor2` and `cryptography`, both of which
+arrive with `webauthn` itself, so it costs no dependency at all.
+
+Recorded fixtures were the other option and are strictly worse: a challenge is generated per
+ceremony, so a fixture can only ever be replayed against a challenge pinned to match it — meaning
+the test could never exercise the challenge check it most wants to. Every ceremony test here signs
+whatever it is given and runs through the real verifier; only Redis, the CRUD singletons and the
+rate limiter are stood in for.

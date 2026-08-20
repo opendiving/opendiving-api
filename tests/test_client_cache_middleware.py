@@ -183,6 +183,7 @@ class TestTheRealAuthRoutes:
             "/auth/google",
             "/auth/complete",
             "/auth/refresh",
+            "/auth/passkey/verify",
         }
         for route in router.routes:
             if getattr(route, "path", None) in minting:

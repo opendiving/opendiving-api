@@ -8,6 +8,11 @@ If so, they're signed in immediately. If not, a temporary onboarding session is 
 and no `User` row is created until profile completion (`POST /auth/complete`) succeeds -
 there are no unverified users, and there is no separate sign up flow.
 
+A passkey assertion (`POST /auth/passkey/options`/`verify`) is the third way in, and the
+one that skips that question: a credential row names its account outright, so there is
+nothing to resolve and no onboarding branch to reach. Registering one is the authenticated
+half of the feature and lives in `api.v1.passkeys`.
+
 `POST /auth/refresh`/`POST /auth/logout` also live here (see `DECISIONS.md`) - they
 used to sit in their own `login.py`/`logout.py` modules under a stale `"login"` tag,
 left over from the old password-based flow.
@@ -69,8 +74,10 @@ from ...schemas.authentication_request import (
     AuthenticationRequestUpdate,
 )
 from ...schemas.user import UserCreateInternal, UserReadInternal
+from ...schemas.webauthn_credential import PasskeySignInOptions, PasskeySignInVerifyRequest
 from ...services.auth_service import AuthenticatedUser, OnboardingRequired, issue_tokens, resolve_identity
 from ...services.email_service import send_magic_link_email
+from ...services.passkey_service import finish_sign_in, start_sign_in
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -102,11 +109,17 @@ async def _start_onboarding_or_sign_in(
 ) -> AuthOutcome:
     """Turn a verified identity into either a signed-in session or an onboarding handoff.
 
-    Shared by every entry point that proves who someone is (magic link, Google), because
-    each of them faces the same fork: a `User` row already exists for this identity, or it
-    doesn't and one has to be created by `POST /auth/complete`. In the second case no user
-    is created here - the caller gets a short-lived onboarding token carrying the verified
-    email and profile, which is the only thing that lets `/auth/complete` trust them.
+    Shared by every entry point that proves who someone is (magic link, Google, passkey),
+    because each of them faces the same fork: a `User` row already exists for this identity,
+    or it doesn't and one has to be created by `POST /auth/complete`. In the second case no
+    user is created here - the caller gets a short-lived onboarding token carrying the
+    verified email and profile, which is the only thing that lets `/auth/complete` trust
+    them.
+
+    A passkey assertion can only ever take the first branch, since a credential exists only
+    because a signed-in user registered it. It comes through here anyway rather than calling
+    `issue_tokens` directly: token shape, cookie mechanics and every future outcome variant
+    then stay in one place instead of two that have to be kept in step.
     """
     if isinstance(outcome, AuthenticatedUser):
         tokens = await issue_tokens(response, outcome.user["uuid"])
@@ -379,6 +392,65 @@ async def auth_with_google(
         name=google_user.name,
         avatar=google_user.avatar,
     )
+    return await _start_onboarding_or_sign_in(response, outcome)
+
+
+@router.post("/passkey/options", response_model=PasskeySignInOptions)
+async def passkey_sign_in_options(request: Request) -> PasskeySignInOptions:
+    """Step 1 of signing in with a passkey: mints a challenge and the assertion options
+    the browser hands to `navigator.credentials.get()`.
+
+    Anonymous and deliberately incurious - `allowCredentials` is empty, so this request
+    names no account and can reveal nothing about any. Discoverable credentials are what
+    buy that: the assertion itself carries the credential id, and the credential row names
+    the user, so no email-first step exists for a "does this address have a passkey"
+    oracle to hide in.
+
+    The ceiling is `AUTH_REFRESH_RATE_LIMIT_PER_IP`'s, and for the same reason: conditional
+    UI arms on every signed-out page view that supports it, landing hero included, and an
+    office behind one NAT gateway is a single IP to this counter.
+
+    503 when Redis is unreachable. The challenge store is the anti-replay guarantee, so it
+    fails closed where rate limiting fails open - and the magic link, being pure Postgres,
+    keeps working through exactly that outage. Three methods with independent failure
+    domains is the design, not an accident.
+    """
+    await enforce_rate_limit(
+        f"auth:passkey-options:ip:{client_ip(request)}",
+        settings.PASSKEY_OPTIONS_RATE_LIMIT_PER_IP,
+        settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
+    )
+
+    flow_id, options = await start_sign_in()
+    return PasskeySignInOptions(flow_id=flow_id, options=options)
+
+
+@router.post("/passkey/verify", response_model=AuthOutcome)
+async def passkey_sign_in_verify(
+    request: Request,
+    body: PasskeySignInVerifyRequest,
+    response: Response,
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> AuthOutcome:
+    """Step 2: verifies the assertion and signs in whoever owns the credential.
+
+    The challenge is spent on the *attempt*, not on success, so a captured assertion can
+    never be retried against a still-live one. An unknown credential, a tombstoned owner,
+    an expired or already-spent challenge, a wrong origin, a wrong RP ID and a bad
+    signature are one indistinguishable 401 - see `passkey_service.finish_sign_in`.
+
+    Always resolves to an existing account and never to onboarding, since a credential can
+    only exist because a signed-in user registered it. It goes through the shared funnel
+    anyway: that is what makes token shape, cookie mechanics and every future outcome
+    variant free here instead of a second copy to keep in step.
+    """
+    await enforce_rate_limit(
+        f"auth:passkey-verify:ip:{client_ip(request)}",
+        settings.PASSKEY_VERIFY_RATE_LIMIT_PER_IP,
+        settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
+    )
+
+    outcome = await finish_sign_in(db=db, flow_id=body.flow_id, credential=body.credential)
     return await _start_onboarding_or_sign_in(response, outcome)
 
 
