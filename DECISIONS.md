@@ -8423,22 +8423,46 @@ being asked for an HTTP status.
 
 `publish-image.yml` grew a `push: tags: ["v*"]` trigger alongside the `workflow_dispatch` it was
 born with, and the two paths publish different things on purpose. A tag push is a *release*: it puts
-the whole alias set for that version behind one build — `X.Y.Z`, `X.Y`, `latest`, and a bare `X`
+the whole alias set for that version behind one build - `X.Y.Z`, `X.Y`, `latest`, and a bare major
 only from 1.0.0 on. A dispatch is everything else: a scratch build off a branch, a `staging` tag, or
 a rebuild of an already-released version because its base image grew a CVE. There is still no
-`push: branches:` trigger, and the reason is unchanged — images are cut when someone decides to cut
+`push: branches:` trigger, and the reason is unchanged - images are cut when someone decides to cut
 one.
 
+**The whole thing is the sibling of `opendiving-web`'s workflow of the same name, deliberately.**
+The two repos release in lockstep on one version, so a policy change - a new alias rule, a new guard
+\- has to be made twice; making it twice in one idiom is the difference between a diff and an
+archaeology session. That is also why the tags are assembled by hand here rather than by
+`docker/metadata-action`: with the shape gate below in place the action's remaining value is
+`{{major}}.{{minor}}` extraction, which is two `BASH_REMATCH` captures, and using it would have made
+the same policy read differently in the two repos. It also reads `github.sha` for its own `type=sha`
+and `image.revision`, which is the wrong commit on a dispatch (see below).
+
+**The tag has to be `vX.Y.Z`, and anything else fails loudly.** Every tag push enters the version
+block, because the trigger is `v*` and anything under that glob which cannot be aliased has to fail
+rather than quietly publish a bare `sha-` image nobody asked for. Pre-releases are the case worth
+naming: this pipeline has no story for aliasing one, and the two ecosystems disagree about how to
+spell one anyway - SemVer wants `0.2.0-rc.1`, PEP 440 writes `0.2.0rc1`, and `pyproject.toml` is a
+PEP 440 field. A shape check that tried to *detect* a pre-release would therefore have to know both
+spellings and would still be guessing; refusing every shape but `vX.Y.Z` needs to know neither.
+
 **`X` is withheld below 1.0.0.** A `0` alias reads as "any 0.x", which is exactly the range whose
-minors are allowed to break. Prereleases get their version tag and nothing else: no `X.Y` (which
-`docker/metadata-action` withholds by itself) and no `latest` (which the workflow withholds).
+minors are allowed to break.
 
 **The full alias set is recomputed on a rebuild, never hand-picked.** A CVE rebuild is a dispatch
-pointed at the `v*` tag, and it re-pushes `X.Y.Z`, `X.Y` and — when the operator ticks the input
-saying so — `latest`, all from one build. Pushing a subset would leave everyone following an alias
+pointed at the `v*` tag, and it re-pushes `X.Y.Z`, `X.Y` and - when the operator ticks the input
+saying so - `latest`, all from one build. Pushing a subset would leave everyone following an alias
 on the vulnerable digest, and two builds would put two digests behind aliases of the same version.
-That is also why `latest` is decided by the workflow rather than by metadata-action's `latest=auto`,
-which keys off the event being a tag push and would silently drop it from exactly this case.
+`latest` is a checkbox rather than an assumption for the same reason: a tag push is by definition
+the newest version, but a dispatch at an old tag must not drag `latest` backwards.
+
+**A dispatch may name its ref either way round.** `refs/tags/v0.4.0` is a legal `actions/checkout`
+ref, and left unstripped it would miss the `v[0-9]` test - so the guard would never run, no aliases
+would be computed, and the run would go green having published only `sha-<12>`. That is the silent
+outcome the guard exists to prevent, which is why both `refs/tags/` and `refs/heads/` come off
+first. The extra-tag input is refused outright when it looks like a version, for the neighbouring
+reason: typed there, a version would be published off whatever commit `ref` names, unchecked against
+the manifest and without the aliases it is supposed to carry.
 
 **Native arm64 runners, not QEMU.** `matrix.include` pairs `linux/amd64` with `ubuntu-latest` and
 `linux/arm64` with `ubuntu-24.04-arm`. Emulating aarch64 on an amd64 runner works and is slow enough
@@ -8446,42 +8470,34 @@ here to matter: every dependency without an aarch64 wheel would compile under QE
 fallback if hosted arm64 runners ever go away.
 
 **Two builds, one manifest, and nothing tagged until both land.** Each architecture pushes *by
-digest* (`push-by-digest=true,name-canonical=true`) — a manifest with no tag pointing at it — and a
+digest* (`push-by-digest=true,name-canonical=true`) - a manifest with no tag pointing at it - and a
 third job runs `docker buildx imagetools create` to point every tag at a list of the two. Tagging in
 the matrix jobs instead would have whichever finished second overwrite the first, which is the
 single-architecture image this replaced. The useful side effect is that a half-finished matrix
-leaves untagged blobs and no image anyone can pull by name, so a failed build is a non-event.
+leaves untagged blobs and no image anyone can pull by name, so a failed build is a non-event - which
+is also why `fail-fast: false` is safe here, and worth having: both architectures report rather than
+the first failure hiding the second.
 
 **The tag has to agree with `pyproject.toml`.** Both repos are tagged by hand, in lockstep, on the
-same version — so tagging a commit whose manifest still reads the old version is the slip the ritual
-will eventually make. A `v*` build (the tag trigger, or a dispatch pointed at a `v*` ref or extra
-tag) reads the version out of `pyproject.toml` with `tomllib` and fails before a layer is built if
-they disagree. Failing *there* is what makes recovery trivial: nothing was published, so the tag can
-be deleted, the bump fixed, and the tag re-cut. Immutability starts at publish. What the guard
-cannot catch — a tag on any commit at or after the bump — is inherent and accepted.
+same version - so tagging a commit whose manifest still reads the old version is the slip the ritual
+will eventually make. A `v*` build (the tag trigger, or a dispatch pointed at a `v*` ref) reads the
+version out of `pyproject.toml` with `tomllib` and fails before a layer is built if they disagree.
+Failing *there* is what makes recovery trivial: nothing was published, so the tag can be deleted,
+the bump fixed, and the tag re-cut. Immutability starts at publish. What the guard cannot catch - a
+tag on any commit at or after the bump - is inherent and accepted.
 
-**A `v*` value in the extra-tag input publishes the version, it does not push `v0.2.0` as a tag.**
-The image tag vocabulary is a bare `0.2.0`; a parallel `v`-prefixed one would only split what
-consumers pin to. So a `v*` extra tag is folded into the version and disappears; anything else
-(`staging`) is pushed verbatim, which is what the input is for.
-
-**metadata-action supplies the tags and nothing else.** The labels are still assembled by hand,
-because `org.opencontainers.image.revision` has to name the commit that was checked out and
-metadata-action reads `github.sha` — on a dispatch, the tip of whichever branch the run was launched
-from, not the ref being built. `type=sha` is wrong for the same reason, so the `sha-<12>` tag is a
-`type=raw` built from the value read off the worktree, and `DOCKER_METADATA_SHORT_SHA_LENGTH` is
-absent because nothing uses `type=sha`. What the action is worth having for is the semver parsing:
-`{{major}}.{{minor}}` extraction and prerelease handling. The same trap is why the matrix jobs check
-out `needs.prepare.outputs.sha` rather than the ref — a branch that moves between jobs would
-otherwise put two architectures of different code behind one manifest.
+**The commit is resolved once and passed down.** `github.sha` is the tip of whichever branch a
+dispatch was launched from, not the ref being built, so every sha here comes from the working tree
+after checkout - and the matrix jobs check out `needs.prepare.outputs.sha` rather than the ref,
+because a branch that moved between jobs would otherwise put two architectures of different code
+behind one manifest.
 
 **The draft release is created by the workflow, and published by a person.**
 `gh release create --draft --generate-notes` runs after the manifest exists, so a failed build never
 produces a release. What it produces is a skeleton categorised by `.github/release.yml`; the
 headline paragraph and the **Breaking** section are written by hand before it goes out (see the
-release checklist in `CONTRIBUTING.md`). It is the one job here that needs `contents: write` — the
-others are `packages: write` and `contents: read`, granted per job rather than once at the top of
-the file.
+release checklist in `CONTRIBUTING.md`). It is the one job that needs `contents: write`, granted to
+it alone rather than to the whole file, which stays on `contents: read` plus `packages: write`.
 
 ## The PR title becomes a label, in a job of its own
 

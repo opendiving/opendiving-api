@@ -254,9 +254,11 @@ Then, in both repos:
    ```
 
 3. The tag push runs **Publish Image**, which builds amd64 and arm64 on native runners and pushes
-   `0.4.0`, `0.4`, `latest` and `sha-<12>` (plus a bare `0` once this is past 1.0.0). A tag whose
-   name disagrees with the manifest version fails the workflow before it builds anything — so
-   nothing was published, and the fix is to delete the tag, correct the bump, and re-cut it.
+   `0.4.0`, `0.4`, `latest` and `sha-<12>` — plus the bare major (`1`, `2`, …) once this is past
+   1.0.0, which is withheld below it because a `0` alias would read as "any 0.x". The tag has to be
+   exactly `vX.Y.Z`: pre-releases and other shapes have no alias story here and are refused. A tag
+   whose name disagrees with the manifest version is refused the same way, before anything is built
+   — so nothing was published, and the fix is to delete the tag, correct the bump, and re-cut it.
 
 4. The api workflow opens a **draft** release with generated notes. Write the headline paragraph and
    confirm the **Breaking** section: say "None" in so many words when it is empty, because generated
