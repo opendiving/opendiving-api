@@ -19,9 +19,11 @@ name: Publish Image
 # resolves the workflow id. The `ref` input below selects the commit to build, so being
 # launched from `main` costs nothing.
 #
-# This is deliberately the sibling of `opendiving-web`'s workflow of the same name: the
-# two repos release in lockstep on one version, so the tag set, the guard and the failure
-# modes have to be the same thing said twice, not two things that resemble each other.
+# This is modelled on `opendiving-web`'s workflow of the same name, deliberately: the two
+# repos release in lockstep on one version, so the tag set, the guard and the failure
+# modes want to be the same thing said twice rather than two things that resemble each
+# other. They are not identical yet - the api side is ahead by the extra-tag rejection
+# below and the `image.version` label, both of which the web repo is owed.
 on:
   push:
     tags: ["v*"]

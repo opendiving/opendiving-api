@@ -8429,14 +8429,18 @@ a rebuild of an already-released version because its base image grew a CVE. Ther
 `push: branches:` trigger, and the reason is unchanged - images are cut when someone decides to cut
 one.
 
-**The whole thing is the sibling of `opendiving-web`'s workflow of the same name, deliberately.**
-The two repos release in lockstep on one version, so a policy change - a new alias rule, a new guard
-\- has to be made twice; making it twice in one idiom is the difference between a diff and an
-archaeology session. That is also why the tags are assembled by hand here rather than by
-`docker/metadata-action`: with the shape gate below in place the action's remaining value is
-`{{major}}.{{minor}}` extraction, which is two `BASH_REMATCH` captures, and using it would have made
-the same policy read differently in the two repos. It also reads `github.sha` for its own `type=sha`
-and `image.revision`, which is the wrong commit on a dispatch (see below).
+**The whole thing is modelled on `opendiving-web`'s workflow of the same name, deliberately.** The
+two repos release in lockstep on one version, so a policy change (a new alias rule, a new guard) has
+to be made twice, and making it twice in one idiom is the difference between a diff and an
+archaeology session. They are not identical today, and the gap is a port owed rather than a
+difference of opinion: the api side refuses a `v*` value in the extra-tag input and stamps
+`org.opencontainers.image.version`, and the web side has neither - so a `tag=v0.4.0` dispatch there
+still publishes that literal name off an unchecked commit. That is also why the tags are assembled
+by hand here rather than by `docker/metadata-action`: with the shape gate below in place the
+action's remaining value is `{{major}}.{{minor}}` extraction, which is two `BASH_REMATCH` captures,
+and using it would have made the same policy read differently in the two repos. It also reads
+`github.sha` for its own `type=sha` and `image.revision`, which is the wrong commit on a dispatch
+(see below).
 
 **The tag has to be `vX.Y.Z`, and anything else fails loudly.** Every tag push enters the version
 block, because the trigger is `v*` and anything under that glob which cannot be aliased has to fail
