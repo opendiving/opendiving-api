@@ -9549,3 +9549,127 @@ instead of it, which is how a site-wide `default-src 'self'` at the proxy blocks
 webfont — and losing `X-Forwarded-Proto`, without which the web app never emits HSTS at all. An
 operator who would rather own HSTS at the proxy sets `WEB_HSTS=off` and sends it there; the point is
 that one thing sends it.
+
+## `public` requires the absence of every credential, not just a bearer token
+
+`ClientCacheMiddleware` labelled a response `public, max-age=60` when the request used a safe method
+and carried no `Authorization` header. The admin panel authenticates with a **session cookie**, so
+every CRUDAdmin request passed both checks:
+
+```console
+$ curl -s -o /dev/null -D- http://127.0.0.1:8000/admin/login
+HTTP/1.1 200 OK
+content-type: text/html; charset=utf-8
+cache-control: public, max-age=60
+```
+
+This is *"`ClientCacheMiddleware` inferred "not user-specific" from the wrong signal"* above, in a
+second shape. The fix there added the method check, because "no `Authorization` header" was letting
+the token-minting POSTs through. It left the header check itself intact, and a bearer token is not
+the only credential this app accepts.
+
+### What was actually mislabelled, and what was not
+
+Worth being exact, because the obvious reading of that `curl` is worse than the truth and the
+difference is the whole reason this is a tidy-up rather than an incident.
+
+CRUDAdmin's own `AdminAuthMiddleware` sets `no-cache, no-store, must-revalidate, private` on the
+pages it authenticates, and this middleware's "never overwrite an explicit `Cache-Control`" rule
+preserved it. **The model pages were therefore never publicly cacheable** — not the dashboard, and
+not the HTML listing and editing rows from `User`, `Dive`, `GearItem` or anything else registered in
+`admin/views.py`.
+
+The gap is what upstream deliberately skips: the login path, `/static/`, and *any* 3xx —
+`_should_add_cache_headers` excludes redirects on purpose, to keep redirect handling and cookie
+transmission out of the browser cache. Those responses were ours to label, and for a signed-in admin
+we labelled them `public`. Surveyed against a real CRUDAdmin mounted on a real
+`create_application()`, signed in, before and after the change:
+
+| request (signed in)             | status | before                                         | after               |
+| ------------------------------- | ------ | ---------------------------------------------- | ------------------- |
+| `GET /admin/login`              | 303    | `public, max-age=60`                           | `private, no-store` |
+| `GET /admin/User`               | 307    | `public, max-age=60`                           | `private, no-store` |
+| `GET /admin/static/favicon.png` | 200    | `public, max-age=60`                           | `private, no-store` |
+| `GET /admin/`                   | 200    | `no-cache, no-store, must-revalidate, private` | unchanged           |
+| `GET /admin/User/`              | 200    | `no-cache, no-store, must-revalidate, private` | unchanged           |
+
+None of those three carries data. The reason to fix it anyway is that the *last two rows are the
+ones doing the work*, and they are a third-party middleware's headers on a dependency this repo pins
+and bumps. An app that labels a cookie-authenticated GET publicly cacheable is relying on
+`crudadmin` to keep saving it, on exactly the paths `crudadmin` has already decided not to.
+
+Nothing in `deploy/` caches either — Caddy does not by default and the bundle adds no cache module —
+so even the three affected rows need an intermediary the operator put there (a corporate proxy, a
+CDN in front of the bundle) to reach a shared cache at all. That is the second reason this is not
+urgent, and it is also why the app has to be right about it regardless: the header is a *claim* made
+to caches the app will never see.
+
+### Keying on the cookie rather than on the mount path
+
+The panel's mount path is `settings.CRUD_ADMIN_MOUNT_PATH`, so a path check was available and would
+have been precise. `Cookie` won for three reasons, in order of weight.
+
+- **A path check is an allowlist by omission, which is how this bug happened twice.** It answers for
+  the surfaces that were known when it was written; the next cookie-authenticated thing mounted on
+  this app is public again, silently, and the failure is a shipped `public` header rather than a
+  test going red. The cookie check answers for the *property* — this request carried a credential —
+  and so covers things that do not exist yet.
+- **The mount path is operator-configurable.** Reading `CRUD_ADMIN_MOUNT_PATH` in the middleware
+  handles a renamed panel but couples a generic response header to one feature's config, and prefix
+  matching on it has its own edge (`/admin` must not match `/administrators`). Neither is hard; both
+  are avoidable.
+- **The failure directions are not symmetrical.** Being wrong about a path fails open — a page goes
+  out marked public. Being wrong about a cookie fails closed — a response that could have been
+  cached is not. `CREDENTIAL_HEADERS` therefore takes the whole `Cookie` header rather than a list
+  of known session cookie names, for the same reason: a name list is one more thing to keep in step
+  with every auth surface, and getting it wrong fails open.
+
+Two costs, both accepted. In the deploy bundle the API and the web app are one origin (see
+`deploy/Caddyfile`) and the app's `refresh_token` cookie is set without a `path`, so a signed-in
+browser sends it on every API read — those reads are now `private, no-store` even where the data is
+public. Anonymous visitors, who are the ones a shared cache exists for, still get
+`public, max-age=60`, and CRUDAdmin scopes its own `session_id` and `csrf_token` cookies to
+`<mount_path>/`, so they never reach `/api/v1` at all. Separately, the panel's static assets are
+`no-store` for a signed-in admin, which costs a re-fetch of a 94 KB favicon per page view on the
+lowest-traffic surface in the app. Carving `/static/` out would mean reintroducing exactly the
+path-matching this section just argued against, for that.
+
+### The public branch had to grow a `Vary`
+
+The decision is made by reading request headers, and a cache that is not told which ones will answer
+the *next* request for that URL out of the entry it stored — including a request that carries a
+credential. Concretely: an unauthenticated `GET /admin/` gets a 303 to the login page, a shared
+cache stores it as public, and the signed-in admin behind that cache is bounced to login for the
+next minute. So the public branch appends `Vary: Authorization, Cookie`.
+
+That value is `", ".join(sorted(CREDENTIAL_HEADERS))`, not a second literal beside the first. Two
+hand-maintained copies of one set drift, and this pair drifts *fail-open*: a third credential header
+added to the set but forgotten in the `Vary` still makes its own request `private, no-store`, while
+leaving a shared cache free to answer it from the anonymous entry it stored — which is precisely
+what the `Vary` is here to prevent. `tests/test_client_cache_middleware.py` asserts the containment
+rather than the string, so the set is the only place to edit.
+
+`MutableHeaders.add_vary_header` rather than assignment, because `CORSMiddleware` has already set
+`Vary: Origin` by the time this runs — `add_middleware` inserts at the front of the stack, so the
+later-registered `ClientCacheMiddleware` sits *outside* `CORSMiddleware` and sees its headers on the
+way out. Assigning would drop `Origin` and let a cache serve one origin's CORS headers to another.
+Measured on a cross-origin anonymous read: `Vary: Origin, Authorization, Cookie`.
+
+That is the same registration-order rule *"Security headers are the app's, not the proxy's"* above
+depends on, and `SecurityHeadersMiddleware` has since been registered after both, which makes it the
+outermost of the three. It only fills in headers a response lacks, so it neither reads nor disturbs
+what this one decided — but the ordering is now load-bearing in two sections, and anything inserted
+into that stack has to keep `ClientCacheMiddleware` outside `CORSMiddleware`.
+
+This does not fragment the cache: only requests with neither header get a public response, so every
+public entry shares the same vary key. And there is no matching `Vary` on the `private, no-store`
+branch, which needs none — nothing may store it in the first place.
+
+### What is still public under the mount path
+
+An *anonymous* `GET /admin/login` is still `public, max-age=60`, and that is deliberate: CRUDAdmin's
+login template (`templates/auth/login.html`) is a static form whose only hidden inputs are the
+OAuth2 password-grant constants, and the CSRF token is issued as a cookie by the *POST* handler
+rather than embedded in the page. If a future version puts a per-session token in that HTML this
+stops being true, and the mount path becomes the right check after all — worth re-reading the
+template when bumping `crudadmin`.

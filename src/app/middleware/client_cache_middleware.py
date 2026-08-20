@@ -27,7 +27,7 @@ class ClientCacheMiddleware(BaseHTTPMiddleware):
         - The `Cache-Control` header instructs clients (e.g., browsers)
         to cache the response for the specified duration.
         - `public` is only ever applied to a *safe* (GET/HEAD) request that carried no
-          `Authorization` header, and it never overwrites a `Cache-Control` header the
+          credential at all, and it never overwrites a `Cache-Control` header the
           endpoint already set. Anything else gets `private, no-store`.
         - The method check is not belt-and-braces, it is load-bearing. "No `Authorization`
           header" was previously taken to mean "not user-specific", which is exactly
@@ -40,11 +40,41 @@ class ClientCacheMiddleware(BaseHTTPMiddleware):
           carries a secret is equally unsafe to cache publicly. `GET /auth/email/verify/check`
           takes a magic-link token and returns the account's email, and sets its own
           `Cache-Control` for that reason - which the first check here preserves.
+        - A bearer token is not the only credential this app accepts, which is how the
+          same mistake came back in a second shape. CRUDAdmin authenticates with a
+          `session_id` **cookie**, so every signed-in request under `CRUD_ADMIN_MOUNT_PATH`
+          is a safe method with no `Authorization` header. Its model pages survived that
+          only because CRUDAdmin sets `no-store` on them itself and the check above
+          preserves it - and CRUDAdmin deliberately skips its own header on the login
+          path, on `/static/`, and on every redirect, all of which this middleware was
+          labelling `public, max-age=60` for a signed-in admin. `Cookie` therefore counts
+          as a credential here alongside `Authorization`, rather than leaving the answer
+          to a dependency.
+        - Keying on the cookie rather than on the admin's mount path is deliberate.
+          `CRUD_ADMIN_MOUNT_PATH` is operator-configurable, and a path check answers only
+          for the surface that happened to be known when it was written - the same
+          allowlist-by-omission that let the token-minting POSTs through. See
+          *"`public` requires the absence of every credential, not just a bearer token"*
+          in `DECISIONS.md`, which has the measured before/after.
     """
 
     #: Methods whose responses may be marked publicly cacheable. Everything else either
     #: changes state or, as above, hands back a credential.
     SAFE_METHODS = frozenset({"GET", "HEAD"})
+
+    #: Request headers that can carry a credential. *Any* of them present means the
+    #: response may be specific to whoever sent it. Deliberately the whole `Cookie`
+    #: header rather than a list of known session cookie names: a name list is another
+    #: thing to keep in step with every auth surface, and being wrong about it fails
+    #: open. Being wrong this way only costs a cache hit.
+    CREDENTIAL_HEADERS = frozenset({"Authorization", "Cookie"})
+
+    #: What the public branch declares it varied on. Derived from the set above rather
+    #: than typed out again: a third credential header added there but forgotten here
+    #: would still get `private, no-store` on its own request, while leaving shared
+    #: caches free to answer it from the anonymous entry they stored - which is the
+    #: fail-open direction, and the exact thing the `Vary` exists to prevent.
+    VARY_ON_CREDENTIALS = ", ".join(sorted(CREDENTIAL_HEADERS))
 
     def __init__(self, app: FastAPI, max_age: int = 60) -> None:
         super().__init__(app)
@@ -75,14 +105,21 @@ class ClientCacheMiddleware(BaseHTTPMiddleware):
         if "Cache-Control" in response.headers:
             return response
 
-        # `public` requires both: a safe method, and no `Authorization` header. Either one
-        # alone is insufficient - see the class docstring for why the header check on its
-        # own labelled every token-minting auth response as publicly cacheable.
+        # `public` requires both: a safe method, and no credential on the request. Either
+        # one alone is insufficient - see the class docstring for the two times a partial
+        # check labelled a private response publicly cacheable.
         is_safe = request.method in self.SAFE_METHODS
-        is_anonymous = "Authorization" not in request.headers
+        is_anonymous = not any(header in request.headers for header in self.CREDENTIAL_HEADERS)
 
         if is_safe and is_anonymous:
             response.headers["Cache-Control"] = f"public, max-age={self.max_age}"
+            # The decision above was made by reading request headers, so a shared cache
+            # has to be told which ones - otherwise it serves this anonymous entry to the
+            # next request for the same URL that *does* carry a credential. Concretely:
+            # the login redirect an unauthenticated `GET /admin/` gets, replayed to a
+            # signed-in admin. `add_vary_header` merges rather than overwrites, so the
+            # `Vary: Origin` the CORS middleware sets survives.
+            response.headers.add_vary_header(self.VARY_ON_CREDENTIALS)
         else:
             response.headers["Cache-Control"] = "private, no-store"
 
