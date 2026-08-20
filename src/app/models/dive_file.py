@@ -1,5 +1,5 @@
-from sqlalchemy import ForeignKey, Index, Integer, LargeBinary, String
-from sqlalchemy.orm import Mapped, declared_attr, deferred, mapped_column
+from sqlalchemy import ForeignKey, Index, Integer, String
+from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
 from ..core.db.models import PublicUUIDMixin, TimestampMixin
@@ -22,21 +22,22 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
     Without it the endpoint would accept any blob shaped vaguely like an export, and a
     stored file could not be trusted to be the one that pre-filled the dive's form.
 
-    Bytes live in Postgres (`data`, a `bytea`) rather than object storage, for the same
-    reasons as `CertificationFile`: exports are a few hundred KB, a diver logs a few
-    hundred dives, and the existing database and its backups cover the lot with no new
-    infrastructure. `services/dive_files.py` is the only module that touches `data` and
-    is the seam to rewrite if that ever stops being true.
+    Bytes live on the files volume, not in this table: the row carries a `storage_key`
+    and `services/blob_store.py` holds the file. `services/dive_files.py` is still the
+    only module that knows an export is stored at all, and is the seam that would be
+    rewritten for a different backend - see *"File payloads live on the files volume, not
+    in Postgres"* in `DECISIONS.md` for why they left Postgres.
 
-    A separate table rather than a `bytea` on `dive`: `dive` is read by `get_multi` on
-    the hot list path, and a blob column there is one careless `schema_to_select` away
-    from being dragged into every page of every dive list. Out of reach is better than
-    deferred.
+    A separate table rather than columns on `dive`: `dive` is read by `get_multi` on the
+    hot list path, and the file's metadata has no business riding along with every page of
+    every dive list. That reasoning predates the move (it was about a `bytea`) and
+    survives it.
 
-    No `SoftDeleteMixin`. A soft-deleted blob occupies its bytes forever with nothing
-    able to read it; these are hard-deleted, including when their dive is soft-deleted
-    (see `erase_dive`) - which also frees both unique slots below, so re-importing the
-    same export into a new dive isn't blocked by a dive the diver can no longer see.
+    No `SoftDeleteMixin`. A soft-deleted row holds a file nothing can read; these are
+    hard-deleted, including when their dive is soft-deleted (see `erase_dive`) - which
+    also frees both unique slots below, so re-importing the same export into a new dive
+    isn't blocked by a dive the diver can no longer see. The stored file goes with the
+    row, unlinked after the deleting transaction commits.
     """
 
     __tablename__ = "dive_file"
@@ -46,9 +47,9 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
     # index below is per-user and has to be enforceable in one table.
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id"))
     dive_id: Mapped[int] = mapped_column(ForeignKey("dive.id", ondelete="CASCADE"))
-    # Hex SHA-256 of `data`. Three jobs: the `ETag` on the download endpoint, the dedupe
-    # key below, and the value the upload token is checked against - it is what ties a
-    # set of bytes to a parse this server performed.
+    # Hex SHA-256 of the stored bytes. Four jobs now: the `ETag` on the download endpoint,
+    # the dedupe key below, the value the upload token is checked against - it is what ties
+    # a set of bytes to a parse this server performed - and half of `storage_key`.
     sha256: Mapped[str] = mapped_column(String(64))
     # Taken from the parser that successfully read the file (`DiveParser.content_type`),
     # never from the client's claimed `Content-Type` - it is what the download route
@@ -60,13 +61,14 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
     # the file at import time - not a promise the same parser would still claim it - so
     # that a later backfill can select the subset it knows how to re-read.
     parser_key: Mapped[str] = mapped_column(String(32))
-    # `deferred` so any query for a file row returns metadata only unless the bytes are
-    # asked for explicitly with `undefer`.
+    # Where the bytes are, on the files volume: `dive-files/{sha256[:2]}/{nonce}_{sha256}`,
+    # minted by `blob_store.new_key`. Opaque to everything but that module - a valid S3
+    # object key as much as a relative path. The nonce is per *write*, not the row's uuid:
+    # that is what stops a retired key ever being minted again.
     #
-    # `nullable=False` is spelled out because wrapping the column in `deferred()` hides
-    # the `Mapped[bytes]` annotation from SQLAlchemy's nullability inference, which would
-    # otherwise emit a nullable column - and a file row with no bytes is meaningless.
-    data: Mapped[bytes] = deferred(mapped_column(LargeBinary, nullable=False))
+    # The key is *data*, not a rule: a future kind (dive photos, species images) can pick a
+    # different layout without moving anything already stored.
+    storage_key: Mapped[str] = mapped_column(String(255))
 
     @declared_attr.directive
     @classmethod
@@ -85,4 +87,9 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
             # Also the index a backfill reads by: `user_id` leads, so no separate
             # single-column index on it is needed.
             Index("ux_dive_file_user_id_sha256", "user_id", "sha256", unique=True),
+            # One row per stored file. Two rows naming one key would let either one's
+            # deletion unlink the other's bytes - impossible while every key carries a
+            # freshly minted nonce, and asserted here anyway because that is a property of
+            # `blob_store.new_key`, which is a function, not of the schema.
+            Index("ux_dive_file_storage_key", "storage_key", unique=True),
         )

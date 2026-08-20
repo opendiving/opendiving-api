@@ -53,6 +53,7 @@ from ..schemas.dive_profile import (
     ParsedProfileSchema,
     ProfileEventType,
 )
+from .blob_store import BlobMissingError
 from .dive_parsers import DiveParseError, DiveParser
 
 logger = logging.getLogger(__name__)
@@ -766,13 +767,18 @@ async def load_profile(db: AsyncSession, *, dive_id: int) -> LoadedProfile | Non
     """Fetch a dive's full profile. The only place `data` is ever loaded - hence the
     explicit `undefer`, which is what makes every other query here cheap by default.
 
-    Detached before returning, exactly as `load_dive_file` and `load_certification_file`
-    are and for the reason recorded there: an attached instance keeps its undeferred
-    payload materialized for the life of the session. That cost nothing while the only
-    caller was a single-dive route, and stopped being free when the full export began
-    calling this once per dive - twice, in fact, since `export.json` and `dives.uddf` each
-    embed every profile. Without this an archive of a few hundred dives would hold every
-    one of them, which is what `services/export/loader.py` promises it does not.
+    Detached before returning, because an attached instance keeps its undeferred payload
+    materialized for the life of the session. That cost nothing while the only caller was a
+    single-dive route, and stopped being free when the full export began calling this once
+    per dive - twice, in fact, since `export.json` and `dives.uddf` each embed every
+    profile. Without this an archive of a few hundred dives would hold every one of them,
+    which is what `services/export/loader.py` promises it does not.
+
+    `load_dive_file` and `load_certification_file` used to be the siblings this pointed at.
+    They are not any more: their payloads left Postgres for the files volume, so both read
+    explicit columns and there is no longer an ORM instance to detach. This is now the only
+    place in the app where the problem exists at all - `dive_profile.data` is JSONB, stays
+    in the database deliberately, and so still arrives attached.
 
     Every caller copies what it needs out of `LoadedProfile` below and none of them touch
     the row again, so detaching is invisible to all three.
@@ -1003,7 +1009,15 @@ async def backfill_profiles(
                 skipped += 1
                 continue
 
-        file = await load_dive_file(db, dive_id=row.dive_id)
+        try:
+            file = await load_dive_file(db, dive_id=row.dive_id)
+        except BlobMissingError:
+            # The row is there and its file is not - data loss or an unmounted volume,
+            # not a race. Counted rather than raised, so a run over a half-restored volume
+            # reports how many dives are in this state instead of dying on the first.
+            logger.error("Skipping dive %s: its stored file is missing from the volume", row.dive_id)
+            failed += 1
+            continue
         if file is None:
             logger.warning("Skipping dive %s: its stored file vanished mid-run", row.dive_id)
             failed += 1

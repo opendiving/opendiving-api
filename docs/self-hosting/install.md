@@ -44,9 +44,9 @@ credentials instead of bundling Postfix.
 
 - 1 vCPU, 1 GB RAM, and 10 GB of disk is enough to start. Postgres and Redis are the memory floor;
   two GB is comfortable.
-- **Disk grows with the files you upload**, and the uploads live in Postgres — a dive-computer
-  export is tens of kilobytes, a c-card photo up to 10 MB. A thousand dives with photographed cards
-  is still comfortably inside a few GB.
+- **Disk grows with the files you upload**, which live on their own Docker volume rather than in the
+  database — a dive-computer export is tens of kilobytes, a c-card photo up to 10 MB. A thousand
+  dives with photographed cards is still comfortably inside a few GB.
 - **amd64 and arm64 both**. Every release publishes both architectures, so a Raspberry Pi 4/5, an
   Ampere VPS or an Apple-silicon box runs the same images as an x86 server.
 
@@ -87,6 +87,6 @@ are released together.
 
 - [configuration.md](configuration.md) — every setting, grouped
 - [reverse-proxy.md](reverse-proxy.md) — bring your own proxy, or run on a LAN with no domain
-- [backup-restore.md](backup-restore.md) — one `pg_dump` is the whole logbook
+- [backup-restore.md](backup-restore.md) — the dump and the files volume, both
 - [upgrade.md](upgrade.md) — pull, up, done
 - [troubleshooting.md](troubleshooting.md) — when it doesn't go like that

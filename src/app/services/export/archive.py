@@ -33,8 +33,8 @@ once and holding them would defeat the whole memory argument above, and interlea
 two members is not possible (`ZipFile` allows one open member at a time). So it is
 accepted rather than solved, and named here so nobody rediscovers it as a mystery.
 
-The blobs are the reason the bound matters, and they are read **one row at a time** -
-`dive_file.data` and `certification_file.data` are `deferred`, and the loop below never
+The blobs are the reason the bound matters, and they are read **one file at a time** -
+they live on the files volume rather than in the database now, and the loop below never
 holds more than the file it is currently writing. `ZIP_STORED`, not `ZIP_DEFLATED`, for
 those two directories: the stored exports are already-compressed FIT binaries and the
 c-cards are JPEG/PNG/PDF, so deflating them burns CPU proportional to the whole archive
@@ -46,6 +46,7 @@ owner, over a bearer token, and never cached (see `api/v1/export.py`) - but "exp
 means a zip that includes ID-like scans, which is worth stating rather than discovering.
 """
 
+import logging
 import tempfile
 import zipfile
 from collections.abc import AsyncIterator, Iterator
@@ -55,6 +56,7 @@ from typing import IO
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...schemas.certification import CertificationSide
+from ..blob_store import BlobMissingError
 from ..certification_files import load_certification_file
 from ..dive_files import load_dive_file
 from .envelope import write_export_json
@@ -62,6 +64,8 @@ from .loader import ExportBundle
 from .paths import ArchivePaths, plan_archive_paths
 from .tabular import CSV_WRITERS
 from .uddf import write_uddf
+
+logger = logging.getLogger(__name__)
 
 # Where `SpooledTemporaryFile` stops holding the archive in memory and rolls it onto
 # disk. 32 MB covers a few hundred dives with their exports and c-cards, which is most
@@ -195,15 +199,25 @@ async def _write_blobs(
     """Every stored binary, one row at a time.
 
     A file that has vanished between the metadata read and this loop is skipped rather
-    than failing the export: the only way there is a concurrent delete from another
-    session, and losing a member beats losing the archive. `export.json` still names it,
-    which is the honest record of what was there when the export began.
+    than failing the export: losing a member beats losing the archive. `export.json` still
+    names it, which is the honest record of what was there when the export began.
+
+    Two ways to vanish now, and both are skipped on the same terms. A missing *row* is a
+    concurrent delete from another session. A missing *file* - `BlobMissingError` - is data
+    loss or a half-mounted files volume, which is logged at error level because it is an
+    operational problem rather than a race; the export is precisely the tool someone
+    reaches for when their volume is half-dead, so failing the whole archive over it would
+    take away the one thing still working.
     """
     for dive in bundle.dives:
         member = paths.dive_files.get(dive.id)
         if member is None:
             continue
-        stored = await load_dive_file(db, dive_id=dive.id)
+        try:
+            stored = await load_dive_file(db, dive_id=dive.id)
+        except BlobMissingError:
+            logger.error("Skipping dive %s's export: its stored file is missing from the volume", dive.id)
+            continue
         if stored is None:
             continue
         archive.writestr(_member(member, exported_at, compress_type=zipfile.ZIP_STORED), stored.data)
@@ -213,9 +227,17 @@ async def _write_blobs(
             member = paths.certification_files.get((certification.id, info.side.value))
             if member is None:
                 continue
-            card = await load_certification_file(
-                db, certification_id=certification.id, side=CertificationSide(info.side)
-            )
+            try:
+                card = await load_certification_file(
+                    db, certification_id=certification.id, side=CertificationSide(info.side)
+                )
+            except BlobMissingError:
+                logger.error(
+                    "Skipping certification %s's %s card image: its stored file is missing from the volume",
+                    certification.id,
+                    info.side.value,
+                )
+                continue
             if card is None:
                 continue
             archive.writestr(_member(member, exported_at, compress_type=zipfile.ZIP_STORED), card.data)

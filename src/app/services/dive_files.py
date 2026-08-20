@@ -1,9 +1,10 @@
 """Storage for the dive-computer exports dives are imported from.
 
-The **only** module that reads or writes `dive_file.data`. Routes go through these
-functions and never see bytes-in-a-column, so moving the payload to object storage later
-means rewriting this file (and adding a `storage_key` column) rather than touching every
-call site - the same seam, for the same reasons, as `services/certification_files.py`.
+The **only** module that knows a dive has a stored export at all. Routes go through these
+functions and never see where the bytes are, which is what let the payload move out of a
+`bytea` column and onto the files volume without a single call site changing - the same
+seam, for the same reasons, as `services/certification_files.py`.
+`services/blob_store.py` is the layer below, and the only one that touches a filesystem.
 """
 
 import hashlib
@@ -11,16 +12,16 @@ import logging
 import uuid as uuid_pkg
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal, cast
+from typing import Literal
 
 from fastapi import UploadFile
-from sqlalchemy import CursorResult, delete, insert, select, update
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import undefer
 from starlette.concurrency import run_in_threadpool
 from uuid6 import uuid7
 
+from ..core.db.database import release_read_transaction
 from ..core.security import verify_dive_file_token
 from ..core.utils.uploads import read_upload_within_limit, safe_filename
 from ..models.dive import Dive
@@ -29,6 +30,7 @@ from ..models.dive_mixture import DiveMixture
 from ..schemas.dive import DiveFileInfo, DiveTechScalars
 from ..schemas.dive_mixture import DiveMixtureRead
 from ..schemas.parsed_dive import DiveMixtureSchema
+from . import blob_store
 from .dive_parsers import PARSER_BY_KEY, DiveParseError, DiveParser, UnsupportedDiveFileError
 from .dive_profiles import (
     NormalizedProfile,
@@ -41,6 +43,9 @@ from .dive_profiles import (
 )
 
 logger = logging.getLogger(__name__)
+
+# The key prefix every stored export is written under - see `blob_store.new_key`.
+KEY_KIND = "dive-files"
 
 # Matches the cap `/dive/parse` reads under, since the same file makes both trips: a
 # limit here that was lower would let a file pre-fill a form and then be refused
@@ -81,7 +86,7 @@ class LoadedDiveFile:
 
 @dataclass(frozen=True, slots=True)
 class _ExistingRow:
-    """The dedupe lookup's result - metadata only, never `data`."""
+    """The dedupe lookup's result - metadata only, never the payload."""
 
     id: int
     dive_id: int
@@ -90,6 +95,7 @@ class _ExistingRow:
     byte_size: int
     original_filename: str
     parser_key: str
+    storage_key: str
     updated_at: datetime | None
 
 
@@ -127,8 +133,9 @@ def _info(row: _ExistingRow) -> DiveFileInfo:
 async def _find_by_digest(db: AsyncSession, *, user_id: int, digest: str) -> _ExistingRow | None:
     """Look up this diver's row for a given content hash.
 
-    Explicit columns rather than `select(DiveFile)`, so the `bytea` cannot be dragged
-    along even by accident.
+    Explicit columns rather than `select(DiveFile)`. That predates the payload leaving
+    Postgres - it kept the `bytea` from being dragged along by accident - and stays because
+    it says exactly what the dedupe decision reads.
     """
     stmt = select(
         DiveFile.id,
@@ -138,6 +145,7 @@ async def _find_by_digest(db: AsyncSession, *, user_id: int, digest: str) -> _Ex
         DiveFile.byte_size,
         DiveFile.original_filename,
         DiveFile.parser_key,
+        DiveFile.storage_key,
         DiveFile.updated_at,
     ).where(DiveFile.user_id == user_id, DiveFile.sha256 == digest)
     row = (await db.execute(stmt)).one_or_none()
@@ -240,26 +248,6 @@ async def store_tech_scalars(
         await db.commit()
 
 
-async def _release_read_transaction(db: AsyncSession) -> None:
-    """End the read-only transaction the lookups above opened, before a slow extraction.
-
-    `extract_profile` is up to ~1.5 s of pure CPU (see `_MAX_FRAMES`) handed to a worker
-    thread. Without this the connection it rode in on sits idle-in-transaction for all of
-    it, so a burst of FIT uploads ties up pool connections doing nothing - the event loop
-    is free, which is what `run_in_threadpool` bought, but the pool is not.
-
-    Safe at both call sites: nothing has been written yet, so there is nothing to preserve,
-    and the writes that follow open their own transaction. Nor can it strand a caller's
-    locals - both lookups return frozen dataclasses (`_ExistingRow`, `ExistingProfileRow`)
-    rather than ORM instances, so there is nothing to expire.
-
-    `rollback` rather than `commit` because it states what is true here: no work is being
-    persisted. If a write ever grows above one of these calls, it wants its own commit
-    rather than to be swept up by this.
-    """
-    await db.rollback()
-
-
 async def store_dive_file(
     db: AsyncSession,
     *,
@@ -318,7 +306,7 @@ async def store_dive_file(
         # version to bump - so a fix of that shape ships with a backfill run, not with a
         # re-upload.
         if should_extract(await get_existing_profile(db, dive_id=dive_id), sha256=digest) == "extract":
-            await _release_read_transaction(db)
+            await release_read_transaction(db)
             profile, scalars = await run_in_threadpool(_extract_all, parser, data)
             try:
                 if profile is not None:
@@ -346,6 +334,18 @@ async def store_dive_file(
                 # somewhere unrelated.
                 logger.exception("Opportunistic re-extraction for dive %s could not be stored", dive_id)
                 await db.rollback()
+
+        # Re-uploading is the natural repair after a partial loss of the files volume, and
+        # this is what makes it actually work: without it the row says "already stored",
+        # the download 500s forever, and the server refuses the very bytes that would fix
+        # it. Costs one `stat` on the normal path. The write is safe because it re-`put`s
+        # the key the row already carries rather than minting one - and a `put` of a key
+        # whose name ends in these bytes' hash is byte-identical to what was there, so it
+        # can only ever recreate the file this row already names.
+        if not await blob_store.has(existing.storage_key):
+            logger.warning("Rewriting the missing stored file for dive %s from a re-upload", dive_id)
+            await blob_store.put(existing.storage_key, data)
+
         return _info(existing)
 
     if outcome == "conflict" and existing is not None:
@@ -369,15 +369,31 @@ async def store_dive_file(
     # In a thread for the same reason `POST /dive/parse` parses in one: sampling a FIT
     # file is pure Python and takes up to ~1.5 s at `_MAX_FRAMES`, and this is an
     # `async def`. The read transaction is released first so the connection isn't held
-    # idle for the duration - see `_release_read_transaction`.
-    await _release_read_transaction(db)
+    # idle for the duration - see `release_read_transaction`.
+    await release_read_transaction(db)
     profile, scalars = await run_in_threadpool(_extract_all, parser, data)
+
+    # The file lands on the volume *before* the transaction that references it, and the
+    # replaced one is unlinked *after* that transaction commits. Every database-visible
+    # state therefore names bytes that exist; the only thing a crash between the two can
+    # produce is an unreferenced file, which is harmless until the sweeper reclaims it.
+    #
+    # The key carries a nonce minted per write, which is what makes the post-commit unlink
+    # below safe against a concurrent re-upload of the same bytes without any locking - a
+    # retired key can never be minted again. See `blob_store.new_key`.
+    row_uuid = uuid7()
+    storage_key = blob_store.new_key(KEY_KIND, sha256=digest)
+    await blob_store.put(storage_key, data)
 
     try:
         # Replacement, not versioning: whatever this dive had is gone. Runs before the
         # insert because `ux_dive_file_dive_id` is checked per statement, so two rows
         # for one dive must not coexist even momentarily.
-        await db.execute(delete(DiveFile).where(DiveFile.dive_id == dive_id))
+        replaced = list(
+            (
+                await db.execute(delete(DiveFile).where(DiveFile.dive_id == dive_id).returning(DiveFile.storage_key))
+            ).scalars()
+        )
         # Same statement-ordering reason, and the same transaction as the file itself: a
         # dive must never end up with a stored file and a profile extracted from a
         # *different* one. Unconditional, so a replacement export with no samples clears
@@ -393,12 +409,12 @@ async def store_dive_file(
                 byte_size=len(data),
                 original_filename=filename,
                 parser_key=parser.key,
-                data=data,
+                storage_key=storage_key,
                 # Spelled out rather than left to `PublicUUIDMixin`'s `default_factory`:
                 # that is a dataclass-level default applied when the ORM constructs an
                 # instance, and this Core-level INSERT never constructs one. Without it
                 # Postgres gets a NULL and rejects the row.
-                uuid=uuid7(),
+                uuid=row_uuid,
                 created_at=now,
             )
             .returning(DiveFile.uuid, DiveFile.updated_at)
@@ -421,11 +437,18 @@ async def store_dive_file(
             scalars=scalars if scalars is not None else dict.fromkeys(TECH_SCALAR_FIELDS),
             commit=False,
         )
+        # Registered before the commit, because the hook that runs it fires *on* the
+        # commit; a rollback below clears the registration instead.
+        blob_store.delete_after_commit(db, replaced)
         await db.commit()
     except IntegrityError as exc:
         # Two uploads for the same dive raced between the delete and the insert. One
         # user per dive and a button disabled while in flight make this vanishingly
         # rare; a retry is a better answer than a lock on the hot path.
+        #
+        # The file written above is left on the volume: no row references it, so it is an
+        # orphan for the sweeper. A retry mints a new key and writes again, so nothing here
+        # depends on cleaning this one up.
         await db.rollback()
         raise DiveFileConflictError(
             "The source file for this dive changed while this upload was in flight. Please try again."
@@ -444,26 +467,31 @@ async def store_dive_file(
 async def load_dive_file(db: AsyncSession, *, dive_id: int) -> LoadedDiveFile | None:
     """Fetch a dive's stored export, or `None` if it has none.
 
-    The only place `data` is ever loaded - hence the explicit `undefer`, which is what
-    makes every *other* query against this table cheap by default.
+    `None` means *this dive has no row*. A row whose file is missing from the volume raises
+    `blob_store.BlobMissingError` instead, and each caller decides how loudly to fail: the
+    download route 500s, the export archive skips the member, the two backfills count it
+    failed. Collapsing the two into `None` would report data loss as a 404.
+
+    Explicit columns and no `db.expunge` any more: the row this reads is four short
+    strings, so there is no longer a materialized blob sitting in the session's identity
+    map for the rest of a backfill run - see *"`load_dive_file` detaches the row it read"*
+    in `DECISIONS.md` for the problem that used to solve.
     """
-    stmt = select(DiveFile).where(DiveFile.dive_id == dive_id).options(undefer(DiveFile.data))
-    file = (await db.execute(stmt)).scalar_one_or_none()
-    if file is None:
+    stmt = select(
+        DiveFile.storage_key,
+        DiveFile.content_type,
+        DiveFile.original_filename,
+        DiveFile.sha256,
+    ).where(DiveFile.dive_id == dive_id)
+    row = (await db.execute(stmt)).one_or_none()
+    if row is None:
         return None
 
-    # Detached before returning, because everything worth having is copied out below and
-    # what stays behind is a megabyte. `local_session` is built `expire_on_commit=False`,
-    # so an attached instance keeps its undeferred `data` materialized in the identity map
-    # for the life of the session - and the batch commit in a backfill does not expire it.
-    # A run over a few thousand dives would otherwise hold every export it had read.
-    db.expunge(file)
-
     return LoadedDiveFile(
-        data=file.data,
-        content_type=file.content_type,
-        original_filename=file.original_filename,
-        sha256=file.sha256,
+        data=await blob_store.get(row.storage_key),
+        content_type=row.content_type,
+        original_filename=row.original_filename,
+        sha256=row.sha256,
     )
 
 
@@ -481,9 +509,10 @@ async def get_dive_file_sha256(db: AsyncSession, *, dive_id: int) -> str | None:
 async def delete_dive_file(db: AsyncSession, *, dive_id: int, commit: bool = True) -> bool:
     """Hard-delete a dive's stored export. Returns whether there was one to delete.
 
-    Hard, not soft, and not merely unlinked: a row nothing can reach keeps occupying its
-    bytes forever, and a "delete" that only hides the file would be a worse trade than
-    losing it from the corpus.
+    Hard, not soft, and not merely unlinked: a row nothing can reach keeps its file on the
+    volume forever, and a "delete" that only hides the file would be a worse trade than
+    losing it from the corpus. The file itself goes after the caller's transaction commits
+    - the mirror of the write ordering in `store_dive_file`.
 
     Takes the dive's extracted profile with it. Nothing cascades from removing the file
     (the profile's FK is to `dive`, not to `dive_file`), and a profile whose source export
@@ -497,11 +526,15 @@ async def delete_dive_file(db: AsyncSession, *, dive_id: int, commit: bool = Tru
     """
     await delete_profile_for_dive(db, dive_id=dive_id, commit=False)
     await store_tech_scalars(db, dive_id=dive_id, scalars=dict.fromkeys(TECH_SCALAR_FIELDS), commit=False)
-    result = cast(CursorResult, await db.execute(delete(DiveFile).where(DiveFile.dive_id == dive_id)))
-    deleted = result.rowcount > 0
+    keys = list(
+        (
+            await db.execute(delete(DiveFile).where(DiveFile.dive_id == dive_id).returning(DiveFile.storage_key))
+        ).scalars()
+    )
+    blob_store.delete_after_commit(db, keys)
     if commit:
         await db.commit()
-    return deleted
+    return bool(keys)
 
 
 async def delete_files_for_dive(db: AsyncSession, *, dive_id: int, commit: bool = True) -> None:
@@ -712,7 +745,16 @@ async def backfill_tech_fields(
             failed += 1
             continue
 
-        file = await load_dive_file(db, dive_id=row.dive_id)
+        try:
+            file = await load_dive_file(db, dive_id=row.dive_id)
+        except blob_store.BlobMissingError:
+            # The row is there and its file is not, which is data loss or an unmounted
+            # volume rather than a race. Counted as a failure and the run continues, on the
+            # same terms as the parse failure below: a run that stopped here would report
+            # less than one that finished and said how many dives are in this state.
+            logger.error("Skipping dive %s: its stored file is missing from the volume", row.dive_id)
+            failed += 1
+            continue
         if file is None:
             logger.warning("Skipping dive %s: its stored file vanished mid-run", row.dive_id)
             failed += 1

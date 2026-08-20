@@ -78,11 +78,18 @@ async def _load(user_id: int) -> ExportBundle:
     which is what every database-backed test here uses; the loader is async. The rows are
     committed by the time this runs, so the two see the same data.
 
-    The engine is disposed afterwards because `pytest-asyncio` gives each test its own
-    event loop, and a pooled asyncpg connection is bound to the loop that opened it -
-    reusing one across tests fails with a "attached to a different loop" error that reads
-    like a bug in the code under test.
+    The engine is disposed on **both** sides of the call, because `pytest-asyncio` gives
+    each test its own event loop and a pooled asyncpg connection is bound to the loop that
+    opened it - reusing one across loops fails with "another operation is in progress" or
+    "attached to a different loop", either of which reads like a bug in the code under
+    test. Disposing afterwards protects the next test; disposing first protects this one,
+    and it is needed because this test is not the only thing that puts connections in that
+    pool. The session-scoped `client` fixture enters the app's real lifespan on
+    `TestClient`'s own portal loop, and the lifespan opens the shared engine for its
+    startup work - so by the time any test here runs, the pool may already hold a
+    connection belonging to a loop that is not this one.
     """
+    await async_engine.dispose()
     try:
         async with local_session() as session:
             return await load_export_bundle(session, user_id=user_id)

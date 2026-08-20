@@ -47,8 +47,13 @@ one rather than matching the wrapping by hand.
      all.
   3. `docker compose restart api` to apply it — `src/migrations` is bind-mounted, so the new
      revision is already inside the container and the lifespan runs it. (`restart` reuses the
-     existing container, so it is *not* enough after editing `docker-compose.yml` or the
-     `Dockerfile`; that needs `docker compose up -d api`.)
+     existing container, so it is *not* enough after editing `docker-compose.yml`; that needs
+     `docker compose up -d api`. After editing the **`Dockerfile`** bare `up -d` is not enough
+     either — it recreates the container from the *stale* image, so anything the Dockerfile newly
+     creates is simply absent. That needs `docker compose up -d --build`, and the case that proves
+     it is `/data/files`: a named volume copies the image directory's ownership on first mount, so
+     mounting over a path the stale image lacks gives you a root-owned volume and a uid-1000
+     container that fails its own writability check.)
 
   `CheckConstraint`s in `__table_args__` are picked up by autogenerate like anything else — the
   hand-written `ALTER TABLE ... ADD CONSTRAINT` era is over. CI fails a PR whose models and
@@ -89,6 +94,11 @@ something to look up, not to restate it.
   comes back as a 500. → *"Update schemas refuse an explicit null for a `NOT NULL` column"*
 - **List endpoints clamp pagination.** → `clamp_pagination`
 - **Binary reads use `ETag`/`If-None-Match` → 304.**
+- **Uploaded payloads go on the files volume, never in a column.** `services/blob_store.py` is the
+  only module that touches a filesystem; keys come from `new_key` (a fresh nonce per write, never
+  derived from the row) and are stored on the row. The ordering rule is not optional: write the
+  file, *then* commit the row; delete the row, *then* unlink after the commit
+  (`delete_after_commit`). → *"File payloads live on the files volume, not in Postgres"*
 
 ## Code Style — Python
 

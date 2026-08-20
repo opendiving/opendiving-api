@@ -51,6 +51,15 @@ COPY --from=builder --chown=app:app /app/.venv /app/.venv
 # Ensure the virtual environment is in the PATH
 ENV PATH="/app/.venv/bin:$PATH"
 
+# Where uploaded dive-computer exports and c-card images live (FILE_STORAGE_DIR). Created
+# here, owned by `app`, and *before* `USER app` - which is load-bearing rather than tidy:
+# the first time a named volume is mounted over an image directory, Docker copies that
+# directory's contents **and its ownership** into the empty volume. That is the entire
+# mechanism by which the uid-1000 process gets a writable volume with nothing for the
+# operator to do. Without this line the volume is created root-owned, and the container
+# fails its own startup writability check.
+RUN mkdir -p /data/files && chown -R app:app /data
+
 # Switch to the non-root user
 USER app
 

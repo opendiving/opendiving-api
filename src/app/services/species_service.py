@@ -45,6 +45,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.config import settings
+from ..core.db.database import release_read_transaction
 from ..core.exceptions.http_exceptions import RateLimitException
 from ..core.utils import cache
 from ..core.utils.rate_limit import enforce_rate_limit
@@ -1044,37 +1045,6 @@ async def _attach_catalog_uuids(db: AsyncSession, results: list[SpeciesSearchRes
     ]
 
 
-async def _release_read_transaction(db: AsyncSession) -> None:
-    """End the read-only transaction the local lookups opened, before going out to a register.
-
-    Every function here that touches `db` does so *before* the slow part, and SQLAlchemy's
-    `AsyncSession` autobegins on the first `execute()` - so without this the connection that
-    ran a sub-millisecond `SELECT` sits idle-in-transaction for the whole outbound call. That
-    is up to `_SEARCH_BUDGET_SECONDS` on search and `_RESOLVE_BUDGET_SECONDS` on resolve,
-    against a pool of five plus ten overflow: on the order of fifteen concurrent "add species"
-    clicks would park every connection doing nothing, and unrelated endpoints then wait out
-    `pool_timeout` and fail. The event loop is free the whole time, which is exactly what
-    makes it invisible until the pool runs dry.
-
-    The geocoder this module is otherwise modelled on cannot have this problem - its routes
-    take no `db` dependency at all. This one needs the session for the local catalog, so the
-    release has to be explicit.
-
-    `rollback` rather than `commit` because it states what is true here: nothing is being
-    persisted. Safe at every call site below because nothing has been written yet, and because
-    each one releases only on a path where the preceding lookup returned **no ORM instance** -
-    either rows already converted to Pydantic models, or a `None`. That matters: `rollback`
-    expires live ORM objects regardless of `expire_on_commit=False`, which applies to commit
-    only, so releasing while holding a `Species` would turn its next attribute access into a
-    silent reload.
-
-    `services/dive_files.py` has the same helper for the same reason (a `run_in_threadpool`
-    hop rather than an HTTP call) - see *"Uploaded files are parsed in a thread"* in
-    DECISIONS.md. Two copies is a coincidence worth tolerating; a third wants a shared util.
-    """
-    await db.rollback()
-
-
 async def search_species(db: AsyncSession, query: str) -> SpeciesSearchResponse:
     """Search the catalog and both registers at once, merged into one ranked list.
 
@@ -1092,8 +1062,8 @@ async def search_species(db: AsyncSession, query: str) -> SpeciesSearchResponse:
 
     local, local_was_full = await _local_search(db, normalized)
     # `_local_search` has already turned its rows into `SpeciesSearchResult`s, so there is no
-    # ORM state to expire and nothing to preserve - see `_release_read_transaction`.
-    await _release_read_transaction(db)
+    # ORM state to expire and nothing to preserve - see `release_read_transaction`.
+    await release_read_transaction(db)
 
     remote = await _remote_search(normalized)
 
@@ -1231,10 +1201,10 @@ async def resolve_species(db: AsyncSession, aphia_id: int) -> Species:
 
     # Nothing found, so the lookup above is holding a transaction open over no ORM state and
     # no writes - and the next line can take twenty-five seconds. See
-    # `_release_read_transaction`; the early return above deliberately precedes it, because
+    # `release_read_transaction`; the early return above deliberately precedes it, because
     # that path *does* hold a live `Species` and must not have it expired underneath the
     # caller.
-    await _release_read_transaction(db)
+    await release_read_transaction(db)
 
     # Initialized before the scope, not after it: `move_on_after` cancels the body wherever it
     # happens to be, so an assignment inside it is not guaranteed to have run.
@@ -1254,7 +1224,7 @@ async def resolve_species(db: AsyncSession, aphia_id: int) -> Species:
             return existing
         # Same shape, and the branch that makes this endpoint's worst case two budgets rather
         # than one - so the second read must not hold a connection across the second fetch.
-        await _release_read_transaction(db)
+        await release_read_transaction(db)
         valid_taxon: _Taxon | None = None
         with anyio.move_on_after(_RESOLVE_BUDGET_SECONDS):
             valid_taxon = _worms_taxon(await _worms("AphiaRecordByAphiaID", taxon.valid_aphia_id))

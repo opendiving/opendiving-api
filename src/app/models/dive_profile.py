@@ -79,8 +79,9 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     #
     # `nullable=False` is spelled out because wrapping the column in `deferred()` hides
     # the `Mapped[dict]` annotation from SQLAlchemy's nullability inference, which would
-    # otherwise emit a nullable column - the same trap already documented on
-    # `DiveFile.data`.
+    # otherwise emit a nullable column. `DiveFile.data` and `CertificationFile.data` used
+    # to carry the same note; they are gone (their payloads moved to the files volume), so
+    # this is the last column in the app the trap applies to.
     #
     # Declared here, in the middle of the summary block it isn't part of, because these
     # models are dataclasses: a column with no default cannot follow one that has a

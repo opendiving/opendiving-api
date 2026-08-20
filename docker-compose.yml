@@ -41,6 +41,10 @@ services:
       # on the next rebuild - the same reason `./src/app` is mounted.
       - ./src/migrations:/code/migrations
       - ./src/alembic.ini:/code/alembic.ini
+      # Uploaded dive-computer exports and c-card images (FILE_STORAGE_DIR, default
+      # `/data/files`). A named volume rather than a bind mount so the image's
+      # `chown app:app /data` is copied into it on first mount - see the Dockerfile.
+      - files-data:/data/files
 
   # One-shot: creates the admin panel's own tables and seeds its initial admin, then
   # exits. Runs to completion before `api` starts, so the four gunicorn workers in the
@@ -100,6 +104,12 @@ services:
     volumes:
       - ./src/app:/code/app
       - ./src/.env:/code/.env
+      # The worker touches no stored file today - the export archive is built inline in
+      # the API, and the gear-service digest reads none. Mounted anyway, because the day a
+      # thumbnail or re-parse job lands here a worker without the mount writes into its own
+      # container layer and loses the lot on the next `up`. One line against a silent-loss
+      # foot-gun.
+      - files-data:/data/files
 
   db:
     image: postgres:18
@@ -194,4 +204,5 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  files-data:
   #pgadmin-data:

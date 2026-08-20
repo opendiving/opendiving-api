@@ -7,12 +7,13 @@ whole tables scoped to one `user_id`, with no per-dive query anywhere. A logbook
 hundred dives and a handful of sites, trips and gear items, so "load the lot" costs less
 than the round trips a lazier shape would need - and the archive walks all of it anyway.
 
-**The two things this does not load are the binary payloads**: `dive_file.data` and
-`certification_file.data` stay `deferred`, and `dive_profile.data` is not selected at
-all. Those are fetched one row at a time by whoever actually needs them (`archive.py`
-for the blobs, `uddf.py`/`envelope.py` for the profile series), so peak memory is one
-file plus one profile rather than a diver's entire history of both. That is the one
-place this module accepts an N+1 on purpose.
+**The two things this does not load are the binary payloads**: uploaded exports and card
+images live on the files volume rather than in the database at all now (this reads only
+their `storage_key`-bearing rows' scalar columns), and `dive_profile.data` stays
+`deferred`. Those are fetched one row at a time by whoever actually needs them
+(`archive.py` for the blobs, `uddf.py`/`envelope.py` for the profile series), so peak
+memory is one file plus one profile rather than a diver's entire history of both. That
+is the one place this module accepts an N+1 on purpose.
 
 **One collection is scoped through the dives rather than by column.** `species` has no
 `user_id` at all - the catalog is global (see `models/species.py`) - so it is loaded by the

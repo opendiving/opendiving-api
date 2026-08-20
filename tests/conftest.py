@@ -1,6 +1,21 @@
+import os
+import tempfile
 from collections.abc import AsyncGenerator, Callable, Generator
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, Mock
+
+# **Before any `src.app` import below.** `settings` is built at import time, and the app's
+# lifespan - which `TestClient` enters for real, see the `client` fixture - creates and
+# probes `FILE_STORAGE_DIR` and hard-fails if it cannot write there. Its default is
+# `/data/files`, a path that exists inside the container and nowhere else, so without this
+# every client test dies in startup on a developer's laptop and on the CI runner alike.
+# `.github/workflows/tests.yml` sets the same variable in its `env:` block for the steps
+# that run outside pytest (`alembic upgrade head`).
+#
+# One directory for the whole session, left behind for the OS to reap: the suite writes
+# nothing into it (every service test mocks the session or the store), and a fixture that
+# tore it down would have to outlive the session-scoped `client`.
+os.environ.setdefault("FILE_STORAGE_DIR", tempfile.mkdtemp(prefix="opendiving-test-files-"))
 
 import pytest
 import pytest_asyncio

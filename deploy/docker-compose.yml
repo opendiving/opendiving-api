@@ -157,6 +157,11 @@ services:
     environment: *api-environment
     expose:
       - "8000"
+    volumes:
+      # Every uploaded dive-computer export and every c-card image. This is the **second
+      # half of your backup** - the database dump does not carry it. See
+      # docs/self-hosting/backup-restore.md, which gives the tar recipe for it.
+      - files-data:/data/files
     # The image's own healthcheck asks `/api/v1/health/ready`, which round-trips Postgres
     # and Redis - so `service_healthy` here means "can serve", not "has a process".
     depends_on:
@@ -183,6 +188,10 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+    volumes:
+      # The worker reads no stored file today. Mounted anyway so the first background job
+      # that does cannot silently write into its own container layer instead.
+      - files-data:/data/files
     depends_on:
       db:
         condition: service_healthy
@@ -218,9 +227,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-opendiving}
     volumes:
-      # Every dive, every uploaded dive-computer file and every c-card image is in here:
-      # the originals live in Postgres, not on a separate media volume, which is why one
-      # `pg_dump` is the whole backup (docs/self-hosting/backup-restore.md).
+      # Every dive, every dive site, every certification record - the whole logbook except
+      # the uploaded files themselves, which live on `files-data` below. A backup is those
+      # two artifacts, dump first and files second; neither is complete alone
+      # (docs/self-hosting/backup-restore.md).
       #
       # Postgres 18+ images store the cluster in a version-specific PGDATA
       # (/var/lib/postgresql/18/docker) under this mount, so the volume goes one level up
@@ -253,6 +263,12 @@ services:
 
 volumes:
   postgres-data:
+  # Uploaded dive-computer exports and c-card images, one ordinary file each, named by the
+  # `storage_key` its row carries. The other half of your backup: `pg_dump` does not
+  # contain these, and a restore of the dump alone leaves every download 500ing. Back it up
+  # with the tar recipe in docs/self-hosting/backup-restore.md - and note that `docker
+  # compose down -v` destroys it along with everything else.
+  files-data:
   redis-data:
   caddy-data:
   caddy-config:
