@@ -71,6 +71,12 @@ jobs:
       REDIS_CACHE_PORT: 6379
       REDIS_QUEUE_HOST: localhost
       REDIS_QUEUE_PORT: 6379
+      # The app creates and probes this directory at startup and refuses to boot if it
+      # cannot write there. Its default is `/data/files` - a path that exists inside the
+      # container image and nowhere else, least of all on a runner. `tests/conftest.py`
+      # sets the same variable for pytest itself (it has to, since `settings` is read at
+      # import); this covers the `alembic upgrade head` step, which imports the app too.
+      FILE_STORAGE_DIR: ${{ runner.temp }}/opendiving-files
 
     steps:
       - uses: actions/checkout@v7

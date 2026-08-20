@@ -380,6 +380,17 @@ class ExportSettings(BaseSettings):
     EXPORT_RATE_LIMIT_PER_USER: int = config("EXPORT_RATE_LIMIT_PER_USER", default=10)
 
 
+class FileStorageSettings(BaseSettings):
+    # Where uploaded dive-computer exports and c-card images are stored. Everything under
+    # it is written and read by `services/blob_store.py` and by nothing else.
+    #
+    # No new required `.env` value, on purpose: both compose files mount a named volume at
+    # this default, so a correct install needs nothing typed. It is a setting at all
+    # because a bind-mount install wants to point it at a real directory - and because the
+    # test suite and CI have to repoint it away from a path they cannot create.
+    FILE_STORAGE_DIR: str = config("FILE_STORAGE_DIR", default="/data/files")
+
+
 class ProxySettings(BaseSettings):
     # Addresses (or CIDR blocks) of reverse proxies whose `X-Forwarded-For` header may be
     # believed - see `core.utils.client_ip`. Every per-IP rate limit depends on this:
@@ -554,6 +565,7 @@ class Settings(
     GeocodingSettings,
     SpeciesSettings,
     ExportSettings,
+    FileStorageSettings,
     ProxySettings,
     FrontendSettings,
     GearServiceSettings,

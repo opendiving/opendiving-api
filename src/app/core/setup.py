@@ -31,6 +31,8 @@ from .config import (
 from .db.database import async_engine as engine
 from .db.migrations import upgrade_to_head
 from .utils import cache
+from ..services import blob_store
+from ..services.blob_store import ensure_root_writable
 
 # -------------- logging --------------
 configure_logging(settings.LOG_LEVEL)
@@ -83,6 +85,46 @@ async def apply_migrations() -> None:
         await asyncio.to_thread(upgrade_to_head)
 
 
+def _volume_has_any_file() -> bool:
+    return next(blob_store.iter_keys(), None) is not None
+
+
+async def warn_if_files_volume_looks_empty() -> None:
+    """Shout if the database has file rows and the volume has no files.
+
+    The state this catches is a restore that brought the dump back and forgot the files
+    archive, or a compose file that lost its `files-data` mount - both of which otherwise
+    surface one 500 at a time, days later, as a diver tries to open a card.
+
+    CRITICAL and keep serving, rather than a refusal: the documented restore order is
+    database first, files second, so there is a legitimate window where this is true on
+    purpose. Runs after the migrations because `storage_key` has to exist to be counted.
+    """
+    try:
+        async with engine.begin() as conn:
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT (SELECT count(*) FROM dive_file) + (SELECT count(*) FROM certification_file) AS n"
+                    )
+                )
+            ).scalar_one()
+    except Exception:
+        # Never a reason to fail startup: a schema this query cannot run against is either
+        # a database `apply_migrations` was told not to touch or one that is mid-restore.
+        logger.debug("Could not count stored file rows for the files-volume check", exc_info=True)
+        return
+
+    if rows and not await asyncio.to_thread(_volume_has_any_file):
+        logger.critical(
+            "The database has %d stored file row(s) but the files volume at %s is empty - it looks "
+            "unmounted or not yet restored, and file downloads will fail until it is. See "
+            "docs/self-hosting/backup-restore.md.",
+            rows,
+            settings.FILE_STORAGE_DIR,
+        )
+
+
 # -------------- cache --------------
 async def create_redis_cache_pool() -> None:
     cache.pool = redis.ConnectionPool.from_url(settings.REDIS_CACHE_URL)
@@ -124,8 +166,15 @@ def lifespan_factory(
             if isinstance(settings, RedisCacheSettings):
                 await create_redis_cache_pool()
 
+            # Before the migrations, not after: the revision that moved the payloads out
+            # of `bytea` writes files itself, so an unwritable volume has to fail here
+            # rather than halfway through a data move.
+            await asyncio.to_thread(ensure_root_writable)
+
             if apply_migrations_on_start:
                 await apply_migrations()
+
+            await warn_if_files_volume_looks_empty()
 
             initialization_complete.set()
 
