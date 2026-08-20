@@ -31,6 +31,14 @@
 	#
 	# No body-size limit is set: Caddy imposes none by default, and the app enforces its
 	# own (5 MB dive files, 10 MB card images) with an error message that explains itself.
+	#
+	# No `header` block either, and that is a decision rather than an omission. These
+	# paths never touch the web container, so nothing it sets applies to them - but the
+	# API answers them with `Content-Security-Policy: frame-ancestors 'none'`,
+	# `X-Frame-Options` and `nosniff` of its own (`SecurityHeadersMiddleware`), which is
+	# the version that also holds for the installs that run their own proxy instead of
+	# this file. Adding them here as well would be a second definition of one policy,
+	# free to drift from the first.
 	@api path /api/v1* /admin* /docs /redoc /openapi.json
 	handle @api {
 		reverse_proxy api:8000
@@ -39,6 +47,12 @@
 	# The web app, which also carries `/healthz` and the Next.js static assets. It sets
 	# its own security headers, HSTS included (`WEB_HSTS=off` turns that one off), so
 	# there is nothing to add here.
+	#
+	# That covers this handler only - the `@api` paths above are matched first and never
+	# reach it. HSTS is the one exception, and only by accident of being recorded per
+	# *host*: once a browser has loaded any page of the domain, `/admin` is pinned too.
+	# An operator whose first-ever request to the domain is `/admin` itself, from a
+	# bookmark, is the one visitor that misses it.
 	handle {
 		reverse_proxy web:3000
 	}

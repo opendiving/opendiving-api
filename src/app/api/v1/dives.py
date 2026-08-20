@@ -1020,7 +1020,11 @@ async def read_dive_file(
             # explicitly: the browser must not be free to re-interpret user-uploaded
             # content as something scriptable.
             "X-Content-Type-Options": "nosniff",
-            "Content-Security-Policy": "default-src 'none'; sandbox",
+            # `frame-ancestors` is spelled out because it does not fall back to
+            # `default-src`: a response with its own policy opts out of
+            # `SecurityHeadersMiddleware`'s default and would otherwise be framable
+            # however strict the rest of this is.
+            "Content-Security-Policy": "default-src 'none'; sandbox; frame-ancestors 'none'",
             # `private` because this is one diver's file and no shared cache should keep
             # a copy; the `ETag` makes re-validation after 5 minutes cheap.
             "Cache-Control": "private, max-age=300",

@@ -86,7 +86,11 @@ def _download(buffer: IO[bytes], *, filename: str, media_type: str) -> Streaming
             # files; the UDDF is XML), so the browser must not be free to re-interpret one
             # as something scriptable at this origin.
             "X-Content-Type-Options": "nosniff",
-            "Content-Security-Policy": "default-src 'none'; sandbox",
+            # `frame-ancestors` is spelled out because it does not fall back to
+            # `default-src`: a response with its own policy opts out of
+            # `SecurityHeadersMiddleware`'s default and would otherwise be framable
+            # however strict the rest of this is.
+            "Content-Security-Policy": "default-src 'none'; sandbox; frame-ancestors 'none'",
         },
     )
 
