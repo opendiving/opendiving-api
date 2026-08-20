@@ -26,7 +26,7 @@ class OwnedResourceCache[InternalT, PublicT]:
 
     Resources whose read/list logic does more than a straight `get_multi`/`get` plus a shape
     conversion don't fit this shape and should keep their own hand-written cache helpers
-    instead of forcing themselves through this factory. The four that opt out, and why:
+    instead of forcing themselves through this factory. The five that opt out, and why:
 
     - `dives.py` - enriches each row with related trips/dive sites/gear and supports several
       extra filters.
@@ -37,9 +37,15 @@ class OwnedResourceCache[InternalT, PublicT]:
       searches an EXISTS over that child table rather than columns of its own. It still
       constructs one of these for `list_cache_key_prefix` and `invalidate_list`, so its
       hand-rolled helpers keep the key shapes this factory defines.
+    - `passkeys.py` - the odd one out, and for the opposite reason: it is not *enriched*, it
+      is not cached at all. `GET /user/passkeys` is unpaginated and capped at
+      `PASSKEY_MAX_CREDENTIALS_PER_USER` rows, and nothing anywhere embeds a credential - so
+      there is no page to cache and no invalidation obligation to get wrong. Caching it would
+      be inventing a thing that can go stale.
 
-    In each case the enrichment is a second query whose results have to be zipped back into
-    the page before conversion, which is precisely the step this factory has no room for.
+    In each of the first four the enrichment is a second query whose results have to be
+    zipped back into the page before conversion, which is precisely the step this factory has
+    no room for.
     Adding a generic hook for it would complicate the factory for its two remaining
     straightforward users (dive sites, gear sets) to serve four callers that each need
     something different; the duplication is the cheaper side of that trade. Revisit if the

@@ -4,7 +4,7 @@ import warnings
 from enum import Enum
 from importlib import metadata
 from typing import Self
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings
@@ -411,8 +411,75 @@ class ProxySettings(BaseSettings):
 
 
 class FrontendSettings(BaseSettings):
-    # Used to build the magic-link URL emailed to the user (`{FRONTEND_URL}/auth/verify?token=...`).
+    # Used to build the magic-link URL emailed to the user (`{FRONTEND_URL}/auth/verify?token=...`),
+    # and - through `passkey_rp_id`/`passkey_origin` below - it *is* the passkey domain.
+    #
+    # Changing its hostname orphans every registered passkey, because browsers scope a
+    # credential to the RP ID it was created under and will not offer it to another. The
+    # magic link is the recovery path when that happens; `docs/self-hosting/configuration.md`
+    # says so where an operator reads about this setting.
     FRONTEND_URL: str = config("FRONTEND_URL", default="http://localhost:3000")
+
+    @property
+    def passkey_rp_id(self) -> str:
+        """The WebAuthn Relying Party ID: the bare hostname of `FRONTEND_URL`.
+
+        Derived rather than configured, so there is no second place for it to be wrong -
+        see the plan's rejection of a `PASSKEYS_ENABLED` knob for the same reasoning. The
+        ceremony belongs to the *frontend* origin; this API's own host never appears in it,
+        which the split-origin dev topology makes impossible to get accidentally right.
+
+        `localhost` in dev, which browsers treat as a secure context, so the whole feature
+        works locally over plain HTTP. An IP address is *not* a valid RP ID no matter what
+        certificate fronts it - the browser offers the API and then throws `SecurityError`.
+        """
+        return urlparse(self.FRONTEND_URL).hostname or ""
+
+    @property
+    def passkey_origin(self) -> str:
+        """The origin a `clientDataJSON` from that frontend will carry.
+
+        **Rebuilt from the parse, never the raw setting.** Browsers write a bare
+        `scheme://host[:port]`, so a `FRONTEND_URL` with a trailing slash - the most
+        ordinary way to write a URL variable - would fail every ceremony's origin check
+        with a 401 while magic links (plain concatenation) kept working, pointing nowhere
+        near the cause.
+        """
+        parsed = urlparse(self.FRONTEND_URL)
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+
+class PasskeySettings(BaseSettings):
+    """Everything passkeys need beyond `FRONTEND_URL`, all defaulted - registering one
+    adds nothing to any install's required configuration.
+    """
+
+    # How long a minted challenge stays in Redis (`auth:passkey-challenge:*`). Long enough
+    # to sit on the login page with conditional UI armed, short enough to bound how long a
+    # captured ceremony has to be replayed - and the challenge is `GETDEL`-consumed on the
+    # first verify attempt regardless, so this is only the ceiling on an *unused* one.
+    PASSKEY_CHALLENGE_TTL_SECONDS: int = config("PASSKEY_CHALLENGE_TTL_SECONDS", default=600)
+
+    # At most this many credentials per account. Abuse hygiene rather than product policy:
+    # a diver with a phone, a laptop and two security keys is nowhere near it.
+    PASSKEY_MAX_CREDENTIALS_PER_USER: int = config("PASSKEY_MAX_CREDENTIALS_PER_USER", default=10)
+
+    # Fixed-window rate limits over `MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS`, the window every
+    # auth limit shares.
+    #
+    # The options ceiling is high on purpose and matches `AUTH_REFRESH_RATE_LIMIT_PER_IP`
+    # exactly: conditional UI arms on every signed-out page view that supports it, including
+    # the landing-page hero, so options are minted at page-view frequency, and an office
+    # behind one NAT gateway is a single IP to this counter. `/auth/refresh` faced the same
+    # situation while firing *less* often, so anything lower here contradicts that call. If
+    # abuse ever shows, the lever is arming conditional UI on first focus of the email input
+    # rather than on mount - not a lower ceiling.
+    #
+    # None of these is the security boundary. The single-use challenge and the signature
+    # are; rate limiting fails open (see `core.utils.rate_limit`).
+    PASSKEY_OPTIONS_RATE_LIMIT_PER_IP: int = config("PASSKEY_OPTIONS_RATE_LIMIT_PER_IP", default=240)
+    PASSKEY_VERIFY_RATE_LIMIT_PER_IP: int = config("PASSKEY_VERIFY_RATE_LIMIT_PER_IP", default=30)
+    PASSKEY_REGISTER_RATE_LIMIT_PER_USER: int = config("PASSKEY_REGISTER_RATE_LIMIT_PER_USER", default=10)
 
 
 class GearServiceSettings(BaseSettings):
@@ -568,6 +635,7 @@ class Settings(
     FileStorageSettings,
     ProxySettings,
     FrontendSettings,
+    PasskeySettings,
     GearServiceSettings,
     TestSettings,
     RedisCacheSettings,

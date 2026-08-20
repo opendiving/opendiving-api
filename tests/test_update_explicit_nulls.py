@@ -45,6 +45,7 @@ from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.gear_set import GearSet
 from src.app.models.trip import Trip
 from src.app.models.user import User
+from src.app.models.webauthn_credential import WebauthnCredential
 from src.app.schemas.certification import CertificationUpdate
 from src.app.schemas.dive import DiveUpdate
 from src.app.schemas.dive_site import DiveSiteUpdate
@@ -53,6 +54,7 @@ from src.app.schemas.gear_service import GearServiceRecordUpdate, GearServiceSch
 from src.app.schemas.gear_set import GearSetUpdate
 from src.app.schemas.trip import TripUpdate
 from src.app.schemas.user import UserAdminUpdate, UserUpdate
+from src.app.schemas.webauthn_credential import WebauthnCredentialUpdate
 
 # Every update schema the public API accepts a PATCH body into, paired with the table it
 # writes to - plus `UserAdminUpdate`, which is admin-only but inherits the guard from
@@ -70,6 +72,7 @@ SCHEMAS_AND_TABLES: list[tuple[type[RejectsExplicitNulls], Any]] = [
     (GearServiceRecordUpdate, GearServiceRecord),
     (UserUpdate, User),
     (UserAdminUpdate, User),
+    (WebauthnCredentialUpdate, WebauthnCredential),
 ]
 
 # Nullable columns that still can't be cleared on their own, because a *different* rule
