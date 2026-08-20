@@ -9366,8 +9366,25 @@ arrived at through the mechanism added to prevent a different one. Writing the c
 sets the fingerprint to the hash of an empty set, which cannot collide with any real finding, so a
 recurrence always opens a fresh issue while a genuine dismissal — whose body still holds the
 vulnerable fingerprint — still stays closed. The cost is that the body stops being the record of
-what was fixed, so the cleared ids are read out of the old body and put in the closing comment,
-where the thread keeps them.
+what was fixed, so the old body is quoted into the closing comment first, where the thread keeps it.
+
+**Quoted whole, rather than the CVE ids scraped out of it**, and the intermediate version that did
+scrape them is worth recording because it failed in a way that reads as safe.
+`CLEARED="$(… | grep -oE '(CVE|GHSA)-…' | …)"` exits 1 when it matches nothing, and under the step's
+`set -euo pipefail` a failing command substitution in a plain assignment aborts the step *there* —
+after the branch has been chosen and before `gh issue comment`, `gh issue edit` and `gh issue close`
+run. The issue is left open, uncommented, still carrying the stale vulnerable fingerprint: precisely
+the state the rewrite above exists to prevent, reintroduced by the code meant to preserve the
+record, and the `else` branch written to handle "no ids found" is unreachable for the same reason it
+is needed. It is reachable — a human filing or relabelling an `image-cve` issue, or a Trivy id
+outside the CVE/GHSA shape (`DSA-`, `DLA-`, `PYSEC-`). The general rule, since this repository's
+workflows are full of `set -euo pipefail`: **`grep` in a command substitution is a conditional
+wearing a pipeline's clothes.** Inside an `if` it is fine, which is why the label check further up
+the same step is; assigned to a variable it is a failure path. `jq` and `sed` do not have this shape
+— both exit 0 on no match — which is the other half of why copying beat scraping. Scraping was also
+capped by construction: it could only ever recover ids that survived the report's 50-row table cut,
+so the comment would have read as a complete accounting of what was fixed while silently dropping
+the rest, whereas the body carries its own "…and N more rows" caveat along with the table.
 
 **Findings fail the PR check but never the scheduled job.** Different jobs, different answers, both
 on purpose. The scheduled job's output is an issue, so a red X would add nothing and would train
