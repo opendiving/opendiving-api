@@ -8432,15 +8432,16 @@ one.
 **The whole thing is modelled on `opendiving-web`'s workflow of the same name, deliberately.** The
 two repos release in lockstep on one version, so a policy change (a new alias rule, a new guard) has
 to be made twice, and making it twice in one idiom is the difference between a diff and an
-archaeology session. They are not identical today, and the gap is a port owed rather than a
-difference of opinion: the api side refuses a `v*` value in the extra-tag input and stamps
-`org.opencontainers.image.version`, and the web side has neither - so a `tag=v0.4.0` dispatch there
-still publishes that literal name off an unchecked commit. That is also why the tags are assembled
-by hand here rather than by `docker/metadata-action`: with the shape gate below in place the
-action's remaining value is `{{major}}.{{minor}}` extraction, which is two `BASH_REMATCH` captures,
-and using it would have made the same policy read differently in the two repos. It also reads
-`github.sha` for its own `type=sha` and `image.revision`, which is the wrong commit on a dispatch
-(see below).
+archaeology session. What differs between the two files is only what has to: the version is read out
+of `pyproject.toml` by `tomllib` rather than out of `package.json` by `node`, the title and
+description name this image, and QEMU would cost compiled wheels here rather than an emulated
+`next build`. Anything else that drifts apart is a port owed one way or the other, and worth closing
+as one - the extra-tag rejection and the `image.version` label below were both such a port, made
+here first and carried across afterwards. That is also why the tags are assembled by hand here
+rather than by `docker/metadata-action`: with the shape gate below in place the action's remaining
+value is `{{major}}.{{minor}}` extraction, which is two `BASH_REMATCH` captures, and using it would
+have made the same policy read differently in the two repos. It also reads `github.sha` for its own
+`type=sha` and `image.revision`, which is the wrong commit on a dispatch (see below).
 
 **The tag has to be `vX.Y.Z`, and anything else fails loudly.** Every tag push enters the version
 block, because the trigger is `v*` and anything under that glob which cannot be aliased has to fail
@@ -8464,9 +8465,11 @@ the newest version, but a dispatch at an old tag must not drag `latest` backward
 ref, and left unstripped it would miss the `v[0-9]` test - so the guard would never run, no aliases
 would be computed, and the run would go green having published only `sha-<12>`. That is the silent
 outcome the guard exists to prevent, which is why both `refs/tags/` and `refs/heads/` come off
-first. The extra-tag input is refused outright when it looks like a version, for the neighbouring
-reason: typed there, a version would be published off whatever commit `ref` names, unchecked against
-the manifest and without the aliases it is supposed to carry.
+first. The extra-tag input is refused outright when it looks like a version - with or without the
+`v`, since the aliases this publishes are bare and `tag=0.4.0` would therefore overwrite a real one
+where `tag=v0.4.0` only invents a name - for the neighbouring reason: typed there, a version would
+be published off whatever commit `ref` names, unchecked against the manifest and without the aliases
+it is supposed to carry.
 
 **Native arm64 runners, not QEMU.** `matrix.include` pairs `linux/amd64` with `ubuntu-latest` and
 `linux/arm64` with `ubuntu-24.04-arm`. Emulating aarch64 on an amd64 runner works and is slow enough
