@@ -11,7 +11,14 @@
 # from this repository and from opendiving-web on the same version tag; the three
 # third-party ones are pinned to a digest, so `docker compose pull` fetches exactly the
 # bytes this file was tested against and a rebuilt upstream tag cannot change what runs
-# under you. Renovate and friends update the digest with the tag, in a diff you can read.
+# under you.
+#
+# Keeping those three current is the project's job, not yours, and it happens upstream of
+# this file: a bot raises a PR when a digest moves, and a scheduled scan watches the
+# published images for CVEs between those PRs (`.github/renovate.json5` and
+# `.github/workflows/vulnerability-scan.yml` in the api repository). What that means for
+# you is that a new digest travels on the next release, not on `docker compose pull` -
+# picking it up means re-downloading this file, the same as any other change to it.
 #
 # Full documentation: docs/self-hosting/ in the opendiving-api repository.
 #

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, String
+from sqlalchemy import DateTime, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .database import Base
@@ -16,3 +16,14 @@ class TokenBlacklist(Base):
     # `datetime.now(UTC)`, and asyncpg refuses to bind an aware datetime to a naive
     # `TIMESTAMP WITHOUT TIME ZONE` column at all.
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    # When the row was written, which is a different question from `expires_at` - that one
+    # is copied from the token's own `exp` and so says when it was *issued*. Only this
+    # column can answer "how long after it was spent was this token presented again?", the
+    # one signal that separates rotation's documented two-tab race (milliseconds) from a
+    # stolen cookie being replayed (minutes or hours). Read by
+    # `api.v1.auth._warn_if_revoked` and by nothing else.
+    #
+    # `server_default` for the same reason `user.units` has one: the column is NOT NULL, so
+    # the migration adding it needs a server-side default to backfill existing rows. Every
+    # row written since is stamped explicitly by `core.security._blacklist_one`.
+    revoked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

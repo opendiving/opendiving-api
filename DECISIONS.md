@@ -2982,6 +2982,9 @@ standard fix is a short reuse-detection window (accept a just-rotated token once
 The token is spent before its replacement is minted, so a crash between the two leaves the caller
 signed out rather than holding two live refresh tokens.
 
+Rotation also creates a signal, which took a second change to actually read - see *"A reused refresh
+token is a `WARNING`, and `revoked_at` is what makes it legible"* below.
+
 That two-tab race is a genuine concurrency loss and is not the same thing as the same-second token
 *collision* described in the next section, which looked identical from the outside (a random logout)
 but happened with a single tab and had nothing to do with concurrency.
@@ -3024,6 +3027,108 @@ Two things worth knowing:
 The frontend carried a workaround for this: `sleepPastTheSecond()` in
 `opendiving-web/scripts/screenshots.mjs`, and *"The one-second refresh-token collision"* in
 `opendiving-web/DECISIONS.md`. Both can go once this is deployed.
+
+## A reused refresh token is a `WARNING`, and `revoked_at` is what makes it legible
+
+Rotation was already correct: `/auth/refresh` spends the presented cookie before minting its
+replacement, so a replay fails closed. What was missing was the *signal*. A reuse attempt is the
+strongest evidence this app ever gets that a refresh cookie has been stolen, and it produced nothing
+an operator could see.
+
+`verify_token` is why. It collapses two very different outcomes into one `None` - "a token we issued
+and then deliberately revoked, presented again" and "unparseable garbage" - and
+`refresh_access_token` turned both into the same `UnauthorizedException("Invalid refresh token.")`.
+The first is a security event. The second is noise.
+
+**`verify_token`'s signature did not change.** It runs on every authenticated request through
+`api.dependencies.get_current_user`, and widening its return type into a discriminated result would
+reshape the hottest path in the app for the benefit of one rare branch. Instead the question is
+asked a second time on the failure path only, by `core.security.revocation_time` - one indexed
+lookup (`token_blacklist.token` is unique) on a path that has already decided to answer 401, and no
+cost at all on any request that succeeds.
+
+`WARNING`, not `info`, for the reason `fetch_owned_or_raise` documents at length: nothing here
+configures logging below `configure_logging`, `uvicorn` configures only its own loggers, and an
+`info` call would be dropped on the floor in exactly the session where someone is trying to work out
+what happened. The level is load-bearing, and `tests/test_auth_refresh.py` asserts it rather than
+merely asserting that *something* was logged.
+
+### The hard part: telling theft from the documented race
+
+Rotation's own trade-off (above) is that **two tabs refreshing at the same instant race, and the
+loser gets a 401** - and the loser reaches precisely this branch. A naive reuse warning therefore
+fires on a benign, expected and not-especially-rare event, and an alert that cries wolf is worse
+than no alert at all.
+
+The signal that separates them is **elapsed time since the token was spent**: a tab race resolves in
+milliseconds, a stolen cookie is replayed minutes or hours later. The old schema could not supply
+it. `token_blacklist` stored only `token` and `expires_at`, and `expires_at` is copied from the
+token's own `exp` - so it says when the token was *issued*, never when it was revoked.
+
+Hence `token_blacklist.revoked_at`, and the migration that adds it. That is the whole schema change:
+one timestamp column, stamped by `core.security._blacklist_one` from the same clock as everything
+else in that module (so a test can freeze it), with a `server_default` of `now()` because the column
+is NOT NULL and existing rows need backfilling.
+
+That backfill is worth stating out loud, because it is a lie the column tells exactly once: every
+row that predates the migration gets the moment the migration ran, not the moment it was actually
+revoked. So immediately after upgrading, a query like
+`WHERE revoked_at > now() - interval '10 minutes'` matches the *entire* pre-existing table rather
+than the handful of rows someone meant. It is harmless for the log line - those rows are all older
+than any live session's rotation - and it stops being true once the first `purge_expired_tokens` run
+clears them, but it is a real foot-gun in the window between. (Written from experience, in that
+window.)
+
+The log line reports the gap and says what it means rather than asserting theft, because only the
+reader can tell the two apart:
+
+> A revoked refresh token was presented (subject: …) 0.004s after it was revoked. Under a second is
+> the two-tab rotation race POST /auth/refresh documents; a longer gap is worth investigating as a
+> stolen cookie.
+
+The elapsed figure is rendered as seconds below a minute and as a `timedelta` above it. Both ends of
+the range matter: milliseconds are what distinguish the race, and a replay can arrive days later,
+where `518400.000s` is a number nobody reads at a glance.
+
+### What was deliberately not done
+
+**Tier 1 - log unconditionally, no schema change.** Honest and cheaper, and there is a real argument
+for it: a self-hosted single-user instance has nobody watching logs anyway. Rejected because a
+warning that fires on the documented race and cannot say which case it is leaves the reader with the
+same "was this real?" question they started with. One column is a small price for a line that is
+actually actionable.
+
+**Tier 3 - family revocation.** The textbook response to reuse is to revoke the whole descendant
+chain of the reused token. That needs a lineage identifier propagated across rotations, and no such
+thing exists: `_new_jti` identifies one issuance at a time, deliberately, and every rotation mints
+an unrelated token. Building it means a second column, threading the family id through
+`create_refresh_token`/`issue_tokens`/`refresh_access_token`, and a revocation path that deletes by
+family rather than by value. It is the right direction if this ever matters; it is out of scope for
+making the event *visible*, which is what was actually missing. Recorded here rather than left
+unmentioned so the next person knows it was considered.
+
+**Automatic sign-out on reuse.** Not done for the same reason as the wording above: the tab race
+reaches this branch, and signing a user out because two of their tabs refreshed together would turn
+a harmless collision into a real logout. The 401 the replay already gets is the whole response.
+
+**Anything visible in the response.** The 401 and its `detail` are byte-identical whether the token
+was revoked or was never a token at all. Diverging would make the response an oracle for whether a
+given cookie was ever real, which is exactly the thing the single message exists to avoid. There is
+a test for it.
+
+### The purge ends the detection window, and that is fine
+
+`purge_expired_tokens` (hourly, `core/worker/functions.py`) deletes blacklist rows once `expires_at`
+has passed, which also ends the window in which a reuse of that token is detectable. That is
+consistent rather than a hole: `expires_at` *is* the token's own `exp`, so past it the token fails
+on expiry in `jwt.decode` regardless of any blacklist row, and there is no longer a usable
+credential to detect the theft of. The detection window and the token's useful life are the same
+window by construction.
+
+One seam worth knowing about, between a token's `exp` and the next hourly purge: the row still
+exists, so a presentation still logs, but `jwt.decode` now raises on expiry and `token_subject`
+degrades to reporting an unknown subject. That is deliberate - the alternative is decoding with
+`verify_exp` off, and there is no reason to read claims off an expired token to garnish a log line.
 
 ## Blacklist expiries are UTC-aware, and so is the purge that reads them
 
@@ -9147,6 +9252,207 @@ The same applies to the copy that has to exist in `opendiving-web` — the polic
 released in lockstep, and a finder who lands on the frontend repo needs the same instructions. An
 org-level `.github` repository would serve both from one file and is the better answer if a third
 repo ever wants it; two copies are the cheaper one while there are two.
+
+## A pin is a promise to renew, and nothing here was renewing them
+
+`deploy/docker-compose.yml` pins `postgres:18`, `redis:8-alpine` and `caddy:2.10-alpine` to digests,
+for the reasons the section above gives, and that was the whole of the story: no Renovate config, no
+`.github/dependabot.yml`, no audit or image-scan step in any of the five workflows. The pins were
+frozen at whatever those images were the day someone wrote them down and would stay there until a
+human happened to look.
+
+**That is strictly worse than not pinning at all, and it is worth being precise about why**, because
+it is the part a future reader will otherwise undo. A floating tag and a stale digest have the same
+observable behaviour — nothing in the repository changes, no diff appears, nobody is told anything —
+but the *content* they resolve to moves in opposite directions. `postgres:18` un-pinned drifts
+towards the current patched build; `postgres:18@sha256:06cad38a…` drifts away from it, one upstream
+security release at a time, while continuing to look deliberate. Pinning does not reduce the number
+of things you have to think about; it moves the thinking from "what will I get" to "when do I
+renew", and skipping the second half converts a decision into rot that reads as rigour. The pin is
+only worth having if something raises a PR when the digest moves — which is what
+`.github/renovate.json5` now is.
+
+The same argument answers the question the `linting.yml`/`tests.yml`/`type-checking.yml` permissions
+section above left open — whether to SHA-pin `actions/checkout@v7` and friends the way
+`astral-sh/setup-uv` and the docker actions already are — and answers it "not yet, and now for a
+better reason than before". The objection recorded there was that a pin nothing renews goes stale.
+Renovate renews it, so that objection is spent; what is left is the ordinary trade between a major
+tag (a first-party action, publishing security fixes into `v7`, from an owner whose compromise is a
+different order of event) and a SHA (a third-party action, where tag mutability is the actual threat
+model). The repository already draws that line where most people draw it. It is now a live choice
+rather than a default, and the Renovate config is written so that neither style is normalised into
+the other: `pinDigests` is `false`, and the `helpers:pinGitHubActionDigests` preset is deliberately
+not extended.
+
+**The `Dockerfile` floats on purpose, and the inconsistency with `deploy/` is the point.**
+`ghcr.io/astral-sh/uv:python3.14-bookworm-slim` and `python:3.14-slim-bookworm` carry no digest, and
+digest-pinning them "for consistency" would break the CVE story outright. `deploy/` is *pulled*: no
+build happens on the operator's machine, so the digest is the only thing standing between them and
+whatever upstream pushed this morning. The `Dockerfile` is *built*, and the one sanctioned remedy
+for a base-image CVE — dispatch Publish Image at the old `v` tag, per `CONTRIBUTING.md` — works
+precisely because the base is resolved at build time. Pin it, and re-running that dispatch
+reproduces the vulnerable base byte for byte and publishes a new digest that fixes nothing, while
+every alias moves and the whole thing reports success. The two files pin differently because they
+are answering different questions, and a reviewer reading them side by side is owed that sentence.
+
+**Renovate over Dependabot, but not for the usual reason.** The obvious argument — Dependabot cannot
+see a compose file — stopped being true in February 2025, when `docker-compose` went GA as an
+ecosystem, so the three digests are reachable to it after all. What decided it instead is a stack of
+three: Dependabot has no **uv** ecosystem, and `uv.lock` is what the shipped image installs from
+(`uv sync --locked`), so the entire Python tree would go unwatched; it cannot read `.python-version`
+at all; and its groups are scoped to a single ecosystem, which makes the coordinated Python move
+below inexpressible. Verified rather than assumed, by running
+`renovate --platform=local --dry-run=extract` against this repository before committing to it: 76
+dependencies across `pyproject.toml` (with `uv.lock` correctly picked up as its lock file),
+`Dockerfile`, `deploy/docker-compose.yml`, `docker-compose.yml`, `.python-version` and all five
+workflows. The same run is what confirms the pinning styles survive — `docker/login-action` comes
+back with both a `currentDigest` and a `currentValue` of `v4.6.0`, so the SHA and its trailing
+version comment are renewed together, while `actions/checkout` comes back with no digest at all and
+stays a tag.
+
+**A Python version is held back rather than automated.** `requires-python = "~=3.14.0"`, ruff's
+`target-version = "py314"`, `.python-version` and the two `Dockerfile` base tags have to move
+together, and Renovate reaches only the last three — it does not update `requires-python` (an open
+feature request) and knows nothing about ruff's target. An auto-opened PR would therefore be wrong
+by construction: it would move the interpreter, leave `requires-python` behind, and
+`uv sync --locked` would refuse to install into it. `dependencyDashboardApproval` on a group of the
+three reachable files is the honest handling — the dashboard says 3.15 exists, no red PR appears,
+and whoever ticks the box edits the other two by hand.
+
+## The scan that matters runs on a schedule, not on a pull request
+
+`.github/workflows/vulnerability-scan.yml` has two jobs and they are not two configurations of one
+idea. The PR job answers "is the change I am proposing vulnerable"; the scheduled job answers "is
+what people are already running vulnerable". Only the second one closes the loop with the rebuild
+`CONTRIBUTING.md` documents, because the event that triggers a rebuild is a release that passed
+every check the day it shipped and grew a CVE three weeks later — there is no PR in flight, no diff,
+and nothing in the repository has changed. A PR-blocking scan cannot see that no matter how strict
+it is, and a repository that has one is easy to mistake for a repository that is covered.
+
+**Trivy for both, not `pip-audit`.** `pip-audit` reads Python packages, and the CVEs that force a
+rebuild are Debian packages inside `python:3.14-slim-bookworm`. Trivy reports the OS layer and the
+installed Python distributions in one pass and labels which is which, which is what lets the issue
+body hand each row the remedy that actually applies to it — a rebuild for an OS finding, a whole new
+patch release for a Python one. Those two are further apart than they look; *"The two remedies in
+the report are genuinely different"* below is why. Using it for the PR job too means one third-party
+action pinned instead of two.
+
+**Trivy itself floats on `latest`, deliberately**, and it is the one pin in this repository that is
+meant not to exist. A scanner is worth what its release knows about; a version frozen here would
+quietly stop recognising new advisory formats while continuing to report zero findings, which is the
+one failure mode a security check must not have — indistinguishable from good news.
+
+**The alert is an issue, not a code-scanning alert.** SARIF plus `github/codeql-action/upload-sarif`
+is the better surface and produces a real alert list, but it needs GitHub Advanced Security on a
+private repository, and this one is private until it isn't. A detection mechanism that only starts
+working after a settings change nobody has made is not detection. When the repository goes public,
+`upload-sarif` becomes free and that step is what to replace.
+
+**One issue, edited in place, with a fingerprint.** A fresh issue per run would be a daily
+notification for a fact that has not changed, and the second one would be muted. So the workflow
+keeps a single `image-cve` issue and edits its body while the finding persists, closes it when a
+scan comes back clean, and — the part that needs the fingerprint — will not reopen for a set of CVEs
+somebody already read and closed. The fingerprint is the sorted set of *fixable CVE ids* and
+deliberately not the image digests: a rebuild that fails to clear a CVE changes every digest without
+changing the problem, and keying on digests would file that as news every time.
+
+**The clean-scan close rewrites the body before closing, and that one line is what keeps the
+suppression honest.** Closing without it leaves the issue carrying the fingerprint of the last
+*vulnerable* scan, which makes this workflow's own close byte-for-byte indistinguishable from a
+human dismissal — so the identical CVE set reappearing later (a rebuild that regressed, an alias
+that moved back, a fix upstream withdrawn) would match, take the "leaving it closed" branch, and
+never alert again. A silently suppressed alert is the precise failure this file exists to prevent,
+arrived at through the mechanism added to prevent a different one. Writing the clean report in first
+sets the fingerprint to the hash of an empty set, which cannot collide with any real finding, so a
+recurrence always opens a fresh issue while a genuine dismissal — whose body still holds the
+vulnerable fingerprint — still stays closed. The cost is that the body stops being the record of
+what was fixed, so the old body is quoted into the closing comment first, where the thread keeps it.
+
+**Quoted whole, rather than the CVE ids scraped out of it**, and the intermediate version that did
+scrape them is worth recording because it failed in a way that reads as safe.
+`CLEARED="$(… | grep -oE '(CVE|GHSA)-…' | …)"` exits 1 when it matches nothing, and under the step's
+`set -euo pipefail` a failing command substitution in a plain assignment aborts the step *there* —
+after the branch has been chosen and before `gh issue comment`, `gh issue edit` and `gh issue close`
+run. The issue is left open, uncommented, still carrying the stale vulnerable fingerprint: precisely
+the state the rewrite above exists to prevent, reintroduced by the code meant to preserve the
+record. The `else` branch written to handle "no ids found" never runs either: the assignment aborts
+the step first, so the one condition that would select that branch is the condition that stops it
+being reached. The *case* it was written for is real, though — a human filing or relabelling an
+`image-cve` issue, or a Trivy id outside the CVE/GHSA shape (`DSA-`, `DLA-`, `PYSEC-`). The general
+rule, since this repository's workflows are full of `set -euo pipefail`: **`grep` in a command
+substitution is a conditional wearing a pipeline's clothes.** Inside an `if` it is fine, which is
+why the label check further up the same step is; assigned to a variable it is a failure path. `jq`
+and `sed` do not have this shape — both exit 0 on no match — which is the other half of why copying
+beat scraping. Scraping was also capped by construction: it could only ever recover ids that
+survived the report's 50-row table cut, so the comment would have read as a complete accounting of
+what was fixed while silently dropping the rest, whereas the body carries its own "…and N more rows"
+caveat along with the table.
+
+**Findings fail the PR check but never the scheduled job.** Different jobs, different answers, both
+on purpose. The scheduled job's output is an issue, so a red X would add nothing and would train
+someone to ignore a red X on a security workflow; genuine errors still fail it, and it fails loudly
+in the one case that would otherwise look identical to good news — release tags exist but not one
+image alias resolves, which is a broken login or a missing package rather than an absence of
+releases. The PR job does fail, on HIGH/CRITICAL with a fix available only. The usual objection is
+that a newly published transitive CVE turns unrelated PRs red; it holds less here because Renovate
+is configured to open the fixing PR the moment the advisory lands, so the red state arrives with the
+remedy beside it. Without Renovate actually running, that check is a standing obstacle with no
+remedy attached — which is one more reason the enablement step is written down in `CONTRIBUTING.md`
+rather than assumed.
+
+**It skips cleanly when nothing has been published.** There are no `v*` tags yet and no package on
+GHCR, so a scheduled job that assumed either would have been red from the day it merged, and a check
+that is red from day one is a check somebody turns off. No `vX.Y.Z` tags means a logged skip.
+
+**Only the newest release is scanned, and widening that would make the workflow worse.** The first
+draft scanned `latest` plus every live `X.Y` alias — every minor ever released — on the reasoning
+that more coverage is more safety. It is not, and the reason is the same one this whole change is
+built on: an alert nobody can act on is not detection, it is training people to ignore the channel.
+A Publish Image dispatch recomputes the aliases of *the one version it names* and no others (see
+`prepare` in `publish-image.yml`). So a finding on `0.2` would survive every rebuild the
+documentation describes, return on the next morning's scan, and — because an image nobody rebuilds
+keeps accruing *new* advisories — open a brand-new issue each time the previous one was closed,
+since the fingerprint is a set of CVE ids and a new id is legitimately new. The result is a channel
+that cycles forever on something structurally unaddressable.
+
+`SECURITY.md` settles what would otherwise be a judgement call here. Its supported-versions table is
+"the most recent release: yes; anything older: no — upgrade to the newest", so the scan set is not a
+pragmatic truncation of a wider ideal — it *is* the supported surface, and the four aliases it
+covers (`X.Y.Z`, `X.Y`, the bare major, `latest`, one image under four names) are every form in
+which someone can be pinned to that release. That is also what makes SECURITY.md's own promise hold:
+"in that case `docker compose pull` is the whole fix even with a version pinned" is only true for a
+version whose base-image CVEs something is watching for. Widening the scan back means first widening
+the support policy, and that is a decision in `SECURITY.md`, not a line in a workflow.
+
+**The tracking issue is public, and `SECURITY.md` says not to open public issues for
+vulnerabilities. Both are right, and the line between them is worth stating** — because the next
+person to notice will otherwise either delete the workflow or quietly loosen the policy. That rule
+protects an *undisclosed defect in code this project ships*: opening an issue for one starts the
+exposure clock before a fix exists, which is exactly the harm it names. A base-image finding is the
+other thing entirely. It carries a CVE id because Debian and NVD published it first — Trivy has no
+way to report a vulnerability that has not already been disclosed upstream, since matching an
+installed version against a public advisory database is the whole of what it does. The issue
+therefore discloses nothing a reader could not get by running `trivy image` against the same public
+tag themselves, and the clock it is accused of starting started upstream, days earlier, without us.
+What the issue adds is not disclosure but *notification* — the maintainer learning that a
+published-and-supported image now needs the rebuild `CONTRIBUTING.md` documents. Route that through
+private vulnerability reporting instead and it lands in a channel designed for a human finder
+awaiting a human reply, on a daily cron, for facts that are already public: noise in the one inbox
+that must not be noisy. The distinction to preserve, if this is ever revisited: **already-public
+advisory about shipped bytes → issue; undisclosed defect in our own code → the private channel in
+`SECURITY.md`.** A scan that ever starts reporting the second kind — a `--scanners secret` pass
+finding a committed credential, say — has crossed the line and needs a different destination.
+
+**The two remedies in the report are genuinely different, and conflating them was a real bug in the
+first draft.** It told the reader that a *Python* package finding "needs a merged bump first",
+implying merge-then-rebuild. That cannot work, and the mechanism is worth stating because it is
+non-obvious: a dispatch checks out `ref` (`inputs.ref || github.ref`), the `Dockerfile` installs
+with `uv sync --locked` from the `uv.lock` bind-mounted out of *that* tree, and the tag/manifest
+guard refuses to publish `main` under an already-used version. So a rebuild at `v0.4.0` reinstalls
+`v0.4.0`'s exact dependency set however many bumps have landed since, publishes a fresh digest,
+moves every alias, and reports success while fixing nothing — the same shape of silent failure as
+digest-pinning the base image, arrived at from the other direction. The only remedy for a Python
+finding is a new patch release, and the issue body now says so per row rather than in a footnote.
 
 ## Security headers are the app's, not the proxy's
 
