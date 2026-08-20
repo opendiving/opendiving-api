@@ -9640,13 +9640,20 @@ The decision is made by reading request headers, and a cache that is not told wh
 the *next* request for that URL out of the entry it stored — including a request that carries a
 credential. Concretely: an unauthenticated `GET /admin/` gets a 303 to the login page, a shared
 cache stores it as public, and the signed-in admin behind that cache is bounced to login for the
-next minute. So the public branch appends `Vary: Cookie, Authorization`.
+next minute. So the public branch appends `Vary: Authorization, Cookie`.
+
+That value is `", ".join(sorted(CREDENTIAL_HEADERS))`, not a second literal beside the first. Two
+hand-maintained copies of one set drift, and this pair drifts *fail-open*: a third credential header
+added to the set but forgotten in the `Vary` still makes its own request `private, no-store`, while
+leaving a shared cache free to answer it from the anonymous entry it stored — which is precisely
+what the `Vary` is here to prevent. `tests/test_client_cache_middleware.py` asserts the containment
+rather than the string, so the set is the only place to edit.
 
 `MutableHeaders.add_vary_header` rather than assignment, because `CORSMiddleware` has already set
 `Vary: Origin` by the time this runs — `add_middleware` inserts at the front of the stack, so the
 later-registered `ClientCacheMiddleware` sits *outside* `CORSMiddleware` and sees its headers on the
 way out. Assigning would drop `Origin` and let a cache serve one origin's CORS headers to another.
-Measured on a cross-origin anonymous read: `Vary: Origin, Cookie, Authorization`.
+Measured on a cross-origin anonymous read: `Vary: Origin, Authorization, Cookie`.
 
 That is the same registration-order rule *"Security headers are the app's, not the proxy's"* above
 depends on, and `SecurityHeadersMiddleware` has since been registered after both, which makes it the

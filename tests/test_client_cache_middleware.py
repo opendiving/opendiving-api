@@ -158,6 +158,16 @@ class TestPublicResponsesDeclareWhatTheyVaryOn:
         assert "Origin" in vary
         assert "Cookie" in vary
 
+    def test_every_credential_header_is_named(self, client: TestClient):
+        """Derived from `CREDENTIAL_HEADERS`, not typed out beside it. A header added to
+        the set but missing from the `Vary` would still make its own request private
+        while leaving shared caches free to answer it from the anonymous entry - the
+        fail-open direction this header exists to close.
+        """
+        vary = {value.strip() for value in client.get("/public-thing").headers["Vary"].split(",")}
+
+        assert ClientCacheMiddleware.CREDENTIAL_HEADERS <= vary
+
 
 class TestTheRealAuthRoutes:
     """Asserted against the actual route table rather than the fixture above, so this

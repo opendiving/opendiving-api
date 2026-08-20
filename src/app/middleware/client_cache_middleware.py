@@ -69,6 +69,13 @@ class ClientCacheMiddleware(BaseHTTPMiddleware):
     #: open. Being wrong this way only costs a cache hit.
     CREDENTIAL_HEADERS = frozenset({"Authorization", "Cookie"})
 
+    #: What the public branch declares it varied on. Derived from the set above rather
+    #: than typed out again: a third credential header added there but forgotten here
+    #: would still get `private, no-store` on its own request, while leaving shared
+    #: caches free to answer it from the anonymous entry they stored - which is the
+    #: fail-open direction, and the exact thing the `Vary` exists to prevent.
+    VARY_ON_CREDENTIALS = ", ".join(sorted(CREDENTIAL_HEADERS))
+
     def __init__(self, app: FastAPI, max_age: int = 60) -> None:
         super().__init__(app)
         self.max_age = max_age
@@ -112,7 +119,7 @@ class ClientCacheMiddleware(BaseHTTPMiddleware):
             # the login redirect an unauthenticated `GET /admin/` gets, replayed to a
             # signed-in admin. `add_vary_header` merges rather than overwrites, so the
             # `Vary: Origin` the CORS middleware sets survives.
-            response.headers.add_vary_header("Cookie, Authorization")
+            response.headers.add_vary_header(self.VARY_ON_CREDENTIALS)
         else:
             response.headers["Cache-Control"] = "private, no-store"
 
