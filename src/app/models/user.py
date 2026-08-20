@@ -27,10 +27,11 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # a reminder nobody switched on is a reminder that never arrives, and the whole point
     # of the feature is reaching a diver who isn't currently in the app.
     #
-    # `Mapped[bool]` without `| None` deliberately - the column is NOT NULL, and
-    # `server_default` is what makes the model agree with the hand-written ALTER TABLE
-    # that adds it to an existing database (see DECISIONS.md; `create_all` never alters
-    # an existing table).
+    # `Mapped[bool]` without `| None` deliberately - the column is NOT NULL, and that is
+    # what the `default`/`server_default` pair is for. `default=` is client-side, applied
+    # by SQLAlchemy on INSERT, so it never reaches the DDL and Alembic cannot see it;
+    # only `server_default` gives the migration adding this column a value to backfill
+    # the rows already in the table with, which a NOT NULL column has to have.
     gear_service_emails: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
 
     # Which measurement system this diver reads and types in - `metric` or `imperial`
@@ -41,7 +42,8 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # DECISIONS.md).
     #
     # Same `default`/`server_default` pair as `gear_service_emails` above, for the same
-    # reason - the column is NOT NULL and `create_all` never alters an existing table.
+    # reason - the column is NOT NULL, so the migration adding it needs a server-side
+    # default to backfill the existing rows.
     units: Mapped[str] = mapped_column(String(16), default="metric", server_default="metric")
 
     # Overrides `SoftDeleteMixin.is_deleted` to add an index: unlike Dive, Certification and

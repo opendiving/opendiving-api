@@ -1715,18 +1715,27 @@ Opt-*out*, not opt-in: a reminder nobody switched on is a reminder that never ar
 entire point of the feature is reaching a diver who isn't currently in the app.
 
 It has to be added to **both** `UserRead` (so `GET /user` feeds the settings toggle; the `= True`
-default also covers the window before the `ALTER` runs) and `UserUpdate`. Missing the second is the
-easy mistake: `UserUpdate` is `extra="forbid"`, so the toggle would 422 rather than save.
+default also covers reading a database that does not have the column yet) and `UserUpdate`. Missing
+the second is the easy mistake: `UserUpdate` is `extra="forbid"`, so the toggle would 422 rather
+than save.
 
-Per "Schema changes have no migration tool", apply to an existing local DB with:
+**The DDL below is archaeology.** Written under "Schema changes have no migration tool", this was
+the hand-applied step for an existing local DB, and the whole manual-DDL list for the feature - both
+new tables, all their indexes, all three `CheckConstraint`s and both FKs arrived via `create_all()`
+on restart, because they were brand-new tables:
 
 ```sql
 ALTER TABLE "user" ADD COLUMN gear_service_emails BOOLEAN NOT NULL DEFAULT true;
 ```
 
-That is the whole manual-DDL list for this feature. Both new tables, all their indexes, all three
-`CheckConstraint`s and both FKs arrive via `create_all()` on restart, because they are brand-new
-tables.
+None of that is a step any more (see *"Migrations run on startup, and every schema change ships
+one"*): the equivalent ships as an Alembic revision and reaches a database by the container
+starting. What survived the change is the column's `server_default="true"`, and for a reason worth
+keeping straight - it is not there to make the model agree with the hand-written `ALTER`. The column
+is `NOT NULL`, so whatever adds it to a table that already has rows must supply a value for them,
+and only a server-side default is part of the DDL. `default=True` is applied by SQLAlchemy on
+INSERT, so autogenerate cannot see it and a migration generated from a model carrying `default=`
+alone would fail against any non-empty table.
 
 ## Certification card files live in Postgres, not object storage
 
@@ -7465,25 +7474,32 @@ as a sentence at the point of use - `"units": "imperial"` - and the settings row
 *"`user.gear_service_emails` is the only new column on an existing table"*): the field goes on
 `UserRead` **and** `UserUpdate`, because `UserUpdate` is `extra="forbid"` and missing the second
 422s the settings toggle instead of saving it. `UserRead`'s `= UnitSystem.METRIC` default is what
-lets `GET /user` answer against a database where the hand-written `ALTER` has not run yet.
-`UserAdminUpdate` inherits both the field and the guard with no separate edit. The column is
-`NOT NULL`, so `"units"` joins `UserUpdate.NON_NULLABLE_FIELDS` - and
+lets `GET /user` answer against a database that does not have the column yet. `UserAdminUpdate`
+inherits both the field and the guard with no separate edit. The column is `NOT NULL`, so `"units"`
+joins `UserUpdate.NON_NULLABLE_FIELDS` - and
 `test_update_explicit_nulls.py::test_the_declared_fields_match_the_table` reads that list back off
 the SQLAlchemy metadata, so forgetting it fails the build rather than quietly reopening the
-explicit-null hole (see *"Update schemas refuse an explicit null for a `NOT NULL` column"*). What no
-test can catch is a forgotten hand-applied `ALTER`.
+explicit-null hole (see *"Update schemas refuse an explicit null for a `NOT NULL` column"*). When
+this was written, what no test could catch was the forgotten hand-applied `ALTER` that would leave a
+database in exactly that state.
 
-Being a new column on an existing table (see *"Schema changes have no migration tool"*), this needs
-a manual migration on any existing database:
+**The DDL below is archaeology**, for the same reason as in the `gear_service_emails` section this
+one is modelled on. Under "Schema changes have no migration tool" this was the manual step on any
+existing database, and the whole manual-DDL list for the feature:
 
 ```sql
 ALTER TABLE "user" ADD COLUMN units VARCHAR(16) NOT NULL DEFAULT 'metric';
 ```
 
-That is the whole manual-DDL list for this feature, and the whole API-side surface with it: no
-endpoint's response varies by the preference, so there is no cache key, no invalidation and no
-parser work anywhere in this change. Metric is the default for every existing row and every new
-account.
+The equivalent ships as an Alembic revision now (see *"Migrations run on startup, and every schema
+change ships one"*), and `alembic check` in CI fails a PR whose models and revisions disagree, which
+is the forgotten-`ALTER` hole closed. `server_default="metric"` stays, and stays load-bearing: a
+`NOT NULL` column added to a table with rows in it needs a server-side default to backfill them, and
+`default="metric"` is client-side and invisible to autogenerate.
+
+That is the whole API-side surface with it: no endpoint's response varies by the preference, so
+there is no cache key, no invalidation and no parser work anywhere in this change. Metric is the
+default for every existing row and every new account.
 
 ## The attribution string is a wire format, so its shape is part of the API contract
 
