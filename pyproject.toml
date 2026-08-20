@@ -11,7 +11,9 @@ dependencies = [
     "httptools>=0.6.1",
     "uuid>=1.30",
     "uuid6>=2024.1.12",
-    "alembic>=1.13.1",
+    # 1.16 for the `path_separator` config option, which replaced `version_path_separator`
+    # and is what silences the legacy-splitting warning on `prepend_sys_path`.
+    "alembic>=1.16.0",
     "asyncpg>=0.29.0",
     "SQLAlchemy-Utils>=0.41.1",
     "python-jose>=3.3.0",
