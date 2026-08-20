@@ -76,7 +76,12 @@ jobs:
       # container image and nowhere else, least of all on a runner. `tests/conftest.py`
       # sets the same variable for pytest itself (it has to, since `settings` is read at
       # import); this covers the `alembic upgrade head` step, which imports the app too.
-      FILE_STORAGE_DIR: ${{ runner.temp }}/opendiving-files
+      #
+      # A literal path, not `${{ runner.temp }}`: the `runner` context is not available in
+      # a job-level `env:` block, and using it here does not fail the step - it makes the
+      # whole workflow file invalid, so the job never runs and never appears in
+      # `gh pr checks` at all. Which looks exactly like a green PR.
+      FILE_STORAGE_DIR: /tmp/opendiving-files
 
     steps:
       - uses: actions/checkout@v7
