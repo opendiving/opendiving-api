@@ -16,9 +16,10 @@ one rather than matching the wrapping by hand.
 - **`cp src/.env.example src/.env` is not a working configuration, on purpose.** The template's
   `SECRET_KEY` is a published placeholder and startup rejects it in every environment — generate one
   with `openssl rand -hex 32`. Same shape elsewhere: no `CONTACT_FORM_EMAIL` default (the endpoint
-  503s unset), no `SMTP_HOST` allowed on `ENVIRONMENT=production`, admin panel commented out. See
-  *"The config template stopped being a working configuration"* in `DECISIONS.md` before adding a
-  setting that can be silently wrong.
+  503s unset), no `ADMIN_EMAIL` default and the line commented out (unset means the first-superuser
+  script creates nothing), no missing `SMTP_HOST` allowed on any `ENVIRONMENT` but `local`, admin
+  panel commented out. See *"The config template stopped being a working configuration"* in
+  `DECISIONS.md` before adding a setting that can be silently wrong.
 
 - Runs in: Docker Compose — `db` (postgres), `redis`, `api`, `worker` (arq), and `admin_init`
   (one-shot, seeds the admin panel before `api` starts)
