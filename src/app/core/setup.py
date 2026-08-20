@@ -15,6 +15,7 @@ from sqlalchemy import text
 
 from ..api.dependencies import get_current_superuser
 from ..middleware.client_cache_middleware import ClientCacheMiddleware
+from ..middleware.security_headers_middleware import SecurityHeadersMiddleware
 from ..models import *  # noqa: F403
 from .config import (
     AppSettings,
@@ -171,6 +172,9 @@ def create_application(
         - EnvironmentSettings: Conditionally sets documentation URLs and integrates custom routes for API documentation
           based on the environment type.
 
+        Frame protection and `nosniff` come from no setting at all - they are added to
+        every application this builds, see `SecurityHeadersMiddleware`.
+
     apply_migrations_on_start : bool
         A flag to indicate whether to run `alembic upgrade head` on application startup.
         Defaults to True. Distinct from the `MIGRATE_ON_START` setting, which is the
@@ -237,6 +241,18 @@ def create_application(
         # `BaseHTTPMiddleware` subclasses are typed; this is the standard, documented
         # way to register middleware and works correctly at runtime.
         application.add_middleware(ClientCacheMiddleware, max_age=settings.CLIENT_CACHE_MAX_AGE)  # type: ignore[arg-type]
+
+    # Registered last on purpose. `add_middleware` inserts at the front of the stack, so
+    # the last one added is the *outermost* - which is what puts it outside
+    # `CORSMiddleware`, the one piece of the stack that answers a request itself (an
+    # `OPTIONS` preflight) instead of calling through. Registered before it, this would
+    # never see those responses. Everything routed, the admin panel `main.py` mounts
+    # included, is covered either way: a mount lives in the router, inside all of this.
+    #
+    # Unconditional, unlike the middleware above it, because there is no deployment where
+    # these headers are the wrong answer and a setting would only be one more thing that
+    # can be quietly off.
+    application.add_middleware(SecurityHeadersMiddleware)
 
     if isinstance(settings, EnvironmentSettings):
         if settings.ENVIRONMENT != EnvironmentOption.PRODUCTION:
