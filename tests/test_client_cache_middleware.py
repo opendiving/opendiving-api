@@ -179,6 +179,7 @@ class TestTheRealAuthRoutes:
 
         minting = {
             "/auth/email/verify",
+            "/auth/email/verify-code",
             "/auth/google",
             "/auth/complete",
             "/auth/refresh",

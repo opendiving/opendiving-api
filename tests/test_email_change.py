@@ -99,6 +99,30 @@ class TestRequestEmailChange:
             assert kwargs["object"].invalidated_at is not None
 
     @pytest.mark.asyncio
+    async def test_the_row_it_mints_carries_no_sign_in_code(self, mock_db, current_user_dict):
+        """`authentication_request` backs both flows, and only sign-in puts a code on the
+        row. An email change is confirmed by opening the link *in the new mailbox*, so a
+        code typed back into the tab that asked would prove nothing about that mailbox -
+        it would turn a possession proof into a click.
+        """
+        with (
+            patch("src.app.api.v1.users.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.users.crud_authentication_requests") as mock_crud,
+            patch("src.app.api.v1.users.send_email_change_confirmation_email", new_callable=AsyncMock),
+        ):
+            mock_crud.count = AsyncMock(return_value=0)
+            mock_crud.create = AsyncMock(return_value=None)
+
+            await request_email_change(
+                _request(),
+                EmailChangeRequest(new_email="new@example.com"),
+                current_user_dict,
+                mock_db,
+            )
+
+            assert mock_crud.create.call_args.kwargs["object"].code_hash is None
+
+    @pytest.mark.asyncio
     async def test_does_not_call_update_when_there_is_nothing_pending(self, mock_db, current_user_dict):
         with (
             patch("src.app.api.v1.users.enforce_rate_limit", new_callable=AsyncMock),

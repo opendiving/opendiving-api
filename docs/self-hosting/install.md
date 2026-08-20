@@ -33,12 +33,12 @@ is yours.
 
 ## What you need
 
-**A mail relay.** Sign-in is passwordless — an emailed magic link is the only way anybody, including
-you, gets in — so an instance that cannot send mail cannot be used. Any SMTP relay works: your mail
-provider, your host's, or your own existing server. Don't stand up an MTA for this unless you
-already know why; getting mail *accepted* (SPF, DKIM, DMARC, IP reputation, a port 25 your host
-probably blocks) is the hard part, and it is why every serious self-hosted app asks for relay
-credentials instead of bundling Postfix.
+**A mail relay.** Sign-in is passwordless — an emailed link, or the six-digit code beside it, is the
+only way anybody including you gets in — so an instance that cannot send mail cannot be used. Any
+SMTP relay works: your mail provider, your host's, or your own existing server. Don't stand up an
+MTA for this unless you already know why; getting mail *accepted* (SPF, DKIM, DMARC, IP reputation,
+a port 25 your host probably blocks) is the hard part, and it is why every serious self-hosted app
+asks for relay credentials instead of bundling Postfix.
 
 **A machine.** Modest: this is a personal dive log, not a photo library.
 
