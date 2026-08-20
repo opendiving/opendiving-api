@@ -406,6 +406,53 @@ class TestRegistration:
         # Without the rollback the session is unusable for anything that follows.
         mock_db.rollback.assert_awaited_once()
 
+    def test_each_conflict_is_a_fresh_exception_object(self):
+        """A module-level `HTTPException` constant would be the tempting shape here, and is
+        a leak: raising one instance repeatedly *prepends* each raise's frames to the
+        traceback it already carries, so the object accumulates every conflict's stack for
+        the life of the process and pins each one's locals - a request's session, user dict
+        and attestation payload - alive with it.
+        """
+        from src.app.services.passkey_service import _already_registered, _at_the_cap
+
+        for factory in (_at_the_cap, _already_registered):
+            first, second = factory(), factory()
+
+            assert first is not second
+            assert first.status_code == second.status_code == 409
+            assert first.detail == second.detail
+
+    @pytest.mark.asyncio
+    async def test_both_conflict_paths_are_indistinguishable(self, mock_db, redis_client):
+        """The per-user check and the unique constraint answer the same thing, so a caller
+        cannot use the difference to learn that a credential belongs to another account."""
+        from sqlalchemy.exc import IntegrityError
+
+        details = set()
+        for existing, create in (
+            ([_stored(credential_id=b"same")], AsyncMock()),
+            ([], AsyncMock(side_effect=IntegrityError("INSERT", {}, Exception("duplicate key")))),
+        ):
+            device = SoftAuthenticator(rp_id=RP_ID, origin=ORIGIN)
+            mock_db.rollback = AsyncMock()
+            with patch("src.app.services.passkey_service.crud_webauthn_credentials") as crud:
+                crud.get_multi = AsyncMock(return_value={"data": []})
+                crud.create = create
+                options = (await passkey_registration_options(_user(), mock_db)).options
+                attestation = device.register(options)
+                crud.get_multi = AsyncMock(
+                    return_value={"data": [_stored(credential_id=device.credential_id)] if existing else []}
+                )
+
+                with pytest.raises(HTTPException) as exc_info:
+                    await passkey_registration_verify(
+                        PasskeyRegistrationVerifyRequest(credential=attestation, name="iPhone"), _user(), mock_db
+                    )
+
+            details.add((exc_info.value.status_code, exc_info.value.detail))
+
+        assert details == {(409, "That passkey is already registered.")}
+
 
 @pytest.mark.usefixtures("no_rate_limits")
 class TestSignInOptions:

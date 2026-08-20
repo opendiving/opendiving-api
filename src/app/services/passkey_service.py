@@ -55,9 +55,8 @@ logger = logging.getLogger(__name__)
 _SIGN_IN_FAILED = "That passkey could not be used to sign in."
 
 # Raised from two places - the per-user check, and the unique constraint that catches what
-# that check cannot see. One object because it carries no per-call state and the two paths
-# must be indistinguishable to the caller.
-_ALREADY_REGISTERED = HTTPException(status_code=409, detail="That passkey is already registered.")
+# that check cannot see - which must be indistinguishable to the caller.
+_ALREADY_REGISTERED_DETAIL = "That passkey is already registered."
 
 
 def _registration_selection() -> AuthenticatorSelectionCriteria:
@@ -98,13 +97,27 @@ def _known_transports(transports: list[str] | None) -> list[AuthenticatorTranspo
 def _at_the_cap() -> HTTPException:
     """409, not 422: the request body is fine, the *account's state* is what conflicts -
     which is the line `AGENTS.md` draws between the two codes. A raw `HTTPException` for
-    the same reason `POST /dive/{uuid}/file`'s conflicts are raw ones:
+    the same reason `PUT /dive/{uuid}/file`'s conflicts are raw ones:
     `core/exceptions/http_exceptions.py` has no class for 409.
+
+    A factory, and so is `_already_registered` below - **never** a module-level constant,
+    however tempting one looks for a message with no per-call state in it. Raising one
+    exception *instance* repeatedly prepends each raise's frames to the traceback it is
+    already carrying instead of replacing them, so a shared object accumulates every
+    conflict's stack for the life of the process and pins each one's locals - here, a
+    request's `AsyncSession`, `user` dict and attestation payload - alive with it. `raise
+    ... from None` also writes `__cause__`/`__context__` onto the shared object, where a
+    concurrent request can see it.
     """
     return HTTPException(
         status_code=409,
         detail=f"You already have {settings.PASSKEY_MAX_CREDENTIALS_PER_USER} passkeys. Remove one to add another.",
     )
+
+
+def _already_registered() -> HTTPException:
+    """See `_at_the_cap` for why this is a factory rather than a constant."""
+    return HTTPException(status_code=409, detail=_ALREADY_REGISTERED_DETAIL)
 
 
 async def start_registration(*, db: AsyncSession, user: dict[str, Any]) -> dict[str, Any]:
@@ -176,7 +189,7 @@ async def finish_registration(
     if len(existing) >= settings.PASSKEY_MAX_CREDENTIALS_PER_USER:
         raise _at_the_cap()
     if any(row.credential_id == verified.credential_id for row in existing):
-        raise _ALREADY_REGISTERED
+        raise _already_registered()
 
     try:
         created = await crud_webauthn_credentials.create(
@@ -203,7 +216,7 @@ async def finish_registration(
         # either way. Rolled back for the same reason `complete_profile` does: the session
         # is unusable afterwards otherwise.
         await db.rollback()
-        raise _ALREADY_REGISTERED from None
+        raise _already_registered() from None
 
     return cast(WebauthnCredentialReadInternal, created)
 
