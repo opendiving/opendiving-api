@@ -36,6 +36,15 @@ For running the tooling (ruff, mypy, pytest) outside the container you need Pyth
 uv sync --extra dev
 ```
 
+Commits in this repo are signed, and a hook keeps them that way. Once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+`.githooks/pre-push` then refuses to push a commit carrying no signature at all. Linked worktrees
+share the setting, so that single command covers them too.
+
 ## Before you open a PR
 
 Three workflows run on every pull request, and all must be green. Run them locally first:
@@ -241,6 +250,9 @@ docker compose exec api python -m src.scripts.backfill_dive_profiles --parser-ke
 
 ## Pull requests
 
+- **Every commit in the PR must be signed.** GitHub shows the ones that aren't as *Unverified*,
+  which is worth nothing to anyone auditing a self-hosted deployment's provenance later. Set
+  `core.hooksPath` as above and the push hook keeps you honest.
 - Branch off `main`, keep the PR focused on one thing.
 - Title the PR as a conventional commit — `<type>[(scope)][!]: <description>`, e.g.
   `feat: store the dive-computer export a dive was imported from`. Types: `feat`, `fix`, `refactor`,
