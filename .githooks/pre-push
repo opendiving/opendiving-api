@@ -21,16 +21,32 @@ only_zeros() {
     esac
 }
 
+# $1 local sha, $2 the sha the remote advertised. That second one arrives over
+# the wire rather than from a remote-tracking ref, so it can name a commit this
+# clone has never fetched - someone advancing the branch in the GitHub UI is
+# enough, and a --force push then gets past the non-fast-forward refusal that
+# would otherwise stop this. `rev-list a..b` with an unknown `a` writes nothing
+# and exits 128, which as a bare command substitution is indistinguishable from
+# "nothing to push". Ask first, and fall back to the whole unpushed set.
+list_unpushed() {
+    if git cat-file -e "$2^{commit}" 2>/dev/null; then
+        git rev-list "$2..$1"
+    else
+        git rev-list "$1" --not --remotes
+    fi
+}
+
 failed=0
 
 while read -r _local_ref local_sha remote_ref remote_sha; do
     only_zeros "$local_sha" && continue    # deleting a branch pushes a null sha
 
-    if only_zeros "$remote_sha"; then
-        # New branch: everything that is not already on a remote.
-        revs=$(git rev-list "$local_sha" --not --remotes)
-    else
-        revs=$(git rev-list "$remote_sha..$local_sha")
+    # A brand-new branch advertises the null sha, which no `cat-file` resolves,
+    # so it takes the same fallback as an unknown one.
+    if ! revs=$(list_unpushed "$local_sha" "$remote_sha"); then
+        echo "pre-push: cannot tell what $remote_ref would receive; refusing" >&2
+        failed=1
+        continue
     fi
     [ -z "$revs" ] && continue
 

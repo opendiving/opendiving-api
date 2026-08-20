@@ -10339,6 +10339,20 @@ therefore catches a single `ValueError`, which covers both `json.JSONDecodeError
 not have caught the regression either way: `ruff format --check` runs on `src tests scripts`, and
 `.claude/` is in none of them.
 
+**A bare command substitution hides a failure, and here that failure read as "nothing to push".**
+The `remote_sha` a pre-push hook is handed comes off the wire in the ref advertisement, not from a
+remote-tracking ref, so it can name a commit this clone has never fetched - someone advancing the
+branch in the GitHub UI is enough, and a `--force` push then gets past the non-fast-forward refusal
+that would otherwise stop it first. `git rev-list <unknown>..<local>` prints nothing and exits 128,
+but `revs=$(...)` keeps only the empty stdout, and the `[ -z "$revs" ] && continue` on the next line
+reads that as an empty range and skips the signature check entirely. Reproduced end to end before
+fixing it: an unsigned commit landed on a remote with the hook installed and `git push` exiting 0.
+The hook now resolves the advertised sha with `cat-file -e` first and falls back to everything not
+already on a remote-tracking ref - the same path a brand-new branch takes, since the null sha
+resolves no better - and refuses the push outright if the listing itself fails. The lesson
+generalises past this file: in a guard, a command substitution whose exit status nobody reads is a
+pass waiting to happen.
+
 None of this survives someone determined: `git push --no-verify` skips the push hook, a commit made
 outside the Bash tool never meets the other one, and both files are editable by anything that can
 edit the repo. They are speed bumps against a habit, and the habit is the actual failure mode. The
