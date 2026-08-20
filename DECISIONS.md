@@ -4825,6 +4825,12 @@ report reading "nothing skipped" for a skipped dive is worse than no report.
 
 ## `load_dive_file` detaches the row it read, because the blob outlives the need for it
 
+**Superseded for the two file loaders.** Their payloads left Postgres before the first release, so
+both read explicit columns and there is no ORM instance to detach — see *"File payloads live on the
+files volume, not in Postgres"*. The mechanism below is still live in `load_profile`
+(`services/dive_profiles.py`), which is now the only loader that undefers a real column;
+`dive_profile.data` is JSONB and stays in the database deliberately.
+
 `local_session` is built `expire_on_commit=False` (`core/db/database.py`), which is right for the
 request path — a committed ORM instance stays usable instead of triggering a fresh `SELECT` per
 attribute on the way out through a response model. The cost lands somewhere that path never sees.

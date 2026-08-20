@@ -94,6 +94,29 @@ def sniff_content_type(data: bytes) -> str:
     raise UnsupportedCardFileError("Unsupported file type. Upload a JPEG, PNG, WEBP or PDF.")
 
 
+async def _release_read_transaction(db: AsyncSession) -> None:
+    """End the read-only transaction the lookup above opened, before the blob write.
+
+    Third copy of an idea `services/dive_files.py` and `services/species_service.py` each
+    carry their own of, and it earns its place here for the same reason: `AsyncSession`
+    autobegins on the first `execute()`, so without this the connection that ran a
+    sub-millisecond `SELECT` sits **idle-in-transaction** across a threadpool write and
+    `fsync` of up to 10 MB. The event loop is free throughout - that is what the thread hop
+    bought - but the pool is not, and the symptom when it finally bites is unrelated
+    endpoints timing out on `pool_timeout`. See *"The read transaction is released before
+    either endpoint goes outbound"* in `DECISIONS.md`.
+
+    Safe here for the same two reasons as there: nothing has been written yet, so there is
+    nothing to preserve, and the lookup returns a `Row` of two scalars rather than an ORM
+    instance, so there is no state to expire. It costs the upsert nothing either - the
+    pre-select takes no lock, so it never protected the statement that follows it.
+
+    `rollback` rather than `commit` because it states what is true: no work is being
+    persisted.
+    """
+    await db.rollback()
+
+
 async def store_certification_file(
     db: AsyncSession, *, certification_id: int, side: CertificationSide, upload: UploadFile
 ) -> CertificationFileInfo:
@@ -145,6 +168,7 @@ async def store_certification_file(
 
     row_uuid = existing.uuid if existing is not None else uuid7()
     key = blob_store.build_key(KEY_KIND, row_uuid=row_uuid, sha256=digest)
+    await _release_read_transaction(db)
     await blob_store.put(key, data)
 
     # Just the parts a replacement changes. Everything identifying the row -
