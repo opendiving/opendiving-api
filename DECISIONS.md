@@ -3330,6 +3330,22 @@ brand-new tables. Only ever contended on a cold database.
 Note this was invisible on a warm database - the earlier multi-worker test passed simply because the
 tables already existed. It only reproduced against a freshly created one.
 
+**And a third, when the files volume arrived.** `ensure_root_writable` proves the volume is writable
+by creating a probe file and unlinking it — and the first version used one fixed name,
+`{root}/tmp/.writable`, for all four workers. Two of them overlapping means the second one's
+`unlink` hits a file the first already took; `FileNotFoundError` is an `OSError`, so the handler
+turned it into a fatal "the files volume is not writable" against a volume that was perfectly
+healthy. Fixed with a per-pid probe name and `missing_ok=True` on the unlink — the same treatment
+`_write_atomically` in that module already gave its temp files, which is what makes the omission
+worth recording rather than just fixing.
+
+Worth noting what makes this one nastier than the two above: they crash-loop a *cold* start and are
+therefore loud, while this is a race that fires intermittently on any start and accuses the wrong
+component when it does. An operator reading that message goes and checks their mount. So the shape
+recurs in a fourth way too — **a startup check is itself per-worker code, and a check that can fail
+spuriously is worse than no check**. `tests/test_blob_store.py::TestEnsureRootWritable` now pins
+both halves, and the threaded test does fail against the old shared-name version.
+
 ## Running the admin panel on more than one worker
 
 Two pieces of the panel's state are per-process. Verified with 4 workers against Postgres:
@@ -9869,6 +9885,10 @@ does nothing against that; only an absolute sanity check does. No arq cron, for 
 scheduled deletion machinery is precisely what that tale warns against automating.
 
 ### Startup fails loudly if it cannot write, and shouts if the volume looks unmounted
+
+The writability probe is per-pid (`{root}/tmp/.writable-{pid}`, unlinked with `missing_ok=True`),
+because this check runs in the lifespan and the lifespan runs once per worker — see *"Two things
+raced once the image ran four workers"*, which this became the third instance of.
 
 `ensure_root_writable` runs in the lifespan **before** `apply_migrations`, because the revision that
 moves the payloads writes files itself. Four gunicorn workers each discovering an unwritable volume
