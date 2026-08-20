@@ -199,12 +199,14 @@ async def verify_email_link(
     """Step 2 of the email flow: validates the magic-link token and either signs the
     caller in (existing account) or hands back an onboarding session (new one).
 
-    Re-opening/re-verifying the *same* link again (e.g. because a mail client's
-    link-preview/security-scanning feature "detonated" it before a human clicked, or
-    the user simply clicked twice) is deliberately not an error - it just re-confirms
-    the same outcome, since `resolve_identity` is a pure lookup with no side effects
-    of its own. Only an *expired* link, or one superseded by a newer request (see
-    `request_email_link`), is rejected - see `AuthenticationRequest.invalidated_at`.
+    The token is strictly single-use, as the email that carries it promises: an
+    already-`used_at` link is rejected, alongside one that expired or was superseded
+    by a newer request (see `request_email_link` and
+    `AuthenticationRequest.invalidated_at`). Replay used to be allowed here on the
+    grounds that `resolve_identity` is a pure lookup - true, but beside the point,
+    since the side effect that matters is `_start_onboarding_or_sign_in` minting a
+    fresh refresh cookie good for `REFRESH_TOKEN_EXPIRE_DAYS`. Anyone who reads the
+    mail after the recipient has clicked it got a brand-new week-long session.
     """
     await enforce_rate_limit(
         f"auth:email-verify:ip:{client_ip(request)}",
@@ -216,8 +218,14 @@ async def verify_email_link(
     if auth_request is None:
         raise UnauthorizedException("This sign-in link is invalid.")
 
+    # Ordered most-specific-reason-first, matching `check_email_link`: superseded
+    # beats used, used beats expired, so the caller is told the one thing that is
+    # most useful to know about their link.
     if auth_request["invalidated_at"] is not None:
         raise UnauthorizedException("This sign-in link is no longer valid - a newer one was requested.")
+
+    if auth_request["used_at"] is not None:
+        raise UnauthorizedException("This sign-in link has already been used.")
 
     expires_at = auth_request["expires_at"]
     if expires_at.tzinfo is None:
@@ -225,10 +233,9 @@ async def verify_email_link(
     if expires_at < datetime.now(UTC):
         raise UnauthorizedException("This sign-in link has expired.")
 
-    if auth_request["used_at"] is None:
-        await crud_authentication_requests.update(
-            db=db, object=AuthenticationRequestUpdate(used_at=datetime.now(UTC)), id=auth_request["id"]
-        )
+    await crud_authentication_requests.update(
+        db=db, object=AuthenticationRequestUpdate(used_at=datetime.now(UTC)), id=auth_request["id"]
+    )
 
     outcome = await resolve_identity(db=db, provider="email", email=auth_request["email"])
     return await _start_onboarding_or_sign_in(response, outcome)

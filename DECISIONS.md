@@ -893,17 +893,18 @@ ever call `POST /auth/email/verify`/`POST /user/email-change/verify`. A preview/
 page, but it can't fake a real click, so no session is issued and no email is changed without
 genuine user interaction.
 
-On top of that, as defense-in-depth (e.g. a double click, or a slow network retry re-submitting the
-same request): `AuthenticationRequest` distinguishes `used_at` (informational - when a token was
-first successfully verified) from `invalidated_at` (when a *newer* request supersedes it - see
-`request_email_link`/`request_email_change`, which invalidate any previous live request for the same
-email/user). Verifying an already-used-but-not-invalidated token is deliberately **not** an error -
-it's a harmless repeat, since re-running `resolve_identity`/re-applying the same email change
-produces the exact same outcome every time. Only an *invalidated* or *expired* token is rejected.
-This is safe specifically because neither flow grants an escalated or different outcome on replay
-within the token's own (short) validity window - it's the same account either way - so there's no
-meaningful security downgrade from allowing the repeat, just the removal of a confusing failure
-mode.
+Behind that, `AuthenticationRequest` distinguishes two ways a token stops being live: `used_at`
+(when it was first successfully verified) and `invalidated_at` (when a *newer* request supersedes
+it; see `request_email_link`/`request_email_change`, which invalidate any previous live request for
+the same email/user). Both are rejections in the sign-in flow; the split exists so the caller can be
+told *which* one applies, since "a newer link is waiting in your inbox" and "this one is spent" call
+for different next steps.
+
+Verifying an already-used token was originally **not** an error in either flow, as defense-in-depth
+against races (a double click, a slow network retry re-submitting the same request). That leniency
+is gone from sign-in - see *"A spent sign-in link is a spent sign-in link"* below for why the
+argument for it didn't survive contact with what the endpoint actually does. `verify_email_change`
+keeps a narrowed form of it, described under the next heading.
 
 `invalidated_at` was added to the *existing* `authentication_request` table - same "no migration
 tool" caveat as `purpose`/`user_id` above applies on an already-running dev DB:
@@ -924,11 +925,12 @@ actionable to a human who revisits it long after the fact.
 The fix: `GET /auth/email/verify/check` and `GET /user/email-change/verify/check`
 (`check_email_link`/`check_email_change_link`) are new, side-effect-free precheck endpoints - they
 look up the token and report whether it's still live (not found, invalidated, *already used*, or
-expired all count as "not live"), and, if it is, which email it's for. Unlike the POST verify
-endpoints, **`used_at` alone is enough to make the precheck say "invalid"** - there's no races to
-tolerate here, since nothing has been submitted yet. The frontend calls this on page load, *before*
-showing the confirm button at all, so a revisited/already-used link shows an error immediately
-rather than a clickable button (see the web app's `DECISIONS.md`).
+expired all count as "not live"), and, if it is, which email it's for. **`used_at` alone is enough
+to make the precheck say "invalid"**, which at the time set it apart from both POST verify
+endpoints; `verify_email_link` has since been brought in line, and only `verify_email_change` still
+tolerates a replay. The frontend calls this on page load, *before* showing the confirm button at
+all, so a revisited/already-used link shows an error immediately rather than a clickable button (see
+the web app's `DECISIONS.md`).
 
 This also gives the frontend a place to show the *target* email up front (in both the check response
 and, for email changes, echoed back from the POST verify response), so a user confirming a change
@@ -939,9 +941,10 @@ to unconditionally report success on replay. It now fetches the account's *curre
 only treats the replay as a harmless repeat if `current_email == new_email` (i.e. the change this
 token represents was in fact the last thing applied) - otherwise it's a genuine, rejected reuse
 (e.g. the account's email was changed *again* since, by a different, later request), and raises same
-as an invalidated token would. `verify_email_link` (sign-in) didn't need the equivalent change -
-`resolve_identity` is a pure function of the verified email, so replaying it can't "drift" the way a
-mutable `email` column can.
+as an invalidated token would. `verify_email_link` (sign-in) was judged not to need the equivalent
+change at the time, on the grounds that `resolve_identity` is a pure function of the verified email
+and so can't "drift" the way a mutable `email` column can. That reasoning was about the wrong half
+of the endpoint - see the next section.
 
 The admin panel (`admin/views.py`) lost its `password_transformer`/`PasswordTransformer` for the
 `User` view - there's no password field to transform. Admin-created users authenticate afterwards
@@ -956,6 +959,57 @@ creates the two new tables automatically, but won't touch the existing `user` ta
 ALTER TABLE "user" DROP COLUMN hashed_password;
 ALTER TABLE "user" DROP COLUMN google_id;
 ```
+
+### A spent sign-in link is a spent sign-in link
+
+`verify_email_link` now rejects `used_at is not None` outright:
+`"This sign-in link has already been used."`, ordered after the invalidated check and before the
+expiry one so the reason a caller gets back is the most specific one available - superseded beats
+used, used beats expired, matching the order `check_email_link` already evaluates them in (it
+collapses all three into the same `valid=false`, but the precedence is the one it settled on). The
+`if auth_request["used_at"] is None:` guard that used to wrap the `update` went with it; once a used
+token can't reach that line, the branch had only one reachable side.
+
+**What the original argument missed.** It justified the replay on `resolve_identity` being a pure
+lookup of a verified email - which is true, and about the wrong half of the endpoint.
+`verify_email_link` doesn't return `resolve_identity`'s answer; it hands it to
+`_start_onboarding_or_sign_in` → `issue_tokens`, which mints an access token **and sets a refresh
+cookie good for `REFRESH_TOKEN_EXPIRE_DAYS` (7 by default)**. So a replay was never "the same
+outcome re-confirmed": it was a *second, independent session*, with a lifetime measured in days,
+issued from a link whose own validity is measured in minutes. "No escalated or different outcome -
+it's the same account either way" answered a question nobody was asking. The risk was never that a
+replay reaches a *different* account; it is that a *different person* reaches this one. Anyone who
+can read the mail after the recipient has clicked it - a shared or forwarded mailbox, a mail
+archive, a gateway that retains message bodies, a backup - had `MAGIC_LINK_TOKEN_EXPIRE_MINUTES` to
+turn a spent link into a week of their own.
+
+The email that carries the link has said
+`"This link expires in N minutes and can only be used once"` since it was written
+(`services/email_service.py`). Only one of those two clauses was enforced. The copy is unchanged;
+the server caught up to it.
+
+**No grace window, deliberately.** The leniency's stated job was tolerating races, so the honest
+question was whether any survive. The one it was actually written for - a mail scanner "detonating"
+the link before a human clicks - is already gone, removed by the precheck-then-explicit-button flow
+two sections up: nothing is POSTed until a person clicks, and the button only exists on a link
+`GET /auth/email/verify/check` just reported live. A double click can't produce one either, because
+`/auth/verify`'s handler flips the page to its "verifying" state in the same tick it fires the
+request, so the button is unmounted before the response lands - and the web client has no automatic
+retry of this POST. A bounded window (accept a replay within a few seconds of `used_at`) was
+considered and rejected on that basis: it would hold a real replay window open to buy back a failure
+mode the UI no longer produces, and the cost of being wrong is one click on "Request a new sign-in
+link" against a 30-minute, rate-limited endpoint.
+
+**The two flows still differ, and now for a reason.** `verify_email_change` continues to tolerate a
+replay while `current_email == new_email`, because that replay re-*reports* a change already applied
+and hands back nothing but the address it applied. Sign-in has no equivalent: there is no
+already-applied state to re-report, only a fresh credential to mint. The asymmetry is between "tell
+you again what happened" and "give you another one".
+
+This is an API contract change - `POST /auth/email/verify` returns 401 where it used to return 200 -
+but no client behaviour depends on the old response: the web app's `/auth/verify` never reaches the
+POST for a used link, since the precheck rejects it on `used_at` alone and the page renders an error
+in place of the button.
 
 ## Current-user routes moved off `/user/me` and `/user/{uuid}` onto a bare `/user`
 
