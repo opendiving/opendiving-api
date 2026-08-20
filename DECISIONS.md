@@ -8951,3 +8951,62 @@ anyone who has the setting locally, or vice versa. `tests/test_config_safety.py`
 independent copy of `core/config.py` under another name with `starlette.config.Config` pointed at a
 file that does not exist. `config.py` imports nothing from this package, so that copy touches
 neither `sys.modules` nor the `settings` object every other module is already holding.
+
+## `linting.yml`, `tests.yml` and `type-checking.yml` run on a read-only token, with nothing left in `.git/config`
+
+None of the three had a `permissions:` block, and the absence of one is not "no permissions" — the
+run inherits whatever the repository default grants, which is read *and* write across every scope
+unless somebody has narrowed it in the Actions settings. None of them has ever needed any of it:
+between them they check out, `uv sync --extra dev`, run ruff and mdformat in check mode, run mypy
+three times, run alembic and pytest against service containers, and write a coverage table to the
+step summary. Nothing writes to the repository, comments on a PR, or touches a package. All three
+now declare `contents: read` at workflow level, which is what `publish-image.yml` and `pr-title.yml`
+were already doing.
+
+Narrowing the scope is only half of it. `actions/checkout` writes the `GITHUB_TOKEN` into
+`.git/config` in the workspace unless told not to, and each of these jobs then installs the whole
+dev dependency tree into that same workspace and runs code out of it. A compromised transitive
+dependency therefore finds a credential on disk without having to go looking for one, and the scope
+above is all that decides what it is worth. `tests.yml` has the sharpest version — pytest imports
+and executes the tree outright, and `alembic upgrade head` imports the app — but `type-checking.yml`
+is not the pure-parse job it looks like either: `plugins = ["pydantic.mypy"]` in `pyproject.toml`
+means mypy imports and runs plugin code out of the installed tree on every invocation.
+`persist-credentials: false` on every checkout is the other half, and it costs nothing here: none of
+these jobs pushes, fetches a second ref, or uses git at all after the checkout step.
+`publish-image.yml`'s three checkouts already carried it, which is why this is filling a gap rather
+than setting a new policy.
+
+`tests.yml` is the one worth reading twice, because it does the most. It stands up Postgres and
+Redis service containers and points the suite at them with `POSTGRES_SERVER: localhost` — the
+variable `CONTRIBUTING.md` spends a section on, because the DB-backed tests skip themselves silently
+when it names a host they cannot reach. All of that is the runner talking to containers on the
+runner: the migrations write to a database thrown away with the job, and nothing in
+`alembic upgrade head`, `alembic check`, the skip assertion (which greps a file in `/tmp`) or the
+coverage step touches the repository. The coverage table goes to `$GITHUB_STEP_SUMMARY`, a file the
+runner collects with the **Actions runtime token** — the same credential `actions/upload-artifact`
+authenticates with. That is not a `GITHUB_TOKEN` scope at all, so no `permissions:` entry grants or
+withholds it, and a job doing either of those things is not evidence it needs write.
+
+The one action in these jobs that touches `GITHUB_TOKEN` is `astral-sh/setup-uv`, whose
+`github-token` input defaults to `${{ github.token }}` and is, in the pinned version's own words,
+"used when downloading uv from GitHub releases". That is a read against a public repository, which a
+`contents: read` token does fine. Its `enable-cache` default of `auto` goes through the Actions
+cache service, on the runtime token again.
+
+If one of these jobs ever does need more, the block goes on that job rather than widening the
+workflow's — and the job has to re-state `contents: read` alongside whatever it adds, because a
+job-level `permissions:` block *replaces* the workflow-level one rather than adding to it.
+`pr-title.yml` is the worked example (`permissions: {}` at the top, and the labelling job asking for
+exactly the two scopes it uses); `publish-image.yml`'s `draft-release` job is the other, taking
+`contents: write` for itself alone rather than for the file.
+
+The `actions/*` steps stay on major tags (`@v7`), deliberately untouched. Whether to SHA-pin them
+the way `astral-sh/setup-uv` and the docker actions in `publish-image.yml` already are is a separate
+question with its own trade-off — a pin nothing renews goes stale — and folding it into a
+permissions change would have made both halves harder to review.
+
+This is the port of `opendiving-web`'s section of nearly the same name, which landed the same two
+lines in its `ci.yml` and `code-quality.yml` first. The two repos are meant to say this the same way
+for the same reason `publish-image.yml` and `pr-title.yml` mirror each other. What differs is only
+what has to: the tools these jobs run, and the fact that nothing here is a commented-out
+PR-commenting step waiting to want `pull-requests: write`.
