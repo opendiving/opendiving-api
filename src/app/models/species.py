@@ -35,7 +35,7 @@ class Species(Base, PublicUUIDMixin, TimestampMixin):
 
     __tablename__ = "species"
 
-    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, unique=True, primary_key=True, init=False)
+    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
     # The World Register of Marine Species' own identifier, and this table's real identity.
     # Unique so two divers resolving the same species concurrently collide in the database
     # rather than creating a duplicate taxon - `services.species_service.resolve_species`

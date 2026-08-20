@@ -120,9 +120,9 @@ WIKIDATA_ENTITIES = {
 
 @pytest.fixture(scope="module")
 def species_app() -> Any:
-    """Its own app with `create_tables_on_start=False`, like `test_geocoding.py` - the route
+    """Its own app with `apply_migrations_on_start=False`, like `test_geocoding.py` - the route
     tests here stub the database out entirely."""
-    return create_application(router=router, settings=settings, create_tables_on_start=False)
+    return create_application(router=router, settings=settings, apply_migrations_on_start=False)
 
 
 @pytest.fixture

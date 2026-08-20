@@ -29,7 +29,7 @@ class TripLocation(Base):
 
     __tablename__ = "trip_location"
 
-    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, unique=True, primary_key=True, init=False)
+    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
     # No standalone index on trip_id: the composite index below (leading column trip_id)
     # already serves lookups filtered by trip_id alone, plus satisfies the ORDER BY
     # position used by get_locations_for_trip/get_locations_for_trips.

@@ -46,9 +46,9 @@ REVERSE_PAYLOAD = {
 
 @pytest.fixture(scope="module")
 def geocode_app() -> Any:
-    """Its own app with `create_tables_on_start=False`, like `test_export_endpoints.py` -
+    """Its own app with `apply_migrations_on_start=False`, like `test_export_endpoints.py` -
     nothing below these routes touches a database."""
-    return create_application(router=router, settings=settings, create_tables_on_start=False)
+    return create_application(router=router, settings=settings, apply_migrations_on_start=False)
 
 
 @pytest.fixture

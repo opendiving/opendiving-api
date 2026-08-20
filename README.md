@@ -35,10 +35,10 @@ documented REST API — so your data is never more than one `curl` away.
 - **More parsers** — Subsurface XML and UDDF (which also admits Apple Watch dives via Oceanic+'s
   UDDF export), then Shearwater Cloud exports; a pluggable importer layer so every supported format
   is a migration path in.
-- **Self-hosting hardening** — a single compose bundle including the web app and TLS, prebuilt
-  images, and Alembic migrations before 1.0 (schema changes are currently applied manually during
-  prototyping — see [DECISIONS.md](DECISIONS.md)). Email is already vendor-free: it goes out over
-  plain SMTP, so any relay works.
+- **Self-hosting hardening** — a single compose bundle including the web app and TLS, and prebuilt
+  images. Migrations have landed: the API runs `alembic upgrade head` on startup, so upgrading an
+  instance is `docker compose pull && docker compose up -d`. Email is already vendor-free: it goes
+  out over plain SMTP, so any relay works.
 - **Public share links** — read-only dive/trip pages.
 - **Statistics endpoints** — records, per-year aggregates, site maps, species log.
 
@@ -158,6 +158,8 @@ curl http://localhost:8000/api/v1/dive/{uuid}/profile -H "Authorization: Bearer 
 - `docs/authentication.md` — the auth design, with sequence diagrams for every flow.
 - `DECISIONS.md` — non-obvious choices and gotchas (schema-change workflow, check constraints,
   caching strategy…). Read it before your first PR.
+- Schema changes ship an Alembic revision and are applied on startup. A dev database created before
+  migrations landed needs one `alembic stamp head` — see [CONTRIBUTING.md](CONTRIBUTING.md).
 - Tests: `uv run pytest`, or containerised —
   `docker compose -f docker-compose.yml -f docker-compose.test.yml up --build --abort-on-container-exit api`.
   `docker-compose.test.yml` is an overlay and does nothing on its own. Note that the Postgres-backed

@@ -22,7 +22,7 @@ class GearServiceSchedule(Base, PublicUUIDMixin, TimestampMixin):
 
     __tablename__ = "gear_service_schedule"
 
-    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, unique=True, primary_key=True, init=False)
+    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
     # Denormalized from `gear_item.user_id`. Three call sites want the owner without a
     # join: the route's ownership check, `invalidate_gear_caches(user_id)`, and the
     # digest job's per-user grouping. Gear never changes hands, so it can't drift.

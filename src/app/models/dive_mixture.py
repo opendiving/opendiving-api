@@ -7,7 +7,7 @@ from ..core.db.database import Base
 class DiveMixture(Base):
     __tablename__ = "dive_mixture"
 
-    id: Mapped[int] = mapped_column(autoincrement=True, nullable=False, unique=True, primary_key=True, init=False)
+    id: Mapped[int] = mapped_column(autoincrement=True, nullable=False, primary_key=True, init=False)
     dive_id: Mapped[int] = mapped_column(ForeignKey("dive.id", ondelete="CASCADE"), index=True)
 
     volume: Mapped[float] = mapped_column(Float)

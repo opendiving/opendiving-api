@@ -29,7 +29,7 @@ class AuthenticationProvider(Base):
         UniqueConstraint("user_id", "provider", name="uq_authentication_provider_user_provider"),
     )
 
-    id: Mapped[int] = mapped_column(autoincrement=True, nullable=False, unique=True, primary_key=True, init=False)
+    id: Mapped[int] = mapped_column(autoincrement=True, nullable=False, primary_key=True, init=False)
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), index=True)
     provider: Mapped[str] = mapped_column(String(20))
 

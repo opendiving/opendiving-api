@@ -14,7 +14,7 @@ class UserDiveStats(Base, TimestampMixin):
 
     __tablename__ = "user_dive_stats"
 
-    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, unique=True, primary_key=True, init=False)
+    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id"), unique=True, index=True)
 
     total_dives: Mapped[int] = mapped_column(Integer, default=0)

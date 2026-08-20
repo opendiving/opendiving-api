@@ -10,7 +10,7 @@ from ..core.db.models import PublicUUIDMixin, SoftDeleteMixin, TimestampMixin
 class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "dive"
 
-    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, unique=True, primary_key=True, init=False)
+    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id"), index=True)
     dive_number: Mapped[int] = mapped_column(Integer)
     # Always stored as the equivalent UTC instant, regardless of the offset the caller

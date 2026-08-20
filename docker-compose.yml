@@ -18,8 +18,8 @@ services:
     # expose:
     #   - "8000"
     # Wait for the datastores to answer, not merely to have been started - otherwise the
-    # app's `create_all()` on startup races an initializing Postgres. `admin_init` is a
-    # one-shot that must finish before any worker serves `/admin`.
+    # app's startup `alembic upgrade head` races an initializing Postgres. `admin_init` is
+    # a one-shot that must finish before any worker serves `/admin`.
     depends_on:
       db:
         condition: service_healthy
@@ -35,6 +35,12 @@ services:
       # `/code/app` and is unaffected. This is what makes
       # `docker compose exec api python -m src.scripts.backfill_dive_profiles` work.
       - ./src:/code/src
+      # Migrations are baked into the image at these paths (see Dockerfile), and the
+      # startup `alembic upgrade head` reads them from there. Bind-mounted over so a
+      # revision written on the host applies on `docker compose restart api` rather than
+      # on the next rebuild - the same reason `./src/app` is mounted.
+      - ./src/migrations:/code/migrations
+      - ./src/alembic.ini:/code/alembic.ini
 
   # One-shot: creates the admin panel's own tables and seeds its initial admin, then
   # exits. Runs to completion before `api` starts, so the four gunicorn workers in the

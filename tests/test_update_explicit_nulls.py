@@ -245,11 +245,11 @@ def _fake_redis() -> Any:
 
 @pytest.fixture(scope="module")
 def owned_app() -> Any:
-    """Its own app with `create_tables_on_start=False`, as in `test_ownership.py` - the
+    """Its own app with `apply_migrations_on_start=False`, as in `test_ownership.py` - the
     shared `client` fixture opens one whose startup hook connects to Postgres, which
     would put this in the database-backed subset for no reason.
     """
-    return create_application(router=router, settings=settings, create_tables_on_start=False)
+    return create_application(router=router, settings=settings, apply_migrations_on_start=False)
 
 
 @pytest.fixture
