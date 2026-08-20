@@ -182,6 +182,13 @@ Sign-in still needs a mail relay: the magic link has to reach an inbox. A LAN in
 `ENVIRONMENT=local` with no `SMTP_HOST`, which logs the link to `docker compose logs api` instead of
 emailing it — fine for one person who has shell access, and no way to onboard anyone else.
 
+Passkeys are not offered on this shape, and that is expected: browsers hand out WebAuthn only in a
+secure context, and an IP address is not a valid passkey domain even behind a certificate. The
+emailed link and code are the whole sign-in story here. Giving the box a real hostname with a
+certificate the browser trusts — a Tailscale HTTPS name, an internal CA — makes it eligible; point
+`FRONTEND_URL` at that `https://` name and the option appears. See
+[configuration.md](configuration.md#sign-in).
+
 `WEB_HSTS=off` matters only if the same browser also reaches this instance over HTTPS through
 something else; the header is never sent on a request that arrived over plain HTTP.
 

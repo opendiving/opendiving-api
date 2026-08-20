@@ -10274,6 +10274,39 @@ the test could never exercise the challenge check it most wants to. Every ceremo
 whatever it is given and runs through the real verifier; only Redis, the CRUD singletons and the
 rate limiter are stood in for.
 
+### There is no "sign up with a passkey"
+
+A passkey can only ever *sign in*. Registration lives behind an authenticated session, so a visitor
+with no account has nothing to register against — they take the email or Google path, finish
+onboarding, and are offered a passkey afterwards.
+
+That is a decision rather than a limitation, because the alternative was reachable: the onboarding
+token could carry a pending attestation through `POST /auth/complete` and land the credential with
+the new `User` row. It was rejected on three counts. It couples account creation to a ceremony
+replayed across two requests, which is a new failure mode in the one flow that must not have any. It
+would create the only account shape whose email address was never structurally verified — today an
+account cannot come into existence except behind a verified onboarding token (see *"Unified auth
+flow: no passwords, no separate sign up, one `User` row per identity"*), and that property is worth
+more than a saved screen. And the screen is all it saves, for first-time visitors only, once.
+
+The knock-on is that enrollment has to be *offered*, since nobody arrives at a passkey by signing in
+— which is why the web client owns a nudge after onboarding and a card in settings rather than
+waiting to be asked. Revisit only with funnel data showing the email round-trip losing signups.
+
+### The absence of a passkey switch is what puts eligibility in the operator docs
+
+There is no `PASSKEYS_ENABLED`, deliberately (above). The consequence lands on the self-hosting
+docs: an operator asking "why is there no passkey option on my instance" is asking a question **no
+server-side state can answer** — nothing was configured, nothing failed, and the API never learns
+that a browser declined to offer the ceremony. Only the deployment's own shape explains it.
+
+So `docs/self-hosting/configuration.md` carries the rules as an eligibility list rather than a
+setting (HTTPS, a hostname, `localhost` exempt, IP addresses never), `reverse-proxy.md` says it
+where the plain-HTTP LAN instance is described, and `troubleshooting.md` answers the symptom
+directly. The trap the docs exist for is the IP-address one: `https://192.168.1.10` is a secure
+context, so the browser offers WebAuthn and *then* throws — which reads as a certificate problem and
+is not one, and no amount of fixing the certificate moves it.
+
 ## Signing is enforced by two local hooks, because GitHub cannot do it yet
 
 Every commit in this repo is meant to be signed, and for a while roughly half of them were. The tell

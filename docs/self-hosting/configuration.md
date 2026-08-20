@@ -32,13 +32,89 @@ self-hoster normally touches, and any setting from that file can be added to `.e
 | `CADDY_SITE_ADDRESS` | `${DOMAIN}`         | The address Caddy answers on. `:80` for a LAN instance with no certificate.                                                                                                                 |
 | `TRUSTED_PROXY_IPS`  | `172.29.0.0/16`     | Whose `X-Forwarded-For` and `X-Forwarded-Proto` the API believes. Every per-IP rate limit depends on it, as do the admin panel's HTTPS enforcement and its IP allowlist.                    |
 | `ENVIRONMENT`        | `production`        | `production` hides `/docs`. `staging` puts them behind a superuser; both require `SMTP_HOST`. `local` opens the docs and logs sign-in links instead of emailing them.                       |
-| `FRONTEND_URL`       | `https://${DOMAIN}` | Where emailed links point, and the API's single allowed CORS origin. Override for a plain-HTTP instance.                                                                                    |
+| `FRONTEND_URL`       | `https://${DOMAIN}` | Where emailed links point, the API's single allowed CORS origin, and the passkey domain — see [Sign-in](#sign-in) before changing its hostname. Override for a plain-HTTP instance.         |
 | `SITE_URL`           | `https://${DOMAIN}` | The web app's own origin, used for link previews. Override alongside `FRONTEND_URL`.                                                                                                        |
 | `AUTH_COOKIE_SECURE` | `true`              | The refresh cookie's `Secure` flag. `false` only for plain HTTP, where the browser otherwise drops it and every reload signs the user out.                                                  |
 | `WEB_HSTS`           | `on`                | `Strict-Transport-Security`, sent only on requests that already arrived over HTTPS. `off` hands the header to a proxy in front, or supports an instance that must stay reachable over HTTP. |
 | `WEB_NOINDEX`        | `off`               | `true` disallows all crawlers and adds `X-Robots-Tag: noindex, nofollow` to every page.                                                                                                     |
 | `OPENDIVING_VERSION` | `latest`            | The image tag both containers run. Pin it once this instance holds dives you'd miss.                                                                                                        |
 | `LOG_LEVEL`          | `INFO`              | Applied to the API and the worker alike.                                                                                                                                                    |
+
+## Sign-in
+
+Sign-in is passwordless, and an instance offers up to three ways in. **Email always works**: the
+sign-in mail carries a link *and* a six-digit code, either of which completes it — the code is there
+for the ordinary case of typing your address on a laptop and reading the mail on a phone. **Google**
+appears if you set `GOOGLE_CLIENT_ID`. **Passkeys** appear when the visitor's browser can do
+WebAuthn against this instance, which is a property of how you deployed it rather than a setting —
+see below.
+
+Nothing here is required. The defaults are the tested configuration, and an instance that sets none
+of it still has working sign-in as long as mail is delivered.
+
+| Variable                               | Default | What it does                                                                                                                                                                                    |
+| -------------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SIGN_IN_CODE_ATTEMPTS_MAX`            | `5`     | Wrong guesses allowed against the emailed code. Running out spends the code only — the link in the same mail still works.                                                                       |
+| `PASSKEY_CHALLENGE_TTL_SECONDS`        | `600`   | How long a started ceremony stays completable. It is spent on the first attempt either way, so this bounds only an abandoned one.                                                               |
+| `PASSKEY_MAX_CREDENTIALS_PER_USER`     | `10`    | Passkeys one account may hold. Abuse hygiene, not product policy.                                                                                                                               |
+| `PASSKEY_OPTIONS_RATE_LIMIT_PER_IP`    | `240`   | Per IP, per `MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS`. High because one is minted per signed-out page view that offers passkey autofill, and an office behind one NAT gateway is a single IP here. |
+| `PASSKEY_VERIFY_RATE_LIMIT_PER_IP`     | `30`    | Per IP, same window.                                                                                                                                                                            |
+| `PASSKEY_REGISTER_RATE_LIMIT_PER_USER` | `10`    | Per signed-in account, same window.                                                                                                                                                             |
+
+There is deliberately **no on/off switch for passkeys**. The browser's own capability detection is
+the switch: where a ceremony cannot work the web app hides the option rather than offering one that
+fails, and a server flag would only be a second place for the answer to be wrong.
+
+### Passkeys need HTTPS, and a hostname
+
+Browsers expose WebAuthn only in a secure context, and they scope a credential to a *domain*. So an
+instance is eligible when it is reached over HTTPS at a **hostname**:
+
+- **Plain HTTP** gets no WebAuthn at all. The passkey option simply never appears; the emailed link
+  and code serve that instance fully. This is the `AUTH_COOKIE_SECURE=false` LAN shape in
+  [reverse-proxy.md](reverse-proxy.md) — nothing about it is broken, it just has two methods instead
+  of three.
+- **An IP address is never eligible**, certificate or not. `https://192.168.1.10` is a secure
+  context, so the browser offers the API and then fails every ceremony: an IP is not a valid
+  relying-party id. A hostname is the fix, not a better certificate.
+- **`localhost` is exempt** by specification, which is why passkeys work in local development over
+  plain HTTP.
+
+The bundled Caddy gets a certificate for `DOMAIN` on its own, so the default install is already
+eligible. A LAN box can become eligible without going public: anything that gives it a real hostname
+and a certificate the browser trusts — a Tailscale HTTPS name, an internal CA — works, as long as
+`FRONTEND_URL` is then set to that `https://` hostname.
+
+### `FRONTEND_URL` is the passkey domain
+
+The relying-party id and the expected origin are both derived from it; there is no separate setting.
+Two consequences worth knowing before you edit it:
+
+- **Changing its hostname orphans every passkey already registered.** Browsers will not offer a
+  credential created under one domain to another, and the API will not accept one. Nobody is locked
+  out — the emailed link is the recovery path, and everyone re-adds a passkey afterwards — but it is
+  silent, so treat a hostname change as "everyone signs in by email once".
+- **Write it without a trailing slash.** The origin is rebuilt from the parsed URL rather than
+  concatenated, so `https://dive.example.com/` is tolerated — but keep it clean anyway, since the
+  same value is compared against what the browser sends.
+
+`SITE_URL` is the web app's own origin and should move with it.
+
+### When something is down
+
+The three methods fail independently, which is most of the argument for having three:
+
+| Down       | Email link / code    | Passkey                    | Google |
+| ---------- | -------------------- | -------------------------- | ------ |
+| Mail relay | ✗                    | ✓                          | ✓      |
+| Redis      | ✓ (limits fail open) | ✗ (challenges fail closed) | ✓      |
+| Google     | ✓                    | ✓                          | ✗      |
+| Postgres   | ✗                    | ✗                          | ✗      |
+
+Redis is deliberately the odd one out. Rate limiting there fails *open* — an outage must not lock
+everyone out of an app — but a passkey challenge **is** the replay protection, so with Redis
+unreachable the passkey endpoints answer 503 rather than verifying a ceremony without one. Email
+sign-in is pure Postgres and is unaffected.
 
 ## Database, cache, migrations
 
@@ -53,22 +129,23 @@ a database that already exists under a different name).
 | `REDIS_PASSWORD`   | *(none)*      | For pointing the app at a managed Redis instead of the bundled one. The bundled one needs no password and is not reachable outside the compose network.                                                                                                                                                             |
 | `FILE_STORAGE_DIR` | `/data/files` | Where uploaded dive-computer exports and c-card images are written inside the container. The compose file mounts the `files-data` volume there, so there is nothing to set unless you replaced that volume with a bind mount — and then the host directory has to be owned by uid 1000 or the API refuses to start. |
 
-Redis holds cache entries and open rate-limit windows only. Losing it costs a cold cache; nothing
+Redis holds cache entries, open rate-limit windows and in-flight passkey challenges. Losing it costs
+a cold cache and interrupts passkey sign-in until it is back (see [Sign-in](#sign-in)); nothing
 durable lives there. What is durable lives in two places, and a backup has to cover both: the
 records are in Postgres, and the uploaded files themselves are on the `files-data` volume. See
 [backup-restore.md](backup-restore.md).
 
 ## Optional features
 
-| Variable                                                    | Default   | What it does                                                                                           |
-| ----------------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------ |
-| `CONTACT_FORM_EMAIL`                                        | *(none)*  | Where the contact form delivers. Unset, that endpoint answers 503 and the form is off.                 |
-| `CONTACT_EMAIL`                                             | *(none)*  | Shown on the contact page as a fallback. Display only.                                                 |
-| `GOOGLE_CLIENT_ID`                                          | *(none)*  | Offers Google Sign-In. Unset, the button is hidden and `accounts.google.com` leaves the web app's CSP. |
-| `GRAVATAR_ENABLED`                                          | `false`   | Avatars from Gravatar. See *Third-party calls* below before turning it on.                             |
-| `MAP_TILE_URL`, `MAP_TILE_URL_DARK`, `MAP_TILE_ATTRIBUTION` | Carto     | The dive-site picker's basemap. The web app's CSP follows these automatically.                         |
-| `GEOCODER_URL`                                              | Nominatim | Turns a map pin into a place name, server-side. Set to `""` to switch geocoding off entirely.          |
-| `WORMS_API_URL`, `WIKIDATA_API_URL`                         | public    | The species picker's two registers, also called server-side.                                           |
+| Variable                                                    | Default   | What it does                                                                                                                    |
+| ----------------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTACT_FORM_EMAIL`                                        | *(none)*  | Where the contact form delivers. Unset, that endpoint answers 503 and the form is off.                                          |
+| `CONTACT_EMAIL`                                             | *(none)*  | Shown on the contact page as a fallback. Display only.                                                                          |
+| `GOOGLE_CLIENT_ID`                                          | *(none)*  | Offers Google Sign-In. Unset, the button is hidden and `accounts.google.com` leaves the web app's CSP. See [Sign-in](#sign-in). |
+| `GRAVATAR_ENABLED`                                          | `false`   | Avatars from Gravatar. See *Third-party calls* below before turning it on.                                                      |
+| `MAP_TILE_URL`, `MAP_TILE_URL_DARK`, `MAP_TILE_ATTRIBUTION` | Carto     | The dive-site picker's basemap. The web app's CSP follows these automatically.                                                  |
+| `GEOCODER_URL`                                              | Nominatim | Turns a map pin into a place name, server-side. Set to `""` to switch geocoding off entirely.                                   |
+| `WORMS_API_URL`, `WIKIDATA_API_URL`                         | public    | The species picker's two registers, also called server-side.                                                                    |
 
 ### The admin panel
 
