@@ -192,6 +192,18 @@ class MagicLinkSettings(BaseSettings):
     MAGIC_LINK_REQUEST_RATE_LIMIT_PER_IP: int = config("MAGIC_LINK_REQUEST_RATE_LIMIT_PER_IP", default=15)
     MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP: int = config("MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP", default=30)
 
+    # Wrong guesses allowed against the six-digit code printed beside the link, after
+    # which the code is spent and only the link still works (see
+    # `crud.crud_authentication_requests.register_failed_code_attempt`).
+    #
+    # This is the boundary, not the rate limit: 5 guesses in a space of 10^6 is roughly a
+    # one-in-200,000 shot per request, and every request emails the victim, so an attack
+    # worth running is one they are watching arrive. Raising it is not a knob to reach for
+    # casually - each extra guess raises those odds linearly, and the reason the
+    # cap can be this tight is that a diver who mistypes twice can simply read the code
+    # again from the email that is already open in front of them.
+    SIGN_IN_CODE_ATTEMPTS_MAX: int = config("SIGN_IN_CODE_ATTEMPTS_MAX", default=5)
+
     # The two remaining auth endpoints, limited per-IP over the same window.
     #
     # `/auth/complete` is the username-availability oracle (it answers "Username not

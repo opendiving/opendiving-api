@@ -9994,3 +9994,113 @@ back into `bytea` is a path nobody will run, and pretending otherwise ships unte
 
 Postgres does not reclaim the dropped columns' pages without a `VACUUM FULL`. Not automated: a
 rewrite of both tables under an exclusive lock is the operator's call, not a migration's.
+
+## The sign-in email carries a code as well as a link
+
+`POST /auth/email/request` now mints two credentials for one `authentication_request` row: the magic
+link it always emailed, and a six-digit code printed beside it. Either completes the sign-in;
+whichever arrives first consumes the row, because both end at the same
+`claim_authentication_request`. Redeeming the code is `POST /auth/email/verify-code`.
+
+**The failure this fixes is the one the explicit-click precheck never touched.** That work (see *"A
+confirmed change can still show 'invalid or expired'"* above) stopped mail scanners from detonating
+a link before a human clicked it. It could not do anything about the other half of the problem: a
+link signs in **the device that opens it**. Someone who types their address on a desktop and reads
+mail on a phone lands signed in inside the phone's mail-app browser, and this app's reason to be at
+a desktop is a dive computer plugged into it — so that split is the normal case here, not the edge
+one. A code crosses the gap because a person carries it. Slack, Notion and Anthropic all send the
+same link-plus-code email.
+
+Three columns, no new table: `code_hash`, `code_attempts`, and a public `uuid` (the `request_id`
+below). `authentication_request` already had the expiry, the single-use claim, and the
+supersede-on-new-request rule; the code inherits every one of them.
+
+### `request_id`, and the denial-of-service it removes
+
+`POST /auth/email/request` answers with the new row's public uuid. The generic message is unchanged
+and the id is not an oracle — a row is minted for every address, account or not, so it is a fresh
+random value either way — but it is the *only* handle on the verify endpoint. **There is
+deliberately no lookup by email.**
+
+The first design of this had one, and it was wrong in a way worth recording. With an anonymous,
+email-keyed verify endpoint, anyone who knows an address can fire wrong codes at whatever request
+the victim has live. Pair that with the other half of the first design — a burnt code burns its link
+— and five garbage guesses cancel a sign-in the attacker cannot complete, aimed squarely at the
+accounts (email-only, self-hosted, no Google) for which that inbox *is* the recovery path. Keying on
+`request_id` makes the row unreachable to anyone who did not request it, and a burnt code now voids
+`code_hash` alone: the link in the same email keeps working.
+`tests/test_authentication_request_claim.py` pins that last part directly, because it is the
+property the redesign exists for.
+
+The same change dissolved a second defect for free. Two tabs racing `POST /auth/email/request` can
+each leave a live row for one address — the invalidate-then-create pair is not atomic — and an
+`(email, live)` lookup would then resolve them through FastCRUD's unordered `.first()`, so a tab
+could verify a row it did not mint. By uuid, each tab names exactly its own.
+
+### The attempt cap is the boundary, and it is one statement
+
+Six digits is ~20 bits. Nothing about how it is stored defends it: `code_hash` is SHA-256 for
+hygiene — keeping a live credential out of logs, dumps and the admin panel — and no key-stretching
+function saves a millionfold space from someone already holding the digest.
+`SIGN_IN_CODE_ATTEMPTS_MAX` (5) is what makes the code safe, so it has to hold under concurrency.
+
+`register_failed_code_attempt` is therefore hand-written Core, in the same spirit as
+`claim_authentication_request` next to it: one `UPDATE` that increments and, in the same `CASE`,
+nulls `code_hash` when the incremented value reaches the cap. Read-decide-write would let five
+guesses issued in parallel all read `0` and all store `1`, which is the difference between a
+five-guess bound and no bound at all — and rate limiting cannot be the answer, since it fails open
+on a Redis outage (see *"Rate limiting fails open on a Redis *outage*"*).
+
+The residual exposure, with the arithmetic shown rather than asserted — because the plan this came
+from asserted it and was wrong by a factor of sixty. The only party holding a `request_id` for
+someone else's address is one who requested it, and every such request emails the victim.
+`MAGIC_LINK_REQUEST_RATE_LIMIT_PER_EMAIL` allows 3 requests per address per
+`MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS` (900 s), each minting a fresh code worth 5 guesses in a 10⁶
+space: 15 guesses per quarter hour, or one a minute, sustained. An expected success therefore needs
+on the order of 10⁶ guesses ≈ 694 days of uninterrupted maximum-rate attack, which fills the
+victim's inbox with 288 unrequested sign-in emails a day for two years. Bounded, and impossible to
+run quietly.
+
+Eight digits is the lever if observation ever disagrees, and the derivation says why it is the right
+one rather than the obvious alternative. The horizon is the code space over the guess rate, so
+lengthening the code from 6 digits to 8 multiplies it by 100 — while the request cap has only 3 → 1
+of headroom before sign-in stops working at all, which is 3× at best and is paid for by every diver
+whose first email never arrived. The cap is what makes today's horizon years rather than days; it is
+not where the next order of magnitude is.
+
+That the plan's "eleven days" survived into a first draft here is worth recording, because it is the
+shape of error a quantified security claim invites — the figure reads as authoritative precisely
+because it is specific, and the rate it implies (~1 guess/second) is one the per-email cap never
+permits.
+
+### Everything else is the shape already there
+
+- **One message for every rejection.** Wrong digits, an unknown `request_id`, an expired or
+  superseded request, and a spent code are all `"This code is invalid or has expired."` A caller
+  learns nothing about a row they cannot already name. The link's rejections stay specific, because
+  they steer a human looking at a page ("a newer link is waiting"); a code is typed against a row
+  the caller cannot see.
+- **A malformed code is a 422, not a guess.** `EmailCodeVerifyRequest` strips non-digits (the email
+  prints `481 052`, so a paste carries the space) and insists on six. `code_attempts` bounds guesses
+  at the secret, and a five-character string was never one.
+- **`purpose="email_change"` rows never carry a code.** That flow is confirmed by opening the link
+  *in the new mailbox*; a code typed back into the tab that asked would prove nothing about that
+  mailbox. `AuthenticationRequestCreate.code_hash` defaults to `None` and only `request_email_link`
+  sets it.
+- **Both guard tests were fed.** `/auth/email/verify-code` joins `ANONYMOUS_BY_DESIGN` (which fails
+  closed and blocks the PR until told why) and the POST-only minting set in
+  `test_client_cache_middleware.py` — that one is opt-in and checks only routes already listed, so a
+  forgotten entry passes silently and it had to be added deliberately.
+- **`_has_expired`** replaced the third copy of the naive-timestamp coercion in `api/v1/auth.py`.
+
+### The migration
+
+`60ec1a2894ea`, autogenerated and then corrected in one respect: autogenerate emits both `NOT NULL`
+adds (`uuid`, `code_attempts`) with no default, which is fine against the empty table CI builds and
+fails outright on any instance with a sign-in request in flight. Both are added with a server
+default and then have it dropped, so existing rows are filled and the models stay the only place a
+default is declared — `migrations/env.py` does not set `compare_server_default`, so a server default
+left behind would drift silently rather than being caught by `alembic check`. The backfill uses
+`gen_random_uuid()` rather than `uuidv7()`: the column is only ever looked up by equality, and every
+row it touches expires within the hour. Nothing backfills `code_hash` — a request created before
+this ran was emailed no code, and `NULL` is the truth about it.

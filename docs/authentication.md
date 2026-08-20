@@ -3,10 +3,18 @@
 How sign-in, sign-up, account linking, session refresh, and email changes work in the OpenDiving
 API.
 
-There is a single entry point into the app: email magic link or Google - no passwords, no separate
-sign up flow. See `src/app/api/v1/auth.py` for the endpoints (`/auth/email/request`,
-`/auth/email/verify`, `/auth/google`, `/auth/complete`) and `DECISIONS.md` for the full design
+There is a single entry point into the app: email or Google - no passwords, no separate sign up
+flow. See `src/app/api/v1/auth.py` for the endpoints (`/auth/email/request`, `/auth/email/verify`,
+`/auth/email/verify-code`, `/auth/google`, `/auth/complete`) and `DECISIONS.md` for the full design
 rationale.
+
+The email path offers **two ways to finish, backed by one record**. `POST /auth/email/request`
+emails a magic link *and* a six-digit code, and either completes the sign-in - whichever is used
+first consumes the row, so exactly one session is ever issued. The code exists because a link signs
+in the device that opens it, and mail is often read on a different one; the code travels with the
+person instead. It is redeemed against the `request_id` the request response hands back to the
+browser that asked, and is bounded by `SIGN_IN_CODE_ATTEMPTS_MAX` wrong guesses, after which the
+code alone dies and the link keeps working.
 
 Changing an account's email (`src/app/api/v1/users.py`) reuses the same magic-link mechanics:
 `POST /user/email-change/request` emails a confirmation link to the *new* address, and the change
@@ -40,7 +48,8 @@ flowchart TD
 
 No separate "register" endpoint - a brand-new email just falls out of the same `/auth/email/request`
 → `/auth/email/verify` pair as signing in, because the server doesn't know yet whether the address
-belongs to anyone.
+belongs to anyone. The code from the same email reaches the same place: it returns
+`onboarding_required` too, so the unified flow needs no carve-out for it.
 
 ```mermaid
 sequenceDiagram
@@ -53,20 +62,26 @@ sequenceDiagram
     U->>FE: Enters email, clicks Continue
     FE->>API: POST /auth/email/request {email}
     API->>DB: Invalidate any previous live\nsign_in request for this email
-    API->>DB: Create AuthenticationRequest\n(token_hash, expires_at, purpose=sign_in)
-    API->>Mail: Send magic link email
-    API-->>FE: "Check your email for the next step."
-    Note over API,FE: Same generic response whether\nor not the email has an account
+    API->>DB: Create AuthenticationRequest\n(token_hash, code_hash, expires_at, purpose=sign_in)
+    API->>Mail: Send email carrying the link\nand the six-digit code
+    API-->>FE: "Check your email for the next step."\n+ request_id
+    Note over API,FE: Same generic message whether or not\nthe email has an account; request_id is\na fresh uuid either way
 
-    U->>Mail: Opens email, clicks link
-    Mail->>FE: GET /auth/verify?token=...
-    FE->>API: GET /auth/email/verify/check?token=...
-    API-->>FE: valid=true, email
-    FE-->>U: Shows "Sign in as {email}" button
+    alt Reads the mail on this device - opens the link
+        U->>Mail: Opens email, clicks link
+        Mail->>FE: GET /auth/verify?token=...
+        FE->>API: GET /auth/email/verify/check?token=...
+        API-->>FE: valid=true, email
+        FE-->>U: Shows "Sign in as {email}" button
 
-    U->>FE: Clicks "Sign in"
-    FE->>API: POST /auth/email/verify {token}
-    API->>DB: Validate token, mark used_at
+        U->>FE: Clicks "Sign in"
+        FE->>API: POST /auth/email/verify {token}
+    else Reads it elsewhere - types the code back here
+        U->>FE: Enters the six-digit code
+        FE->>API: POST /auth/email/verify-code\n{request_id, code}
+        API->>DB: Compare code_hash; a wrong guess\nincrements code_attempts
+    end
+    API->>DB: Claim the request (used_at) - link and code\nrace for one row, exactly one wins
     API->>DB: resolve_identity(email) -> no account
     API-->>FE: status=onboarding_required\n+ onboarding_token, email
     FE->>U: Redirect to /onboarding
@@ -80,8 +95,8 @@ sequenceDiagram
 
 #### 2. Sign in with email (existing user)
 
-Identical first step to signing up - the difference only appears once the link is verified and
-`resolve_identity` finds a matching account.
+Identical first step to signing up - the difference only appears once the link or code is verified
+and `resolve_identity` finds a matching account.
 
 ```mermaid
 sequenceDiagram
@@ -92,16 +107,21 @@ sequenceDiagram
 
     U->>FE: Enters email, clicks Continue
     FE->>API: POST /auth/email/request {email}
-    API-->>FE: "Check your email for the next step."
+    API-->>FE: "Check your email for the next step."\n+ request_id
 
-    U->>FE: Opens magic link from email
-    FE->>API: GET /auth/email/verify/check?token=...
-    API-->>FE: valid=true, email
-    FE-->>U: Shows "Sign in" button
+    alt Reads the mail on this device - opens the link
+        U->>FE: Opens magic link from email
+        FE->>API: GET /auth/email/verify/check?token=...
+        API-->>FE: valid=true, email
+        FE-->>U: Shows "Sign in" button
 
-    U->>FE: Clicks "Sign in"
-    FE->>API: POST /auth/email/verify {token}
-    API->>DB: Validate token, mark used_at
+        U->>FE: Clicks "Sign in"
+        FE->>API: POST /auth/email/verify {token}
+    else Reads it elsewhere - types the code back here
+        U->>FE: Enters the six-digit code
+        FE->>API: POST /auth/email/verify-code\n{request_id, code}
+    end
+    API->>DB: Claim the request (used_at) - link and code\nrace for one row, exactly one wins
     API->>DB: resolve_identity(email) -> account found
     API-->>FE: status=authenticated + access_token\n(+ refresh_token cookie)
     FE->>U: Redirect to /dashboard
@@ -224,12 +244,12 @@ sequenceDiagram
     end
 ```
 
-Magic-link emails go out over SMTP - any relay works, and any provider will give you one. Set these
-in `src/.env`:
+Sign-in emails go out over SMTP - any relay works, and any provider will give you one. Set these in
+`src/.env`:
 
 ```bash
-# Required to actually deliver magic-link emails - without SMTP_HOST, the link is
-# only logged (useful for local development). Resend users: smtp.resend.com,
+# Required to actually deliver sign-in emails - without SMTP_HOST, the link and code
+# are only logged (useful for local development). Resend users: smtp.resend.com,
 # username "resend", password = the API key.
 SMTP_HOST="smtp.example.com"
 SMTP_PORT=587
@@ -249,4 +269,9 @@ FRONTEND_URL="http://localhost:3000"
 MAGIC_LINK_TOKEN_EXPIRE_MINUTES=30
 ONBOARDING_TOKEN_EXPIRE_MINUTES=30
 EMAIL_CHANGE_TOKEN_EXPIRE_MINUTES=30
+
+# Wrong guesses allowed against the six-digit code before it is spent. The link in
+# the same email is untouched by this - see `DECISIONS.md` for why that asymmetry
+# is the point.
+SIGN_IN_CODE_ATTEMPTS_MAX=5
 ```

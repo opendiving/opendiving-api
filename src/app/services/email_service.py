@@ -136,18 +136,32 @@ def _refuse_to_log_credential_outside_local(what: str) -> None:
         raise EmailDeliveryError(f"No email transport is configured (SMTP_HOST), so {what} cannot be delivered.")
 
 
-async def send_magic_link_email(email: str, magic_link_url: str) -> None:
-    """Sends the magic-link sign-in email.
+async def send_magic_link_email(email: str, magic_link_url: str, code: str) -> None:
+    """Sends the sign-in email, carrying both ways to finish signing in: the magic link,
+    and the six-digit `code` to type back into the tab that asked for it.
+
+    Both are printed because they fail in opposite places. A link signs in *whichever
+    device opens it*, so someone who typed their address on a desktop and reads mail on a
+    phone ends up signed in inside the phone's mail-app browser - the common real-world
+    magic-link failure, and a particularly bad one for an app whose reason to be at a
+    desktop is a dive computer plugged into it. A code crosses that gap because a person
+    carries it. The link stays first in the email because it is the stronger credential
+    and the one tap fewer.
+
+    The code is spaced as `481 052`, the shape every other service prints it in - two
+    groups of three are easier to carry from one screen to another than an unbroken run.
+    `POST /auth/email/verify-code` strips the separator back out, so it costs the typist
+    nothing to include or omit.
 
     A no-op (logged, not raised) when `SMTP_HOST` isn't configured, so local
     development without a relay doesn't hard-fail `POST /auth/email/request`
-    - the link is still generated and logged so it can be used manually. Anywhere but
-    `local` that same condition raises instead, since the logged link is a live credential
-    (see `_refuse_to_log_credential_outside_local`).
+    - the link and code are still generated and logged so they can be used manually.
+    Anywhere but `local` that same condition raises instead, since both are live
+    credentials (see `_refuse_to_log_credential_outside_local`).
     """
     if not settings.SMTP_HOST:
         _refuse_to_log_credential_outside_local("the magic-link sign-in email")
-        logger.warning("SMTP_HOST not configured; magic link for %s: %s", email, magic_link_url)
+        logger.warning("SMTP_HOST not configured; magic link for %s: %s (code %s)", email, magic_link_url, code)
         return
 
     message = _build_message(
@@ -156,7 +170,10 @@ async def send_magic_link_email(email: str, magic_link_url: str) -> None:
         html_body=(
             "<p>Click the link below to continue signing in to OpenDiving:</p>"
             f'<p><a href="{magic_link_url}">{magic_link_url}</a></p>'
-            f"<p>This link expires in {settings.MAGIC_LINK_TOKEN_EXPIRE_MINUTES} minutes "
+            "<p>Reading this on a different device than the one you started on? Enter this "
+            "code there instead:</p>"
+            f'<p style="font-size:24px;letter-spacing:3px"><strong>{code[:3]} {code[3:]}</strong></p>'
+            f"<p>This link and code expire in {settings.MAGIC_LINK_TOKEN_EXPIRE_MINUTES} minutes "
             "and can only be used once. If you didn't request this, you can safely "
             "ignore this email.</p>"
         ),

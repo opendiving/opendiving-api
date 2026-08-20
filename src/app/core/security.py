@@ -74,6 +74,39 @@ def hash_token(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode()).hexdigest()
 
 
+def generate_sign_in_code() -> str:
+    """Generates the six-digit code printed beside the magic link in the same email
+    (`POST /auth/email/request`, redeemed by `POST /auth/email/verify-code`).
+
+    Six digits because a person retypes it across devices - the failure the link cannot
+    fix, since a link signs in whichever device opens it and mail is often read on a
+    different one. Zero-padded, so `000042` is as likely as any other value and the code
+    is always exactly six characters to compare and to display.
+
+    `secrets.randbelow` rather than `random`: the space is small enough that a
+    predictable generator would be guessable outright, whatever the attempt cap does.
+    """
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def hash_sign_in_code(code: str) -> str:
+    """Hashes a sign-in code for storage (`AuthenticationRequest.code_hash`).
+
+    A fast hash, for a *different* reason than `hash_token` above. There the argument is
+    entropy: 256 bits is beyond guessing, so slowing an attacker down buys nothing. Here
+    there are barely 20 bits, and no key-stretching function saves a six-digit secret
+    from an attacker holding the digest - a million SHA-256s is milliseconds, a million
+    bcrypts is an afternoon, and an afternoon is well inside the code's usefulness to
+    someone who already has the database.
+
+    So this hash is not what protects the code. `code_attempts` is (see
+    `crud.crud_authentication_requests.register_failed_code_attempt`), and this exists so
+    that a live credential is not sitting in plaintext in logs, backups, or the admin
+    panel's row view.
+    """
+    return hashlib.sha256(code.encode()).hexdigest()
+
+
 # -------------- google id token verification --------------
 async def verify_google_id_token(credential: str) -> GoogleUserInfo | None:
     """Verify a Google Identity Services ID token and extract the account info from it.
