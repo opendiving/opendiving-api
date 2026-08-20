@@ -47,6 +47,13 @@ uv run mypy scripts --config-file pyproject.toml
 uv run pytest --cov=src/app --cov-report=term-missing
 ```
 
+If your PR touches `src/app/models/`, add the migration drift check — CI runs it and the suite does
+not (see *Things that will bite you* below):
+
+```bash
+cd src && POSTGRES_SERVER=localhost uv run alembic check
+```
+
 Note that lint and type-checking cover `tests/` and the build-time `scripts/` as well as `src/`.
 mypy runs as three separate invocations, for two different reasons. `src` and `tests` are split
 because the app is importable as both `app.*` (via `mypy_path`) and `src.app.*` (how the tests
@@ -160,13 +167,49 @@ Tests live in `tests/`, one module per feature area (`test_dives.py`, `test_gear
 endpoints and new parsing behaviour should come with tests; bug fixes should come with a test that
 fails without the fix.
 
-## Two things that will bite you
+## Things that will bite you
 
-**There are no migrations yet.** `Base.metadata.create_all()` runs on startup and creates *new*
-tables, but never alters existing ones. Adding a column means: update the model and schema, restart
-the `api` container, then apply the `ALTER TABLE` by hand against your dev database. If your PR
-changes the schema, **put the SQL in the PR description** so everyone else can apply it too. The
-same goes for new `CheckConstraint`s. Versioned Alembic migrations are on the roadmap before 1.0.
+**Every schema change ships an Alembic revision.** The API runs `alembic upgrade head` in its
+lifespan, so your change reaches a database — yours, CI's, or a self-hosted instance's — by the
+container starting. Adding a column means:
+
+```bash
+cd src && POSTGRES_SERVER=localhost uv run alembic revision --autogenerate -m "add dive.deco_model"
+```
+
+`POSTGRES_SERVER=localhost` for the same reason the test suite needs it — `src/.env` names the
+compose hostname `db`, which does not resolve on the host — and autogenerate needs a live database
+to compare the models against, so the stack has to be up. Read the file it writes before committing
+it. Autogenerate compares the models against the database it connects to and is a first draft: it
+cannot see a data backfill, it renders a rename as a drop plus an add, and it will happily write
+`DROP TABLE` for anything in your database that the models no longer describe. Then
+`docker compose restart api` applies it (`src/migrations` is bind-mounted, so the new revision is
+already inside the container).
+
+CI fails the PR if the models and the revisions disagree — it runs `alembic upgrade head` against an
+empty database and then `alembic check`, which autogenerates again and fails on any difference. That
+is also the fastest local check that you generated everything you needed:
+
+```bash
+cd src && POSTGRES_SERVER=localhost uv run alembic check
+```
+
+**A database that predates migrations needs stamping, once.** Anything created by the old
+`create_all()` workflow — every dev database from before this landed — has the tables but no
+`alembic_version`, so `upgrade head` tries to create them again and the API fails to start. Tell
+Alembic it is already current, then verify that claim:
+
+```bash
+cd src
+POSTGRES_SERVER=localhost uv run alembic stamp head
+POSTGRES_SERVER=localhost uv run alembic check
+```
+
+The `check` is the part not to skip. The old workflow applied `ALTER TABLE`s by hand from PR
+descriptions, so any given machine may be missing a constraint nobody ran, or still carrying a
+column that was dropped from the models — a stamp asserts a state nobody verified, and
+migrate-on-start will never notice afterwards. Apply whatever `check` reports by hand, or wipe the
+database and let the migrations build it: `docker compose down -v && docker compose up`.
 
 **Read [DECISIONS.md](DECISIONS.md) before your first PR.** It records the non-obvious choices and
 the traps already hit — the schema-change workflow above, check-constraint behaviour, the caching

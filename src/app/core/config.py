@@ -110,7 +110,14 @@ class CryptSettings(BaseSettings):
 
 
 class DatabaseSettings(BaseSettings):
-    pass
+    # The API brings the schema up to `head` on startup, so upgrading an instance is
+    # `docker compose pull && docker compose up -d` and nothing else. Off is for operators
+    # who want to run `alembic upgrade head` themselves - during a backup window, or from a
+    # one-shot container - and it is the same escape hatch Miniflux ships as
+    # `RUN_MIGRATIONS`. Turning it off does *not* fall back to anything: the app then boots
+    # against whatever schema it finds, and a version behind on migrations fails at the
+    # first query that needs the new column.
+    MIGRATE_ON_START: bool = config("MIGRATE_ON_START", default=True)
 
 
 def postgres_uri(user: str, password: str, server: str, port: int, database: str) -> str:

@@ -272,7 +272,7 @@ OWNER = {"id": OWNER_ID, "uuid": uuid_pkg.uuid4(), "username": "ada", "is_superu
 
 @pytest.fixture(scope="module")
 def owned_app() -> Any:
-    """Its own app with `create_tables_on_start=False`, like `test_export_endpoints.py`.
+    """Its own app with `apply_migrations_on_start=False`, like `test_export_endpoints.py`.
 
     The shared `client` fixture opens `src.app.main`'s app, whose startup hook connects to
     Postgres - which would put these in the database-backed subset for no reason. Nothing
@@ -280,7 +280,7 @@ def owned_app() -> Any:
     cached read helper, which is the ordering `TestEveryOwnedRouteUsesIt` exists to
     protect.
     """
-    return create_application(router=router, settings=settings, create_tables_on_start=False)
+    return create_application(router=router, settings=settings, apply_migrations_on_start=False)
 
 
 @pytest.fixture

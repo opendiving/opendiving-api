@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import AsyncGenerator, Callable
 from contextlib import _AsyncGeneratorContextManager, asynccontextmanager
@@ -26,8 +27,8 @@ from .config import (
     configure_logging,
     settings,
 )
-from .db.database import Base
 from .db.database import async_engine as engine
+from .db.migrations import upgrade_to_head
 from .utils import cache
 
 # -------------- logging --------------
@@ -44,33 +45,41 @@ configure_logging(settings.LOG_LEVEL)
 # than off, so a genuine httpx problem is still visible.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
+logger = logging.getLogger(__name__)
+
 # -------------- database --------------
-# Arbitrary constant; the only thing that matters is that every process runs `create_tables`
-# picks the same one. Namespaced mentally as "opendiving schema bootstrap".
+# Arbitrary constant; the only thing that matters is that every process running
+# `apply_migrations` picks the same one. Namespaced mentally as "opendiving schema
+# bootstrap".
 _SCHEMA_BOOTSTRAP_LOCK_KEY = 8231907441002137
 
 
-async def create_tables() -> None:
-    """Create any brand-new tables. Never alters existing ones - see `DECISIONS.md`.
+async def apply_migrations() -> None:
+    """Bring the database up to the latest Alembic revision, unless told not to.
 
     Serialized behind a Postgres advisory lock because this runs in the lifespan, and the
-    lifespan runs once *per worker*: under `gunicorn -w 4` against a database that doesn't
-    have the tables yet, four workers call `create_all` simultaneously. `checkfirst=True`
-    doesn't save you - it inspects the catalog and then issues `CREATE TABLE`, so two
-    workers can both look, both see nothing, and both try. The loser dies with
-    `duplicate key value violates unique constraint "pg_type_typname_nsp_index"` and
-    gunicorn eventually gives up on the whole container.
+    lifespan runs once *per worker*: under `gunicorn -w 4` against a database that is
+    behind, four workers start the same upgrade simultaneously. Alembic takes no
+    cross-process lock of its own - two workers both read `alembic_version`, both find the
+    same revision, and both run it, so the loser dies on a `CREATE TABLE` for a table the
+    winner just made and gunicorn eventually gives up on the whole container. (Inherited
+    from `create_all`, which had the same race for the same reason.)
 
     The lock is transaction-scoped, so it releases when this block commits, and it makes
-    the check-then-create pair atomic across processes: whoever gets in second re-inspects
-    inside the lock, finds the tables, and does nothing. Only ever contended on a cold
-    database - on every subsequent boot `create_all` is a no-op and the lock is
-    uncontended.
+    read-version-then-upgrade atomic across processes: whoever gets in second re-reads
+    `alembic_version` inside the lock, finds it already at `head`, and does nothing. Held
+    on this connection while Alembic works on its own - the outer transaction touches no
+    table, so it cannot deadlock against the DDL. Only ever contended on a cold or
+    out-of-date database; on every subsequent boot the upgrade is a no-op.
     """
+    if not settings.MIGRATE_ON_START:
+        logger.info("MIGRATE_ON_START is false - skipping `alembic upgrade head`.")
+        return
+
     async with engine.begin() as conn:
         if conn.dialect.name == "postgresql":
             await conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _SCHEMA_BOOTSTRAP_LOCK_KEY})
-        await conn.run_sync(Base.metadata.create_all)
+        await asyncio.to_thread(upgrade_to_head)
 
 
 # -------------- cache --------------
@@ -97,7 +106,7 @@ def lifespan_factory(
     | ClientSideCacheSettings
     | EnvironmentSettings
     | FrontendSettings,
-    create_tables_on_start: bool = True,
+    apply_migrations_on_start: bool = True,
 ) -> Callable[[FastAPI], _AsyncGeneratorContextManager[Any]]:
     """Factory to create a lifespan async context manager for a FastAPI app."""
 
@@ -114,8 +123,8 @@ def lifespan_factory(
             if isinstance(settings, RedisCacheSettings):
                 await create_redis_cache_pool()
 
-            if create_tables_on_start:
-                await create_tables()
+            if apply_migrations_on_start:
+                await apply_migrations()
 
             initialization_complete.set()
 
@@ -137,7 +146,7 @@ def create_application(
     | ClientSideCacheSettings
     | EnvironmentSettings
     | FrontendSettings,
-    create_tables_on_start: bool = True,
+    apply_migrations_on_start: bool = True,
     lifespan: Callable[[FastAPI], _AsyncGeneratorContextManager[Any]] | None = None,
     **kwargs: Any,
 ) -> FastAPI:
@@ -156,15 +165,17 @@ def create_application(
         It determines the configuration applied:
 
         - AppSettings: Configures basic app metadata like name, description, contact, and license info.
-        - DatabaseSettings: Adds event handlers for initializing database tables during startup.
+        - DatabaseSettings: Adds event handlers for bringing the schema up to `head` during startup.
         - RedisCacheSettings: Sets up event handlers for creating and closing a Redis cache pool.
         - ClientSideCacheSettings: Integrates middleware for client-side caching.
         - EnvironmentSettings: Conditionally sets documentation URLs and integrates custom routes for API documentation
           based on the environment type.
 
-    create_tables_on_start : bool
-        A flag to indicate whether to create database tables on application startup.
-        Defaults to True.
+    apply_migrations_on_start : bool
+        A flag to indicate whether to run `alembic upgrade head` on application startup.
+        Defaults to True. Distinct from the `MIGRATE_ON_START` setting, which is the
+        operator's switch: this one is for apps built inside the test suite, which want
+        no database work at all.
 
     **kwargs
         Additional keyword arguments passed directly to the FastAPI constructor.
@@ -194,7 +205,7 @@ def create_application(
 
     # Use custom lifespan if provided, otherwise use default factory
     if lifespan is None:
-        lifespan = lifespan_factory(settings, create_tables_on_start=create_tables_on_start)
+        lifespan = lifespan_factory(settings, apply_migrations_on_start=apply_migrations_on_start)
 
     application = FastAPI(lifespan=lifespan, **kwargs)
     application.include_router(router)

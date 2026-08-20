@@ -15,7 +15,7 @@ class DiveDiveSite(Base):
 
     __tablename__ = "dive_dive_site"
 
-    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, unique=True, primary_key=True, init=False)
+    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
     # No standalone index on dive_id: the composite index below (leading column dive_id)
     # already serves lookups filtered by dive_id alone, plus satisfies the ORDER BY position
     # used by get_dive_sites_for_dive/get_dive_sites_for_dives without an extra index.

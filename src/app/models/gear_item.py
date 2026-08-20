@@ -18,7 +18,7 @@ class GearItem(Base, PublicUUIDMixin, TimestampMixin):
 
     __tablename__ = "gear_item"
 
-    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, unique=True, primary_key=True, init=False)
+    id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id"), index=True)
     name: Mapped[str] = mapped_column(String(255))
     brand: Mapped[str | None] = mapped_column(String(255), default=None)
