@@ -57,8 +57,11 @@ artifacts, which is what the `curl` lines above fetch.
 - **Certifications** — c-card records with front/back card images.
 - **Full export** — everything out in open formats (UDDF, CSV, and a complete JSON + original-files
   archive) in one request. Owner-only, never cached; the UDDF validates against the 3.2.2 schema.
-- **Passwordless auth** — email magic links (over SMTP, so any relay or provider works) and Google
-  Sign-In, with automatic account linking, short-lived access tokens, and httpOnly refresh cookies.
+- **Passwordless auth** — email sign-in (over SMTP, so any relay or provider works), Google Sign-In,
+  and passkeys, with automatic account linking, short-lived access tokens, and httpOnly refresh
+  cookies. The sign-in email carries a magic link *and* a six-digit code, so reading your mail on a
+  different device than you started on still works. A passkey is a third *first* factor rather than
+  a second one — unphishable and one tap, and the only method needing no third-party service at all.
   No password storage at all. The full design, with sequence diagrams, is in
   [docs/authentication.md](docs/authentication.md).
 

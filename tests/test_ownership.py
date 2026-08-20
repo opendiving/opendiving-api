@@ -375,6 +375,19 @@ FETCH_OWNED_ROUTES = [
         "src.app.api.v1.certifications:crud_certifications",
         "Certification not found",
     ),
+    # Only PATCH and DELETE: passkeys have no single-item GET, since `GET /user/passkeys`
+    # returns the caller's whole (capped) list and there is nothing per-row to fetch.
+    *(
+        OwnedRoute(
+            method,
+            "/api/v1/user/passkey/{uuid}",
+            "src.app.api.v1.passkeys:crud_webauthn_credentials",
+            "Passkey not found",
+            extra,
+        )
+        for method, extra in _CRUD_METHODS
+        if method != "GET"
+    ),
 ]
 
 # The other family. These six resolve ownership in SQL rather than through

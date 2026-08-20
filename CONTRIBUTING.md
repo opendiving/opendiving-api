@@ -26,8 +26,8 @@ docker compose up
 ```
 
 That gives you the API on <http://localhost:8000> (docs at `/docs`), PostgreSQL, Redis, and the arq
-worker. Leave `SMTP_HOST` unset locally — magic-link sign-in URLs are then written to the API logs
-instead of emailed, which is what you want for development.
+worker. Leave `SMTP_HOST` unset locally — sign-in URLs, and the six-digit code that rides the same
+email, are then written to the API logs instead of emailed, which is what you want for development.
 
 For running the tooling (ruff, mypy, pytest) outside the container you need Python 3.14 and
 [uv](https://docs.astral.sh/uv/):

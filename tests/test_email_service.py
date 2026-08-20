@@ -209,7 +209,7 @@ class TestSendMagicLinkEmail:
             mock_settings.SMTP_HOST = None
             mock_settings.ENVIRONMENT = EnvironmentOption.LOCAL
 
-            await send_magic_link_email("user@example.com", "https://app.example.com/auth/verify?token=abc")
+            await send_magic_link_email("user@example.com", "https://app.example.com/auth/verify?token=abc", "481052")
 
             mock_smtplib.SMTP.assert_not_called()
             mock_smtplib.SMTP_SSL.assert_not_called()
@@ -224,7 +224,7 @@ class TestSendMagicLinkEmail:
             mock_settings.MAGIC_LINK_TOKEN_EXPIRE_MINUTES = 30
             mock_run_sync.return_value = None
 
-            await send_magic_link_email("user@example.com", "https://app.example.com/auth/verify?token=abc")
+            await send_magic_link_email("user@example.com", "https://app.example.com/auth/verify?token=abc", "481052")
 
             mock_run_sync.assert_called_once()
             _send_fn, message = mock_run_sync.call_args.args
@@ -241,7 +241,7 @@ class TestSendMagicLinkEmail:
             _configured(mock_settings)
             mock_settings.MAGIC_LINK_TOKEN_EXPIRE_MINUTES = 30
 
-            await send_magic_link_email("user@example.com", "https://app.example.com/auth/verify?token=abc")
+            await send_magic_link_email("user@example.com", "https://app.example.com/auth/verify?token=abc", "481052")
 
             assert mock_run_sync.call_args.args[0] is _send
 
@@ -366,7 +366,10 @@ class TestCredentialBearingEmailsOutsideLocal:
     @pytest.mark.parametrize(
         ("sender", "args"),
         [
-            (send_magic_link_email, ("user@example.com", "https://app.example.com/auth/verify?token=secret")),
+            (
+                send_magic_link_email,
+                ("user@example.com", "https://app.example.com/auth/verify?token=secret", "481052"),
+            ),
             (
                 send_email_change_confirmation_email,
                 ("new@example.com", "https://app.example.com/settings/email?token=secret"),
@@ -393,7 +396,9 @@ class TestCredentialBearingEmailsOutsideLocal:
 
             with caplog.at_level(logging.WARNING, logger="src.app.services.email_service"):
                 with pytest.raises(EmailDeliveryError):
-                    await send_magic_link_email("user@example.com", "https://app.example.com/auth/verify?token=secret")
+                    await send_magic_link_email(
+                        "user@example.com", "https://app.example.com/auth/verify?token=secret", "481052"
+                    )
 
             assert "token=secret" not in caplog.text
 
@@ -404,7 +409,9 @@ class TestCredentialBearingEmailsOutsideLocal:
             mock_settings.ENVIRONMENT = EnvironmentOption.LOCAL
 
             with caplog.at_level(logging.WARNING, logger="src.app.services.email_service"):
-                await send_magic_link_email("user@example.com", "https://app.example.com/auth/verify?token=secret")
+                await send_magic_link_email(
+                    "user@example.com", "https://app.example.com/auth/verify?token=secret", "481052"
+                )
 
             # Signing in without a relay configured is the whole point of the fallback.
             assert "token=secret" in caplog.text

@@ -1,20 +1,27 @@
 """Unified authentication & registration flow, plus session refresh/teardown.
 
 The single entry point into the app: a caller either proves ownership of an email
-address (magic link) or authenticates with Google, and *only then* do we ask "does an
-account already exist for this identity?" (`resolve_identity`, in `services.auth_service`).
+address (the magic link, or the six-digit code printed beside it in the same email) or
+authenticates with Google, and *only then* do we ask "does an account already exist for
+this identity?" (`resolve_identity`, in `services.auth_service`).
 If so, they're signed in immediately. If not, a temporary onboarding session is issued
 and no `User` row is created until profile completion (`POST /auth/complete`) succeeds -
 there are no unverified users, and there is no separate sign up flow.
+
+A passkey assertion (`POST /auth/passkey/options`/`verify`) is the third way in, and the
+one that skips that question: a credential row names its account outright, so there is
+nothing to resolve and no onboarding branch to reach. Registering one is the authenticated
+half of the feature and lives in `api.v1.passkeys`.
 
 `POST /auth/refresh`/`POST /auth/logout` also live here (see `DECISIONS.md`) - they
 used to sit in their own `login.py`/`logout.py` modules under a stale `"login"` tag,
 left over from the old password-based flow.
 """
 
+import hmac
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Cookie, Depends, Request, Response
 from jose import JWTError
@@ -31,6 +38,8 @@ from ...core.security import (
     blacklist_tokens,
     create_onboarding_token,
     generate_secure_token,
+    generate_sign_in_code,
+    hash_sign_in_code,
     hash_token,
     oauth2_scheme,
     revocation_time,
@@ -42,30 +51,57 @@ from ...core.security import (
 from ...core.utils.client_ip import client_ip
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...crud.crud_authentication_providers import crud_authentication_providers
-from ...crud.crud_authentication_requests import claim_authentication_request, crud_authentication_requests
+from ...crud.crud_authentication_requests import (
+    claim_authentication_request,
+    crud_authentication_requests,
+    register_failed_code_attempt,
+)
 from ...crud.crud_users import crud_users
 from ...schemas.auth import (
     AuthOutcome,
     EmailAuthRequest,
     EmailAuthRequestResponse,
+    EmailCodeVerifyRequest,
     EmailVerifyRequest,
     GoogleAuthRequest,
     LinkCheckResponse,
     ProfileCompletionRequest,
 )
 from ...schemas.authentication_provider import AuthenticationProviderCreate
-from ...schemas.authentication_request import AuthenticationRequestCreate, AuthenticationRequestUpdate
+from ...schemas.authentication_request import (
+    AuthenticationRequestCreate,
+    AuthenticationRequestRead,
+    AuthenticationRequestUpdate,
+)
 from ...schemas.user import UserCreateInternal, UserReadInternal
+from ...schemas.webauthn_credential import PasskeySignInOptions, PasskeySignInVerifyRequest
 from ...services.auth_service import AuthenticatedUser, OnboardingRequired, issue_tokens, resolve_identity
 from ...services.email_service import send_magic_link_email
+from ...services.passkey_service import finish_sign_in, start_sign_in
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 logger = logging.getLogger(__name__)
 
-# Always the exact same response regardless of whether the email belongs to an
-# existing account - see `EmailAuthRequestResponse`.
-_EMAIL_REQUEST_RESPONSE = EmailAuthRequestResponse()
+# The one thing `POST /auth/email/verify-code` ever says about a code it won't accept.
+# Wrong digits, a `request_id` naming no row, an expired or superseded request, and a code
+# whose attempts ran out are all this sentence, so that nothing about the row leaks to a
+# caller who has not already proven they are the browser that asked for it.
+_CODE_REJECTED = "This code is invalid or has expired."
+
+
+def _has_expired(auth_request: dict[str, Any]) -> bool:
+    """Whether a request's `expires_at` is in the past, tolerating a naive timestamp.
+
+    The column is `TIMESTAMPTZ` and asyncpg hands back an aware `datetime`, but a row read
+    through a driver or a test double that doesn't is a `TypeError` on the comparison
+    rather than a wrong answer - so the coercion is here, once, instead of at each of the
+    three sites that ask the question.
+    """
+    expires_at: datetime = auth_request["expires_at"]
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    return expires_at < datetime.now(UTC)
 
 
 async def _start_onboarding_or_sign_in(
@@ -73,11 +109,17 @@ async def _start_onboarding_or_sign_in(
 ) -> AuthOutcome:
     """Turn a verified identity into either a signed-in session or an onboarding handoff.
 
-    Shared by every entry point that proves who someone is (magic link, Google), because
-    each of them faces the same fork: a `User` row already exists for this identity, or it
-    doesn't and one has to be created by `POST /auth/complete`. In the second case no user
-    is created here - the caller gets a short-lived onboarding token carrying the verified
-    email and profile, which is the only thing that lets `/auth/complete` trust them.
+    Shared by every entry point that proves who someone is (magic link, Google, passkey),
+    because each of them faces the same fork: a `User` row already exists for this identity,
+    or it doesn't and one has to be created by `POST /auth/complete`. In the second case no
+    user is created here - the caller gets a short-lived onboarding token carrying the
+    verified email and profile, which is the only thing that lets `/auth/complete` trust
+    them.
+
+    A passkey assertion can only ever take the first branch, since a credential exists only
+    because a signed-in user registered it. It comes through here anyway rather than calling
+    `issue_tokens` directly: token shape, cookie mechanics and every future outcome variant
+    then stay in one place instead of two that have to be kept in step.
     """
     if isinstance(outcome, AuthenticatedUser):
         tokens = await issue_tokens(response, outcome.user["uuid"])
@@ -105,10 +147,18 @@ async def _start_onboarding_or_sign_in(
 async def request_email_link(
     request: Request, body: EmailAuthRequest, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> EmailAuthRequestResponse:
-    """Step 1 of the email flow: generates a magic-link token and emails it.
+    """Step 1 of the email flow: generates a magic-link token and a six-digit code, and
+    emails both.
 
     Always returns the same generic message, whether or not `email` belongs to an
     existing account - this must never be used to check if someone has signed up.
+
+    The `request_id` in the response is the row's public uuid, and it is handed back for
+    one reason: it is the only way to reach `POST /auth/email/verify-code`, which has no
+    email-keyed lookup at all. That keeps the code's attempt budget spendable *only* by
+    the browser that asked for it - a stranger who knows an address cannot burn a diver's
+    code, let alone their link. It is not an oracle either way: a row is minted for every
+    address, so the id is a fresh random value whether or not an account exists.
     """
     email = body.email.lower()
 
@@ -141,18 +191,25 @@ async def request_email_link(
         )
 
     raw_token = generate_secure_token()
+    code = generate_sign_in_code()
     expires_at = datetime.now(UTC) + timedelta(minutes=settings.MAGIC_LINK_TOKEN_EXPIRE_MINUTES)
-    await crud_authentication_requests.create(
+    created = await crud_authentication_requests.create(
         db=db,
         object=AuthenticationRequestCreate(
-            email=email, token_hash=hash_token(raw_token), expires_at=expires_at, purpose="sign_in"
+            email=email,
+            token_hash=hash_token(raw_token),
+            code_hash=hash_sign_in_code(code),
+            expires_at=expires_at,
+            purpose="sign_in",
         ),
+        schema_to_select=AuthenticationRequestRead,
+        return_as_model=True,
     )
 
     magic_link_url = f"{settings.FRONTEND_URL}/auth/verify?token={raw_token}"
-    await send_magic_link_email(email=email, magic_link_url=magic_link_url)
+    await send_magic_link_email(email=email, magic_link_url=magic_link_url, code=code)
 
-    return _EMAIL_REQUEST_RESPONSE
+    return EmailAuthRequestResponse(request_id=created.uuid)
 
 
 @router.get("/email/verify/check", response_model=LinkCheckResponse)
@@ -185,10 +242,7 @@ async def check_email_link(
     if auth_request is None or auth_request["invalidated_at"] is not None or auth_request["used_at"] is not None:
         return LinkCheckResponse(valid=False)
 
-    expires_at = auth_request["expires_at"]
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=UTC)
-    if expires_at < datetime.now(UTC):
+    if _has_expired(auth_request):
         return LinkCheckResponse(valid=False)
 
     return LinkCheckResponse(valid=True, email=auth_request["email"])
@@ -232,10 +286,7 @@ async def verify_email_link(
     if auth_request["used_at"] is not None:
         raise UnauthorizedException("This sign-in link has already been used.")
 
-    expires_at = auth_request["expires_at"]
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=UTC)
-    if expires_at < datetime.now(UTC):
+    if _has_expired(auth_request):
         raise UnauthorizedException("This sign-in link has expired.")
 
     # The authoritative single-use gate, sitting immediately before the session gets
@@ -244,6 +295,69 @@ async def verify_email_link(
     # `claim_authentication_request` for why this can't be a filtered FastCRUD `update`.
     if not await claim_authentication_request(db, request_id=auth_request["id"]):
         raise UnauthorizedException("This sign-in link has already been used.")
+
+    outcome = await resolve_identity(db=db, provider="email", email=auth_request["email"])
+    return await _start_onboarding_or_sign_in(response, outcome)
+
+
+@router.post("/email/verify-code", response_model=AuthOutcome)
+async def verify_email_code(
+    request: Request,
+    body: EmailCodeVerifyRequest,
+    response: Response,
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> AuthOutcome:
+    """The other half of step 2: the six-digit code from the sign-in email, typed back
+    into the tab that asked for it. Signs the caller in, or hands back an onboarding
+    session, exactly as the link does.
+
+    This exists because a link signs in *the device that opens it*, and mail is very often
+    read somewhere else - the one magic-link failure the explicit-click precheck never
+    addressed. Both credentials ride the same row and end at the same
+    `claim_authentication_request`, so a link and a code racing on one request resolve the
+    way two links do: one wins, the other is told it has already been used.
+
+    **`request_id` is not decoration.** There is deliberately no lookup by email here. The
+    id was handed only to the browser that made the request, so the only party who can
+    spend this code's attempts is the one who asked for it - and an earlier design without
+    it let anyone who knew an address fire five wrong guesses at whatever request the
+    victim had live, which, if a burnt code took its link with it, is sign-in denial aimed
+    at exactly the accounts (email-only, self-hosted) whose recovery path is that inbox. It
+    also removes a genuine nondeterminism: two tabs can each leave a live row for the same
+    address, and an `(email, live)` lookup would resolve them by an unordered `.first()`.
+
+    Every rejection is the same sentence (`_CODE_REJECTED`), including the case where the
+    `request_id` names nothing at all.
+    """
+    await enforce_rate_limit(
+        f"auth:email-verify-code:ip:{client_ip(request)}",
+        settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
+        settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
+    )
+
+    auth_request = await crud_authentication_requests.get(db=db, uuid=body.request_id, purpose="sign_in")
+    if (
+        auth_request is None
+        or auth_request["code_hash"] is None
+        or auth_request["invalidated_at"] is not None
+        or auth_request["used_at"] is not None
+        or _has_expired(auth_request)
+    ):
+        raise UnauthorizedException(_CODE_REJECTED)
+
+    if not hmac.compare_digest(auth_request["code_hash"], hash_sign_in_code(body.code)):
+        # Charged before the 401 is raised, and atomically - the cap is the whole defense
+        # of a six-digit secret, so it must not be walkable by firing guesses in parallel.
+        await register_failed_code_attempt(
+            db, request_id=auth_request["id"], max_attempts=settings.SIGN_IN_CODE_ATTEMPTS_MAX
+        )
+        raise UnauthorizedException(_CODE_REJECTED)
+
+    # The authoritative single-use gate, same as the link's - see
+    # `claim_authentication_request`. A correct code that loses this race lost to the link
+    # in its own email, or to a second tab, and either way a session was already issued.
+    if not await claim_authentication_request(db, request_id=auth_request["id"]):
+        raise UnauthorizedException(_CODE_REJECTED)
 
     outcome = await resolve_identity(db=db, provider="email", email=auth_request["email"])
     return await _start_onboarding_or_sign_in(response, outcome)
@@ -278,6 +392,65 @@ async def auth_with_google(
         name=google_user.name,
         avatar=google_user.avatar,
     )
+    return await _start_onboarding_or_sign_in(response, outcome)
+
+
+@router.post("/passkey/options", response_model=PasskeySignInOptions)
+async def passkey_sign_in_options(request: Request) -> PasskeySignInOptions:
+    """Step 1 of signing in with a passkey: mints a challenge and the assertion options
+    the browser hands to `navigator.credentials.get()`.
+
+    Anonymous and deliberately incurious - `allowCredentials` is empty, so this request
+    names no account and can reveal nothing about any. Discoverable credentials are what
+    buy that: the assertion itself carries the credential id, and the credential row names
+    the user, so no email-first step exists for a "does this address have a passkey"
+    oracle to hide in.
+
+    The ceiling is `AUTH_REFRESH_RATE_LIMIT_PER_IP`'s, and for the same reason: conditional
+    UI arms on every signed-out page view that supports it, landing hero included, and an
+    office behind one NAT gateway is a single IP to this counter.
+
+    503 when Redis is unreachable. The challenge store is the anti-replay guarantee, so it
+    fails closed where rate limiting fails open - and the magic link, being pure Postgres,
+    keeps working through exactly that outage. Three methods with independent failure
+    domains is the design, not an accident.
+    """
+    await enforce_rate_limit(
+        f"auth:passkey-options:ip:{client_ip(request)}",
+        settings.PASSKEY_OPTIONS_RATE_LIMIT_PER_IP,
+        settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
+    )
+
+    flow_id, options = await start_sign_in()
+    return PasskeySignInOptions(flow_id=flow_id, options=options)
+
+
+@router.post("/passkey/verify", response_model=AuthOutcome)
+async def passkey_sign_in_verify(
+    request: Request,
+    body: PasskeySignInVerifyRequest,
+    response: Response,
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> AuthOutcome:
+    """Step 2: verifies the assertion and signs in whoever owns the credential.
+
+    The challenge is spent on the *attempt*, not on success, so a captured assertion can
+    never be retried against a still-live one. An unknown credential, a tombstoned owner,
+    an expired or already-spent challenge, a wrong origin, a wrong RP ID and a bad
+    signature are one indistinguishable 401 - see `passkey_service.finish_sign_in`.
+
+    Always resolves to an existing account and never to onboarding, since a credential can
+    only exist because a signed-in user registered it. It goes through the shared funnel
+    anyway: that is what makes token shape, cookie mechanics and every future outcome
+    variant free here instead of a second copy to keep in step.
+    """
+    await enforce_rate_limit(
+        f"auth:passkey-verify:ip:{client_ip(request)}",
+        settings.PASSKEY_VERIFY_RATE_LIMIT_PER_IP,
+        settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
+    )
+
+    outcome = await finish_sign_in(db=db, flow_id=body.flow_id, credential=body.credential)
     return await _start_onboarding_or_sign_in(response, outcome)
 
 

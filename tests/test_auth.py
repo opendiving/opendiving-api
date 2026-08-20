@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi import Response
+from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 
 from src.app.api.v1.auth import (
@@ -16,22 +17,42 @@ from src.app.api.v1.auth import (
     check_email_link,
     complete_profile,
     request_email_link,
+    verify_email_code,
     verify_email_link,
 )
+from src.app.core.config import settings
 from src.app.core.exceptions.http_exceptions import DuplicateValueException, RateLimitException, UnauthorizedException
 from src.app.core.schemas import GoogleUserInfo, OnboardingTokenData
-from src.app.schemas.auth import EmailAuthRequest, EmailVerifyRequest, GoogleAuthRequest, ProfileCompletionRequest
+from src.app.core.security import hash_sign_in_code
+from src.app.schemas.auth import (
+    EmailAuthRequest,
+    EmailCodeVerifyRequest,
+    EmailVerifyRequest,
+    GoogleAuthRequest,
+    ProfileCompletionRequest,
+)
 from tests.helpers.mocks import claimed_used_at_sql, stub_claim
 
 # Every sign-in path subjects its tokens to this, not to the account's username - see
 # `services.auth_service.issue_tokens`.
 USER_UUID = uuid_pkg.uuid4()
 
+# The public uuid of the `authentication_request` row - handed back as `request_id` by
+# `POST /auth/email/request` and the only handle on `POST /auth/email/verify-code`.
+REQUEST_UUID = uuid_pkg.uuid4()
+
 
 def _request(ip: str = "1.2.3.4") -> Mock:
     request = Mock()
     request.client = Mock(host=ip)
     return request
+
+
+def _created_row(request_uuid: uuid_pkg.UUID = REQUEST_UUID) -> Mock:
+    """What `crud_authentication_requests.create` hands back now that the route asks for
+    the model: `request_email_link` reads `.uuid` off it to answer with a `request_id`.
+    """
+    return Mock(uuid=request_uuid)
 
 
 class TestRequestEmailLink:
@@ -46,7 +67,7 @@ class TestRequestEmailLink:
         ):
             mock_crud.count = AsyncMock(return_value=0)
             mock_crud.update = AsyncMock(return_value=None)
-            mock_crud.create = AsyncMock(return_value=None)
+            mock_crud.create = AsyncMock(return_value=_created_row())
 
             result = await request_email_link(_request(), EmailAuthRequest(email="new@example.com"), mock_db)
 
@@ -54,6 +75,44 @@ class TestRequestEmailLink:
             mock_send.assert_called_once()
             assert mock_send.call_args.kwargs["email"] == "new@example.com"
             mock_crud.update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_hands_the_asking_browser_the_request_id_for_its_code(self, mock_db):
+        """The `request_id` is the whole reason `POST /auth/email/verify-code` is safe to
+        expose anonymously: without it there is no way to name a row, so nobody but the
+        browser that asked can spend a diver's code attempts.
+        """
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.crud_authentication_requests") as mock_crud,
+            patch("src.app.api.v1.auth.send_magic_link_email", new_callable=AsyncMock),
+        ):
+            mock_crud.count = AsyncMock(return_value=0)
+            mock_crud.create = AsyncMock(return_value=_created_row())
+
+            result = await request_email_link(_request(), EmailAuthRequest(email="new@example.com"), mock_db)
+
+            assert result.request_id == REQUEST_UUID
+
+    @pytest.mark.asyncio
+    async def test_emails_a_six_digit_code_and_stores_only_its_hash(self, mock_db):
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.crud_authentication_requests") as mock_crud,
+            patch("src.app.api.v1.auth.send_magic_link_email", new_callable=AsyncMock) as mock_send,
+        ):
+            mock_crud.count = AsyncMock(return_value=0)
+            mock_crud.create = AsyncMock(return_value=_created_row())
+
+            await request_email_link(_request(), EmailAuthRequest(email="new@example.com"), mock_db)
+
+            code = mock_send.call_args.kwargs["code"]
+            assert len(code) == 6
+            assert code.isdigit()
+
+            stored = mock_crud.create.call_args.kwargs["object"]
+            assert stored.code_hash == hash_sign_in_code(code)
+            assert code not in str(stored)
 
     @pytest.mark.asyncio
     async def test_never_queries_whether_the_user_exists(self, mock_db):
@@ -68,7 +127,7 @@ class TestRequestEmailLink:
         ):
             mock_crud.count = AsyncMock(return_value=0)
             mock_crud.update = AsyncMock(return_value=None)
-            mock_crud.create = AsyncMock(return_value=None)
+            mock_crud.create = AsyncMock(return_value=_created_row())
 
             result = await request_email_link(_request(), EmailAuthRequest(email="anyone@example.com"), mock_db)
 
@@ -85,7 +144,7 @@ class TestRequestEmailLink:
         ):
             mock_crud.count = AsyncMock(return_value=1)
             mock_crud.update = AsyncMock(return_value=None)
-            mock_crud.create = AsyncMock(return_value=None)
+            mock_crud.create = AsyncMock(return_value=_created_row())
 
             await request_email_link(_request(), EmailAuthRequest(email="repeat@example.com"), mock_db)
 
@@ -110,7 +169,7 @@ class TestRequestEmailLink:
         ):
             mock_crud.count = AsyncMock(return_value=0)
             mock_crud.update = AsyncMock(return_value=None)
-            mock_crud.create = AsyncMock(return_value=None)
+            mock_crud.create = AsyncMock(return_value=_created_row())
 
             await request_email_link(_request(), EmailAuthRequest(email="first-time@example.com"), mock_db)
 
@@ -424,6 +483,249 @@ class TestVerifyEmailLink:
             assert outcome.status == "onboarding_required"
             assert outcome.onboarding_token is not None
             assert outcome.email == "new@example.com"
+
+
+CODE = "481052"
+
+
+def _code_request(**overrides) -> dict:
+    """A live `sign_in` row carrying a code, as `crud.get` hands it back."""
+    row = {
+        "id": 1,
+        "uuid": REQUEST_UUID,
+        "email": "existing@example.com",
+        "code_hash": hash_sign_in_code(CODE),
+        "used_at": None,
+        "invalidated_at": None,
+        "expires_at": datetime.now(UTC) + timedelta(minutes=10),
+    }
+    row.update(overrides)
+    return row
+
+
+class TestVerifyEmailCode:
+    """`POST /auth/email/verify-code` - the code from the sign-in email, typed back into
+    the tab that asked for it. The other half of step 2, beside the link.
+    """
+
+    @staticmethod
+    def _body(code: str = CODE) -> EmailCodeVerifyRequest:
+        return EmailCodeVerifyRequest(request_id=REQUEST_UUID, code=code)
+
+    @pytest.mark.asyncio
+    async def test_rate_limited_requests_are_rejected(self, mock_db):
+        with patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock) as mock_limit:
+            mock_limit.side_effect = RateLimitException("Too many requests. Please try again later.")
+
+            with pytest.raises(RateLimitException):
+                await verify_email_code(_request(), self._body(), Mock(), mock_db)
+
+    @pytest.mark.asyncio
+    async def test_the_row_is_found_by_uuid_and_never_by_email(self, mock_db):
+        """Load-bearing, not an implementation detail. An email-keyed lookup would put
+        every diver's code attempts in reach of anyone who knows their address, and would
+        also have to pick between the several live rows two racing tabs can leave.
+        """
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
+            patch("src.app.services.auth_service.crud_authentication_providers") as mock_providers,
+            patch("src.app.services.auth_service.crud_users") as mock_users,
+        ):
+            mock_requests.get = AsyncMock(return_value=_code_request())
+            mock_users.get = AsyncMock(return_value={"id": 1, "uuid": USER_UUID, "email": "existing@example.com"})
+            mock_providers.exists = AsyncMock(return_value=True)
+            stub_claim(mock_db)
+
+            await verify_email_code(_request(), self._body(), Mock(), mock_db)
+
+            kwargs = mock_requests.get.call_args.kwargs
+            assert kwargs["uuid"] == REQUEST_UUID
+            assert kwargs["purpose"] == "sign_in"
+            assert "email" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_request_id_and_a_wrong_code_answer_identically(self, mock_db):
+        """The no-oracle rule for this endpoint. Someone holding a `request_id` learns
+        nothing about the row it names, and someone holding none learns nothing about
+        whether it ever existed.
+        """
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
+            patch("src.app.api.v1.auth.register_failed_code_attempt", new_callable=AsyncMock),
+        ):
+            mock_requests.get = AsyncMock(return_value=None)
+            with pytest.raises(UnauthorizedException) as unknown_id:
+                await verify_email_code(_request(), self._body(), Mock(), mock_db)
+
+            mock_requests.get = AsyncMock(return_value=_code_request())
+            with pytest.raises(UnauthorizedException) as wrong_code:
+                await verify_email_code(_request(), self._body(code="000000"), Mock(), mock_db)
+
+        assert unknown_id.value.detail == wrong_code.value.detail
+
+    @pytest.mark.asyncio
+    async def test_a_wrong_code_is_charged_against_the_attempt_cap(self, mock_db):
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
+            patch("src.app.api.v1.auth.register_failed_code_attempt", new_callable=AsyncMock) as mock_charge,
+            patch("src.app.api.v1.auth.resolve_identity", new_callable=AsyncMock) as mock_resolve,
+        ):
+            mock_requests.get = AsyncMock(return_value=_code_request())
+
+            response = Mock()
+            with pytest.raises(UnauthorizedException):
+                await verify_email_code(_request(), self._body(code="000000"), response, mock_db)
+
+            mock_charge.assert_awaited_once()
+            assert mock_charge.await_args.kwargs["request_id"] == 1
+            assert mock_charge.await_args.kwargs["max_attempts"] == settings.SIGN_IN_CODE_ATTEMPTS_MAX
+            mock_resolve.assert_not_called()
+            response.set_cookie.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_spent_code_is_rejected_without_charging_another_attempt(self, mock_db):
+        """`code_hash IS NULL` is how "the attempts ran out" is spelled. Charging again
+        would keep incrementing a counter nothing reads, and the row still carries a live
+        link this must not touch.
+        """
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
+            patch("src.app.api.v1.auth.register_failed_code_attempt", new_callable=AsyncMock) as mock_charge,
+        ):
+            mock_requests.get = AsyncMock(return_value=_code_request(code_hash=None))
+
+            with pytest.raises(UnauthorizedException):
+                await verify_email_code(_request(), self._body(), Mock(), mock_db)
+
+            mock_charge.assert_not_called()
+            mock_db.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            pytest.param({"invalidated_at": datetime.now(UTC)}, id="invalidated"),
+            pytest.param({"used_at": datetime.now(UTC)}, id="used"),
+            pytest.param({"expires_at": datetime.now(UTC) - timedelta(minutes=1)}, id="expired"),
+        ],
+    )
+    async def test_a_row_that_is_no_longer_live_is_rejected(self, mock_db, overrides):
+        """Unlike the link, these collapse into one message rather than reporting which
+        applies: the link's reasons steer a human looking at a page ("a newer link is
+        waiting"), while a code is typed against a row the caller cannot see.
+        """
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
+            patch("src.app.api.v1.auth.register_failed_code_attempt", new_callable=AsyncMock) as mock_charge,
+        ):
+            mock_requests.get = AsyncMock(return_value=_code_request(**overrides))
+
+            with pytest.raises(UnauthorizedException, match="invalid or has expired"):
+                await verify_email_code(_request(), self._body(), Mock(), mock_db)
+
+            mock_charge.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_the_right_code_signs_an_existing_user_in_through_the_claim(self, mock_db):
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
+            patch("src.app.services.auth_service.crud_authentication_providers") as mock_providers,
+            patch("src.app.services.auth_service.crud_users") as mock_users,
+        ):
+            mock_requests.get = AsyncMock(return_value=_code_request())
+            mock_users.get = AsyncMock(
+                return_value={"id": 1, "uuid": USER_UUID, "username": "existinguser", "email": "existing@example.com"}
+            )
+            mock_providers.exists = AsyncMock(return_value=True)
+            stub_claim(mock_db)
+
+            response = Mock()
+            outcome = await verify_email_code(_request(), self._body(), response, mock_db)
+
+            assert outcome.status == "authenticated"
+            assert outcome.access_token is not None
+            response.set_cookie.assert_called_once()
+            assert "used_at IS NULL" in claimed_used_at_sql(mock_db)
+
+    @pytest.mark.asyncio
+    async def test_a_code_typed_with_the_spacing_the_email_prints_still_works(self, mock_db):
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
+            patch("src.app.services.auth_service.crud_authentication_providers") as mock_providers,
+            patch("src.app.services.auth_service.crud_users") as mock_users,
+        ):
+            mock_requests.get = AsyncMock(return_value=_code_request())
+            mock_users.get = AsyncMock(return_value={"id": 1, "uuid": USER_UUID, "email": "existing@example.com"})
+            mock_providers.exists = AsyncMock(return_value=True)
+            stub_claim(mock_db)
+
+            outcome = await verify_email_code(_request(), self._body(code="481 052"), Mock(), mock_db)
+
+            assert outcome.status == "authenticated"
+
+    @pytest.mark.asyncio
+    async def test_losing_the_claim_to_the_link_in_the_same_email_raises_unauthorized(self, mock_db):
+        """One row, two credentials, one session. Whichever of the link and the code
+        reaches `claim_authentication_request` first is the one that signs in; the other
+        is refused, and no second session is minted.
+        """
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
+            patch("src.app.api.v1.auth.resolve_identity", new_callable=AsyncMock) as mock_resolve,
+        ):
+            mock_requests.get = AsyncMock(return_value=_code_request())
+            stub_claim(mock_db, won=False)
+
+            response = Mock()
+            with pytest.raises(UnauthorizedException, match="invalid or has expired"):
+                await verify_email_code(_request(), self._body(), response, mock_db)
+
+            mock_resolve.assert_not_called()
+            response.set_cookie.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_new_user_gets_an_onboarding_session(self, mock_db):
+        """The unified flow needs no carve-out for codes: a verified email with no account
+        behind it goes to `/auth/complete`, exactly as it does from the link.
+        """
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
+            patch("src.app.services.auth_service.crud_users") as mock_users,
+        ):
+            mock_requests.get = AsyncMock(return_value=_code_request(email="new@example.com"))
+            mock_users.get = AsyncMock(return_value=None)
+            stub_claim(mock_db)
+
+            outcome = await verify_email_code(_request(), self._body(), Mock(), mock_db)
+
+            assert outcome.status == "onboarding_required"
+            assert outcome.email == "new@example.com"
+            assert outcome.onboarding_token is not None
+
+
+class TestEmailCodeVerifyRequestSchema:
+    """The code arrives from a human keyboard, so the schema does the normalizing."""
+
+    @pytest.mark.parametrize("typed", ["481052", "481 052", "481-052", " 481052 "])
+    def test_separators_are_stripped(self, typed):
+        assert EmailCodeVerifyRequest(request_id=REQUEST_UUID, code=typed).code == "481052"
+
+    @pytest.mark.parametrize("typed", ["48105", "4810521", "", "abcdef"])
+    def test_anything_that_is_not_six_digits_is_a_422_not_a_guess(self, typed):
+        """Rejected here rather than counted against `code_attempts`: the cap bounds
+        guesses at the secret, and a five-character string was never one.
+        """
+        with pytest.raises(ValidationError):
+            EmailCodeVerifyRequest(request_id=REQUEST_UUID, code=typed)
 
 
 class TestAuthWithGoogle:

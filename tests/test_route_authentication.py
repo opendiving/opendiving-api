@@ -39,12 +39,23 @@ ANONYMOUS_BY_DESIGN: dict[tuple[str, str], str] = {
     ("POST", "/api/v1/auth/email/request"): "Asks for a magic link; nobody is signed in at the start of sign-in.",
     ("GET", "/api/v1/auth/email/verify/check"): "Reads back the address a link stands for, before a session exists.",
     ("POST", "/api/v1/auth/email/verify"): "Redeems the magic link - the request that mints the first session.",
+    (
+        "POST",
+        "/api/v1/auth/email/verify-code",
+    ): "Redeems the code from the same email as that link, at the same point in the flow.",
     ("POST", "/api/v1/auth/google"): "Redeems a Google ID token; same position in the flow as email/verify.",
     ("POST", "/api/v1/auth/complete"): "Turns an onboarding token into an account - there is no account yet.",
     (
         "POST",
         "/api/v1/auth/refresh",
     ): "Trades a refresh token for an access token, which an expired session has instead.",
+    ("POST", "/api/v1/auth/passkey/options"): (
+        "Hands out a challenge to sign in with; naming an account first is exactly what "
+        "discoverable credentials exist to avoid."
+    ),
+    ("POST", "/api/v1/auth/passkey/verify"): (
+        "Redeems a passkey assertion - the signature is the credential, same position in the flow as email/verify."
+    ),
     # 2. The caller may be locked out, and that is the point.
     ("POST", "/api/v1/contact"): "A diver who cannot sign in is precisely who needs to reach a human.",
     # 3. The caller is a monitor or an orchestrator, holding no account at all.

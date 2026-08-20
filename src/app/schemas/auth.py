@@ -1,6 +1,8 @@
+import re
+import uuid as uuid_pkg
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 
 # -------------- email magic link --------------
@@ -14,15 +16,51 @@ class EmailAuthRequestResponse(BaseModel):
     """Always the exact same message regardless of whether `email` belongs to an
     existing account - see `POST /auth/email/request`. Never add a field here that
     could let a caller distinguish the two cases (e.g. "user found"/"user created").
+
+    `request_id` does not distinguish them: a row is minted for every address, account or
+    not, so its public uuid is a fresh random value either way. It is the handle the
+    caller needs to redeem the six-digit code from the same email
+    (`POST /auth/email/verify-code`), and handing it *only* to the browser that asked is
+    what keeps that endpoint out of reach of anyone else - see `verify_email_code`.
     """
 
     message: str = "Check your email for the next step."
+    request_id: uuid_pkg.UUID
 
 
 class EmailVerifyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     token: str
+
+
+class EmailCodeVerifyRequest(BaseModel):
+    """`POST /auth/email/verify-code` - the six-digit code from the sign-in email, plus
+    the `request_id` that `POST /auth/email/request` handed back to the tab that asked.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: Annotated[uuid_pkg.UUID, Field(examples=["0198f0c1-4b6f-7c3a-9d2e-5a1b7c8d9e0f"])]
+    code: Annotated[str, Field(examples=["481052"])]
+
+    @field_validator("code")
+    @classmethod
+    def _six_digits_however_they_were_typed(cls, value: str) -> str:
+        """The email prints the code as `481 052`, so a copy-paste arrives with the space
+        in it - and a hyphen or a non-breaking space is just as plausible from a mail
+        client that reflows the body. Strip everything that isn't a digit, then insist on
+        exactly six of them.
+
+        Rejecting a malformed code here rather than counting it as a guess is deliberate:
+        `code_attempts` bounds *guesses at the secret*, and a five-character string was
+        never one. It also cannot be an oracle - the answer depends only on what the
+        caller typed, never on the row.
+        """
+        digits = re.sub(r"\D", "", value)
+        if len(digits) != 6:
+            raise ValueError("The sign-in code is six digits.")
+        return digits
 
 
 class LinkCheckResponse(BaseModel):
