@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 from uuid6 import uuid7
 
+from ..core.db.database import release_read_transaction
 from ..core.security import verify_dive_file_token
 from ..core.utils.uploads import read_upload_within_limit, safe_filename
 from ..models.dive import Dive
@@ -247,26 +248,6 @@ async def store_tech_scalars(
         await db.commit()
 
 
-async def _release_read_transaction(db: AsyncSession) -> None:
-    """End the read-only transaction the lookups above opened, before a slow extraction.
-
-    `extract_profile` is up to ~1.5 s of pure CPU (see `_MAX_FRAMES`) handed to a worker
-    thread. Without this the connection it rode in on sits idle-in-transaction for all of
-    it, so a burst of FIT uploads ties up pool connections doing nothing - the event loop
-    is free, which is what `run_in_threadpool` bought, but the pool is not.
-
-    Safe at both call sites: nothing has been written yet, so there is nothing to preserve,
-    and the writes that follow open their own transaction. Nor can it strand a caller's
-    locals - both lookups return frozen dataclasses (`_ExistingRow`, `ExistingProfileRow`)
-    rather than ORM instances, so there is nothing to expire.
-
-    `rollback` rather than `commit` because it states what is true here: no work is being
-    persisted. If a write ever grows above one of these calls, it wants its own commit
-    rather than to be swept up by this.
-    """
-    await db.rollback()
-
-
 async def store_dive_file(
     db: AsyncSession,
     *,
@@ -325,7 +306,7 @@ async def store_dive_file(
         # version to bump - so a fix of that shape ships with a backfill run, not with a
         # re-upload.
         if should_extract(await get_existing_profile(db, dive_id=dive_id), sha256=digest) == "extract":
-            await _release_read_transaction(db)
+            await release_read_transaction(db)
             profile, scalars = await run_in_threadpool(_extract_all, parser, data)
             try:
                 if profile is not None:
@@ -387,8 +368,8 @@ async def store_dive_file(
     # In a thread for the same reason `POST /dive/parse` parses in one: sampling a FIT
     # file is pure Python and takes up to ~1.5 s at `_MAX_FRAMES`, and this is an
     # `async def`. The read transaction is released first so the connection isn't held
-    # idle for the duration - see `_release_read_transaction`.
-    await _release_read_transaction(db)
+    # idle for the duration - see `release_read_transaction`.
+    await release_read_transaction(db)
     profile, scalars = await run_in_threadpool(_extract_all, parser, data)
 
     # The file lands on the volume *before* the transaction that references it, and the

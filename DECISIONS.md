@@ -7969,10 +7969,21 @@ moment a route needs the database**, and this feature needed it for the local ca
 `services/dive_files.py` already carries the identical helper for the identical reason, reached from
 a `run_in_threadpool` hop instead of an HTTP call — see *"Uploaded files are parsed in a thread, not
 on the event loop"*. Two copies with genuinely different safety arguments is tolerable; a third
-wants a shared util rather than a third docstring. Both are pinned by ordering tests
-(`TestTheReadTransactionIsReleasedBeforeGoingOutbound`,
-`TestProfileExtractionReleasesTheTransaction`), because what regresses is somebody moving a query
-back above the release, and no behavioural test would notice.
+wants a shared util rather than a third docstring.
+
+**The third arrived, and the util was extracted.** `store_certification_file` needed the same
+release before its `blob_store.put` — a threadpool write plus an `fsync` of up to 10 MB — when the
+file payloads moved onto the files volume (*"File payloads live on the files volume, not in
+Postgres"*). So `release_read_transaction` now lives in `core/db/database.py` and all three call
+sites import it, with each keeping a one-line comment naming *its* slow thing rather than restating
+the mechanism. The precondition moved with it and is worth repeating because it is the half that
+bites: `rollback` expires live ORM objects regardless of `expire_on_commit=False`, so the caller —
+not the helper — has to know it is holding nothing but detached data.
+
+All three are pinned by ordering tests (`TestTheReadTransactionIsReleasedBeforeGoingOutbound`,
+`TestProfileExtractionReleasesTheTransaction`,
+`TestTheReadTransactionIsReleasedBeforeTheBlobWrite`), because what regresses is somebody moving a
+query back above the release, and no behavioural test would notice.
 
 **And an ordering test is easy to write so that it does not test the ordering.** The first version
 of this one asserted `calls.index("release") < calls.index("outbound")`, which passes happily while
@@ -7983,7 +7994,9 @@ the outbound call. The same round found the synonym branch's release untested at
 fixture driving the test has `valid_AphiaID == AphiaID` and never enters it; that release could be
 deleted with the suite green. Both were caught by review rather than by the tests, which is the
 point worth keeping: **a test whose failure mode is "still passes" is worth mutating on purpose
-before trusting it**, and each of these now fails when its own regression is reintroduced.
+before trusting it**, and each of these now fails when its own regression is reintroduced. The
+certification one was mutated the same way before being trusted: deleting its release, and
+reinserting a query between the release and the write, each turn it red.
 
 The real-pool test (`TestConcurrentResolvesDoNotExhaustThePool`) supplies the other half — the
 ordering tests pin *that* the release happens, this pins what it buys, measured against an actual

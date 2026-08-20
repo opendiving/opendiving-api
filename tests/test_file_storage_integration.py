@@ -236,6 +236,102 @@ class TestCardFileWriteOrdering:
         assert (volume / key).read_bytes() == JPEG
 
 
+class TestTheReadTransactionIsReleasedBeforeTheBlobWrite:
+    """`blob_store.put` is a threadpool write plus an `fsync` of up to 10 MB, and the lookup
+    that precedes it autobegins a transaction.
+
+    Without an explicit release the connection that ran a sub-millisecond `SELECT` is held
+    idle-in-transaction for the whole of that write, against a pool of five plus ten
+    overflow. The event loop is free throughout, which is exactly what makes it invisible
+    until the pool runs dry and unrelated endpoints start timing out.
+
+    An ordering test rather than a behavioural one, matching
+    `test_dive_files.py::TestProfileExtractionReleasesTheTransaction` and
+    `test_species.py::TestTheReadTransactionIsReleasedBeforeGoingOutbound`: what regresses is
+    somebody moving a query back above the release, and nothing else would notice.
+    """
+
+    @staticmethod
+    def _tracking_session(calls: list[str], *, existing: object | None = None) -> AsyncMock:
+        result = MagicMock()
+        result.one_or_none.return_value = existing
+        result.one.return_value = SimpleNamespace(uuid=uuid7(), updated_at=None)
+
+        def record_query(*args: object, **kwargs: object) -> MagicMock:
+            calls.append("query")
+            return result
+
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=record_query)
+        db.rollback = AsyncMock(side_effect=lambda: calls.append("release"))
+        db.commit = AsyncMock(side_effect=lambda: calls.append("commit"))
+        db.info = {}
+        return db
+
+    @staticmethod
+    def _assert_no_query_is_held_open(calls: list[str]) -> None:
+        """No `query` may sit between a release and the blob write that follows it.
+
+        Positional rather than `calls.index(...)`, which returns the *first* occurrence and
+        so cannot see the regression this class exists for: a read added back between the
+        release and the write leaves `["query", "release", "query", "write"]`, where every
+        index-based comparison still holds while the connection is pinned open again. The
+        same trap is written up under *"The read transaction is released before either
+        endpoint goes outbound"* in `DECISIONS.md`, where the first version of the sibling
+        test had exactly this bug.
+        """
+        assert "write" in calls, "nothing was written; the test is not exercising the path"
+        assert "release" in calls, "the lookup's transaction is never released"
+
+        for position, call in enumerate(calls):
+            if call != "write":
+                continue
+            preceding = calls[:position]
+            assert "release" in preceding, f"wrote at {position} before any release: {calls}"
+            window = preceding[len(preceding) - preceding[::-1].index("release") :]
+            assert "query" not in window, f"a query is held open across the blob write: {calls}"
+
+    @pytest.fixture
+    def recording_put(self, monkeypatch: pytest.MonkeyPatch):
+        """Marks the write in the same list the session writes into, so one sequence carries
+        both sides of the ordering."""
+        calls: list[str] = []
+        real_put = blob_store.put
+
+        async def record(key: str, data: bytes) -> None:
+            calls.append("write")
+            await real_put(key, data)
+
+        monkeypatch.setattr("src.app.services.certification_files.blob_store.put", record)
+        return calls
+
+    @pytest.mark.asyncio
+    async def test_a_first_upload_releases_before_writing(self, volume: Path, recording_put: list[str]) -> None:
+        db = self._tracking_session(recording_put)
+
+        await store_certification_file(
+            db, certification_id=3, side=CertificationSide.FRONT, upload=_upload(JPEG, "card.jpg")
+        )
+
+        self._assert_no_query_is_held_open(recording_put)
+
+    @pytest.mark.asyncio
+    async def test_a_replacement_releases_before_writing_too(self, volume: Path, recording_put: list[str]) -> None:
+        """The branch where the lookup actually found something, and so has a `Row` that has
+        to survive the rollback."""
+        row_uuid = uuid7()
+        existing = SimpleNamespace(
+            uuid=row_uuid, storage_key=blob_store.build_key(CARD_KIND, row_uuid=row_uuid, sha256="ef" + "0" * 62)
+        )
+        db = self._tracking_session(recording_put, existing=existing)
+
+        await store_certification_file(
+            db, certification_id=3, side=CertificationSide.FRONT, upload=_upload(JPEG, "card.jpg")
+        )
+
+        self._assert_no_query_is_held_open(recording_put)
+
+
 class TestAMissingFileIsNotAMissingRow:
     """`None` means "no row"; a row whose file is gone raises.
 
