@@ -81,6 +81,15 @@ proxy, add its address; see step 3 of [reverse-proxy.md](reverse-proxy.md).
 The reverse error is quieter and worse: trusting a network that is *not* in front of the app lets
 callers forge the header and skip the limits entirely. List the proxy, not the world.
 
+## `/admin` redirects forever, or 403s me
+
+Both are the same setting. The panel enforces HTTPS on `ENVIRONMENT=production` and applies its IP
+allowlist to the address the app believes the caller has — and the app believes a forwarded address
+only from a proxy listed in `TRUSTED_PROXY_IPS`. Unlisted, every request looks like plain HTTP from
+the proxy itself: the panel redirects to the HTTPS URL it is already on, and any honest allowlist
+value matches nobody. Fix the list, not the panel, and make sure your proxy sends
+`X-Forwarded-Proto` — the bundled Caddy does, and the shipped value already names it.
+
 ## Signing in works, then a reload signs me out
 
 The refresh cookie is `Secure`, so a browser will not send it back over plain HTTP. On an instance

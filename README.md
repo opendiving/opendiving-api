@@ -16,7 +16,7 @@ relay:
 mkdir opendiving && cd opendiving
 curl -LO https://github.com/opendiving/opendiving-api/releases/latest/download/docker-compose.yml
 curl -LO https://github.com/opendiving/opendiving-api/releases/latest/download/Caddyfile
-curl -Lo .env https://github.com/opendiving/opendiving-api/releases/latest/download/.env.example
+curl -Lo .env https://github.com/opendiving/opendiving-api/releases/latest/download/example.env
 $EDITOR .env
 docker compose up -d
 ```

@@ -27,7 +27,7 @@ one rather than matching the wrapping by hand.
   for development: it builds from `./src`, bind-mounts it, and publishes the API and Postgres on the
   host. `deploy/docker-compose.yml` is what people install — pulled images, digest-pinned
   third-party ones, a bundled Caddy under the `proxy` profile, and nothing published but 80/443. It
-  is uploaded as a release artifact along with `deploy/Caddyfile` and `deploy/.env.example`, so a
+  is uploaded as a release artifact along with `deploy/Caddyfile` and `deploy/example.env`, so a
   change to any of the three ships on the next tag. Anything that changes how the app is
   *configured* (a new required setting, a renamed one, a new service) has to be made in both, and
   `docs/self-hosting/` is where an installer reads about it. Nothing that runs from the published

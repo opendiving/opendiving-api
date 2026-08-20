@@ -30,7 +30,7 @@ self-hoster normally touches, and any setting from that file can be added to `.e
 | -------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `COMPOSE_PROFILES`   | `proxy`             | Runs the bundled Caddy. Comment it out to bring your own proxy — [reverse-proxy.md](reverse-proxy.md).                                                                                      |
 | `CADDY_SITE_ADDRESS` | `${DOMAIN}`         | The address Caddy answers on. `:80` for a LAN instance with no certificate.                                                                                                                 |
-| `TRUSTED_PROXY_IPS`  | `172.29.0.0/16`     | Whose `X-Forwarded-For` the API believes. Every per-IP rate limit depends on it.                                                                                                            |
+| `TRUSTED_PROXY_IPS`  | `172.29.0.0/16`     | Whose `X-Forwarded-For` and `X-Forwarded-Proto` the API believes. Every per-IP rate limit depends on it, as do the admin panel's HTTPS enforcement and its IP allowlist.                    |
 | `ENVIRONMENT`        | `production`        | `production` hides `/docs` and makes `SMTP_HOST` mandatory. `staging` puts the docs behind a superuser; `local` opens them and logs sign-in links instead of emailing them.                 |
 | `FRONTEND_URL`       | `https://${DOMAIN}` | Where emailed links point, and the API's single allowed CORS origin. Override for a plain-HTTP instance.                                                                                    |
 | `SITE_URL`           | `https://${DOMAIN}` | The web app's own origin, used for link previews. Override alongside `FRONTEND_URL`.                                                                                                        |
@@ -82,8 +82,17 @@ CRUD_ADMIN_ALLOWED_NETWORKS=10.0.0.0/8   # optional, comma-separated
 
 The compose file already points its tables at the app's Postgres (`CRUD_ADMIN_DB_URL`), which is
 what makes it work behind four API workers. If your `POSTGRES_PASSWORD` contains `@`, `/`, `:` or
-`#`, percent-encode it in that derived URL. Running your own proxy? Route `/admin` to `api:8000`
-yourself — the web container carries only `/api/v1`.
+`#`, percent-encode it in that derived URL.
+
+The allowlist matches the caller's address only when `TRUSTED_PROXY_IPS` names the proxy actually in
+front of the app — the panel's own middleware reads the forwarded address the app was told to
+believe. The same setting is what stops the panel redirecting `/admin` to the HTTPS URL it is
+already on: it enforces HTTPS on `ENVIRONMENT=production`, and a proxy the app hasn't been told
+about makes every request look like plain HTTP. Both symptoms are one misconfiguration, and the
+shipped value covers the bundled Caddy.
+
+Running your own proxy? Route `/admin` to `api:8000` yourself — the web container carries only
+`/api/v1` — and make sure your proxy is in `TRUSTED_PROXY_IPS` **and** sets `X-Forwarded-Proto`.
 
 ## Third-party calls
 

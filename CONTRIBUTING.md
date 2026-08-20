@@ -305,7 +305,7 @@ Then, in both repos:
    — so nothing was published, and the fix is to delete the tag, correct the bump, and re-cut it.
 
 4. The api workflow opens a **draft** release with generated notes, and attaches
-   `deploy/docker-compose.yml`, `deploy/Caddyfile` and `deploy/.env.example` to it — those three
+   `deploy/docker-compose.yml`, `deploy/Caddyfile` and `deploy/example.env` to it — those three
    files *are* the install, and `releases/latest/download/<name>` is the URL the docs tell people to
    `curl`. Check they are there. Write the headline paragraph and confirm the **Breaking** section:
    say "None" in so many words when it is empty, because generated notes simply omit an empty

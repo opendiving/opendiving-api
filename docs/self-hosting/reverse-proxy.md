@@ -42,6 +42,13 @@ wrong in either direction and something breaks quietly:
 Add the address your proxy connects *from*. If it joins the compose network, that is already covered
 by the shipped `172.29.0.0/16`.
 
+Two consequences beyond the rate limits, both admin-panel-only and both invisible until you turn the
+panel on: the app decides whether a request arrived over HTTPS from the same forwarded headers, so a
+proxy it hasn't been told about makes `/admin` redirect to the HTTPS URL it is already on, forever;
+and the panel's `CRUD_ADMIN_ALLOWED_IPS`/`..._NETWORKS` allowlist matches whatever address the app
+believes, which is your proxy rather than the caller. Make sure your proxy sets `X-Forwarded-Proto`
+as well as `X-Forwarded-For` — the snippets below do.
+
 **4. Set `AUTH_COOKIE_SECURE=false`** only if your proxy serves the app over plain HTTP. Terminating
 TLS at the proxy and forwarding HTTP internally is fine and needs no change — the browser is what
 the cookie flag concerns.
@@ -134,3 +141,8 @@ emailing it — fine for one person who has shell access, and no way to onboard 
 
 `WEB_HSTS=off` matters only if the same browser also reaches this instance over HTTPS through
 something else; the header is never sent on a request that arrived over plain HTTP.
+
+Don't enable the admin panel on a plain-HTTP instance that is also `ENVIRONMENT=production`: the
+panel enforces HTTPS there, so it redirects `/admin` to an `https://` URL this instance does not
+answer on. Either put a certificate in front of it or leave the panel off — it is off by default,
+and the API's own endpoints are unaffected.

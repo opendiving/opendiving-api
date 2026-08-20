@@ -6,7 +6,7 @@ Four commands, a domain, and a mail relay.
 mkdir opendiving && cd opendiving
 curl -LO https://github.com/opendiving/opendiving-api/releases/latest/download/docker-compose.yml
 curl -LO https://github.com/opendiving/opendiving-api/releases/latest/download/Caddyfile
-curl -Lo .env https://github.com/opendiving/opendiving-api/releases/latest/download/.env.example
+curl -Lo .env https://github.com/opendiving/opendiving-api/releases/latest/download/example.env
 ```
 
 Edit six values in `.env` — the file explains each one where it sits:

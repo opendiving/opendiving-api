@@ -3,7 +3,7 @@
 #   mkdir opendiving && cd opendiving
 #   curl -LO   https://github.com/opendiving/opendiving-api/releases/latest/download/docker-compose.yml
 #   curl -LO   https://github.com/opendiving/opendiving-api/releases/latest/download/Caddyfile
-#   curl -Lo .env https://github.com/opendiving/opendiving-api/releases/latest/download/.env.example
+#   curl -Lo .env https://github.com/opendiving/opendiving-api/releases/latest/download/example.env
 #   $EDITOR .env          # six values
 #   docker compose up -d
 #
@@ -42,6 +42,20 @@ x-api-environment: &api-environment
   # same fact. Set FRONTEND_URL in `.env` to override it - a LAN instance on plain HTTP
   # is the case that has to.
   FRONTEND_URL: ${FRONTEND_URL:-https://${DOMAIN:?set DOMAIN in .env - it is the address this instance is reached at}}
+  # Which peers may set the request's scheme and client address through
+  # `X-Forwarded-Proto`/`X-Forwarded-For`, read by gunicorn from the environment and
+  # handed to uvicorn's proxy-headers middleware. It follows TRUSTED_PROXY_IPS because it
+  # is the same question - "who is in front of this app?" - asked by a second piece of
+  # machinery, and two knobs for one fact is how they end up disagreeing.
+  #
+  # Without it the app sees every request as plain `http` from Caddy's own address, and
+  # two things break in ways that look unrelated to a proxy: the admin panel's
+  # HTTPS-enforcing middleware redirects every `/admin` request to the https URL it is
+  # already on (an infinite loop), and its IP allowlist matches the proxy rather than the
+  # caller, so any honest value there locks the operator out. Per-IP rate limits are
+  # unaffected either way - `core/utils/client_ip.py` does this walk itself, against the
+  # same setting, and both take the right-most entry no proxy in the list vouched for.
+  FORWARDED_ALLOW_IPS: ${TRUSTED_PROXY_IPS:-}
   # The admin panel's own tables (`admin_user`, `admin_session`, …) live in the app's
   # Postgres rather than in a per-container SQLite file, which is single-process only and
   # so cannot work behind `gunicorn -w 4`. Harmless when the panel is off, which is the

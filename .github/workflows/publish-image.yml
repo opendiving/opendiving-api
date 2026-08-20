@@ -412,6 +412,13 @@ jobs:
       # release *artifacts* rather than paths in a repository someone has to find and
       # match to a version: `releases/latest/download/<name>` is a stable URL that always
       # names the newest published release, and `releases/download/vX.Y.Z/<name>` pins one.
+      #
+      # The template is `deploy/example.env` and not `deploy/.env.example`, which is the
+      # name the rest of this repository uses, because **GitHub renames a release asset
+      # whose name starts with a dot**: uploaded as `.env.example` it is stored as
+      # `default.env.example`, and the documented `.../download/.env.example` URL 404s
+      # while the workflow goes green. Verified by uploading one. Immich's `example.env`
+      # is the same workaround. Do not "fix" the name back.
       # The compose file's default image tag is `latest`, which is why pinning the
       # download matters less than pinning `OPENDIVING_VERSION` in `.env` - both are
       # documented in docs/self-hosting/.
@@ -425,7 +432,7 @@ jobs:
           TAG: v${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
-          ASSETS=(deploy/docker-compose.yml deploy/Caddyfile deploy/.env.example)
+          ASSETS=(deploy/docker-compose.yml deploy/Caddyfile deploy/example.env)
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists - refreshing its deploy bundle only."
             gh release upload "$TAG" "${ASSETS[@]}" --clobber

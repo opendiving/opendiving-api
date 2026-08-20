@@ -8646,6 +8646,13 @@ converged on. They are uploaded as **release artifacts** by `publish-image.yml`,
 `releases/latest/download/docker-compose.yml` is a stable URL that always names the newest published
 release - a repository path would be a `main` that may be ahead of every published image.
 
+The template is `deploy/example.env`, not the `deploy/.env.example` that would match `src/`, because
+**GitHub renames a release asset whose name begins with a dot**: uploaded as `.env.example` it is
+stored as `default.env.example`, the workflow goes green, and the documented
+`.../download/.env.example` URL 404s on the first release that ships it. Confirmed by uploading one
+to a scratch repository and fetching both URLs. Immich's `example.env` is the same workaround, which
+is worth knowing before someone renames it back for consistency.
+
 The root `docker-compose.yml` was never going to become that file. It builds from source,
 bind-mounts `./src` over the image, runs `uvicorn --reload`, and publishes the API on every
 interface and Postgres on the loopback - four properties that are right for development and wrong
@@ -8736,4 +8743,39 @@ development tool by construction.
 Verified on the bundle running the published-image layout: `admin_init` created the four `admin_*`
 tables in the app's Postgres, seeded the initial admin, logged
 `Admin interface initialized (tables ready, initial admin ensured)`, exited 0, and `/admin/login`
-answered 200 through Caddy.
+answered 200 through Caddy. That first check ran on `ENVIRONMENT=local`, which is exactly the
+configuration that hides the next section's bug - the panel only enforces HTTPS in production, so a
+local run cannot see the redirect loop. Verifying a *deployment* concern against anything but the
+shipped `ENVIRONMENT=production` is a check that agrees with you for the wrong reason.
+
+## The panel needs forwarded headers, and `TRUSTED_PROXY_IPS` is the one knob for them
+
+`deploy/docker-compose.yml` sets `FORWARDED_ALLOW_IPS` from `TRUSTED_PROXY_IPS`. Gunicorn reads that
+variable from the environment and hands it to uvicorn's `ProxyHeadersMiddleware`, which rewrites the
+request's `scheme` from `X-Forwarded-Proto` and its `client` from `X-Forwarded-For` - for peers on
+that list only. Without it the app sees every request as plain `http` from Caddy's own address, and
+the admin panel breaks in two ways that look like anything but a proxy problem:
+
+- **An infinite redirect.** `create_admin_interface()` passes `enforce_https=True` on
+  `ENVIRONMENT=production`, which installs CRUDAdmin's `HTTPSRedirectMiddleware`. It 301s any
+  request whose scheme is `http` to the same URL under `https` - which Caddy terminates and proxies
+  back as `http`, forever. Measured before the fix: `/admin/` 301 → `https://api:8000/admin/`,
+  *including* when the request carried `X-Forwarded-Proto: https`, because the header was not
+  believed. After: 303 → `/admin/login`, 200.
+- **An allowlist that matches the proxy.** CRUDAdmin's `IPRestrictionMiddleware` compares
+  `request.client.host` and never reads `X-Forwarded-For` itself - unlike `core/utils/client_ip.py`,
+  which this app wrote precisely because that comparison is wrong behind a proxy. So
+  `CRUD_ADMIN_ALLOWED_IPS=203.0.113.7` matched nobody and 403'd the operator, while the only value
+  that let anything through was the compose subnet - i.e. the entire internet, since every request
+  arrives through Caddy. Measured after the fix, with that setting in place: caller `203.0.113.7` →
+  200, caller `198.51.100.9` → 403.
+
+**One setting, not two,** because "who is in front of this app?" is one fact and two knobs for it
+are two knobs that will disagree. The two consumers happen to agree on the algorithm as well: both
+uvicorn's `_TrustedHosts.get_trusted_client_address` (0.52.1) and this app's `client_ip` take the
+right-most entry that no trusted proxy vouched for, and both accept CIDR blocks.
+
+Per-IP rate limits are unaffected by the change, which was worth measuring rather than assuming,
+since `client_ip` now reads a `request.client` that has already been rewritten. Through Caddy with a
+forged `X-Forwarded-For: 9.9.9.9`, the limiter still keyed on the true peer; from inside the network
+with a legitimate chain, on the client the chain names. Both are the same answers as before.
