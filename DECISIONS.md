@@ -7163,6 +7163,24 @@ separate concern again: auth, re-signup, and a GDPR purge job it needs regardles
 `GearServiceRecord` and `Certification` are leaves nothing else references, so they gain nothing
 from the change.
 
+**The `User` half of that has since landed, and it did not turn into what this section imagined.**
+The purge job arrived (*"Deleting an account is two changes with a fortnight between them"*), and
+with it the cascades this change declined to declare (*"The ten cascades that were never declared"*)
+— but `User` stayed soft-deleting rather than being converted. The flag became the *grace period*
+instead of the deletion: `is_deleted` now means "a purge is scheduled", the hard
+`DELETE FROM "user"` runs a fortnight later from the worker, and `POST /auth/restore` can clear the
+flag in between. So the column that was kept here for want of a purge job is the column the purge
+job turned out to need, and the third state it always implicitly had — flagged, still whole, still
+reachable — is now the feature rather than the leftover.
+
+The blob half of the paragraph aged differently again, and split in two. `dive_profile` is still
+rows in Postgres, so the cascade carries it and there was never anything to fold in. `dive_file` no
+longer holds bytes at all — the file is on the volume and the row holds a key — so the hand-rolled
+deletion path this section would have had to reconcile became the opposite problem: the cascade runs
+*inside Postgres*, SQLAlchemy never sees the rows, and the keys have to be read out before anything
+is deleted or the files are stranded (*"The cascade cannot reach the files, and nothing warns
+you"*). Nothing else on the list moved.
+
 The asymmetry has one visible consequence beyond the indexes: `fetch_owned_or_raise` and
 `services/export/loader.py`'s `_owned` both apply the liveness filter only when the model actually
 carries the column. FastCRUD's `get_model_column` raises `ValueError` for a column the model lacks
@@ -10701,6 +10719,31 @@ so the call would be a permanent no-op wearing a comment about ordering and fail
 trap *"The profile backfill is a script, not an arq job"* records for a script, in a second process.
 It is also unnecessary: `erase_user` sweeps those keys from inside the API when the account is
 flagged, and nothing can repopulate them afterwards because every read for a deleted account 401s.
+
+### The admin panel's own log is a second copy, and the purge leaves it alone
+
+`crudadmin` keeps two tables of its own: `admin_event_log`, a row per action with the acting admin,
+their address and user agent, and `admin_audit_log`, which for every create, update and delete
+stores the affected row's JSON state before and after. `User` is registered for `view`/`create`/
+`update` (`admin/views.py`), so an operator editing a diver by hand writes that diver's email into
+an audit row. `CRUD_ADMIN_TRACK_EVENTS` gates both tables and defaults to `True`, and
+`deploy/docker-compose.yml` points `CRUD_ADMIN_DB_URL` at the app's own Postgres — so on a real
+install this is not a far-off SQLite file, it is more tables in the same database the purge is
+running in.
+
+The purge still does not touch them, and that is a decision rather than an oversight. They carry no
+foreign key to `user`, so nothing happens by default; adding the delete deliberately would mean a
+data-subject request editing the record of what *an operator* did, which is the one thing an audit
+log exists to be proof of. An audit log a subject can rewrite is worth nothing. So the boundary is
+drawn at the app's own data, and the second copy becomes the operator's retention duty —
+`docs/self-hosting/configuration.md` says so under both the deletion knob and the panel, with the
+`DELETE` to run, because `crudadmin` ships a `cleanup_old_logs` helper that nothing in this app
+calls. Same shape as `sweep_orphaned_files.py`: a reclaim path that exists and is not wired to
+anything is a documentation duty, not a guarantee. The panel is off by default, which is why this is
+a paragraph in the operator docs and not code.
+
+Same shape as the backup paragraph in `backup-restore.md`: the honest answer to "does erasure reach
+this?" is no, and saying so beats a purge that pretends to.
 
 ### Hourly at :30, and no `run_at_startup`
 
