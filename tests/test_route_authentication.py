@@ -56,6 +56,10 @@ ANONYMOUS_BY_DESIGN: dict[tuple[str, str], str] = {
     ("POST", "/api/v1/auth/passkey/verify"): (
         "Redeems a passkey assertion - the signature is the credential, same position in the flow as email/verify."
     ),
+    ("POST", "/api/v1/auth/restore"): (
+        "Undoes a deletion, so it serves exactly the accounts `get_current_user` filters "
+        "out - the restore token is the credential, and it names the account itself."
+    ),
     # 2. The caller may be locked out, and that is the point.
     ("POST", "/api/v1/contact"): "A diver who cannot sign in is precisely who needs to reach a human.",
     # 3. The caller is a monitor or an orchestrator, holding no account at all.

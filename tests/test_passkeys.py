@@ -12,7 +12,7 @@ design rests on, and a stub that just returned a stored value would assert it aw
 
 import logging
 import uuid as uuid_pkg
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -88,7 +88,7 @@ def _request(ip: str = "1.2.3.4") -> Mock:
 
 
 def _user(**overrides: Any) -> dict[str, Any]:
-    user = {"id": 7, "uuid": USER_UUID, "email": "diver@example.com", "name": "A Diver"}
+    user = {"id": 7, "uuid": USER_UUID, "email": "diver@example.com", "name": "A Diver", "is_deleted": False}
     user.update(overrides)
     return user
 
@@ -515,7 +515,7 @@ class TestSignInVerify:
             patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as issue,
         ):
             crud.get = AsyncMock(return_value=ceremony.stored)
-            users.get = AsyncMock(return_value={"id": 7, "uuid": USER_UUID})
+            users.get = AsyncMock(return_value={"id": 7, "uuid": USER_UUID, "is_deleted": False})
             issue.return_value = {"access_token": "at", "token_type": "bearer"}
 
             outcome = await passkey_sign_in_verify(_request(), PasskeySignInVerifyRequest(**body), Mock(), mock_db)
@@ -543,7 +543,7 @@ class TestSignInVerify:
             patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as issue,
         ):
             crud.get = AsyncMock(return_value=ceremony.stored)
-            users.get = AsyncMock(return_value={"id": 7, "uuid": USER_UUID})
+            users.get = AsyncMock(return_value={"id": 7, "uuid": USER_UUID, "is_deleted": False})
             issue.return_value = {"access_token": "at", "token_type": "bearer"}
 
             outcome = await passkey_sign_in_verify(_request(), PasskeySignInVerifyRequest(**body), Mock(), mock_db)
@@ -621,7 +621,7 @@ class TestSignInVerify:
             patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as issue,
         ):
             crud.get = AsyncMock(return_value=ceremony.stored)
-            users.get = AsyncMock(return_value={"id": 7, "uuid": USER_UUID})
+            users.get = AsyncMock(return_value={"id": 7, "uuid": USER_UUID, "is_deleted": False})
             issue.return_value = {"access_token": "at", "token_type": "bearer"}
 
             await passkey_sign_in_verify(_request(), PasskeySignInVerifyRequest(**body), Mock(), mock_db)
@@ -653,8 +653,10 @@ class TestSignInVerify:
 
         await _run(None, None)  # unknown credential
         await _run(ceremony.stored, None)  # credential fine, owner soft-deleted
-        await _run(ceremony.stored, {"id": 7, "uuid": USER_UUID}, flow_id=str(uuid_pkg.uuid4()))  # unknown flow
-        await _run(ceremony.stored, {"id": 7, "uuid": USER_UUID}, origin="https://evil.example")
+        await _run(
+            ceremony.stored, {"id": 7, "uuid": USER_UUID, "is_deleted": False}, flow_id=str(uuid_pkg.uuid4())
+        )  # unknown flow
+        await _run(ceremony.stored, {"id": 7, "uuid": USER_UUID, "is_deleted": False}, origin="https://evil.example")
 
         wrong_rp = SoftAuthenticator(rp_id="attacker.example", origin=ORIGIN)
         wrong_rp._private_key = ceremony.device._private_key
@@ -665,7 +667,7 @@ class TestSignInVerify:
             patch("src.app.services.passkey_service.crud_users") as users,
         ):
             crud.get = AsyncMock(return_value=ceremony.stored)
-            users.get = AsyncMock(return_value={"id": 7, "uuid": USER_UUID})
+            users.get = AsyncMock(return_value={"id": 7, "uuid": USER_UUID, "is_deleted": False})
             with pytest.raises(UnauthorizedException) as exc_info:
                 await passkey_sign_in_verify(_request(), PasskeySignInVerifyRequest(**body), Mock(), mock_db)
         messages.add(exc_info.value.detail)
@@ -673,10 +675,10 @@ class TestSignInVerify:
         assert len(messages) == 1
 
     @pytest.mark.asyncio
-    async def test_a_soft_deleted_owner_never_reaches_the_funnel(self, mock_db, redis_client):
-        """The `is_deleted=False` filter is what fails closed here until the deletion
-        plan's `deletion_pending` outcome lands - the credential lookup is a resolve site
-        that plan's edit list does not know about."""
+    async def test_an_owner_who_no_longer_exists_is_the_same_401_as_everything_else(self, mock_db, redis_client):
+        """A credential whose user row is simply gone - purged, in practice - is one of the
+        failures that share `_SIGN_IN_FAILED`, and must not become a way to tell a live
+        credential from a stale one."""
         ceremony = await _register_credential(mock_db, redis_client)
         body = await self._assert_with(mock_db, redis_client, ceremony)
 
@@ -691,8 +693,47 @@ class TestSignInVerify:
             with pytest.raises(UnauthorizedException):
                 await passkey_sign_in_verify(_request(), PasskeySignInVerifyRequest(**body), Mock(), mock_db)
 
-            assert users.get.call_args.kwargs["is_deleted"] is False
             issue.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_soft_deleted_owner_is_offered_the_account_back(self, mock_db, redis_client):
+        """The fourth entry point into `deletion_pending`, and the one that reaches it from
+        its own resolve site rather than through `resolve_identity` - an assertion carries
+        no email to look anything up by.
+
+        This used to be the same generic 401 as a forged assertion: safe, but a dead end
+        with nothing explaining why the app had stopped opening.
+        """
+        ceremony = await _register_credential(mock_db, redis_client)
+        body = await self._assert_with(mock_db, redis_client, ceremony)
+        deleted_at = datetime.now(UTC) - timedelta(days=2)
+
+        with (
+            patch("src.app.services.passkey_service.crud_webauthn_credentials") as crud,
+            patch("src.app.services.passkey_service.crud_users") as users,
+            patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as issue,
+        ):
+            crud.get = AsyncMock(return_value=ceremony.stored)
+            users.get = AsyncMock(
+                return_value={
+                    "id": 7,
+                    "uuid": USER_UUID,
+                    "email": "diver@example.com",
+                    "is_deleted": True,
+                    "deleted_at": deleted_at,
+                }
+            )
+
+            outcome = await passkey_sign_in_verify(_request(), PasskeySignInVerifyRequest(**body), Mock(), mock_db)
+
+        assert outcome.status == "deletion_pending"
+        assert outcome.restore_token
+        assert outcome.access_token is None
+        assert outcome.purge_after == deleted_at + timedelta(days=settings.ACCOUNT_DELETION_GRACE_DAYS)
+        # No session, and no write either: the assertion is not recorded, so reaching the
+        # restore screen leaves the account exactly as deleted as it was.
+        issue.assert_not_called()
+        assert not any("UPDATE webauthn_credential" in str(call.args[0]) for call in mock_db.execute.call_args_list)
 
     @pytest.mark.asyncio
     async def test_the_loser_of_a_concurrent_assertion_gets_no_session(self, mock_db, redis_client):
@@ -708,7 +749,7 @@ class TestSignInVerify:
             patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as issue,
         ):
             crud.get = AsyncMock(return_value=ceremony.stored)
-            users.get = AsyncMock(return_value={"id": 7, "uuid": USER_UUID})
+            users.get = AsyncMock(return_value={"id": 7, "uuid": USER_UUID, "is_deleted": False})
 
             with pytest.raises(UnauthorizedException):
                 await passkey_sign_in_verify(_request(), PasskeySignInVerifyRequest(**body), Mock(), mock_db)
@@ -729,7 +770,7 @@ class TestSignInVerify:
             patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as issue,
         ):
             crud.get = AsyncMock(return_value=ceremony.stored)
-            users.get = AsyncMock(return_value={"id": 7, "uuid": USER_UUID})
+            users.get = AsyncMock(return_value={"id": 7, "uuid": USER_UUID, "is_deleted": False})
             issue.return_value = {"access_token": "at", "token_type": "bearer"}
 
             await passkey_sign_in_verify(_request(), PasskeySignInVerifyRequest(**body), Mock(), mock_db)
