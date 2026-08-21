@@ -1,0 +1,23 @@
+# Blank issues stay enabled on purpose: the forms above exist to collect the version and install
+# details a bug report is useless without, not to refuse anything that doesn't fit one of three
+# shapes. A report nobody anticipated is worth more than a well-formatted one.
+blank_issues_enabled: true
+
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/opendiving/opendiving-api/security/advisories/new
+    about: >-
+      Report it privately here, never as a public issue — every self-hosted instance is exposed for
+      as long as it takes to cut a release. No GitHub account? security@opendiving.app.
+
+  - name: Question, or stuck installing
+    url: https://github.com/opendiving/opendiving-api/discussions
+    about: >-
+      Ask in Discussions. Troubleshooting docs first if you haven't read them; an install that is
+      misconfigured rather than broken gets answered faster there than in the tracker.
+
+  - name: Something in the web app
+    url: https://github.com/opendiving/opendiving-web/issues/new/choose
+    about: >-
+      Anything you saw in a browser — a page, a form, a chart — belongs in the frontend repository.
+      If you can't tell which side it is, file it here and it will be moved.
