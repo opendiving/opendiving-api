@@ -30,14 +30,21 @@ import sys
 # command would actually disable. Enforcing on either key blocks a commit on
 # the strength of a *tag* setting and then names the wrong one in the message,
 # which is the falsehood this whole gate exists to remove.
+#
+# The quote handling is not decoration. This matches command *text*, while the
+# shell strips quotes before git sees the argument, so one falsy value reaches
+# git through `=false`, `="false"`, `"commit.gpgsign=false"` and, empty,
+# through `=`, `=""` and `"commit.gpgsign="` - all the same command to git, and
+# an empty value is false to it. See DECISIONS.md.
 DISABLE = (
     (
         "commit.gpgsign",
         re.compile(
             r"""
               --no-gpg-sign\b                      # commit/rebase/cherry-pick spelling
-            | \b commit\.gpgsign \s* [=\ ] \s* (?: false | 0 | no | off | n )\b
-            | \b commit\.gpgsign = (?: "" | '' )? (?! \S )   # empty reads as false
+            | \b commit\.gpgsign \s* [=\ ] \s* ["']? (?: false | 0 | no | off | n )\b
+            | \b commit\.gpgsign                   # an empty value is false to git
+              (?: = ["']{0,2} | \s+ (?: "" | '' ) ) (?! \S )
             | (?<![\w-]) (?:--)? unset (?:-all)? \b    # removal, naming the key
               [^\n]* \b commit\.gpgsign \b
             | (?<![\w-]) (?:--)? (?: remove | rename ) -section \b
@@ -50,8 +57,9 @@ DISABLE = (
         "tag.gpgsign",
         re.compile(
             r"""
-              \b tag\.gpgsign \s* [=\ ] \s* (?: false | 0 | no | off | n )\b
-            | \b tag\.gpgsign = (?: "" | '' )? (?! \S )
+              \b tag\.gpgsign \s* [=\ ] \s* ["']? (?: false | 0 | no | off | n )\b
+            | \b tag\.gpgsign
+              (?: = ["']{0,2} | \s+ (?: "" | '' ) ) (?! \S )
             | (?<![\w-]) (?:--)? unset (?:-all)? \b
               [^\n]* \b tag\.gpgsign \b
             | (?<![\w-]) (?:--)? (?: remove | rename ) -section \b

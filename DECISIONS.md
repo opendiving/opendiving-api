@@ -11209,13 +11209,25 @@ between the verb and the section name, since scope flags, `--file <path>` and th
 `--remove-section` chained ahead of the word `commit`; over-blocking a command the reader can split
 in two is the safe direction, and under-blocking is the one that disarms the hook.
 
-**An empty value is falsy too, and the pattern had been missing it.**
+**An empty value is falsy, and quoting is where the pattern kept losing it.**
 `git -c commit.gpgsign= commit` produces a commit whose `%G?` is `N` exactly as the spelled-out
-`false` does, because `git config --type=bool` reads the empty string as `false` - both halves
-verified. So each key's value list now also matches `=` with nothing after it, and the `=""` / `=''`
-a shell leaves behind. Worth naming because it looks like a boundary case and is not: the boundary
-below is about shapes that are not git command lines at all, and this is the exact shape the pattern
-exists for.
+`false` does, because git reads the empty string as `false` for a bool - both halves verified. The
+awkward part is that this hook matches command *text* while the shell strips quotes before git ever
+sees the argument, so a single value reaches git through several spellings that are one command to
+it and several strings here: `=false`, `="false"` and `"commit.gpgsign=false"` for the word, and
+`=`, `=""` and `"commit.gpgsign="` for the empty one. Each key's pattern therefore allows one
+optional quote ahead of a spelled-out falsy word - `git config commit.gpgsign "false"` was unmatched
+before this change - and, for the empty value, up to two stray quote characters after the `=`,
+asserting only that the token ends there. Fitting the pattern to one example at a time is what
+produced two rounds of this; the shell's own quote-stripping is the rule that covers them all.
+
+The space-separated *write* needs its own alternative, and an explicit quote pair with it.
+`git config --global commit.gpgsign ""` persists an empty value, so from then on `signing_is_on`
+reads `false` and the guard is inert - the disarm hazard again, arriving through a set rather than
+an unset. It cannot be matched as "the key, whitespace, then nothing", because `(?!\S)` is satisfied
+by *more* whitespace: that spelling fires on any command that merely mentions the key and then
+breaks a line, which is most of this file. Requiring the `""` or `''` that a shell must have written
+to pass an empty argument keeps it to the real case, verified against both.
 
 **Where the line is, deliberately.** The patterns match *git command* shapes. They do not match
 `sed` on `~/.gitconfig`, and they do not match `GIT_CONFIG_GLOBAL=/dev/null git commit`, which hides
@@ -11243,12 +11255,15 @@ them.
 
 **And the verification, because this file has none.** `.claude/` is outside `ruff`'s roots
 (`src tests scripts`) and no CI job reads it, so the only check the hook gets is running it by hand
-against a set of JSON payloads - one per shape, seven of them - in three environments: the
-maintainer's config, then `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null` for a stranger's
-clone, then a scratch config carrying `tag.gpgsign` alone, which is the only thing that exercises
-the key-aware dispatch. Write the payloads through heredocs: their bodies carry the very flags the
-live hook rejects, and heredoc bodies are what `strip_heredoc_bodies` ignores, so piping the same
-JSON inline gets the verifying command blocked by the hook it is testing. And capture the status on
-its own statement - `echo "... exit $?"` reports the status of the command substitution in that same
-line, not the hook's, so the loop prints a clean pass no matter what the hook did. That was
-reproduced against the pre-gate hook, which blocked two of the seven.
+against a set of JSON payloads - one per shape the patterns claim to cover - in three environments:
+the maintainer's config, then `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null` for a
+stranger's clone, then a scratch config carrying `tag.gpgsign` alone, which is the only thing that
+exercises the key-aware dispatch. Write the payloads through heredocs: their bodies carry the very
+flags the live hook rejects, and heredoc bodies are what `strip_heredoc_bodies` ignores, so piping
+the same JSON inline gets the verifying command blocked by the hook it is testing. And capture the
+status on its own statement - `echo "... exit $?"` reports the status of the command substitution in
+that same line, not the hook's, so the loop prints a clean pass no matter what the hook did. That
+was reproduced against the pre-gate hook, which blocked only the two inline-override shapes. And add
+a run of commands that must *not* block - a plain `git commit`, a `git config --get` of either key,
+`=true` - because every fix here widens a pattern, and nothing else would notice it widening too
+far.
