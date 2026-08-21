@@ -86,7 +86,6 @@ class TestUnitsPreference:
                 "name": "Ada Lovelace",
                 "username": "ada",
                 "email": "ada@example.com",
-                "profile_image_url": "https://profileimageurl.com",
             }
         )
 

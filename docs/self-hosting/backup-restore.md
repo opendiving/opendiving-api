@@ -2,8 +2,9 @@
 
 **A backup is two artifacts: a `pg_dump` and a copy of the files volume.** The database holds every
 dive, dive site, trip and certification record; the `files-data` volume holds the uploaded
-dive-computer exports and c-card images themselves, one ordinary file each. Neither is a backup on
-its own — a restore of the dump alone gives you a logbook whose file downloads all fail.
+dive-computer exports, c-card images and profile pictures themselves, one ordinary file each.
+Neither is a backup on its own — a restore of the dump alone gives you a logbook whose file
+downloads all fail.
 
 Take them **in that order, database first**, and the pair is consistent: a file is written before
 the row that references it, and files are never modified in place, so a copy taken after the dump is

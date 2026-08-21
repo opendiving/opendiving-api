@@ -6,6 +6,7 @@ Layout, and what each member is for:
 export.json          the complete structured export - see schemas/export.py
 dives.uddf           the same bytes GET /export/uddf serves
 csv/dives.csv        the flat spreadsheet view, plus six normalized files beside it
+avatar.webp          the diver's profile picture, if they have one
 files/...            every stored dive-computer export, under a per-dive name
 certifications/...   both sides of every stored c-card
 ```
@@ -59,6 +60,7 @@ from ...schemas.certification import CertificationSide
 from ..blob_store import BlobMissingError
 from ..certification_files import load_certification_file
 from ..dive_files import load_dive_file
+from ..user_avatars import AVATAR_FILENAME, StoredAvatar, read_avatar_bytes
 from .envelope import write_export_json
 from .loader import ExportBundle
 from .paths import ArchivePaths, plan_archive_paths
@@ -208,7 +210,20 @@ async def _write_blobs(
     operational problem rather than a race; the export is precisely the tool someone
     reaches for when their volume is half-dead, so failing the whole archive over it would
     take away the one thing still working.
+
+    The avatar comes off the `user` row already in the bundle rather than out of a query
+    of its own, and it is `ZIP_STORED` like the rest: it is a WebP, and deflating an
+    already-compressed image burns CPU to save nothing.
     """
+    if bundle.user.avatar_storage_key and bundle.user.avatar_sha256:
+        avatar_ref = StoredAvatar(storage_key=bundle.user.avatar_storage_key, sha256=bundle.user.avatar_sha256)
+        try:
+            avatar = await read_avatar_bytes(avatar_ref)
+        except BlobMissingError:
+            logger.error("Skipping the profile picture: its stored file is missing from the volume")
+        else:
+            archive.writestr(_member(AVATAR_FILENAME, exported_at, compress_type=zipfile.ZIP_STORED), avatar)
+
     for dive in bundle.dives:
         member = paths.dive_files.get(dive.id)
         if member is None:

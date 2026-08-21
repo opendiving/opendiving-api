@@ -123,11 +123,11 @@ file to the service names and are not yours to change. `POSTGRES_USER` and `POST
 default to `opendiving` and can be overridden in `.env` before the first start (afterwards they name
 a database that already exists under a different name).
 
-| Variable           | Default       | What it does                                                                                                                                                                                                                                                                                                        |
-| ------------------ | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MIGRATE_ON_START` | `true`        | Runs `alembic upgrade head` as the API starts, which is what makes an upgrade `pull` + `up -d`. Turn it off only if you'd rather run `docker compose run --rm api alembic upgrade head` yourself.                                                                                                                   |
-| `REDIS_PASSWORD`   | *(none)*      | For pointing the app at a managed Redis instead of the bundled one. The bundled one needs no password and is not reachable outside the compose network.                                                                                                                                                             |
-| `FILE_STORAGE_DIR` | `/data/files` | Where uploaded dive-computer exports and c-card images are written inside the container. The compose file mounts the `files-data` volume there, so there is nothing to set unless you replaced that volume with a bind mount — and then the host directory has to be owned by uid 1000 or the API refuses to start. |
+| Variable           | Default       | What it does                                                                                                                                                                                                                                                                                                                          |
+| ------------------ | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MIGRATE_ON_START` | `true`        | Runs `alembic upgrade head` as the API starts, which is what makes an upgrade `pull` + `up -d`. Turn it off only if you'd rather run `docker compose run --rm api alembic upgrade head` yourself.                                                                                                                                     |
+| `REDIS_PASSWORD`   | *(none)*      | For pointing the app at a managed Redis instead of the bundled one. The bundled one needs no password and is not reachable outside the compose network.                                                                                                                                                                               |
+| `FILE_STORAGE_DIR` | `/data/files` | Where uploaded dive-computer exports, c-card images and profile pictures are written inside the container. The compose file mounts the `files-data` volume there, so there is nothing to set unless you replaced that volume with a bind mount — and then the host directory has to be owned by uid 1000 or the API refuses to start. |
 
 Redis holds cache entries, open rate-limit windows and in-flight passkey challenges. Losing it costs
 a cold cache and interrupts passkey sign-in until it is back (see [Sign-in](#sign-in)); nothing
@@ -142,7 +142,6 @@ records are in Postgres, and the uploaded files themselves are on the `files-dat
 | `CONTACT_FORM_EMAIL`                                        | *(none)*  | Where the contact form delivers. Unset, that endpoint answers 503 and the form is off.                                          |
 | `CONTACT_EMAIL`                                             | *(none)*  | Shown on the contact page as a fallback. Display only.                                                                          |
 | `GOOGLE_CLIENT_ID`                                          | *(none)*  | Offers Google Sign-In. Unset, the button is hidden and `accounts.google.com` leaves the web app's CSP. See [Sign-in](#sign-in). |
-| `GRAVATAR_ENABLED`                                          | `false`   | Avatars from Gravatar. See *Third-party calls* below before turning it on.                                                      |
 | `MAP_TILE_URL`, `MAP_TILE_URL_DARK`, `MAP_TILE_ATTRIBUTION` | Carto     | The dive-site picker's basemap. The web app's CSP follows these automatically.                                                  |
 | `GEOCODER_URL`                                              | Nominatim | Turns a map pin into a place name, server-side. Set to `""` to switch geocoding off entirely.                                   |
 | `WORMS_API_URL`, `WIKIDATA_API_URL`                         | public    | The species picker's two registers, also called server-side.                                                                    |
@@ -235,12 +234,18 @@ this copy. Leave the panel off, as it ships, and none of this exists.
 
 Nothing here phones home. What the app can be told to contact:
 
-- **From the browser**: map tiles (the dive-site picker only, and only the `z/x/y` of the area
-  shown), and Gravatar if you turn it on — which discloses a hash of every signed-in user's email
-  address and their IP to Automattic, on every page. It is off by default.
+- **From the browser**: map tiles, and only those — the dive-site picker only, and only the `z/x/y`
+  of the area shown. Nothing else, including profile pictures: an avatar is stored on your own files
+  volume and served by your own API. (Gravatar used to be an option here, disclosing a hash of every
+  signed-in user's email address and their IP to Automattic on every page. It is gone, along with
+  its `GRAVATAR_ENABLED` variable.)
 - **From the server**: the geocoder and the two species registers, on cache misses only. A pinned
   coordinate or a typed search string goes out; nothing identifying the diver does, and the source
-  IP is your server's. Both are configurable, and the geocoder can be switched off outright.
+  IP is your server's. Both are configurable, and the geocoder can be switched off outright. One
+  more, only if you have set `GOOGLE_CLIENT_ID`: when somebody signs up with Google, the API fetches
+  their Google profile picture once — from `googleusercontent.com`, at account creation and never
+  again — and stores it on your files volume. It is best-effort; a failure just means that account
+  starts with initials.
 
 There is no analytics of any kind, and the web app's Content-Security-Policy structurally forbids
 adding some without also changing the policy.

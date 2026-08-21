@@ -94,7 +94,7 @@ class TestHandlersKeepTheirOwnPolicy:
     def test_those_responses_still_name_frame_ancestors(self, client: TestClient):
         """`frame-ancestors` does not fall back to `default-src`, so opting out of the
         middleware's CSP means opting out of frame protection unless the handler says so
-        itself - which is why all three download endpoints spell it out."""
+        itself - which is why every download endpoint spells it out."""
         csp = client.get("/downloads-a-file").headers["Content-Security-Policy"]
 
         assert "frame-ancestors 'none'" in csp

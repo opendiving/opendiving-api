@@ -9868,6 +9868,9 @@ happened *before* photos rather than with them, for one reason above all others:
 been tagged, so no instance anywhere holds data.** After the first release this becomes a real data
 migration for strangers; today it is one revision against a dev database that is disposable anyway.
 
+A third kind has since arrived on the same volume, and nothing at this layer changed to take it: see
+*"Avatars are the third kind on the files volume, and Pillow re-encodes every one"*.
+
 ### A filesystem volume, not an object store
 
 No bundled S3 server and no S3 backend code. On a single node the S3 API buys nothing the filesystem
@@ -10899,3 +10902,224 @@ One asymmetry the screen has to disclose: `verify_email_code` claims the request
 the identity, so a code spent on reaching the restore screen is spent, and closing that tab costs a
 fresh code. The magic link leaves its token unused — the precheck marks nothing — so the same
 journey by link is reopenable until it expires.
+
+## Avatars are the third kind on the files volume, and Pillow re-encodes every one
+
+Gravatar is gone. A diver's picture is now uploaded to `PUT /user/avatar`, stored on this instance's
+own files volume under the `user-avatars/` kind, and served by `GET /user/avatar` to its owner. The
+`user` row carries two nullable columns — `avatar_storage_key` and `avatar_sha256` — and
+`profile_image_url` is dropped. This extends *"File payloads live on the files volume, not in
+Postgres"*, which anticipated it: the key layout was built so "a future kind (photos, species
+images) can pick a different layout without moving anything already stored", and avatars are the
+first such kind. Nothing at the `blob_store` layer changed to accommodate them.
+
+What Gravatar cost is worth recording, because it is the argument for doing this at all: it was off
+by default, so a default install had no pictures anywhere; turning it on disclosed a SHA-256 of
+every signed-in user's email address plus their IP to Automattic on every page; and changing your
+picture meant creating an account on someone else's website. The API's half of the teardown is the
+`GRAVATAR_ENABLED` passthrough in `deploy/docker-compose.yml`, its `deploy/example.env` block and
+its row in `docs/self-hosting/configuration.md`. With it gone, *Third-party calls* from the browser
+is map tiles and nothing else.
+
+### Two columns, not a `user_avatar` table
+
+The table option was the obvious symmetry — it would mirror `certification_file` exactly — and it
+was rejected. A `certification_file` row earns table-hood by being one of *two* per parent (`side`),
+by carrying display metadata (`byte_size`, `original_filename`, `content_type`) and by being fetched
+in bulk for list views. An avatar has none of that: it is a strictly 1:1 optional attribute, the
+served content type is constant because everything is normalized to WebP, and size and original
+filename stop meaning anything the moment the bytes are re-encoded.
+
+The deciding argument is on the read side. `UserRead` needs the avatar's existence and its version
+on **every** read, and `get_current_user` already selects every mapped `user` column — so a column
+rides along free, where a table costs a join or a second query on the hottest dependency in the app.
+
+`avatar_storage_key` carries the same unique index the two file tables have on theirs, for the same
+reason: two rows naming one key would let either one's replacement unlink the other's bytes.
+Nullable, and Postgres allows any number of NULLs in a unique index, so accounts without a picture
+are unaffected.
+
+### The bytes that arrive are never the bytes that are stored
+
+Every upload is decoded, EXIF-oriented, centre-cropped square, bounded to 512 px and re-encoded as
+WebP at quality 85. That is a **privacy** decision before it is a performance one: re-encoding is
+what strips EXIF, and a phone photo's EXIF carries GPS. A client cannot be trusted to do it — the
+web app is one caller of an API that also serves iOS and anything else somebody writes — so the
+guarantee lives server-side, where it holds for all of them. It is the opposite stance to card files
+next door, which are archival documents and are stored byte for byte; an avatar is a derived display
+artifact and the original is not kept.
+
+Bounding is the second reason. Without decoding, "accept image, serve image" means a 10 MB 8000×8000
+upload is served forever, on every header mount. One ~512 px WebP is typically 10–40 KB and covers
+every mount the clients have (36–80 px, doubled on retina).
+
+`pillow-heif` was rejected for the same reason cards reject HEIC: a native-library dependency for a
+case iOS pickers already transcode around.
+
+### Pillow parses untrusted bytes, and the two oversized bands are not one check
+
+Three fences: an explicit `formats=["JPEG", "PNG", "WEBP", "GIF"]` allowlist so only four
+battle-tested parsers are ever reachable from an anonymous byte string; a 50 MP cap read from
+`Image.size` before any pixel is decoded; and the existing 10 MB `read_upload_within_limit` on the
+read itself. Decode and encode run in `anyio.to_thread.run_sync`, like every other blocking hop.
+
+**The trap is the second band.** Above 178,956,970 px (`Image.MAX_IMAGE_PIXELS * 2`) Pillow raises
+`DecompressionBombError` *from inside `Image.open` itself*, before the app's own cap can run — so
+the open has to sit inside the same `try` and map to the same 415. Uncaught it is a 500, and a
+pixel-cap test whose fixture is under that threshold would never notice, because it exercises only
+the app's own band. `tests/test_user_avatars.py` covers both, and covers the bomb band twice: once
+against Pillow's real limit and once with `MAX_IMAGE_PIXELS` lowered under an ordinary image, so the
+`except` clause is executed rather than reasoned about. Both fixtures are 74-byte PNGs whose IHDR
+*declares* the dimensions — the checks are header-only, so materialising a real raster would cost
+168 MB of test memory to prove nothing extra.
+
+### The pixel cap bounds what is *accepted*, not what is allocated
+
+This took two rounds of review to get right, and it is the least obvious thing in the feature. The
+50 MP cap reads like a memory bound and is not one: a 50 MP RGB raster is 150 MB, and a uniform PNG
+that describes one is about 150 KB on the wire — a four-figure amplification the 10 MB byte cap
+cannot see, on a route with no rate limit in front of it. The first draft held **three**
+full-resolution rasters at once, because `ImageOps.exif_transpose` copies and `Image.convert` copies
+even when the mode already matches. Measured with `ru_maxrss` on a 7000×7000 PNG: **568 MB for one
+request**, from 150 KB of upload.
+
+**The first fix was a partial one, and the way it was partial is the interesting part.** Adding
+`image.draft(None, (512, 512))`, `exif_transpose(..., in_place=True)` and a guarded `convert` took
+the RGB PNG case from 568 MB to 206 MB and the same picture as a JPEG to 10 MB — and left the alpha
+paths untouched: 422 MB for RGBA, 454 MB for a transparent palette GIF, and **644 MB for
+greyscale-plus-alpha, higher than the number the fix was written to remove**. The cause is inside
+Pillow rather than in this code: `Image.resize` begins with
+
+```python
+if self.mode in ["LA", "RGBA"] and resample != Resampling.NEAREST:
+    im = self.convert({"LA": "La", "RGBA": "RGBa"}[self.mode])
+```
+
+which premultiplies alpha into a full-size copy *before* the recursive call that applies the `box=`
+crop, so no amount of crop-first reordering avoids it — and `Image.reduce` carries the identical
+branch, so it is not a way out either. Premultiplying is not a Pillow wart; it is what resampling
+alpha correctly requires.
+
+So the real remedy is a **second cap, on what will be rasterized rather than on what the file
+claims**, and the two are not redundant:
+
+- `MAX_AVATAR_PIXELS` (50 MP) judges the header, before `draft` has had a chance to make a dishonest
+  declaration cheap. Remove it and a bomb is quietly downscaled instead of refused.
+- `MAX_AVATAR_DECODE_PIXELS` (1536×1536) judges the post-`draft` size, immediately before the first
+  line that decodes.
+
+**Measure that second cap per format, not per mode.** Two rounds of this review went on figures that
+were true of whatever input had been tried. Every figure here is one machine's `ru_maxrss` delta on
+Pillow 12.3, taken in a fresh process per case because that counter is a monotonic high-water mark
+and building the fixture in the same process hides the answer, and rounded up across two machines
+that disagreed by up to 30%; the ratios are the durable part. At 1536×1536 one decode costs ~20 MB
+for an RGB PNG, ~35 MB for a transparent palette GIF, ~60 MB for an RGBA PNG, ~70 MB for `LA` — and
+**~90 MB for an RGBA WebP, from a 158-byte file**, because `WebPImageFile.load` materializes the
+whole frame as `bytes` and copies it again into a `BytesIO` before the raster is built, which the
+PNG and GIF plugins do not do. The cap started at 2048×2048, where that same WebP measured 104–135
+MB and four workers came to half a gigabyte against the 1 GB minimum; 1536 brings them to ~360 MB.
+The scaling is sub-linear — 56% of the pixels bought around 70% of the memory — so stopping there
+rather than at 1024 is a point of diminishing returns rather than a round number.
+
+`draft` is what keeps the second cap from meaning "no photos above 2.4 MP". Only JPEG can honour it
+— it decodes at a fraction of the DCT scale, which is what `Image.thumbnail` uses it for — and JPEG
+is what cameras produce, so **a phone photo of any megapixel count still passes**: a 48 MP one
+arrives at the second cap as about 1 MP. What gets refused is a large PNG, WebP or GIF, which is not
+a picture of anybody's face. It inherits one quirk worth knowing before somebody reports it as a
+bug: `draft` only halves while *both* edges stay at or above 512, so a JPEG whose short edge is
+under 1024 px is not reduced at all and is refused like a PNG of the same size. To be over the cap
+*and* under that short edge an image has to be wider than about 2.25:1, so 16:9 and everything
+squarer stays clear and only a true panorama lands in it.
+
+That quirk is also why the rejection carries no advice about formats. "Save it as a JPEG" would be
+the useful thing to say to almost everyone who reaches the second cap — and wrong for the one caller
+already sending one. An error message has to be true for every input that can reach it.
+
+Third piece: **`_DECODE_LIMITER`**, an `anyio.CapacityLimiter(1)` passed to `run_sync` as its own
+limiter rather than by shrinking the global one every other blocking hop shares. Without it the
+ceiling is the app's threadpool, which `core/setup.set_threadpool_tokens` raises to 100 per worker
+against four workers in the shipped image, and no per-decode figure survives being multiplied by
+400\. One at a time costs nothing real — a realistic upload is tens of milliseconds through this,
+uploads are rare, and the input that would make the queue matter is the hostile one. With it, ~90 MB
+is a per-worker ceiling and the shipped four workers cost at most ~360 MB between them, against a
+documented install minimum of 1 GB for the whole stack ([install.md](docs/self-hosting/install.md)).
+
+Worth generalizing, because the next image feature will meet it: **an accept-side limit in pixels is
+not a limit in bytes of memory.** The gap between them is whatever the format's compression ratio
+can be made to be, multiplied by however many copies the library makes — and the second factor is
+mode-dependent in a way no reading of your own code will show you. Measure it, per mode, in a fresh
+process (`ru_maxrss` is a monotonic high-water mark, so building the fixture in the same process
+hides the answer).
+
+### The retired key is read from the database, never from `current_user`
+
+`store_user_avatar` reads the key it is replacing with a fresh narrow `select`, and takes no
+`current_user` argument at all. That dict is resolved once per request by `get_current_user`, so on
+a second upload arriving while the first is still in flight it names a key that has already been
+retired — and scheduling *that* for unlinking would destroy the other request's freshly committed
+blob. Reading it here narrows the window to two uploads genuinely overlapping the function, which
+costs an orphan and never a live file, because `blob_store.new_key` mints a fresh nonce per write.
+The same shape as the card store's narrow lookup, and the same accepted stance.
+
+`delete_user_avatar` repeats the key it read in its `UPDATE`'s `WHERE`, so a delete racing a
+replacement matches no row and answers "nothing to remove" rather than clearing columns it did not
+write and unlinking a live blob.
+
+The download route reads key and digest in **one** narrow in-handler select for the same family of
+reasons. Serving from the `current_user` snapshot would let a concurrent replace commit and unlink
+the old blob mid-request, turning a routine race into a `BlobMissingError` — which is deliberately a
+loud 500, so it would read as data loss where none happened. The 304 path stops at that one query,
+having touched no bytes.
+
+### The Google picture is imported once, at account creation, and never again
+
+The chain already existed end to end — verified ID token → `GoogleUserInfo.avatar` → onboarding JWT
+→ decoded at `POST /auth/complete` — and it ended by writing a URL string into `profile_image_url`
+that nothing rendered. Now the bytes are fetched and normalized there instead, and the row is
+created with the avatar columns already set: `put()` precedes the route's single commit, so the
+ordering rule holds and a rollback strands only a nonce-keyed orphan inside the sweeper's grace
+window. `release_read_transaction` runs first, because the duplicate checks autobegan a transaction
+that must not idle across a network fetch plus a decode.
+
+This is the server fetching a URL, so: the URL comes out of a *verified* token and is additionally
+required to be `https` on a host equal to or ending in `.googleusercontent.com`, redirects are not
+followed, there is a 5 s timeout, and the read is capped at the upload limit. **Every failure is
+non-fatal** — log and create the account without a picture. Account creation must not hinge on a
+CDN, and the request has just proved Google reachable by verifying the token. Inline rather than an
+arq job: one bounded fetch, once per account ever, and the picture is there on the first dashboard
+paint instead of a flash of initials.
+
+Signing in later never re-imports. After creation the avatar is the diver's to manage, and silently
+overwriting an uploaded picture because Google's changed would be the old Gravatar behaviour in new
+clothes. `AuthOutcome` therefore loses its `avatar` field while `OnboardingTokenData` keeps it: the
+URL is an *input* to account creation, not something any client renders.
+
+### Erase, purge, sweep, export
+
+- **`DELETE /user` does not touch the avatar.** That route flags the row for the grace period, and
+  `POST /auth/restore` inside it should bring back a whole account rather than a faceless one — the
+  same treatment dives and cards get.
+- **The purge collects a third key.** `_collect_stored_file_keys` reads it off the `user` row before
+  the `DELETE`, with no join, unlike the `certification_file` case that has to reach through
+  `certification`. Without it a purged account leaves its portrait on the volume, which is a privacy
+  hole inside an erasure feature.
+- **The sweeper's referenced set gains a third source**, and it is the only one on a nullable
+  column, so that select filters the NULLs out.
+- **The export archive gains a root `avatar.webp`**, `ZIP_STORED` like the other already-compressed
+  blobs, with the archive's usual log-and-skip on `BlobMissingError`.
+
+### The admin bootstrap named the dropped column, silently
+
+`src/scripts/create_first_superuser.py` hand-builds a Core `Table` mirroring `user`, and
+`profile_image_url` was one of its columns — with a client-side `default=`, which SQLAlchemy puts
+into the INSERT whether or not the script's `data` dict mentions it. After the drop that INSERT is
+an `UndefinedColumn`, and the bare `except Exception` at the bottom of `create_first_user` catches
+it, logs one line and continues: a fresh install would come up with no superuser and nothing but a
+log line saying so. Nothing covered the script, because `--cov` is scoped to `src/app` and it runs
+from a one-shot compose service.
+
+The fix is not just deleting the column. The two `Table` definitions are now module-level constants
+so `tests/test_create_first_superuser.py` can assert both directions of the drift: every column the
+copy names exists on the real table, and every `NOT NULL` column without a server default is named
+by the copy. A copy of a schema is a thing that goes stale; the guard is what makes the next drop
+fail in CI instead of on somebody's first install.

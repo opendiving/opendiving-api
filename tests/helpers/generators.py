@@ -16,7 +16,6 @@ def create_user(db: Session, is_super_user: bool = False) -> models.User:
         # namespace only ever fills up. See `unique_username`.
         username=unique_username(),
         email=unique_email(),
-        profile_image_url=fake.image_url(),
         uuid=uuid7(),
         is_superuser=is_super_user,
     )

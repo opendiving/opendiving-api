@@ -148,6 +148,14 @@ async def _collect_stored_file_keys(db: AsyncSession, user_id: int) -> list[str]
 
     `certification_file` has no `user_id` of its own (it hangs off `certification`), which
     is why the second query joins rather than filtering.
+
+    The avatar is the third source and the odd one out: its key is a column on the `user`
+    row being deleted rather than on a cascaded child, so no join and no filter beyond the
+    id. It is here for the same reason as the other two - a purge that leaves the diver's
+    portrait on the volume is a privacy hole inside an erasure feature - and it is why
+    `DELETE /user` can leave the avatar alone: that route only flags the row, and
+    `POST /auth/restore` inside the grace period should bring back a whole account rather
+    than a faceless one.
     """
     dive_file_keys = (await db.execute(select(DiveFile.storage_key).where(DiveFile.user_id == user_id))).scalars().all()
     certification_file_keys = (
@@ -161,7 +169,8 @@ async def _collect_stored_file_keys(db: AsyncSession, user_id: int) -> list[str]
         .scalars()
         .all()
     )
-    return [*dive_file_keys, *certification_file_keys]
+    avatar_key = (await db.execute(select(User.avatar_storage_key).where(User.id == user_id))).scalar_one_or_none()
+    return [*dive_file_keys, *certification_file_keys, *([avatar_key] if avatar_key else [])]
 
 
 async def _purge_one_account(db: AsyncSession, *, user_id: int, email: str, cutoff: datetime) -> bool:

@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi import Response
+from jose import jwt
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 
@@ -23,7 +24,7 @@ from src.app.api.v1.auth import (
 from src.app.core.config import settings
 from src.app.core.exceptions.http_exceptions import DuplicateValueException, RateLimitException, UnauthorizedException
 from src.app.core.schemas import GoogleUserInfo, OnboardingTokenData
-from src.app.core.security import hash_sign_in_code
+from src.app.core.security import ALGORITHM, SECRET_KEY, hash_sign_in_code
 from src.app.schemas.auth import (
     EmailAuthRequest,
     EmailCodeVerifyRequest,
@@ -31,6 +32,7 @@ from src.app.schemas.auth import (
     GoogleAuthRequest,
     ProfileCompletionRequest,
 )
+from src.app.services.user_avatars import StoredAvatar
 from tests.helpers.mocks import claimed_used_at_sql, stub_claim
 
 # Every sign-in path subjects its tokens to this, not to the account's username - see
@@ -839,8 +841,15 @@ class TestAuthWithGoogle:
             assert outcome.status == "onboarding_required"
             assert outcome.email == "newperson@example.com"
             assert outcome.name == "New Person"
-            assert outcome.avatar == "https://example.com/a.png"
             assert outcome.onboarding_token is not None
+
+            # The picture is deliberately *not* on the response - nothing renders it - but
+            # it has to survive inside the token, which is the channel `POST /auth/complete`
+            # imports it from. Dropping it from both would silently sever that chain, and
+            # the only symptom would be Google sign-ups quietly starting with initials.
+            payload = jwt.decode(outcome.onboarding_token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
+            assert payload["avatar"] == "https://example.com/a.png"
+            assert outcome.model_dump().get("avatar") is None
 
 
 class TestCompleteProfile:
@@ -937,6 +946,68 @@ class TestCompleteProfile:
             mock_blacklist.assert_called_once_with("good", mock_db)
             response.set_cookie.assert_called_once()
 
+    @staticmethod
+    async def _complete_with_avatar(mock_db, imported, *, avatar="https://lh3.googleusercontent.com/a/photo"):
+        """Run `POST /auth/complete` for a Google identity whose token carries `avatar`,
+        with the import itself stubbed, and hand back what `crud_users.create` was given."""
+        token_data = OnboardingTokenData(
+            email="new@example.com", provider="google", provider_user_id="g-1", name="New Person", avatar=avatar
+        )
+
+        with (
+            patch("src.app.api.v1.auth.verify_onboarding_token", new_callable=AsyncMock) as mock_verify,
+            patch("src.app.api.v1.auth.crud_users") as mock_users,
+            patch("src.app.api.v1.auth.crud_authentication_providers") as mock_providers,
+            patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.import_google_avatar", new_callable=AsyncMock) as mock_import,
+        ):
+            mock_verify.return_value = token_data
+            mock_users.exists = AsyncMock(return_value=False)
+            mock_users.create = AsyncMock(return_value=Mock(id=42, uuid=USER_UUID))
+            mock_providers.create = AsyncMock(return_value=None)
+            mock_import.return_value = imported
+            mock_db.commit = AsyncMock(return_value=None)
+
+            outcome = await complete_profile(
+                _request(),
+                ProfileCompletionRequest(onboarding_token="good", name="New Person", username="newperson"),
+                Mock(),
+                mock_db,
+            )
+
+            return outcome, mock_users.create.call_args.kwargs["object"], mock_import
+
+    @pytest.mark.asyncio
+    async def test_a_google_picture_becomes_the_new_accounts_avatar(self, mock_db):
+        """The columns are set on the row being created, not written afterwards: the blob is
+        already on the volume by this point, so the account's single commit is what makes it
+        referenced - the write-file-then-commit-row ordering, unchanged."""
+        imported = StoredAvatar(storage_key="user-avatars/ab/nonce_abc", sha256="ab" * 32)
+
+        outcome, created, mock_import = await self._complete_with_avatar(mock_db, imported)
+
+        assert outcome.status == "authenticated"
+        mock_import.assert_awaited_once_with("https://lh3.googleusercontent.com/a/photo")
+        assert created.avatar_storage_key == "user-avatars/ab/nonce_abc"
+        assert created.avatar_sha256 == "ab" * 32
+
+    @pytest.mark.asyncio
+    async def test_an_import_that_fails_still_creates_the_account(self, mock_db):
+        """`import_google_avatar` answers `None` for every failure it can have, and this is
+        why: a sign-up must not hinge on a CDN. The diver gets initials, not an error."""
+        outcome, created, _ = await self._complete_with_avatar(mock_db, None)
+
+        assert outcome.status == "authenticated"
+        assert created.avatar_storage_key is None
+        assert created.avatar_sha256 is None
+
+    @pytest.mark.asyncio
+    async def test_an_email_signup_has_no_picture_to_import(self, mock_db):
+        _, created, mock_import = await self._complete_with_avatar(mock_db, None, avatar=None)
+
+        mock_import.assert_awaited_once_with(None)
+        assert created.avatar_storage_key is None
+
     @pytest.mark.asyncio
     async def test_concurrent_onboarding_rolls_back_and_raises_duplicate(self, mock_db):
         """Two requests racing to complete the same onboarding token/email: whichever
@@ -961,4 +1032,7 @@ class TestCompleteProfile:
                     mock_db,
                 )
 
-            mock_db.rollback.assert_called_once()
+            # Two rollbacks, and only the second is the failure: the first is
+            # `release_read_transaction` ending the duplicate checks' transaction before the
+            # Google-picture import, so the connection does not idle across a network fetch.
+            assert mock_db.rollback.await_count == 2

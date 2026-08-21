@@ -228,7 +228,6 @@ def sample_user_read():
         name=fake.name(),
         username=unique_username(),
         email=unique_email(),
-        profile_image_url=fake.image_url(),
     )
 
 

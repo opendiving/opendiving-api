@@ -13,7 +13,13 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from src.scripts.create_first_superuser import create_first_user
+from src.app.models.authentication_provider import AuthenticationProvider
+from src.app.models.user import User
+from src.scripts.create_first_superuser import (
+    AUTHENTICATION_PROVIDER_TABLE,
+    USER_TABLE,
+    create_first_user,
+)
 
 
 class TestAdminEmailIsRequired:
@@ -65,3 +71,36 @@ class TestAdminEmailIsRequired:
 
         query = session.execute.await_args.args[0]
         assert "diver@opendiving.example" in query.compile().params.values()
+
+
+class TestTheHandBuiltTableMatchesTheModel:
+    """The other silent failure in this script, and the reason its tables are module-level.
+
+    `USER_TABLE` is a hand-written copy of a real table, and the INSERT it builds includes
+    every column carrying a client-side `default=` whether or not `data` names it. So a
+    column dropped from the model - `profile_image_url` was, when avatars arrived - turns
+    the bootstrap into an `UndefinedColumn` on every fresh install, which the bare
+    `except Exception` at the bottom of `create_first_user` logs and swallows. The operator
+    gets a running instance they cannot sign in to and one line in the startup log.
+
+    Nothing else covers this: `--cov` is scoped to `src/app`, the script runs from a
+    one-shot compose service, and the suite never inserts through it.
+    """
+
+    def test_every_column_it_names_exists_on_the_real_table(self) -> None:
+        assert set(USER_TABLE.columns.keys()) <= set(User.__table__.columns.keys())
+        assert set(AUTHENTICATION_PROVIDER_TABLE.columns.keys()) <= set(AuthenticationProvider.__table__.columns.keys())
+
+    def test_every_column_the_insert_must_supply_is_named(self) -> None:
+        """The mirror direction. A new `NOT NULL` column with no server-side default is one
+        the INSERT has to provide a value for, and this copy is where that value would come
+        from - so a model change that adds one has to be reflected here or the bootstrap
+        fails the same silent way, from the opposite cause.
+        """
+        required = {
+            name
+            for name, column in User.__table__.columns.items()
+            if not column.nullable and column.server_default is None and not column.primary_key
+        }
+
+        assert required <= set(USER_TABLE.columns.keys())
