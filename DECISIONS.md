@@ -10146,11 +10146,13 @@ can only exist because a signed-in user registered it — so `finish_sign_in` re
 
 Two consequences. First, **no auto-linking decision exists** here. Google's silent link-by-email
 (`auth_service.resolve_identity`) is defended by Google's `email_verified`; a passkey asserts
-nothing to link *by*, and never needs to. Second, this is **a resolve site that
-`plans/account-deletion.md`'s edit list does not know about** — that plan enumerates the
+nothing to link *by*, and never needs to. Second, this is **a third resolve site**, which
+`plans/account-deletion.md`'s edit list originally did not know about — that plan enumerated the
 `resolve_identity` call sites when teaching every path a `deletion_pending` outcome, and this one is
-not among them. The interim is the `is_deleted=False` filter on the user lookup, which fails closed
-into the same generic 401 as everything else. Whichever lands second owns the joint.
+not among them. The handshake said whichever landed second owned the joint; passkeys landed first,
+and the restore change took it. `finish_sign_in` now answers `AuthenticatedUser | DeletionPending`
+and its user lookup carries no `is_deleted` filter at all — see *"A restore is a click, not a side
+effect of signing in"*.
 
 ### No `authentication_provider` row for passkeys, and its own table instead
 
@@ -10714,15 +10716,19 @@ The batch is capped at 100 and the cap is **logged when hit**, because a silent 
 machine carries 531 dives and 147 dive sites — so an unbounded batch is a job that can hold locks
 for minutes.
 
-### The email promises the operator, not a sign-in, and only for now
+### The email points at signing in, and carries no restore link of its own
 
-`plans/account-deletion.md` §5's self-service restore is the next change. Until it lands there is no
-way back through the app at all: `resolve_identity` filters `is_deleted=False`, so a deleted
-account's magic link routes to onboarding, and `/auth/complete` answers "An account with this email
-already exists" against the tombstone. So the confirmation email says the deletion can still be
-undone by whoever runs the instance, which is true today, rather than telling the user to sign in —
-which would send them into exactly that dead end. The sender's docstring says to reword it in the
-same change that adds the endpoint.
+It could not, at first. Before the self-service restore there was no way back through the app at all
+— `resolve_identity` filtered `is_deleted=False`, so a deleted account's magic link routed to
+onboarding and `/auth/complete` answered "An account with this email already exists" against the
+tombstone — so the confirmation mail named the operator instead, and its docstring said to reword it
+in the change that added the endpoint. That change landed; the copy now says to sign in again before
+the date.
+
+What it deliberately still does not carry is a restore link. A restore token is minted only against
+a freshly verified identity and lives minutes; one sitting in an inbox for a fortnight is a standing
+key to an account whose owner has already asked for it to be destroyed — the deletion mail is the
+one message guaranteed to be sitting in the inbox of someone who just decided to leave.
 
 ### The purge test that would silently pass having done nothing
 
@@ -10739,3 +10745,109 @@ The race gets its own test and cannot be arranged with real concurrency: the moc
 to answer the guarded `DELETE` with `rowcount = 0`, and the assertion is that the job rolls back,
 registers no unlinks, and logs rather than raising. Same shape
 `TestAVanishedGearItemDoesNotFiveHundred` uses for the same class of problem.
+
+## A restore is a click, not a side effect of signing in
+
+The grace period was half a feature until this: `DELETE /user` flagged the row and named a date, and
+nothing could clear it again. Every way back in was a dead end — `resolve_identity` filtered
+`is_deleted=False`, so a magic link into a pending-deletion account routed to onboarding and
+`/auth/complete` answered `"An account with this email already exists"` against the account's own
+tombstone. A fortnight to change your mind, with nothing to change it *with*.
+
+The obvious fix — sign them in and clear the flag — is the one thing this must not do. Someone
+deletes an account deliberately; a link they open a week later, or a passkey their browser offers
+unprompted, must not quietly undo that. So the four entry points gained a **third outcome** rather
+than a fourth path: `AuthOutcome.status = "deletion_pending"`, carrying a restore token and the
+purge date and **no session at all**. `POST /auth/restore` is what acts on it.
+
+### One funnel, three resolve sites, and the edit that makes it work everywhere
+
+`_start_onboarding_or_sign_in` was one `isinstance` check with an `else` that reads `outcome.email`,
+`.provider`, `.name`. A third variant reaching it unhandled falls into that `else` and dies on the
+first attribute — a bug that type-checks. Writing the branch there instead is what makes the feature
+true on the magic link, the six-digit code, Google and passkeys at once, because all four end in
+that function.
+
+Upstream of it there are three places that turn a verified identity into a row, and **all three
+needed the edit**:
+
+- `resolve_identity`'s email lookup — the obvious one.
+- `resolve_identity`'s **provider-link** lookup. Relaxing only the email one is not half a feature,
+  it is a hole: someone who signed up with Google and later changed their address is reachable
+  *only* by provider link (`verify_email_change` rewrites `user.email` in place). With the filter
+  still on, they miss that lookup, miss the email lookup too — the Google identity's address is no
+  longer the row's — fall through to `OnboardingRequired`, and get a **second account** while the
+  first waits to be purged.
+- `passkey_service.finish_sign_in`, the site that never traverses `resolve_identity` at all. Its
+  branch sits **after** `verify_authentication_response`, and the order is the whole of why it is
+  safe: every other failure there shares one 401 because every other failure is reachable by someone
+  holding no credential, and a caller who has just produced a valid assertion is not that someone.
+  Moved earlier, the same branch is a credential-existence oracle. It also returns before
+  `record_assertion`, so reaching the restore screen writes nothing — the property all four paths
+  share.
+
+Neither `resolve_identity` lookup links a provider onto a pending-deletion account either. Nothing
+is lost by waiting: the restore signs them in, and the next sign-in through that provider links it
+against a live row.
+
+### `TokenType.RESTORE`, because the alternative is harmless only by accident
+
+Reusing the onboarding token would have worked. `verify_onboarding_token` hard-checks `token_type`,
+so making the two interchangeable means dropping that check, and then each is redeemable at the
+other's endpoint — today harmlessly, since an onboarding token names no user id to restore and a
+restore token names no email to create an account from. That is a property of today's payloads, not
+of the design, and not one the next change to either should have to preserve. So: its own member,
+its own pair of helpers, and the same `jti`-plus-blacklist single-use mechanics the onboarding token
+uses.
+
+It is subjected to the account's `uuid` rather than the verified email. The passkey path proves an
+identity with no email in it at all, and `verify_email_change` can rewrite the row's address while
+the token is in flight.
+
+### `/auth/restore`, not `/user/restore`
+
+Every `/user/*` route sits behind `get_current_user`, which filters `is_deleted=False` — it would
+401 on precisely the accounts the endpoint exists to serve. This is not filing: the restore token
+*is* the credential here, and it names the account itself, so nothing about the request has to. The
+route is in `test_route_authentication.py`'s `ANONYMOUS_BY_DESIGN` for that reason.
+
+**It clears both columns.** `is_deleted = false` with `deleted_at` still set is a live account
+carrying a deletion clock nothing reconciles, and the mirror state is the never-purge row the job
+warns about. The `UserRestoreDeleted` schema — which carried `is_deleted` alone — is deleted rather
+than fixed: a schema that can only clear one column while wearing the name "restore" is a trap, and
+the endpoint clears both in one statement anyway.
+
+### The row lock is what settles the race with the purge
+
+`purge_deleted_accounts` selects a batch and then deletes one account at a time, so a restore can
+commit in the window between. Both halves guard against it and they meet in the middle: the purge's
+`DELETE` repeats the selection's predicate, and the restore takes the row `FOR UPDATE` before
+touching it. If the purge is mid-account, the restore waits on its transaction and then finds no row
+— a 401 that says the account is *gone*, not that the link is invalid, because the caller holds a
+token this server signed for that account and "invalid link" would send them hunting for a fresh one
+that cannot exist. If the restore wins, the purge's guarded `DELETE` matches nothing and logs that
+the account came back. There is no ordering in which a restored account is destroyed or a destroyed
+account appears restored.
+
+Spending the token commits the restore with it — `crud_token_blacklist.create` commits the session —
+so the account coming back and its token being spent are one transaction, with the lock held across
+both.
+
+### The precheck is a nicety on one path out of four, and the plan used to argue from it
+
+`GET /auth/email/verify/check` now looks the user up (it inspected only the `authentication_request`
+row before) so the landing page's button can say *Restore my account* rather than *Sign in*. It
+answers `valid=true` **plus a flag**, not `valid=false` plus a field: the link works, and
+`valid=false` is what the page shows "ask for a new one" for, so the existing branch stays where it
+is and a second one is added after it.
+
+That affordance exists on exactly one of the four ways in. A typed code, a Google dialog and a
+biometric gesture have no side-effect-free look-before-you-click step; on those three,
+`deletion_pending` can only be a screen shown after the POST. The load-bearing property is not that
+the button never *says* the wrong thing — it is that redeeming the credential never *does* the wrong
+thing, and that holds on all four.
+
+One asymmetry the screen has to disclose: `verify_email_code` claims the request before resolving
+the identity, so a code spent on reaching the restore screen is spent, and closing that tab costs a
+fresh code. The magic link leaves its token unused — the precheck marks nothing — so the same
+journey by link is reopenable until it expires.
