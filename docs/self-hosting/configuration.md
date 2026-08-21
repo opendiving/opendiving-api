@@ -147,6 +147,29 @@ records are in Postgres, and the uploaded files themselves are on the `files-dat
 | `GEOCODER_URL`                                              | Nominatim | Turns a map pin into a place name, server-side. Set to `""` to switch geocoding off entirely.                                   |
 | `WORMS_API_URL`, `WIKIDATA_API_URL`                         | public    | The species picker's two registers, also called server-side.                                                                    |
 
+### Account deletion
+
+| Variable                      | Default | What it does                                                                                                              |
+| ----------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `ACCOUNT_DELETION_GRACE_DAYS` | `14`    | How long a deleted account stays restorable before it and everything it owns are destroyed. `0` purges on the next sweep. |
+
+Deleting an account takes effect immediately — the app stops opening, on every device — but the data
+is not destroyed until the grace period runs out. A cron in the `worker` container runs hourly at
+:30 and issues a real `DELETE FROM "user"` for each account past its deadline, taking that diver's
+dives, dive sites, certifications, gear, trips and every uploaded file with it. Nothing else purges
+an account, and nothing decides on a user's behalf that one should go: the job only ever executes a
+request the user already made.
+
+**Two things worth knowing before you change the number.** The bundled privacy page states that
+personal information is permanently deleted within 30 days. That sentence is true at the default and
+stays true up to about 29 days; raise this past that and the page your instance serves is making a
+promise your configuration breaks. And at `0` there is no way back at all — the confirmation email
+says so instead of naming a date, but a misclick is then final.
+
+**You are the controller.** OpenDiving is software; the operator of an instance is who data
+protection law has obligations for. This setting is the knob that erasure requests are served by —
+what it does, and how promptly, is your call to make and to document.
+
 ### The admin panel
 
 Off by default, and a deliberate opt-in: it is a full CRUD interface over every model and bypasses

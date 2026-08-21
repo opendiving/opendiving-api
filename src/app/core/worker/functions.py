@@ -29,7 +29,6 @@ from ...services.gear_service import (
 from ..config import configure_logging, settings
 from ..db.crud_token_blacklist import crud_token_blacklist
 from ..db.database import local_session
-from ..utils.cache import delete_keys_by_pattern
 
 asyncio.set_event_loop(uvloop.new_event_loop())
 
@@ -241,6 +240,15 @@ async def purge_deleted_accounts(ctx: dict[Any, Any]) -> str:
     `ORDER BY deleted_at` with a limit makes "N left for the next pass" a real queue rather
     than a nondeterministic sample, and the leftover count is logged rather than silently
     capped.
+
+    **No Redis sweep here, deliberately**, and it is worth saying why the obvious line is
+    absent. `delete_keys_by_pattern` returns silently when `cache.client is None`, and that
+    global is only ever set by the API's lifespan - which this process does not go through
+    (see *"The profile backfill is a script, not an arq job"* in `DECISIONS.md`, which
+    names the same trap for the same reason). A call here would be a permanent no-op
+    wearing a comment about ordering and failure semantics. It is also unnecessary:
+    `erase_user` swept `user_{id}_*` from inside the API when the account was flagged, and
+    nothing can have repopulated it since, because every read for a deleted account 401s.
     """
     cutoff = datetime.now(UTC) - timedelta(days=settings.ACCOUNT_DELETION_GRACE_DAYS)
 
@@ -288,11 +296,6 @@ async def purge_deleted_accounts(ctx: dict[Any, Any]) -> str:
             # The id and the request date, never the address: writing the email being
             # erased into logs that outlive the purge would be a self-inflicted wound.
             logging.info("Purged account %d (requested %s)", row.id, row.deleted_at)
-            # After the commit and outside it, so a Redis failure cannot roll back a delete
-            # that has already happened - and only for an account that actually went, so a
-            # restored one keeps its warm cache. Hygiene either way: every read for this
-            # account 401ed the moment it was flagged, days ago.
-            await delete_keys_by_pattern(f"user_{row.id}_*")
 
     if len(due) == ACCOUNT_PURGE_BATCH_SIZE:
         logging.info("Purge batch was full; more accounts may be due on the next pass")

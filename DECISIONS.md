@@ -10599,3 +10599,143 @@ creates missing tables and **never alters an existing one** — so on a dev data
 a fixture bug: that database really would refuse the delete. And per CONTRIBUTING.md the whole class
 skips silently without `POSTGRES_SERVER=localhost`, so a green run on the host proves nothing until
 you have checked it did not skip.
+
+## Deleting an account is two changes with a fortnight between them
+
+`DELETE /user` flagged the row and stopped. Nothing had ever purged a flagged one, so a "deleted"
+account's dives, email address and c-card scans sat in Postgres indefinitely — against a privacy
+page that publishes "personal information is permanently deleted within 30 days". Pre-launch that
+cost nothing; the moment the flagship instance has a user it is a published promise the code
+contradicts.
+
+The endpoint now flags the row and names a date; `purge_deleted_accounts` destroys the account when
+that date passes. `ACCOUNT_DELETION_GRACE_DAYS` defaults to **14**, and the number is chosen against
+that published sentence rather than picked round: a 30-day window swept hourly lands at "30 days and
+change", which would make it false by a rounding error. 14 leaves the sweep cadence as margin and
+needs no edit to the privacy page at all.
+
+**The account goes dark immediately, and there is no countdown banner.** A grace period where the
+app keeps working fails the case that matters most — someone deleting because they want to be *gone
+from it*: a stalker, a shared laptop, a stolen phone. "Delete" has to mean the app stops opening
+now. `get_current_user` already filters `is_deleted=False`, so every read 401s for free, and
+`/auth/refresh` learned to re-resolve the row in the change before this one, which is what stops the
+*other* devices' cookies rotating through the window. The information a banner would carry is not
+lost, it moves: into the confirmation email and onto the way back in, which is where somebody who
+changes their mind actually is.
+
+### The double-submit guard is a database predicate, not a rate limit
+
+Two `DELETE /user` calls from one live session both clear `get_current_user` before either commits,
+and FastCRUD's soft delete rewrites `deleted_at` unconditionally — so the second would move the
+deletion clock and send a second email. The write is therefore an
+`UPDATE ... WHERE is_deleted = false ... RETURNING deleted_at`, and zero rows is "already pending":
+same body, same date, no mail. `RETURNING` is what makes "did *this* call do it?" one statement
+rather than a check-then-act with the same race inside it.
+
+The endpoint is rate limited too, because it sends mail — but that is a separate job and does not
+solve this one. A two-request race beats any counter.
+
+The email is sent **last and non-fatally**, after the response body is composed. `_send` propagates,
+and an instance off `local` is required to have a relay, so a raise there would leave the user
+locked out *and* never told the date — strictly worse than no email. The body carries `purge_after`
+for the same reason: a dead relay costs the copy, not the date.
+
+### The purge's `DELETE` repeats the selection's `WHERE`, and that is the whole safety property
+
+The batch is selected once and then deleted one account at a time, each in its own transaction. A
+restore committing in that window would be destroyed by a bare `DELETE FROM "user" WHERE id = :id` —
+along with every dive behind it. So the statement carries the selection's predicate again:
+
+```sql
+DELETE FROM "user" WHERE id = :id AND is_deleted AND deleted_at IS NOT NULL AND deleted_at < :cutoff
+```
+
+Zero rows affected is the normal "they came back" outcome, logged at info. This is the shape *"The
+service-record resolvers split"* already named: **an invariant that holds within a snapshot is not a
+guarantee across statements.** `cutoff` is computed once per run and reused by both the selection
+and every delete, so one sweep reasons about one instant.
+
+`deleted_at IS NOT NULL` is not defensive noise. `deleted_at < :cutoff` evaluates to NULL for a row
+flagged without its clock, so such an account would be dark forever and nothing would say so — hence
+the warning the job logs when it counts any. If an admin-initiated suspension ever arrives it gets
+its own column; that warning is what would catch someone giving it this one instead.
+
+### The cascade cannot reach the files, and nothing warns you
+
+This is the half that would have shipped broken. `blob_store.delete_after_commit` works by parking
+keys on the session's `info` dict for a post-commit listener, and a `DELETE FROM "user"` retires
+`dive_file` and `certification_file` **inside Postgres**, through the FK cascades — SQLAlchemy never
+sees those rows, no service function runs, and nothing is ever parked. The purge would commit
+cleanly, report success, and leave every dive-computer export and every c-card scan on the volume.
+
+`src/scripts/sweep_orphaned_files.py` would reclaim them, but it is a manual script nothing invokes:
+"an operator might run it one day" is not an erasure guarantee. So the keys are collected explicitly
+before anything is deleted — two selects, the second joining `certification` because
+`certification_file` has no `user_id` of its own — and registered **after** the guarded `DELETE` and
+before the commit. That ordering is the function's own rule, and here it also does the right thing
+under the race above: an account that was restored rolls back, and the rollback listener drops the
+unlinks rather than deleting a live diver's scans.
+
+This is the handshake `plans/done/file-storage-out-of-postgres.md` left open. It shipped first, so
+this is where "a cascade delete strands blobs unless the keys are collected first" gets written
+down.
+
+Two smaller pieces of the same job. `authentication_request` rows are deleted **by email**, because
+`purpose="sign_in"` rows carry a `NULL user_id` by design and no cascade reaches them — partial by
+construction, since `verify_email_change` rewrites `user.email` in place and rows created under a
+previous address carry one the purge cannot name. The week-long expiry sweep is the primary
+mechanism for that table; this only covers what is younger than it. And `token_blacklist` rows are
+left alone: they carry no user FK and must stay until natural expiry, because that is what keeps the
+deleted account's tokens dead.
+
+Logs carry the id and the request date, **never the address**. Writing the email being erased into
+logs that outlive the purge is a self-inflicted wound.
+
+### No Redis sweep in the worker, and the absence is the decision
+
+The obvious line — `delete_keys_by_pattern(f"user_{id}_*")` after each purge — is deliberately not
+there. `cache.client` is set only by the API's lifespan, which the arq process does not go through,
+so the call would be a permanent no-op wearing a comment about ordering and failure semantics. Same
+trap *"The profile backfill is a script, not an arq job"* records for a script, in a second process.
+It is also unnecessary: `erase_user` sweeps those keys from inside the API when the account is
+flagged, and nothing can repopulate them afterwards because every read for a deleted account 401s.
+
+### Hourly at :30, and no `run_at_startup`
+
+Hourly rather than daily is what makes `ACCOUNT_DELETION_GRACE_DAYS=0` behave the way an operator
+setting it to zero would expect. At :30 so it does not contend with the two sweeps on the hour mark.
+And no `run_at_startup`, unlike both of those: they delete rows already past their own expiry and a
+restart loop costs nothing but a no-op `DELETE`, while this one destroys logbooks. A restart loop
+must never be the thing that decides an account's fate a few minutes early. That is the digest job's
+reasoning, one notch stronger.
+
+The batch is capped at 100 and the cap is **logged when hit**, because a silent truncation reads as
+"purged everything" when it did not. One account can be a lot of work — user 1 on one developer's
+machine carries 531 dives and 147 dive sites — so an unbounded batch is a job that can hold locks
+for minutes.
+
+### The email promises the operator, not a sign-in, and only for now
+
+`plans/account-deletion.md` §5's self-service restore is the next change. Until it lands there is no
+way back through the app at all: `resolve_identity` filters `is_deleted=False`, so a deleted
+account's magic link routes to onboarding, and `/auth/complete` answers "An account with this email
+already exists" against the tombstone. So the confirmation email says the deletion can still be
+undone by whoever runs the instance, which is true today, rather than telling the user to sign in —
+which would send them into exactly that dead end. The sender's docstring says to reword it in the
+same change that adds the endpoint.
+
+### The purge test that would silently pass having done nothing
+
+Two of these need Postgres and only one of them is obvious.
+`TestPurgeDeletedAccountsAgainstPostgres` asserts the **files are gone from the volume**, not just
+the rows — a test that counts rows passes while every c-card scan stays on disk, which is the exact
+failure above. It has to be a real-database test for a second reason as well: `delete_after_commit`
+fires on `Session.after_commit`, and the `AsyncMock` sessions much of the suite uses never commit.
+
+Per CONTRIBUTING.md that whole class skips silently without `POSTGRES_SERVER=localhost`, so a green
+run on the host proves nothing until you have checked it did not skip.
+
+The race gets its own test and cannot be arranged with real concurrency: the mocked session is told
+to answer the guarded `DELETE` with `rowcount = 0`, and the assertion is that the job rolls back,
+registers no unlinks, and logs rather than raising. Same shape
+`TestAVanishedGearItemDoesNotFiveHundred` uses for the same class of problem.
