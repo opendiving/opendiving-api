@@ -25,6 +25,7 @@ import pytest
 from src.app.models.certification import Certification
 from src.app.schemas.certification import CertificationFileInfo, CertificationSide
 from src.app.schemas.dive import DiveFileInfo
+from src.app.services.blob_store import BlobMissingError
 from src.app.services.certification_files import LoadedCardFile, get_file_infos_for_certifications
 from src.app.services.dive_files import LoadedDiveFile
 from src.app.services.export.archive import write_archive
@@ -35,10 +36,15 @@ from tests.helpers.export import EXPORTED_AT, UUIDS, build_bundle, full_bundle, 
 DIVE_FILE_BYTES = b'{"DeviceLog": {"Header": {}}}'
 CARD_FRONT_BYTES = b"\xff\xd8\xff\xe0front"
 CARD_BACK_BYTES = b"\x89PNG\r\n\x1a\nback"
+AVATAR_BYTES = b"RIFF\x00\x00\x00\x00WEBPportrait"
 
 
 def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+async def _fake_read_avatar(stored: Any) -> bytes:
+    return AVATAR_BYTES
 
 
 def _install_blob_loaders(monkeypatch: Any) -> None:
@@ -130,6 +136,44 @@ class TestInventory:
         named |= {file["archive_path"] for cert in envelope["certifications"] for file in cert["files"]}
         blobs = {name for name in archive.namelist() if name.startswith(("files/", "certifications/"))}
         assert blobs == named
+
+    @pytest.mark.asyncio
+    async def test_the_avatar_is_a_root_member_when_the_account_has_one(self, monkeypatch):
+        """The archive is the only artifact carrying the blobs, and "download everything"
+        has to mean the whole account - the picture included."""
+        bundle = full_bundle()
+        bundle.user.avatar_storage_key = "user-avatars/ab/nonce_abc"
+        bundle.user.avatar_sha256 = _digest(AVATAR_BYTES)
+        monkeypatch.setattr("src.app.services.export.archive.read_avatar_bytes", _fake_read_avatar)
+
+        archive = await _build(bundle, monkeypatch)
+
+        assert archive.read("avatar.webp") == AVATAR_BYTES
+        assert archive.getinfo("avatar.webp").compress_type == zipfile.ZIP_STORED
+
+    @pytest.mark.asyncio
+    async def test_an_account_without_one_has_no_such_member(self, monkeypatch):
+        archive = await _build(full_bundle(), monkeypatch)
+
+        assert "avatar.webp" not in archive.namelist()
+
+    @pytest.mark.asyncio
+    async def test_an_avatar_missing_from_the_volume_costs_the_member_not_the_archive(self, monkeypatch):
+        """The archive's recorded stance on `BlobMissingError`: losing a member beats
+        losing the export, which is the one tool still working when a volume is half-dead."""
+        bundle = full_bundle()
+        bundle.user.avatar_storage_key = "user-avatars/ab/nonce_abc"
+        bundle.user.avatar_sha256 = _digest(AVATAR_BYTES)
+
+        async def missing(stored: Any) -> bytes:
+            raise BlobMissingError(stored.storage_key)
+
+        monkeypatch.setattr("src.app.services.export.archive.read_avatar_bytes", missing)
+
+        archive = await _build(bundle, monkeypatch)
+
+        assert "avatar.webp" not in archive.namelist()
+        assert archive.testzip() is None
 
     @pytest.mark.asyncio
     async def test_an_empty_logbook_still_produces_a_readable_archive(self, monkeypatch):

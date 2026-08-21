@@ -13,9 +13,14 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
+from uuid6 import uuid7
 
 from src.app.services import blob_store
 from src.scripts import sweep_orphaned_files as sweeper
+from tests.conftest import db_available
+from tests.helpers.generators import create_user
 
 REFERENCED = "dive-files/aa/referenced"
 ORPHAN = "dive-files/bb/orphan"
@@ -194,3 +199,34 @@ class TestTempDirectory:
             report = await sweeper.sweep()
 
         assert (report.on_disk, report.orphaned) == (1, 0)
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestReferencedKeys:
+    """The query the whole diff runs on, against a real database.
+
+    Every test above stubs `_referenced_keys` out, which is right for testing the refusal
+    logic and wrong for the one thing that makes this script dangerous: a key source the
+    query forgets is a live file the sweep offers to delete. Avatars are the third source
+    and the only one on a nullable column, so they are also the only one that can quietly
+    contribute a `None` to the set instead of a key.
+    """
+
+    @pytest.mark.asyncio
+    async def test_an_avatar_key_counts_as_referenced(self, db: Session, async_db: AsyncSession) -> None:
+        diver = create_user(db)
+        diver.avatar_storage_key = f"user-avatars/aa/{uuid7()}_{'a' * 64}"
+        diver.avatar_sha256 = "a" * 64
+        db.commit()
+
+        referenced = await sweeper._referenced_keys(async_db)
+
+        assert diver.avatar_storage_key in referenced
+
+    @pytest.mark.asyncio
+    async def test_an_account_without_one_contributes_nothing(self, db: Session, async_db: AsyncSession) -> None:
+        create_user(db)
+
+        referenced = await sweeper._referenced_keys(async_db)
+
+        assert None not in referenced

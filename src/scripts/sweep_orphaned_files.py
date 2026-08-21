@@ -15,8 +15,8 @@ pointed at the wrong host - and no amount of mtime grace helps, because the file
 and the database is wrong.
 
 So `--delete` refuses when the numbers smell like a wrong database rather than real
-orphans - both tables empty against a populated tree, or an unreferenced fraction above
-`_SUSPICIOUS_FRACTION` - and only `--force` overrides it.
+orphans - no key referenced anywhere against a populated tree, or an unreferenced fraction
+above `_SUSPICIOUS_FRACTION` - and only `--force` overrides it.
 
 A script, not an arq cron. Every source of an orphan is rare and bounded: a crash between
 writing a file and committing its row; two replacements of the same card racing; files
@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..app.core.db.database import local_session
 from ..app.models.certification_file import CertificationFile
 from ..app.models.dive_file import DiveFile
+from ..app.models.user import User
 from ..app.services import blob_store
 
 logging.basicConfig(level=logging.INFO)
@@ -75,9 +76,20 @@ class SweepReport:
 
 
 async def _referenced_keys(session: AsyncSession) -> set[str]:
+    """Every key any row names, across the three places a blob key is stored.
+
+    Avatars are the third and the only one on a nullable column, so that select filters
+    the NULLs out - an account with no picture must not contribute a `None` to a set the
+    tree is diffed against.
+    """
     dive_keys = (await session.execute(select(DiveFile.storage_key))).scalars().all()
     card_keys = (await session.execute(select(CertificationFile.storage_key))).scalars().all()
-    return set(dive_keys) | set(card_keys)
+    avatar_keys = (
+        (await session.execute(select(User.avatar_storage_key).where(User.avatar_storage_key.is_not(None))))
+        .scalars()
+        .all()
+    )
+    return set(dive_keys) | set(card_keys) | set(avatar_keys)
 
 
 def _classify(referenced: set[str], *, now: float) -> tuple[list[str], int, int]:
@@ -143,7 +155,7 @@ def _refusal(referenced: set[str], orphans: list[str], on_disk: int) -> str | No
 
 
 async def sweep(*, delete: bool = False, force: bool = False) -> SweepReport:
-    """Diff the volume against both tables' `storage_key` columns."""
+    """Diff the volume against every `storage_key` column: both file tables and `user`."""
     async with local_session() as session:
         referenced = await _referenced_keys(session)
 

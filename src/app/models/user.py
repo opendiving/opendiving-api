@@ -1,5 +1,5 @@
-from sqlalchemy import Boolean, String
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import Boolean, Index, String
+from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
 from ..core.db.models import PublicUUIDMixin, SoftDeleteMixin, TimestampMixin
@@ -19,7 +19,24 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # `AuthenticationProvider`, one row per linked provider. This is what lets the same
     # account be reached via either method without the `User` row itself needing to
     # know which ones are in use.
-    profile_image_url: Mapped[str] = mapped_column(String, default="https://profileimageurl.com")
+    # The diver's avatar, or `NULL` for the initials fallback. Two columns rather than a
+    # `user_avatar` table: this is a strictly 1:1 optional attribute with no metadata worth
+    # keeping (the served type is always WebP, and byte size and original filename stop
+    # meaning anything once the upload has been re-encoded - see
+    # `services/user_avatars.py`), and `get_current_user` already selects every mapped
+    # column, so a column rides along free where a table would cost a join on the hottest
+    # dependency in the app.
+    #
+    # `avatar_storage_key` is where the bytes are on the files volume,
+    # `user-avatars/{sha256[:2]}/{nonce}_{sha256}`, minted by `blob_store.new_key`. The
+    # nonce is per write, deliberately not this row's uuid: the row survives replacement,
+    # so a key derived from it could be re-minted after being retired and a post-commit
+    # unlink could then destroy a live blob.
+    avatar_storage_key: Mapped[str | None] = mapped_column(String(255), default=None)
+    # Hex SHA-256 of the **stored** (normalized) bytes, not of what was uploaded. It is
+    # the download route's `ETag`, and `UserRead` publishes it as the version token the
+    # clients append as `?v=` - so it doubles as "does this account have a picture".
+    avatar_sha256: Mapped[str | None] = mapped_column(String(64), default=None)
     is_superuser: Mapped[bool] = mapped_column(default=False)
 
     # Whether to email this user when their gear is due for servicing (see
@@ -51,3 +68,14 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # pins `is_deleted`), no other index on this table covers it. Trip and DiveSite used to
     # be on that list and are hard-deleted now, so they have no such column to cover.
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, index=True, kw_only=True)
+
+    @declared_attr.directive
+    @classmethod
+    def __table_args__(cls) -> tuple:
+        return (
+            # One row per stored file, the same guard `dive_file` and `certification_file`
+            # carry: two rows naming one key would let either one's replacement unlink the
+            # other's bytes. Nullable, and Postgres lets a unique index hold any number of
+            # NULLs, so every account without a picture is unaffected.
+            Index("ux_user_avatar_storage_key", "avatar_storage_key", unique=True),
+        )

@@ -38,7 +38,12 @@ class UserRead(PublicUUIDSchema):
     name: Annotated[str, Field(min_length=2, max_length=30, examples=["User Userson"])]
     username: Annotated[str, Field(min_length=2, max_length=20, pattern=r"^[a-z0-9]+$", examples=["userson"])]
     email: Annotated[EmailStr, Field(examples=["user.userson@example.com"])]
-    profile_image_url: str
+    # Null means this diver has no picture and the clients draw initials. Non-null is both
+    # "there is one" and the version token to append to `GET /user/avatar` as `?v=`, so a
+    # replaced avatar lands on a fresh URL and an unchanged one is never re-downloaded.
+    # There is no URL here on purpose: the bytes need a bearer token, so the clients fetch
+    # them through their API client rather than putting a src on an `<img>`.
+    avatar_sha256: str | None = None
     # Feeds the settings page's gear-reminder toggle. The `= True` is what `/openapi.json`
     # publishes as the field's default; it is *not* a fallback for a database missing the
     # column, which is what this said for a while. `get_current_user` selects every mapped
@@ -66,7 +71,12 @@ class UserCreateInternal(UserBase):
     `AuthenticationProviderCreate`), not on the user row itself.
     """
 
-    profile_image_url: str = "https://profileimageurl.com"
+    # Set together or not at all, and only by the Google import in `POST /auth/complete`
+    # (`services.user_avatars.import_google_avatar`), which has already written the blob by
+    # the time the row is created - the write-file-then-commit-row ordering. An email
+    # sign-up has no picture to import and starts with initials.
+    avatar_storage_key: str | None = None
+    avatar_sha256: str | None = None
 
 
 class UserUpdate(RejectsExplicitNulls):
@@ -79,12 +89,13 @@ class UserUpdate(RejectsExplicitNulls):
 
     model_config = ConfigDict(extra="forbid")
 
-    # Every field here maps to a `NOT NULL` column - `profile_image_url` included, which
-    # carries a placeholder URL rather than a null when a user has no picture.
+    # Every field here maps to a `NOT NULL` column. The avatar columns are deliberately
+    # absent from this schema altogether - they are written by `PUT`/`DELETE /user/avatar`,
+    # which own the blob beside them, and a PATCH that could null the key while leaving the
+    # file on the volume is exactly the orphan this app has a sweeper for.
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = (
         "name",
         "username",
-        "profile_image_url",
         "gear_service_emails",
         "units",
     )
@@ -92,12 +103,6 @@ class UserUpdate(RejectsExplicitNulls):
     name: Annotated[str | None, Field(min_length=2, max_length=30, examples=["User Userberg"], default=None)]
     username: Annotated[
         str | None, Field(min_length=2, max_length=20, pattern=r"^[a-z0-9]+$", examples=["userberg"], default=None)
-    ]
-    profile_image_url: Annotated[
-        str | None,
-        Field(
-            pattern=r"^(https?|ftp)://[^\s/$.?#].[^\s]*$", examples=["https://www.profileimageurl.com"], default=None
-        ),
     ]
     # Must be listed here as well as on `UserRead`: this schema is `extra="forbid"`, so
     # without it the settings page's toggle would 422 rather than save.
@@ -125,6 +130,19 @@ class UserAdminUpdate(UserUpdate):
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = (*UserUpdate.NON_NULLABLE_FIELDS, "email")
 
     email: Annotated[EmailStr | None, Field(examples=["user.userberg@example.com"], default=None)]
+
+
+class AvatarRead(BaseModel):
+    """`PUT /user/avatar`'s body: the stored image's hex digest, and nothing else.
+
+    The same value `UserRead.avatar_sha256` carries, returned here so a client that has
+    just uploaded can render the new picture without waiting on a `GET /user` round trip -
+    it is the `ETag` on the download route and the `?v=` token that gives each version its
+    own cache entry. Nothing about the *upload* is echoed back: byte size, content type and
+    original filename all stop being true the moment the bytes are re-encoded.
+    """
+
+    sha256: Annotated[str, Field(examples=["e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"])]
 
 
 class AccountDeletionResponse(BaseModel):

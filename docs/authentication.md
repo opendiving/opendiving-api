@@ -180,11 +180,12 @@ sequenceDiagram
         API->>DB: Link Google provider to that account
         API-->>FE: status=authenticated + access_token
     else No account at all
-        API-->>FE: status=onboarding_required\n+ onboarding_token, email, name, avatar
+        API-->>FE: status=onboarding_required\n+ onboarding_token, email, name
         FE->>U: Redirect to /onboarding (name prefilled)
         U->>FE: Confirms/edits name, picks username
         FE->>API: POST /auth/complete
-        API->>DB: Create User + AuthenticationProvider\n(provider=google, provider_user_id=sub)
+        API->>Google: Fetch the picture the onboarding token names
+        API->>DB: Create User (avatar columns set) + AuthenticationProvider\n(provider=google, provider_user_id=sub)
         API-->>FE: status=authenticated + access_token
     end
     FE->>U: Redirect to /dashboard

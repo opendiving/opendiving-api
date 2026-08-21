@@ -133,8 +133,8 @@ something to look up, not to restate it.
 - Paths: kebab-case under `/api/v1` (e.g., `/api/v1/dive-sites`). Collections are plural (`/dives`),
   single resources singular and keyed by public uuid (`/dive/{uuid}`).
 - Methods: GET (read), POST (create), PATCH (partial update), DELETE (remove). PUT only for
-  idempotent whole-slot replace — currently just `PUT /dive/{uuid}/file` and
-  `PUT /certification/{uuid}/file/{side}`.
+  idempotent whole-slot replace — currently `PUT /dive/{uuid}/file`,
+  `PUT /certification/{uuid}/file/{side}` and `PUT /user/avatar`.
 - Response: the resource schema directly (`response_model=DiveRead`) — no envelope. Success is
   signalled by the status code.
 - Errors: FastAPI's `{ "detail": "message" }`; 422 returns `detail` as an array of per-field

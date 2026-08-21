@@ -134,10 +134,13 @@ class AuthOutcome(BaseModel):
     access_token: str | None = None
     token_type: str | None = None
 
-    # Set only when status == "onboarding_required".
+    # Set only when status == "onboarding_required". There is deliberately no `avatar`
+    # here: a Google identity's picture rides the *onboarding token* to
+    # `POST /auth/complete`, which fetches and stores it as the new account's avatar
+    # (`services/user_avatars.py`). It was never rendered by anything, and an account's
+    # picture is now served from this instance rather than named by a third-party URL.
     onboarding_token: str | None = None
     name: str | None = None
-    avatar: str | None = None
 
     # Set only when status == "deletion_pending". `purge_after` is null only for a row
     # flagged with no clock to count from - see `services.auth_service.DeletionPending`.

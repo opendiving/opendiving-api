@@ -2,7 +2,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, cast
 
-from fastapi import APIRouter, Cookie, Depends, Request, Response
+from fastapi import APIRouter, Cookie, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +20,7 @@ from ...core.security import blacklist_token, blacklist_tokens, generate_secure_
 from ...core.utils.cache import cache, delete_keys_by_pattern
 from ...core.utils.client_ip import client_ip
 from ...core.utils.rate_limit import enforce_rate_limit
+from ...core.utils.uploads import content_disposition_attachment
 from ...crud.crud_authentication_requests import claim_authentication_request, crud_authentication_requests
 from ...crud.crud_user_dive_stats import crud_user_dive_stats
 from ...crud.crud_users import crud_users
@@ -33,7 +34,7 @@ from ...schemas.email_change import (
     EmailChangeVerifyRequest,
     EmailChangeVerifyResponse,
 )
-from ...schemas.user import AccountDeletionResponse, UserRead, UserUpdate
+from ...schemas.user import AccountDeletionResponse, AvatarRead, UserRead, UserUpdate
 from ...schemas.user_dive_stats import UserDiveStatsRead, UserDiveStatsReadInternal
 from ...services.dive_activity import dive_activity
 from ...services.dive_gas import gas_use_history
@@ -41,6 +42,16 @@ from ...services.email_service import (
     send_account_deletion_email,
     send_email_change_confirmation_email,
     send_email_changed_notification,
+)
+from ...services.user_avatars import (
+    AVATAR_CONTENT_TYPE,
+    AVATAR_FILENAME,
+    MAX_AVATAR_UPLOAD_SIZE,
+    UnsupportedAvatarImageError,
+    delete_user_avatar,
+    get_stored_avatar,
+    read_avatar_bytes,
+    store_user_avatar,
 )
 
 logger = logging.getLogger(__name__)
@@ -125,6 +136,122 @@ async def patch_user(
 
     await crud_users.update(db=db, object=values, uuid=current_user["uuid"])
     return {"message": "User updated"}
+
+
+# -------------- avatar --------------
+#
+# Three routes rather than a field on `PATCH /user`, for the reason every stored payload
+# here gets its own: the bytes live on the files volume and the row carries a key, so the
+# write has an ordering rule (file first, row second) and the delete has the mirror of it.
+# A JSON PATCH that could null the key would leave the file behind.
+#
+# Self-scoped like the rest of `/user` - no uuid anywhere, so there is no ownership check
+# to get backwards. Serving *another* diver's avatar is a separate, viewer-facing route
+# for whenever buddies or sharing arrive; nothing renders one today.
+
+
+@router.put("/user/avatar", response_model=AvatarRead)
+async def write_user_avatar(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    file: Annotated[
+        UploadFile,
+        File(description=f"Profile picture (JPEG, PNG, WEBP or GIF, max {MAX_AVATAR_UPLOAD_SIZE // (1024 * 1024)} MB)"),
+    ],
+) -> AvatarRead:
+    """Set or replace the caller's profile picture.
+
+    `PUT` because this is a whole-slot idempotent replace - there is one avatar per
+    account and uploading again overwrites it.
+
+    **What comes back out is not what went in.** The image is decoded, oriented from its
+    EXIF, cropped square, bounded to 512 px and re-encoded as WebP, which is what strips
+    the metadata a phone photo carries - GPS included. Anything that will not decode as one
+    of the four accepted formats is a 415; anything over the size limit is a 413.
+
+    The response carries the stored image's digest, which is its version: append it to
+    `GET /user/avatar` as `?v=` so a replacement lands on a URL the browser has not cached.
+    """
+    try:
+        digest = await store_user_avatar(db=db, user_id=current_user["id"], upload=file)
+    except UnsupportedAvatarImageError as exc:
+        raise HTTPException(status_code=415, detail=str(exc)) from exc
+
+    return AvatarRead(sha256=digest)
+
+
+@router.get("/user/avatar")
+async def read_user_avatar(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    v: Annotated[
+        str | None,
+        Query(description="Opaque cache-busting version token; ignored by the server"),
+    ] = None,
+) -> Response:
+    """Serve the caller's own avatar - one WebP, always.
+
+    Deliberately *not* `@cache`d, for the same reason as the card download: Redis here
+    holds serialized API responses, and parking binaries in it evicts what the cache is
+    for. The `ETag`/`If-None-Match` pair does that job in the browser instead.
+
+    `v` is read by nothing here, and is declared so the contract is visible rather than
+    looking like a stray parameter. The response is cacheable for five minutes and the
+    avatar can be *replaced* at this same URL, so the client passes the digest from
+    `UserRead.avatar_sha256` and each version gets its own cache entry.
+
+    The key and the digest come from a narrow read here rather than from `current_user`,
+    which is a snapshot taken when the request began. Serving from the snapshot would let a
+    replacement commit and unlink the old blob mid-request, turning a routine race into a
+    `BlobMissingError` - which is a loud 500 by design, because a row naming bytes that are
+    gone is data loss and answering 404 is how nobody ever investigates it.
+    """
+    stored = await get_stored_avatar(db=db, user_id=current_user["id"])
+    if stored is None:
+        raise NotFoundException("No avatar set")
+
+    etag = f'"{stored.sha256}"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "private, max-age=300"})
+
+    return Response(
+        content=await read_avatar_bytes(stored),
+        media_type=AVATAR_CONTENT_TYPE,
+        headers={
+            # `attachment`, not `inline`: the clients fetch this through their API client
+            # and render from a blob URL, so nothing ever navigates here directly.
+            "Content-Disposition": content_disposition_attachment(AVATAR_FILENAME, default="avatar"),
+            "X-Content-Type-Options": "nosniff",
+            # `frame-ancestors` is spelled out because it does not fall back to
+            # `default-src`: a response with its own policy opts out of
+            # `SecurityHeadersMiddleware`'s default and would otherwise be framable
+            # however strict the rest of this is.
+            "Content-Security-Policy": "default-src 'none'; sandbox; frame-ancestors 'none'",
+            # `private` because this is one diver's picture and no shared cache should keep
+            # a copy; the `ETag` makes re-validation after 5 minutes cheap.
+            "Cache-Control": "private, max-age=300",
+            "ETag": etag,
+        },
+    )
+
+
+@router.delete("/user/avatar")
+async def erase_user_avatar(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> dict[str, str]:
+    """Remove the caller's profile picture, leaving the account itself alone.
+
+    404 when there was nothing to remove, the shape the card-file delete established. No
+    confirmation step anywhere near this: re-uploading undoes it.
+    """
+    if not await delete_user_avatar(db=db, user_id=current_user["id"]):
+        raise NotFoundException("No avatar set")
+
+    return {"message": "Avatar removed"}
 
 
 @router.post("/user/email-change/request", response_model=EmailChangeRequestResponse)

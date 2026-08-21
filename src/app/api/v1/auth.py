@@ -37,7 +37,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.config import settings
-from ...core.db.database import async_get_db
+from ...core.db.database import async_get_db, release_read_transaction
 from ...core.exceptions.http_exceptions import DuplicateValueException, UnauthorizedException
 from ...core.schemas import OnboardingTokenData
 from ...core.security import (
@@ -96,6 +96,7 @@ from ...services.auth_service import (
 )
 from ...services.email_service import send_magic_link_email
 from ...services.passkey_service import finish_sign_in, start_sign_in
+from ...services.user_avatars import import_google_avatar
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -179,12 +180,16 @@ async def _start_onboarding_or_sign_in(
             avatar=outcome.avatar,
         )
     )
+    # `avatar` is deliberately not on the response, while the onboarding *token* above
+    # carries it: the URL is an input to `POST /auth/complete`, which fetches the bytes and
+    # stores them as the new account's avatar, and no client ever renders it. Sending it
+    # out would be publishing a googleusercontent.com URL the completion form has no use
+    # for - and the field it fed was declared, copied and never displayed.
     return AuthOutcome(
         status="onboarding_required",
         onboarding_token=onboarding_token,
         email=outcome.email,
         name=outcome.name,
-        avatar=outcome.avatar,
     )
 
 
@@ -553,6 +558,15 @@ async def complete_profile(
     Rate limited per-IP because the username check below is an availability oracle:
     someone holding a single onboarding token could otherwise walk a wordlist through
     it and learn which usernames are taken.
+
+    A Google sign-up arrives with a picture, and this is where it becomes the account's
+    avatar: the URL rode the verified ID token into the onboarding session, and the bytes
+    are fetched and normalized here rather than stored as a link to somebody else's CDN.
+    Inline rather than a background job - one bounded fetch, once per account ever, and
+    the avatar is there on the first dashboard paint instead of a flash of initials. It is
+    non-fatal in every failure mode (see `import_google_avatar`) and it is a one-off:
+    signing in later never re-imports, because by then the picture is the diver's to
+    manage and overwriting it because Google's changed would be Gravatar in new clothes.
     """
     await enforce_rate_limit(
         f"auth:complete:ip:{client_ip(request)}",
@@ -572,11 +586,19 @@ async def complete_profile(
         # request reusing the same onboarding token/browser tab.
         raise DuplicateValueException("An account with this email already exists")
 
+    # The duplicate checks above autobegan a transaction, and what follows is a network
+    # fetch plus an image decode - exactly the idle-in-transaction hold
+    # `release_read_transaction` exists to prevent. Nothing live is held across it: the
+    # checks returned bare booleans and `token_data` is a Pydantic model.
+    await release_read_transaction(db)
+    avatar = await import_google_avatar(token_data.avatar)
+
     user_internal = UserCreateInternal(
         name=body.name,
         username=body.username,
         email=token_data.email,
-        profile_image_url=token_data.avatar or "https://profileimageurl.com",
+        avatar_storage_key=avatar.storage_key if avatar else None,
+        avatar_sha256=avatar.sha256 if avatar else None,
     )
 
     try:

@@ -499,3 +499,29 @@ class TestPurgeDeletedAccountsAgainstPostgres:
         assert db.get(User, diver_id) is None
         assert not blob_store.exists(dive_key), "the dive-computer export outlived the account"
         assert not blob_store.exists(card_key), "the c-card scan outlived the account"
+
+    @pytest.mark.asyncio
+    async def test_the_avatar_goes_with_the_account(self, db: Session) -> None:
+        """The third key source, and the one that is not a cascaded child at all - it is a
+        column on the row being deleted, so nothing about the cascade would ever surface it.
+
+        `DELETE /user` deliberately leaves it alone (a restore inside the grace period
+        should bring back a whole account, not a faceless one), which makes this the only
+        thing that ever removes a diver's portrait from the volume.
+        """
+        diver = create_user(db)
+        avatar_key = blob_store.new_key("user-avatars", sha256="e" * 64)
+        await blob_store.put(avatar_key, b"a normalized webp, notionally")
+        diver.avatar_storage_key = avatar_key
+        diver.avatar_sha256 = "e" * 64
+        db.commit()
+        assert blob_store.exists(avatar_key)
+
+        self._request_deletion(db, diver, days_ago=settings.ACCOUNT_DELETION_GRACE_DAYS + 1)
+        diver_id = diver.id
+        db.expunge_all()
+
+        await purge_deleted_accounts({})
+
+        assert db.get(User, diver_id) is None
+        assert not blob_store.exists(avatar_key), "the diver's portrait outlived the account"
