@@ -158,19 +158,19 @@ environment the container was created with.
 
 ## API overview
 
-All endpoints are mounted under `/api/v1`; the live OpenAPI docs at `/docs` are the source of truth.
+Everything is mounted under `/api/v1`, and the interactive OpenAPI docs at `/docs` are the reference
+for it — generated from the routes themselves, so they describe the API as it actually is rather
+than as a list here last remembered it.
 
-| Area           | Endpoints                                                                                                      |
-| -------------- | -------------------------------------------------------------------------------------------------------------- |
-| Auth           | `/auth/email/request`, `/auth/email/verify`, `/auth/google`, `/auth/complete`, `/auth/refresh`, `/auth/logout` |
-| User           | `/user`, `/user/dive-stats`, `/user/gas-use-history`, email-change flow                                        |
-| Dives          | `/dive`, `/dives`, `/dive/parse`, `/dive/{uuid}/file`, `/dive/{uuid}/profile`                                  |
-| Trips & sites  | `/trip(s)`, `/dive-site(s)`                                                                                    |
-| Gear           | `/gear-item(s)`, `/gear-set(s)`, `/gear-service-schedule(s)`, `/gear-service-record(s)`, `/gear-service-due`   |
-| Certifications | `/certification(s)`, `/certification/{uuid}/file/{side}`                                                       |
-| Export         | `/export/uddf`, `/export/csv`, `/export/archive` — the caller's whole logbook, owner-only, never cached        |
-| Contact        | `/contact` (unauthenticated, rate-limited; forwards to `CONTACT_FORM_EMAIL`)                                   |
-| Health         | `/health` (the process is up), `/health/ready` (Postgres and Redis answered — 503 otherwise)                   |
+The families: **auth** (email link or six-digit code, Google, passkeys, refresh, sign-out, account
+restore) and **user** (profile, avatar, email change, dive statistics, gas-use history, account
+deletion); **dives**, the bulk of it, with their **files** — upload an export, read the per-sample
+profile back — alongside **trips**, **dive sites**, the shared **species** catalog a dive can
+reference, and a **geocoding** helper for naming a site pinned on a map; **gear** as items, sets,
+service schedules and service records; **certifications** with their card images; and **export** in
+UDDF, CSV or full-archive form. All of those want a bearer token. The ones that don't are
+**contact**, the auth routes themselves, and the two health checks — `/health` says the process is
+up, `/health/ready` says Postgres and Redis answered, and 503s when they didn't.
 
 A typical import flow:
 
