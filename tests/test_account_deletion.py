@@ -2,8 +2,7 @@
 
 Two halves of one feature, tested in one module because the endpoint's only lasting effect
 is the state the job later acts on: the endpoint flags the row and names a date, and
-`purge_deleted_accounts` is what makes that date mean anything. See
-`plans/account-deletion.md` §5 and §6.
+`purge_deleted_accounts` is what makes that date mean anything.
 
 The Postgres-backed classes are skipped silently without a reachable database - on a
 developer's machine that means `POSTGRES_SERVER=localhost`, since `src/.env` points at the

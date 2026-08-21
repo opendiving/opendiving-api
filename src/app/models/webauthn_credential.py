@@ -29,7 +29,7 @@ class WebauthnCredential(Base, PublicUUIDMixin):
 
     id: Mapped[int] = mapped_column(autoincrement=True, nullable=False, primary_key=True, init=False)
 
-    # `CASCADE` from day one: `plans/account-deletion.md` purges accounts with a
+    # `CASCADE` from day one: the account purge deletes accounts with a
     # `DELETE FROM "user"`, and a credential that outlived its user would still be a live
     # sign-in path pointing at a row that no longer exists.
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), index=True)
@@ -64,8 +64,8 @@ class WebauthnCredential(Base, PublicUUIDMixin):
 
     # The authenticator model's identifier. Stored because it is free at registration time
     # and is what a "signed in with your iPhone" icon would eventually need; nothing reads
-    # it in v1, and no attestation or AAGUID policy is enforced anywhere (see the plan's
-    # "Rejected, named").
+    # it in v1, and no attestation or AAGUID policy is enforced anywhere - deliberately,
+    # since enforcing one would restrict which authenticators a diver may use.
     aaguid: Mapped[uuid_pkg.UUID | None] = mapped_column(Uuid, default=None)
 
     # The spec's backup-state flag: true for a passkey synced to a cloud keychain, false

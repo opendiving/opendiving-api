@@ -4988,8 +4988,8 @@ back gas and an 11 L EAN49 bottle): the dive reported no gas use at all before, 
 depth of **28.37 m** — where the dive's own average depth is 17.79 m. Using the dive average would
 have understated the rate by a third. That gap *is* the feature.
 
-**Two other sources were considered and rejected**, both of which the plan for this phase had
-expected to use:
+**Two other sources were considered and rejected**, both of which the original design for this phase
+had expected to use:
 
 - **Per-cylinder pressure activity** — reading "this tank was being breathed" off the stretch where
   its pressure falls. Unavailable and unsound, and the corpus says both. Unavailable: all 19
@@ -5026,7 +5026,7 @@ Details worth knowing:
 
 ## The cylinder pressures come from the mixtures, not from the profile's pressure curve
 
-`gas_attribution` carries no pressures, though the plan for this phase had it carrying
+`gas_attribution` carries no pressures, though the original design for this phase had it carrying
 `start_pressure_bar10`/`end_pressure_bar10`. Consumption is derived from
 `DiveMixture.start_pressure` and `end_pressure`, exactly as the single-cylinder path already did.
 
@@ -5039,10 +5039,10 @@ form, where a diver can correct a mistyped end pressure, while a profile is immu
 export is re-imported. A profile-derived pressure would silently outrank the correction.
 
 So the split is clean, and it is the reason the column is called `gas_attribution` rather than the
-plan's `gas_usage`: it holds the attribution — which cylinder, for how long, how deep — and nothing
-that any other table already knows. The per-tank field a client reads keeps the plan's own name,
-`seconds_on_gas`, because on the wire it sits beside `seconds`-less figures where a bare `seconds`
-would not say what it counted.
+originally proposed `gas_usage`: it holds the attribution — which cylinder, for how long, how deep —
+and nothing that any other table already knows. The per-tank field a client reads keeps the
+originally proposed name, `seconds_on_gas`, because on the wire it sits beside `seconds`-less
+figures where a bare `seconds` would not say what it counted.
 
 ## A multi-cylinder figure covers the cylinders it can account for, and says so
 
@@ -5285,8 +5285,8 @@ purpose.
 ## What UDDF 3.2.2 has no slot for, and what the plan got wrong about it
 
 The mapping from our columns to UDDF elements was settled against the vendored XSD
-(`tests/fixtures/uddf/uddf_3.2.2.xsd`), not from memory, and the schema contradicted the plan in
-both directions.
+(`tests/fixtures/uddf/uddf_3.2.2.xsd`), not from memory, and the schema contradicted what had been
+proposed in both directions.
 
 **Three things genuinely have nowhere to go, and are exported in `export.json`/CSV instead:**
 
@@ -5300,7 +5300,7 @@ both directions.
   end-of-dive scalars, not a per-sample series.
 - **Gas `role`, gear sets, service schedules and history, c-card records.** No elements exist.
 
-**Three the plan expected to lose, and the schema allows after all:**
+**Three the proposal expected to lose, and the schema allows after all:**
 
 - **`po2_limit` maps to `<mix><maximumpo2>`.** Which is why `_MixKey` includes it: a diver carrying
   the same EAN32 planned to 1.4 on the bottom and 1.6 on the ascent has defined two mixes as far as
@@ -6050,10 +6050,9 @@ forward search, so a second source is required either way.
 difference is what they cost. Marine Regions means a second outbound host, a second licence (CC-BY
 4.0), a second set of terms and a second failure mode — for a feature whose whole selling point is
 that a self-hoster gets it working with no account. Natural Earth is 293 public-domain polygons that
-do not change, checked in at about a megabyte. This is the same call
-`plans/dive-site-coordinates-and-maps.md` made when it rejected PostGIS to keep an install step off
-every self-hoster, and the same one the geocoding proxy itself makes. Take Marine Regions instead
-only if carrying the file turns out to be the objectionable half.
+do not change, checked in at about a megabyte. This is the same call that rejected PostGIS to keep
+an install step off every self-hoster, and the same one the geocoding proxy itself makes. Take
+Marine Regions instead only if carrying the file turns out to be the objectionable half.
 
 **No geometry library either.** `shapely` would pull GEOS into the image to do arithmetic that is a
 few dozen lines: a bounding-box reject followed by ray casting, over 324 polygon parts.
@@ -6379,12 +6378,12 @@ split here buys cross-tool reach and symmetry with the web repo, nothing more.
 
 ## GPS from an import lands on the dive, and the plan that said otherwise was wrong twice
 
-`plans/dive-site-coordinates-and-maps.md` phase 2 said, in bold: **do not add coordinate columns to
-`dive`.** The parsed fix was to ride along in the import response and pre-fill a *new dive site's*
-coordinates instead, on the grounds that per-dive entry points "spread across the dive schemas, the
-export bundle, and the UDDF writer for a feature nobody asked for yet" — while conceding that "a
-drift dive genuinely has one, so this will come back". It came back, and the corpus says the
-concession was the load-bearing half.
+The dive-site coordinates design said, in bold: **do not add coordinate columns to `dive`.** The
+parsed fix was to ride along in the import response and pre-fill a *new dive site's* coordinates
+instead, on the grounds that per-dive entry points "spread across the dive schemas, the export
+bundle, and the UDDF writer for a feature nobody asked for yet" — while conceding that "a drift dive
+genuinely has one, so this will come back". It came back, and the corpus says the concession was the
+load-bearing half.
 
 `dive` now carries `entry_latitude`/`entry_longitude`/`exit_latitude`/`exit_longitude`, four plain
 `Float` columns on the same terms as `dive_site.latitude`/`longitude`. Two reasons, and the first is
@@ -6394,11 +6393,11 @@ the one that settles it:
   are two places *one* dive passed through, and on a drift dive they are hundreds of metres apart.
   Folding either onto the site means picking one of them and discarding the other, and then
   overwriting it on the next dive at the same site.
-- **A prefill is not storage.** The plan's version showed the number in a form and then dropped it
-  unless the diver happened to create a new site. Every import into an existing site — which is most
-  of them — threw the fix away exactly as the parsers used to.
+- **A prefill is not storage.** That version showed the number in a form and then dropped it unless
+  the diver happened to create a new site. Every import into an existing site — which is most of
+  them — threw the fix away exactly as the parsers used to.
 
-**Where they sit is what makes this cheap**, and it is the answer to the plan's spread worry.
+**Where they sit is what makes this cheap**, and it is the answer to the spread worry above.
 `DiveTechScalars` (`schemas/dive.py`) already exists for columns the import owns and the form cannot
 set, `TECH_SCALAR_FIELDS` is read off its `model_fields`, and `store_tech_scalars` spreads that into
 one `UPDATE`. So four fields on that mixin reach `DiveRead`, the attach path and
@@ -7079,8 +7078,7 @@ index above."
 An unindexed FK with `ON DELETE CASCADE` is the one genuine performance footgun in this design.
 Invisible at a few hundred rows, an incident at ten million. A metadata test asserting that every
 cascading FK has a *usable* index — not merely that an index exists, since a partial one on a
-cascade target counts as none — is listed under §Before launch in the plan and is not in this
-change.
+cascade target counts as none — is deferred to before launch and is not in this change.
 
 ### The DDL
 
@@ -10075,7 +10073,7 @@ guesses issued in parallel all read `0` and all store `1`, which is the differen
 five-guess bound and no bound at all — and rate limiting cannot be the answer, since it fails open
 on a Redis outage (see *"Rate limiting fails open on a Redis *outage*"*).
 
-The residual exposure, with the arithmetic shown rather than asserted — because the plan this came
+The residual exposure, with the arithmetic shown rather than asserted — because the design this came
 from asserted it and was wrong by a factor of sixty. The only party holding a `request_id` for
 someone else's address is one who requested it, and every such request emails the victim.
 `MAGIC_LINK_REQUEST_RATE_LIMIT_PER_EMAIL` allows 3 requests per address per
@@ -10092,10 +10090,10 @@ of headroom before sign-in stops working at all, which is 3× at best and is pai
 whose first email never arrived. The cap is what makes today's horizon years rather than days; it is
 not where the next order of magnitude is.
 
-That the plan's "eleven days" survived into a first draft here is worth recording, because it is the
-shape of error a quantified security claim invites — the figure reads as authoritative precisely
-because it is specific, and the rate it implies (~1 guess/second) is one the per-email cap never
-permits.
+That the earlier "eleven days" figure survived into a first draft here is worth recording, because
+it is the shape of error a quantified security claim invites — the figure reads as authoritative
+precisely because it is specific, and the rate it implies (~1 guess/second) is one the per-email cap
+never permits.
 
 ### Everything else is the shape already there
 
@@ -10164,13 +10162,13 @@ can only exist because a signed-in user registered it — so `finish_sign_in` re
 
 Two consequences. First, **no auto-linking decision exists** here. Google's silent link-by-email
 (`auth_service.resolve_identity`) is defended by Google's `email_verified`; a passkey asserts
-nothing to link *by*, and never needs to. Second, this is **a third resolve site**, which
-`plans/account-deletion.md`'s edit list originally did not know about — that plan enumerated the
-`resolve_identity` call sites when teaching every path a `deletion_pending` outcome, and this one is
-not among them. The handshake said whichever landed second owned the joint; passkeys landed first,
-and the restore change took it. `finish_sign_in` now answers `AuthenticatedUser | DeletionPending`
-and its user lookup carries no `is_deleted` filter at all — see *"A restore is a click, not a side
-effect of signing in"*.
+nothing to link *by*, and never needs to. Second, this is **a third resolve site**, which the
+account-deletion work originally did not know about — it enumerated the `resolve_identity` call
+sites when teaching every path a `deletion_pending` outcome, and this one is not among them. The
+handshake said whichever landed second owned the joint; passkeys landed first, and the restore
+change took it. `finish_sign_in` now answers `AuthenticatedUser | DeletionPending` and its user
+lookup carries no `is_deleted` filter at all — see *"A restore is a click, not a side effect of
+signing in"*.
 
 ### No `authentication_provider` row for passkeys, and its own table instead
 
@@ -10201,10 +10199,10 @@ magic link (pure Postgres) working:
 
 Redis rather than an `authentication_request` row because conditional UI arms on every signed-out
 page view that supports it, landing hero included — so challenges are minted at *page-view*
-frequency. A Postgres row per view is the unbounded-personal-data-table shape
-`plans/account-deletion.md` §2 caught `authentication_request` in; a TTL key cleans itself with no
-sweep job. Consumed with `GETDEL` on the verify **attempt**, so it is single-use even when
-verification then fails — a captured response must not be retriable against a still-live challenge.
+frequency. A Postgres row per view is the same unbounded-personal-data-table shape
+`authentication_request` grew into and needed a sweep for; a TTL key cleans itself with no sweep
+job. Consumed with `GETDEL` on the verify **attempt**, so it is single-use even when verification
+then fails — a captured response must not be retriable against a still-live challenge.
 
 Registration challenges are keyed per user, so two tabs racing both fail: the second tab's `options`
 call overwrites the challenge the first tab's `verify` then presents. Named and accepted — it
@@ -10354,10 +10352,11 @@ runs, or at the push.
 **The real enforcement is a GitHub ruleset, and it is not available to us.** Both repos are private
 under a free organisation, so `GET /repos/{owner}/{repo}/rulesets` and the branch-protection
 endpoint each answer `403 Upgrade to GitHub Pro or make this repository public`. When the repos go
-public - which is the plan - add a ruleset with `required_signatures` and **target every branch, not
-`main`**. A `main`-only rule is theatre: pull requests here are squash-merged, and GitHub creates
-and signs that commit with its own web-flow key, so `main` is already 100% verified while the branch
-behind it can be entirely unsigned. That gap is the exact state this section exists to describe.
+public - which is the intent - add a ruleset with `required_signatures` and **target every branch,
+not `main`**. A `main`-only rule is theatre: pull requests here are squash-merged, and GitHub
+creates and signs that commit with its own web-flow key, so `main` is already 100% verified while
+the branch behind it can be entirely unsigned. That gap is the exact state this section exists to
+describe.
 
 Until then, two local hooks:
 
@@ -10436,9 +10435,9 @@ keeps a refresh cookie that returns 200, rotates itself, and goes on doing so fo
 `REFRESH_TOKEN_EXPIRE_DAYS` window - and, since nobody re-resolves the `sub`, it would keep doing so
 after the row itself was gone. "Delete my account" therefore meant "this browser is signed out",
 which is not what the button says and is precisely wrong for the case that motivates deletion: the
-stolen phone, the shared laptop, the ex-buddy who still has a session open.
-`plans/account-deletion.md` §1 rests the whole grace-period design on the account going dark
-immediately, and that claim was false everywhere except the device that pressed the button.
+stolen phone, the shared laptop, the ex-buddy who still has a session open. The whole grace-period
+design rests on the account going dark immediately, and that claim was false everywhere except the
+device that pressed the button.
 
 The fix is one `crud_users.exists(db=db, uuid=..., is_deleted=False)` between the verify and the
 rotation. Three details in it are decisions rather than mechanics:
@@ -10453,9 +10452,9 @@ rotation. Three details in it are decisions rather than mechanics:
 - **The lookup happens *before* the presented token is spent**, so a request that answers 401 writes
   nothing. That mirrors the existing refusal to blacklist a token that failed to verify, and it has
   a second consequence worth stating: a soft delete that gets reversed leaves the account's other
-  sessions working, because they were made inert rather than destroyed. `POST /auth/restore` in
-  `plans/account-deletion.md` §5 depends on that, and a restore that silently signed every other
-  device out would be a worse answer than the one this gives.
+  sessions working, because they were made inert rather than destroyed. `POST /auth/restore` depends
+  on that, and a restore that silently signed every other device out would be a worse answer than
+  the one this gives.
 
 The cost is one indexed lookup on an endpoint that already does two, on a path that runs once per
 access-token lifetime per device.
@@ -10486,11 +10485,10 @@ Measured rather than assumed — one developer's machine, using the app normally
 Nothing had ever been removed, and the count had doubled in the preceding day. The 464 matter twice
 over: `purpose="sign_in"` rows carry `user_id IS NULL` deliberately (the flow predates the account
 existing), so the `ON DELETE CASCADE` on `authentication_request.user_id` cannot reach them, and no
-account deletion ever will. `plans/account-deletion.md` §6 is where that lands — the account purge
-deletes by *email* as a second statement, and even that is partial, because `verify_email_change`
-rewrites `user.email` in place and a row created under a previous address carries a name the purge
-cannot ask for. **This sweep is the primary mechanism for the table; the per-account delete only
-covers rows younger than this margin.**
+account deletion ever will. The account purge deletes by *email* as a second statement, and even
+that is partial, because `verify_email_change` rewrites `user.email` in place and a row created
+under a previous address carries a name the purge cannot ask for. **This sweep is the primary
+mechanism for the table; the per-account delete only covers rows younger than this margin.**
 
 `core.worker.functions.purge_expired_authentication_requests`, hourly at `:00` beside
 `purge_expired_tokens`, `run_at_startup=True` on the same grounds: both delete only rows already
@@ -10564,11 +10562,11 @@ This is the same argument the five-way hard-delete change made and won — *"The
 specifying the right behaviour and never executing it"*. The difference is that this time the schema
 was not specifying it either.
 
-**Nothing deletes a user yet.** This revision only makes it possible; the purge job that uses it is
-`plans/account-deletion.md` §6, a later change. That ordering is deliberate — a schema change with
-no behaviour change is a PR whose whole content is the FK table above — but it means the guarantee
-ships with no caller to exercise it, which is why `tests/test_user_cascade.py` exists rather than
-the cascade being pinned incidentally by the purge's own tests.
+**Nothing deletes a user yet.** This revision only makes it possible; the purge job that uses it
+lands as a later change. That ordering is deliberate — a schema change with no behaviour change is a
+PR whose whole content is the FK table above — but it means the guarantee ships with no caller to
+exercise it, which is why `tests/test_user_cascade.py` exists rather than the cascade being pinned
+incidentally by the purge's own tests.
 
 ### Two mechanical traps in writing the revision
 
@@ -10696,9 +10694,8 @@ before the commit. That ordering is the function's own rule, and here it also do
 under the race above: an account that was restored rolls back, and the rollback listener drops the
 unlinks rather than deleting a live diver's scans.
 
-This is the handshake `plans/done/file-storage-out-of-postgres.md` left open. It shipped first, so
-this is where "a cascade delete strands blobs unless the keys are collected first" gets written
-down.
+This is the handshake the files-volume work left open. It shipped first, so this is where "a cascade
+delete strands blobs unless the keys are collected first" gets written down.
 
 Two smaller pieces of the same job. `authentication_request` rows are deleted **by email**, because
 `purpose="sign_in"` rows carry a `NULL user_id` by design and no cascade reaches them — partial by

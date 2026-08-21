@@ -10,8 +10,8 @@ having three sign-in methods at all.
 
 Deliberately not an `authentication_request` row. Conditional UI arms on every
 signed-out page view that supports it, so challenges are minted at page-view frequency -
-a Postgres row per view is the unbounded table shape `plans/account-deletion.md` caught
-`authentication_request` in, while a TTL key cleans itself up with no sweep job.
+a Postgres row per view is the same unbounded table shape `authentication_request` grew
+into and needed a sweep job for, while a TTL key cleans itself up with none.
 """
 
 import logging

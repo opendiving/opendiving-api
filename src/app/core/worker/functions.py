@@ -224,7 +224,7 @@ async def purge_deleted_accounts(ctx: dict[Any, Any]) -> str:
     after the request the account stops being recoverable and this destroys it: one
     `DELETE FROM "user"` per account, carrying every dive, dive site, certification, gear
     item, trip and stats row down the ten cascades declared for exactly this, plus the
-    stored files those rows pointed at. See `plans/account-deletion.md` §6.
+    stored files those rows pointed at.
 
     Hourly rather than daily, so `ACCOUNT_DELETION_GRACE_DAYS=0` behaves the way an
     operator setting it to zero expects. No `run_at_startup`, unlike the two sweeps beside

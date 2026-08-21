@@ -1,6 +1,6 @@
 """The way back into an account inside its deletion grace period.
 
-`plans/account-deletion.md` §5. Deleting is reversible for `ACCOUNT_DELETION_GRACE_DAYS`,
+Deleting is reversible for `ACCOUNT_DELETION_GRACE_DAYS`,
 and this is the half that makes that mean something: every entry point resolves a
 soft-deleted account to a `deletion_pending` outcome instead of a dead end, and
 `POST /auth/restore` is the one thing that brings it back.

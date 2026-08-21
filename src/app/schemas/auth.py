@@ -125,7 +125,7 @@ class AuthOutcome(BaseModel):
       `purge_after` is the date it stops being recoverable at all.
 
     A client that does not know the third status must not treat it as a sign-in: there is
-    no `access_token` in it. See `plans/account-deletion.md` §5.
+    no `access_token` in it.
     """
 
     status: Literal["authenticated", "onboarding_required", "deletion_pending"]

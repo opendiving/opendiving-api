@@ -6,9 +6,8 @@ existing row could be derived from. `authentication_provider` could not host the
 many-per-user with per-credential state (public key, signature counter, transports) that
 has no column there.
 
-`ON DELETE CASCADE` on `user_id` from the outset, so `plans/account-deletion.md`'s purge
-needs no edit for this table: a credential that outlived its account would still be a live
-sign-in path.
+`ON DELETE CASCADE` on `user_id` from the outset, so the account purge needs no edit for
+this table: a credential that outlived its account would still be a live sign-in path.
 
 Revision ID: f7710514ddde
 Revises: 60ec1a2894ea

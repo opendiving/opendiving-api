@@ -5,10 +5,9 @@ Two things a mocked session cannot answer, and both are load-bearing:
 - **`record_assertion`'s conditional UPDATE.** Its `rowcount` under two transactions racing
   for the same row is what decides which of two submissions of one assertion mints a
   session. Same argument, at more length, in `test_authentication_request_claim.py`.
-- **`ON DELETE CASCADE` on `user_id`.** It ships from day one so
-  `plans/account-deletion.md`'s purge needs no edit here - which is only true if the
-  database actually enforces it, and a declaration in a model proves nothing about the
-  table an Alembic revision built.
+- **`ON DELETE CASCADE` on `user_id`.** It ships from day one so the account purge needs
+  no edit here - which is only true if the database actually enforces it, and a
+  declaration in a model proves nothing about the table an Alembic revision built.
 
 Automatically skipped when no database is reachable - note that a run on the host needs
 `POSTGRES_SERVER=localhost` before these execute at all (see `CONTRIBUTING.md`).

@@ -271,7 +271,7 @@ class TestMixDefinitions:
 
     @pytest.mark.asyncio
     async def test_the_planned_ppo2_lands_in_maximumpo2(self, monkeypatch):
-        """The plan's mapping table said `po2_limit` had no UDDF slot. The XSD disagrees."""
+        """An earlier mapping table said `po2_limit` had no UDDF slot. The XSD disagrees."""
         document = await _render(full_bundle(), monkeypatch=monkeypatch)
         mixes = _tree(document).findall(f"{UDDF}gasdefinitions/{UDDF}mix")
         assert [_text(m, f"{UDDF}maximumpo2") for m in mixes] == ["1.4", None, "1.6"]

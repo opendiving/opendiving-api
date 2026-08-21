@@ -383,8 +383,8 @@ class TestRefreshRequiresALiveAccount:
 
     @pytest.mark.asyncio
     async def test_a_subject_with_no_row_at_all_cannot_refresh(self, mock_db):
-        """The purge in `plans/account-deletion.md` removes the row outright, and a
-        pre-purge cookie names a uuid nothing resolves. Same answer as a deleted row.
+        """The account purge removes the row outright, and a pre-purge cookie names a uuid
+        nothing resolves. Same answer as a deleted row.
         """
         with (
             patch("src.app.api.v1.auth.verify_token", new_callable=AsyncMock) as mock_verify,
@@ -472,8 +472,8 @@ class TestRefreshLivenessAgainstPostgres:
     @pytest.mark.asyncio
     async def test_deleting_the_account_ends_the_sessions_it_never_saw(self, db, async_db, diver):
         """`DELETE /user` blacklists the two tokens on that request and nothing else, so
-        this is the cookie on the *other* device - the stolen phone the grace period in
-        `plans/account-deletion.md` exists for.
+        this is the cookie on the *other* device - the stolen phone the deletion grace
+        period exists for.
         """
         blacklist = FakeTokenBlacklist()
 
