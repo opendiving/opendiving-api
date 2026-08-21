@@ -45,7 +45,7 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
     id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
     # The owner is denormalized off `dive` rather than joined for it, because the dedupe
     # index below is per-user and has to be enforceable in one table.
-    user_id: Mapped[int] = mapped_column(ForeignKey("user.id"))
+    user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"))
     dive_id: Mapped[int] = mapped_column(ForeignKey("dive.id", ondelete="CASCADE"))
     # Hex SHA-256 of the stored bytes. Four jobs now: the `ETag` on the download endpoint,
     # the dedupe key below, the value the upload token is checked against - it is what ties

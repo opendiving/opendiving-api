@@ -9,7 +9,7 @@ class DiveSite(Base, PublicUUIDMixin, TimestampMixin):
     __tablename__ = "dive_site"
 
     id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
-    user_id: Mapped[int] = mapped_column(ForeignKey("user.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(255))
     notes: Mapped[str] = mapped_column(Text, default="")
     location: Mapped[str | None] = mapped_column(String(255), default=None)

@@ -23,7 +23,7 @@ class Certification(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "certification"
 
     id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
-    user_id: Mapped[int] = mapped_column(ForeignKey("user.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), index=True)
     # Which training agency issued this - see `CertificationAgency` in
     # `schemas/certification.py`, which is the single source of truth for the vocabulary.
     # Stored as a plain string with no DB `CHECK`, exactly like `gear_item.type` and

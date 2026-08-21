@@ -26,7 +26,7 @@ class GearServiceSchedule(Base, PublicUUIDMixin, TimestampMixin):
     # Denormalized from `gear_item.user_id`. Three call sites want the owner without a
     # join: the route's ownership check, `invalidate_gear_caches(user_id)`, and the
     # digest job's per-user grouping. Gear never changes hands, so it can't drift.
-    user_id: Mapped[int] = mapped_column(ForeignKey("user.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), index=True)
     gear_item_id: Mapped[int] = mapped_column(ForeignKey("gear_item.id", ondelete="CASCADE"))
     # What kind of servicing this rule is about - see `ServiceKind` in
     # `schemas/gear_service.py`, which is the single source of truth for the vocabulary.
