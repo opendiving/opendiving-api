@@ -13,6 +13,13 @@ one that skips that question: a credential row names its account outright, so th
 nothing to resolve and no onboarding branch to reach. Registering one is the authenticated
 half of the feature and lives in `api.v1.passkeys`.
 
+All four ways in share one funnel (`_start_onboarding_or_sign_in`), and it has a third
+answer besides "signed in" and "onboard first": the identity resolves to an account inside
+its deletion grace period. Nothing is signed in and nothing is changed - the caller is
+handed a restore token and the purge date, and `POST /auth/restore` is the explicit click
+that brings the account back. That is also why the restore endpoint lives here rather than
+under `/user`, where `get_current_user` would 401 on the very accounts it serves.
+
 `POST /auth/refresh`/`POST /auth/logout` also live here (see `DECISIONS.md`) - they
 used to sit in their own `login.py`/`logout.py` modules under a stale `"login"` tag,
 left over from the old password-based flow.
@@ -21,10 +28,11 @@ left over from the old password-based flow.
 import hmac
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Cookie, Depends, Request, Response
 from jose import JWTError
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,6 +45,7 @@ from ...core.security import (
     blacklist_token,
     blacklist_tokens,
     create_onboarding_token,
+    create_restore_token,
     generate_secure_token,
     generate_sign_in_code,
     hash_sign_in_code,
@@ -46,6 +55,7 @@ from ...core.security import (
     token_subject,
     verify_google_id_token,
     verify_onboarding_token,
+    verify_restore_token,
     verify_token,
 )
 from ...core.utils.client_ip import client_ip
@@ -57,6 +67,7 @@ from ...crud.crud_authentication_requests import (
     register_failed_code_attempt,
 )
 from ...crud.crud_users import crud_users
+from ...models.user import User
 from ...schemas.auth import (
     AuthOutcome,
     EmailAuthRequest,
@@ -66,6 +77,7 @@ from ...schemas.auth import (
     GoogleAuthRequest,
     LinkCheckResponse,
     ProfileCompletionRequest,
+    RestoreRequest,
 )
 from ...schemas.authentication_provider import AuthenticationProviderCreate
 from ...schemas.authentication_request import (
@@ -75,7 +87,13 @@ from ...schemas.authentication_request import (
 )
 from ...schemas.user import UserCreateInternal, UserReadInternal
 from ...schemas.webauthn_credential import PasskeySignInOptions, PasskeySignInVerifyRequest
-from ...services.auth_service import AuthenticatedUser, OnboardingRequired, issue_tokens, resolve_identity
+from ...services.auth_service import (
+    AuthenticatedUser,
+    DeletionPending,
+    OnboardingRequired,
+    issue_tokens,
+    resolve_identity,
+)
 from ...services.email_service import send_magic_link_email
 from ...services.passkey_service import finish_sign_in, start_sign_in
 
@@ -105,25 +123,47 @@ def _has_expired(auth_request: dict[str, Any]) -> bool:
 
 
 async def _start_onboarding_or_sign_in(
-    response: Response, outcome: AuthenticatedUser | OnboardingRequired
+    response: Response, outcome: AuthenticatedUser | OnboardingRequired | DeletionPending
 ) -> AuthOutcome:
-    """Turn a verified identity into either a signed-in session or an onboarding handoff.
+    """Turn a verified identity into a signed-in session, an onboarding handoff, or the
+    offer of a deleted account back.
 
-    Shared by every entry point that proves who someone is (magic link, Google, passkey),
-    because each of them faces the same fork: a `User` row already exists for this identity,
-    or it doesn't and one has to be created by `POST /auth/complete`. In the second case no
-    user is created here - the caller gets a short-lived onboarding token carrying the
-    verified email and profile, which is the only thing that lets `/auth/complete` trust
-    them.
+    Shared by every entry point that proves who someone is (magic link, six-digit code,
+    Google, passkey), because each of them faces the same fork: a `User` row already exists
+    for this identity, or it doesn't and one has to be created by `POST /auth/complete`, or
+    it exists and is inside its deletion grace period. In the second case no user is created
+    here - the caller gets a short-lived onboarding token carrying the verified email and
+    profile, which is the only thing that lets `/auth/complete` trust them.
 
-    A passkey assertion can only ever take the first branch, since a credential exists only
-    because a signed-in user registered it. It comes through here anyway rather than calling
-    `issue_tokens` directly: token shape, cookie mechanics and every future outcome variant
-    then stay in one place instead of two that have to be kept in step.
+    **The third branch is why all four paths funnel through one function.** A restore is
+    offered, never performed: no session is minted and nothing about the account changes, so
+    signing in cannot silently cancel a deletion somebody deliberately asked for. What the
+    caller gets is a `restore_token` and the date, and `POST /auth/restore` is the click
+    that acts on them. Writing that branch here is what makes it true on every provider at
+    once - including the passkey path, whose resolve site is `finish_sign_in` rather than
+    `resolve_identity` and which reaches this function anyway.
+
+    A passkey assertion can only ever take the first or third branch, since a credential
+    exists only because a signed-in user registered it. It comes through here rather than
+    calling `issue_tokens` directly: token shape, cookie mechanics and every future outcome
+    variant then stay in one place instead of two that have to be kept in step.
     """
     if isinstance(outcome, AuthenticatedUser):
         tokens = await issue_tokens(response, outcome.user["uuid"])
         return AuthOutcome(status="authenticated", **tokens)
+
+    if isinstance(outcome, DeletionPending):
+        # The row's own address rather than whatever was verified to get here: on the
+        # passkey path nothing was, and after an email change the two differ. Disclosing it
+        # to this caller is not a leak - reaching this line took a magic link sent to that
+        # inbox, a code from it, a Google identity linked to the account, or possession of a
+        # registered authenticator.
+        return AuthOutcome(
+            status="deletion_pending",
+            restore_token=await create_restore_token(outcome.user["uuid"]),
+            purge_after=outcome.purge_after,
+            email=outcome.user["email"],
+        )
 
     onboarding_token = await create_onboarding_token(
         OnboardingTokenData(
@@ -223,6 +263,14 @@ async def check_email_link(
     and lets it display which email it's about to sign in as. Never marks anything
     used or changes any state.
 
+    It also answers `deletion_pending` for a link into an account inside its deletion grace
+    period, so the button can say *Restore my account* instead of *Sign in*. That is a
+    nicety this one path can afford and the other three cannot - a typed code, a Google
+    dialog and a biometric gesture have no side-effect-free look-before-you-click step, and
+    show the same outcome on a screen after the POST instead. What all four share, and what
+    actually carries the design, is that redeeming the credential still changes nothing
+    about the account.
+
     The only GET in this module that must not be publicly cached. It is anonymous and
     side-effect-free, which is exactly the shape `ClientCacheMiddleware` marks
     `public, max-age=60` - but the magic-link token sits in the query string and the
@@ -244,6 +292,26 @@ async def check_email_link(
 
     if _has_expired(auth_request):
         return LinkCheckResponse(valid=False)
+
+    # The one lookup this endpoint makes outside `authentication_request`, and the only
+    # reason for it: the account this link opens may be inside its deletion grace period,
+    # and then the button has to say *Restore my account* rather than *Sign in*. The link
+    # itself is still perfectly good, so this is `valid=True` plus a flag - see
+    # `LinkCheckResponse`.
+    #
+    # By email, matching what `verify_email_link` will resolve this same link to: it passes
+    # no `provider_user_id`, so `resolve_identity` answers from its email lookup alone and
+    # the precheck cannot disagree with the POST that follows it.
+    #
+    # Still side-effect-free, and no more of an oracle than the line above it: this
+    # response already names the address, and only the holder of a live, unspent link sent
+    # to that inbox ever sees either.
+    user = await crud_users.get(db=db, email=auth_request["email"])
+    if user is not None and user["is_deleted"]:
+        pending = DeletionPending.for_row(cast(dict[str, Any], user))
+        return LinkCheckResponse(
+            valid=True, email=auth_request["email"], deletion_pending=True, purge_after=pending.purge_after
+        )
 
     return LinkCheckResponse(valid=True, email=auth_request["email"])
 
@@ -328,6 +396,11 @@ async def verify_email_code(
 
     Every rejection is the same sentence (`_CODE_REJECTED`), including the case where the
     `request_id` names nothing at all.
+
+    Unlike the link, this claims the request *before* resolving the identity, so a code
+    spent on reaching a `deletion_pending` screen is spent - closing that tab costs a fresh
+    code, where the same journey by magic link leaves the link unused and reopenable until
+    it expires. The screen has to say so.
     """
     await enforce_rate_limit(
         f"auth:email-verify-code:ip:{client_ip(request)}",
@@ -435,14 +508,19 @@ async def passkey_sign_in_verify(
     """Step 2: verifies the assertion and signs in whoever owns the credential.
 
     The challenge is spent on the *attempt*, not on success, so a captured assertion can
-    never be retried against a still-live one. An unknown credential, a tombstoned owner,
-    an expired or already-spent challenge, a wrong origin, a wrong RP ID and a bad
-    signature are one indistinguishable 401 - see `passkey_service.finish_sign_in`.
+    never be retried against a still-live one. An unknown credential, an expired or
+    already-spent challenge, a wrong origin, a wrong RP ID and a bad signature are one
+    indistinguishable 401 - see `passkey_service.finish_sign_in`.
 
-    Always resolves to an existing account and never to onboarding, since a credential can
-    only exist because a signed-in user registered it. It goes through the shared funnel
-    anyway: that is what makes token shape, cookie mechanics and every future outcome
-    variant free here instead of a second copy to keep in step.
+    An owner whose account is pending deletion is the one case that is *not* that 401: a
+    verified assertion answers `deletion_pending` and offers the account back, which used
+    to be a dead end with nothing explaining it. The branch sits after verification, so it
+    tells nobody anything they had not already proved.
+
+    Never resolves to onboarding, since a credential can only exist because a signed-in
+    user registered it. It goes through the shared funnel anyway: that is what makes token
+    shape, cookie mechanics and every future outcome variant free here instead of a second
+    copy to keep in step.
     """
     await enforce_rate_limit(
         f"auth:passkey-verify:ip:{client_ip(request)}",
@@ -515,6 +593,70 @@ async def complete_profile(
     await blacklist_token(body.onboarding_token, db)
 
     tokens = await issue_tokens(response, created_user.uuid)
+    return AuthOutcome(status="authenticated", **tokens)
+
+
+@router.post("/restore", response_model=AuthOutcome)
+async def restore_account(
+    request: Request,
+    body: RestoreRequest,
+    response: Response,
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> AuthOutcome:
+    """Undo a deletion inside its grace period and sign the account back in.
+
+    The second half of a `deletion_pending` outcome, and the click that makes a restore a
+    decision rather than a side effect of signing in. Everything before it was
+    read-only: the four entry points verify an identity, resolve it to a flagged row and
+    hand back a `restore_token`, and the account stays deleted until this endpoint runs.
+
+    **In `auth.py` rather than as `/user/restore`, and that is not filing.** Every `/user/*`
+    route sits behind `get_current_user`, which filters `is_deleted=False` - it would 401
+    on precisely the accounts this exists to serve. The restore token is the authority
+    here, and it names the account itself, so nothing about the request has to.
+
+    Both columns are cleared, not just the flag: `is_deleted = true, deleted_at IS NULL` is
+    a row `purge_deleted_accounts` can never take and never reports as due, so leaving the
+    clock set would "restore" the account into a state that only looks alive.
+
+    The row is taken `FOR UPDATE` first, which is what settles the race with the purge. If
+    the purge is mid-account, this waits for its transaction and then finds no row - the
+    account is gone, and the 401 says so. If this wins, the purge's guarded `DELETE` (which
+    repeats `is_deleted AND deleted_at < :cutoff`) matches nothing and logs that the account
+    came back. There is no ordering in which a restored account is destroyed or a destroyed
+    account appears restored.
+    """
+    await enforce_rate_limit(
+        f"auth:restore:ip:{client_ip(request)}",
+        settings.AUTH_COMPLETE_RATE_LIMIT_PER_IP,
+        settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
+    )
+
+    user_uuid = await verify_restore_token(body.restore_token, db)
+    if user_uuid is None:
+        raise UnauthorizedException("This restore link is invalid, has expired, or has already been used.")
+
+    locked = (
+        await db.execute(select(User.id, User.is_deleted).where(User.uuid == user_uuid).with_for_update())
+    ).one_or_none()
+    if locked is None:
+        # The grace period ran out while the screen was open. Said plainly rather than as
+        # the generic 401 above: the caller holds a token this server signed for this
+        # account, so there is nothing here they are not entitled to know, and "invalid
+        # link" would send somebody hunting for a fresh one that cannot exist.
+        raise UnauthorizedException("This account has already been permanently deleted and cannot be restored.")
+
+    if locked.is_deleted:
+        await db.execute(update(User).where(User.id == locked.id).values(is_deleted=False, deleted_at=None))
+
+    # Commits the restore with it - `crud_token_blacklist.create` commits the session - so
+    # the account coming back and its token being spent are one transaction, and the row
+    # lock above is held across both. A second submission of the same screen finds the
+    # token blacklisted; a second *token* (a fresh one from another entry point) finds the
+    # account already live and simply signs in, which is the same answer either way.
+    await blacklist_token(body.restore_token, db)
+
+    tokens = await issue_tokens(response, user_uuid)
     return AuthOutcome(status="authenticated", **tokens)
 
 

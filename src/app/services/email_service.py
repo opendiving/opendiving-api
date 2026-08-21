@@ -286,12 +286,13 @@ async def send_account_deletion_email(email: str, purge_after: datetime) -> None
     deadline is already past when this is composed, so telling the user there is still time
     would be advice that cannot be followed - the next sweep takes the account.
 
-    **The way back is the operator's, not the user's, and the copy says only that** - on
-    purpose, and only for now. `plans/account-deletion.md` §5's self-service restore
-    (`POST /auth/restore`, reached by signing in during the window) is the next change; this
-    is what is true until it lands, and a sentence telling the user to sign in would send
-    them into `/auth/complete`'s "An account with this email already exists" instead.
-    Reword this to point at the sign-in path in the same change that adds it.
+    **The way back is the user's own, and the copy now says so.** Signing in during the
+    window - by any of the four routes - reaches a screen offering the account back rather
+    than the dead end it used to (`/auth/complete`'s "An account with this email already
+    exists" against the tombstone). The mail deliberately does not carry a restore link of
+    its own: a restore token is minted only against a freshly verified identity, and one
+    sitting in an inbox for a fortnight is a standing key to an account its owner has
+    already asked to have destroyed.
     """
     if not settings.SMTP_HOST:
         logger.warning(
@@ -312,9 +313,8 @@ async def send_account_deletion_email(email: str, purge_after: datetime) -> None
             "<p><strong>Nothing has been erased yet.</strong> Your account, your dives, your "
             "dive sites, your certifications and your gear will be permanently erased on "
             f"<strong>{purge_after:%-d %B %Y}</strong>.</p>"
-            "<p>If you deleted your account by mistake, contact whoever runs this OpenDiving "
-            "instance before that date and the deletion can still be undone. After it, "
-            "nothing can be restored.</p>"
+            "<p>If you deleted your account by mistake, sign in again before that date and "
+            "you'll be offered it back. After that date, nothing can be restored.</p>"
         )
 
     message = _build_message(to=email, subject="Your OpenDiving account has been deleted", html_body=body)

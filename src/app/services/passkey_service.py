@@ -37,7 +37,7 @@ from ..schemas.webauthn_credential import (
     WebauthnCredentialCreateInternal,
     WebauthnCredentialReadInternal,
 )
-from ..services.auth_service import AuthenticatedUser
+from ..services.auth_service import AuthenticatedUser, DeletionPending
 from ..services.passkey_challenges import (
     consume_registration_challenge,
     consume_sign_in_challenge,
@@ -243,7 +243,9 @@ async def start_sign_in() -> tuple[str, dict[str, Any]]:
     return flow_id, options_to_json_dict(options)
 
 
-async def finish_sign_in(*, db: AsyncSession, flow_id: str, credential: dict[str, Any]) -> AuthenticatedUser:
+async def finish_sign_in(
+    *, db: AsyncSession, flow_id: str, credential: dict[str, Any]
+) -> AuthenticatedUser | DeletionPending:
     """Verify an assertion and resolve it to the account that owns the credential.
 
     Every failure below raises the same 401 with the same message - see `_SIGN_IN_FAILED`.
@@ -251,9 +253,17 @@ async def finish_sign_in(*, db: AsyncSession, flow_id: str, credential: dict[str
     Does **not** go through `resolve_identity`: that function answers "which account owns
     this email, and is this provider linked to it", and an assertion carries no email. The
     credential row *is* the link, and it can only exist because a signed-in user made it.
-    This is therefore a resolve site `plans/account-deletion.md`'s edit list does not know
-    about; until that lands, a soft-deleted owner falls through the `is_deleted=False`
-    filter into the same 401 as everything else here.
+    This is therefore the third resolve site, and it answers the same three-way question
+    the other two do - hence the `DeletionPending` branch below, without which the owner of
+    an account inside its grace period gets the same generic 401 as a forged assertion,
+    with no way back and nothing explaining why.
+
+    **That branch sits after `verify_authentication_response`, and the order is the whole
+    of why it is safe.** The uniform 401 exists because every other failure here is
+    reachable by someone holding no credential at all; a caller who has just produced a
+    valid assertion is not that someone, and telling *them* their account is pending
+    deletion discloses nothing they are not already entitled to. Moved earlier, the same
+    branch would be a credential-existence oracle for anyone who could name an id.
     """
     challenge = await consume_sign_in_challenge(flow_id)
     if challenge is None:
@@ -284,9 +294,18 @@ async def finish_sign_in(*, db: AsyncSession, flow_id: str, credential: dict[str
         logger.info("A passkey assertion for credential %s failed verification: %s", stored.uuid, exc)
         raise UnauthorizedException(_SIGN_IN_FAILED) from None
 
-    user = await crud_users.get(db=db, id=stored.user_id, is_deleted=False)
+    user = await crud_users.get(db=db, id=stored.user_id)
     if user is None:
         raise UnauthorizedException(_SIGN_IN_FAILED)
+    user = cast(dict[str, Any], user)
+
+    if user["is_deleted"]:
+        # Returned before `record_assertion`, so that reaching the restore screen writes
+        # nothing at all - the same property the other three paths have, and what makes
+        # "the button never *does* the wrong thing" true here too. The counter simply stays
+        # where it was; the authenticator's own is ahead, so the next assertion (after a
+        # restore, or another look at this screen) verifies exactly as it would have.
+        return DeletionPending.for_row(user)
 
     recorded = await record_assertion(
         db,
@@ -301,7 +320,7 @@ async def finish_sign_in(*, db: AsyncSession, flow_id: str, credential: dict[str
         # gets to mint a session.
         raise UnauthorizedException(_SIGN_IN_FAILED)
 
-    return AuthenticatedUser(user=cast(dict[str, Any], user))
+    return AuthenticatedUser(user=user)
 
 
 def _warn_if_counter_regressed(credential: dict[str, Any], stored: WebauthnCredentialReadInternal) -> None:
