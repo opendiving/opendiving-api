@@ -3,6 +3,7 @@ from arq.cron import cron
 
 from ...core.config import settings
 from .functions import (
+    purge_deleted_accounts,
     purge_expired_authentication_requests,
     purge_expired_tokens,
     send_gear_service_digests,
@@ -23,6 +24,12 @@ class WorkerSettings:
         # restart loop costs nothing but a no-op DELETE. Two tiny statements against
         # different tables don't contend, so they share the hour mark.
         cron(purge_expired_authentication_requests, minute=0, run_at_startup=True),
+        # Hourly, so `ACCOUNT_DELETION_GRACE_DAYS=0` behaves the way an operator setting
+        # it to zero expects, and at :30 so it doesn't contend with the two sweeps on the
+        # hour mark. No `run_at_startup`, and that is the difference that matters: those
+        # two delete rows already past their own expiry, this one destroys logbooks, and a
+        # restart loop must never be what decides an account's fate a few minutes early.
+        cron(purge_deleted_accounts, minute=30),
         # Deliberately no `run_at_startup` here, unlike the two purges above: those are
         # idempotent housekeeping, this one sends email, and a worker restart must never
         # blast a round of reminders out. Once a day is plenty - `should_notify` means

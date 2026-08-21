@@ -127,6 +127,19 @@ class UserAdminUpdate(UserUpdate):
     email: Annotated[EmailStr | None, Field(examples=["user.userberg@example.com"], default=None)]
 
 
+class AccountDeletionResponse(BaseModel):
+    """`DELETE /user`'s body. The `purge_after` date is the whole point of it.
+
+    The account goes dark immediately, so there is no in-app countdown to read it off
+    later - the client shows this date on the goodbye screen and the confirmation email
+    repeats it. Returned before the email is attempted, deliberately: a relay failure
+    then costs the copy, not the date.
+    """
+
+    message: str
+    purge_after: datetime
+
+
 class UserDelete(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

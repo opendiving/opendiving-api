@@ -6,13 +6,18 @@ from typing import Any, cast
 
 import uvloop
 from arq.worker import Worker
-from sqlalchemy import CursorResult, and_, delete, or_, select, update
+from sqlalchemy import CursorResult, and_, delete, func, or_, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...models.authentication_request import AuthenticationRequest
+from ...models.certification import Certification
+from ...models.certification_file import CertificationFile
+from ...models.dive_file import DiveFile
 from ...models.gear_item import GearItem
 from ...models.gear_service_schedule import GearServiceSchedule
 from ...models.user import User
 from ...schemas.gear_service import ServiceStatus
+from ...services import blob_store
 from ...services.email_service import send_gear_service_digest_email
 from ...services.gear_service import (
     SERVICE_DUE_SOON_DAYS,
@@ -24,6 +29,7 @@ from ...services.gear_service import (
 from ..config import configure_logging, settings
 from ..db.crud_token_blacklist import crud_token_blacklist
 from ..db.database import local_session
+from ..utils.cache import delete_keys_by_pattern
 
 asyncio.set_event_loop(uvloop.new_event_loop())
 
@@ -119,6 +125,180 @@ async def purge_expired_authentication_requests(ctx: dict[Any, Any]) -> str:
 
     logging.info("Purged %d expired authentication request(s)", purged)
     return f"Purged {purged} expired authentication request(s)"
+
+
+# One sweep's worth of accounts. The work per account is a cascade delete over every dive,
+# site, gear item and c-card the diver ever had - user 1 on one developer's machine carries
+# 531 dives and 147 dive sites - so an unbounded batch is a job that can hold locks for
+# minutes. Whatever is left over is named in the log line and taken by the next pass an
+# hour later, which is soon enough for a deadline measured in days.
+ACCOUNT_PURGE_BATCH_SIZE = 100
+
+
+async def _collect_stored_file_keys(db: AsyncSession, user_id: int) -> list[str]:
+    """Every blob key the account owns, read *before* anything is deleted.
+
+    This is the step the cascade cannot do for us, and nothing warns you that it can't.
+    `DELETE FROM "user"` retires `dive_file` and `certification_file` rows **inside
+    Postgres**, through the FK cascades - SQLAlchemy never sees those rows, no service
+    function runs, and `blob_store.delete_after_commit` is therefore never called. The
+    purge would commit cleanly, report success, and leave every dive-computer export and
+    every c-card scan sitting on the volume. `src/scripts/sweep_orphaned_files.py` would
+    reclaim them, but it is a manual script nothing invokes - for a GDPR purge, "an
+    operator might run a script one day" is not an answer.
+
+    `certification_file` has no `user_id` of its own (it hangs off `certification`), which
+    is why the second query joins rather than filtering.
+    """
+    dive_file_keys = (await db.execute(select(DiveFile.storage_key).where(DiveFile.user_id == user_id))).scalars().all()
+    certification_file_keys = (
+        (
+            await db.execute(
+                select(CertificationFile.storage_key)
+                .join(Certification, Certification.id == CertificationFile.certification_id)
+                .where(Certification.user_id == user_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [*dive_file_keys, *certification_file_keys]
+
+
+async def _purge_one_account(db: AsyncSession, *, user_id: int, email: str, cutoff: datetime) -> bool:
+    """Destroy one account inside its own transaction. Returns whether it actually went.
+
+    The `DELETE` repeats the selection's predicate rather than naming the id alone, and
+    that is the load-bearing line here. The batch is selected once and then deleted one
+    account at a time, so `POST /auth/restore` can clear both columns and commit in the
+    window between - and a bare `DELETE FROM "user" WHERE id = :id` would then hard-delete
+    a live, just-restored account and every dive behind it. DECISIONS.md names the shape:
+    *"an invariant that holds within a snapshot is not a guarantee across statements"*.
+    Zero rows affected is the normal "they came back" outcome, not an error.
+
+    `cutoff` is the run's, not a fresh `now()`: one sweep reasons about one instant, so an
+    account cannot be spared by the selection and taken by the delete a second later.
+
+    The `authentication_request` delete is by email because those rows carry a `NULL`
+    `user_id` for `purpose="sign_in"` by design, so the cascade cannot reach them. It is
+    partial by construction and the sweep above is the primary mechanism for that table:
+    `verify_email_change` rewrites `user.email` in place, so rows created under an address
+    the account has since moved off carry an email this cannot name and no `user_id` to
+    follow. Nothing short of storing every historical address would close that, and the
+    seven-day sweep bounds it anyway.
+
+    """
+    keys = await _collect_stored_file_keys(db, user_id)
+
+    await db.execute(delete(AuthenticationRequest).where(AuthenticationRequest.email == email))
+    result = cast(
+        CursorResult,
+        await db.execute(
+            delete(User).where(
+                User.id == user_id,
+                User.is_deleted.is_(True),
+                User.deleted_at.is_not(None),
+                User.deleted_at < cutoff,
+            )
+        ),
+    )
+    if result.rowcount == 0:
+        # Rolls back the `authentication_request` delete above with it - a restored account
+        # keeps its sign-in history like any other.
+        await db.rollback()
+        logging.info("Account %d was restored before the purge reached it; nothing deleted", user_id)
+        return False
+
+    # After the statement that retired the rows and before the commit, per
+    # `blob_store.delete_after_commit`'s own rule: registering earlier would leave the
+    # unlinks standing across the rollback above, and unlinking the files of an account
+    # that is alive again is the one outcome here that cannot be undone.
+    blob_store.delete_after_commit(db, keys)
+    await db.commit()
+    return True
+
+
+async def purge_deleted_accounts(ctx: dict[Any, Any]) -> str:
+    """Hard-delete accounts whose grace period has run out.
+
+    The other half of `DELETE /user`, which only flags the row. `ACCOUNT_DELETION_GRACE_DAYS`
+    after the request the account stops being recoverable and this destroys it: one
+    `DELETE FROM "user"` per account, carrying every dive, dive site, certification, gear
+    item, trip and stats row down the ten cascades declared for exactly this, plus the
+    stored files those rows pointed at. See `plans/account-deletion.md` §6.
+
+    Hourly rather than daily, so `ACCOUNT_DELETION_GRACE_DAYS=0` behaves the way an
+    operator setting it to zero expects. No `run_at_startup`, unlike the two sweeps beside
+    it in `core/worker/settings.py`: those are idempotent housekeeping, this one destroys
+    logbooks, and a restart loop must never be the thing that decides an account's fate
+    early.
+
+    `deleted_at IS NOT NULL` is not defensive noise. `deleted_at < :cutoff` is NULL for a
+    row flagged without its clock, so such an account would be dark forever and nothing
+    would say so - hence the warning below, which is what would catch a future
+    admin-suspension feature borrowing this column instead of getting its own.
+
+    `ORDER BY deleted_at` with a limit makes "N left for the next pass" a real queue rather
+    than a nondeterministic sample, and the leftover count is logged rather than silently
+    capped.
+    """
+    cutoff = datetime.now(UTC) - timedelta(days=settings.ACCOUNT_DELETION_GRACE_DAYS)
+
+    async with local_session() as db:
+        stranded = (
+            await db.execute(
+                select(func.count()).select_from(User).where(User.is_deleted.is_(True), User.deleted_at.is_(None))
+            )
+        ).scalar_one()
+        if stranded:
+            logging.warning(
+                "%d deleted account(s) carry no deleted_at and will never be purged; "
+                "only DELETE /user should write either column",
+                stranded,
+            )
+
+        due = (
+            await db.execute(
+                select(User.id, User.email, User.deleted_at)
+                .where(User.is_deleted.is_(True), User.deleted_at.is_not(None), User.deleted_at < cutoff)
+                .order_by(User.deleted_at)
+                .limit(ACCOUNT_PURGE_BATCH_SIZE)
+            )
+        ).all()
+
+    if not due:
+        logging.info("No accounts past their deletion grace period")
+        return "No accounts to purge"
+
+    purged = 0
+    for row in due:
+        gone = False
+        # One session, and so one transaction, per account: a single failure strands that
+        # account for the next pass rather than taking the batch with it. Leaving the block
+        # on an exception closes the session, which rolls the transaction back - and the
+        # rollback is also what drops any blob unlinks registered inside it.
+        async with local_session() as db:
+            try:
+                gone = await _purge_one_account(db, user_id=row.id, email=row.email, cutoff=cutoff)
+            except Exception:
+                logging.exception("Could not purge account %d", row.id)
+
+        if gone:
+            purged += 1
+            # The id and the request date, never the address: writing the email being
+            # erased into logs that outlive the purge would be a self-inflicted wound.
+            logging.info("Purged account %d (requested %s)", row.id, row.deleted_at)
+            # After the commit and outside it, so a Redis failure cannot roll back a delete
+            # that has already happened - and only for an account that actually went, so a
+            # restored one keeps its warm cache. Hygiene either way: every read for this
+            # account 401ed the moment it was flagged, days ago.
+            await delete_keys_by_pattern(f"user_{row.id}_*")
+
+    if len(due) == ACCOUNT_PURGE_BATCH_SIZE:
+        logging.info("Purge batch was full; more accounts may be due on the next pass")
+
+    logging.info("Purged %d deleted account(s)", purged)
+    return f"Purged {purged} deleted account(s)"
 
 
 def _due_text(row: Any, status: ServiceStatus, today: date) -> str:

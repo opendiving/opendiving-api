@@ -503,6 +503,31 @@ class GearServiceSettings(BaseSettings):
     GEAR_SERVICE_DIGEST_HOUR: int = config("GEAR_SERVICE_DIGEST_HOUR", default=7)
 
 
+class AccountDeletionSettings(BaseSettings):
+    # How long a deletion request sits reversible before `purge_deleted_accounts`
+    # destroys the account (see `core.worker.functions`). The account is dark from the
+    # moment the button is pressed either way - this is only how long the way back in
+    # stays open, not a period the app keeps working.
+    #
+    # `0` means the next hourly sweep purges it, which is the setting an operator who
+    # wants no grace period at all would reach for. It changes the confirmation email's
+    # copy rather than being a special case in the job: at zero there is nothing to tell
+    # the user to sign in before.
+    #
+    # 14 rather than 30, and the reason is a published sentence: the bundled privacy page
+    # promises erasure "within 30 days", and a 30-day window swept hourly lands at "30
+    # days and change". Raising this past roughly 29 makes that sentence false for the
+    # instance - `docs/self-hosting/configuration.md` says so.
+    ACCOUNT_DELETION_GRACE_DAYS: int = config("ACCOUNT_DELETION_GRACE_DAYS", default=14)
+
+    # Fixed-window per-user limit over `MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS`, because
+    # `DELETE /user` sends mail. Deliberately not the thing that stops a double submit -
+    # a two-request race beats any counter, which is why the endpoint's real guard is a
+    # database predicate (`WHERE is_deleted = false`) and this is only here to stop one
+    # account being used to pump the relay.
+    ACCOUNT_DELETION_RATE_LIMIT_PER_USER: int = config("ACCOUNT_DELETION_RATE_LIMIT_PER_USER", default=5)
+
+
 class TestSettings(BaseSettings): ...
 
 
@@ -650,6 +675,7 @@ class Settings(
     FrontendSettings,
     PasskeySettings,
     GearServiceSettings,
+    AccountDeletionSettings,
     TestSettings,
     RedisCacheSettings,
     ClientSideCacheSettings,
