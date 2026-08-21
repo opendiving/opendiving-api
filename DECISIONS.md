@@ -5282,11 +5282,11 @@ the spool. So `uddf.py` writes the envelope by hand and serializes one `<dive>` 
 are fetched one row at a time by whoever needs them. It is the one N+1 in the package and it is on
 purpose.
 
-## What UDDF 3.2.2 has no slot for, and what the original mapping got wrong about it
+## What UDDF 3.2.2 has no slot for, and what the plan got wrong about it
 
 The mapping from our columns to UDDF elements was settled against the vendored XSD
-(`tests/fixtures/uddf/uddf_3.2.2.xsd`), not from memory, and the schema contradicted that mapping in
-both directions.
+(`tests/fixtures/uddf/uddf_3.2.2.xsd`), not from memory, and the schema contradicted what had been
+proposed in both directions.
 
 **Three things genuinely have nowhere to go, and are exported in `export.json`/CSV instead:**
 
@@ -5300,7 +5300,7 @@ both directions.
   end-of-dive scalars, not a per-sample series.
 - **Gas `role`, gear sets, service schedules and history, c-card records.** No elements exist.
 
-**Three that mapping expected to lose, and the schema allows after all:**
+**Three the proposal expected to lose, and the schema allows after all:**
 
 - **`po2_limit` maps to `<mix><maximumpo2>`.** Which is why `_MixKey` includes it: a diver carrying
   the same EAN32 planned to 1.4 on the bottom and 1.6 on the ascent has defined two mixes as far as
@@ -6376,7 +6376,7 @@ generator undoing each other. There is no such generator on this side — nothin
 files but us, `mdformat` treats `AGENTS.md` like every other doc, and no configuration changed. The
 split here buys cross-tool reach and symmetry with the web repo, nothing more.
 
-## GPS from an import lands on the dive, and the earlier design that said otherwise was wrong twice
+## GPS from an import lands on the dive, and the plan that said otherwise was wrong twice
 
 The dive-site coordinates design said, in bold: **do not add coordinate columns to `dive`.** The
 parsed fix was to ride along in the import response and pre-fill a *new dive site's* coordinates
@@ -10881,7 +10881,7 @@ and answered as the same "already used" 401 the pre-lock check gives, because an
 500 on a restore that in fact succeeded. It is the same check asked at two moments, so both moments
 say the same sentence — hence `_RESTORE_REJECTED` being a constant rather than two string literals.
 
-### The precheck is a nicety on one path out of four, and the design used to argue from it
+### The precheck is a nicety on one path out of four, and the plan used to argue from it
 
 `GET /auth/email/verify/check` now looks the user up (it inspected only the `authentication_request`
 row before) so the landing page's button can say *Restore my account* rather than *Sign in*. It
