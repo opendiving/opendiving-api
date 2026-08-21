@@ -438,7 +438,7 @@ class FrontendSettings(BaseSettings):
         """The WebAuthn Relying Party ID: the bare hostname of `FRONTEND_URL`.
 
         Derived rather than configured, so there is no second place for it to be wrong -
-        see the plan's rejection of a `PASSKEYS_ENABLED` knob for the same reasoning. The
+        the same reasoning that rejected a `PASSKEYS_ENABLED` knob. The
         ceremony belongs to the *frontend* origin; this API's own host never appears in it,
         which the split-origin dev topology makes impossible to get accidentally right.
 

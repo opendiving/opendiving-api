@@ -1,8 +1,8 @@
 """`DELETE FROM "user"` reaches every row the account owns.
 
 Ten FKs into `user.id` carried no `ondelete` rule, so that statement raised
-`ForeignKeyViolation` for any account that had ever been used. `plans/account-deletion.md`
-§4 declares them `CASCADE`; this pins the result. Nothing in the app issues the delete yet -
+`ForeignKeyViolation` for any account that had ever been used. Revision `48781087b2b3`
+declares them `CASCADE`; this pins the result. Nothing in the app issues the delete yet -
 the purge job is a later change - which is exactly why the guarantee needs a test of its own
 rather than arriving with its first caller.
 

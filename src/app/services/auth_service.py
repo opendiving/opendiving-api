@@ -86,10 +86,9 @@ class DeletionPending:
     """The identity resolves to an account inside its deletion grace period.
 
     Not a sign-in and not onboarding: the row is still there and still deleted, and the
-    caller is offered the account back rather than being given it. See
-    `plans/account-deletion.md` §5 - signing in must not silently cancel a deletion
-    somebody deliberately asked for, so a restore is its own explicit click on every path
-    that can reach one.
+    caller is offered the account back rather than being given it. Signing in must not
+    silently cancel a deletion somebody deliberately asked for, so a restore is its own
+    explicit click on every path that can reach one.
 
     `purge_after` is `None` only in the state `purge_deleted_accounts` warns about - a row
     flagged with no `deleted_at` to count from, which nothing in the app writes. The screen
