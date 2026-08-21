@@ -52,6 +52,12 @@ artifacts, which is what the `curl` lines above fetch.
   **deco ceiling, dive events**) is extracted server-side and served with ETag caching.
 - **Air consumption** — SAC and RMV derived automatically, per tank on multi-tank dives, plus a
   gas-use history endpoint powering the dashboard trend chart.
+- **Species log** — record what you saw on a dive, from a catalog searched live against
+  [WoRMS](https://www.marinespecies.org/) for the taxonomy and [Wikidata](https://www.wikidata.org/)
+  for the common names — so typing "clownfish" finds *Amphiprion ocellaris*, which WoRMS alone would
+  not. Catalog rows are shared across the instance, and search falls back to what is already stored
+  rather than failing when a register is unreachable. Distinct species seen is part of the dive
+  statistics.
 - **Gear** — items, gear sets with default weights, service **schedules** (by months and/or dives),
   service history, a due-soon endpoint, and a scheduled email reminder digest.
 - **Certifications** — c-card records with front/back card images.
@@ -71,7 +77,7 @@ artifacts, which is what the `curl` lines above fetch.
   UDDF export), then Shearwater Cloud exports; a pluggable importer layer so every supported format
   is a migration path in.
 - **Public share links** — read-only dive/trip pages.
-- **Statistics endpoints** — records, per-year aggregates, site maps, species log.
+- **Statistics endpoints** — records, per-year aggregates, site maps, a life list.
 
 ## Running it from source
 
