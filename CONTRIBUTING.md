@@ -36,15 +36,6 @@ For running the tooling (ruff, mypy, pytest) outside the container you need Pyth
 uv sync --extra dev
 ```
 
-Commits in this repo are signed, and a hook keeps them that way. Once per clone:
-
-```bash
-git config core.hooksPath .githooks
-```
-
-`.githooks/pre-push` then refuses to push a commit carrying no signature at all. Linked worktrees
-share the setting, so that single command covers them too.
-
 ## Before you open a PR
 
 Three workflows run on every pull request, and all must be green. Run them locally first:
@@ -250,9 +241,10 @@ docker compose exec api python -m src.scripts.backfill_dive_profiles --parser-ke
 
 ## Pull requests
 
-- **Every commit in the PR must be signed.** GitHub shows the ones that aren't as *Unverified*,
-  which is worth nothing to anyone auditing a self-hosted deployment's provenance later. Set
-  `core.hooksPath` as above and the push hook keeps you honest.
+- **Your commits do not need to be signed.** PRs here are squash-merged, and GitHub creates and
+  signs that one commit with its own key, so what a self-hoster audits on `main` later is signed
+  whatever your branch carried. Sign if you already sign — nobody will ask you to set GPG up for a
+  pull request.
 - Branch off `main`, keep the PR focused on one thing.
 - Title the PR as a conventional commit — `<type>[(scope)][!]: <description>`, e.g.
   `feat: store the dive-computer export a dive was imported from`. Types: `feat`, `fix`, `refactor`,
@@ -266,6 +258,22 @@ docker compose exec api python -m src.scripts.backfill_dive_profiles --parser-ke
   SQL, new env vars, a backfill script).
 - If the change affects the API contract, mention whether the web or iOS client needs a matching
   change.
+
+## For maintainers
+
+Commits pushed to this repository's own branches are signed, and a hook keeps them that way. Once
+per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+`.githooks/pre-push` then refuses to push a commit carrying no signature at all. Linked worktrees
+share the setting, so that single command covers them too.
+
+That instruction lives here rather than in *Getting set up* because it is not a contributor's
+problem: the commits in a pull request do not need to be signed, and enabling this hook in a clone
+that does not sign only walls you out of your own push.
 
 ## Cutting a release
 

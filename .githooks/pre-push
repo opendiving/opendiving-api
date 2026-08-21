@@ -68,8 +68,10 @@ Sign them, then push again:
     git rebase --exec 'git commit --amend --no-edit -S' origin/main
 
 An agent that lands here has almost certainly turned signing off on the git
-command line, which overrides every config file. Do not: signing works on
-this machine with no passphrase prompt, and CONTRIBUTING.md says so.
+command line, which overrides every config file. Do not. This hook is opt-in
+per clone, so it is running because somebody here enabled it - see "For
+maintainers" in CONTRIBUTING.md - and that was a decision to sign what this
+clone pushes.
 MSG
 fi
 
