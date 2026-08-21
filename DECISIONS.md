@@ -11005,23 +11005,39 @@ claims**, and the two are not redundant:
 
 - `MAX_AVATAR_PIXELS` (50 MP) judges the header, before `draft` has had a chance to make a dishonest
   declaration cheap. Remove it and a bomb is quietly downscaled instead of refused.
-- `MAX_AVATAR_DECODE_PIXELS` (2048×2048) judges the post-`draft` size, immediately before the first
-  line that decodes. Measured at that size: 26 MB for RGB, 45 MB palette, 63 MB RGBA, 75 MB `LA`.
+- `MAX_AVATAR_DECODE_PIXELS` (1536×1536) judges the post-`draft` size, immediately before the first
+  line that decodes.
 
-`draft` is what keeps the second cap from meaning "no photos above 4 MP". Only JPEG can honour it —
-it decodes at a fraction of the DCT scale, which is what `Image.thumbnail` uses it for — and JPEG is
-what cameras produce, so **a phone photo of any megapixel count still passes**: a 48 MP one arrives
-at the second cap as about 1 MP. What gets refused is a large PNG, WebP or GIF, which is not a
-picture of anybody's face. It inherits one quirk worth knowing before somebody reports it as a bug:
-`draft` only halves while *both* edges stay at or above 512, so an extreme panorama is not reduced
-at all and is refused like a PNG of the same size.
+**Measure that second cap per format, not per mode.** Two rounds of this review went on figures that
+were true of whatever input had been tried. At 1536×1536 one decode costs 18 MB for an RGB PNG, 29
+MB for a transparent palette GIF, 49 MB for an RGBA PNG, 56 MB for `LA` — and **74 MB for an RGBA
+WebP, from a 700-byte file**, because `WebPImageFile.load` materializes the whole frame as `bytes`
+and copies it again into a `BytesIO` before the raster is built, which the PNG and GIF plugins do
+not do. The cap started at 2048×2048, where that same WebP measured 104 MB and four workers came to
+420 MB against the 1 GB minimum; 1536 brings it to ~300 MB. The scaling is sub-linear — 56% of the
+pixels bought 71% of the memory — so stopping there rather than at 1024 is a point of diminishing
+returns rather than a round number.
+
+`draft` is what keeps the second cap from meaning "no photos above 2.4 MP". Only JPEG can honour it
+— it decodes at a fraction of the DCT scale, which is what `Image.thumbnail` uses it for — and JPEG
+is what cameras produce, so **a phone photo of any megapixel count still passes**: a 48 MP one
+arrives at the second cap as about 1 MP. What gets refused is a large PNG, WebP or GIF, which is not
+a picture of anybody's face. It inherits one quirk worth knowing before somebody reports it as a
+bug: `draft` only halves while *both* edges stay at or above 512, so a JPEG whose short edge is
+under 1024 px is not reduced at all and is refused like a PNG of the same size. To be over the cap
+*and* under that short edge an image has to be wider than about 2.25:1, so 16:9 and everything
+squarer stays clear and only a true panorama lands in it.
+
+That quirk is also why the rejection carries no advice about formats. "Save it as a JPEG" would be
+the useful thing to say to almost everyone who reaches the second cap — and wrong for the one caller
+already sending one. An error message has to be true for every input that can reach it.
 
 Third piece: **`_DECODE_LIMITER`**, an `anyio.CapacityLimiter(1)` passed to `run_sync` as its own
 limiter rather than by shrinking the global one every other blocking hop shares. Without it the
 ceiling is the app's threadpool, which `core/setup.set_threadpool_tokens` raises to 100 per worker
 against four workers in the shipped image, and no per-decode figure survives being multiplied by
 400\. One at a time costs nothing real — a realistic upload is tens of milliseconds through this,
-uploads are rare, and the input that would make the queue matter is the hostile one. With it, ~75 MB
+uploads are rare, and the input that would make the queue matter is the hostile one. With it, ~74 MB
 is a per-worker ceiling and the shipped four workers cost at most ~300 MB between them, against a
 documented install minimum of 1 GB for the whole stack ([install.md](docs/self-hosting/install.md)).
 

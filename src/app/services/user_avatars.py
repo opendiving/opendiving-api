@@ -75,28 +75,38 @@ MAX_AVATAR_PIXELS = 50_000_000
 #   costs 200 to 640 MB of resident memory depending on its mode, measured, against a
 #   documented install minimum of **1 GB for the whole stack** (docs/self-hosting/install.md).
 #
-# Measured at 2048x2048, worst input per mode: 26 MB for ordinary RGB, 45 MB for a
-# transparent palette image, 63 MB for RGBA, 75 MB for greyscale-plus-alpha - which is the
-# widest because Pillow widens `LA` to RGBA and then premultiplies *that* inside `resize`,
-# a copy intrinsic to alpha-aware resampling because it happens before the crop box can
-# shrink anything. With `_DECODE_LIMITER` below, ~75 MB is a per-worker ceiling and the
-# shipped four workers cost at most ~300 MB between them even under a deliberate attempt.
+# **Measure this per format, not per mode, and measure it rather than reasoning about it.**
+# Two review rounds went on figures that were true of whatever input the author happened to
+# try. Measured at 1536x1536, one decode: 18 MB for an ordinary RGB PNG, 29 MB for a
+# transparent palette GIF, 49 MB for an RGBA PNG, 56 MB for greyscale-plus-alpha - Pillow
+# widens `LA` to RGBA and then premultiplies *that* inside `resize`, a copy intrinsic to
+# alpha-aware resampling because it happens before the crop box can shrink anything - and
+# **74 MB for an RGBA WebP, from a 700-byte file**, because `WebPImageFile.load`
+# materializes the whole frame as `bytes` and copies it again into a `BytesIO` before the
+# raster is built, a detour the PNG and GIF plugins do not take.
+#
+# 1536 rather than 2048, which is where this started: at 2048 the same WebP measured 104 MB
+# and four workers came to 420 MB, on top of their own resident set, against a documented
+# install minimum of 1 GB for the whole stack. At 1536 it is ~300 MB. Note the scaling is
+# sub-linear - 56% of the pixels bought 71% of the memory - so chasing it further returns
+# less each time, which is the argument for stopping here rather than at 1024. Three times
+# the avatar's own dimension is generous for something that ends up 512 px square.
 #
 # What it rejects is not what it sounds like. **A camera photo of any megapixel count still
 # passes**, because a camera produces JPEG and `draft` reduces JPEG below this before the
 # check runs - a 48 MP phone photo arrives here as roughly 1 MP. What it rejects is a large
 # *PNG, WebP or GIF*, which is not a picture of anybody's face: the web client uploads a
 # 512x512 crop, and the honest answer to a 16 MP screenshot offered as an avatar is to say
-# no rather than to spend a quarter of a gigabyte on it. The written-out square is
-# deliberate - it is the number to quote in the rejection, and 2048 is a size people
-# recognize.
+# no rather than to spend a quarter of a gigabyte on it.
 #
 # One quirk it inherits from `draft`, worth knowing before someone reports it as a bug: JPEG
-# only reduces while *both* edges stay at or above the avatar dimension, so an extreme
-# panorama (6000x1000, say) is not reduced at all and is refused here like a PNG of the same
-# size. Nobody's avatar is a panorama, and the alternative is letting the short edge fall
-# below what the output needs.
-MAX_AVATAR_DECODE_PIXELS = 2048 * 2048
+# only halves while *both* edges stay at or above the avatar dimension, so a JPEG whose short
+# edge is under 1024 px is not reduced at all and is refused here like a PNG of the same
+# size. That band is narrower than it sounds - to be over this cap with a short edge under
+# 1024 an image has to be wider than about 2.25:1, so 16:9 and everything squarer stays
+# clear of it and only a true panorama lands in it. It is also why the rejection below says
+# nothing about formats: "save it as a JPEG" would be exactly the wrong advice there.
+MAX_AVATAR_DECODE_PIXELS = 1536 * 1536
 
 # One avatar decoded at a time per worker process, which is what turns the per-decode
 # figure above into a ceiling rather than a multiplier. Without it the ceiling is the app's
@@ -203,8 +213,7 @@ def _normalize(data: bytes) -> bytes:
             # And before `exif_transpose`, which is the first line here that decodes.
             if image.width * image.height > MAX_AVATAR_DECODE_PIXELS:
                 raise UnsupportedAvatarImageError(
-                    f"That image is too large to process ({width}x{height}). Please use a smaller photo, "
-                    "or save it as a JPEG."
+                    f"That image is too large to process ({width}x{height}). Please use a smaller photo."
                 )
 
             ImageOps.exif_transpose(image, in_place=True)

@@ -70,6 +70,7 @@ from tests.helpers.images import (
     plain_png,
     png_declaring,
     png_with_alpha,
+    webp_with_alpha,
 )
 
 USER_UUID = uuid7()
@@ -242,6 +243,19 @@ class TestNormalization:
         with pytest.raises(UnsupportedAvatarImageError):
             _normalize(png_declaring(20000, 10000))
 
+    def test_a_webp_upload_round_trips_with_its_transparency(self) -> None:
+        """WebP is an accepted *input* as well as the output format, and it is the one that
+        costs the most to decode per byte - `WebPImageFile.load` materializes the frame
+        twice before the raster exists. It had no fixture for two review rounds, which is
+        how the documented memory ceiling came to be measured from PNGs alone."""
+        result = _open(_normalize(webp_with_alpha(size=(600, 600))))
+
+        assert result.format == "WEBP"
+        assert result.mode == "RGBA"
+        pixel = result.convert("RGBA").getpixel((8, 8))
+        assert isinstance(pixel, tuple)
+        assert pixel[3] == 0
+
     def test_a_large_png_is_refused_for_what_it_would_rasterize_to(self) -> None:
         """The second cap, and it is not a duplicate of the first.
 
@@ -253,8 +267,13 @@ class TestNormalization:
         assert 3000 * 3000 < MAX_AVATAR_PIXELS
         assert 3000 * 3000 > MAX_AVATAR_DECODE_PIXELS
 
-        with pytest.raises(UnsupportedAvatarImageError):
+        with pytest.raises(UnsupportedAvatarImageError) as exc_info:
             _normalize(png_declaring(3000, 3000))
+
+        # No format advice in the message, deliberately: a JPEG can reach this branch too
+        # (`draft` does not reduce one whose short edge is under 1024), and "save it as a
+        # JPEG" would be unactionable for exactly that caller.
+        assert "JPEG" not in str(exc_info.value)
 
     def test_the_same_dimensions_as_a_jpeg_are_accepted(self) -> None:
         """The pair to the test above, and the reason the decode cap does not read as

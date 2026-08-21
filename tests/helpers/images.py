@@ -114,6 +114,22 @@ def large_jpeg(*, size: tuple[int, int]) -> bytes:
     return buffer.getvalue()
 
 
+def webp_with_alpha(*, size: tuple[int, int]) -> bytes:
+    """A lossless RGBA WebP - the format that costs the most to decode, per byte.
+
+    `WebPImageFile.load` materializes the whole frame as `bytes` and copies it again into a
+    `BytesIO` before building the raster, which the PNG and GIF plugins do not do, so a
+    700-byte WebP outweighs every other input of the same dimensions. It is an accepted
+    upload format, so it needs a fixture; two review rounds went by on figures measured
+    from PNGs alone.
+    """
+    image = Image.new("RGBA", size, (0, 0, 255, 180))
+    image.paste((255, 0, 0, 0), (0, 0, size[0] // 2, size[1] // 2))
+    buffer = io.BytesIO()
+    image.save(buffer, format="WEBP", lossless=True)
+    return buffer.getvalue()
+
+
 def bmp() -> bytes:
     """A perfectly valid image in a format the `formats=` allowlist does not name."""
     buffer = io.BytesIO()
