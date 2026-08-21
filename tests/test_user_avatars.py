@@ -277,7 +277,7 @@ class TestNormalization:
 
     def test_the_same_dimensions_as_a_jpeg_are_accepted(self) -> None:
         """The pair to the test above, and the reason the decode cap does not read as
-        "no photos above 4 MP". A camera produces JPEG, `draft` reduces JPEG before the
+        "no photos above 2.4 MP". A camera produces JPEG, `draft` reduces JPEG before the
         cap is asked, and the same 9 MP that is refused as a PNG arrives here as 0.6 MP.
         """
         result = _open(_normalize(large_jpeg(size=(3000, 3000))))

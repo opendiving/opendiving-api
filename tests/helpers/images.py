@@ -118,8 +118,9 @@ def webp_with_alpha(*, size: tuple[int, int]) -> bytes:
     """A lossless RGBA WebP - the format that costs the most to decode, per byte.
 
     `WebPImageFile.load` materializes the whole frame as `bytes` and copies it again into a
-    `BytesIO` before building the raster, which the PNG and GIF plugins do not do, so a
-    700-byte WebP outweighs every other input of the same dimensions. It is an accepted
+    `BytesIO` before building the raster, which the PNG and GIF plugins do not do, so this
+    outweighs every other input of the same dimensions - at 1536x1536 it is 158 bytes on
+    disk and around 90 MB to decode. It is an accepted
     upload format, so it needs a fixture; two review rounds went by on figures measured
     from PNGs alone.
     """

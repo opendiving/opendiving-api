@@ -77,22 +77,24 @@ MAX_AVATAR_PIXELS = 50_000_000
 #
 # **Measure this per format, not per mode, and measure it rather than reasoning about it.**
 # Two review rounds went on figures that were true of whatever input the author happened to
-# try. Every number below is one machine's `ru_maxrss` delta on Pillow 12.3, taken in a
-# fresh process per case because that counter is a monotonic high-water mark; treat the
-# ratios between them as the durable part. One decode at 1536x1536: 18 MB for an ordinary RGB PNG, 29 MB for a
-# transparent palette GIF, 49 MB for an RGBA PNG, 56 MB for greyscale-plus-alpha - Pillow
-# widens `LA` to RGBA and then premultiplies *that* inside `resize`, a copy intrinsic to
-# alpha-aware resampling because it happens before the crop box can shrink anything - and
-# **74 MB for an RGBA WebP, from a 700-byte file**, because `WebPImageFile.load`
-# materializes the whole frame as `bytes` and copies it again into a `BytesIO` before the
-# raster is built, a detour the PNG and GIF plugins do not take.
+# try. Every number below is an `ru_maxrss` delta on Pillow 12.3, taken in a fresh process
+# per case because that counter is a monotonic high-water mark, and rounded up across two
+# machines that disagreed by up to 30%; treat the ratios as the durable part. One decode at
+# 1536x1536: ~20 MB for an ordinary RGB PNG, ~35 MB for a transparent palette GIF, ~60 MB
+# for an RGBA PNG, ~70 MB for greyscale-plus-alpha - Pillow widens `LA` to RGBA and then
+# premultiplies *that* inside `resize`, a copy intrinsic to alpha-aware resampling because
+# it happens before the crop box can shrink anything - and **~90 MB for an RGBA WebP, from
+# a 158-byte file**, because `WebPImageFile.load` materializes the whole frame as `bytes`
+# and copies it again into a `BytesIO` before the raster is built, a detour the PNG and GIF
+# plugins do not take.
 #
-# 1536 rather than 2048, which is where this started: at 2048 the same WebP measured 104 MB
-# and four workers came to 420 MB, on top of their own resident set, against a documented
-# install minimum of 1 GB for the whole stack. At 1536 it is ~300 MB. Note the scaling is
-# sub-linear - 56% of the pixels bought 71% of the memory - so chasing it further returns
-# less each time, which is the argument for stopping here rather than at 1024. Three times
-# the avatar's own dimension is generous for something that ends up 512 px square.
+# 1536 rather than 2048, which is where this started: at 2048 that same WebP measured
+# 104-135 MB and four workers came to half a gigabyte, on top of their own resident set,
+# against a documented install minimum of 1 GB for the whole stack. At 1536 four workers
+# come to ~360 MB. Note the scaling is sub-linear - 56% of the pixels bought around 70% of
+# the memory - so chasing it further returns less each time, which is the argument for
+# stopping here rather than at 1024. Three times the avatar's own dimension is generous for
+# something that ends up 512 px square.
 #
 # What it rejects is not what it sounds like. **A camera photo of any megapixel count still
 # passes**, because a camera produces JPEG and `draft` reduces JPEG below this before the

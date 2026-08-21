@@ -11011,14 +11011,15 @@ claims**, and the two are not redundant:
 **Measure that second cap per format, not per mode.** Two rounds of this review went on figures that
 were true of whatever input had been tried. Every figure here is one machine's `ru_maxrss` delta on
 Pillow 12.3, taken in a fresh process per case because that counter is a monotonic high-water mark
-and building the fixture in the same process hides the answer; the ratios are the durable part. At
-1536×1536 one decode costs 18 MB for an RGB PNG, 29 MB for a transparent palette GIF, 49 MB for an
-RGBA PNG, 56 MB for `LA` — and **74 MB for an RGBA WebP, from a 700-byte file**, because
-`WebPImageFile.load` materializes the whole frame as `bytes` and copies it again into a `BytesIO`
-before the raster is built, which the PNG and GIF plugins do not do. The cap started at 2048×2048,
-where that same WebP measured 104 MB and four workers came to 420 MB against the 1 GB minimum; 1536
-brings it to ~300 MB. The scaling is sub-linear — 56% of the pixels bought 71% of the memory — so
-stopping there rather than at 1024 is a point of diminishing returns rather than a round number.
+and building the fixture in the same process hides the answer, and rounded up across two machines
+that disagreed by up to 30%; the ratios are the durable part. At 1536×1536 one decode costs ~20 MB
+for an RGB PNG, ~35 MB for a transparent palette GIF, ~60 MB for an RGBA PNG, ~70 MB for `LA` — and
+**~90 MB for an RGBA WebP, from a 158-byte file**, because `WebPImageFile.load` materializes the
+whole frame as `bytes` and copies it again into a `BytesIO` before the raster is built, which the
+PNG and GIF plugins do not do. The cap started at 2048×2048, where that same WebP measured 104–135
+MB and four workers came to half a gigabyte against the 1 GB minimum; 1536 brings them to ~360 MB.
+The scaling is sub-linear — 56% of the pixels bought around 70% of the memory — so stopping there
+rather than at 1024 is a point of diminishing returns rather than a round number.
 
 `draft` is what keeps the second cap from meaning "no photos above 2.4 MP". Only JPEG can honour it
 — it decodes at a fraction of the DCT scale, which is what `Image.thumbnail` uses it for — and JPEG
@@ -11039,8 +11040,8 @@ limiter rather than by shrinking the global one every other blocking hop shares.
 ceiling is the app's threadpool, which `core/setup.set_threadpool_tokens` raises to 100 per worker
 against four workers in the shipped image, and no per-decode figure survives being multiplied by
 400\. One at a time costs nothing real — a realistic upload is tens of milliseconds through this,
-uploads are rare, and the input that would make the queue matter is the hostile one. With it, ~74 MB
-is a per-worker ceiling and the shipped four workers cost at most ~300 MB between them, against a
+uploads are rare, and the input that would make the queue matter is the hostile one. With it, ~90 MB
+is a per-worker ceiling and the shipped four workers cost at most ~360 MB between them, against a
 documented install minimum of 1 GB for the whole stack ([install.md](docs/self-hosting/install.md)).
 
 Worth generalizing, because the next image feature will meet it: **an accept-side limit in pixels is
