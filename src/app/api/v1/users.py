@@ -1,7 +1,9 @@
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, cast
 
 from fastapi import APIRouter, Cookie, Depends, Request, Response
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,12 +17,13 @@ from ...core.exceptions.http_exceptions import (
     UnauthorizedException,
 )
 from ...core.security import blacklist_token, blacklist_tokens, generate_secure_token, hash_token, oauth2_scheme
-from ...core.utils.cache import cache
+from ...core.utils.cache import cache, delete_keys_by_pattern
 from ...core.utils.client_ip import client_ip
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...crud.crud_authentication_requests import claim_authentication_request, crud_authentication_requests
 from ...crud.crud_user_dive_stats import crud_user_dive_stats
 from ...crud.crud_users import crud_users
+from ...models.user import User
 from ...schemas.auth import LinkCheckResponse
 from ...schemas.authentication_request import AuthenticationRequestCreate, AuthenticationRequestUpdate
 from ...schemas.dive import DiveActivityPoint, DiveGasUsePoint
@@ -30,11 +33,17 @@ from ...schemas.email_change import (
     EmailChangeVerifyRequest,
     EmailChangeVerifyResponse,
 )
-from ...schemas.user import UserRead, UserUpdate
+from ...schemas.user import AccountDeletionResponse, UserRead, UserUpdate
 from ...schemas.user_dive_stats import UserDiveStatsRead, UserDiveStatsReadInternal
 from ...services.dive_activity import dive_activity
 from ...services.dive_gas import gas_use_history
-from ...services.email_service import send_email_change_confirmation_email, send_email_changed_notification
+from ...services.email_service import (
+    send_account_deletion_email,
+    send_email_change_confirmation_email,
+    send_email_changed_notification,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["user"])
 
@@ -412,7 +421,7 @@ async def read_dive_activity(
     return await _cached_dive_activity(request, user_id=current_user["id"], db=db)
 
 
-@router.delete("/user")
+@router.delete("/user", response_model=AccountDeletionResponse)
 async def erase_user(
     request: Request,
     response: Response,
@@ -420,14 +429,55 @@ async def erase_user(
     db: Annotated[AsyncSession, Depends(async_get_db)],
     access_token: str = Depends(oauth2_scheme),
     refresh_token: str | None = Cookie(None, alias="refresh_token"),
-) -> dict[str, str]:
-    """Soft-delete the authenticated user's own account and end the session.
+) -> AccountDeletionResponse:
+    """Delete the authenticated user's own account, reversibly for `ACCOUNT_DELETION_GRACE_DAYS`.
 
-    The row is flagged rather than removed. Both the access token and, when present, the
-    refresh token are blacklisted and the refresh cookie cleared, so the tokens the caller
-    is holding stop working immediately instead of staying valid until they expire.
+    The account goes **dark immediately** and stays deleted until the grace period runs
+    out, at which point `purge_deleted_accounts` issues a real `DELETE FROM "user"` and
+    every row and stored file the account owns goes with it. There is no state in between
+    where the app keeps working: `get_current_user` filters `is_deleted=False`, so every
+    read 401s from this instant, and `/auth/refresh` re-resolves the row so the other
+    devices' cookies stop rotating too. Someone deleting their account because they want
+    to be *gone from it* gets that, not a fortnight's countdown banner.
+
+    Both presented tokens are blacklisted and the refresh cookie cleared, so the caller's
+    own session dies now rather than at its natural expiry.
+
+    The response carries `purge_after` and is composed **before** the confirmation email is
+    attempted, so a dead relay costs the copy rather than the date.
     """
-    await crud_users.delete(db=db, uuid=current_user["uuid"])
+    await enforce_rate_limit(
+        f"account-deletion:user:{current_user['id']}",
+        settings.ACCOUNT_DELETION_RATE_LIMIT_PER_USER,
+        settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
+    )
+
+    # Conditional on the row actually transitioning, not on what `get_current_user`
+    # resolved. Two concurrent calls from one live session both pass that dependency
+    # before either commits, and an unconditional write would rewrite `deleted_at` - which
+    # is the deletion clock - and send a second email. `RETURNING` is what makes "did this
+    # call do it?" one statement rather than a check-then-act with the same race in it.
+    now = datetime.now(UTC)
+    deleted_at = cast(
+        datetime | None,
+        (
+            await db.execute(
+                update(User)
+                .where(User.id == current_user["id"], User.is_deleted.is_(False))
+                .values(is_deleted=True, deleted_at=now)
+                .returning(User.deleted_at)
+            )
+        ).scalar_one_or_none(),
+    )
+    newly_deleted = deleted_at is not None
+    if deleted_at is None:
+        # Already pending: report the deadline the *first* request set, so a double submit
+        # and a retry both answer with the same date.
+        deleted_at = cast(
+            datetime | None,
+            (await db.execute(select(User.deleted_at).where(User.id == current_user["id"]))).scalar_one_or_none(),
+        )
+    await db.commit()
 
     if refresh_token:
         await blacklist_tokens(access_token=access_token, refresh_token=refresh_token, db=db)
@@ -435,4 +485,26 @@ async def erase_user(
     else:
         await blacklist_token(token=access_token, db=db)
 
-    return {"message": "User deleted"}
+    # Null only if the row is not there to read - it was purged between `get_current_user`
+    # resolving it and this statement - or if something flagged it without setting the
+    # clock, the never-purge state `purge_deleted_accounts` warns about. Neither is worth
+    # 500ing at somebody who is trying to leave, so answer with a date derived from now.
+    purge_after = (deleted_at or now) + timedelta(days=settings.ACCOUNT_DELETION_GRACE_DAYS)
+
+    # Hygiene rather than correctness: every read 401s from this instant regardless, and
+    # user ids are sequential and never reused, so nothing can be served out of these. The
+    # uuid-keyed `trip_cache:{uuid}` / `dive_site_cache:{uuid}` entries are not swept -
+    # they are not user-scoped, and are unreachable for the same reason.
+    await delete_keys_by_pattern(f"user_{current_user['id']}_*")
+
+    if newly_deleted:
+        # Last, and never fatal. The deletion has already committed; a relay failure that
+        # propagated would leave the user locked out *and* never told the purge date,
+        # which is strictly worse than no email. `send_gear_service_digests` makes the
+        # same trade the other way round, for a job that can safely repeat itself.
+        try:
+            await send_account_deletion_email(current_user["email"], purge_after)
+        except Exception:
+            logger.exception("Could not send the account-deletion confirmation for user %s", current_user["id"])
+
+    return AccountDeletionResponse(message="User deleted", purge_after=purge_after)

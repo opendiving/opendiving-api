@@ -2,7 +2,8 @@
 
 Used for the magic-link sign-in email (see `api.v1.auth.request_email_link`), the
 email-change confirmation/notification pair (see `api.v1.users`), the passkey
-added/removed security notices (see `api.v1.passkeys`), the gear-service
+added/removed security notices (see `api.v1.passkeys`), the account-deletion
+confirmation that carries the purge date (see `api.v1.users.erase_user`), the gear-service
 digest (see `core.worker.functions.send_gear_service_digests`), and the contact form
 (see `api.v1.contact`), all funneling through `_send` so the "run a blocking client off
 the event loop" plumbing only lives in one place.
@@ -19,6 +20,7 @@ import html
 import logging
 import smtplib
 import ssl
+from datetime import datetime
 from email.message import EmailMessage
 
 import anyio
@@ -260,6 +262,62 @@ async def send_passkey_removed_email(email: str, passkey_name: str) -> None:
             "<p>If this wasn't you, please contact support.</p>"
         ),
     )
+
+    await anyio.to_thread.run_sync(_send, message)
+
+
+async def send_account_deletion_email(email: str, purge_after: datetime) -> None:
+    """Confirms a deletion request and names the date the account stops being recoverable.
+
+    This is where the countdown lives, and for now it is the *only* place. The app itself
+    goes dark the instant the button is pressed - deliberately, see
+    `plans/account-deletion.md` §1 - so there is no in-app banner to carry "12 days left",
+    and nothing else tells the user the date. That makes this mail the one artifact
+    somebody who changes their mind has to work from; see the last paragraph for what it
+    can honestly ask them to do about it today.
+
+    Best-effort, on the `send_passkey_added_email` model rather than the magic-link one:
+    it carries no token, so a missing `SMTP_HOST` logs everywhere instead of raising off
+    `local`. Callers wrap it too - `erase_user` has already committed the deletion by the
+    time this runs, and a relay failure that turned into a 500 would leave the user locked
+    out *and* never told the date, which is strictly worse than no email.
+
+    The zero-grace branch is not cosmetic. At `ACCOUNT_DELETION_GRACE_DAYS=0` the purge
+    deadline is already past when this is composed, so telling the user there is still time
+    would be advice that cannot be followed - the next sweep takes the account.
+
+    **The way back is the operator's, not the user's, and the copy says only that** - on
+    purpose, and only for now. `plans/account-deletion.md` §5's self-service restore
+    (`POST /auth/restore`, reached by signing in during the window) is the next change; this
+    is what is true until it lands, and a sentence telling the user to sign in would send
+    them into `/auth/complete`'s "An account with this email already exists" instead.
+    Reword this to point at the sign-in path in the same change that adds it.
+    """
+    if not settings.SMTP_HOST:
+        logger.warning(
+            "SMTP_HOST not configured; account-deletion confirmation for %s (purge after %s)", email, purge_after
+        )
+        return
+
+    if settings.ACCOUNT_DELETION_GRACE_DAYS <= 0:
+        body = (
+            "<p>Your OpenDiving account has been deleted.</p>"
+            "<p>This instance keeps no grace period, so your dives, dive sites, "
+            "certifications and gear are being erased now and cannot be recovered.</p>"
+        )
+    else:
+        body = (
+            "<p>Your OpenDiving account has been deleted, and the app has already stopped "
+            "letting you in.</p>"
+            "<p><strong>Nothing has been erased yet.</strong> Your account, your dives, your "
+            "dive sites, your certifications and your gear will be permanently erased on "
+            f"<strong>{purge_after:%-d %B %Y}</strong>.</p>"
+            "<p>If you deleted your account by mistake, contact whoever runs this OpenDiving "
+            "instance before that date and the deletion can still be undone. After it, "
+            "nothing can be restored.</p>"
+        )
+
+    message = _build_message(to=email, subject="Your OpenDiving account has been deleted", html_body=body)
 
     await anyio.to_thread.run_sync(_send, message)
 
