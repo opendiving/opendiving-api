@@ -11009,14 +11009,16 @@ claims**, and the two are not redundant:
   line that decodes.
 
 **Measure that second cap per format, not per mode.** Two rounds of this review went on figures that
-were true of whatever input had been tried. At 1536×1536 one decode costs 18 MB for an RGB PNG, 29
-MB for a transparent palette GIF, 49 MB for an RGBA PNG, 56 MB for `LA` — and **74 MB for an RGBA
-WebP, from a 700-byte file**, because `WebPImageFile.load` materializes the whole frame as `bytes`
-and copies it again into a `BytesIO` before the raster is built, which the PNG and GIF plugins do
-not do. The cap started at 2048×2048, where that same WebP measured 104 MB and four workers came to
-420 MB against the 1 GB minimum; 1536 brings it to ~300 MB. The scaling is sub-linear — 56% of the
-pixels bought 71% of the memory — so stopping there rather than at 1024 is a point of diminishing
-returns rather than a round number.
+were true of whatever input had been tried. Every figure here is one machine's `ru_maxrss` delta on
+Pillow 12.3, taken in a fresh process per case because that counter is a monotonic high-water mark
+and building the fixture in the same process hides the answer; the ratios are the durable part. At
+1536×1536 one decode costs 18 MB for an RGB PNG, 29 MB for a transparent palette GIF, 49 MB for an
+RGBA PNG, 56 MB for `LA` — and **74 MB for an RGBA WebP, from a 700-byte file**, because
+`WebPImageFile.load` materializes the whole frame as `bytes` and copies it again into a `BytesIO`
+before the raster is built, which the PNG and GIF plugins do not do. The cap started at 2048×2048,
+where that same WebP measured 104 MB and four workers came to 420 MB against the 1 GB minimum; 1536
+brings it to ~300 MB. The scaling is sub-linear — 56% of the pixels bought 71% of the memory — so
+stopping there rather than at 1024 is a point of diminishing returns rather than a round number.
 
 `draft` is what keeps the second cap from meaning "no photos above 2.4 MP". Only JPEG can honour it
 — it decodes at a fraction of the DCT scale, which is what `Image.thumbnail` uses it for — and JPEG

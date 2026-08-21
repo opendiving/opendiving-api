@@ -77,7 +77,9 @@ MAX_AVATAR_PIXELS = 50_000_000
 #
 # **Measure this per format, not per mode, and measure it rather than reasoning about it.**
 # Two review rounds went on figures that were true of whatever input the author happened to
-# try. Measured at 1536x1536, one decode: 18 MB for an ordinary RGB PNG, 29 MB for a
+# try. Every number below is one machine's `ru_maxrss` delta on Pillow 12.3, taken in a
+# fresh process per case because that counter is a monotonic high-water mark; treat the
+# ratios between them as the durable part. One decode at 1536x1536: 18 MB for an ordinary RGB PNG, 29 MB for a
 # transparent palette GIF, 49 MB for an RGBA PNG, 56 MB for greyscale-plus-alpha - Pillow
 # widens `LA` to RGBA and then premultiplies *that* inside `resize`, a copy intrinsic to
 # alpha-aware resampling because it happens before the crop box can shrink anything - and
