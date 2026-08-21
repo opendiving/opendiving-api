@@ -269,10 +269,12 @@ async def send_passkey_removed_email(email: str, passkey_name: str) -> None:
 async def send_account_deletion_email(email: str, purge_after: datetime) -> None:
     """Confirms a deletion request and names the date the account stops being recoverable.
 
-    This is where the countdown lives. The app itself goes dark the instant the button is
-    pressed - deliberately, see `plans/account-deletion.md` §1 - so there is no in-app
-    banner to carry "12 days left", and the two places somebody who changes their mind
-    will actually be are this email and the restore screen it points at.
+    This is where the countdown lives, and for now it is the *only* place. The app itself
+    goes dark the instant the button is pressed - deliberately, see
+    `plans/account-deletion.md` §1 - so there is no in-app banner to carry "12 days left",
+    and nothing else tells the user the date. That makes this mail the one artifact
+    somebody who changes their mind has to work from; see the last paragraph for what it
+    can honestly ask them to do about it today.
 
     Best-effort, on the `send_passkey_added_email` model rather than the magic-link one:
     it carries no token, so a missing `SMTP_HOST` logs everywhere instead of raising off
