@@ -18,7 +18,7 @@ class GearSet(Base, PublicUUIDMixin, TimestampMixin):
     __tablename__ = "gear_set"
 
     id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
-    user_id: Mapped[int] = mapped_column(ForeignKey("user.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(255))
     # The ballast (in kilograms) the diver normally carries with this configuration,
     # used to prefill `dive.weight` when the set is loaded into the dive form. Like the

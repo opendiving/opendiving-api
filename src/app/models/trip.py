@@ -11,7 +11,7 @@ class Trip(Base, PublicUUIDMixin, TimestampMixin):
     __tablename__ = "trip"
 
     id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
-    user_id: Mapped[int] = mapped_column(ForeignKey("user.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(255))
     start_date: Mapped[date] = mapped_column(Date)
     notes: Mapped[str] = mapped_column(Text, default="")

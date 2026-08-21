@@ -10508,3 +10508,94 @@ row ever written, because nothing has ever deleted one. Autogenerate does see a 
 **What this costs.** A link older than the retention window now reports "invalid" where it used to
 report "expired" — the row that carried the distinction is gone. Both are 401s, both are true, and
 `check_email_link` collapsed the two into one `valid=false` already.
+
+## The ten cascades that were never declared
+
+`DELETE FROM "user" WHERE id = :id` did not work. Ten foreign keys pointed at `user.id` with no
+`ondelete` rule at all, so the statement raised `ForeignKeyViolation` on the first of them for any
+account that had ever logged a dive, saved a site or earned a c-card. An account with nothing behind
+it deleted fine, which is a distinction with no practical consequence and is stated only so the
+claim is exact.
+
+Nobody had noticed because nothing issues that statement. `DELETE /user` soft-deletes — FastCRUD
+flags the row, because `User` carries `SoftDeleteMixin` — and no job has ever purged a flagged one.
+The schema was never asked the question, so it never gave its answer.
+
+| Constraint                           | Was       | Now       |
+| ------------------------------------ | --------- | --------- |
+| `certification_user_id_fkey`         | NO ACTION | `CASCADE` |
+| `dive_user_id_fkey`                  | NO ACTION | `CASCADE` |
+| `dive_file_user_id_fkey`             | NO ACTION | `CASCADE` |
+| `dive_site_user_id_fkey`             | NO ACTION | `CASCADE` |
+| `gear_item_user_id_fkey`             | NO ACTION | `CASCADE` |
+| `gear_service_record_user_id_fkey`   | NO ACTION | `CASCADE` |
+| `gear_service_schedule_user_id_fkey` | NO ACTION | `CASCADE` |
+| `gear_set_user_id_fkey`              | NO ACTION | `CASCADE` |
+| `trip_user_id_fkey`                  | NO ACTION | `CASCADE` |
+| `user_dive_stats_user_id_fkey`       | NO ACTION | `CASCADE` |
+
+`authentication_provider`, `authentication_request` and `webauthn_credential` already cascaded and
+were left alone. The last of those is worth a note: it arrived correct on 2026-08-21 with `#99`, and
+its model says why — *"a credential that outlived its user would still be a live sign-in path
+pointing at a row that no longer exists"* (`models/webauthn_credential.py:31-33`). It is the one
+table whose author was asked the question before writing it.
+
+This is the same argument the five-way hard-delete change made and won — *"The schema had been
+specifying the right behaviour and never executing it"*. The difference is that this time the schema
+was not specifying it either.
+
+**Nothing deletes a user yet.** This revision only makes it possible; the purge job that uses it is
+`plans/account-deletion.md` §6, a later change. That ordering is deliberate — a schema change with
+no behaviour change is a PR whose whole content is the FK table above — but it means the guarantee
+ships with no caller to exercise it, which is why `tests/test_user_cascade.py` exists rather than
+the cascade being pinned incidentally by the purge's own tests.
+
+### Two mechanical traps in writing the revision
+
+**Autogenerate does not detect an `ondelete` change.** Add `ondelete="CASCADE"` to ten models, run
+`alembic revision --autogenerate`, and you get an empty revision and a green terminal.
+`alembic check` is quiet for the same reason — it compares what autogenerate compares. So the
+revision is hand-written, and so is the only test that would catch it being wrong.
+
+**Postgres cannot `ALTER` a constraint's delete rule.** Each one is `DROP CONSTRAINT` plus
+`ADD CONSTRAINT` under the same name, ten times, in both directions. The names are Postgres's own
+`<table>_<column>_fkey` default (the baseline declares these FKs unnamed and the metadata carries no
+`naming_convention`), and they were read off the live database rather than inferred from that rule.
+`downgrade` passes `ondelete=None`, which renders no `ON DELETE` clause at all — which *is* NO
+ACTION, so the round trip is exact rather than approximately so. Verified by running it: the
+downgrade restores exactly ten `confdeltype = 'a'` rows and the upgrade removes them again.
+
+### The index question, asked and already answered
+
+An unindexed FK with `ON DELETE CASCADE` seq-scans the child table on every parent delete, and a
+**partial** index on a cascade target counts as none — the referential-integrity lookup carries no
+predicate for one to be implied by. That is measured, not reasoned about; see *"The indexes are the
+part that needed care, not the deletes"*, where the same trap cost two extra indexes on
+`gear_service_record`.
+
+Checked here against the live schema rather than the models, and all ten already have a plain btree
+leading with `user_id`: eight from `index=True`, plus `ux_dive_file_user_id_sha256` and the unique
+`ix_user_dive_stats_user_id`. So this change adds no index, and the reason it needed none is a fact
+about the current schema rather than a property of the design — a new table joining the list has to
+be checked the same way.
+
+### The test is in two halves because they fail on different things
+
+`TestEveryForeignKeyIntoUserCascades` walks `Base.metadata` and needs no database. It exists for the
+copy-paste that produced eight of the ten originals: a new model reaching `user.id` with a bare
+`ForeignKey("user.id")` would reinstate the bug and fail nothing else, and the failure would surface
+in a cron job on the first account that owned one of its rows.
+
+`TestDeletingAUserTakesEverythingWithIt` needs Postgres, because the models' opinion and the
+database's are separate facts and only the second governs a real delete. It seeds one row in each of
+the ten tables plus the second-order rows that hang off them, then issues the `DELETE` as raw SQL.
+The second-order half is not decoration: a cascade stopping one level short would orphan
+`certification_file`, `dive_dive_site`, `gear_set_item` and `trip_location` silently rather than
+raising, so counting only the ten would pass while they stayed.
+
+One trap in running it. `conftest._ensure_tables` builds the test schema with `create_all`, which
+creates missing tables and **never alters an existing one** — so on a dev database that has not run
+`alembic upgrade head` since this change, the Postgres half fails. That is the correct outcome, not
+a fixture bug: that database really would refuse the delete. And per CONTRIBUTING.md the whole class
+skips silently without `POSTGRES_SERVER=localhost`, so a green run on the host proves nothing until
+you have checked it did not skip.

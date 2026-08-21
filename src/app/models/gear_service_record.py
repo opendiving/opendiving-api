@@ -21,7 +21,7 @@ class GearServiceRecord(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
 
     id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
     # Denormalized owner, same reasoning as on `GearServiceSchedule`.
-    user_id: Mapped[int] = mapped_column(ForeignKey("user.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), index=True)
     gear_item_id: Mapped[int] = mapped_column(ForeignKey("gear_item.id", ondelete="CASCADE"))
     # Copied from the schedule at write time rather than read back through
     # `gear_service_schedule_id`. Two reasons: a record may have no schedule at all, and
