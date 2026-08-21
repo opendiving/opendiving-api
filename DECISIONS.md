@@ -11218,16 +11218,26 @@ it and several strings here: `=false`, `="false"` and `"commit.gpgsign=false"` f
 `=`, `=""` and `"commit.gpgsign="` for the empty one. Each key's pattern therefore allows one
 optional quote ahead of a spelled-out falsy word - `git config commit.gpgsign "false"` was unmatched
 before this change - and, for the empty value, up to two stray quote characters after the `=`,
-asserting only that the token ends there. Fitting the pattern to one example at a time is what
-produced two rounds of this; the shell's own quote-stripping is the rule that covers them all.
+asserting only that the shell word ends there. Fitting the pattern to one example at a time is what
+produced three rounds of this; the shell's own quote-stripping is the rule that covers them all.
 
 The space-separated *write* needs its own alternative, and an explicit quote pair with it.
 `git config --global commit.gpgsign ""` persists an empty value, so from then on `signing_is_on`
 reads `false` and the guard is inert - the disarm hazard again, arriving through a set rather than
-an unset. It cannot be matched as "the key, whitespace, then nothing", because `(?!\S)` is satisfied
-by *more* whitespace: that spelling fires on any command that merely mentions the key and then
-breaks a line, which is most of this file. Requiring the `""` or `''` that a shell must have written
-to pass an empty argument keeps it to the real case, verified against both.
+an unset. It cannot be matched as "the key, whitespace, then nothing", because a `(?!\S)` lookahead
+is satisfied by *more* whitespace: that spelling fires on any command that merely mentions the key
+and then breaks a line, which is most of this file. Requiring the `""` or `''` that a shell must
+have written to pass an empty argument keeps it to the real case, verified against both.
+
+**And "the word ends here" is not `(?!\S)`.** That was the third miss in the same place, and it is
+the one worth carrying somewhere else: a shell word can end on a metacharacter written flush against
+it, with no space at all. `git config --global commit.gpgsign ""; git commit -m x` is ordinary
+chaining rather than evasion, and against `(?!\S)` the `;` reads as more value and the whole
+alternative fails - so the one command that persists the disarming write walked through, while the
+same command with a space before the `;` blocked. The lookahead is therefore written against the
+complement, `(?![^\s;&|()<>])`: whitespace, end of string, or any of the characters that end a word
+in a shell. Over-blocking is the safe side of that trade, and it stays cheap because the gate only
+lets a match through when git says the key is on.
 
 **Where the line is, deliberately.** The patterns match *git command* shapes. They do not match
 `sed` on `~/.gitconfig`, and they do not match `GIT_CONFIG_GLOBAL=/dev/null git commit`, which hides

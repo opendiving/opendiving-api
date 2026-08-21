@@ -44,7 +44,8 @@ DISABLE = (
               --no-gpg-sign\b                      # commit/rebase/cherry-pick spelling
             | \b commit\.gpgsign \s* [=\ ] \s* ["']? (?: false | 0 | no | off | n )\b
             | \b commit\.gpgsign                   # an empty value is false to git
-              (?: = ["']{0,2} | \s+ (?: "" | '' ) ) (?! \S )
+              (?: = ["']{0,2} | \s+ (?: "" | '' ) )
+              (?! [^\s;&|()<>] )                   # word ends: space, chain, or EOL
             | (?<![\w-]) (?:--)? unset (?:-all)? \b    # removal, naming the key
               [^\n]* \b commit\.gpgsign \b
             | (?<![\w-]) (?:--)? (?: remove | rename ) -section \b
@@ -59,7 +60,8 @@ DISABLE = (
             r"""
               \b tag\.gpgsign \s* [=\ ] \s* ["']? (?: false | 0 | no | off | n )\b
             | \b tag\.gpgsign
-              (?: = ["']{0,2} | \s+ (?: "" | '' ) ) (?! \S )
+              (?: = ["']{0,2} | \s+ (?: "" | '' ) )
+              (?! [^\s;&|()<>] )
             | (?<![\w-]) (?:--)? unset (?:-all)? \b
               [^\n]* \b tag\.gpgsign \b
             | (?<![\w-]) (?:--)? (?: remove | rename ) -section \b
