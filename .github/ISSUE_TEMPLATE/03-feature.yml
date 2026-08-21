@@ -1,0 +1,17 @@
+name: Feature request
+description: Something the API should be able to do and can't
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The problem, in terms of diving rather than of endpoints — what you wanted to record, find or get out, and where it stopped.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: What would you have it do?
+      description: Only if you have something in mind. A well-described problem is worth more than a half-designed solution, and this box is fine left empty.

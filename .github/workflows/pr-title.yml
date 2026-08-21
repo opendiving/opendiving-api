@@ -4,7 +4,14 @@ on:
   pull_request:
     # `edited` is the one that matters: it re-runs the check when a title is
     # corrected, so a failing PR goes green without an empty commit to push.
-    types: [opened, edited, reopened]
+    #
+    # `synchronize` is not about the title at all - it is what lets this be a
+    # required check. A required check has to have passed on the PR's *latest*
+    # head SHA, so without a run per push, a PR that gains a second commit
+    # would sit at "Expected - waiting for status" for good. The title is read
+    # from the event payload rather than from the tree, so the extra runs
+    # reach the same verdict.
+    types: [opened, edited, reopened, synchronize]
 
 # The one list of types, read by both jobs below: the check that enforces them
 # and the labels that carry them into the release notes. CONTRIBUTING.md spells

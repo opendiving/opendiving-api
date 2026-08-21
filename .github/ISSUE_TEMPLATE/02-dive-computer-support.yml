@@ -1,0 +1,59 @@
+name: Dive-computer or file-format support
+description: Ask for a computer or export format the importer doesn't read yet
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Adding a parser is the most useful contribution available here, and the scarce ingredient is not the code —
+        it is a real export from a computer nobody on this project owns. What is already read, and what is next in
+        line, is in the [README](https://github.com/opendiving/opendiving-api#readme); the parser interface is in
+        [CONTRIBUTING.md](https://github.com/opendiving/opendiving-api/blob/main/CONTRIBUTING.md#adding-a-dive-computer-parser).
+
+  - type: input
+    id: model
+    attributes:
+      label: Make and model
+      placeholder: Shearwater Perdix 2, Garmin Descent Mk3i, Mares Genius…
+    validations:
+      required: true
+
+  - type: input
+    id: format
+    attributes:
+      label: Export format
+      description: What the file is, and which app or desktop tool produces it.
+      placeholder: UDDF 3.2.2 out of Subsurface, .db export from Shearwater Cloud…
+    validations:
+      required: true
+
+  - type: textarea
+    id: how-to-export
+    attributes:
+      label: How you get the file out
+      description: The menu path, and whether it exports one dive or the whole log. This is the part that is hard to guess without the hardware.
+
+  - type: markdown
+    attributes:
+      value: |
+        ### Before you attach a sample
+
+        **A dive export is personal data.** Depending on the format it can carry the GPS coordinates of where you
+        dived, the serial numbers of your computer and transmitters, your name, and dates. An attachment on a public
+        issue cannot be unpublished — treat anything you drop in as permanent.
+
+        Strip it first — or better, export a pool session rather than a real dive. One dive is plenty either way: a
+        parser needs the shape of the format, not your logbook.
+
+  - type: textarea
+    id: sample
+    attributes:
+      label: Sample file
+      description: Drag the file into this box to attach it. If it is a format GitHub refuses, zip it.
+
+  - type: checkboxes
+    id: offer
+    attributes:
+      label: Optional
+      options:
+        - label: I would be up for writing the parser myself, with pointers

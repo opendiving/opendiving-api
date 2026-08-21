@@ -12,5 +12,6 @@ import is what loads it. Only genuinely Claude-specific instructions belong bene
 
 # Claude Code
 
-Project-wide conventions live in the parent `opendiving/CLAUDE.md`, which loads alongside this file
-when Claude starts here.
+In the maintainer's private umbrella checkout, project-wide conventions live in the parent
+`opendiving/CLAUDE.md`, which loads alongside this file when Claude starts here. A standalone clone
+of this repo has no such parent, and needs nothing beyond this file.

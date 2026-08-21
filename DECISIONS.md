@@ -11284,3 +11284,45 @@ was reproduced against the pre-gate hook, which blocked only the two inline-over
 a run of commands that must *not* block - a plain `git commit`, a `git config --get` of either key,
 `=true` - because every fix here widens a pattern, and nothing else would notice it widening too
 far.
+
+## Issue templates are YAML forms, and the sharp edges are in what a form cannot do
+
+`.github/ISSUE_TEMPLATE/` holds **forms**, not markdown templates, for one reason: the two answers
+that decide whether a bug report is actionable — which version, and how it was installed — are the
+two a free-text template reliably doesn't get. A required `input` and a `dropdown` do. The install
+dropdown's three real options are the three ways this actually runs (release bundle,
+`docker compose up` from a clone, host tooling against `src/`), and the container dropdown offers
+`api`, `worker` and `admin_init`, because "the app is broken" from someone whose `admin_init` never
+seeded is a different investigation entirely.
+
+**Security has no form and never will.** It is a `contact_links` entry in `config.yml` pointing at
+private vulnerability reporting, because anything with a form behind it produces a public issue, and
+SECURITY.md's whole argument is that a public issue starts the exposure clock before the fix exists.
+The same file's other two links route questions to Discussions and browser-side reports to
+`opendiving-web`. Private vulnerability reporting and Discussions are both repository switches
+thrown when this goes public, so both URLs 404 until then — written ahead of the flip on purpose,
+since the alternative is a security link that appears the day *after* the file describing it does.
+
+**A form applies labels but does not create them.** Anything named under `labels:` has to exist in
+the repository already, so the forms name only `bug` and `enhancement` — the stock set plus the
+conventional-commit type labels `pr-title.yml` manages is everything there is, and an area label
+invented in a form would simply be dropped on submission with nothing to notice it. Issues opened
+through the API skip templates altogether, so the `image-cve` issue the vulnerability scan files is
+unaffected by any of this.
+
+**Blank issues stay enabled.** Three forms are a guess about what people will report, and a report
+nobody anticipated is worth more than a well-formatted one.
+
+**There is no file-upload field**, which matters for the dive-computer support form, whose entire
+purpose is collecting a sample export. The attachment is a drag into an ordinary `textarea`, so the
+privacy warning is a `markdown` block sitting above it rather than a field's own description, and
+nothing can enforce it: dive exports carry GPS coordinates, computer and transmitter serials, names
+and dates, and an attachment on a public issue cannot be unpublished. The form asks for a pool
+session instead of a real dive, which is the only advice here that removes the data rather than
+trusting someone to strip it.
+
+**"Paste your logs" is an instruction to paste credentials, here.** With `SMTP_HOST` unset the
+sign-in email is written to the API log, magic link and six-digit code included, and both are live
+for whoever's account they belong to — so the bug form's logs field says to read the lines before
+pasting them. Local development is exactly the configuration that produces those log lines, and
+exactly the configuration a bug reporter is most likely to be running.

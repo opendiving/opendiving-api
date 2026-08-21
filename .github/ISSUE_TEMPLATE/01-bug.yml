@@ -1,0 +1,68 @@
+name: Bug report
+description: Something in the API, the worker or the install behaves wrongly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Found a **security** problem instead? Don't file it here — [SECURITY.md](https://github.com/opendiving/opendiving-api/blob/main/SECURITY.md)
+        has the private channel. Every self-hosted instance is exposed for as long as a public issue is open.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The image tag you are running, or the commit if you build from source. `curl -s https://your-instance/api/v1/health` prints it.
+      placeholder: "0.3.1, or latest @ a1b2c3d"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How is it installed?
+      options:
+        - Release bundle — the compose file and prebuilt images from a release
+        - From source — docker compose up in a clone of this repository
+        - Host tooling — uv run against the app directly, no container
+        - Something else (say so below)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: container
+    attributes:
+      label: Which container?
+      description: Where the problem shows up, not where you think the cause is.
+      options:
+        - api
+        - worker
+        - admin_init
+        - More than one, or not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, and what came back. A `curl` line or a request/response pair beats a description of one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        `docker compose logs api --tail=100`, or the worker's. Read them before pasting: with `SMTP_HOST` unset the
+        sign-in emails are written to the log, and those magic links and six-digit codes are live credentials for
+        whoever's account they belong to.
+      render: shell
