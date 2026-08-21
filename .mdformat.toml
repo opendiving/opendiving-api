@@ -1,4 +1,4 @@
-# Markdown formatting for the docs at the repo root and under `docs/`.
+# Markdown formatting for the docs at the repo root and under `docs/` and `.github/`.
 #
 # `wrap = 100` matches the `printWidth` opendiving-web's Prettier config uses for
 # markdown, so the two DECISIONS.md files stay visually alike. `number = true` keeps

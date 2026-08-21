@@ -43,7 +43,7 @@ Three workflows run on every pull request, and all must be green. Run them local
 ```bash
 uv run ruff check src tests scripts
 uv run ruff format --check src tests scripts
-uv run mdformat --check *.md docs
+uv run mdformat --check *.md docs .github
 uv run mypy src --config-file pyproject.toml
 uv run mypy tests --config-file pyproject.toml
 uv run mypy scripts --config-file pyproject.toml
@@ -131,7 +131,7 @@ annotations.
 The markdown docs are formatted too — drop the `--check` to rewrite them:
 
 ```bash
-uv run mdformat *.md docs
+uv run mdformat *.md docs .github
 ```
 
 That covers `DECISIONS.md`, which you will be appending to. Write the new section however it comes
