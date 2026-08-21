@@ -257,7 +257,43 @@ docker compose exec api python -m src.scripts.backfill_dive_profiles --parser-ke
 - Say in the description what you changed, why, and anything a reviewer has to do by hand (schema
   SQL, new env vars, a backfill script).
 - If the change affects the API contract, mention whether the web or iOS client needs a matching
-  change.
+  change — and if you are writing that matching change yourself, see below.
+
+**Changes that span both repos.** Open the api pull request first, and link the two to each other so
+whoever lands on one can see the other half. Expect the api side to merge first: a client is written
+against an endpoint that exists, and merging in the other order leaves `main` calling something that
+isn't there yet.
+
+No CI job tests the pair together. Each repo's checks run against its own tree, so a contract that
+drifted between them passes both and breaks only when the two are actually run side by side — which
+makes the linked pull requests the whole safety net, and the linking an ask rather than a courtesy.
+
+## What to expect
+
+One maintainer, on this in their spare time. It is the same caveat [SECURITY.md](SECURITY.md) makes
+about vulnerability reports, and it applies to ordinary issues and pull requests too — there is no
+review rota and nobody covering a quiet fortnight.
+
+The usual shape is a first response within a few days. If a week goes by in silence, **ping the
+thread.** That means it got buried, not that it was read and dismissed, and a reminder is welcome
+rather than pushy. Nothing here is closed for going stale either: an issue or a PR gets closed by a
+human with a reason, or it stays open.
+
+## AI-assisted contributions
+
+Welcome, and this repository is unusually ready for them on purpose. [AGENTS.md](AGENTS.md) and
+[DECISIONS.md](DECISIONS.md) are written for your tools as much as for you — the first is the
+conventions an agent should have loaded before it writes a line, the second is every trap already
+hit here and what it cost. Point a coding agent at this repo and it starts better briefed than it
+would on most.
+
+What that does not change is who owns the pull request. The person who opens it is its author: you
+ran the change, you understood it, and you can answer a review question about any line without going
+back to the model to ask. That is the entire bar, and it is the same one a hand-typed PR meets.
+
+Bulk submissions nobody read before opening get closed without ceremony — not as a verdict on the
+tooling, but because review attention is the scarce resource here and unreviewed output is what
+spends it fastest.
 
 ## For maintainers
 
