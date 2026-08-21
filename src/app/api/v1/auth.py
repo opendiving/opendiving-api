@@ -107,6 +107,11 @@ logger = logging.getLogger(__name__)
 # caller who has not already proven they are the browser that asked for it.
 _CODE_REJECTED = "This code is invalid or has expired."
 
+# `POST /auth/restore`'s answer to a token it will not spend. Asked twice - once before the
+# row is locked and once as the `IntegrityError` a concurrent second submission raises on
+# the blacklist insert - so the two must say the same thing.
+_RESTORE_REJECTED = "This restore link is invalid, has expired, or has already been used."
+
 
 def _has_expired(auth_request: dict[str, Any]) -> bool:
     """Whether a request's `expires_at` is in the past, tolerating a naive timestamp.
@@ -397,10 +402,12 @@ async def verify_email_code(
     Every rejection is the same sentence (`_CODE_REJECTED`), including the case where the
     `request_id` names nothing at all.
 
-    Unlike the link, this claims the request *before* resolving the identity, so a code
-    spent on reaching a `deletion_pending` screen is spent - closing that tab costs a fresh
-    code, where the same journey by magic link leaves the link unused and reopenable until
-    it expires. The screen has to say so.
+    A code spent on reaching a `deletion_pending` screen is spent: the request is claimed
+    before the identity is resolved, and the screen has to say so, because closing that tab
+    costs a fresh code. The link reaches the same screen without that cost - not because
+    `verify_email_link` orders those two steps any differently (it does not), but because
+    the link path has `GET /auth/email/verify/check` in front of it, which answers
+    `deletion_pending` while marking nothing used. The code has no such precheck to reach.
     """
     await enforce_rate_limit(
         f"auth:email-verify-code:ip:{client_ip(request)}",
@@ -634,7 +641,7 @@ async def restore_account(
 
     user_uuid = await verify_restore_token(body.restore_token, db)
     if user_uuid is None:
-        raise UnauthorizedException("This restore link is invalid, has expired, or has already been used.")
+        raise UnauthorizedException(_RESTORE_REJECTED)
 
     locked = (
         await db.execute(select(User.id, User.is_deleted).where(User.uuid == user_uuid).with_for_update())
@@ -651,10 +658,23 @@ async def restore_account(
 
     # Commits the restore with it - `crud_token_blacklist.create` commits the session - so
     # the account coming back and its token being spent are one transaction, and the row
-    # lock above is held across both. A second submission of the same screen finds the
-    # token blacklisted; a second *token* (a fresh one from another entry point) finds the
-    # account already live and simply signs in, which is the same answer either way.
-    await blacklist_token(body.restore_token, db)
+    # lock above is held across both. A second *token* (a fresh one from another entry
+    # point) finds the account already live and simply signs in, which is the same answer
+    # either way.
+    #
+    # The same token submitted twice is the case the `except` is for, and it is the only
+    # write here that a lock cannot serialize away. `verify_restore_token` reads the
+    # blacklist *before* the lock is taken, so a double-click has both requests past that
+    # check before either commits; the loser then wakes up holding the lock and tries to
+    # insert a `token_blacklist.token` that is unique and already there. That is the
+    # deferred half of the check above, so it answers the same 401 rather than the 500 an
+    # escaping `IntegrityError` would be. The rollback drops the loser's own UPDATE with
+    # it, which is right: the winner has already restored the account.
+    try:
+        await blacklist_token(body.restore_token, db)
+    except IntegrityError:
+        await db.rollback()
+        raise UnauthorizedException(_RESTORE_REJECTED) from None
 
     tokens = await issue_tokens(response, user_uuid)
     return AuthOutcome(status="authenticated", **tokens)

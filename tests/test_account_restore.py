@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 import pytest_asyncio
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -376,6 +377,34 @@ class TestRestoreAccount:
 
         assert outcome.status == "authenticated"
         assert 'UPDATE "user"' not in session.sql
+
+    @pytest.mark.asyncio
+    async def test_a_double_submit_that_loses_the_race_is_a_401_not_a_500(self):
+        """The one write here a row lock cannot serialize away.
+
+        `verify_restore_token` reads the blacklist *before* the lock is taken, so both
+        halves of a double-click are past that check before either commits. The loser then
+        wakes up holding the lock and inserts a `token_blacklist.token` that is unique and
+        already there - an uncaught `IntegrityError` would be a 500 on a restore that
+        actually succeeded.
+        """
+        session = _RestoreSession(locked=Mock(id=1, is_deleted=False))
+
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.verify_restore_token", new_callable=AsyncMock) as verify,
+            patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock) as blacklist,
+        ):
+            verify.return_value = USER_UUID
+            blacklist.side_effect = IntegrityError("duplicate key", None, Exception())
+
+            with pytest.raises(UnauthorizedException) as raised:
+                await self._call(session, "tok")
+
+        # The same sentence the pre-lock check answers with - the two are one question
+        # asked at two moments.
+        assert "already been used" in str(raised.value.detail)
+        session.rollback.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_a_token_that_does_not_verify_is_a_401(self, mock_db):

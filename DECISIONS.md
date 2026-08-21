@@ -10833,6 +10833,14 @@ Spending the token commits the restore with it — `crud_token_blacklist.create`
 so the account coming back and its token being spent are one transaction, with the lock held across
 both.
 
+The lock does not settle *everything*, and the exception is the one write it cannot reach.
+`verify_restore_token` reads the blacklist before the row is locked, so a double-clicked button has
+both requests past that check before either commits; the loser then wakes up holding the lock and
+inserts a `token_blacklist.token` that is unique and already there. That `IntegrityError` is caught
+and answered as the same "already used" 401 the pre-lock check gives, because an escaping one is a
+500 on a restore that in fact succeeded. It is the same check asked at two moments, so both moments
+say the same sentence — hence `_RESTORE_REJECTED` being a constant rather than two string literals.
+
 ### The precheck is a nicety on one path out of four, and the plan used to argue from it
 
 `GET /auth/email/verify/check` now looks the user up (it inspected only the `authentication_request`
