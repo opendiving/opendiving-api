@@ -55,8 +55,31 @@ MAX_AVATAR_UPLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
 # Pixels, checked against the *header* before anything is decoded. A 10 MB upload can
 # describe far more pixels than it costs bytes, which is the whole shape of a
 # decompression bomb: 50 MP is roughly a 7000x7000 photo, comfortably above any camera
-# somebody points at their own face and far below what would hurt to rasterize.
+# somebody points at their own face.
+#
+# It is **not** low enough to make the raster free, and that is worth stating rather than
+# implying. A 50 MP RGB raster is 150 MB, and a uniform PNG that describes one costs a
+# couple of hundred kilobytes on the wire - a four-figure amplification that the byte cap
+# above cannot see. So the cap is one of three things holding memory down, the other two
+# being `_normalize`'s reduced decode and `_DECODE_LIMITER`'s bound on how many of these
+# can be in flight at once. Lowering it further would start rejecting real phone photos -
+# 48 and 50 MP sensors ship today - which is a worse trade than bounding the concurrency.
 MAX_AVATAR_PIXELS = 50_000_000
+
+# One avatar decoded at a time per worker process, which is what turns "150 MB per 50 MP
+# raster" into a bound rather than a multiplier. Without it the ceiling is the app's own
+# threadpool - `core/setup.set_threadpool_tokens` raises it to 100 per worker, and the
+# shipped image runs four - so a hundred concurrent uploads of a cap-passing uniform PNG
+# is not a number a single-node install survives. Measured on this pipeline: 206 MB for a
+# 7000x7000 PNG, 10 MB for the same picture as a JPEG (see `_normalize` on why they
+# differ), against 568 MB for both before the reduced decode landed.
+#
+# One rather than a handful because it costs nothing to be strict here. A realistic phone
+# photo is tens of milliseconds through this, uploads are rare - once per account,
+# occasionally again - and the input that would make the queue matter is precisely the
+# hostile one. Passed to `run_sync` as its own limiter rather than shrinking the global
+# one, which every other blocking hop in the app shares.
+_DECODE_LIMITER = anyio.CapacityLimiter(1)
 
 # Only these four parsers are ever invoked. Pillow ships dozens, several for formats whose
 # decoders have a CVE history and none of which anyone uploads as an avatar; `formats=`
@@ -114,6 +137,16 @@ def _normalize(data: bytes) -> bytes:
     it is handed in `save()`, and nothing here hands it the source's EXIF, ICC profile or
     XMP. An animated input contributes its first frame, which is the one `Image.open`
     leaves selected.
+
+    **Every step after the cap is written to hold one full-resolution raster, not three**,
+    because at the cap one of those is 150 MB. `draft` asks the decoder for the smallest
+    raster still no smaller than the avatar - JPEG does this natively by decoding at a
+    fraction of the DCT scale, which is what `Image.thumbnail` uses it for, and it turns
+    the common phone-photo case into a couple of megabytes. `exif_transpose` runs
+    `in_place` because it copies otherwise, and the mode conversion is guarded because
+    `convert` to the mode an image already has copies too. `ImageOps.fit` crops and
+    resizes in a single `resize(..., box=...)`, so the square is never materialised at
+    full size either.
     """
     try:
         with Image.open(io.BytesIO(data), formats=ALLOWED_FORMATS) as image:
@@ -123,15 +156,21 @@ def _normalize(data: bytes) -> bytes:
                     f"That image is too large to process ({width}x{height}). Please use a smaller photo."
                 )
 
-            oriented = ImageOps.exif_transpose(image) or image
+            # After the cap, never before: the cap has to judge what the file *claims*,
+            # which is what makes it a bomb check rather than a resizing hint.
+            image.draft(None, (AVATAR_DIMENSION, AVATAR_DIMENSION))
+            ImageOps.exif_transpose(image, in_place=True)
+
             # Alpha survives into the WebP rather than being composited onto an invented
             # background: a logo with a transparent corner should keep it, and the clients
             # draw avatars on surfaces of several different colours.
-            has_alpha = oriented.mode in ("RGBA", "LA") or (oriented.mode == "P" and "transparency" in oriented.info)
-            oriented = oriented.convert("RGBA" if has_alpha else "RGB")
+            has_alpha = image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info)
+            target_mode = "RGBA" if has_alpha else "RGB"
+            oriented = image if image.mode == target_mode else image.convert(target_mode)
 
-            # Never larger than the source's shorter edge, so nothing is upscaled. `fit`
-            # centre-crops to the square and resizes in one pass.
+            # Never larger than the source's shorter edge, so nothing is upscaled - `draft`
+            # cannot have taken it below the avatar dimension, since it only reduces while
+            # the result stays at least that large.
             edge = min(oriented.width, oriented.height, AVATAR_DIMENSION)
             square = ImageOps.fit(oriented, (edge, edge), method=Image.Resampling.LANCZOS)
 
@@ -145,15 +184,17 @@ def _normalize(data: bytes) -> bytes:
 
 
 async def process_avatar(data: bytes) -> bytes:
-    """`_normalize`, off the event loop.
+    """`_normalize`, off the event loop and behind `_DECODE_LIMITER`.
 
     A decode plus a WebP encode is tens to hundreds of milliseconds of pure CPU, and the
     same thread hop every other blocking hop in this app takes (`blob_store.put`, the
-    dive-export parse, the Google key fetch).
+    dive-export parse, the Google key fetch). Unlike those, it is also the one hop whose
+    *memory* is set by what the caller uploaded rather than by what the app allocates -
+    hence its own limiter. See `_DECODE_LIMITER`.
     """
     if not data:
         raise UnsupportedAvatarImageError("The uploaded file is empty.")
-    return await anyio.to_thread.run_sync(_normalize, data)
+    return await anyio.to_thread.run_sync(_normalize, data, limiter=_DECODE_LIMITER)
 
 
 async def store_user_avatar(db: AsyncSession, *, user_id: int, upload: UploadFile) -> str:

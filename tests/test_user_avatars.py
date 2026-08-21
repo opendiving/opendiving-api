@@ -28,6 +28,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import anyio
 import httpx
 import pytest
 from fastapi import HTTPException, UploadFile
@@ -63,6 +64,7 @@ from tests.helpers.images import (
     animated_gif,
     bmp,
     jpeg_with_exif,
+    large_jpeg,
     plain_png,
     png_declaring,
     png_with_alpha,
@@ -159,6 +161,65 @@ class TestNormalization:
         result = _open(_normalize(plain_png(size=(120, 80))))
 
         assert result.size == (80, 80)
+
+    def test_a_large_jpeg_is_never_decoded_at_full_resolution(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The memory half, and it does not show up in any output the other tests read.
+
+        The pixel cap bounds what is *accepted*, not what is allocated: a cap-passing
+        50 MP source is a 150 MB raster, and the route has no rate limit in front of it.
+        `draft` is what makes the common case cheap - JPEG decodes at a fraction of the DCT
+        scale, so nothing near full resolution is ever materialised. Asserted on the opened
+        image's own size, which `draft` rewrites in place before a pixel is read.
+        """
+        opened: list[Image.Image] = []
+        real_open = Image.open
+
+        def spy(fp: Any, **kwargs: Any) -> Image.Image:
+            image = real_open(fp, **kwargs)
+            opened.append(image)
+            return image
+
+        monkeypatch.setattr(user_avatars.Image, "open", spy)
+
+        result = _open(_normalize(large_jpeg(size=(4000, 4000))))
+
+        # A quarter of each edge: `draft` halves while the result stays at or above the
+        # requested size, and an eighth (500) would fall under the 512 px avatar. So a
+        # 48 MB raster becomes 3 MB, and the assertion is on the size the decoder was left
+        # holding rather than on anything the output could tell you.
+        assert opened[0].size == (1000, 1000), "the full-resolution raster was decoded anyway"
+        assert result.size == (AVATAR_DIMENSION, AVATAR_DIMENSION)
+
+    def test_a_jpeg_already_near_the_avatar_size_is_not_reduced_below_it(self) -> None:
+        """The other side of `draft`: it only reduces while the result stays at least the
+        avatar dimension, so the no-upscaling rule survives it."""
+        result = _open(_normalize(large_jpeg(size=(700, 700))))
+
+        assert result.size == (AVATAR_DIMENSION, AVATAR_DIMENSION)
+
+    @pytest.mark.asyncio
+    async def test_decodes_run_one_at_a_time_per_worker(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The bound that makes the raster size a ceiling rather than a multiplier.
+
+        Asserted on the wiring rather than on memory: a resident-set measurement is both
+        noisy and monotonic, while "this hop carries its own limiter, and it is not the
+        global one every other blocking call shares" is exactly the property that would be
+        lost if someone simplified the `run_sync` call.
+        """
+        captured: dict[str, Any] = {}
+        real_run_sync = user_avatars.anyio.to_thread.run_sync
+
+        async def spy(func: Any, *args: Any, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return await real_run_sync(func, *args, **kwargs)
+
+        monkeypatch.setattr(user_avatars.anyio.to_thread, "run_sync", spy)
+
+        await user_avatars.process_avatar(jpeg_with_exif())
+
+        assert captured["limiter"] is user_avatars._DECODE_LIMITER
+        assert user_avatars._DECODE_LIMITER.total_tokens == 1
+        assert user_avatars._DECODE_LIMITER is not anyio.to_thread.current_default_thread_limiter()
 
     def test_an_image_over_the_pixel_cap_is_refused_from_its_header_alone(self) -> None:
         """The app's own band. The fixture declares 56 MP in 74 bytes, which is the point:

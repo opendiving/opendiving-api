@@ -10973,6 +10973,38 @@ against Pillow's real limit and once with `MAX_IMAGE_PIXELS` lowered under an or
 *declares* the dimensions — the checks are header-only, so materialising a real raster would cost
 168 MB of test memory to prove nothing extra.
 
+### The pixel cap bounds what is *accepted*, not what is allocated
+
+This was caught in review and is the least obvious thing in the feature. The 50 MP cap reads like a
+memory bound and is not one: a 50 MP RGB raster is 150 MB, and a uniform PNG that describes one is
+about 150 KB on the wire — a four-figure amplification the 10 MB byte cap cannot see, on a route
+with no rate limit in front of it. The first draft held **three** full-resolution rasters at once,
+because `ImageOps.exif_transpose` copies and `Image.convert` copies even when the mode already
+matches. Measured with `ru_maxrss` on a 7000×7000 PNG: **568 MB for one request**.
+
+Three changes, none of which touch the cap:
+
+- **`image.draft(None, (512, 512))`** immediately after the cap check. JPEG decodes at a fraction of
+  the DCT scale, which is what `Image.thumbnail` uses this for, and it halves while the result stays
+  at or above the requested size — so the no-upscaling rule survives it. The same 7000×7000 picture
+  as a JPEG went from 568 MB to **10 MB**. It has to sit *after* the cap, because the cap has to
+  judge what the file claims; before it, a bomb would be quietly downscaled instead of rejected.
+- **`exif_transpose(..., in_place=True)`** and a guarded `convert`, which removes the two redundant
+  copies. The PNG case — no `draft` support, so one raster is unavoidable — went to **206 MB**.
+- **`_DECODE_LIMITER`**, an `anyio.CapacityLimiter(1)` passed to `run_sync` as its own limiter.
+  Without it the ceiling is the app's threadpool, which `core/setup.set_threadpool_tokens` raises to
+  100 per worker against four workers in the shipped image. One at a time costs nothing real — a
+  phone photo is tens of milliseconds through this, uploads are rare, and the input that would make
+  the queue matter is the hostile one.
+
+Lowering the cap instead was considered and rejected: 48 and 50 MP phone sensors ship today, and
+rejecting a real photo is a worse trade than bounding the concurrency. The cap stays a bomb check,
+which is all it ever was.
+
+Worth generalizing, because the next image feature will meet it: **an accept-side limit in pixels is
+not a limit in bytes of memory**, and the gap between them is whatever the format's compression
+ratio can be made to be.
+
 ### The retired key is read from the database, never from `current_user`
 
 `store_user_avatar` reads the key it is replacing with a fresh narrow `select`, and takes no

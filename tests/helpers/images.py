@@ -99,6 +99,21 @@ def plain_png(*, size: tuple[int, int]) -> bytes:
     return buffer.getvalue()
 
 
+def large_jpeg(*, size: tuple[int, int]) -> bytes:
+    """A JPEG big enough for the decoder's reduced-scale path to have something to do.
+
+    Gently textured rather than flat: a uniform image compresses to almost nothing, and a
+    fixture whose bytes bear no relation to its dimensions is the one that makes a size
+    assertion read as a coincidence.
+    """
+    image = Image.new("RGB", size, "teal")
+    for x in range(0, size[0], 64):
+        image.paste(Image.new("RGB", (32, size[1]), "orange"), (x, 0))
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=85)
+    return buffer.getvalue()
+
+
 def bmp() -> bytes:
     """A perfectly valid image in a format the `formats=` allowlist does not name."""
     buffer = io.BytesIO()
