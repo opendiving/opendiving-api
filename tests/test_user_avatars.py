@@ -5,14 +5,15 @@ security boundary**, not a resizing convenience: Pillow is being handed bytes an
 caller chose, and what comes out has to be metadata-free whatever went in. So the branches
 tested here are the rejections and the strippings, not the happy resize.
 
-Two of those rejections look like one check and are two, which is the trap this module
-exists to keep closed. An image between the app's 50 MP cap and Pillow's own limit is
-rejected by `_normalize`'s explicit test; an image past 178,956,970 px never reaches that
-line, because `Image.open` raises `DecompressionBombError` first. A pixel-cap test whose
-fixture sits under that threshold passes while the largest inputs of all 500. Both bands
-are covered below, and the second one twice - once against Pillow's real limit, once
-against a lowered one, so the `except` clause is executed rather than merely reasoned
-about.
+Three of those rejections are about size, and they look like one check. An image between
+the app's claimed-size cap and Pillow's own limit is rejected by `_normalize`'s explicit
+test; an image past 178,956,970 px never reaches that line, because `Image.open` raises
+`DecompressionBombError` first; and an image that passes both can still be refused for what
+it would *rasterize* to, which is a different question from what it claims and the only one
+that governs memory. A test suite that covered one of the three would leave the largest
+inputs 500ing and the most compressible ones taking hundreds of megabytes. All three are
+covered below, and the bomb band twice - once against Pillow's real limit, once against a
+lowered one, so the `except` clause is executed rather than merely reasoned about.
 
 The store/delete group is about ordering (file before row, unlink after commit) and about
 *where the retired key comes from*, which is the other silent failure: reading it from the
@@ -46,6 +47,7 @@ from src.app.core.setup import create_application
 from src.app.services import blob_store, user_avatars
 from src.app.services.user_avatars import (
     AVATAR_DIMENSION,
+    MAX_AVATAR_DECODE_PIXELS,
     MAX_AVATAR_PIXELS,
     MAX_AVATAR_UPLOAD_SIZE,
     StoredAvatar,
@@ -239,6 +241,29 @@ class TestNormalization:
         """
         with pytest.raises(UnsupportedAvatarImageError):
             _normalize(png_declaring(20000, 10000))
+
+    def test_a_large_png_is_refused_for_what_it_would_rasterize_to(self) -> None:
+        """The second cap, and it is not a duplicate of the first.
+
+        9 MP is well under the claimed-size cap that catches bombs, and still far more than
+        this will hold in memory: `draft` cannot reduce a PNG, so the whole raster would be
+        materialised - and on the alpha paths two or three copies of it, against a
+        documented install minimum of 1 GB for the entire stack.
+        """
+        assert 3000 * 3000 < MAX_AVATAR_PIXELS
+        assert 3000 * 3000 > MAX_AVATAR_DECODE_PIXELS
+
+        with pytest.raises(UnsupportedAvatarImageError):
+            _normalize(png_declaring(3000, 3000))
+
+    def test_the_same_dimensions_as_a_jpeg_are_accepted(self) -> None:
+        """The pair to the test above, and the reason the decode cap does not read as
+        "no photos above 4 MP". A camera produces JPEG, `draft` reduces JPEG before the
+        cap is asked, and the same 9 MP that is refused as a PNG arrives here as 0.6 MP.
+        """
+        result = _open(_normalize(large_jpeg(size=(3000, 3000))))
+
+        assert result.size == (AVATAR_DIMENSION, AVATAR_DIMENSION)
 
     def test_the_bomb_guard_is_the_catch_and_not_the_fixture(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The same claim with the threshold moved under an ordinary image, so the `except`

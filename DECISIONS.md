@@ -10975,35 +10975,62 @@ against Pillow's real limit and once with `MAX_IMAGE_PIXELS` lowered under an or
 
 ### The pixel cap bounds what is *accepted*, not what is allocated
 
-This was caught in review and is the least obvious thing in the feature. The 50 MP cap reads like a
-memory bound and is not one: a 50 MP RGB raster is 150 MB, and a uniform PNG that describes one is
-about 150 KB on the wire — a four-figure amplification the 10 MB byte cap cannot see, on a route
-with no rate limit in front of it. The first draft held **three** full-resolution rasters at once,
-because `ImageOps.exif_transpose` copies and `Image.convert` copies even when the mode already
-matches. Measured with `ru_maxrss` on a 7000×7000 PNG: **568 MB for one request**.
+This took two rounds of review to get right, and it is the least obvious thing in the feature. The
+50 MP cap reads like a memory bound and is not one: a 50 MP RGB raster is 150 MB, and a uniform PNG
+that describes one is about 150 KB on the wire — a four-figure amplification the 10 MB byte cap
+cannot see, on a route with no rate limit in front of it. The first draft held **three**
+full-resolution rasters at once, because `ImageOps.exif_transpose` copies and `Image.convert` copies
+even when the mode already matches. Measured with `ru_maxrss` on a 7000×7000 PNG: **568 MB for one
+request**, from 150 KB of upload.
 
-Three changes, none of which touch the cap:
+**The first fix was a partial one, and the way it was partial is the interesting part.** Adding
+`image.draft(None, (512, 512))`, `exif_transpose(..., in_place=True)` and a guarded `convert` took
+the RGB PNG case from 568 MB to 206 MB and the same picture as a JPEG to 10 MB — and left the alpha
+paths untouched: 422 MB for RGBA, 454 MB for a transparent palette GIF, and **644 MB for
+greyscale-plus-alpha, higher than the number the fix was written to remove**. The cause is inside
+Pillow rather than in this code: `Image.resize` begins with
 
-- **`image.draft(None, (512, 512))`** immediately after the cap check. JPEG decodes at a fraction of
-  the DCT scale, which is what `Image.thumbnail` uses this for, and it halves while the result stays
-  at or above the requested size — so the no-upscaling rule survives it. The same 7000×7000 picture
-  as a JPEG went from 568 MB to **10 MB**. It has to sit *after* the cap, because the cap has to
-  judge what the file claims; before it, a bomb would be quietly downscaled instead of rejected.
-- **`exif_transpose(..., in_place=True)`** and a guarded `convert`, which removes the two redundant
-  copies. The PNG case — no `draft` support, so one raster is unavoidable — went to **206 MB**.
-- **`_DECODE_LIMITER`**, an `anyio.CapacityLimiter(1)` passed to `run_sync` as its own limiter.
-  Without it the ceiling is the app's threadpool, which `core/setup.set_threadpool_tokens` raises to
-  100 per worker against four workers in the shipped image. One at a time costs nothing real — a
-  phone photo is tens of milliseconds through this, uploads are rare, and the input that would make
-  the queue matter is the hostile one.
+```python
+if self.mode in ["LA", "RGBA"] and resample != Resampling.NEAREST:
+    im = self.convert({"LA": "La", "RGBA": "RGBa"}[self.mode])
+```
 
-Lowering the cap instead was considered and rejected: 48 and 50 MP phone sensors ship today, and
-rejecting a real photo is a worse trade than bounding the concurrency. The cap stays a bomb check,
-which is all it ever was.
+which premultiplies alpha into a full-size copy *before* the recursive call that applies the `box=`
+crop, so no amount of crop-first reordering avoids it — and `Image.reduce` carries the identical
+branch, so it is not a way out either. Premultiplying is not a Pillow wart; it is what resampling
+alpha correctly requires.
+
+So the real remedy is a **second cap, on what will be rasterized rather than on what the file
+claims**, and the two are not redundant:
+
+- `MAX_AVATAR_PIXELS` (50 MP) judges the header, before `draft` has had a chance to make a dishonest
+  declaration cheap. Remove it and a bomb is quietly downscaled instead of refused.
+- `MAX_AVATAR_DECODE_PIXELS` (2048×2048) judges the post-`draft` size, immediately before the first
+  line that decodes. Measured at that size: 26 MB for RGB, 45 MB palette, 63 MB RGBA, 75 MB `LA`.
+
+`draft` is what keeps the second cap from meaning "no photos above 4 MP". Only JPEG can honour it —
+it decodes at a fraction of the DCT scale, which is what `Image.thumbnail` uses it for — and JPEG is
+what cameras produce, so **a phone photo of any megapixel count still passes**: a 48 MP one arrives
+at the second cap as about 1 MP. What gets refused is a large PNG, WebP or GIF, which is not a
+picture of anybody's face. It inherits one quirk worth knowing before somebody reports it as a bug:
+`draft` only halves while *both* edges stay at or above 512, so an extreme panorama is not reduced
+at all and is refused like a PNG of the same size.
+
+Third piece: **`_DECODE_LIMITER`**, an `anyio.CapacityLimiter(1)` passed to `run_sync` as its own
+limiter rather than by shrinking the global one every other blocking hop shares. Without it the
+ceiling is the app's threadpool, which `core/setup.set_threadpool_tokens` raises to 100 per worker
+against four workers in the shipped image, and no per-decode figure survives being multiplied by
+400\. One at a time costs nothing real — a realistic upload is tens of milliseconds through this,
+uploads are rare, and the input that would make the queue matter is the hostile one. With it, ~75 MB
+is a per-worker ceiling and the shipped four workers cost at most ~300 MB between them, against a
+documented install minimum of 1 GB for the whole stack ([install.md](docs/self-hosting/install.md)).
 
 Worth generalizing, because the next image feature will meet it: **an accept-side limit in pixels is
-not a limit in bytes of memory**, and the gap between them is whatever the format's compression
-ratio can be made to be.
+not a limit in bytes of memory.** The gap between them is whatever the format's compression ratio
+can be made to be, multiplied by however many copies the library makes — and the second factor is
+mode-dependent in a way no reading of your own code will show you. Measure it, per mode, in a fresh
+process (`ru_maxrss` is a monotonic high-water mark, so building the fixture in the same process
+hides the answer).
 
 ### The retired key is read from the database, never from `current_user`
 

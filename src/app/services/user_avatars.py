@@ -15,10 +15,12 @@ holds for all of them. The original is not kept: an avatar is a derived display 
 and fidelity to what was uploaded is worth nothing. That is the opposite of the card files
 next door, which are archival documents and are stored byte for byte.
 
-Pillow parses untrusted bytes, so the decode is fenced in three ways: an explicit `formats`
-allowlist so only four battle-tested parsers are ever reachable, a pixel cap checked from
-the header before any pixel is decoded, and a byte cap on the read itself. See
-`_normalize` for the two oversized bands and why both end in the same rejection.
+Pillow parses untrusted bytes, so the decode is fenced on four sides: an explicit `formats`
+allowlist so only four battle-tested parsers are ever reachable, a byte cap on the read
+itself, a cap on the pixel count the header *claims*, and a second cap on what will
+actually be rasterized once the decoder has been asked to do it cheaply. See `_normalize`
+for why those last two are not the same check, and `MAX_AVATAR_DECODE_PIXELS` for why a cap
+in pixels is not a cap in bytes of memory.
 """
 
 import hashlib
@@ -52,33 +54,61 @@ KEY_KIND = "user-avatars"
 # decode below holds the raster on top of it.
 MAX_AVATAR_UPLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
 
-# Pixels, checked against the *header* before anything is decoded. A 10 MB upload can
-# describe far more pixels than it costs bytes, which is the whole shape of a
-# decompression bomb: 50 MP is roughly a 7000x7000 photo, comfortably above any camera
-# somebody points at their own face.
+# Pixels the file *claims*, read from the header before anything is decoded. This is the
+# bomb check: a 10 MB upload can describe far more pixels than it costs bytes, and 50 MP is
+# roughly a 7000x7000 photo - comfortably above any camera somebody points at their own
+# face, and the number the plan for this feature settled on.
 #
-# It is **not** low enough to make the raster free, and that is worth stating rather than
-# implying. A 50 MP RGB raster is 150 MB, and a uniform PNG that describes one costs a
-# couple of hundred kilobytes on the wire - a four-figure amplification that the byte cap
-# above cannot see. So the cap is one of three things holding memory down, the other two
-# being `_normalize`'s reduced decode and `_DECODE_LIMITER`'s bound on how many of these
-# can be in flight at once. Lowering it further would start rejecting real phone photos -
-# 48 and 50 MP sensors ship today - which is a worse trade than bounding the concurrency.
+# It is deliberately **not** the memory bound. A cap in pixels says nothing about bytes of
+# RAM: a uniform PNG describing 50 MP is a couple of hundred kilobytes on the wire and a
+# 150 MB raster, and the alpha paths hold two or three of those at once. That is what
+# `MAX_AVATAR_DECODE_PIXELS` below is for.
 MAX_AVATAR_PIXELS = 50_000_000
 
-# One avatar decoded at a time per worker process, which is what turns "150 MB per 50 MP
-# raster" into a bound rather than a multiplier. Without it the ceiling is the app's own
-# threadpool - `core/setup.set_threadpool_tokens` raises it to 100 per worker, and the
-# shipped image runs four - so a hundred concurrent uploads of a cap-passing uniform PNG
-# is not a number a single-node install survives. Measured on this pipeline: 206 MB for a
-# 7000x7000 PNG, 10 MB for the same picture as a JPEG (see `_normalize` on why they
-# differ), against 568 MB for both before the reduced decode landed.
+# Pixels *after* the reduced decode, which is a different question and the one that governs
+# memory. Both caps end in the same 415 and they are not redundant:
 #
-# One rather than a handful because it costs nothing to be strict here. A realistic phone
-# photo is tens of milliseconds through this, uploads are rare - once per account,
-# occasionally again - and the input that would make the queue matter is precisely the
-# hostile one. Passed to `run_sync` as its own limiter rather than shrinking the global
-# one, which every other blocking hop in the app shares.
+# - `MAX_AVATAR_PIXELS` judges the declaration, before `draft` has had a chance to make a
+#   dishonest one cheap. Take it away and a bomb is quietly downscaled instead of refused.
+# - This one judges what will actually be rasterized. Take it away and a 7000x7000 PNG -
+#   which `draft` cannot help with, because only JPEG can decode at a fraction of scale -
+#   costs 200 to 640 MB of resident memory depending on its mode, measured, against a
+#   documented install minimum of **1 GB for the whole stack** (docs/self-hosting/install.md).
+#
+# Measured at 2048x2048, worst input per mode: 26 MB for ordinary RGB, 45 MB for a
+# transparent palette image, 63 MB for RGBA, 75 MB for greyscale-plus-alpha - which is the
+# widest because Pillow widens `LA` to RGBA and then premultiplies *that* inside `resize`,
+# a copy intrinsic to alpha-aware resampling because it happens before the crop box can
+# shrink anything. With `_DECODE_LIMITER` below, ~75 MB is a per-worker ceiling and the
+# shipped four workers cost at most ~300 MB between them even under a deliberate attempt.
+#
+# What it rejects is not what it sounds like. **A camera photo of any megapixel count still
+# passes**, because a camera produces JPEG and `draft` reduces JPEG below this before the
+# check runs - a 48 MP phone photo arrives here as roughly 1 MP. What it rejects is a large
+# *PNG, WebP or GIF*, which is not a picture of anybody's face: the web client uploads a
+# 512x512 crop, and the honest answer to a 16 MP screenshot offered as an avatar is to say
+# no rather than to spend a quarter of a gigabyte on it. The written-out square is
+# deliberate - it is the number to quote in the rejection, and 2048 is a size people
+# recognize.
+#
+# One quirk it inherits from `draft`, worth knowing before someone reports it as a bug: JPEG
+# only reduces while *both* edges stay at or above the avatar dimension, so an extreme
+# panorama (6000x1000, say) is not reduced at all and is refused here like a PNG of the same
+# size. Nobody's avatar is a panorama, and the alternative is letting the short edge fall
+# below what the output needs.
+MAX_AVATAR_DECODE_PIXELS = 2048 * 2048
+
+# One avatar decoded at a time per worker process, which is what turns the per-decode
+# figure above into a ceiling rather than a multiplier. Without it the ceiling is the app's
+# own threadpool - `core/setup.set_threadpool_tokens` raises it to 100 per worker, and the
+# shipped image runs four - and a hundred concurrent decodes is not a number a 1 GB install
+# survives whatever the per-decode figure is.
+#
+# One rather than a handful because it costs nothing to be strict here. A realistic upload
+# is tens of milliseconds through this, uploads are rare - once per account, occasionally
+# again - and the input that would make the queue matter is precisely the hostile one.
+# Passed to `run_sync` as its own limiter rather than shrinking the global one, which every
+# other blocking hop in the app shares.
 _DECODE_LIMITER = anyio.CapacityLimiter(1)
 
 # Only these four parsers are ever invoked. Pillow ships dozens, several for formats whose
@@ -122,31 +152,41 @@ def _normalize(data: bytes) -> bytes:
     """Decode, orient, square, bound and re-encode as WebP. Runs in a worker thread.
 
     Every rejection raises `UnsupportedAvatarImageError`, which the routes map to one 415.
-    Two of them are worth naming because they look like one check and are two:
+    Three of them are worth naming, because two look like one check and are two, and the
+    third looks like a duplicate of the first and is not:
 
-    - **Above `MAX_AVATAR_PIXELS`** the app rejects, from `Image.size` - which the plugin
-      fills in from the header, so this costs no pixel decode.
     - **Above `Image.MAX_IMAGE_PIXELS * 2`** (178,956,970 by default) Pillow raises
-      `DecompressionBombError` from inside `Image.open` itself, *before* the line above
-      ever runs. That is why the open sits inside this `try` rather than above it: left
-      out, the largest inputs of all would be the ones that 500.
+      `DecompressionBombError` from inside `Image.open` itself, before any line of this
+      function's own runs. That is why the open sits inside this `try` rather than above
+      it: left out, the largest inputs of all would be the ones that 500.
+    - **Above `MAX_AVATAR_PIXELS`** the app rejects what the header *claims*, from
+      `Image.size`, which costs no pixel decode.
+    - **Above `MAX_AVATAR_DECODE_PIXELS`, after `draft`**, it rejects what will actually be
+      rasterized. The two caps answer different questions and neither substitutes for the
+      other; the constants say which is which.
 
-    `exif_transpose` first, so a portrait phone photo comes out upright - orientation is
+    Between the second and the third, `draft` asks the decoder for the smallest raster
+    still no smaller than the avatar. Only JPEG can honour it - it decodes at a fraction of
+    the DCT scale, which is what `Image.thumbnail` uses it for - and that is exactly the
+    format cameras produce, so a 48 MP phone photo arrives at the third check as about
+    1 MP. It halves only while the result stays at or above the requested size, so the
+    no-upscaling rule survives it.
+
+    `exif_transpose` next, so a portrait phone photo comes out upright - orientation is
     the one thing in the metadata that has to be applied before the rest of it is dropped.
     Dropping is structural rather than an erasure step: the WebP encoder writes only what
     it is handed in `save()`, and nothing here hands it the source's EXIF, ICC profile or
     XMP. An animated input contributes its first frame, which is the one `Image.open`
     leaves selected.
 
-    **Every step after the cap is written to hold one full-resolution raster, not three**,
-    because at the cap one of those is 150 MB. `draft` asks the decoder for the smallest
-    raster still no smaller than the avatar - JPEG does this natively by decoding at a
-    fraction of the DCT scale, which is what `Image.thumbnail` uses it for, and it turns
-    the common phone-photo case into a couple of megabytes. `exif_transpose` runs
-    `in_place` because it copies otherwise, and the mode conversion is guarded because
-    `convert` to the mode an image already has copies too. `ImageOps.fit` crops and
-    resizes in a single `resize(..., box=...)`, so the square is never materialised at
-    full size either.
+    The rest is written to hold as few full-resolution rasters as it can: `exif_transpose`
+    runs `in_place` because it copies otherwise, the mode conversion is guarded because
+    `convert` to the mode an image already has copies too, and `ImageOps.fit` crops and
+    resizes in a single `resize(..., box=...)`. **It cannot get to one on the alpha
+    paths**, and that is Pillow rather than this code: `resize` premultiplies an `LA` or
+    `RGBA` source into a full-size `La`/`RGBa` copy before the crop box shrinks anything,
+    which is intrinsic to resampling alpha correctly. Hence the third cap, which is what
+    makes the ceiling hold whatever the mode.
     """
     try:
         with Image.open(io.BytesIO(data), formats=ALLOWED_FORMATS) as image:
@@ -156,9 +196,17 @@ def _normalize(data: bytes) -> bytes:
                     f"That image is too large to process ({width}x{height}). Please use a smaller photo."
                 )
 
-            # After the cap, never before: the cap has to judge what the file *claims*,
-            # which is what makes it a bomb check rather than a resizing hint.
+            # After the claimed-size cap, never before: that cap has to judge the
+            # declaration, which is what makes it a bomb check rather than a resizing hint.
             image.draft(None, (AVATAR_DIMENSION, AVATAR_DIMENSION))
+
+            # And before `exif_transpose`, which is the first line here that decodes.
+            if image.width * image.height > MAX_AVATAR_DECODE_PIXELS:
+                raise UnsupportedAvatarImageError(
+                    f"That image is too large to process ({width}x{height}). Please use a smaller photo, "
+                    "or save it as a JPEG."
+                )
+
             ImageOps.exif_transpose(image, in_place=True)
 
             # Alpha survives into the WebP rather than being composited onto an invented
