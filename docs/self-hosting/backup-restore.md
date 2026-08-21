@@ -15,6 +15,18 @@ Nothing else in the stack holds anything durable: Redis is cache, open rate-limi
 passkey challenges that expire in minutes, and Caddy's volume holds certificates that re-issue
 themselves.
 
+**A backup outlives an erasure, and restoring one brings the erased account back.** When a diver
+deletes their account the purge job destroys the rows and unlinks their files
+([configuration.md](configuration.md#account-deletion)) — from the live stack, and from nowhere
+else. Every dump and every files archive taken before that moment still carries them, and a restore
+puts them back as surely as it puts back anything else. This is a property of restoring, not a hole
+in the purge: nothing the app does can reach a tarball on another machine. The defensible position,
+and the standard one, is that restoring from backup is a separate process and an erasure re-applies
+on top of it — so if you restore a backup older than a deletion request you have just recreated data
+someone asked you to destroy, and it is on you to run the deletion again. Backup rotation is what
+bounds how long that can be true, which is one more reason to have a retention period rather than an
+ever-growing pile.
+
 Registered passkeys are ordinary rows, so the dump carries them — but they are bound to the hostname
 in `FRONTEND_URL`, and a restore that comes up under a different one leaves every passkey unusable.
 Signing in by email still works, which is how everyone gets back in and re-adds one. See

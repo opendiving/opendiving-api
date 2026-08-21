@@ -170,6 +170,12 @@ says so instead of naming a date, but a misclick is then final.
 protection law has obligations for. This setting is the knob that erasure requests are served by —
 what it does, and how promptly, is your call to make and to document.
 
+**Two things the purge cannot reach**, and both are yours to handle rather than the app's. Your
+backups keep a deleted account until they rotate, and restoring one older than the request brings
+that account back — see [backup-restore.md](backup-restore.md). And if you have turned the admin
+panel on, its own event and audit tables hold a second copy of whatever you edited there; see
+[The admin panel](#the-admin-panel).
+
 ### The admin panel
 
 Off by default, and a deliberate opt-in: it is a full CRUD interface over every model and bypasses
@@ -195,6 +201,35 @@ shipped value covers the bundled Caddy.
 
 Running your own proxy? Route `/admin` to `api:8000` yourself — the web container carries only
 `/api/v1` — and make sure your proxy is in `TRUSTED_PROXY_IPS` **and** sets `X-Forwarded-Proto`.
+
+**Turning it on gives you a second copy of personal data, and account deletion does not reach it.**
+The panel keeps its own tables — `admin_event_log`, a row per action with the admin's address and
+user agent, and `admin_audit_log`, which for every create, update and delete stores the row's JSON
+state *before* and *after*. Edit a diver through the panel and their email address is now in that
+audit row as well as on the `user` row. One setting gates both tables, `CRUD_ADMIN_TRACK_EVENTS`,
+and it defaults to on — so enabling the panel enables these unless you say otherwise. They live
+wherever `CRUD_ADMIN_DB_URL` points, which the compose file points at the app's own Postgres, so a
+`pg_dump` carries them too.
+
+The [account purge](#account-deletion) deliberately leaves them alone. Those tables have no foreign
+key to `user` and a different lifecycle: they are a record of what *an operator* did, which is the
+one thing an audit log is for, and a purge that quietly rewrote it would be an audit log worth
+nothing.
+
+That makes them yours to manage, and nothing manages them for you — `crudadmin` has a retention
+helper but nothing in this app calls it, so both tables grow for as long as the panel is enabled. If
+you turn it on, prune them yourself on whatever schedule matches what you tell your users:
+
+```bash
+docker compose exec -T db psql -U opendiving -d opendiving \
+  -c "DELETE FROM admin_audit_log WHERE timestamp < now() - interval '90 days';" \
+  -c "DELETE FROM admin_event_log WHERE timestamp < now() - interval '90 days';"
+```
+
+Audit rows carry the id of the event they belong to, but not as a foreign key — nothing stops you
+deleting the events and leaving the audit rows pointing at nothing, so keep the two windows the
+same. And when you serve an erasure request for someone whose row you once edited by hand, remember
+this copy. Leave the panel off, as it ships, and none of this exists.
 
 ## Third-party calls
 
