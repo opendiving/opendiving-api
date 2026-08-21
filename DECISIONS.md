@@ -11209,6 +11209,14 @@ between the verb and the section name, since scope flags, `--file <path>` and th
 `--remove-section` chained ahead of the word `commit`; over-blocking a command the reader can split
 in two is the safe direction, and under-blocking is the one that disarms the hook.
 
+**An empty value is falsy too, and the pattern had been missing it.**
+`git -c commit.gpgsign= commit` produces a commit whose `%G?` is `N` exactly as the spelled-out
+`false` does, because `git config --type=bool` reads the empty string as `false` - both halves
+verified. So each key's value list now also matches `=` with nothing after it, and the `=""` / `=''`
+a shell leaves behind. Worth naming because it looks like a boundary case and is not: the boundary
+below is about shapes that are not git command lines at all, and this is the exact shape the pattern
+exists for.
+
 **Where the line is, deliberately.** The patterns match *git command* shapes. They do not match
 `sed` on `~/.gitconfig`, and they do not match `GIT_CONFIG_GLOBAL=/dev/null git commit`, which hides
 the config rather than removing it and sails past the pattern and the gate alike.

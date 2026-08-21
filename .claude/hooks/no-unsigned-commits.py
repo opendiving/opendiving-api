@@ -37,6 +37,7 @@ DISABLE = (
             r"""
               --no-gpg-sign\b                      # commit/rebase/cherry-pick spelling
             | \b commit\.gpgsign \s* [=\ ] \s* (?: false | 0 | no | off | n )\b
+            | \b commit\.gpgsign = (?: "" | '' )? (?! \S )   # empty reads as false
             | (?<![\w-]) (?:--)? unset (?:-all)? \b    # removal, naming the key
               [^\n]* \b commit\.gpgsign \b
             | (?<![\w-]) (?:--)? (?: remove | rename ) -section \b
@@ -50,6 +51,7 @@ DISABLE = (
         re.compile(
             r"""
               \b tag\.gpgsign \s* [=\ ] \s* (?: false | 0 | no | off | n )\b
+            | \b tag\.gpgsign = (?: "" | '' )? (?! \S )
             | (?<![\w-]) (?:--)? unset (?:-all)? \b
               [^\n]* \b tag\.gpgsign \b
             | (?<![\w-]) (?:--)? (?: remove | rename ) -section \b
