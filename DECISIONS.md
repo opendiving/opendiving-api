@@ -4968,10 +4968,10 @@ Three things to know about it:
 
 `.github` joined that list late, which is the cost of spelling paths out: markdown added somewhere
 the glob does not reach is silently unformatted, and nothing fails to say so. `*.md docs` never
-reached `.github/`, where a pull request template and issue templates live - the files a contributor
-reads before opening a PR, and the ones an agent told to "run mdformat" would have left alone. Any
-new directory that can hold markdown has to be added here, to `.github/workflows/linting.yml`, and
-to `CONTRIBUTING.md`, which is where the check commands are stated.
+reached `.github/`, so `PULL_REQUEST_TEMPLATE.md` - the one file every contributor reads before
+opening a PR - was the one file an agent told to "run mdformat" would have left alone. Any new
+directory that can hold markdown has to be added here, to `.github/workflows/linting.yml`, and to
+`CONTRIBUTING.md`, which is where the check commands are stated.
 
 `number = true` is set so ordered lists keep counting `1.`, `2.`, `3.` - the default renumbers every
 item to `1.`, which is valid markdown and unreadable in a diff.
