@@ -4945,8 +4945,8 @@ one definition per data message, no compressed timestamp headers, no accumulator
 
 `DECISIONS.md` grows by a section on most PRs, and until now nothing formatted it. Every new section
 guessed at the wrapping of the ones around it, and a paragraph edited in the middle either got
-rewrapped by hand or left one short line behind. `uv run mdformat *.md docs` does it now, and
-`.github/workflows/linting.yml` checks it alongside `ruff format --check`.
+rewrapped by hand or left one short line behind. `uv run mdformat *.md docs .github tests` does it
+now, and `.github/workflows/linting.yml` checks it alongside `ruff format --check`.
 
 opendiving-web formats its markdown with Prettier, which would have been the obvious way to keep the
 two repos identical - but there is no `package.json` here, and adding one plus a lockfile plus a
@@ -4959,12 +4959,24 @@ Three things to know about it:
 
 - **`mdformat-gfm` is not optional.** Core mdformat is CommonMark only, and a GFM table is not
   CommonMark - without the plugin it reflows the rows as if they were a paragraph.
-- **Paths are always spelled out** (`*.md docs`). Version 1.0 has no `--exclude`, and handing it `.`
-  walks `.venv/`, `.pytest_cache/` and any worktrees under `.claude/` - about 60 markdown files that
-  are not ours.
+- **Paths are always spelled out** (`*.md docs .github tests`). Version 1.0 has no `--exclude`, and
+  handing it `.` walks `.venv/`, `.pytest_cache/` and any worktrees under `.claude/` - about 60
+  markdown files that are not ours.
 - **A wrapped line that starts with `-` comes back escaped as `\-`.** This prose uses `-` as an em
   dash, so it happens a handful of times per reflow. It renders as a plain dash; leave it alone.
   mdformat is not being clever, it is avoiding a line that would otherwise parse as a list item.
+
+`.github` and `tests` joined that list late, which is the cost of spelling paths out: markdown added
+somewhere the glob does not reach is silently unformatted, and nothing fails to say so. `*.md docs`
+never reached `.github/PULL_REQUEST_TEMPLATE.md` - the one file every contributor reads before
+opening a PR - or the fixture READMEs under `tests/`, and the export one had drifted unnoticed. The
+list now covers every tracked markdown file in the repo, which is the property to preserve: check it
+with `git ls-files '*.md'` rather than by eye.
+
+Adding a directory means five files, because the path list is stated in five places and a stale one
+is worse than none - `.github/workflows/linting.yml` is what CI enforces, `CONTRIBUTING.md` states
+both commands, `AGENTS.md` carries the one an agent is told to run, `.mdformat.toml`'s header
+comment says what the settings apply to, and this section.
 
 `number = true` is set so ordered lists keep counting `1.`, `2.`, `3.` - the default renumbers every
 item to `1.`, which is valid markdown and unreadable in a diff.

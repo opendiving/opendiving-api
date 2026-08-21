@@ -41,4 +41,4 @@ jobs:
       # directory walks everything below it - `.venv/` included, which is 60-odd
       # markdown files from site-packages.
       - name: Check markdown formatting
-        run: uv run mdformat --check *.md docs
+        run: uv run mdformat --check *.md docs .github tests
