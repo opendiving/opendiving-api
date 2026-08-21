@@ -46,6 +46,11 @@ class TokenType(StrEnum):
     # Google) that doesn't have a `User` row yet - see `create_onboarding_token`/
     # `verify_onboarding_token` below, and `POST /auth/complete`.
     ONBOARDING = "onboarding"
+    # The way back into an account inside its deletion grace period: minted when a
+    # verified identity resolves to a soft-deleted row, spent by `POST /auth/restore` -
+    # see `create_restore_token`/`verify_restore_token` below. Its own member rather than
+    # a reused `ONBOARDING`, so neither is accepted at the other's endpoint.
+    RESTORE = "restore"
     # Not a session at all: a receipt from `POST /dive/parse` attesting that this server
     # parsed a specific set of bytes for a specific user - see `create_dive_file_token`/
     # `verify_dive_file_token` below, and `PUT /dive/{uuid}/file`. Carries no authority;
@@ -338,6 +343,69 @@ async def verify_onboarding_token(token: str, db: AsyncSession) -> OnboardingTok
         name=payload.get("name"),
         avatar=payload.get("avatar"),
     )
+
+
+# -------------- restore tokens --------------
+async def create_restore_token(user_uuid: uuid_pkg.UUID) -> str:
+    """Mints the token that `POST /auth/restore` spends to bring a soft-deleted account
+    back, handed out by `_start_onboarding_or_sign_in` when a verified identity resolves
+    to a row inside its deletion grace period.
+
+    The mirror image of `create_onboarding_token`, deliberately: both carry a verified
+    identity across one explicit decision the user has yet to make, neither is a session,
+    both are single-use by blacklisting (hence the `jti`), and both borrow
+    `ONBOARDING_TOKEN_EXPIRE_MINUTES` because the window they have to stay open for is the
+    same one - somebody reading a screen and pressing a button.
+
+    It is emphatically *not* the same token. `verify_onboarding_token` hard-checks
+    `token_type`, so a distinct `TokenType.RESTORE` is what stops each from being redeemed
+    at the other's endpoint. Both directions happen to be harmless today - an onboarding
+    token names no user id to restore, a restore token names no email to create an account
+    from - which is a property of today's payloads rather than of the design, and not
+    something the next change to either should have to preserve.
+
+    The subject is the `uuid` rather than the email the identity was proven with: on the
+    passkey path there is no email in play at all, and the row's address can be rewritten
+    by `verify_email_change` while the token is in flight.
+    """
+    expire = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=settings.ONBOARDING_TOKEN_EXPIRE_MINUTES)
+    to_encode: dict[str, Any] = {
+        "sub": str(user_uuid),
+        "exp": expire,
+        "jti": _new_jti(),
+        "token_type": TokenType.RESTORE,
+    }
+    encoded_jwt: str = jwt.encode(to_encode, SECRET_KEY.get_secret_value(), algorithm=ALGORITHM)
+    return encoded_jwt
+
+
+async def verify_restore_token(token: str, db: AsyncSession) -> uuid_pkg.UUID | None:
+    """Validates a restore JWT - not blacklisted (i.e. not already spent on a restore),
+    unexpired, correctly signed, and of the right type - and returns the account it names.
+
+    Says nothing about whether that account still exists or is still deleted: the purge can
+    take it while the token is in flight, so the caller re-reads the row under a lock (see
+    `POST /auth/restore`) rather than trusting this.
+    """
+    if await crud_token_blacklist.exists(db, token=token):
+        return None
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+
+    if payload.get("token_type") != TokenType.RESTORE:
+        return None
+
+    subject = payload.get("sub")
+    if not isinstance(subject, str):
+        return None
+
+    try:
+        return uuid_pkg.UUID(subject)
+    except ValueError:
+        return None
 
 
 # -------------- dive file tokens --------------

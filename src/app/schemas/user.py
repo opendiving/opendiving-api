@@ -141,11 +141,18 @@ class AccountDeletionResponse(BaseModel):
 
 
 class UserDelete(BaseModel):
+    """FastCRUD's soft-delete payload - both columns, which is what makes `deleted_at` the
+    deletion clock `purge_deleted_accounts` counts from.
+
+    There is deliberately no `UserRestoreDeleted` beside it any more. It carried
+    `is_deleted` alone, so restoring through it would have cleared the flag and left the
+    clock set - `is_deleted = false, deleted_at = <a date>` looks alive but is a row nothing
+    reconciles, and the mirror state (`true`, `NULL`) is the never-purge one the job warns
+    about. `POST /auth/restore` clears both in one statement under a row lock; a schema that
+    can only clear one is a trap wearing the right name.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     is_deleted: bool
     deleted_at: datetime
-
-
-class UserRestoreDeleted(BaseModel):
-    is_deleted: bool

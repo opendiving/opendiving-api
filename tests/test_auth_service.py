@@ -77,7 +77,7 @@ class TestResolveIdentity:
             patch("src.app.services.auth_service.crud_users") as mock_users,
         ):
             mock_providers.get = AsyncMock(return_value={"user_id": 7})
-            mock_users.get = AsyncMock(return_value={"id": 7, "username": "someone"})
+            mock_users.get = AsyncMock(return_value={"id": 7, "username": "someone", "is_deleted": False})
 
             outcome = await resolve_identity(
                 mock_db, provider="google", email="someone@example.com", provider_user_id="g-1"
@@ -85,7 +85,9 @@ class TestResolveIdentity:
 
             assert isinstance(outcome, AuthenticatedUser)
             assert outcome.user["id"] == 7
-            mock_users.get.assert_called_once_with(db=mock_db, id=7, is_deleted=False)
+            # No `is_deleted=False` filter any more - a soft-deleted row has to come back
+            # from this lookup for `DeletionPending` to be reachable through the provider link.
+            mock_users.get.assert_called_once_with(db=mock_db, id=7)
 
     @pytest.mark.asyncio
     async def test_links_provider_onto_existing_user_found_by_email(self, mock_db):
@@ -96,7 +98,7 @@ class TestResolveIdentity:
             mock_providers.get = AsyncMock(return_value=None)
             mock_providers.exists = AsyncMock(return_value=False)
             mock_providers.create = AsyncMock(return_value=None)
-            mock_users.get = AsyncMock(return_value={"id": 3, "username": "existing"})
+            mock_users.get = AsyncMock(return_value={"id": 3, "username": "existing", "is_deleted": False})
 
             outcome = await resolve_identity(
                 mock_db, provider="google", email="existing@example.com", provider_user_id="g-2"
@@ -118,7 +120,7 @@ class TestResolveIdentity:
             mock_providers.get = AsyncMock(return_value=None)
             mock_providers.exists = AsyncMock(return_value=True)
             mock_providers.create = AsyncMock(return_value=None)
-            mock_users.get = AsyncMock(return_value={"id": 3, "username": "existing"})
+            mock_users.get = AsyncMock(return_value={"id": 3, "username": "existing", "is_deleted": False})
 
             outcome = await resolve_identity(mock_db, provider="email", email="existing@example.com")
 

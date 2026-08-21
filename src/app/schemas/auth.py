@@ -1,5 +1,6 @@
 import re
 import uuid as uuid_pkg
+from datetime import datetime
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
@@ -71,10 +72,23 @@ class LinkCheckResponse(BaseModel):
     link (e.g. via the browser's back button) shows an error immediately instead of
     a misleadingly clickable button. `email` is only set when `valid` is `True`, so
     the page can show what it's about to sign in as / change the address to.
+
+    `deletion_pending` is `valid=True` plus a flag rather than a fourth way to be invalid,
+    and the choice is deliberate. The link *works*: redeeming it reaches the restore
+    screen, which is somewhere worth going. `valid=False` is reserved for "this link is
+    dead, ask for another one", so the page keeps its existing "not valid" branch first and
+    adds a second one that relabels the button - *Restore my account* rather than *Sign in*
+    - instead of having to move it.
+
+    Only `api.v1.auth.check_email_link` ever sets it. The email-change precheck shares this
+    schema and leaves both fields at their defaults: it runs behind a live session, and
+    there is no such thing as a pending-deletion account with one.
     """
 
     valid: bool
     email: str | None = None
+    deletion_pending: bool = False
+    purge_after: datetime | None = None
 
 
 # -------------- google --------------
@@ -98,14 +112,23 @@ class ProfileCompletionRequest(BaseModel):
 # -------------- shared outcome --------------
 class AuthOutcome(BaseModel):
     """Unified response for every entry point into the app (`/auth/email/verify`,
-    `/auth/google`, `/auth/complete`): either the caller is signed straight in
-    (`status="authenticated"`, with a fresh access token and a `refresh_token` cookie
-    set on the response), or no account exists yet for the verified identity
-    (`status="onboarding_required"`), in which case `onboarding_token` must be carried
-    forward to `POST /auth/complete` to actually create one.
+    `/auth/email/verify-code`, `/auth/google`, `/auth/passkey/verify`, `/auth/complete`,
+    `/auth/restore`), and it has three shapes:
+
+    - `status="authenticated"` - signed in, with a fresh access token and a
+      `refresh_token` cookie set on the response.
+    - `status="onboarding_required"` - no account exists yet for the verified identity, so
+      `onboarding_token` must be carried forward to `POST /auth/complete` to create one.
+    - `status="deletion_pending"` - an account exists and is inside its deletion grace
+      period. **No session was issued and nothing was changed**; `restore_token` is carried
+      to `POST /auth/restore`, which is the one thing that brings the account back, and
+      `purge_after` is the date it stops being recoverable at all.
+
+    A client that does not know the third status must not treat it as a sign-in: there is
+    no `access_token` in it. See `plans/account-deletion.md` §5.
     """
 
-    status: Literal["authenticated", "onboarding_required"]
+    status: Literal["authenticated", "onboarding_required", "deletion_pending"]
 
     # Set only when status == "authenticated".
     access_token: str | None = None
@@ -113,6 +136,24 @@ class AuthOutcome(BaseModel):
 
     # Set only when status == "onboarding_required".
     onboarding_token: str | None = None
-    email: str | None = None
     name: str | None = None
     avatar: str | None = None
+
+    # Set only when status == "deletion_pending". `purge_after` is null only for a row
+    # flagged with no clock to count from - see `services.auth_service.DeletionPending`.
+    restore_token: str | None = None
+    purge_after: datetime | None = None
+
+    # Set for both "onboarding_required" and "deletion_pending": the address the identity
+    # was proven with, so each screen can say which account it is talking about.
+    email: str | None = None
+
+
+class RestoreRequest(BaseModel):
+    """`POST /auth/restore` - the explicit second step that undoes a deletion, carrying the
+    `restore_token` from a `deletion_pending` outcome.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    restore_token: str

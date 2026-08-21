@@ -2,11 +2,16 @@
 unified auth flow - used by both `POST /auth/email/verify` and `POST /auth/google`
 (see `resolve_identity`), and the token-issuing tail end shared by every endpoint that
 signs a user in (`issue_tokens`).
+
+The question has three answers, not two: an account exists, no account exists yet, or one
+exists and is inside its deletion grace period (`DeletionPending`). The passkey flow
+answers the same three from its own resolve site - `services.passkey_service.finish_sign_in`
+- because an assertion carries no email for this module to look anything up by.
 """
 
 import uuid as uuid_pkg
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, cast
 
 from fastapi import Response
@@ -76,6 +81,37 @@ class OnboardingRequired:
     avatar: str | None
 
 
+@dataclass
+class DeletionPending:
+    """The identity resolves to an account inside its deletion grace period.
+
+    Not a sign-in and not onboarding: the row is still there and still deleted, and the
+    caller is offered the account back rather than being given it. See
+    `plans/account-deletion.md` §5 - signing in must not silently cancel a deletion
+    somebody deliberately asked for, so a restore is its own explicit click on every path
+    that can reach one.
+
+    `purge_after` is `None` only in the state `purge_deleted_accounts` warns about - a row
+    flagged with no `deleted_at` to count from, which nothing in the app writes. The screen
+    then has no date to show, and the restore itself works exactly the same.
+    """
+
+    user: dict[str, Any]
+    purge_after: datetime | None
+
+    @classmethod
+    def for_row(cls, user: dict[str, Any]) -> DeletionPending:
+        """Wraps a soft-deleted row with the date its grace period runs out - the one place
+        `deleted_at + ACCOUNT_DELETION_GRACE_DAYS` is computed for a resolve site, shared by
+        both of `resolve_identity`'s lookups and by `passkey_service.finish_sign_in`.
+        """
+        deleted_at = user.get("deleted_at")
+        purge_after = (
+            deleted_at + timedelta(days=settings.ACCOUNT_DELETION_GRACE_DAYS) if deleted_at is not None else None
+        )
+        return cls(user=user, purge_after=purge_after)
+
+
 async def resolve_identity(
     db: AsyncSession,
     *,
@@ -84,7 +120,7 @@ async def resolve_identity(
     provider_user_id: str | None = None,
     name: str | None = None,
     avatar: str | None = None,
-) -> AuthenticatedUser | OnboardingRequired:
+) -> AuthenticatedUser | OnboardingRequired | DeletionPending:
     """Resolves a verified identity - an email address (and, for Google, a stable
     provider subject id) the caller has already proven ownership of - to either an
     existing account or a signal that onboarding should start.
@@ -99,19 +135,37 @@ async def resolve_identity(
        it isn't already) - this is what lets an email-created account later sign in
        with Google (or vice versa) without creating a duplicate user.
     3. Otherwise, no account exists yet - the caller should start onboarding.
+
+    **Neither lookup filters `is_deleted` any more**, and both branches answer
+    `DeletionPending` for a flagged row. Relaxing only the email one would leave a real
+    hole rather than half a feature: somebody who signed up with Google and later changed
+    their account email (`verify_email_change` rewrites the address on the row) is
+    reachable *only* by provider link, so after deletion the first lookup would miss on
+    the filter, the second would miss on the address, and they would fall through to
+    `OnboardingRequired` - and `/auth/complete` would hand them a **second account** while
+    the first sat waiting to be purged.
     """
     if provider_user_id is not None:
         existing_link = await crud_authentication_providers.get(
             db=db, provider=provider, provider_user_id=provider_user_id
         )
         if existing_link is not None:
-            linked_user = await crud_users.get(db=db, id=existing_link["user_id"], is_deleted=False)
+            linked_user = await crud_users.get(db=db, id=existing_link["user_id"])
             if linked_user is not None:
-                return AuthenticatedUser(user=cast(dict[str, Any], linked_user))
+                linked_user = cast(dict[str, Any], linked_user)
+                if linked_user["is_deleted"]:
+                    return DeletionPending.for_row(linked_user)
+                return AuthenticatedUser(user=linked_user)
 
-    user = await crud_users.get(db=db, email=email, is_deleted=False)
+    user = await crud_users.get(db=db, email=email)
     if user is not None:
         user = cast(dict[str, Any], user)
+        if user["is_deleted"]:
+            # Before the provider link below, not after: an account pending deletion is not
+            # a place to write to. Nothing is lost by waiting - the restore signs them in,
+            # and the next sign-in through this provider links it against a live row.
+            return DeletionPending.for_row(user)
+
         already_linked = await crud_authentication_providers.exists(db=db, user_id=user["id"], provider=provider)
         if not already_linked:
             await crud_authentication_providers.create(

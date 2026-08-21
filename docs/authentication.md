@@ -6,8 +6,8 @@ API.
 There is a single entry point into the app: email, Google, or a passkey - no passwords, no separate
 sign up flow. See `src/app/api/v1/auth.py` for the endpoints (`/auth/email/request`,
 `/auth/email/verify`, `/auth/email/verify-code`, `/auth/google`, `/auth/passkey/options`,
-`/auth/passkey/verify`, `/auth/complete`), `src/app/api/v1/passkeys.py` for managing the passkeys on
-an account, and `DECISIONS.md` for the full design rationale.
+`/auth/passkey/verify`, `/auth/complete`, `/auth/restore`), `src/app/api/v1/passkeys.py` for
+managing the passkeys on an account, and `DECISIONS.md` for the full design rationale.
 
 The email path offers **two ways to finish, backed by one record**. `POST /auth/email/request`
 emails a magic link *and* a six-digit code, and either completes the sign-in - whichever is used
@@ -33,26 +33,40 @@ All endpoints below are mounted under `/api/v1` (e.g. `/api/v1/auth/email/reques
 
 Every journey that starts from an email address funnels through the same question, answered once by
 `services.auth_service.resolve_identity`: "has this verified identity (an email address, or - for
-Google - a stable provider subject id) been seen before?" The answer decides whether the caller is
-signed in immediately or sent to onboarding, and no `User` row is ever created outside of
-`POST /auth/complete`.
+Google - a stable provider subject id) been seen before?" The answer has **three** outcomes, carried
+back as `AuthOutcome.status`: the caller is signed in immediately (`authenticated`), sent to
+onboarding (`onboarding_required`), or offered back an account that is inside its deletion grace
+period (`deletion_pending`). No `User` row is ever created outside of `POST /auth/complete`.
 
 A passkey assertion is the exception, and the only one: it carries no email to resolve, so it
-answers straight to the account that owns the credential and can never reach onboarding.
+answers straight to the account that owns the credential and can never reach onboarding. It can
+still answer `deletion_pending` - that decision is made at its own resolve site,
+`services.passkey_service.finish_sign_in`.
 
 ```mermaid
 flowchart TD
     A[Verified identity: email or Google\npasskeys skip this chart entirely] --> B{Provider id already\nlinked to an account?}
-    B -->|Yes - Google, seen before| C[Sign in as that account]
+    B -->|Yes - Google, seen before| J{That account\npending deletion?}
     B -->|No| D{Account exists\nfor this email?}
-    D -->|Yes| E[Link this provider to it\nif not linked yet]
-    E --> C
+    D -->|Yes| K{That account\npending deletion?}
+    K -->|No| E[Link this provider to it\nif not linked yet]
+    E --> C[Sign in as that account]
+    J -->|No| C
+    J -->|Yes| L[status=deletion_pending\nrestore_token + purge_after]
+    K -->|Yes| L
+    L --> M[POST /auth/restore\nclears both soft-delete columns]
+    M --> C
     D -->|No| F[No account yet]
     F --> G[Issue onboarding session\nemail + provider + optional name/avatar]
     G --> H[POST /auth/complete\nname + username]
     H --> I[Create User + AuthenticationProvider\nin one transaction]
     I --> C
 ```
+
+**A `deletion_pending` response is not a session and changes nothing.** No access token is issued,
+no cookie is set, and the account stays deleted until the user acts on it - signing in must never
+silently cancel a deletion somebody deliberately asked for. A client that does not know the third
+status must not fall through to its onboarding branch: there is no `onboarding_token` in it either.
 
 #### 1. Sign up with email (new user)
 
@@ -199,16 +213,25 @@ sequenceDiagram
     FE->>API: POST /auth/passkey/verify\n{flow_id, assertion}
     API->>R: GETDEL the challenge - spent on the attempt,\neven if verification then fails
     API->>API: Verify signature, RP ID and origin\nagainst FRONTEND_URL
-    API->>DB: credential_id -> credential -> user\n(is_deleted=False)
-    API->>DB: Conditional UPDATE: bump sign_count,\nbacked_up, last_used_at
+    API->>DB: credential_id -> credential -> user
 
     alt Anything at all is wrong
-        API-->>FE: 401 - one identical message for an unknown\ncredential, a tombstoned owner, a spent\nchallenge, a wrong origin or a bad signature
+        API-->>FE: 401 - one identical message for an unknown\ncredential, a purged owner, a spent challenge,\na wrong origin or a bad signature
+    else Verified, owner pending deletion
+        API-->>FE: status=deletion_pending\nrestore_token + purge_after
+        FE->>U: Offer the account back
     else Verified
+        API->>DB: Conditional UPDATE: bump sign_count,\nbacked_up, last_used_at
         API-->>FE: status=authenticated + access_token\n(+ refresh_token cookie)
         FE->>U: Redirect to /dashboard
     end
 ```
+
+The `deletion_pending` branch is the one outcome that is *not* the uniform 401, and it sits
+**after** signature verification for that reason: every other failure is reachable by someone
+holding no credential, while a caller who has just produced a valid assertion is not. Placed any
+earlier it would be a credential-existence oracle. It also returns before the counter is recorded,
+so reaching the offer writes nothing.
 
 A counter that has gone *backwards* (stored > 0, presented ≤ stored) is the cloned-authenticator
 signal: the assertion is refused and a `WARNING` is logged. A synced passkey reports `0` forever,
@@ -324,6 +347,55 @@ sequenceDiagram
         FE-->>U: "Updated to {email}", auto-redirect\nto /settings after 3s
     end
 ```
+
+#### 9. Restoring an account inside the deletion grace period
+
+`DELETE /user` flags the account and names a purge date `ACCOUNT_DELETION_GRACE_DAYS` out; the app
+goes dark immediately and every read 401s from that instant. Until the purge runs, signing in by any
+of the four routes reaches the offer below rather than a dead end - but it is only an *offer*, and
+the account stays deleted until `POST /auth/restore` is called.
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant FE as Frontend
+    participant API as API
+    participant DB as Database
+
+    Note over U,API: Any of the four ways in - link, six-digit code,\nGoogle, or a passkey assertion
+
+    U->>FE: Signs in as usual
+    FE->>API: POST /auth/email/verify (or verify-code / google / passkey/verify)
+    API->>DB: Resolve identity -> row found, is_deleted = true
+    API-->>FE: status=deletion_pending\nrestore_token + purge_after + email
+    Note over API: No access token, no cookie, no write -\nthe account is exactly as deleted as before
+    FE->>U: "This account is scheduled for deletion on {purge_after}"
+
+    alt Wants it back
+        U->>FE: Clicks "Restore my account"
+        FE->>API: POST /auth/restore {restore_token}
+        API->>DB: SELECT ... FOR UPDATE on the row
+        API->>DB: Clear both is_deleted and deleted_at,\nblacklist the restore token (one transaction)
+        API-->>FE: status=authenticated + access_token\n(+ refresh_token cookie)
+        FE->>U: Redirect to /dashboard
+    else Purge already ran
+        API-->>FE: 401 - the account has been permanently deleted
+    end
+```
+
+On the magic-link path only, `GET /auth/email/verify/check` answers `valid=true` **plus**
+`deletion_pending` and `purge_after`, so the landing page can label the button *Restore my account*
+rather than *Sign in* before anything is spent. The other three have no side-effect-free precheck -
+a typed code, a Google dialog and a biometric gesture are all commitments - so they show the same
+outcome on a screen after the POST. Note the asymmetry that follows: `POST /auth/email/verify-code`
+claims the request before resolving, so a code spent on reaching the offer is spent, while the
+link's token is untouched by the precheck and stays reopenable until it expires.
+
+The restore token is its own `TokenType`, is single-use, and expires with
+`ONBOARDING_TOKEN_EXPIRE_MINUTES`. It is never emailed: the deletion confirmation tells the user to
+sign in, because a restore link sitting in an inbox for a fortnight would be a standing key to an
+account its owner asked to have destroyed. See `DECISIONS.md` for the full reasoning, including how
+the row lock settles the race with the purge job.
 
 Sign-in emails go out over SMTP - any relay works, and any provider will give you one. Set these in
 `src/.env`:

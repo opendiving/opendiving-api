@@ -286,13 +286,17 @@ class TestCheckEmailLink:
         with (
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.crud_authentication_requests") as mock_crud,
+            patch("src.app.api.v1.auth.crud_users") as mock_users,
         ):
             mock_crud.get = AsyncMock(return_value=auth_request)
+            mock_users.get = AsyncMock(return_value=None)
 
             result = await check_email_link(_request(), Response(), "good", mock_db)
 
             assert result.valid is True
             assert result.email == "a@example.com"
+            assert result.deletion_pending is False
+            assert result.purge_after is None
 
 
 class TestVerifyEmailLink:
@@ -436,7 +440,13 @@ class TestVerifyEmailLink:
             "invalidated_at": None,
             "expires_at": datetime.now(UTC) + timedelta(minutes=10),
         }
-        db_user = {"id": 1, "uuid": USER_UUID, "username": "existinguser", "email": "existing@example.com"}
+        db_user = {
+            "id": 1,
+            "uuid": USER_UUID,
+            "username": "existinguser",
+            "email": "existing@example.com",
+            "is_deleted": False,
+        }
 
         with (
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
@@ -533,7 +543,9 @@ class TestVerifyEmailCode:
             patch("src.app.services.auth_service.crud_users") as mock_users,
         ):
             mock_requests.get = AsyncMock(return_value=_code_request())
-            mock_users.get = AsyncMock(return_value={"id": 1, "uuid": USER_UUID, "email": "existing@example.com"})
+            mock_users.get = AsyncMock(
+                return_value={"id": 1, "uuid": USER_UUID, "email": "existing@example.com", "is_deleted": False}
+            )
             mock_providers.exists = AsyncMock(return_value=True)
             stub_claim(mock_db)
 
@@ -640,7 +652,13 @@ class TestVerifyEmailCode:
         ):
             mock_requests.get = AsyncMock(return_value=_code_request())
             mock_users.get = AsyncMock(
-                return_value={"id": 1, "uuid": USER_UUID, "username": "existinguser", "email": "existing@example.com"}
+                return_value={
+                    "id": 1,
+                    "uuid": USER_UUID,
+                    "username": "existinguser",
+                    "email": "existing@example.com",
+                    "is_deleted": False,
+                }
             )
             mock_providers.exists = AsyncMock(return_value=True)
             stub_claim(mock_db)
@@ -662,7 +680,9 @@ class TestVerifyEmailCode:
             patch("src.app.services.auth_service.crud_users") as mock_users,
         ):
             mock_requests.get = AsyncMock(return_value=_code_request())
-            mock_users.get = AsyncMock(return_value={"id": 1, "uuid": USER_UUID, "email": "existing@example.com"})
+            mock_users.get = AsyncMock(
+                return_value={"id": 1, "uuid": USER_UUID, "email": "existing@example.com", "is_deleted": False}
+            )
             mock_providers.exists = AsyncMock(return_value=True)
             stub_claim(mock_db)
 
@@ -745,7 +765,7 @@ class TestAuthWithGoogle:
     @pytest.mark.asyncio
     async def test_existing_google_user_signs_in(self, mock_db):
         google_user = GoogleUserInfo(google_id="g-123", email="user@example.com", name="Jane Doe")
-        db_user = {"id": 1, "uuid": USER_UUID, "username": "janedoe", "email": "user@example.com"}
+        db_user = {"id": 1, "uuid": USER_UUID, "username": "janedoe", "email": "user@example.com", "is_deleted": False}
 
         with (
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
@@ -769,7 +789,13 @@ class TestAuthWithGoogle:
         """A magic-link account with a matching, Google-verified email gets the
         `google` provider linked onto it rather than a duplicate account created."""
         google_user = GoogleUserInfo(google_id="g-123", email="user@example.com", name="Jane Doe")
-        existing_user = {"id": 1, "uuid": USER_UUID, "username": "janedoe", "email": "user@example.com"}
+        existing_user = {
+            "id": 1,
+            "uuid": USER_UUID,
+            "username": "janedoe",
+            "email": "user@example.com",
+            "is_deleted": False,
+        }
 
         with (
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
