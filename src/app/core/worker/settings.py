@@ -2,7 +2,13 @@ from arq.connections import RedisSettings
 from arq.cron import cron
 
 from ...core.config import settings
-from .functions import purge_expired_tokens, send_gear_service_digests, shutdown, startup
+from .functions import (
+    purge_expired_authentication_requests,
+    purge_expired_tokens,
+    send_gear_service_digests,
+    shutdown,
+    startup,
+)
 
 REDIS_QUEUE_HOST = settings.REDIS_QUEUE_HOST
 REDIS_QUEUE_PORT = settings.REDIS_QUEUE_PORT
@@ -12,7 +18,12 @@ class WorkerSettings:
     functions: list = []
     cron_jobs = [
         cron(purge_expired_tokens, minute=0, run_at_startup=True),
-        # Deliberately no `run_at_startup` here, unlike the purge above: that one is
+        # Same shape as the sweep above, and for the same reason: both are idempotent
+        # housekeeping that deletes only rows already past their own expiry, so a
+        # restart loop costs nothing but a no-op DELETE. Two tiny statements against
+        # different tables don't contend, so they share the hour mark.
+        cron(purge_expired_authentication_requests, minute=0, run_at_startup=True),
+        # Deliberately no `run_at_startup` here, unlike the two purges above: those are
         # idempotent housekeeping, this one sends email, and a worker restart must never
         # blast a round of reminders out. Once a day is plenty - `should_notify` means
         # most runs send nothing at all.

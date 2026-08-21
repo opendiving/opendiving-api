@@ -40,7 +40,11 @@ class AuthenticationRequest(Base, PublicUUIDMixin):
     # persisted, so a DB leak alone can't be used to mint valid magic links.
     token_hash: Mapped[str] = mapped_column(String, unique=True, index=True)
 
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Indexed for the hourly sweep's `WHERE expires_at < :cutoff`
+    # (`core.worker.functions.purge_expired_authentication_requests`), which is the
+    # only thing that has ever removed a row from this table - and the table it has to
+    # get through is the one that grew unbounded until that job existed.
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
     # SHA-256 hex digest of the six-digit sign-in code printed in the same email as the
     # link (`POST /auth/email/verify-code`). Only ever set for `purpose="sign_in"`: an

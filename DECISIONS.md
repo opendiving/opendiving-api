@@ -10448,3 +10448,63 @@ session does on its own: `Mock(spec=AsyncSession)` answers `execute` with anothe
 `exists` reads as a row found - so every pre-existing test in that file kept passing after the check
 was added, and would keep passing if it were deleted. They now state the live account explicitly
 (`SignedInAccount`) instead of inheriting one from a truthy mock.
+
+## `authentication_request` is swept on a cron, a week after each row expires
+
+`token_blacklist` got a purge job the day it was noticed growing (*"The Arq worker now does one real
+thing"*). `authentication_request` never got one, and it is the worse of the two tables to leave
+unbounded: every magic-link request stores the **email address** it was sent to, and `#98` added a
+sign-in code's digest beside it, so each row is a personal identifier plus a credential's hash.
+Measured rather than assumed — one developer's machine, using the app normally:
+
+```
+ rows | null_user | with_code |   oldest
+------+-----------+-----------+------------
+  565 |       464 |        37 | 2026-08-05
+```
+
+Nothing had ever been removed, and the count had doubled in the preceding day. The 464 matter twice
+over: `purpose="sign_in"` rows carry `user_id IS NULL` deliberately (the flow predates the account
+existing), so the `ON DELETE CASCADE` on `authentication_request.user_id` cannot reach them, and no
+account deletion ever will. `plans/account-deletion.md` §6 is where that lands — the account purge
+deletes by *email* as a second statement, and even that is partial, because `verify_email_change`
+rewrites `user.email` in place and a row created under a previous address carries a name the purge
+cannot ask for. **This sweep is the primary mechanism for the table; the per-account delete only
+covers rows younger than this margin.**
+
+`core.worker.functions.purge_expired_authentication_requests`, hourly at `:00` beside
+`purge_expired_tokens`, `run_at_startup=True` on the same grounds: both delete only rows already
+past their own expiry, so a restart loop costs a no-op `DELETE`.
+
+**The margin is the only interesting decision here, and deleting at `expires_at` would have been
+wrong by a week.** `verify_email_change` deliberately tolerates a replay of an already-used
+email-change link while the address it names is still the account's current one — see *"A confirmed
+change can still show 'invalid or expired'"* above, and `_replay_result_or_reject`. That leniency
+has no state of its own; it lives entirely in the row. Delete the row at expiry and a mail scanner
+detonating the link, a double click, or someone opening yesterday's mail again stops being a no-op
+that reports the change and becomes `"This confirmation link is invalid."` — the documented
+behaviour silently deleted by a housekeeping job that never mentions it.
+
+`AUTHENTICATION_REQUEST_RETENTION` is seven days, and deliberately **not** a setting: an operator
+tuning it would be tuning that leniency without knowing they were. Seven days is far past any race
+and past a human re-reading recent mail, while still bounding the table at roughly a week of sign-in
+traffic. Past it, the replay reports invalid — which is already the answer `check_email_change_link`
+gives that link, since the precheck rejects a used row outright, so the only caller that can still
+reach the leniency is one POSTing directly.
+
+**One statement with `rowcount`, where the sibling job counts first.** Not an inconsistency waiting
+to be tidied: `purge_expired_tokens` counts because FastCRUD's `delete()` raises `NoResultFound`
+when nothing matches, which is the *normal* outcome of an hourly sweep. Core `delete()` has no such
+objection and reports its own count, so this job needs neither the extra scan nor the check-then-act
+window between the two. (`AuthenticationRequest` carries no `SoftDeleteMixin`, so FastCRUD would
+have issued a real `DELETE` here too — the difference is the count, not the verb.)
+
+**`expires_at` gained an index, and a revision to add it.** Same argument as
+`token_blacklist.expires_at`, one notch stronger: the first run on an existing instance meets every
+row ever written, because nothing has ever deleted one. Autogenerate does see a new index (unlike an
+`ondelete` change), but the revision here is hand-written anyway since it is a single
+`create_index`.
+
+**What this costs.** A link older than the retention window now reports "invalid" where it used to
+report "expired" — the row that carried the distinction is gone. Both are 401s, both are true, and
+`check_email_link` collapsed the two into one `valid=false` already.

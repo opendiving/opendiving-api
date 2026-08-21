@@ -3,6 +3,7 @@
 from collections.abc import AsyncGenerator
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,10 +12,17 @@ from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
 from src.app.core.db.database import async_engine
-from src.app.core.worker.functions import _due_text, purge_expired_tokens, send_gear_service_digests
+from src.app.core.worker.functions import (
+    AUTHENTICATION_REQUEST_RETENTION,
+    _due_text,
+    purge_expired_authentication_requests,
+    purge_expired_tokens,
+    send_gear_service_digests,
+)
+from src.app.models.authentication_request import AuthenticationRequest
 from src.app.models.user import User
 from src.app.schemas.gear_service import ServiceKind, ServiceStatus
-from tests.conftest import db_available
+from tests.conftest import db_available, unique_email
 from tests.helpers.generators import create_gear_item, create_gear_service_schedule
 
 
@@ -75,6 +83,140 @@ class TestPurgeExpiredTokens:
 
             mock_blacklist.delete.assert_not_called()
             assert "No expired" in result
+
+
+class _DeletingSession(AsyncMock):
+    """`local_session()` stand-in that answers one DELETE with a fixed `rowcount`."""
+
+    def __init__(self, rowcount: int) -> None:
+        super().__init__()
+        self._rowcount = rowcount
+        self.statements: list[Any] = []
+        self.committed = False
+
+    async def execute(self, statement, parameters=None):
+        self.statements.append(statement)
+        result = MagicMock()
+        result.rowcount = self._rowcount
+        return result
+
+    async def commit(self) -> None:
+        self.committed = True
+
+
+class TestPurgeExpiredAuthenticationRequests:
+    """The sweep that keeps `authentication_request` - one stored email address per
+    sign-in, and nothing that ever deleted one - from growing forever."""
+
+    @pytest.mark.asyncio
+    async def test_deletes_rows_past_the_retention_window(self) -> None:
+        session = _DeletingSession(4)
+        with patch("src.app.core.worker.functions.local_session", return_value=_FakeSessionContext(session)):
+            result = await purge_expired_authentication_requests(MagicMock())
+
+        assert len(session.statements) == 1
+        compiled = str(session.statements[0])
+        assert compiled.strip().upper().startswith("DELETE FROM AUTHENTICATION_REQUEST")
+        assert "authentication_request.expires_at <" in compiled
+        assert session.committed
+        assert "4" in result
+
+    @pytest.mark.asyncio
+    async def test_the_cutoff_trails_now_by_the_retention_window(self) -> None:
+        """Not `now()`: the row carries the email-change replay leniency
+        `verify_email_change` documents, and deleting at expiry would silently end it."""
+        session = _DeletingSession(0)
+        before = datetime.now(UTC)
+        with patch("src.app.core.worker.functions.local_session", return_value=_FakeSessionContext(session)):
+            await purge_expired_authentication_requests(MagicMock())
+
+        (cutoff,) = session.statements[0].compile().params.values()
+        assert cutoff.tzinfo is not None, "a naive cutoff compares off by the host's UTC offset"
+        assert before - AUTHENTICATION_REQUEST_RETENTION - timedelta(minutes=1) <= cutoff
+        assert cutoff <= datetime.now(UTC) - AUTHENTICATION_REQUEST_RETENTION
+
+    @pytest.mark.asyncio
+    async def test_reports_an_empty_sweep_without_erroring(self) -> None:
+        """The common case on an hourly cron, and the reason the sibling job counts before
+        it deletes - `rowcount` gets this for free."""
+        session = _DeletingSession(0)
+        with patch("src.app.core.worker.functions.local_session", return_value=_FakeSessionContext(session)):
+            result = await purge_expired_authentication_requests(MagicMock())
+
+        assert "No expired authentication requests" in result
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestPurgeExpiredAuthenticationRequestsAgainstPostgres:
+    """The sweep against a real database, because the boundary it has to get right is a
+    `WHERE` clause and a mocked session never evaluates one.
+
+    Unscoped, as the cron runs it: it deletes every eligible row in the database, not only
+    this test's, so assertions only ever ask after rows the test seeded.
+    """
+
+    @pytest_asyncio.fixture(autouse=True)
+    async def _dispose_the_app_engine(self) -> AsyncGenerator[None]:
+        """Same reason as `TestSendGearServiceDigestsAgainstPostgres` - the job opens its
+        own session from the module-level `local_session`, bound to the app's
+        session-lifetime engine, and a pooled asyncpg connection belongs to the loop that
+        opened it."""
+        await async_engine.dispose()
+        yield
+        await async_engine.dispose()
+
+    @staticmethod
+    def _request(db: Session, *, expires_at: datetime, purpose: str = "sign_in") -> AuthenticationRequest:
+        row = AuthenticationRequest(
+            email=unique_email(),
+            token_hash=uuid7().hex,
+            expires_at=expires_at,
+            purpose=purpose,
+        )
+        db.add(row)
+        db.commit()
+        return row
+
+    @staticmethod
+    def _still_there(db: Session, row_id: int) -> bool:
+        return db.get(AuthenticationRequest, row_id) is not None
+
+    @pytest.mark.asyncio
+    async def test_a_long_expired_row_is_deleted(self, db: Session) -> None:
+        stale = self._request(db, expires_at=datetime.now(UTC) - AUTHENTICATION_REQUEST_RETENTION - timedelta(days=1))
+        stale_id = stale.id
+        db.expunge(stale)
+
+        await purge_expired_authentication_requests({})
+
+        assert not self._still_there(db, stale_id)
+
+    @pytest.mark.asyncio
+    async def test_a_recently_expired_row_survives_the_retention_window(self, db: Session) -> None:
+        """The whole reason the cutoff is not `now()`: `verify_email_change` tolerates a
+        replay of an already-used link while it names the account's current address, and
+        that leniency lives in this row."""
+        recent = self._request(
+            db,
+            expires_at=datetime.now(UTC) - AUTHENTICATION_REQUEST_RETENTION + timedelta(days=1),
+            purpose="email_change",
+        )
+        recent_id = recent.id
+        db.expunge(recent)
+
+        await purge_expired_authentication_requests({})
+
+        assert self._still_there(db, recent_id)
+
+    @pytest.mark.asyncio
+    async def test_a_live_request_is_left_alone(self, db: Session) -> None:
+        live = self._request(db, expires_at=datetime.now(UTC) + timedelta(minutes=30))
+        live_id = live.id
+        db.expunge(live)
+
+        await purge_expired_authentication_requests({})
+
+        assert self._still_there(db, live_id)
 
 
 def _row(**overrides):

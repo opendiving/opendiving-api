@@ -2,12 +2,13 @@ import asyncio
 import logging
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import uvloop
 from arq.worker import Worker
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import CursorResult, and_, delete, or_, select, update
 
+from ...models.authentication_request import AuthenticationRequest
 from ...models.gear_item import GearItem
 from ...models.gear_service_schedule import GearServiceSchedule
 from ...models.user import User
@@ -27,6 +28,24 @@ from ..db.database import local_session
 asyncio.set_event_loop(uvloop.new_event_loop())
 
 configure_logging(settings.LOG_LEVEL)
+
+# How long an `authentication_request` row is kept *after* its own `expires_at` has
+# passed. Not a knob: it exists to protect one documented leniency, and an operator
+# tuning it would be tuning that leniency without knowing they were.
+#
+# Deleting at `expires_at` would be the obvious rule and is wrong by a week.
+# `verify_email_change` deliberately tolerates a replay of an already-used email-change
+# link while the address it names is still the account's current one
+# (`api.v1.users._replay_result_or_reject`) - a mail scanner detonating the link, a
+# double click, or the user opening yesterday's mail again all land there and get told
+# the change they asked for was applied. That leniency lives entirely in this row, so
+# removing the row turns it into `"This confirmation link is invalid."`.
+#
+# Seven days is far past any race and past a human re-reading recent mail, while still
+# bounding the table at roughly a week of sign-in traffic. Past it, a replay reports
+# invalid rather than confirming - the same answer `check_email_change_link` already
+# gives that link, since it rejects a used row outright.
+AUTHENTICATION_REQUEST_RETENTION = timedelta(days=7)
 
 
 # -------- background tasks --------
@@ -52,6 +71,54 @@ async def purge_expired_tokens(ctx: dict[Any, Any]) -> str:
         await crud_token_blacklist.delete(db, allow_multiple=True, expires_at__lt=now)
         logging.info("Purged %d expired blacklisted token(s)", expired_count)
         return f"Purged {expired_count} expired token(s)"
+
+
+async def purge_expired_authentication_requests(ctx: dict[Any, Any]) -> str:
+    """Delete `authentication_request` rows whose expiry passed more than
+    `AUTHENTICATION_REQUEST_RETENTION` ago.
+
+    The sibling of `purge_expired_tokens`, and the table needed it more: every magic-link
+    request stores the email address it was sent to, `#98` added a sign-in code's digest
+    beside it, and nothing has ever removed a row. On one developer's machine the table
+    held 565 rows - 464 of them `purpose="sign_in"`, whose `user_id` is `NULL` by design
+    and so cannot even be reached by the `ON DELETE CASCADE` an account deletion follows -
+    and it had doubled in a day. This is the primary mechanism keeping that bounded.
+
+    `expires_at` is the right clock rather than `used_at`/`invalidated_at`: an expired row
+    cannot sign anyone in or confirm anything regardless of which of those it carries, and
+    a row that is spent but still live is the one both verify endpoints read to say *why*
+    it was rejected.
+
+    One `DELETE` reporting its own `rowcount`, where `purge_expired_tokens` counts first -
+    not an inconsistency to tidy up. That job counts because FastCRUD's `delete()` raises
+    `NoResultFound` when nothing matches, which is the normal case on an hourly sweep;
+    Core has no such objection, so the count and its check-then-act window are avoidable
+    here.
+
+    UTC-aware for the reason `purge_expired_tokens` spells out: `expires_at` is a
+    `DateTime(timezone=True)`, so a naive `datetime.now()` would compare against it off by
+    the host's UTC offset.
+
+    One cost worth naming: a link older than the retention window now reports "invalid"
+    where it used to report "expired", because the row that carried the distinction is
+    gone. Both are 401s and both are true.
+    """
+    cutoff = datetime.now(UTC) - AUTHENTICATION_REQUEST_RETENTION
+    async with local_session() as db:
+        result = cast(
+            CursorResult,
+            await db.execute(delete(AuthenticationRequest).where(AuthenticationRequest.expires_at < cutoff)),
+        )
+        # Read before the commit: the count belongs to the statement, not the transaction.
+        purged = result.rowcount
+        await db.commit()
+
+    if purged == 0:
+        logging.info("No expired authentication requests to purge")
+        return "No expired authentication requests to purge"
+
+    logging.info("Purged %d expired authentication request(s)", purged)
+    return f"Purged {purged} expired authentication request(s)"
 
 
 def _due_text(row: Any, status: ServiceStatus, today: date) -> str:
