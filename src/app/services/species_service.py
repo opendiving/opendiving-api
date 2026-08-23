@@ -139,8 +139,8 @@ _TAXON_NAME_PROPERTY = "P225"
 _TAXON_RANK_PROPERTY = "P105"
 
 # P105's item to the rank string this app ships. **Spelled WoRMS's way wherever WoRMS has a
-# spelling**, so one rank never reaches a client under two names: a Wikidata-only row and the
-# WoRMS row it merges with have to agree, and the client sorts and displays the string.
+# spelling**, so one rank never reaches a client under two names: a client displays this
+# string verbatim, and a Wikidata-only row and the WoRMS row beside it have to agree.
 #
 # The keys are enumerated against WoRMS's own closed rank vocabulary rather than collected as
 # they turn up - `AphiaTaxonRanksByID` lists thirty distinct names across its kingdoms, and
@@ -152,9 +152,10 @@ _TAXON_RANK_PROPERTY = "P105"
 # somewhere rather than falling through.
 #
 # Falling through is the recorded residual, and it is not neutral: an unmapped item leaves
-# the row on the `"unknown"` sentinel, which orders *between* the ranks rather than below
-# them - see the `"unknown"` section in DECISIONS.md. The map is sized to make that rare, not
-# to make it impossible.
+# the row on the `"unknown"` sentinel, which is the value that would sit *between* the ranks
+# under an order that tiers them rather than below them - see the `"unknown"` section in
+# DECISIONS.md, which also records the second way this field moves between two identical
+# searches. The map is sized to make the fall-through rare, not impossible.
 _WIKIDATA_RANK_BY_QID = {
     "Q36732": "Kingdom",
     "Q2752679": "Subkingdom",
@@ -697,9 +698,11 @@ def _wikidata_result(entity: _WikidataEntity) -> SpeciesSearchResult | None:
     that same binomial - which is exactly why `_choose_common_name` prefers a label that
     differs from it.
 
-    **Resolve is unaffected, by construction.** This is the only site with the fallback, it
-    is reached only from `_wikidata_search`, and `resolve_species` takes its binomial from the
-    WoRMS record - so nothing that gets *written* changes shape here.
+    **Resolve is unaffected, by construction.** The fallback lived here and nowhere else, this
+    function is reached only from `_wikidata_search`, and `resolve_species` takes its binomial
+    from the WoRMS record and asks an entity only for its qid and its English names - so
+    nothing that gets *written* changes shape, and no label-for-binomial fallback survives
+    anywhere in this module.
 
     **The name here is unvetted, and that is a knowing limitation rather than an oversight.**
     Resolve passes `_choose_common_name` the taxon's synonym list so a junior scientific
@@ -724,13 +727,15 @@ def _wikidata_result(entity: _WikidataEntity) -> SpeciesSearchResult | None:
         # P105, translated by `_WIKIDATA_RANK_BY_QID`. This reverses the refusal that stood
         # here - no rank at all rather than one derived from claims - and what changed is the
         # premise rather than the appetite for guessing: rank was picker context that nothing
-        # read, and it becomes a search-ordering input, where a sentinel on every
-        # Wikidata-only row misplaces the row instead of merely leaving a caption blank. This
-        # fill deliberately lands ahead of the ordering that reads it, so that ordering never
-        # meets a Wikidata side where every row is the sentinel. The argument is in the
+        # read, and it is becoming a search-ordering input, where a sentinel on every
+        # Wikidata-only row misplaces the row instead of merely leaving a caption blank.
+        # **Nothing sorts on it yet** - `_ordered` still keys on name match alone - and the
+        # fill deliberately comes first: an order introduced ahead of it would have run
+        # against a Wikidata side where every row was the sentinel. The argument is in the
         # `"unknown"` section of DECISIONS.md. Still the sentinel for an entity with no P105
         # or an unmapped rank item, and a hit WoRMS also returned takes WoRMS's rank at the
-        # merge.
+        # merge - which is also how two identical searches can show two different real ranks
+        # for a taxon the registers disagree about, recorded in that same section.
         rank=entity.rank or "unknown",
         # Wikidata has nothing to say about nomenclatural status, so this one stays a
         # sentinel outright - the merge fills it from WoRMS wherever WoRMS answered.

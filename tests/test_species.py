@@ -493,8 +493,9 @@ class TestWhatAnEntityIsWorth:
     @pytest.mark.asyncio
     async def test_an_unmapped_rank_item_stays_the_sentinel(self, no_redis: None):
         """The recorded residual, pinned so it is a known shape rather than a surprise. A rank
-        item outside the map leaves the row saying it does not know, which is honest - and it
-        is the one outcome that orders between the ranks rather than below them."""
+        item outside the map leaves the row saying it does not know, which is honest - and is
+        the value that would sit between the ranks under an order that tiers them, which is
+        why the map is enumerated up front rather than grown as escapes turn up."""
         db = _empty_db()
         entities = {
             "entities": {

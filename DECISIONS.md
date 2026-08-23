@@ -7906,11 +7906,13 @@ rather than missed — a dropped entity also leaves the *merge*, so a WoRMS row 
 loses the Wikidata name it would otherwise have gained. Measured exposure when the gate went in: one
 P225-less item among the entities behind the flagship queries, and no WoRMS row carried its AphiaID.
 
-**Resolve keeps the label fallback and needs no gate**, by construction rather than by care: nothing
-there reads an entity for a binomial. `resolve_species` takes identity and taxonomy from the WoRMS
-record and asks the entity only for its qid and its English names, and the fallback lives in
-`_wikidata_result`, which only the search path reaches. So the write path — the one that produces a
-row nobody rewrites — is untouched by the drop.
+**The write path needed no gate of its own**, by construction rather than by care: nothing in
+`resolve_species` ever read an entity for a binomial. It takes identity and taxonomy from the WoRMS
+record and asks the entity only for its qid and its English names. The label-for-binomial fallback
+lived in exactly one function, `_wikidata_result`, which only the search path reaches — so deleting
+it there deleted the whole of it, and no such fallback exists anywhere in the module now. That is
+worth stating positively rather than as "resolve keeps it", which is how this paragraph first read
+and would have sent the next person hunting for a second copy that never existed.
 
 **Claims are read statement-rank first, not in serialization order.** Wikidata marks a value
 `deprecated` when the community has ruled it wrong, and `preferred` when several are true and one is
@@ -8246,9 +8248,9 @@ though the column is free.** Wikidata's P105 ("taxon rank") fills `rank` on sear
 returned, through an explicit QID-to-name map in `species_service`, and every entry in that map is
 spelled WoRMS's way wherever WoRMS has a spelling — down to `"Phylum (Division)"`, which is what
 WoRMS actually calls the botanical rank (measured on *Rhodophyta*, AphiaID 852), and `"Forma"` where
-Wikidata's label reads "form". The rule behind that is one rank, one string: the client sorts and
-displays this field, so the same rank arriving under two names depending on which register a row
-came from would read as two ranks. The keys are enumerated against WoRMS's own closed vocabulary
+Wikidata's label reads "form". The rule behind that is one rank, one string: a client displays this
+field verbatim, so the same rank arriving under two names depending on which register a row came
+from would read as two ranks. The keys are enumerated against WoRMS's own closed vocabulary
 (`AphiaTaxonRanksByID`, thirty distinct names across its kingdoms) rather than collected as they
 turn up, plus two entries outside it — **Parvorder**, which Wikidata uses and WoRMS does not
 (*Mysticeti* carries it), and **Clade**, the common non-Linnaean rank. One WoRMS name has no
@@ -8287,13 +8289,21 @@ Two consequences worth stating, because both were found by a client rendering it
 
   **This bullet used to end by refusing to derive a rank from an entity's claims, and that refusal
   is reversed here along with the premise it rested on.** It was right while rank was context nobody
-  read: a second property lookup and a mapping table, spent on a caption. Rank becomes a sort input
-  — the search order puts species and below ahead of genus and above, so the species a diver spotted
-  outranks its genus on the page — and under an order that reads rank, a blanket sentinel is not a
-  missing caption but a wrong position. The fill lands ahead of the ordering that consumes it,
-  deliberately: an order introduced first would have run against a Wikidata side where every row
-  carried the sentinel. What is derived is also narrower than what was refused — P105 is *taxon
-  rank*, Wikidata's own statement of the thing, not an inference from "instance of".
+  read: a second property lookup and a mapping table, spent on a caption. Rank is becoming a sort
+  input — search results are to be ordered with species and below ahead of genus and above, so the
+  species a diver spotted outranks its genus on the page — and under an order that reads rank, a
+  blanket sentinel is not a missing caption but a wrong position.
+
+  **Nothing sorts on `rank` yet, and that is the intended order of arrival rather than an
+  oversight.** `_ordered` still keys on name match alone, and no client sorts on the field either;
+  the ordering change is separate and lands after this one. Filling the rank first is deliberate —
+  an order introduced ahead of the fill would have run against a Wikidata side where every row
+  carried the sentinel, which is the one arrangement guaranteed to sort those rows wrongly. Read the
+  ordering sentences in this section as the reason the fill exists, not as a description of code
+  that is here.
+
+  What is derived is also narrower than what was refused — P105 is *taxon rank*, Wikidata's own
+  statement of the thing, not an inference from "instance of".
 
 - **The merge treats it as a placeholder, not a claim** (`_merge_result`): a real rank from either
   source displaces it, which is what makes a hit both registers matched come out with WoRMS's
@@ -8309,21 +8319,37 @@ Two consequences worth stating, because both were found by a client rendering it
   defensive padding — this exact inference was made independently on the web side and came within a
   commit of documenting that guard as unreachable.
 
-**What P105 bounds, and what it does not.** It gives a Wikidata-sourced row a rank with no WoRMS
-involvement at all, which is what stops a Wikidata-heavy page ordering as though nothing on it had a
-rank. It does not make the field stable between requests. Where a row sorts can still differ across
-two identical searches, but only for a taxon that fails on *both* sides at once: its WoRMS record
-omits `rank` — the fallback two bullets up, and the same trap as the "WoRMS always has one"
-inference — **and** its Wikidata item carries no P105, or one the map does not cover. Needing both
-is what makes the residual small enough to accept rather than absent.
+**What P105 bounds, and what it does not.** It gives a Wikidata-sourced row a real rank with no
+WoRMS involvement at all, so a Wikidata-heavy page has ranks to work with instead of a column of
+sentinels. It does **not** make the field stable across two identical searches, and there are two
+separate ways it moves rather than the one this paragraph first admitted to.
 
-The unmapped-item half is worth naming precisely, because its direction is not the safe one. An
-unmapped rank item produces `"unknown"`, and `"unknown"` sorts *between* the ranks rather than below
-them — so an omitted order or phylum would sit above every genus and family row instead of beneath
-them, inverting the very ruling the sort exists for. Falling back to a sentinel is only safe for
-ranks no register emits. That is why the map is enumerated against a closed vocabulary up front and
-carries **Clade** besides, rather than being filled in as escapes turn up: the enumeration is the
-defence, and the sentinel is not.
+The first is the sentinel, and it needs both registers to fail at once: the WoRMS record omits
+`rank` — the fallback two bullets up, and the same trap as the "WoRMS always has one" inference —
+**and** the Wikidata item carries no P105, or one the map does not cover. Needing both is what keeps
+this residual small.
+
+The second needs neither of them to fail, which is why it was missed on the first pass. The two
+registers can carry **different real ranks for the same taxon**, and which one a merged row shows
+depends on whether WoRMS answered inside `_SEARCH_BUDGET_SECONDS`: `_remote_search` sorts WoRMS's
+answer ahead of Wikidata's, `_merge_result` is first-writer-wins, and a WoRMS leg that misses the
+budget leaves Wikidata as the sole writer. *Mysticeti* is the measured case and it is not a spelling
+difference at all — **WoRMS says `Superfamily`, Wikidata's first P105 statement says `Parvorder`** —
+so the same query can return either string on two consecutive requests. The one-rank-one-string rule
+above governs the *spelling* axis and cannot touch this one; nothing short of preferring one
+register's rank unconditionally would, and that would mean discarding WoRMS's taxonomy on the merged
+rows the whole design exists to build. Accepted, and recorded here rather than left to be
+rediscovered — and bounded in the direction that matters: `Superfamily` and `Parvorder` are both
+above genus, so a disagreement of this shape moves the string a diver reads, not the coarse tier an
+ordering would sort on.
+
+The sentinel half is worth naming precisely too, because its direction is not the safe one. An
+unmapped rank item produces `"unknown"`, and `"unknown"` is the value that would sit *between* the
+ranks under an order that tiers them — so an omitted order or phylum would land above every genus
+and family row instead of beneath them, inverting the ruling such an order would exist for. Falling
+back to a sentinel is only safe for ranks no register emits. That is why the map is enumerated
+against a closed vocabulary up front and carries **Clade** besides, rather than being filled in as
+escapes turn up: the enumeration is the defence, and the sentinel is not.
 
 The alternative — leaving the fields null — was rejected because both columns are `NOT NULL` on a
 resolved row, and a schema whose optionality differs between a search hit and the catalog row it
