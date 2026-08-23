@@ -124,6 +124,7 @@ def _generator_search(*pages: str | tuple[str, ...], more: bool = False) -> dict
         payload["query"] = {"pages": dict(reversed(entries))}
     return payload
 
+
 # *Amphiprion ocellaris* as WoRMS actually sends it - the accepted, species-rank record the
 # whole feature is demonstrated on. Trimmed to the fields this app reads, keeping WoRMS's own
 # key spellings (`scientificname`, the bare `class`/`order`, the 1/0 habitat flags), because
@@ -183,9 +184,7 @@ ORCA_SYNONYMS = [{"scientificname": "Orca gladiator"}, {"scientificname": "Orca 
 # other's reader fails silently rather than loudly - it simply looks like a register with
 # nothing to say - which is why `_registers` routes them apart by URL and why there are two
 # constants here rather than one shared between the paths.
-ORCA_WIKIDATA_SEARCH = _generator_search(
-    ("Q26843", "Orcinus orca", "Orca gladiator", "orca whale", "killer whale")
-)
+ORCA_WIKIDATA_SEARCH = _generator_search(("Q26843", "Orcinus orca", "Orca gladiator", "orca whale", "killer whale"))
 ORCA_WIKIDATA_LOOKUP = {"query": {"search": [{"title": "Q26843"}]}}
 ORCA_WIKIDATA_ENTITIES = {
     "entities": {
@@ -205,9 +204,7 @@ ORCA_WIKIDATA_ENTITIES = {
     }
 }
 
-WIKIDATA_SEARCH = _generator_search(
-    ("Q1126155", "Amphiprion ocellaris", "ocellaris clownfish", "Common clownfish")
-)
+WIKIDATA_SEARCH = _generator_search(("Q1126155", "Amphiprion ocellaris", "ocellaris clownfish", "Common clownfish"))
 WIKIDATA_LOOKUP = {"query": {"search": [{"title": "Q1126155"}]}}
 WIKIDATA_ENTITIES = {
     "entities": {
