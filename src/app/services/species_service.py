@@ -125,14 +125,76 @@ _MISS_TTL_SECONDS = 60 * 60
 # Bumped whenever the cached shape or the way it is composed changes. What is cached is the
 # *normalized, merged* remote list rather than raw provider payloads, so a change to the
 # normalizer has to invalidate the old entries - a new prefix does that without a flush.
-_CACHE_VERSION = "v2"
+_CACHE_VERSION = "v3"
 
 # Wikidata's "WoRMS AphiaID" property. The single hinge the whole two-source design turns
 # on: without a shared key there would be nothing to merge two registers *on*.
 _APHIA_PROPERTY = "P850"
-# Wikidata's "taxon name" property - the scientific name, used when an entity's English
-# label is something else.
+# Wikidata's "taxon name" property - the scientific name. A search row requires it: an item
+# tagged with an AphiaID but no taxon name is not a taxon this app can stand behind, and
+# `?q=orca` used to open with two indistinguishable bare "Orca" rows to prove it.
 _TAXON_NAME_PROPERTY = "P225"
+# Wikidata's "taxon rank" property, whose value is an item rather than a string - so it is
+# read through `_claim_entity_id` and translated by the map below.
+_TAXON_RANK_PROPERTY = "P105"
+
+# P105's item to the rank string this app ships. **Spelled WoRMS's way wherever WoRMS has a
+# spelling**, so one rank never reaches a client under two names: a client displays this
+# string verbatim, and a Wikidata-only row and the WoRMS row beside it have to agree.
+#
+# The keys are enumerated against WoRMS's own closed rank vocabulary rather than collected as
+# they turn up - `AphiaTaxonRanksByID` lists thirty distinct names across its kingdoms, and
+# every one of them is here except *Mutatio*, for which Wikidata has no taxonomic-rank item
+# at all (the full set of items carrying `instance of: taxonomic rank` was enumerated and
+# searched). Two entries sit outside that vocabulary on purpose: **Parvorder**, which
+# Wikidata uses and WoRMS does not (*Mysticeti* carries it), and **Clade**, the common
+# non-Linnaean rank, so the likeliest escape from a register-derived list still lands
+# somewhere rather than falling through.
+#
+# Falling through is the recorded residual, and it is not neutral: an unmapped item leaves
+# the row on the `"unknown"` sentinel, which is the value that would sit *between* the ranks
+# under an order that tiers them rather than below them - see the `"unknown"` section in
+# DECISIONS.md, which also records the second way this field moves between two identical
+# searches. The map is sized to make the fall-through rare, not impossible.
+_WIKIDATA_RANK_BY_QID = {
+    "Q36732": "Kingdom",
+    "Q2752679": "Subkingdom",
+    "Q38348": "Phylum",
+    # WoRMS renders the botanical rank as "Phylum (Division)" - measured on *Rhodophyta*,
+    # AphiaID 852 - and its own spelling is the one that has to win here.
+    "Q334460": "Phylum (Division)",
+    "Q1153785": "Subphylum",
+    "Q3491997": "Subphylum (Subdivision)",
+    "Q3504061": "Superclass",
+    "Q37517": "Class",
+    "Q5867051": "Subclass",
+    "Q2007442": "Infraclass",
+    "Q5868144": "Superorder",
+    "Q36602": "Order",
+    "Q5867959": "Suborder",
+    "Q2889003": "Infraorder",
+    "Q6311258": "Parvorder",
+    "Q2136103": "Superfamily",
+    "Q35409": "Family",
+    "Q164280": "Subfamily",
+    "Q227936": "Tribe",
+    "Q3965313": "Subtribe",
+    "Q34740": "Genus",
+    "Q3238261": "Subgenus",
+    # Botanical ranks: WoRMS scopes Section and Subsection to Plantae, Fungi and Chromista,
+    # and Wikidata's zoological homonyms are a different rank entirely rather than the same
+    # one spelled twice - so only the botanical items are here.
+    "Q3181348": "Section",
+    "Q5998839": "Subsection",
+    "Q7432": "Species",
+    "Q68947": "Subspecies",
+    "Q767728": "Variety",
+    "Q630771": "Subvariety",
+    # Wikidata labels this one "form"; WoRMS spells it "Forma", and WoRMS wins.
+    "Q279749": "Forma",
+    "Q12774043": "Subforma",
+    "Q713623": "Clade",
+}
 
 # Attribution travels per result because it is a licence condition of the data, not a footer.
 # WoRMS asks to be cited; Wikidata is CC0 and asks for nothing, and is credited anyway
@@ -191,13 +253,22 @@ class _Taxon:
 
 @dataclass(frozen=True, slots=True)
 class _WikidataEntity:
-    """One Wikidata entity, reduced to the four things this app wants from it."""
+    """One Wikidata entity, reduced to what this app wants from it.
+
+    No count is quoted, deliberately: this sentence used to carry one, the field list had
+    already outgrown it before the rank arrived, and a number here is only ever a second
+    place to be wrong about something the fields below state exactly.
+    """
 
     qid: str
     aphia_id: int
     scientific_name: str | None
     label: str | None
     aliases: tuple[str, ...]
+    # P105 translated through `_WIKIDATA_RANK_BY_QID`; `None` for an entity with no P105 or
+    # one whose rank item is not in the map, both of which become the `"unknown"` sentinel on
+    # the way out.
+    rank: str | None
 
 
 # -------------- caching --------------
@@ -539,27 +610,44 @@ def _wikidata_entity(qid: str, entity: Any) -> _WikidataEntity | None:
             if isinstance(alias, dict) and (value := _text(alias.get("value"))) is not None:
                 aliases.append(value)
 
+    rank_qid = _claim_entity_id(claims, _TAXON_RANK_PROPERTY)
     return _WikidataEntity(
         qid=qid[:_QID_MAX_LENGTH],
         aphia_id=aphia_id,
         scientific_name=_claim_value(claims, _TAXON_NAME_PROPERTY),
         label=label,
         aliases=tuple(aliases),
+        rank=_WIKIDATA_RANK_BY_QID.get(rank_qid) if rank_qid is not None else None,
     )
 
 
-def _claim_value(claims: dict[str, Any], prop: str) -> str | None:
-    """The first plain-string value of a Wikidata property, if it has one.
+def _claim_values(claims: dict[str, Any], prop: str) -> list[Any]:
+    """Every usable value of a Wikidata property, best statement first.
 
     Wikidata nests every claim four levels deep and any level can be missing or be a type
     this cares nothing about, so each step is checked rather than assumed - a malformed
     entity should cost its own row, never the search.
+
+    **Statement rank is honoured, and that is not decoration.** A property here is
+    multi-valued more often than it looks - P105 carries both a parvorder and a suborder on
+    *Mysticeti* - and Wikidata's own answer to "which of these is current" is the statement's
+    `rank`: `deprecated` marks a value the community has ruled wrong, `preferred` the one to
+    use when several are true. Reading in serialization order and taking the first, as this
+    did, let a deprecated AphiaID or a superseded binomial win purely by sitting earlier in
+    the JSON. So deprecated statements are dropped, preferred ones come first, and the rest
+    keep serialization order - deterministic for a given entity revision, and one rule for
+    every property rather than one for the rank and another for the identifier.
     """
     statements = claims.get(prop)
     if not isinstance(statements, list):
-        return None
+        return []
+    preferred: list[Any] = []
+    normal: list[Any] = []
     for statement in statements:
         if not isinstance(statement, dict):
+            continue
+        rank = statement.get("rank")
+        if rank == "deprecated":
             continue
         snak = statement.get("mainsnak")
         if not isinstance(snak, dict):
@@ -567,17 +655,54 @@ def _claim_value(claims: dict[str, Any], prop: str) -> str | None:
         datavalue = snak.get("datavalue")
         if not isinstance(datavalue, dict):
             continue
-        if (value := _text(datavalue.get("value"))) is not None:
-            return value
+        # An absent or unrecognized rank reads as "normal" - Wikidata's own default, and the
+        # safe direction, since a value is then dropped only when explicitly disowned.
+        (preferred if rank == "preferred" else normal).append(datavalue.get("value"))
+    return preferred + normal
+
+
+def _claim_value(claims: dict[str, Any], prop: str) -> str | None:
+    """The best plain-string value of a Wikidata property, if it has one."""
+    for value in _claim_values(claims, prop):
+        if (text := _text(value)) is not None:
+            return text
+    return None
+
+
+def _claim_entity_id(claims: dict[str, Any], prop: str) -> str | None:
+    """The best item-valued QID of a Wikidata property, if it has one.
+
+    Separate from `_claim_value` because the two datatypes are shaped differently: an
+    external identifier arrives as a bare string, an item reference as a dict whose `id`
+    carries the QID. Both go through the statement-rank ordering above.
+    """
+    for value in _claim_values(claims, prop):
+        if isinstance(value, dict) and (qid := _text(value.get("id"), _QID_MAX_LENGTH)) is not None:
+            return qid
     return None
 
 
 def _wikidata_result(entity: _WikidataEntity) -> SpeciesSearchResult | None:
-    """A Wikidata entity as a search hit.
+    """A Wikidata entity as a search hit, or `None` for an item carrying no taxon name.
 
-    Needs a scientific name to show, which is P225 when the entity has it and the English
-    label otherwise - for most taxa the label *is* the binomial, which is exactly why
-    `_choose_common_name` prefers a label that differs from it.
+    **P225 or no row.** The English label used to stand in when the entity had no taxon name,
+    and the row it built was one this app could not stand behind: `?q=orca` opened with two
+    indistinguishable bare "Orca" rows, one of them Q61884050 - an item with an AphiaID, no
+    P225, and a label that says nothing a diver can act on. Dropping it costs something real
+    and known: a dropped entity also leaves the merge, so a WoRMS row at the same AphiaID
+    loses the Wikidata name it would otherwise have gained. That is the accepted price, and
+    the exposure measured small - one P225-less item among the entities behind the flagship
+    queries, and no WoRMS row carried its AphiaID.
+
+    The name that survives is therefore always P225, and for most taxa the English label is
+    that same binomial - which is exactly why `_choose_common_name` prefers a label that
+    differs from it.
+
+    **Resolve is unaffected, by construction.** The fallback lived here and nowhere else, this
+    function is reached only from `_wikidata_search`, and `resolve_species` takes its binomial
+    from the WoRMS record and asks an entity only for its qid and its English names - so
+    nothing that gets *written* changes shape, and no label-for-binomial fallback survives
+    anywhere in this module.
 
     **The name here is unvetted, and that is a knowing limitation rather than an oversight.**
     Resolve passes `_choose_common_name` the taxon's synonym list so a junior scientific
@@ -589,7 +714,7 @@ def _wikidata_result(entity: _WikidataEntity) -> SpeciesSearchResult | None:
     written, and the first resolve replaces it for everyone. Do not close it by adding a fetch
     here - see the common-name section in DECISIONS.md.
     """
-    scientific_name = entity.scientific_name or entity.label
+    scientific_name = entity.scientific_name
     if scientific_name is None:
         return None
 
@@ -599,11 +724,21 @@ def _wikidata_result(entity: _WikidataEntity) -> SpeciesSearchResult | None:
         uuid=None,
         scientific_name=scientific_name,
         common_name=common_name,
-        # Wikidata does not carry WoRMS's rank vocabulary, and guessing from the entity's
-        # "instance of" claims would mean a third property and a mapping table for a field
-        # the picker only shows as context. A hit that WoRMS also returned is merged onto
-        # WoRMS's record and gets the real rank; one only Wikidata found says so.
-        rank="unknown",
+        # P105, translated by `_WIKIDATA_RANK_BY_QID`. This reverses the refusal that stood
+        # here - no rank at all rather than one derived from claims - and what changed is the
+        # premise rather than the appetite for guessing: rank was picker context that nothing
+        # read, and it is becoming a search-ordering input, where a sentinel on every
+        # Wikidata-only row misplaces the row instead of merely leaving a caption blank.
+        # **Nothing sorts on it yet** - `_ordered` still keys on name match alone - and the
+        # fill deliberately comes first: an order introduced ahead of it would have run
+        # against a Wikidata side where every row was the sentinel. The argument is in the
+        # `"unknown"` section of DECISIONS.md. Still the sentinel for an entity with no P105
+        # or an unmapped rank item, and a hit WoRMS also returned takes WoRMS's rank at the
+        # merge - which is also how two identical searches can show two different real ranks
+        # for a taxon the registers disagree about, recorded in that same section.
+        rank=entity.rank or "unknown",
+        # Wikidata has nothing to say about nomenclatural status, so this one stays a
+        # sentinel outright - the merge fills it from WoRMS wherever WoRMS answered.
         status="unknown",
         matched_name=None,
         source="wikidata",
