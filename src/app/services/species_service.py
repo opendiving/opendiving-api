@@ -94,9 +94,11 @@ _ENRICHMENT_BUDGET_SECONDS = 10.0
 # What a picker can usefully show before "keep typing" is better advice than another row.
 _MAX_RESULTS = 25
 
-# WoRMS pages its list endpoints at 50, and this app never asks for page 2: more than fifty
-# raw hits for one typed fragment is what `has_more` exists to say. Wikidata's search is
-# asked for ten, which is plenty once it is merged into WoRMS's fifty.
+# WoRMS pages its list endpoints at 50. Search never asks for page 2: more than fifty raw
+# hits for one typed fragment is what `has_more` exists to say. Resolve is the exception -
+# `_worms_synonyms` walks every page, because the list it returns vets a name this app then
+# stores forever. Wikidata's search is asked for ten, which is plenty once it is merged into
+# WoRMS's fifty.
 _WORMS_PAGE_SIZE = 50
 _WIKIDATA_SEARCH_LIMIT = 10
 
@@ -116,7 +118,7 @@ _MISS_TTL_SECONDS = 60 * 60
 # Bumped whenever the cached shape or the way it is composed changes. What is cached is the
 # *normalized, merged* remote list rather than raw provider payloads, so a change to the
 # normalizer has to invalidate the old entries - a new prefix does that without a flush.
-_CACHE_VERSION = "v1"
+_CACHE_VERSION = "v2"
 
 # Wikidata's "WoRMS AphiaID" property. The single hinge the whole two-source design turns
 # on: without a shared key there would be nothing to merge two registers *on*.
@@ -593,18 +595,27 @@ def _wikidata_result(entity: _WikidataEntity) -> SpeciesSearchResult | None:
 
 
 def _choose_common_name(
-    *, scientific_name: str, label: str | None, aliases: tuple[str, ...], vernaculars: tuple[str, ...] = ()
+    *,
+    scientific_name: str,
+    label: str | None,
+    aliases: tuple[str, ...],
+    vernaculars: tuple[str, ...] = (),
+    rejected: tuple[str, ...] = (),
 ) -> str | None:
-    """The one English name to display, or `None` to fall back to the scientific name.
+    """The one English name to display, capitalised, or `None` to fall back to the scientific
+    name.
 
     The order is forced by what the sources actually contain. A taxon's English Wikidata
     *label* is very often the binomial itself, which would make "common name" a duplicate of
     the column next to it - so a label is only taken when it differs, and the first English
-    alias ("ocellaris clownfish") is what usually carries the real name. WoRMS vernaculars
+    alias ("Ocellaris clownfish") is what usually carries the real name. WoRMS vernaculars
     come last because their English coverage is the thin part; they are still tried, because
-    a taxon Wikidata has never heard of may well have one.
+    a taxon Wikidata has never heard of may well have one. Neither register orders its
+    vernaculars by preference, which is why this rule never reaches for one over an alias:
+    WoRMS returns its six English names for *Orcinus orca* alphabetically, so "first" there
+    means "grampus".
 
-    Comparison is case-insensitive, and it is a *prefix* test rather than equality. Both
+    **The binomial test is a case-insensitive *prefix* test rather than equality.** Both
     halves of that were forced by real answers. "Amphiprion Ocellaris" as a label is the
     scientific name wearing a capital; and Wikidata labels obscure taxa with the binomial plus
     its authority - resolving one returned the label
@@ -612,17 +623,34 @@ def _choose_common_name(
     test is "different from the scientific name" and would have been displayed as that taxon's
     common name. A name that begins with the binomial is the binomial with decoration on it,
     not something a diver would ever call the animal.
+
+    **`rejected` catches what the prefix test cannot: a junior *scientific* synonym wearing a
+    different genus.** *Orcinus orca*'s label is its binomial and its first English alias is
+    "Orca gladiator" - a superseded scientific name, which shares no prefix with the accepted
+    one and so sailed through as this app's display name for the killer whale. Resolve passes
+    the taxon's WoRMS synonym list, and a candidate that casefold-*equals* an entry is
+    skipped. Equality rather than a prefix here on purpose: a synonym list runs to dozens of
+    names, and prefix-matching against all of them would start eating real vernaculars.
+
+    The same restraint rules out the lexical shortcut that keeps suggesting itself - reject
+    "a capitalised word followed by lowercase words" and you also reject *Hippocampus kuda*'s
+    "Common seahorse" and *Chelonia mydas*'s "Green sea turtle", which are correct.
+
+    **Only the first character is uppercased.** Neither Wikidata field is normalised at
+    source - "whale shark" and "Blacktip reef shark" are both *labels* - so the app has to
+    settle the case itself, and it can only settle the first letter: lowercasing the rest
+    would destroy "Red Sea clownfish" and "Sibbold's Rorqual".
     """
     folded = scientific_name.casefold()
+    banned = {name.casefold() for name in rejected}
 
-    def is_vernacular(candidate: str) -> bool:
-        return not candidate.casefold().startswith(folded)
+    def is_a_name_for_the_animal(candidate: str) -> bool:
+        cased = candidate.casefold()
+        return not cased.startswith(folded) and cased not in banned
 
-    if label is not None and is_vernacular(label):
-        return label
-    for candidate in (*aliases, *vernaculars):
-        if is_vernacular(candidate):
-            return candidate
+    for candidate in (label, *aliases, *vernaculars):
+        if candidate is not None and is_a_name_for_the_animal(candidate):
+            return candidate[:1].upper() + candidate[1:]
     return None
 
 
@@ -1108,12 +1136,44 @@ async def _worms_vernaculars(aphia_id: int) -> list[tuple[str, str | None]]:
     return vernaculars
 
 
-async def _worms_synonyms(aphia_id: int) -> list[str]:
-    """Superseded names for a taxon, so a diver who learned *Manta birostris* still finds it."""
-    rows = await _worms("AphiaSynonymsByAphiaID", aphia_id)
-    if not isinstance(rows, list):
-        return []
-    return [name for row in rows if isinstance(row, dict) and (name := _text(row.get("scientificname"))) is not None]
+async def _worms_synonyms(aphia_id: int) -> list[str] | None:
+    """Superseded names for a taxon, so a diver who learned *Manta birostris* still finds it -
+    or `None` when WoRMS could not be asked for **all** of them.
+
+    **The `None` is the point, and it is why this one enrichment call is load-bearing.**
+    `resolve_species` hands the list to `_choose_common_name` as its reject list, which is the
+    only thing standing between a junior scientific synonym and a permanent display name (see
+    that function, and *Rows are immutable in v1* in DECISIONS.md). A list that failed to
+    arrive is not an empty list: returning `[]` for both would let a rate-limit drop-out or a
+    timeout be read as "this taxon has no synonyms" and the wrong name written blind, with no
+    re-resolve to correct it. Callers must treat `None` as a refusal, not a degradation.
+
+    **And a truncated list vets nothing**, which is why this pages rather than reading the
+    first page and stopping. WoRMS pages synonyms at `_WORMS_PAGE_SIZE` like its other list
+    endpoints, and multi-page lists are ordinary - *Fucus vesiculosus* (145548) has 55, two of
+    the overflow five being different-genus junior synonyms, exactly the shape the reject list
+    exists to catch. A short page ends the list; a full one means there is more, and there is
+    nothing in a full page that distinguishes it from a complete answer.
+
+    **No page cap: the caller's enrichment budget is the bound.** A hard cap forces a choice
+    between refusing a taxon with a very long list *forever* and vetting with a partial one,
+    and both are worse than what a budget gives - at the measured quarter-second a page it
+    spans far more pages than any real taxon needs, and a register pathological enough to
+    exhaust it expires the budget into the ordinary transient 503. Any page that fails fails
+    the whole list, for the same reason a truncation does.
+    """
+    names: list[str] = []
+    offset = 1
+    while True:
+        rows = await _worms("AphiaSynonymsByAphiaID", aphia_id, {"offset": offset})
+        if not isinstance(rows, list):
+            return None
+        names += [
+            name for row in rows if isinstance(row, dict) and (name := _text(row.get("scientificname"))) is not None
+        ]
+        if len(rows) < _WORMS_PAGE_SIZE:
+            return names
+        offset += _WORMS_PAGE_SIZE
 
 
 async def _wikidata_by_aphia_id(aphia_id: int) -> _WikidataEntity | None:
@@ -1181,11 +1241,13 @@ async def resolve_species(db: AsyncSession, aphia_id: int) -> Species:
     caller is naming a taxon that already exists in the world, and whether this instance has
     seen it before is not their concern.
 
-    **The one place in this module that can fail loudly.** If WoRMS cannot be reached, this
-    503s instead of degrading, because the alternative is writing a row into a table shared
-    by every account on the strength of a guess. Wikidata failing is a different matter and
-    degrades silently: it contributes the common name and the qid, and a row without either
-    is a perfectly good row that falls back to the scientific name.
+    **The one place in this module that can fail loudly.** Two WoRMS calls are mandatory and
+    503 rather than degrading, because the alternative is writing a row into a table shared by
+    every account on the strength of a guess: the record itself, and the synonym list that
+    vets the display name (`_worms_synonyms`). Everything else here is enrichment and degrades
+    silently - Wikidata contributes the common name and the qid, WoRMS's vernaculars the rest
+    of the index, and a row without any of them is a perfectly good row that falls back to the
+    scientific name.
 
     Handed a synonym's id - a diver picked *Manta birostris* - it follows `valid_AphiaID` and
     stores the accepted taxon, re-checking for an existing row under the accepted id first.
@@ -1232,15 +1294,22 @@ async def resolve_species(db: AsyncSession, aphia_id: int) -> Species:
             raise HTTPException(status_code=503, detail="Species lookup is temporarily unavailable.")
         taxon = valid_taxon
 
-    # Enrichment, all three concurrently and none of it load-bearing: a failure in any of
-    # them costs names or a qid, never the row. Each collects into its own slot rather than
-    # returning, since a task group's tasks cannot return values.
+    # Enrichment, all three concurrently, and the three are not equals. Losing the
+    # vernaculars or the entity costs names or a qid and never the row: both can only push
+    # `_choose_common_name` toward `None` and the binomial fallback, which is degradation.
+    # **The synonym list is load-bearing**, because it is that function's reject list, and a
+    # missing one is the single absence here that can select a *wrong* name - permanently,
+    # since rows are immutable and there is no re-resolve. So it is the one leg whose failure
+    # is fatal: `_worms_synonyms` returns `None` rather than `[]` when it could not read the
+    # whole list, the slot below starts at `None` so a budget expiry mid-walk is
+    # indistinguishable from that, and the check after the group refuses rather than storing a
+    # name nothing vetted. Each leg collects into its own slot rather than returning, since a
+    # task group's tasks cannot return values.
     #
     # Budgeted well below the record fetch above, and separately from it: the diver is already
-    # several seconds into a spinner by the time this runs, and a synonym list is not worth
-    # another twenty. Whatever arrived is what gets indexed - a species that lands with fewer
-    # search aliases is still a species the diver can attach to the dive.
-    synonyms: list[str] = []
+    # several seconds into a spinner by the time this runs, and enrichment is not worth another
+    # twenty. That budget is also the only bound on the synonym walk - see `_worms_synonyms`.
+    synonyms: list[str] | None = None
     vernaculars: list[tuple[str, str | None]] = []
     entity: _WikidataEntity | None = None
     accepted_id = taxon.aphia_id
@@ -1263,6 +1332,14 @@ async def resolve_species(db: AsyncSession, aphia_id: int) -> Species:
             tasks.start_soon(load_vernaculars)
             tasks.start_soon(load_entity)
 
+    if synonyms is None:
+        # The same 503 the record fetch raises, and for the same reason: a row here is a claim
+        # shared with every account on the instance and never rewritten, so refusing costs the
+        # diver a retry while guessing costs them the wrong name forever. One message for
+        # every way of not having the list - a failed page, a denied rate slot, the budget
+        # expiring mid-walk - because none of them is a distinction the diver can act on.
+        raise HTTPException(status_code=503, detail="Species lookup is temporarily unavailable.")
+
     common_name = _choose_common_name(
         scientific_name=taxon.scientific_name,
         label=entity.label if entity is not None else None,
@@ -1271,6 +1348,9 @@ async def resolve_species(db: AsyncSession, aphia_id: int) -> Species:
         # below. The app has no i18n, so a Japanese common name on a dive card would be a
         # bug; the same name in the search index is a feature.
         vernaculars=tuple(name for name, language in vernaculars if language in (None, "eng")),
+        # A superseded scientific name is not what this animal is called, however plausibly
+        # it reads next to the accepted binomial.
+        rejected=tuple(synonyms),
     )
 
     species = Species(

@@ -8093,13 +8093,16 @@ picker keeps its menu open after a pick and deliberately does not serialise reso
 adding a dive's worth of sightings produces several concurrent resolves from one browser as a matter
 of course.
 
-### The common-name rule, and why it is a prefix test
+### The common-name rule: a prefix test, a reject list, and one capital letter
 
 `species.common_name` is a single English display name, chosen at resolve time as: the English
 Wikidata **label** if it is not the scientific name, else the first English **alias**, else the
 first English WoRMS **vernacular**, else NULL (every surface falls back to the scientific name). The
 order is forced by what the sources contain — a taxon's English Wikidata label is very often the
-binomial itself, and the alias is what carries the real name ("ocellaris clownfish").
+binomial itself, and the alias is what carries the real name ("Ocellaris clownfish"). Nothing here
+reaches for a vernacular over an alias, and that ordering is load-bearing rather than incidental:
+WoRMS has no notion of a preferred vernacular and returns its six English names for *Orcinus orca*
+alphabetically, so taking the first one would name the killer whale "Grampus".
 
 The comparison is a **prefix** test, not equality, and that was found by resolving a real taxon:
 Wikidata labels obscure species with the binomial plus its authority, so AphiaID 125230 came back
@@ -8112,6 +8115,69 @@ diver would ever call the animal.
 Wikidata label and aliases — so カクレクマノミ finds the clownfish even though the UI never shows Japanese.
 English-only display with a multilingual index is the deliberate split; full Wikidata alias
 mirroring waits for the app to have an i18n story.
+
+**The prefix test does not catch a synonym, so the choice is vetted against WoRMS's synonym list.**
+Two stored names got past the rule above. *Orcinus orca* was displayed as **"Orca gladiator"**: its
+Wikidata label is the accepted binomial, so the label was skipped and the first English alias won,
+and that alias is a junior *scientific* synonym under a different genus. No comparison against the
+accepted binomial can see that — "Orca gladiator" shares no prefix with "Orcinus orca". So resolve
+now passes the taxon's superseded names to `_choose_common_name` as a reject list, and any candidate
+that casefold-**equals** one is skipped; for the orca the next alias wins and the row reads "Orca
+whale". Equality rather than a prefix, deliberately narrower than the binomial test beside it: a
+synonym list runs to dozens of names, and prefix-matching every one of them starts eating real
+vernaculars. (The second escapee, *Chaetodontidae* choosing Q271004's sole English alias "the
+butterflyfish family", is **not** fixed and is not a bug to fix here — telling a description from a
+name needs a judgement no source available supplies, and the rank suffix already tells the diver
+what kind of row it is.)
+
+The lexical shortcut that keeps suggesting itself — reject "a capitalised word followed by lowercase
+words" — was considered and is wrong: *Hippocampus kuda*'s "Common seahorse" and *Chelonia mydas*'s
+"Green sea turtle" have exactly that shape, share no genus with their taxon, and are correct.
+
+**A reject list that failed to arrive is not an empty reject list**, which is what turned the
+synonym fetch from best-effort into the one enrichment call resolve cannot do without. It sits in a
+task group beside the vernaculars and the Wikidata entity, and it used to return `[]` for a
+genuinely synonym-free taxon, for a rate-limit drop-out and for a timeout alike — so one bad ten
+seconds would have written a junior synonym as a display name, permanently, since rows are immutable
+in v1 (see *Rows are immutable in v1*) and there is no re-resolve. `_worms_synonyms` now returns
+`None` for every way of not having the list and `[]` only for a real empty one — a safe split,
+because WoRMS answers a synonym-free taxon with the 204 `_request` already maps to `[]` — the slot
+in `resolve_species` is initialised to `None` so a budget expiry mid-fetch is indistinguishable from
+a failure, and a resolve still holding `None` raises the same 503 the record fetch raises. Refusing
+costs the diver a retry; guessing costs them a wrong name forever. The other two legs stay
+best-effort, and the asymmetry is exact: losing the entity or the vernaculars can only push the
+choice toward NULL and the binomial fallback, which is degradation, while a missing synonym list is
+the one absence that can select a *wrong* name.
+
+**And a truncated list vets nothing, so the fetch pages.** `AphiaSynonymsByAphiaID` was read one
+page deep, and WoRMS pages it at 50 like its other list endpoints — *Fucus vesiculosus* (145548) has
+55 synonyms, two of the overflow five being different-genus junior synonyms, exactly the shape the
+reject list exists to catch. Nothing in a full page distinguishes it from a complete answer, so the
+fetch now walks offsets 1, 51, 101 … until a short page. There is **no page cap**: a hard cap has to
+choose between refusing a very long list forever and vetting with a partial one, and both are worse
+than letting the 10 s enrichment budget be the bound — at the measured ~0.25 s a page that spans far
+more pages than any real taxon has, and a register pathological enough to exhaust it expires into
+the ordinary transient 503. Any page that fails fails the whole list, for the same reason truncation
+does; only genuine short pages complete it. Paging has a second, welcome effect: the same list feeds
+`species_name`, so a fully-paged taxon becomes findable by every synonym it has (145548 goes 50 → 55
+rows).
+
+**The chosen name is capitalised on its first character, and only the first.** The registers do not
+agree with themselves about case, and the tempting story — labels are lowercase by policy, aliases
+are free-form — is wrong. Sampled live: "whale shark" and "sperm whale" are lowercase **labels**,
+while "Blacktip reef shark" (*Carcharhinus melanopterus*) and "Giant oceanic manta ray" (*Mobula
+birostris*) are title-case **labels**. Neither field is normalised at source, so the app normalises
+what it gets. Only the first character, because lowercasing the rest would destroy "Red Sea
+clownfish" and "Sibbold's Rorqual". It happens inside `_choose_common_name` rather than at render
+time, which is what keeps search, resolve, the `species.csv` export and the dive detail page (which
+renders the stored string raw) agreeing — a render-side fix would have left those disagreeing.
+
+**The name index is exempt from all of it.** `_name_rows` keeps writing the raw source strings: it
+is a multilingual find-index with no display job, `ILIKE` does not care about case, and rewriting
+what a register said buys the search nothing. So `species.common_name` reads "Ocellaris clownfish"
+while the `species_name` row built from the same alias stays "ocellaris clownfish", and the synonyms
+the reject list disowned are still indexed and still findable — disqualified as a *display* name,
+not as a name.
 
 ### Identity is the accepted AphiaID; synonyms are names, not rows
 

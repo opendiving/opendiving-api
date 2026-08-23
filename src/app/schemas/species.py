@@ -35,7 +35,7 @@ class SpeciesBase(BaseModel):
         Field(
             default=None,
             max_length=255,
-            examples=["ocellaris clownfish"],
+            examples=["Ocellaris clownfish"],
             description="One English display name, or null when no source offered one",
         ),
     ]
@@ -92,7 +92,7 @@ class SpeciesSearchResult(BaseModel):
         Field(default=None, description="Set when this species is already in the local catalog"),
     ]
     scientific_name: Annotated[str, Field(max_length=255, examples=["Amphiprion ocellaris"])]
-    common_name: Annotated[str | None, Field(default=None, max_length=255, examples=["ocellaris clownfish"])]
+    common_name: Annotated[str | None, Field(default=None, max_length=255, examples=["Ocellaris clownfish"])]
     rank: Annotated[str, Field(max_length=64, examples=["Species"])]
     status: Annotated[str, Field(max_length=64, examples=["accepted"])]
     matched_name: Annotated[
