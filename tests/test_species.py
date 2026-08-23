@@ -100,6 +100,39 @@ MANTA_SYNONYM_RECORD = {
     "genus": "Manta",
 }
 
+# The killer whale, which this catalog stored as "Orca gladiator" until the reject list
+# landed. Kept as a payload set rather than a unit-test argument list because the defect only
+# exists end to end: Wikidata offers the junior scientific synonym as its first English alias,
+# and only WoRMS - through a second endpoint, on the resolve path - knows what it is.
+ORCA_RECORD = {
+    "AphiaID": 137102,
+    "scientificname": "Orcinus orca",
+    "authority": "(Linnaeus, 1758)",
+    "status": "accepted",
+    "rank": "Species",
+    "valid_AphiaID": 137102,
+    "valid_name": "Orcinus orca",
+    "genus": "Orcinus",
+}
+ORCA_SYNONYMS = [{"scientificname": "Orca gladiator"}, {"scientificname": "Orca capensis"}]
+ORCA_WIKIDATA_SEARCH = {"query": {"search": [{"title": "Q26843"}]}}
+ORCA_WIKIDATA_ENTITIES = {
+    "entities": {
+        "Q26843": {
+            "labels": {"en": {"language": "en", "value": "Orcinus orca"}},
+            # Wikidata's own alias order, verified against the live entity: the synonym comes
+            # first, so nothing but the reject list stands between it and the dive card.
+            "aliases": {
+                "en": [{"value": "Orca gladiator"}, {"value": "orca whale"}, {"value": "killer whale"}],
+            },
+            "claims": {
+                "P850": [{"mainsnak": {"datavalue": {"value": "137102"}}}],
+                "P225": [{"mainsnak": {"datavalue": {"value": "Orcinus orca"}}}],
+            },
+        }
+    }
+}
+
 WIKIDATA_SEARCH = {"query": {"search": [{"title": "Q1126155"}]}}
 WIKIDATA_ENTITIES = {
     "entities": {
@@ -237,6 +270,11 @@ def _registers(
 
     Defaults are "answered, and had nothing", which is the shape a lot of these tests want
     for the source they are *not* exercising.
+
+    `synonyms` is the *whole* list and gets served the way WoRMS serves it, a page at a time.
+    `_worms_synonyms` walks offsets until a short page comes back, so a canned list handed
+    back whole on every offset would never terminate - and one longer than a page has to
+    arrive in pieces or the walk it exists to exercise never happens.
     """
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -252,7 +290,9 @@ def _registers(
         if "AphiaRecordByAphiaID" in url:
             return httpx.Response(worms_status, json=record)
         if "AphiaSynonymsByAphiaID" in url:
-            return httpx.Response(worms_status, json=list(synonyms))
+            page = species_service._WORMS_PAGE_SIZE
+            start = int(parse_qs(urlparse(url).query).get("offset", ["1"])[0]) - 1
+            return httpx.Response(worms_status, json=list(synonyms)[start : start + page])
         if "AphiaVernacularsByAphiaID" in url:
             return httpx.Response(worms_status, json=list(vernaculars))
         raise AssertionError(f"unexpected request to {url}")
@@ -312,7 +352,11 @@ class TestMergingTwoRegisters:
         result = response.results[0]
         assert result.aphia_id == 278400
         assert result.scientific_name == "Amphiprion ocellaris"
-        assert result.common_name == "ocellaris clownfish"
+        # Capitalised here as well as at resolve, because one `_choose_common_name` serves
+        # both paths. Only the capitalisation carries across, though: the reject list is an
+        # input search cannot supply, and
+        # `test_search_shows_the_unvetted_name_until_a_resolve_fixes_it` pins what that costs.
+        assert result.common_name == "Ocellaris clownfish"
         # WoRMS wrote the row, so its rank survives rather than Wikidata's placeholder.
         assert (result.rank, result.source) == ("Species", "worms")
 
@@ -325,7 +369,7 @@ class TestMergingTwoRegisters:
             response = await species_service.search_species(db, "clownfish")
 
         assert [(r.aphia_id, r.common_name, r.source) for r in response.results] == [
-            (278400, "ocellaris clownfish", "wikidata")
+            (278400, "Ocellaris clownfish", "wikidata")
         ]
 
     @pytest.mark.asyncio
@@ -372,7 +416,14 @@ class TestMergingTwoRegisters:
 
 class TestChoosingTheDisplayName:
     """`_choose_common_name`, whose order is forced by what the sources contain rather than
-    by preference: a taxon's English Wikidata label is usually the binomial itself."""
+    by preference: a taxon's English Wikidata label is usually the binomial itself.
+
+    Two guards on top of that order, and they catch different things. The prefix test rejects
+    a candidate that *is* the accepted binomial with decoration on it; `rejected` - the
+    taxon's WoRMS synonym list, which only the resolve path has - rejects one that is a
+    superseded binomial under some other genus. Everything that survives is capitalised on its
+    first character, because neither Wikidata field is normalised at source.
+    """
 
     def test_a_label_that_repeats_the_binomial_is_not_a_common_name(self):
         assert (
@@ -381,7 +432,7 @@ class TestChoosingTheDisplayName:
                 label="Amphiprion ocellaris",
                 aliases=("ocellaris clownfish",),
             )
-            == "ocellaris clownfish"
+            == "Ocellaris clownfish"
         )
 
     def test_a_label_that_differs_wins_outright(self):
@@ -389,7 +440,7 @@ class TestChoosingTheDisplayName:
             species_service._choose_common_name(
                 scientific_name="Mobula birostris", label="giant oceanic manta ray", aliases=("manta ray",)
             )
-            == "giant oceanic manta ray"
+            == "Giant oceanic manta ray"
         )
 
     def test_a_worms_vernacular_is_the_last_resort(self):
@@ -399,7 +450,7 @@ class TestChoosingTheDisplayName:
             species_service._choose_common_name(
                 scientific_name="Muraenidae", label=None, aliases=(), vernaculars=("moray eels",)
             )
-            == "moray eels"
+            == "Moray eels"
         )
 
     def test_nothing_offered_means_falling_back_to_the_scientific_name(self):
@@ -425,7 +476,7 @@ class TestChoosingTheDisplayName:
             species_service._choose_common_name(
                 scientific_name="Amphiprion ocellaris", label=None, aliases=("ocellaris clownfish",)
             )
-            == "ocellaris clownfish"
+            == "Ocellaris clownfish"
         )
 
     def test_the_comparison_ignores_case(self):
@@ -437,6 +488,93 @@ class TestChoosingTheDisplayName:
             )
             is None
         )
+
+    def test_a_junior_scientific_synonym_is_skipped_for_the_next_alias(self):
+        """The killer whale, which this app displayed as "Orca gladiator" - a superseded
+        *scientific* name. Its Wikidata label is the accepted binomial, so the first alias
+        wins, and that alias shares no prefix with *Orcinus orca* for the test above to catch.
+        Only WoRMS's synonym list knows it is not a name for the animal."""
+        assert (
+            species_service._choose_common_name(
+                scientific_name="Orcinus orca",
+                label="Orcinus orca",
+                aliases=("Orca gladiator", "orca whale", "killer whale"),
+                rejected=("Orca gladiator", "Orca capensis", "Gladiator gladiator"),
+            )
+            == "Orca whale"
+        )
+
+    def test_a_rejected_name_is_matched_case_insensitively(self):
+        """The two registers disagree about case constantly, so an exact-case comparison would
+        let the same synonym through under a different capitalisation."""
+        assert (
+            species_service._choose_common_name(
+                scientific_name="Orcinus orca",
+                label="ORCA GLADIATOR",
+                aliases=("killer whale",),
+                rejected=("orca gladiator",),
+            )
+            == "Killer whale"
+        )
+
+    def test_rejection_is_equality_rather_than_a_prefix(self):
+        """Deliberately narrower than the binomial test beside it. A synonym list runs to
+        dozens of names, so prefix-matching every one of them would start eating real
+        vernaculars: here the reject entry is a prefix of the answer this is supposed to
+        arrive at."""
+        assert (
+            species_service._choose_common_name(
+                scientific_name="Orcinus orca", label=None, aliases=("orca whale",), rejected=("Orca",)
+            )
+            == "Orca whale"
+        )
+
+    def test_the_reject_list_reaches_vernaculars_too(self):
+        """Constructed rather than sampled, because the failure it guards against is an
+        implementation that filters only the Wikidata half and ships a WoRMS vernacular the
+        synonym list had already disowned. Nothing survives here, so the row falls back to its
+        binomial."""
+        assert (
+            species_service._choose_common_name(
+                scientific_name="Orcinus orca",
+                label="Orcinus orca",
+                aliases=("Orca gladiator",),
+                vernaculars=("Orca capensis",),
+                rejected=("Orca gladiator", "Orca capensis"),
+            )
+            is None
+        )
+
+    def test_only_the_first_character_is_uppercased(self):
+        """Lowercasing the rest is the tempting other half of this rule and would be wrong:
+        both of these carry a capital that belongs to the name."""
+        assert (
+            species_service._choose_common_name(
+                scientific_name="Amphiprion bicinctus", label="Red Sea clownfish", aliases=()
+            )
+            == "Red Sea clownfish"
+        )
+        assert (
+            species_service._choose_common_name(
+                scientific_name="Balaenoptera musculus", label=None, aliases=("Sibbold's Rorqual",)
+            )
+            == "Sibbold's Rorqual"
+        )
+
+    def test_capitalisation_reaches_every_source_field(self):
+        """The defect is not "labels are lowercase and aliases are not" - "whale shark" is a
+        label and "Blacktip reef shark" is a label too. Neither field is normalised at source,
+        so all three candidate kinds go through the same rule."""
+        chosen = [
+            species_service._choose_common_name(scientific_name="Rhincodon typus", label="whale shark", aliases=()),
+            species_service._choose_common_name(
+                scientific_name="Physeter macrocephalus", label=None, aliases=("sperm whale",)
+            ),
+            species_service._choose_common_name(
+                scientific_name="Muraenidae", label=None, aliases=(), vernaculars=("moray eels",)
+            ),
+        ]
+        assert chosen == ["Whale shark", "Sperm whale", "Moray eels"]
 
 
 # -------------- degradation, which is the module's one promise --------------
@@ -836,7 +974,7 @@ class TestResolve:
 
         assert species.aphia_id == 278400
         assert species.scientific_name == "Amphiprion ocellaris"
-        assert species.common_name == "ocellaris clownfish"
+        assert species.common_name == "Ocellaris clownfish"
         assert species.wikidata_qid == "Q1126155"
         # WoRMS's flat classification, under its own key spellings.
         assert (species.class_name, species.order_name, species.family) == ("Teleostei", "Perciformes", "Pomacentridae")
@@ -849,6 +987,9 @@ class TestResolve:
         # Every language goes into the index even though the UI is English-only: this is
         # what makes カクレクマノミ find the clownfish.
         assert ("カクレクマノミ", "common", "worms") in names
+        # Raw, uncapitalised, while `common_name` above is not: the index has no display job,
+        # and `ILIKE` does not care, so there is nothing to gain by rewriting what a register
+        # actually said.
         assert ("ocellaris clownfish", "common", "wikidata") in names
 
     @pytest.mark.asyncio
@@ -951,6 +1092,182 @@ class TestResolve:
 
         assert species is winner
         db.rollback.assert_awaited()
+
+
+class TestVettingTheStoredName:
+    """The synonym list is the one enrichment call resolve cannot do without.
+
+    `_choose_common_name` takes it as a reject list, and it is the only input that can stop a
+    junior *scientific* synonym being written as a taxon's display name - "Orca gladiator" for
+    the killer whale, which is what this catalog held. Rows are immutable and there is no
+    re-resolve, so a name chosen without that list is wrong forever, and the whole class here
+    is about the difference between having the list and merely having *something*.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_junior_synonym_is_not_stored_as_the_display_name(self, no_redis: None):
+        """The end-to-end shape of the defect. Wikidata's label for *Orcinus orca* is the
+        binomial, so the prefix test drops it and the first alias wins - and that alias is a
+        superseded scientific name under a different genus, which no rule reading only the
+        accepted binomial could recognise."""
+        db = _empty_db()
+        with _registers(
+            record=ORCA_RECORD,
+            synonyms=ORCA_SYNONYMS,
+            wikidata_search=ORCA_WIKIDATA_SEARCH,
+            wikidata_entities=ORCA_WIKIDATA_ENTITIES,
+        ):
+            species = await species_service.resolve_species(db, 137102)
+
+        assert species.common_name == "Orca whale"
+        # The synonym is still findable, just not displayable: the index keeps every name.
+        added = [call.args[0] for call in db.add.call_args_list]
+        names = {(row.name, row.kind) for row in added if isinstance(row, species_service.SpeciesName)}
+        assert ("Orca gladiator", "synonym") in names
+
+    @pytest.mark.asyncio
+    async def test_a_taxon_with_no_synonyms_is_a_complete_answer(self, no_redis: None):
+        """WoRMS answers a synonym-free taxon with the 204 `_request` maps to `[]`, so an empty
+        list has to stay distinguishable from the failures below - otherwise every taxon
+        without synonyms would 503."""
+        db = _empty_db()
+        with _registers(record=CLOWNFISH_RECORD, wikidata_search=WIKIDATA_SEARCH, wikidata_entities=WIKIDATA_ENTITIES):
+            species = await species_service.resolve_species(db, 278400)
+
+        assert species.common_name == "Ocellaris clownfish"
+
+    @pytest.mark.asyncio
+    async def test_a_synonym_list_that_did_not_arrive_is_a_503(self, no_redis: None):
+        """The asymmetry with the other two enrichment calls. Losing the entity or the
+        vernaculars can only push the choice toward the binomial fallback; losing the synonym
+        list can select the *wrong* name and fix it forever, so this one leg refuses rather
+        than degrading - the diver retries, which costs a spinner."""
+        from fastapi import HTTPException
+
+        db = _empty_db()
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "AphiaSynonymsByAphiaID" in url:
+                raise httpx.ConnectError("dropped")
+            if "AphiaRecordByAphiaID" in url:
+                return httpx.Response(200, json=ORCA_RECORD)
+            if "wikidata" in url:
+                return httpx.Response(200, json={"query": {"search": []}})
+            return httpx.Response(200, json=[])
+
+        with _Providers(handle), pytest.raises(HTTPException) as raised:
+            await species_service.resolve_species(db, 137102)
+
+        assert raised.value.status_code == 503
+        db.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_page_failing_mid_walk_fails_the_whole_list(self, no_redis: None):
+        """The tempting reading is "keep what arrived" - and a partial list is exactly the
+        truncated vet this refuses. Page one is full here, so the walk asks for page two and
+        never gets it; fifty vetted names are not a vet."""
+        from fastapi import HTTPException
+
+        db = _empty_db()
+        first_page = [{"scientificname": f"Orca junior{n:02d}"} for n in range(species_service._WORMS_PAGE_SIZE)]
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "AphiaSynonymsByAphiaID" in url:
+                if "offset=51" in url:
+                    raise httpx.ConnectError("dropped")
+                return httpx.Response(200, json=first_page)
+            if "AphiaRecordByAphiaID" in url:
+                return httpx.Response(200, json=ORCA_RECORD)
+            if "wikidata" in url:
+                return httpx.Response(200, json={"query": {"search": []}})
+            return httpx.Response(200, json=[])
+
+        with _Providers(handle), pytest.raises(HTTPException) as raised:
+            await species_service.resolve_species(db, 137102)
+
+        assert raised.value.status_code == 503
+        db.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_the_enrichment_budget_expiring_is_a_503_rather_than_a_blind_write(self, no_redis: None):
+        """The failure mode a sentinel would have missed. `move_on_after` cancels the leg
+        wherever it happens to be, so the slot keeps whatever it was initialised to - which is
+        why that initialiser is `None` and not `[]`. A budget expiry and a dropped connection
+        have to reach the same refusal, because neither one produced a list."""
+        from fastapi import HTTPException
+
+        db = _empty_db()
+
+        async def never_answers(aphia_id: int) -> list[str] | None:
+            await anyio.sleep(30)
+            return []
+
+        with (
+            _registers(record=ORCA_RECORD),
+            patch.object(species_service, "_ENRICHMENT_BUDGET_SECONDS", 0.01),
+            patch.object(species_service, "_worms_synonyms", never_answers),
+            pytest.raises(HTTPException) as raised,
+        ):
+            await species_service.resolve_species(db, 137102)
+
+        assert raised.value.status_code == 503
+        db.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_the_walk_pages_until_a_short_page(self, no_redis: None):
+        """WoRMS pages synonyms at fifty and nothing in a full page says whether there is
+        more, so the walk has to ask. There is no page cap - the enrichment budget is the
+        bound - and the extra names land in the index as well as in the reject list, which is
+        the second, welcome half of paging."""
+        db = _empty_db()
+        synonyms = [{"scientificname": f"Orca junior{n:02d}"} for n in range(55)]
+
+        with _registers(record=ORCA_RECORD, synonyms=synonyms) as providers:
+            species = await species_service.resolve_species(db, 137102)
+
+        offsets = [
+            parse_qs(urlparse(url).query)["offset"][0] for url in providers.urls() if "AphiaSynonymsByAphiaID" in url
+        ]
+        assert offsets == ["1", "51"]
+
+        assert species.aphia_id == 137102
+        added = [call.args[0] for call in db.add.call_args_list]
+        indexed = {row.name for row in added if isinstance(row, species_service.SpeciesName)}
+        assert "Orca junior54" in indexed
+        assert len([name for name in indexed if name.startswith("Orca junior")]) == 55
+
+    @pytest.mark.asyncio
+    async def test_search_shows_the_unvetted_name_until_a_resolve_fixes_it(self, no_redis: None):
+        """The limitation this vet does *not* cover, pinned so that closing it is a decision
+        somebody makes rather than a diff nobody notices.
+
+        The reject list is a per-taxon WoRMS call, so a search page would need one per row
+        against a keystroke budget, on a path that has already released its read transaction.
+        Search therefore still offers "Orca gladiator" while the taxon is uncatalogued, and
+        the resolve underneath it stores "Orca whale". Tolerable because it runs in the safe
+        direction - the wrong name is never written, and one resolve fixes the row for
+        everyone - but real, and this is the assertion that says so out loud."""
+        db = _empty_db()
+        with _registers(
+            wikidata_search=ORCA_WIKIDATA_SEARCH,
+            wikidata_entities=ORCA_WIKIDATA_ENTITIES,
+        ):
+            found = await species_service.search_species(db, "orca")
+
+        assert [r.common_name for r in found.results] == ["Orca gladiator"]
+
+        db = _empty_db()
+        with _registers(
+            record=ORCA_RECORD,
+            synonyms=ORCA_SYNONYMS,
+            wikidata_search=ORCA_WIKIDATA_SEARCH,
+            wikidata_entities=ORCA_WIKIDATA_ENTITIES,
+        ):
+            stored = await species_service.resolve_species(db, 137102)
+
+        assert stored.common_name == "Orca whale"
 
 
 # -------------- routes --------------
