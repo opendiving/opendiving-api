@@ -8172,6 +8172,23 @@ clownfish" and "Sibbold's Rorqual". It happens inside `_choose_common_name` rath
 time, which is what keeps search, resolve, the `species.csv` export and the dive detail page (which
 renders the stored string raw) agreeing — a render-side fix would have left those disagreeing.
 
+**The reject list reaches resolve only, and search knowingly shows an unvetted name.** The
+capitalisation reaches every surface, because it lives inside `_choose_common_name` and both paths
+call it — but the reject list is an *input* only resolve can supply. Synonyms come from a separate
+WoRMS call keyed to one AphiaID, so vetting a search page would mean up to fifty extra outbound
+calls against a six-second keystroke budget, on a path that has already released its read
+transaction to go outbound. Not worth it, and not close. The consequence is stated rather than
+hidden: `?q=orca` displays "Orca gladiator" for as long as *Orcinus orca* is not in the catalog, and
+the diver who picks that row gets "Orca whale" stored. That disagreement is real, and it is the
+tolerable direction of it — the wrong name is never *written*, it is transient per taxon rather than
+per search, and the first resolve fixes the row for everyone, after which the catalog row wins the
+merge outright and the picker shows the vetted name too.
+`test_search_shows_the_unvetted_name_until_a_resolve_fixes_it` pins the gap so that closing it is a
+decision somebody makes rather than a diff nobody notices. Not to be confused with the rule in
+`_merge_result`'s caller that a catalog row wins the merge outright, which exists to stop a dive's
+species card disagreeing with the picker that filled it: that guarantee is about *stored* rows and
+is untouched here.
+
 **The name index is exempt from all of it.** `_name_rows` keeps writing the raw source strings: it
 is a multilingual find-index with no display job, `ILIKE` does not care about case, and rewriting
 what a register said buys the search nothing. So `species.common_name` reads "Ocellaris clownfish"

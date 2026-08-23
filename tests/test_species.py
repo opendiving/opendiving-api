@@ -352,8 +352,10 @@ class TestMergingTwoRegisters:
         result = response.results[0]
         assert result.aphia_id == 278400
         assert result.scientific_name == "Amphiprion ocellaris"
-        # Capitalised here as well as at resolve: one `_choose_common_name` serves both paths,
-        # which is what keeps a search hit and the catalog row it becomes spelled the same.
+        # Capitalised here as well as at resolve, because one `_choose_common_name` serves
+        # both paths. Only the capitalisation carries across, though: the reject list is an
+        # input search cannot supply, and the last test in `TestVettingTheStoredName` pins
+        # what that costs.
         assert result.common_name == "Ocellaris clownfish"
         # WoRMS wrote the row, so its rank survives rather than Wikidata's placeholder.
         assert (result.rank, result.source) == ("Species", "worms")
@@ -1235,6 +1237,37 @@ class TestVettingTheStoredName:
         indexed = {row.name for row in added if isinstance(row, species_service.SpeciesName)}
         assert "Orca junior54" in indexed
         assert len([name for name in indexed if name.startswith("Orca junior")]) == 55
+
+    @pytest.mark.asyncio
+    async def test_search_shows_the_unvetted_name_until_a_resolve_fixes_it(self, no_redis: None):
+        """The limitation this vet does *not* cover, pinned so that closing it is a decision
+        somebody makes rather than a diff nobody notices.
+
+        The reject list is a per-taxon WoRMS call, so a search page would need one per row
+        against a keystroke budget, on a path that has already released its read transaction.
+        Search therefore still offers "Orca gladiator" while the taxon is uncatalogued, and
+        the resolve underneath it stores "Orca whale". Tolerable because it runs in the safe
+        direction - the wrong name is never written, and one resolve fixes the row for
+        everyone - but real, and this is the assertion that says so out loud."""
+        db = _empty_db()
+        with _registers(
+            wikidata_search=ORCA_WIKIDATA_SEARCH,
+            wikidata_entities=ORCA_WIKIDATA_ENTITIES,
+        ):
+            found = await species_service.search_species(db, "orca")
+
+        assert [r.common_name for r in found.results] == ["Orca gladiator"]
+
+        db = _empty_db()
+        with _registers(
+            record=ORCA_RECORD,
+            synonyms=ORCA_SYNONYMS,
+            wikidata_search=ORCA_WIKIDATA_SEARCH,
+            wikidata_entities=ORCA_WIKIDATA_ENTITIES,
+        ):
+            stored = await species_service.resolve_species(db, 137102)
+
+        assert stored.common_name == "Orca whale"
 
 
 # -------------- routes --------------

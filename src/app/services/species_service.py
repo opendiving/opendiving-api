@@ -83,11 +83,18 @@ _MAX_RESPONSE_BYTES = 512 * 1024
 # cached as though it were complete - see `_store_search`.
 _SEARCH_BUDGET_SECONDS = 6.0
 
-# What `resolve_species` is willing to spend on the one call it cannot do without. Far longer,
-# because this is a deliberate "add this species" click with a spinner against it rather than
-# a keystroke, and because the alternative to waiting is a 503 that leaves the diver unable to
-# log what they saw. The enrichment fan-out that follows gets its own, shorter budget: names
-# and a Wikidata id are worth a moment, not a stall.
+# What `resolve_species` is willing to spend on the record fetch it cannot do without. Far
+# longer than a search budget, because this is a deliberate "add this species" click with a
+# spinner against it rather than a keystroke, and because the alternative to waiting is a 503
+# that leaves the diver unable to log what they saw.
+#
+# The enrichment fan-out that follows gets its own, shorter budget, and it is doing two jobs
+# rather than one. Most of what it collects is best-effort - names and a Wikidata id are worth
+# a moment, not a stall. But the synonym list in that same fan-out vets the display name, so
+# this figure is also a 503 boundary: expire it and `resolve_species` refuses rather than
+# storing a name nothing checked. It is the *only* bound on `_worms_synonyms`' page walk,
+# which is deliberate and explained there - so lowering it shortens that walk rather than
+# merely trimming a fan-out.
 _RESOLVE_BUDGET_SECONDS = 25.0
 _ENRICHMENT_BUDGET_SECONDS = 10.0
 
@@ -571,6 +578,16 @@ def _wikidata_result(entity: _WikidataEntity) -> SpeciesSearchResult | None:
     Needs a scientific name to show, which is P225 when the entity has it and the English
     label otherwise - for most taxa the label *is* the binomial, which is exactly why
     `_choose_common_name` prefers a label that differs from it.
+
+    **The name here is unvetted, and that is a knowing limitation rather than an oversight.**
+    Resolve passes `_choose_common_name` the taxon's synonym list so a junior scientific
+    synonym cannot become a display name; search cannot, because that list is a separate WoRMS
+    call *per row* - fifty of them against a six-second keystroke budget, on a path that has
+    already released its read transaction to go outbound. So `?q=orca` shows "Orca gladiator"
+    for as long as the taxon is not in the catalog, and picking that row stores "Orca whale".
+    The disagreement is real, one-directional and self-healing: the wrong name is never
+    written, and the first resolve replaces it for everyone. Do not close it by adding a fetch
+    here - see the common-name section in DECISIONS.md.
     """
     scientific_name = entity.scientific_name or entity.label
     if scientific_name is None:
