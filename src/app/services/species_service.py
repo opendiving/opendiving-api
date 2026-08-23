@@ -31,6 +31,7 @@ traffic is low is not one.
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
@@ -83,6 +84,17 @@ _MAX_RESPONSE_BYTES = 512 * 1024
 # cached as though it were complete - see `_store_search`.
 _SEARCH_BUDGET_SECONDS = 6.0
 
+# What the vername annotation inside `_worms_by_vernacular` may spend before the rows go out
+# unexplained. It needs a bound of its own because `_request`'s bounds are both far above
+# `_SEARCH_BUDGET_SECONDS`: without this, one hung ajax call would have the *whole* WoRMS
+# by-vernacular source cancelled by the search budget, losing the records this endpoint only
+# decorates. Calibrated against a bound rather than a median, because the latency itself
+# moves - three twenty-call samples of the same URL measured medians of 0.5-0.9 s and maxima
+# of 1.9-3.8 s. Four seconds fits every sample; an 8.5 s outlier in a separate burst says
+# over-budget is a live case rather than an eliminated one, which is why expiry degrades
+# (rows without hints, and the short TTL) instead of failing.
+_AJAX_ANNOTATION_BUDGET_SECONDS = 4.0
+
 # What `resolve_species` is willing to spend on the record fetch it cannot do without. Far
 # longer than a search budget, because this is a deliberate "add this species" click with a
 # spinner against it rather than a keystroke, and because the alternative to waiting is a 503
@@ -109,6 +121,13 @@ _MAX_RESULTS = 25
 _WORMS_PAGE_SIZE = 50
 _WIKIDATA_SEARCH_LIMIT = 10
 
+# The ajax endpoint's row budget, and it has nothing to do with `_WORMS_PAGE_SIZE` above
+# beyond happening to be the same number. **It must be sent, and it must not be exceeded**:
+# omitted, the endpoint answers with its default of twenty rows over a quarter of the taxa;
+# above fifty, the value is *discarded* rather than clamped, so `max_matches=100` returns
+# fewer rows than `max_matches=50`. Measured across five variants of the same call.
+_AJAX_MAX_MATCHES = 50
+
 # How many entities to ask `wbgetentities` for at once. Small on purpose - see
 # `_wikidata_entities`: a taxon entity with all its claims runs ~50 KB, so a batch of ten
 # regularly exceeds `_MAX_RESPONSE_BYTES` and costs the whole Wikidata contribution. Four
@@ -125,7 +144,7 @@ _MISS_TTL_SECONDS = 60 * 60
 # Bumped whenever the cached shape or the way it is composed changes. What is cached is the
 # *normalized, merged* remote list rather than raw provider payloads, so a change to the
 # normalizer has to invalidate the old entries - a new prefix does that without a flush.
-_CACHE_VERSION = "v3"
+_CACHE_VERSION = "v4"
 
 # Wikidata's "WoRMS AphiaID" property. The single hinge the whole two-source design turns
 # on: without a shared key there would be nothing to merge two registers *on*.
@@ -464,6 +483,92 @@ async def _wikidata(params: dict[str, Any]) -> Any | None:
     return await _request(_PROVIDER_WIKIDATA, settings.WIKIDATA_API_URL, {**params, "format": "json"})
 
 
+# -------------- matching --------------
+
+
+# How well a name answers what the diver typed, ascending, so 0 is the best. Named rather
+# than written as bare integers because they are compared, minimised and sorted on in four
+# places, and `2` says nothing at any of them.
+_MATCH_EXACT = 0
+_MATCH_PREFIX = 1
+_MATCH_WORD = 2
+_MATCH_SUBSTRING = 3
+_MATCH_NONE = 4
+
+
+def _match_bucket(query: str, name: str) -> int:
+    """How well `name` matches an already-normalized `query` - `_MATCH_EXACT` down to
+    `_MATCH_NONE`.
+
+    One predicate for every place that asks the question, so the ranking, the choice of which
+    vernacular explains a row, and anything that later has to cut candidates before the full
+    row exists all agree about what "a better match" means.
+
+    **Only the name side is casefolded here; `query` is expected to arrive that way**, from
+    `search_species`, which also collapses its whitespace. Handing this a raw query fails
+    silently and completely rather than loudly: every comparison below is against a folded
+    name, so a single capital puts *every* row in `_MATCH_NONE` and the page comes back
+    ordered by nothing at all, with every hint still attached because nothing looked
+    redundant. Worth knowing before debugging a page reached by calling `_remote_search`
+    directly.
+
+    **Prefix beats word boundary, and that is a decision with a known cost.** "Whale shark"
+    outranks "blue whale" for `?q=whale`, and so does "Whale louse family" - divers log whale
+    sharks constantly and baleen whales almost never, so the first-word compounds people
+    actually mean stay on top, and the intruder displays the very name that earned its
+    position. The word-boundary bucket underneath is what still separates "blue whale" from
+    *Barbourisia rufa*, and `\\b` handles multi-word queries and hyphenated names for free.
+
+    A plural is deliberately *not* a word-boundary match: "whales" lands in the substring
+    bucket for `?q=whale`, which is the right place - above the unmatched mass, below the
+    exact word.
+    """
+    folded = name.casefold()
+    if folded == query:
+        return _MATCH_EXACT
+    if folded.startswith(query):
+        return _MATCH_PREFIX
+    if re.search(rf"\b{re.escape(query)}\b", folded):
+        return _MATCH_WORD
+    if query in folded:
+        return _MATCH_SUBSTRING
+    return _MATCH_NONE
+
+
+# Every rank at or below species in WoRMS's own closed vocabulary (`AphiaTaxonRanksByID`),
+# casefolded. Closed because WoRMS's list is closed - this is an enumeration of a finite set,
+# not a growing collection of things seen in the wild.
+_SPECIES_TIER_RANKS = frozenset(
+    {"species", "subspecies", "variety", "subvariety", "forma", "subforma", "form", "mutatio"}
+)
+
+
+def _rank_tier(rank: str) -> int:
+    """Species and below, then "we do not know", then genus and above.
+
+    A diver is most interested in the species they spotted, so a species outranks its own
+    genus and family on the page. Coarse on purpose: three tiers, not a rank ladder, because
+    the registers disagree about the exact rank of the same taxon often enough that a fine
+    order would move between two identical searches (see the `"unknown"` section in
+    DECISIONS.md).
+
+    **A rule, not two enumerations, and the direction matters.** Membership in the closed
+    species set decides the top tier; the sentinel sits in the middle; *everything else known*
+    falls to the bottom by default. Enumerating the higher tier instead would put every rank
+    left out of that list - superclass, infraorder, subtribe, section - into the middle,
+    above the genus and family rows it is supposed to sit below. Defaulting downward cannot
+    invert that way. What it cannot defend against is a rank that never becomes a string at
+    all: an unmapped Wikidata rank item leaves the row on `"unknown"` and lands middle-tier,
+    which is why `_WIKIDATA_RANK_BY_QID` is enumerated up front rather than grown.
+    """
+    folded = rank.casefold()
+    if folded in _SPECIES_TIER_RANKS:
+        return 0
+    if folded == "unknown":
+        return 1
+    return 2
+
+
 # -------------- normalization --------------
 
 
@@ -532,14 +637,71 @@ def _worms_taxon(row: Any) -> _Taxon | None:
     )
 
 
-def _worms_result(row: Any) -> SpeciesSearchResult | None:
+def _vername_map(rows: Any, query: str) -> dict[int, str] | None:
+    """AphiaID to the one vernacular that best explains why the taxon matched `query`, or
+    `None` when the annotation call did not answer.
+
+    Built from `AjaxAphiaRecordsByNamePart`, which is the only WoRMS endpoint that says
+    *which* vernacular a hit matched on - an `AphiaRecord` carries no vernacular field at all,
+    which is why by-vernacular rows have no explanation of their own.
+
+    **Every language, not just English.** The English-only rule governs the *display* name; a
+    foreign word that accounts for a row is information rather than noise. `?q=orca` returns a
+    shad (*Alosa alosa*) because its Spanish vernacular is "samborca", and `matched
+    "samborca"` is precisely what makes that row make sense. So no `languages[]` filter is
+    sent, and `eng` only wins as a tie-break.
+
+    **Keyed by the raw, unfolded id WoRMS sent**, because these rows carry no `valid_AphiaID`
+    and no `status`: the ajax answer for `whale` contains two "blue whale" rows under
+    different ids, one of them an unaccepted homonym. The caller looks this up with the
+    record's own id, *before* its fold, so the wrong-taxon lookup cannot happen.
+
+    A taxon with several vernames - *Balaena mysticetus* has nine for `whale` - keeps the one
+    that matched best, English first at equal quality, then casefolded alphabetical order.
+    Name-intrinsic tie-breaks rather than response order, because ajax rows are ordered
+    alphabetically by `displayname` and nothing else, and the chosen vername reaches the sort
+    key: letting arrival order pick it would let WoRMS decide page order between two identical
+    searches.
+    """
+    if not isinstance(rows, list):
+        return None
+
+    best: dict[int, tuple[int, int, str, str]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        aphia_id = row.get("id")
+        vername = _text(row.get("vername"))
+        # `vername` is null on every scientific-name match, which is most of the answer for a
+        # query like `orca` - those rows explain nothing and are simply not in the map.
+        if not isinstance(aphia_id, int) or aphia_id <= 0 or vername is None:
+            continue
+        language = _text(row.get("language"), _LANGUAGE_CODE_MAX_LENGTH)
+        candidate = (_match_bucket(query, vername), 0 if language == "eng" else 1, vername.casefold(), vername)
+        if (current := best.get(aphia_id)) is None or candidate < current:
+            best[aphia_id] = candidate
+    return {aphia_id: chosen[-1] for aphia_id, chosen in best.items()}
+
+
+def _worms_result(row: Any, vernames: dict[int, str] | None = None) -> SpeciesSearchResult | None:
     """One WoRMS record as a search hit, folded onto its accepted taxon.
 
     This is where a diver typing *Manta birostris* gets *Mobula birostris* back. WoRMS sends
     `valid_AphiaID`/`valid_name` inline on an unaccepted record, so the fold costs no second
-    request - and the superseded name the diver actually typed is kept as `matched_name`,
-    since being told your name is out of date is useful and being silently handed a different
-    binomial is not.
+    request - and the superseded name the diver actually typed becomes `matched_name`, since
+    being silently handed a different binomial is baffling.
+
+    `vernames` is the by-vernacular source's annotation map, and it fills the same field for
+    rows the fold has nothing to say about: a row that matched on a common name WoRMS will not
+    tell us about otherwise. **The fold wins any collision**, because it is the truer account
+    of what the diver's query actually hit - the ajax row for the unaccepted "blue whale"
+    (AphiaID 380449) folds to the fin whale, and reporting "blue whale" there would be a
+    different animal's name.
+
+    Neither hint is guaranteed to survive: whatever is set here is nulled downstream on any
+    row whose visible names already match the query, which is `SpeciesSearchResult`'s own
+    contract for the field. That test needs the merged `common_name` and cannot be made here,
+    where every row's is `None`.
     """
     taxon = _worms_taxon(row)
     if taxon is None:
@@ -548,12 +710,21 @@ def _worms_result(row: Any) -> SpeciesSearchResult | None:
     matched_name: str | None = None
     scientific_name = taxon.scientific_name
     aphia_id = taxon.aphia_id
+    folded = False
     if taxon.valid_aphia_id is not None and taxon.valid_aphia_id != taxon.aphia_id:
         valid_name = _text(row.get("valid_name"))
         if valid_name is not None:
+            folded = True
             matched_name = taxon.scientific_name
             scientific_name = valid_name
             aphia_id = taxon.valid_aphia_id
+
+    if matched_name is None and vernames is not None:
+        # `taxon.aphia_id` rather than `aphia_id`: the map is keyed by the id WoRMS put on the
+        # record, which is the pre-fold one.
+        vername = vernames.get(taxon.aphia_id)
+        if vername is not None and vername.casefold() != scientific_name.casefold():
+            matched_name = vername
 
     return SpeciesSearchResult(
         aphia_id=aphia_id,
@@ -563,8 +734,9 @@ def _worms_result(row: Any) -> SpeciesSearchResult | None:
         rank=taxon.rank,
         # "accepted" rather than the record's own status whenever the fold above happened:
         # the row now describes the accepted taxon, and reporting the synonym's status would
-        # label the wrong thing.
-        status="accepted" if matched_name is not None else taxon.status,
+        # label the wrong thing. Keyed on the fold rather than on `matched_name`, which a
+        # vername can now also fill without any of that being true.
+        status="accepted" if folded else taxon.status,
         matched_name=matched_name,
         source="worms",
         attribution=_WORMS_ATTRIBUTION,
@@ -727,15 +899,14 @@ def _wikidata_result(entity: _WikidataEntity) -> SpeciesSearchResult | None:
         # P105, translated by `_WIKIDATA_RANK_BY_QID`. This reverses the refusal that stood
         # here - no rank at all rather than one derived from claims - and what changed is the
         # premise rather than the appetite for guessing: rank was picker context that nothing
-        # read, and it is becoming a search-ordering input, where a sentinel on every
-        # Wikidata-only row misplaces the row instead of merely leaving a caption blank.
-        # **Nothing sorts on it yet** - `_ordered` still keys on name match alone - and the
-        # fill deliberately comes first: an order introduced ahead of it would have run
-        # against a Wikidata side where every row was the sentinel. The argument is in the
-        # `"unknown"` section of DECISIONS.md. Still the sentinel for an entity with no P105
-        # or an unmapped rank item, and a hit WoRMS also returned takes WoRMS's rank at the
-        # merge - which is also how two identical searches can show two different real ranks
-        # for a taxon the registers disagree about, recorded in that same section.
+        # read, and `_ordered` now tiers on it through `_rank_tier`, where a sentinel on every
+        # Wikidata-only row misplaces the row instead of merely leaving a caption blank. The
+        # fill landed one release ahead of the order deliberately, so that order never ran
+        # against an all-sentinel Wikidata side. The argument is in the `"unknown"` section of
+        # DECISIONS.md. Still the sentinel for an entity with no P105 or an unmapped rank
+        # item, and a hit WoRMS also returned takes WoRMS's rank at the merge - which is also
+        # how two identical searches can show two different real ranks for a taxon the
+        # registers disagree about, recorded in that same section.
         rank=entity.rank or "unknown",
         # Wikidata has nothing to say about nomenclatural status, so this one stays a
         # sentinel outright - the merge fills it from WoRMS wherever WoRMS answered.
@@ -839,12 +1010,66 @@ async def _worms_by_name(query: str) -> _SourceAnswer:
 
 
 async def _worms_by_vernacular(query: str) -> _SourceAnswer:
-    """Common names, as far as WoRMS has them - which is not far, hence Wikidata."""
-    rows = await _worms("AphiaRecordsByVernacular", query, {"like": "true"})
-    return _worms_page(rows)
+    """Common names, as far as WoRMS has them - which is not far, hence Wikidata.
+
+    **Two calls, concurrently, and only one of them makes rows.** `AphiaRecordsByVernacular`
+    is the row source, exactly as before; `AjaxAphiaRecordsByNamePart` chains alongside it
+    purely to learn *which* vernacular matched, the way `_wikidata_entities` chains inside
+    `_wikidata_search`. It is an annotation and never a source, for three measured reasons:
+    its taxa are a subset of the record endpoint's everywhere sampled, it is useless for some
+    queries (`orca` spends its whole row budget on scientific-name prefixes and omits the
+    animal), and its rows are raw unfolded ids with no `valid_AphiaID` - so using them as rows
+    would need a second fold call and would ship the duplicate taxa that fold away here. The
+    one thing it uniquely knows is the vername string, and that is all this takes.
+
+    Because it contributes no rows, `has_more` never sees it and the source count is unchanged.
+
+    **A slow annotation must not cost the records.** `_request`'s own bounds sit far above
+    `_SEARCH_BUDGET_SECONDS`, so without an inner bound a hung ajax call would have this whole
+    source cancelled by the search budget - losing rows that had already arrived. The ajax leg
+    therefore runs under `_AJAX_ANNOTATION_BUDGET_SECONDS`, and expiry degrades exactly like a
+    fast failure: the records go out unannotated with `ok` false, so the entry keeps the short
+    TTL and the next cold ask tries again. The wait is real and priced - the task group cannot
+    exit until the hung leg is reaped, so a record page that answered in half a second still
+    holds the source for the inner budget - and it is bought with the alternative being a
+    month-long cache entry of unexplained rows.
+    """
+    rows: Any = None
+    vernames: dict[int, str] | None = None
+
+    async def records() -> None:
+        nonlocal rows
+        rows = await _worms("AphiaRecordsByVernacular", query, {"like": "true"})
+
+    async def annotations() -> None:
+        nonlocal vernames
+        with anyio.move_on_after(_AJAX_ANNOTATION_BUDGET_SECONDS):
+            payload = await _worms(
+                "AjaxAphiaRecordsByNamePart",
+                query,
+                # `marine_only` is *not* inert on this endpoint whatever the record calls do:
+                # `Astyanax` returns 11 rows under `true` and 50 under `false`, and the
+                # documented default disagrees with the observed one - so it is sent
+                # explicitly, matching `_worms_by_name`'s freshwater rule.
+                {
+                    "combine_vernaculars": "true",
+                    "marine_only": "false",
+                    "max_matches": _AJAX_MAX_MATCHES,
+                },
+            )
+            vernames = _vername_map(payload, query)
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(records)
+        tasks.start_soon(annotations)
+
+    page = _worms_page(rows, vernames)
+    # An *empty* ajax answer is a complete one - WoRMS says "no match" with a 204 that
+    # `_request` maps to `[]` - so only `None`, the failure and the budget expiry, drops `ok`.
+    return _SourceAnswer(page.results, page.page_was_full, ok=page.ok and vernames is not None)
 
 
-def _worms_page(rows: Any) -> _SourceAnswer:
+def _worms_page(rows: Any, vernames: dict[int, str] | None = None) -> _SourceAnswer:
     """A page of WoRMS records as results, plus whether the page was full and whether WoRMS
     answered at all.
 
@@ -852,13 +1077,18 @@ def _worms_page(rows: Any) -> _SourceAnswer:
     error status, a body over the size cap, a body that did not parse - and `[]` only when
     the register genuinely said "no such name". That distinction is preserved here rather
     than collapsed, because it decides how long the merged answer is cached for.
+
+    `vernames` is `_worms_by_vernacular`'s annotation map; the by-name source has no such
+    thing and passes nothing. It is threaded through here rather than applied afterwards
+    because the lookup needs each record's *pre-fold* id, which stops existing the moment
+    `_worms_result` has returned.
     """
     if rows is None:
         return _SourceAnswer([], False, ok=False)
     if not isinstance(rows, list):
         # Valid JSON that is not an array is not WoRMS answering - a proxy or an error page.
         return _SourceAnswer([], False, ok=False)
-    results = [result for row in rows if (result := _worms_result(row)) is not None]
+    results = [result for row in rows if (result := _worms_result(row, vernames)) is not None]
     return _SourceAnswer(results, len(rows) >= _WORMS_PAGE_SIZE, ok=True)
 
 
@@ -1003,11 +1233,13 @@ async def _remote_search(query: str) -> SpeciesSearchResponse:
     if cached is not None:
         return cached
 
-    collected: list[_SourceAnswer] = []
+    # Each entry carries its source's position in `sources` below, which is the only thing
+    # that can put the answers back in a fixed order afterwards - see the sort further down.
+    collected: list[tuple[int, _SourceAnswer]] = []
 
-    async def fetch(source: str, call: Any) -> None:
+    async def fetch(priority: int, source: str, call: Any) -> None:
         try:
-            collected.append(await call(query))
+            collected.append((priority, await call(query)))
         except ValidationError, ValueError, TypeError, KeyError:
             # `_request` already swallows every network and parse failure, so reaching here
             # means a provider sent a shape the normalizers did not expect. Same treatment:
@@ -1024,8 +1256,8 @@ async def _remote_search(query: str) -> SpeciesSearchResponse:
     )
     with anyio.move_on_after(_SEARCH_BUDGET_SECONDS):
         async with anyio.create_task_group() as tasks:
-            for source, call in sources:
-                tasks.start_soon(fetch, source, call)
+            for priority, (source, call) in enumerate(sources):
+                tasks.start_soon(fetch, priority, source, call)
 
     # **Two different ways of not being complete, and both have to count.** A source can run
     # out of *time* - still in flight when the budget expired, so it is not in `collected` at
@@ -1035,28 +1267,37 @@ async def _remote_search(query: str) -> SpeciesSearchResponse:
     # half its sources would otherwise be stored for thirty days as though it were the whole
     # truth. `_SourceAnswer.ok` is what tells them apart.
     answered = len(collected) == len(sources)
-    complete = answered and all(answer.ok for answer in collected)
+    complete = answered and all(answer.ok for _, answer in collected)
     if not complete:
         logger.info(
             "A species search was incomplete: %d of %d sources answered, %d of those failed.",
             len(collected),
             len(sources),
-            sum(1 for answer in collected if not answer.ok),
+            sum(1 for _, answer in collected if not answer.ok),
         )
 
     # Re-sorted before merging because a task group completes in whatever order the network
     # allowed, and the merge below is first-writer-wins: without this, which register defines
-    # a shared row would depend on the weather. WoRMS first, since it owns the taxonomy.
-    collected.sort(key=lambda answer: 0 if answer.results and answer.results[0].source == "worms" else 1)
+    # a shared row would depend on the weather. **On the source's own index**, not on where its
+    # first row came from: that older key could only see `_PROVIDER_WORMS`, so the two WoRMS
+    # sources tied and their relative order was completion order. Harmless while their rows
+    # were identical in shape - and not harmless now that by-vernacular rows carry vernames,
+    # since network weather would decide whether a folded row's hint reads as a synonym or as a
+    # common name. By-name, then by-vernacular, then Wikidata: WoRMS first, since it owns the
+    # taxonomy, and its two halves in a fixed order.
+    collected.sort(key=lambda entry: entry[0])
 
     merged: dict[int, SpeciesSearchResult] = {}
     truncated = False
-    for answer in collected:
+    for _, answer in collected:
         truncated = truncated or answer.page_was_full
         for result in answer.results:
             _merge_result(merged, result)
 
-    ordered = _ordered(list(merged.values()), query)
+    # After the merge, because whether a hint is redundant depends on the `common_name` the
+    # merge just supplied - and before the cache, so the stored entry keeps the schema's
+    # contract rather than repairing it on every read.
+    ordered = _ordered(_drop_redundant_hints(list(merged.values()), query), query)
     response = SpeciesSearchResponse(results=ordered[:_MAX_RESULTS], has_more=truncated or len(ordered) > _MAX_RESULTS)
     await _store_search(key, response, complete=complete)
     return response
@@ -1089,24 +1330,94 @@ def _merge_result(merged: dict[int, SpeciesSearchResult], result: SpeciesSearchR
     )
 
 
-def _ordered(results: list[SpeciesSearchResult], query: str) -> list[SpeciesSearchResult]:
-    """Exact matches first, then prefix matches, then everything else - stably.
+def _visible_bucket(result: SpeciesSearchResult, query: str) -> int:
+    """The best match over the names the diver can actually read on this row.
 
-    The same ranking the local query applies in SQL, so a catalog row and a remote row that
-    matched equally well end up next to each other rather than in two differently-sorted
-    halves. "Matched" is judged against every name the result carries, since a hit whose
-    reason is a synonym should still rank as the exact match it was.
+    `default` because the generator can in principle be empty - a catalog row whose
+    `scientific_name` column holds an empty string - and a bare `min()` would raise there,
+    which on this path means a 500 out of the one function in this module that promises never
+    to fail for anything a provider or a stored row did.
+    """
+    return min(
+        (_match_bucket(query, name) for name in (result.scientific_name, result.common_name) if name),
+        default=_MATCH_NONE,
+    )
+
+
+def _drop_redundant_hints(results: list[SpeciesSearchResult], query: str) -> list[SpeciesSearchResult]:
+    """Null `matched_name` wherever the row's own visible names already explain the match.
+
+    `SpeciesSearchResult` has promised this all along - "null when the display name already
+    explains the match" - and no single source can keep the promise, because none of them sees
+    the finished row. `_worms_result` can only compare a vername against the scientific name;
+    its `common_name` is always `None` and arrives from Wikidata at the merge. So `?q=swordfish`
+    would ship *Xiphias gladius* as `Swordfish · matched "swordfish"`, and simulating `?q=whale`
+    over live payloads put a redundant hint on four of the first sixteen rows ("Bowhead whale ·
+    matched \\"whale-fish\\"").
+
+    **Any bucket counts, not just equality.** A hint exists to account for a row nothing else
+    accounts for, and "Bowhead whale" accounts for `whale` perfectly well. That is the same
+    test `_ordered` uses to decide whether a row is hint-placed, which is what keeps the wire
+    and the ranking saying the same thing: a hint survives exactly where the ranking would
+    have to read one.
+
+    It runs over the merged list rather than inside a source for the reason above, and it
+    covers the catalog rows too - `_local_search`'s own SQL-side de-noise is equality-only, so
+    a catalog row can reach here with a visible match and a live hint.
+    """
+    return [
+        result
+        if result.matched_name is None or _visible_bucket(result, query) == _MATCH_NONE
+        else result.model_copy(update={"matched_name": None})
+        for result in results
+    ]
+
+
+def _ordered(results: list[SpeciesSearchResult], query: str) -> list[SpeciesSearchResult]:
+    """Rank by how well each row answers the query, best first.
+
+    **Rows rank by the names the diver can see; a hidden name places a row only when the
+    visible names place it nowhere.** That is the governing rule and the first key term. A row
+    the diver can read something relevant on - `scientific_name` or `common_name` - outranks
+    every row placed only by its `matched_name` hint, however good that hint is. Otherwise the
+    genus *Orcinus*, which contains no "orca" anywhere a diver can see and is placed purely by
+    its synonym "Orca", would beat the animal itself on `?q=orca`. Ranking on the best bucket
+    over *all* the names was the first attempt and it failed the same way: *Balaena mysticetus*
+    carries nine "whale" vernaculars, two of them prefix matches, so a row displaying "Bowhead
+    whale" jumped over "Blue whale" explained by a name nobody typed.
+
+    Below that, in order: the match bucket of whichever name placed the row (`_match_bucket`,
+    five buckets rather than the three this used to have); `_rank_tier`, so the species a diver
+    spotted outranks its genus and family inside a bucket; named rows ahead of bare binomials,
+    which is what stops the two indistinguishable bare "Orcadia" genus rows from opening
+    `?q=orca` above the killer whale; then the *displayed* name casefolded, which is the string
+    the diver is actually reading and which kills the capitals-first artefact of comparing raw
+    `str`s; then `aphia_id`, so the order is total and cannot depend on merge order even in
+    theory.
+
+    **This is no longer the ranking the local catalog's SQL applies**, and the divergence is
+    named rather than left for the next reader to assume away. `_local_search` still orders by
+    its own three-way `match_rank` and, worse, applies `LIMIT _MAX_RESULTS` under it - so the
+    moment one instance's catalog holds more than `_MAX_RESULTS` matches for a single query,
+    the SQL can cut a row this key would have ranked first, and nothing here can put it back.
+    The catalog is small by construction and a long way from that threshold; the fix belongs
+    with the `pg_trgm` escalation in DECISIONS.md whenever that reopens.
     """
 
-    def rank(result: SpeciesSearchResult) -> tuple[int, str]:
-        names = [n.casefold() for n in (result.scientific_name, result.common_name, result.matched_name) if n]
-        if any(name == query for name in names):
-            return 0, result.scientific_name
-        if any(name.startswith(query) for name in names):
-            return 1, result.scientific_name
-        return 2, result.scientific_name
+    def key(result: SpeciesSearchResult) -> tuple[int, int, int, int, str, int]:
+        visible = _visible_bucket(result, query)
+        hint = _match_bucket(query, result.matched_name) if result.matched_name else _MATCH_NONE
+        placed_visibly = visible < _MATCH_NONE
+        return (
+            0 if placed_visibly else 1,
+            visible if placed_visibly else hint,
+            _rank_tier(result.rank),
+            0 if result.common_name else 1,
+            (result.common_name or result.scientific_name).casefold(),
+            result.aphia_id,
+        )
 
-    return sorted(results, key=rank)
+    return sorted(results, key=key)
 
 
 async def _local_search(db: AsyncSession, query: str) -> tuple[list[SpeciesSearchResult], bool]:
@@ -1254,7 +1565,10 @@ async def search_species(db: AsyncSession, query: str) -> SpeciesSearchResponse:
         # them would make a dive's species card disagree with the picker that filled it.
         merged.setdefault(result.aphia_id, result)
 
-    ordered = _ordered(list(merged.values()), normalized)
+    # Again over the merged list, because the catalog half has not been through it: a cached
+    # remote entry is already clean, but `_local_search` de-noises by equality alone, so a
+    # catalog row can arrive showing a name that matches the query *and* a hint repeating it.
+    ordered = _ordered(_drop_redundant_hints(list(merged.values()), normalized), normalized)
     return SpeciesSearchResponse(
         results=await _attach_catalog_uuids(db, ordered[:_MAX_RESULTS]),
         has_more=remote.has_more or local_was_full or len(ordered) > _MAX_RESULTS,
