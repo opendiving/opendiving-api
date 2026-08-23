@@ -354,8 +354,8 @@ class TestMergingTwoRegisters:
         assert result.scientific_name == "Amphiprion ocellaris"
         # Capitalised here as well as at resolve, because one `_choose_common_name` serves
         # both paths. Only the capitalisation carries across, though: the reject list is an
-        # input search cannot supply, and the last test in `TestVettingTheStoredName` pins
-        # what that costs.
+        # input search cannot supply, and
+        # `test_search_shows_the_unvetted_name_until_a_resolve_fixes_it` pins what that costs.
         assert result.common_name == "Ocellaris clownfish"
         # WoRMS wrote the row, so its rank survives rather than Wikidata's placeholder.
         assert (result.rank, result.source) == ("Species", "worms")

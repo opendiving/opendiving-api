@@ -8181,13 +8181,13 @@ transaction to go outbound. Not worth it, and not close. The consequence is stat
 hidden: `?q=orca` displays "Orca gladiator" for as long as *Orcinus orca* is not in the catalog, and
 the diver who picks that row gets "Orca whale" stored. That disagreement is real, and it is the
 tolerable direction of it — the wrong name is never *written*, it is transient per taxon rather than
-per search, and the first resolve fixes the row for everyone, after which the catalog row wins the
-merge outright and the picker shows the vetted name too.
+per search, and the first resolve fixes the row for everyone. The picker then follows on its own,
+through the rule in `search_species` that a catalog row wins the merge outright rather than being
+overwritten by a live provider. That rule was written to stop a dive's species card disagreeing with
+the picker that filled it, it is unchanged here, and it is the mechanism this gap heals through
+rather than a second guarantee to hold beside it.
 `test_search_shows_the_unvetted_name_until_a_resolve_fixes_it` pins the gap so that closing it is a
-decision somebody makes rather than a diff nobody notices. Not to be confused with the rule in
-`_merge_result`'s caller that a catalog row wins the merge outright, which exists to stop a dive's
-species card disagreeing with the picker that filled it: that guarantee is about *stored* rows and
-is untouched here.
+decision somebody makes rather than a diff nobody notices.
 
 **The name index is exempt from all of it.** `_name_rows` keeps writing the raw source strings: it
 is a multilingual find-index with no display job, `ILIKE` does not care about case, and rewriting
