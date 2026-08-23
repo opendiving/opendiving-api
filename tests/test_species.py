@@ -1651,13 +1651,17 @@ class TestCaching:
     async def test_a_wikidata_200_that_is_not_a_search_result_is_a_failure(
         self, fake_redis: FakeRedis, label: str, body: dict
     ):
-        """The gap the first version of `ok` left open, and the reason `_wikidata_qids` has
-        three outcomes rather than two.
+        """The gap the first version of `ok` left open, and the reason `_wikidata_search_pages`
+        has three outcomes rather than two.
 
-        Checking only the status code sees a successful request, finds no `query.search`, and
-        reports "Wikidata has nothing for you" - indistinguishable downstream from a genuine
-        miss, and enough to pin a WoRMS-only answer for thirty days while Wikidata was simply
-        refusing.
+        Checking only the status code sees a successful request, finds neither `query.pages` nor
+        the `batchcomplete` that marks a genuine miss, and reports "Wikidata has nothing for
+        you" - indistinguishable downstream from a real empty answer, and enough to pin a
+        WoRMS-only result for thirty days while Wikidata was simply refusing.
+
+        This drives `search_species`, so the reader under test is the generator one. Resolve's
+        `list=search` reader keeps the same three outcomes for its own reasons, pinned
+        separately in `TestResolve`.
         """
         db = _empty_db()
 

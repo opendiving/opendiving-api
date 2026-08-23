@@ -8024,10 +8024,13 @@ ten, but `_WIKIDATA_ENRICH_LIMIT` cuts them back *before* any entity is fetched,
 sees sixteen ids in four concurrent chunks where it used to see ten in three. What grew is the
 **candidate** list, which costs one light call however wide it is; what gets enriched is bounded by
 its own constant rather than by the search's width. The extra chunk is not free — it is roughly a
-third more draws against a cap these samples straddle, and one chunk over it still costs the whole
-page its Wikidata rows for the hour — but it is a bounded, self-healing cost, and it is the reason
-`_WIKIDATA_ENRICH_LIMIT` is written as a product of this constant rather than as a number of its
-own.
+third more draws against a cap these samples straddle — but chunking also *bounded* what going over
+costs, and that is worth being precise about rather than carrying the old severity forward: a chunk
+over the cap now loses its own four candidates and drops `ok`, which puts the merged page on the
+hour TTL. The other chunks still land. Losing every Wikidata row to one oversized response was the
+pre-chunking behaviour described above, and it is exactly what asking in pieces stopped. So the cost
+is bounded and self-healing, and it is the reason `_WIKIDATA_ENRICH_LIMIT` is written as a product
+of this constant rather than as a number of its own.
 
 ### Wikidata's search asks for names, and its shapes are measured
 
