@@ -78,6 +78,52 @@ _SUBORDER_RANK_ITEM = "Q5867959"
 # "cultivar", which is what an unmapped rank looks like when one turns up.
 _UNMAPPED_RANK_ITEM = "Q4886"
 
+
+def _generator_search(*pages: str | tuple[str, ...], more: bool = False) -> dict[str, Any]:
+    """A `generator=search` answer in the live shape - the search path's Wikidata payload.
+
+    Each page is either a bare QID, a candidate whose terms the test does not care about and
+    which therefore carries no `entityterms` at all, or a `(qid, label, *aliases)` tuple where
+    the terms are the point. An empty string in the label position means *aliases only*, which
+    is Q733595's live shape - the `nudibranch` front-runner has no English label whatsoever.
+
+    Four details of the real answer are reproduced rather than tidied away, because a reader
+    that gets any of them wrong has to fail here rather than in production:
+
+    - `query.pages` is keyed by **pageid**, and that key order is *not* the relevance order.
+      The keys below are laid out to iterate in the reverse of `index` deliberately, so a
+      reader that takes the object in iteration order gets the page order backwards.
+    - `entityterms` **omits** a key rather than sending an empty list, independently for
+      `label` and `alias`.
+    - Truncation is signalled only by the top-level `continue` key (`more=True`). This variant
+      never reports `totalhits`, so there is nothing else to read it from.
+    - **Empty is `{"batchcomplete": ""}` with no `query` key at all** - twenty bytes on the
+      wire, and what `_generator_search()` with no pages returns. `list=search` answers a miss
+      with `query.search` present and empty instead, which is the asymmetry the two readers
+      exist for.
+    """
+    entries: list[tuple[str, dict[str, Any]]] = []
+    for index, page in enumerate(pages, start=1):
+        qid, *terms = (page,) if isinstance(page, str) else page
+        pageid = 1000 + index
+        entry: dict[str, Any] = {"pageid": pageid, "ns": 0, "title": qid, "index": index}
+        entityterms: dict[str, list[str]] = {}
+        if terms[:1] and terms[0]:
+            entityterms["label"] = [terms[0]]
+        if terms[1:]:
+            entityterms["alias"] = list(terms[1:])
+        if entityterms:
+            entry["entityterms"] = entityterms
+        entries.append((str(pageid), entry))
+
+    payload: dict[str, Any] = {"batchcomplete": ""}
+    if more:
+        payload["continue"] = {"gsroffset": len(entries), "continue": "gsroffset||"}
+    if entries:
+        # Reversed, so the object iterates worst-ranked first and only `index` can restore it.
+        payload["query"] = {"pages": dict(reversed(entries))}
+    return payload
+
 # *Amphiprion ocellaris* as WoRMS actually sends it - the accepted, species-rank record the
 # whole feature is demonstrated on. Trimmed to the fields this app reads, keeping WoRMS's own
 # key spellings (`scientificname`, the bare `class`/`order`, the 1/0 habitat flags), because
@@ -129,7 +175,18 @@ ORCA_RECORD = {
     "genus": "Orcinus",
 }
 ORCA_SYNONYMS = [{"scientificname": "Orca gladiator"}, {"scientificname": "Orca capensis"}]
-ORCA_WIKIDATA_SEARCH = {"query": {"search": [{"title": "Q26843"}]}}
+
+# The same taxon as two different Wikidata answers, because the two paths ask two different
+# questions and get two differently shaped replies. **Search** asks `generator=search` for the
+# typed word and gets pages carrying entity terms; **resolve** asks `list=search` for one exact
+# `haswbstatement:P850=<id>` and gets a `search` array of titles. Handing either shape to the
+# other's reader fails silently rather than loudly - it simply looks like a register with
+# nothing to say - which is why `_registers` routes them apart by URL and why there are two
+# constants here rather than one shared between the paths.
+ORCA_WIKIDATA_SEARCH = _generator_search(
+    ("Q26843", "Orcinus orca", "Orca gladiator", "orca whale", "killer whale")
+)
+ORCA_WIKIDATA_LOOKUP = {"query": {"search": [{"title": "Q26843"}]}}
 ORCA_WIKIDATA_ENTITIES = {
     "entities": {
         "Q26843": {
@@ -148,7 +205,10 @@ ORCA_WIKIDATA_ENTITIES = {
     }
 }
 
-WIKIDATA_SEARCH = {"query": {"search": [{"title": "Q1126155"}]}}
+WIKIDATA_SEARCH = _generator_search(
+    ("Q1126155", "Amphiprion ocellaris", "ocellaris clownfish", "Common clownfish")
+)
+WIKIDATA_LOOKUP = {"query": {"search": [{"title": "Q1126155"}]}}
 WIKIDATA_ENTITIES = {
     "entities": {
         "Q1126155": {
@@ -351,6 +411,7 @@ def _registers(
     synonyms: Any = (),
     vernaculars: Any = (),
     wikidata_search: Any = None,
+    wikidata_lookup: Any = None,
     wikidata_entities: Any = None,
     worms_status: int = 200,
     wikidata_status: int = 200,
@@ -359,6 +420,15 @@ def _registers(
 
     Defaults are "answered, and had nothing", which is the shape a lot of these tests want
     for the source they are *not* exercising.
+
+    **The two Wikidata searches are routed apart, and never share a default.** Search asks
+    `generator=search` and resolve asks `list=search`, and their answers are shaped
+    differently enough that each reader treats the other's payload as a failed or empty
+    register - silently, since neither shape raises. One `wikidata_search=` serving both would
+    therefore let a test pass while exercising nothing, which is the same trap the `ajax`
+    ordering below exists for. So `wikidata_search=` is the generator payload
+    (`_generator_search`), `wikidata_lookup=` is resolve's `list=search` one, and the empty
+    default for each is that variant's own measured empty.
 
     `synonyms` is the *whole* list and gets served the way WoRMS serves it, a page at a time.
     `_worms_synonyms` walks offsets until a short page comes back, so a canned list handed
@@ -378,7 +448,9 @@ def _registers(
         if "wikidata" in url:
             if "wbgetentities" in url:
                 return httpx.Response(wikidata_status, json=wikidata_entities or {"entities": {}})
-            return httpx.Response(wikidata_status, json=wikidata_search or {"query": {"search": []}})
+            if "generator=search" in url:
+                return httpx.Response(wikidata_status, json=wikidata_search or _generator_search())
+            return httpx.Response(wikidata_status, json=wikidata_lookup or {"query": {"search": []}})
         if "AjaxAphiaRecordsByNamePart" in url:
             return httpx.Response(worms_status, json=list(ajax))
         if "AphiaRecordsByName" in url:
@@ -402,11 +474,14 @@ def _unreachable(host: str) -> _Providers:
     """One register that raises on every request; the other answers with nothing."""
 
     def handle(request: httpx.Request) -> httpx.Response:
-        if host in str(request.url):
+        url = str(request.url)
+        if host in url:
             raise httpx.ConnectError("unreachable")
-        if "wbgetentities" in str(request.url):
+        if "wbgetentities" in url:
             return httpx.Response(200, json={"entities": {}})
-        if "wikidata" in str(request.url):
+        if "generator=search" in url:
+            return httpx.Response(200, json=_generator_search())
+        if "wikidata" in url:
             return httpx.Response(200, json={"query": {"search": []}})
         return httpx.Response(200, json=[])
 
@@ -500,7 +575,7 @@ class TestMergingTwoRegisters:
         row."""
         db = _empty_db()
         entities = {"entities": {"Q999": {"labels": {"en": {"value": "Something"}}, "claims": {}}}}
-        with _registers(wikidata_search={"query": {"search": [{"title": "Q999"}]}}, wikidata_entities=entities):
+        with _registers(wikidata_search=_generator_search("Q999"), wikidata_entities=entities):
             response = await species_service.search_species(db, "something")
 
         assert response.results == []
@@ -588,7 +663,7 @@ class TestWhatAnEntityIsWorth:
                 ),
             }
         }
-        search = {"query": {"search": [{"title": "Q41156273"}, {"title": "Q61884050"}]}}
+        search = _generator_search(("Q41156273", "Orca"), ("Q61884050", "Orca"))
         with _registers(wikidata_search=search, wikidata_entities=entities):
             response = await species_service.search_species(db, "orca")
 
@@ -606,7 +681,7 @@ class TestWhatAnEntityIsWorth:
                 "Q1": _entity("Q1", aphia_id="278400", taxon_name="Amphiprion ocellaris", rank_item=_UNMAPPED_RANK_ITEM)
             }
         }
-        with _registers(wikidata_search={"query": {"search": [{"title": "Q1"}]}}, wikidata_entities=entities):
+        with _registers(wikidata_search=_generator_search("Q1"), wikidata_entities=entities):
             response = await species_service.search_species(db, "amphiprion")
 
         assert [r.rank for r in response.results] == ["unknown"]
@@ -615,7 +690,7 @@ class TestWhatAnEntityIsWorth:
     async def test_an_entity_with_no_rank_claim_at_all_stays_the_sentinel(self, no_redis: None):
         db = _empty_db()
         entities = {"entities": {"Q1": _entity("Q1", aphia_id="278400", taxon_name="Amphiprion ocellaris")}}
-        with _registers(wikidata_search={"query": {"search": [{"title": "Q1"}]}}, wikidata_entities=entities):
+        with _registers(wikidata_search=_generator_search("Q1"), wikidata_entities=entities):
             response = await species_service.search_species(db, "amphiprion")
 
         assert [r.rank for r in response.results] == ["unknown"]
@@ -633,7 +708,7 @@ class TestWhatAnEntityIsWorth:
         }
         with _registers(
             by_name=[CLOWNFISH_RECORD],
-            wikidata_search={"query": {"search": [{"title": "Q1"}]}},
+            wikidata_search=_generator_search("Q1"),
             wikidata_entities=entities,
         ):
             response = await species_service.search_species(db, "amphiprion ocellaris")
@@ -656,7 +731,7 @@ class TestWhatAnEntityIsWorth:
             ],
         }
         entities = {"entities": {"Q168366": {"claims": claims}}}
-        with _registers(wikidata_search={"query": {"search": [{"title": "Q168366"}]}}, wikidata_entities=entities):
+        with _registers(wikidata_search=_generator_search("Q168366"), wikidata_entities=entities):
             response = await species_service.search_species(db, "mysticeti")
 
         assert [r.rank for r in response.results] == ["Parvorder"]
@@ -676,7 +751,7 @@ class TestWhatAnEntityIsWorth:
             ],
         }
         entities = {"entities": {"Q1": {"claims": claims}}}
-        with _registers(wikidata_search={"query": {"search": [{"title": "Q1"}]}}, wikidata_entities=entities):
+        with _registers(wikidata_search=_generator_search("Q1"), wikidata_entities=entities):
             response = await species_service.search_species(db, "amphiprion")
 
         assert [r.rank for r in response.results] == ["Species"]
@@ -696,10 +771,200 @@ class TestWhatAnEntityIsWorth:
             ],
         }
         entities = {"entities": {"Q1": {"claims": claims}}}
-        with _registers(wikidata_search={"query": {"search": [{"title": "Q1"}]}}, wikidata_entities=entities):
+        with _registers(wikidata_search=_generator_search("Q1"), wikidata_entities=entities):
             response = await species_service.search_species(db, "amphiprion")
 
         assert [r.rank for r in response.results] == ["Species"]
+
+
+class TestWikidataBreadthThenEnrichment:
+    """The Wikidata search is deliberately much wider than what it enriches, and the two halves
+    are held apart by a cut in the middle.
+
+    **Phase 1 asks for names, not claims.** `generator=search` with `prop=entityterms` returns
+    fifty candidates and their English terms in about eight kilobytes; the same fifty entities
+    *with* their claims run to well over a megabyte. That gap is the only reason breadth is
+    affordable, and there is no server-side claim filter to soften it with.
+
+    **Phase 2 enriches the survivors of a pre-rank cut**, scored on those terms with the same
+    `_match_bucket` the page ordering uses. So the expensive call stays the size it always was
+    while the candidate list grows fivefold.
+
+    The shapes below are all measured against the live endpoint, and every one of them is a way
+    a tidier fixture would let a broken reader pass.
+    """
+
+    def test_the_search_asks_for_more_candidates_than_it_enriches(self):
+        """The premise the whole two-phase shape rests on. If the search asked for no more than
+        it enriches, the cut would never cut and Phase 1's cheap breadth would buy nothing at
+        all - which was exactly the old arrangement: ten candidates, *below* the enrichment
+        limit, so the good rows a diver meant sat past CirrusSearch's tenth and no amount of
+        ranking downstream could reach them.
+
+        The width itself is a tuning decision and deliberately not pinned to a figure here; the
+        inequality is the design, and it is what a revert would break first.
+        """
+        assert species_service._WIKIDATA_SEARCH_LIMIT > species_service._WIKIDATA_ENRICH_LIMIT
+        # Wikidata's anonymous ceiling for the parameter, measured: 501 comes back with a
+        # "must be between 1 and 500" warning instead of the page that was asked for.
+        assert species_service._WIKIDATA_SEARCH_LIMIT <= 500
+
+    def test_candidates_come_back_in_relevance_order_not_object_order(self):
+        """`query.pages` is keyed by pageid, and that key order is arbitrary - on the live
+        `whale` answer the first three keys carry indices 31, 30 and 1. `index` is the only
+        thing that says what CirrusSearch actually ranked first, and since the cut keeps the
+        head of the list, reading the object in iteration order would discard the wrong end.
+        """
+        payload = _generator_search("Q1", "Q2", "Q3")
+
+        assert [page["title"] for page in payload["query"]["pages"].values()] == ["Q3", "Q2", "Q1"], (
+            "the fixture has stopped handing these over out of order, so this test proves nothing"
+        )
+        pages = species_service._wikidata_search_pages(payload)
+        assert pages is not None
+        assert [page.qid for page in pages] == ["Q1", "Q2", "Q3"]
+
+    def test_a_candidate_with_no_english_label_keeps_its_aliases(self):
+        """Q733595, the live `nudibranch` front-runner, has aliases and **no English label at
+        all**; 22 of that query's 50 pages carry no `alias` key. `entityterms` omits a key
+        rather than emptying it, independently for each, so a reader that indexes both loses a
+        whole candidate to a `KeyError` - and it would be the top-ranked one here.
+        """
+        pages = species_service._wikidata_search_pages(
+            _generator_search(("Q733595", "", "Nudibranchs"), ("Q2", "sea slug"))
+        )
+
+        assert pages is not None
+        assert [(page.qid, page.terms) for page in pages] == [("Q733595", ("Nudibranchs",)), ("Q2", ("sea slug",))]
+
+    def test_a_candidate_with_no_terms_at_all_is_still_a_candidate(self):
+        """Never observed across the sampled payloads, and handled deliberately rather than by
+        luck: a page with no `entityterms` whatsoever contributes no names, which sinks it to
+        the bottom of the pre-rank - it does not raise on the way there."""
+        assert species_service._wikidata_search_pages(_generator_search("Q1")) == [
+            species_service._WikidataPage(qid="Q1", terms=())
+        ]
+
+    @pytest.mark.parametrize(
+        ("label", "payload", "expected"),
+        [
+            # Twenty bytes, measured stable across distinct no-match queries, and the *only*
+            # shape that means "matched nothing" on this variant.
+            ("the measured empty body", {"batchcomplete": ""}, []),
+            # The Action API reports read-only mode and a busy backend this way; nothing about
+            # the transport says anything went wrong.
+            ("a 200 carrying an error", {"error": {"code": "readonly", "info": "read-only"}}, None),
+            ("an unrecognizable shape", {"unexpected": True}, None),
+            ("a transport failure", None, None),
+            # The reason the two readers are separate, and the reason the fixture routes them
+            # apart by URL: `list=search`'s empty answer carries `query.search`, present and
+            # empty, so a reader treating a missing `pages` key as "nothing found" would call
+            # every one of this variant's failures an empty register.
+            ("the other variant's empty answer", {"query": {"search": []}}, None),
+        ],
+    )
+    def test_the_three_outcomes(self, label: str, payload: Any, expected: list[Any] | None):
+        """Three outcomes rather than two, and the third is the one worth having: "the register
+        had nothing" and "the register never answered" are the same empty list downstream, and
+        conflating them is what pins a half-answer under the thirty-day TTL."""
+        assert species_service._wikidata_search_pages(payload) == expected
+
+    @pytest.mark.asyncio
+    async def test_the_cut_keeps_a_late_match_over_an_early_one_that_matches_nothing(self, no_redis: None):
+        """The cut has to cut by relevance rather than by position, or breadth buys nothing.
+        CirrusSearch ranks well for charismatic megafauna and much less well elsewhere, so a
+        candidate whose own name is a plain hit can sit well down the list under candidates
+        that say nothing about what was typed - and a positional cut would enrich the latter.
+        """
+        db = _empty_db()
+        filler = [(f"Q{n}", f"Nothing {n}") for n in range(1, species_service._WIKIDATA_ENRICH_LIMIT + 1)]
+        entities = {"entities": {"Q999": _entity("Q999", aphia_id="105809", taxon_name="Rhincodon typus")}}
+
+        with _registers(
+            wikidata_search=_generator_search(*filler, ("Q999", "whale shark")), wikidata_entities=entities
+        ) as providers:
+            response = await species_service.search_species(db, "whale")
+
+        asked = [
+            qid
+            for url in providers.urls()
+            if "wbgetentities" in url
+            for qid in parse_qs(urlparse(url).query)["ids"][0].split("|")
+        ]
+        assert len(asked) == species_service._WIKIDATA_ENRICH_LIMIT
+        assert "Q999" in asked, "the one candidate that matched the query was cut for sitting last"
+        # And something had to give way for it: the last filler is the one over the line.
+        assert f"Q{species_service._WIKIDATA_ENRICH_LIMIT}" not in asked
+        assert [r.scientific_name for r in response.results] == ["Rhincodon typus"]
+
+    @pytest.mark.asyncio
+    async def test_a_row_says_which_of_its_names_the_query_matched(self, no_redis: None):
+        """*Orcinus orca* on `?q=whale`, which is the case that makes this worth threading at
+        all: the row displays "Orca gladiator", which accounts for nothing a diver typed, and
+        the reason it is on the page is the alias "orca whale". The entity fetch cannot say
+        that - it lists the names without saying which one was hit - so the term has to travel
+        down from the candidate that matched. Under the ranking key a hint places a row only
+        where the visible names place it nowhere, so explaining a row never promotes it.
+        """
+        db = _empty_db()
+        payload = _generator_search(("Q26843", "Orcinus orca", "Orca gladiator", "orca whale", "killer whale"))
+
+        with _registers(wikidata_search=payload, wikidata_entities=ORCA_WIKIDATA_ENTITIES):
+            response = await species_service.search_species(db, "whale")
+
+        assert [(r.common_name, r.matched_name) for r in response.results] == [("Orca gladiator", "orca whale")]
+
+    def test_a_term_that_repeats_the_displayed_name_is_not_an_explanation(self):
+        """The schema's own contract for the field - null when the display name already explains
+        the match - kept at the source, where both of the row's names are in hand. The merged
+        pass afterwards catches only what a single source cannot see, so leaving it all to that
+        would put the rule in one place and the knowledge in another.
+        """
+        entity = species_service._WikidataEntity(
+            qid="Q1126155",
+            aphia_id=278400,
+            scientific_name="Amphiprion ocellaris",
+            label="Amphiprion ocellaris",
+            aliases=("ocellaris clownfish",),
+            rank="Species",
+        )
+
+        for term, expected in (
+            ("ocellaris clownfish", None),
+            # Casefolded, because the display name is capitalised on the way out while the term
+            # is quoted exactly as the register wrote it.
+            ("Ocellaris Clownfish", None),
+            ("Amphiprion ocellaris", None),
+            ("anemonefish", "anemonefish"),
+        ):
+            result = species_service._wikidata_result(entity, term)
+            assert result is not None
+            assert result.matched_name == expected, term
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("label", "candidates", "more", "expected"),
+        [
+            ("wikidata itself held hits back", 1, True, True),
+            # `nudibranch` is the measured case for this clause: fifty candidates and no
+            # `continue` at all, because fifty *is* the whole result set - and then most of them
+            # are discarded here. A flag reading only `continue` would call that page complete.
+            ("more candidates than the cut enriches", species_service._WIKIDATA_ENRICH_LIMIT + 1, False, True),
+            ("everything found, everything enriched", species_service._WIKIDATA_ENRICH_LIMIT, False, False),
+        ],
+    )
+    async def test_both_kinds_of_truncation_reach_has_more(
+        self, no_redis: None, label: str, candidates: int, more: bool, expected: bool
+    ):
+        """Two ways this page can fall short of the truth, and Wikidata knows about only one of
+        them. It sets `continue` when it held hits back; the pre-rank cut is this app's own
+        truncation and is invisible from there."""
+        payload = _generator_search(*[f"Q{n}" for n in range(candidates)], more=more)
+
+        with _registers(wikidata_search=payload):
+            answer = await species_service._wikidata_search("whale")
+
+        assert answer.page_was_full is expected
 
 
 class TestHowWellANameMatches:
@@ -970,7 +1235,7 @@ class TestExplainingAVernacularHit:
         with _registers(
             by_vernacular=[_worms_record(127094, "Xiphias gladius")],
             ajax=[_ajax_row(127094, "Xiphias gladius", "swordfish")],
-            wikidata_search={"query": {"search": [{"title": "Q1"}]}},
+            wikidata_search=_generator_search("Q1"),
             wikidata_entities=entities,
         ):
             response = await species_service.search_species(db, "swordfish")
@@ -997,7 +1262,7 @@ class TestExplainingAVernacularHit:
         with _registers(
             by_vernacular=[_worms_record(137090, "Balaena mysticetus")],
             ajax=[_ajax_row(137090, "Balaena mysticetus", "whale-fish")],
-            wikidata_search={"query": {"search": [{"title": "Q1"}]}},
+            wikidata_search=_generator_search("Q1"),
             wikidata_entities=entities,
         ):
             response = await species_service.search_species(db, "whale")
@@ -1025,7 +1290,7 @@ class TestExplainingAVernacularHit:
         }
         with _registers(
             by_vernacular=[MANTA_SYNONYM_RECORD],
-            wikidata_search={"query": {"search": [{"title": "Q1"}]}},
+            wikidata_search=_generator_search("Q1"),
             wikidata_entities=entities,
         ):
             named = await species_service.search_species(db, "manta")
@@ -1420,7 +1685,7 @@ class TestCaching:
 
         def handle(request: httpx.Request) -> httpx.Response:
             if "wikidata" in str(request.url):
-                return httpx.Response(200, json={"query": {"search": []}})
+                return httpx.Response(200, json=_generator_search())
             return httpx.Response(200, json=[CLOWNFISH_RECORD])
 
         with _Providers(handle):
@@ -1458,7 +1723,7 @@ class TestCaching:
             if "wbgetentities" in url:
                 return httpx.Response(200, json={"entities": {}})
             if "wikidata" in url:
-                return httpx.Response(200, json={"query": {"search": []}})
+                return httpx.Response(200, json=_generator_search())
             return httpx.Response(200, json=[])
 
         with _Providers(handle):
@@ -1601,6 +1866,29 @@ class TestOutboundRequests:
         assert any("haswbstatement" in url and "P850" in url for url in providers.urls())
 
     @pytest.mark.asyncio
+    async def test_the_search_call_asks_for_names_rather_than_claims(self, no_redis: None):
+        """The whole of what makes fifty candidates affordable is in this one URL, and every way
+        of getting it wrong is quiet. `prop=entityterms` returns the candidates' English names
+        in about eight kilobytes; asking for the same fifty entities *with* their claims runs to
+        well over a megabyte, which `_MAX_RESPONSE_BYTES` would then discard wholesale. Drop
+        `wbetterms` and the terms simply vanish, taking the pre-rank cut's only input and every
+        row's explanation with them - the search still answers, with worse rows.
+        """
+        db = _empty_db()
+        with _registers() as providers:
+            await species_service.search_species(db, "whale")
+
+        url = next(url for url in providers.urls() if "wikidata" in url)
+        params = parse_qs(urlparse(url).query)
+
+        assert params["generator"] == ["search"]
+        assert params["gsrsearch"] == ["whale haswbstatement:P850"]
+        assert params["gsrlimit"] == [str(species_service._WIKIDATA_SEARCH_LIMIT)]
+        assert params["prop"] == ["entityterms"]
+        assert (params["wbetterms"], params["wbetlanguage"]) == (["label|alias"], ["en"])
+        assert "claims" not in url
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("query", "must_not_contain"),
         [
@@ -1642,24 +1930,30 @@ class TestOutboundRequests:
     @pytest.mark.asyncio
     async def test_entities_are_fetched_in_small_batches(self, no_redis: None):
         """`props=claims` returns every statement on an entity, and a taxon carries dozens of
-        external identifiers - about 50 KB each. Ten in one response routinely exceeds
+        external identifiers - about 50 KB each. Ten entities in one response routinely exceed
         `_MAX_RESPONSE_BYTES` (measured live: "shark" 667 KB, "turtle" 642 KB), which makes
         `_request` return `None` and silently costs the whole Wikidata contribution for
         exactly the words divers type most.
+
+        The search now asks for far more candidates than it enriches, so this pins both halves
+        at once: the chunk size, and the fact that what gets chunked is the *survivors* of the
+        pre-rank cut rather than every hit the search returned. Conservation across the whole
+        candidate list would be the wrong assertion now - discarding most of them is the design,
+        and asserting the old invariant would have quietly required the cut not to exist.
         """
         qids = [f"Q{n}" for n in range(species_service._WIKIDATA_SEARCH_LIMIT)]
         db = _empty_db()
-        search = {"query": {"search": [{"title": qid} for qid in qids]}}
 
-        with _registers(wikidata_search=search, wikidata_entities={"entities": {}}) as providers:
+        with _registers(wikidata_search=_generator_search(*qids), wikidata_entities={"entities": {}}) as providers:
             await species_service.search_species(db, "shark")
 
         # Parsed rather than counted off the raw URL: `props=claims|labels|aliases` is
         # pipe-separated too, so a substring count would measure the wrong parameter.
         batches = [parse_qs(urlparse(url).query)["ids"][0] for url in providers.urls() if "wbgetentities" in url]
+        survivors = min(len(qids), species_service._WIKIDATA_ENRICH_LIMIT)
 
-        assert len(batches) > 1, "all ten ids went out in one request"
-        assert sum(len(ids.split("|")) for ids in batches) == len(qids), "an id was dropped or duplicated"
+        assert len(batches) > 1, "every enriched id went out in one request"
+        assert sum(len(ids.split("|")) for ids in batches) == survivors, "the batches are not exactly the survivors"
         for ids in batches:
             assert len(ids.split("|")) <= species_service._WIKIDATA_ENTITY_BATCH
 
@@ -1691,7 +1985,7 @@ class TestResolve:
             record=CLOWNFISH_RECORD,
             synonyms=[{"scientificname": "Amphiprion bicolor"}],
             vernaculars=[{"vernacular": "カクレクマノミ", "language_code": "jpn"}],
-            wikidata_search=WIKIDATA_SEARCH,
+            wikidata_lookup=WIKIDATA_LOOKUP,
             wikidata_entities=WIKIDATA_ENTITIES,
         ):
             species = await species_service.resolve_species(db, 278400)
@@ -1736,11 +2030,33 @@ class TestResolve:
             "P225": [{"rank": "normal", "mainsnak": {"datavalue": {"value": "Amphiprion ocellaris"}}}],
         }
         entities = {"entities": {"Q1126155": {"claims": claims}}}
-        with _registers(wikidata_search={"query": {"search": [{"title": "Q1126155"}]}}, wikidata_entities=entities):
+        with _registers(wikidata_lookup=WIKIDATA_LOOKUP, wikidata_entities=entities):
             entity = await species_service._wikidata_by_aphia_id(278400)
 
         assert entity is not None
         assert (entity.qid, entity.aphia_id) == ("Q1126155", 278400)
+
+    @pytest.mark.asyncio
+    async def test_wikidata_refusing_still_stores_the_row_without_a_qid(self, no_redis: None):
+        """The 200-with-an-error guard, pinned on the path that still reaches `_wikidata_qids`.
+
+        The Action API reports read-only mode and a busy CirrusSearch backend as **HTTP 200
+        carrying an `error` object**, so nothing about the transport says anything went wrong
+        and a reader checking only the status code sees a successful, hitless search. Search has
+        its own reader for that now; what is left here is resolve's exact-statement lookup,
+        where the outcome that matters is narrower and permanent - the row is written either
+        way, because WoRMS supplies everything resolve actually needs, and it must be written
+        with **no** `wikidata_qid` rather than with whatever could be scraped out of a refusal.
+        Rows are immutable, so a qid stored wrongly here is stored wrongly forever.
+        """
+        db = _empty_db()
+        refusal = {"error": {"code": "readonly", "info": "The wiki is read-only."}}
+        with _registers(record=CLOWNFISH_RECORD, wikidata_lookup=refusal):
+            species = await species_service.resolve_species(db, 278400)
+
+        assert species.aphia_id == 278400
+        assert species.scientific_name == "Amphiprion ocellaris"
+        assert species.wikidata_qid is None
 
     @pytest.mark.asyncio
     async def test_an_existing_species_is_returned_without_asking_anyone(self, no_redis: None):
@@ -1864,7 +2180,7 @@ class TestVettingTheStoredName:
         with _registers(
             record=ORCA_RECORD,
             synonyms=ORCA_SYNONYMS,
-            wikidata_search=ORCA_WIKIDATA_SEARCH,
+            wikidata_lookup=ORCA_WIKIDATA_LOOKUP,
             wikidata_entities=ORCA_WIKIDATA_ENTITIES,
         ):
             species = await species_service.resolve_species(db, 137102)
@@ -1881,7 +2197,7 @@ class TestVettingTheStoredName:
         list has to stay distinguishable from the failures below - otherwise every taxon
         without synonyms would 503."""
         db = _empty_db()
-        with _registers(record=CLOWNFISH_RECORD, wikidata_search=WIKIDATA_SEARCH, wikidata_entities=WIKIDATA_ENTITIES):
+        with _registers(record=CLOWNFISH_RECORD, wikidata_lookup=WIKIDATA_LOOKUP, wikidata_entities=WIKIDATA_ENTITIES):
             species = await species_service.resolve_species(db, 278400)
 
         assert species.common_name == "Ocellaris clownfish"
@@ -2012,7 +2328,7 @@ class TestVettingTheStoredName:
         with _registers(
             record=ORCA_RECORD,
             synonyms=ORCA_SYNONYMS,
-            wikidata_search=ORCA_WIKIDATA_SEARCH,
+            wikidata_lookup=ORCA_WIKIDATA_LOOKUP,
             wikidata_entities=ORCA_WIKIDATA_ENTITIES,
         ):
             stored = await species_service.resolve_species(db, 137102)
