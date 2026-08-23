@@ -54,7 +54,7 @@ from src.app.models.dive_species import DiveSpecies
 from src.app.models.species import Species
 from src.app.models.species_name import SpeciesName
 from src.app.schemas.dive import DiveCreateRequest, SpeciesInfo
-from src.app.schemas.species import SpeciesSearchResponse
+from src.app.schemas.species import SpeciesSearchResponse, SpeciesSearchResult
 from src.app.services import species_service
 from src.app.services.dive_stats import recalculate_dive_stats
 from tests.conftest import db_available
@@ -190,6 +190,55 @@ def _entity(
     return entity
 
 
+def _worms_record(aphia_id: int, scientific_name: str, *, rank: str = "Species") -> dict[str, Any]:
+    """One accepted `AphiaRecord`, trimmed to the fields the search path reads."""
+    return {
+        "AphiaID": aphia_id,
+        "scientificname": scientific_name,
+        "status": "accepted",
+        "rank": rank,
+        "valid_AphiaID": aphia_id,
+        "valid_name": scientific_name,
+    }
+
+
+def _ajax_row(aphia_id: int, display_name: str, vername: str | None, language: str | None = "eng") -> dict[str, Any]:
+    """One `AjaxAphiaRecordsByNamePart` row in the live six-key shape.
+
+    `id` is raw and unfolded and there is no `valid_AphiaID` or `status` anywhere - which is
+    exactly why these rows annotate and never become rows of their own.
+    """
+    return {
+        "id": aphia_id,
+        "authority": "Linnaeus, 1758",
+        "displayname": display_name,
+        "vername": vername,
+        "language": language,
+        "text": display_name,
+    }
+
+
+def _result(
+    aphia_id: int,
+    scientific_name: str,
+    *,
+    common_name: str | None = None,
+    rank: str = "Species",
+    matched_name: str | None = None,
+) -> SpeciesSearchResult:
+    """A finished search row, for the tests that exercise the ranking key on its own."""
+    return SpeciesSearchResult(
+        aphia_id=aphia_id,
+        scientific_name=scientific_name,
+        common_name=common_name,
+        rank=rank,
+        status="accepted",
+        matched_name=matched_name,
+        source="worms",
+        attribution="World Register of Marine Species (marinespecies.org)",
+    )
+
+
 @pytest.fixture(scope="module")
 def species_app() -> Any:
     """Its own app with `apply_migrations_on_start=False`, like `test_geocoding.py` - the route
@@ -295,6 +344,7 @@ class _Providers:
 
 def _registers(
     *,
+    ajax: Any = (),
     by_name: Any = (),
     by_vernacular: Any = (),
     record: Any = None,
@@ -314,6 +364,13 @@ def _registers(
     `_worms_synonyms` walks offsets until a short page comes back, so a canned list handed
     back whole on every offset would never terminate - and one longer than a page has to
     arrive in pieces or the walk it exists to exercise never happens.
+
+    **`ajax` is routed first, and the ordering is the whole point.**
+    `AjaxAphiaRecordsByNamePart` *contains* the substring `AphiaRecordsByName`, so under the
+    obvious ordering the annotation call silently collects the by-name payload - which is
+    `AphiaRecord`-shaped, an entirely different schema from the six-key ajax row. A broken
+    vername normalizer would then be fed happily and never noticed, since neither shape
+    raises. `[]` is the right default: it is what a 204, WoRMS's real "no match", becomes.
     """
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -322,6 +379,8 @@ def _registers(
             if "wbgetentities" in url:
                 return httpx.Response(wikidata_status, json=wikidata_entities or {"entities": {}})
             return httpx.Response(wikidata_status, json=wikidata_search or {"query": {"search": []}})
+        if "AjaxAphiaRecordsByNamePart" in url:
+            return httpx.Response(worms_status, json=list(ajax))
         if "AphiaRecordsByName" in url:
             return httpx.Response(worms_status, json=list(by_name))
         if "AphiaRecordsByVernacular" in url:
@@ -445,6 +504,51 @@ class TestMergingTwoRegisters:
             response = await species_service.search_species(db, "something")
 
         assert response.results == []
+
+    @pytest.mark.asyncio
+    async def test_the_page_does_not_depend_on_which_worms_leg_answered_first(self, no_redis: None):
+        """Both WoRMS sources reach the merge as `worms` rows, so the old sort - "did this
+        answer's first row come from WoRMS" - could not tell them apart and left their
+        relative order to whichever finished first. Harmless while their rows were the same
+        shape; not harmless once by-vernacular rows carry vernames, because then network
+        weather decides whether a folded row's hint reads as the synonym the diver typed or as
+        somebody's common name. Run twice with the slow leg swapped, byte for byte.
+        """
+        synonym = {
+            "AphiaID": 384056,
+            "scientificname": "Orca tethyos",
+            "status": "unaccepted",
+            "rank": "Species",
+            "valid_AphiaID": 137107,
+            "valid_name": "Stenella coeruleoalba",
+        }
+
+        async def page_with(slow_endpoint: str) -> str:
+            real_worms = species_service._worms
+
+            async def paced(endpoint: str, segment: Any, params: Any = None) -> Any:
+                if endpoint == slow_endpoint:
+                    await anyio.sleep(0.05)
+                return await real_worms(endpoint, segment, params)
+
+            with (
+                _registers(
+                    by_name=[synonym],
+                    by_vernacular=[_worms_record(137107, "Stenella coeruleoalba")],
+                    ajax=[_ajax_row(137107, "Stenella coeruleoalba", "orca dolphin")],
+                ),
+                patch.object(species_service, "_worms", paced),
+            ):
+                return (await species_service._remote_search("orca")).model_dump_json()
+
+        by_name_last = await page_with("AphiaRecordsByName")
+        by_vernacular_last = await page_with("AphiaRecordsByVernacular")
+
+        assert by_name_last == by_vernacular_last
+        # And by-name is the writer that wins, on its position in `sources` rather than on
+        # having been quick: one rule, the same one the merge follows inside a source.
+        results = SpeciesSearchResponse(**json.loads(by_name_last)).results
+        assert [(r.aphia_id, r.matched_name) for r in results] == [(137107, "Orca tethyos")]
 
     @pytest.mark.asyncio
     async def test_exact_matches_rank_above_the_rest(self, no_redis: None):
@@ -596,6 +700,352 @@ class TestWhatAnEntityIsWorth:
             response = await species_service.search_species(db, "amphiprion")
 
         assert [r.rank for r in response.results] == ["Species"]
+
+
+class TestHowWellANameMatches:
+    """`_match_bucket` is the one predicate three different things ask, so the table it
+    implements is pinned here rather than inferred from the orderings it produces."""
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("whale", species_service._MATCH_EXACT),
+            # Prefix above word boundary is an owner decision with a known cost: "Whale louse
+            # family" outranks "Blue whale" for `?q=whale`, and the whale sharks divers
+            # actually log are what it buys.
+            ("Whale shark", species_service._MATCH_PREFIX),
+            ("blue whale", species_service._MATCH_WORD),
+            # `\b` gets hyphenated names for free, which is the reason it is a regex at all.
+            ("killer-whale", species_service._MATCH_WORD),
+            # A plural is *not* a word-boundary match, and the substring bucket is the right
+            # place for it: above the unmatched mass, below the exact word.
+            ("toothed whales", species_service._MATCH_SUBSTRING),
+            ("Balaenoptera musculus", species_service._MATCH_NONE),
+        ],
+    )
+    def test_the_bucket_table(self, name: str, expected: int) -> None:
+        assert species_service._match_bucket("whale", name) == expected
+
+    def test_a_multi_word_query_matches_on_its_whole_boundary(self) -> None:
+        assert species_service._match_bucket("killer whale", "false killer whale") == species_service._MATCH_WORD
+
+    def test_the_name_side_is_casefolded(self) -> None:
+        assert species_service._match_bucket("whale", "WHALE") == species_service._MATCH_EXACT
+
+    @pytest.mark.parametrize(
+        ("rank", "expected"),
+        [("Species", 0), ("Subspecies", 0), ("Forma", 0), ("unknown", 1), ("Genus", 2), ("Family", 2)],
+    )
+    def test_the_rank_tier(self, rank: str, expected: int) -> None:
+        assert species_service._rank_tier(rank) == expected
+
+    def test_a_rank_nobody_enumerated_falls_below_the_sentinel_rather_than_above_it(self) -> None:
+        """The direction the tier's rule form exists for. "Infraorder" is in no list here, and
+        it has to sort *with* genus and family rather than between them and the species - an
+        enumerated higher tier would have floated every rank it forgot."""
+        assert species_service._rank_tier("Infraorder") == species_service._rank_tier("Genus")
+
+
+class TestHowRowsAreRanked:
+    """The ranking key, exercised on finished rows so each term can be isolated.
+
+    The governing rule is one sentence: rows rank by the names the diver can see, and a hidden
+    name places a row only where the visible names place it nowhere.
+    """
+
+    def test_a_prefix_outranks_a_word_boundary_which_outranks_a_substring(self) -> None:
+        rows = [
+            _result(3, "Balaenidae", common_name="right whales and bowhead whales"),
+            _result(2, "Balaenoptera musculus", common_name="blue whale"),
+            _result(1, "Rhincodon typus", common_name="whale shark"),
+        ]
+        assert [r.aphia_id for r in species_service._ordered(rows, "whale")] == [1, 2, 3]
+
+    def test_a_hint_placed_row_sits_below_every_visibly_matching_row(self) -> None:
+        """The measured case, and the finding that made "visible" the first key term rather
+        than one bucket among many. The genus *Orcinus* contains no "orca" a diver can read -
+        it is placed entirely by its synonym, an *exact* hint - and it must still not beat a
+        row whose own binomial merely contains the query.
+        """
+        orcinus = _result(137021, "Orcinus", rank="Genus", matched_name="Orca")
+        pseudorca = _result(137104, "Pseudorca crassidens")
+        assert [r.aphia_id for r in species_service._ordered([orcinus, pseudorca], "orca")] == [137104, 137021]
+
+    def test_inside_the_hint_band_rows_order_by_their_own_hint(self) -> None:
+        """`?q=swordfish`: the orca really does carry "swordfish" as a WoRMS vernacular, so it
+        belongs on the page - explained, second, under the animal that owns the name - and the
+        remora whose vername merely starts with it belongs under that."""
+        orca = _result(137102, "Orcinus orca", common_name="Orca whale", matched_name="swordfish")
+        remora = _result(126413, "Remora brachyptera", matched_name="swordfish sucker")
+        assert [r.aphia_id for r in species_service._ordered([remora, orca], "swordfish")] == [137102, 126413]
+
+    def test_a_species_outranks_a_higher_taxon_in_the_same_bucket(self) -> None:
+        """The owner's ruling - "as a diver I'm most interested in the species I spotted" -
+        and the thing that softens the prefix-first cost without reopening it: the whale louse
+        family still prefix-matches, and the whale shark still opens the page. Asserted with
+        the alphabet pointing the other way, or it proves nothing."""
+        louse = _result(1, "Cyamidae", common_name="Whale louse family", rank="Family")
+        shark = _result(2, "Rhincodon typus", common_name="Whale shark")
+        assert [r.aphia_id for r in species_service._ordered([louse, shark], "whale")] == [2, 1]
+
+    def test_the_sentinel_rank_sits_between_the_two_tiers(self) -> None:
+        """ "We do not know" is not "we know it is a genus", and the middle is the only honest
+        place for it. The names run backwards against the wanted order so the tier is what is
+        being measured."""
+        rows = [
+            _result(1, "Whale aaa", rank="Genus"),
+            _result(2, "Whale bbb", rank="unknown"),
+            _result(3, "Whale ccc", rank="Species"),
+        ]
+        assert [r.aphia_id for r in species_service._ordered(rows, "whale")] == [3, 2, 1]
+
+    def test_a_named_row_outranks_a_bare_binomial_in_the_same_bucket_and_tier(self) -> None:
+        """Today's `?q=orca` absurdity inverted: the animal sat at position 17 while two
+        indistinguishable bare "Orcadia" genus rows opened the page. Same bucket, same tier -
+        the row that can tell the diver what it is goes first, and the alphabet is set against
+        it here so the tie-break cannot be what passes this."""
+        bare = _result(1, "Orca aaa")
+        named = _result(2, "Orcinus orca", common_name="Orca zzz")
+        assert [r.aphia_id for r in species_service._ordered([bare, named], "orca")] == [2, 1]
+
+    def test_the_tie_break_reads_the_displayed_name_and_ignores_case(self) -> None:
+        """Two artefacts at once. The old key sorted on `scientific_name` - a column most rows
+        are not displaying - and compared raw `str`s, so ASCII capitals sorted ahead of
+        lowercase. Both rows here display a `common_name`, and "Zebra" must not lead "apple".
+        """
+        rows = [_result(1, "Aaa aaa", common_name="Whale Zebra"), _result(2, "Zzz zzz", common_name="whale apple")]
+        assert [r.aphia_id for r in species_service._ordered(rows, "whale")] == [2, 1]
+
+    def test_the_order_is_total_so_two_identical_rows_cannot_swap(self) -> None:
+        """`aphia_id` last. Nothing above it separates these, and without it the order would
+        depend on which register happened to be merged first."""
+        rows = [_result(9, "Whale sp.", common_name="Whale"), _result(4, "Whale sp.", common_name="Whale")]
+        assert [r.aphia_id for r in species_service._ordered(rows, "whale")] == [4, 9]
+
+    def test_a_row_nothing_matches_sinks_below_the_explained_ones(self) -> None:
+        """CirrusSearch matches page text that labels and aliases never carry - *Orca
+        latirostris* on `?q=Orcinus orca` is the recorded exception to "every hit says what
+        matched" - and the tail is where such a row belongs."""
+        explained = _result(1, "Feresa attenuata", matched_name="Orca intermedia")
+        unexplained = _result(2, "Peristedion cataphractum")
+        assert [r.aphia_id for r in species_service._ordered([unexplained, explained], "orca")] == [1, 2]
+
+
+class TestExplainingAVernacularHit:
+    """Where `matched_name` comes from on a WoRMS row, and where it is taken away again.
+
+    An `AphiaRecord` carries no vernacular field, so `AphiaRecordsByVernacular` returns rows
+    that matched on a common name and cannot say which one - "*Batis maritima*, a saltmarsh
+    plant, second for `?q=turtle`" with nothing on screen to account for it.
+    `AjaxAphiaRecordsByNamePart` is the only endpoint that knows, and it rides alongside as an
+    annotation: no rows of its own, no `has_more`, no fold.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_vername_says_why_a_by_vernacular_row_matched(self, no_redis: None):
+        db = _empty_db()
+        with _registers(
+            by_vernacular=[_worms_record(137102, "Orcinus orca")],
+            ajax=[_ajax_row(137102, "Orcinus orca", "killer whale")],
+        ):
+            response = await species_service.search_species(db, "killer whale")
+
+        assert [(r.scientific_name, r.matched_name) for r in response.results] == [("Orcinus orca", "killer whale")]
+
+    @pytest.mark.asyncio
+    async def test_a_folded_row_keeps_the_folds_own_account_of_the_match(self, no_redis: None):
+        """The ajax map is keyed by the id WoRMS put on the record, before the fold moves the
+        row - those rows carry no `valid_AphiaID` at all, and the `whale` answer contains two
+        "blue whale" ids, one of them an unaccepted homonym of the fin whale. So the fold wins
+        any collision: the diver typed a superseded binomial, and that is the true account of
+        what they hit."""
+        db = _empty_db()
+        with _registers(
+            by_vernacular=[MANTA_SYNONYM_RECORD],
+            ajax=[_ajax_row(105857, "Manta birostris", "giant manta")],
+        ):
+            response = await species_service.search_species(db, "manta birostris")
+
+        assert [(r.scientific_name, r.matched_name) for r in response.results] == [
+            ("Mobula birostris", "Manta birostris")
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_vername_in_any_language_still_explains_the_row(self, no_redis: None):
+        """The owner's own live case: `?q=orca` returns a shad, and nothing visible accounts
+        for it until you learn its Spanish name is "samborca". The English-only rule governs
+        the display name; a foreign word that says why a row appeared is information."""
+        db = _empty_db()
+        with _registers(
+            by_vernacular=[_worms_record(126413, "Alosa alosa")],
+            ajax=[_ajax_row(126413, "Alosa alosa", "samborca", "spa")],
+        ):
+            response = await species_service.search_species(db, "orca")
+
+        assert [r.matched_name for r in response.results] == ["samborca"]
+
+    @pytest.mark.asyncio
+    async def test_the_better_match_beats_the_english_one(self, no_redis: None):
+        """A taxon with several vernames keeps the one that best answers what was typed, and
+        language only breaks a tie underneath that."""
+        db = _empty_db()
+        with _registers(
+            by_vernacular=[_worms_record(137111, "Feresa attenuata")],
+            ajax=[
+                _ajax_row(137111, "Feresa attenuata", "orca whale", "eng"),
+                _ajax_row(137111, "Feresa attenuata", "orca", "spa"),
+            ],
+        ):
+            response = await species_service.search_species(db, "orca")
+
+        assert [r.matched_name for r in response.results] == ["orca"]
+
+    @pytest.mark.asyncio
+    async def test_english_wins_between_two_equally_good_vernames(self, no_redis: None):
+        """With the alphabet set against it, and the Spanish row sent first, so neither the
+        tie-break below nor arrival order can be what passes this."""
+        db = _empty_db()
+        with _registers(
+            by_vernacular=[_worms_record(137111, "Feresa attenuata")],
+            ajax=[
+                _ajax_row(137111, "Feresa attenuata", "orca aaa", "spa"),
+                _ajax_row(137111, "Feresa attenuata", "orca zzz", "eng"),
+            ],
+        ):
+            response = await species_service.search_species(db, "orca")
+
+        assert [r.matched_name for r in response.results] == ["orca zzz"]
+
+    @pytest.mark.asyncio
+    async def test_a_remaining_tie_is_broken_alphabetically_rather_than_by_response_order(self, no_redis: None):
+        """*Balaena mysticetus* carries nine vernames for `whale` and their order within the
+        response is measured-arbitrary. The chosen one reaches the sort key, so letting
+        arrival order pick it would let WoRMS decide page order between two identical
+        searches."""
+        db = _empty_db()
+        with _registers(
+            by_vernacular=[_worms_record(137021, "Delphinidae", rank="Family")],
+            ajax=[
+                _ajax_row(137021, "Delphinidae", "orca zulu"),
+                _ajax_row(137021, "Delphinidae", "orca alpha"),
+            ],
+        ):
+            response = await species_service.search_species(db, "orca")
+
+        assert [r.matched_name for r in response.results] == ["orca alpha"]
+
+    @pytest.mark.asyncio
+    async def test_a_vername_that_merely_repeats_the_binomial_is_not_a_hint(self, no_redis: None):
+        """`combine_vernaculars=true` adds vernacular matching to a scientific-name search, so
+        a name the row is already showing can come back as its own explanation."""
+        db = _empty_db()
+        with _registers(
+            by_vernacular=[_worms_record(137102, "Orcinus orca")],
+            ajax=[_ajax_row(137102, "Orcinus orca", "orcinus orca")],
+        ):
+            response = await species_service.search_species(db, "whale")
+
+        assert [r.matched_name for r in response.results] == [None]
+
+    @pytest.mark.asyncio
+    async def test_a_hint_is_dropped_once_the_merged_display_name_explains_the_row(self, no_redis: None):
+        """The schema has promised this all along - "null when the display name already
+        explains the match" - and no single source can keep it. `_worms_result` sees a row
+        whose `common_name` is always `None`; the name arrives from Wikidata at the merge. So
+        `?q=swordfish` would have shipped *Xiphias gladius* as `Swordfish · matched
+        "swordfish"`.
+        """
+        db = _empty_db()
+        entities = {
+            "entities": {
+                "Q1": _entity(
+                    "Q1",
+                    aphia_id="127094",
+                    taxon_name="Xiphias gladius",
+                    rank_item=_SPECIES_RANK_ITEM,
+                    label="swordfish",
+                )
+            }
+        }
+        with _registers(
+            by_vernacular=[_worms_record(127094, "Xiphias gladius")],
+            ajax=[_ajax_row(127094, "Xiphias gladius", "swordfish")],
+            wikidata_search={"query": {"search": [{"title": "Q1"}]}},
+            wikidata_entities=entities,
+        ):
+            response = await species_service.search_species(db, "swordfish")
+
+        assert [(r.common_name, r.matched_name) for r in response.results] == [("Swordfish", None)]
+
+    @pytest.mark.asyncio
+    async def test_the_rule_is_any_match_rather_than_equality(self, no_redis: None):
+        """Simulated over the live `?q=whale` payloads, four of the first sixteen rows carried
+        a hint the display already covered - "Bowhead whale · matched \\"whale-fish\\"". An
+        equality test lets every one of those through."""
+        db = _empty_db()
+        entities = {
+            "entities": {
+                "Q1": _entity(
+                    "Q1",
+                    aphia_id="137090",
+                    taxon_name="Balaena mysticetus",
+                    rank_item=_SPECIES_RANK_ITEM,
+                    label="bowhead whale",
+                )
+            }
+        }
+        with _registers(
+            by_vernacular=[_worms_record(137090, "Balaena mysticetus")],
+            ajax=[_ajax_row(137090, "Balaena mysticetus", "whale-fish")],
+            wikidata_search={"query": {"search": [{"title": "Q1"}]}},
+            wikidata_entities=entities,
+        ):
+            response = await species_service.search_species(db, "whale")
+
+        assert [(r.common_name, r.matched_name) for r in response.results] == [("Bowhead whale", None)]
+
+    @pytest.mark.asyncio
+    async def test_the_fold_hint_survives_where_no_visible_name_explains_the_row(self, no_redis: None):
+        """The other half of the same rule, and the reconciliation it needs. `?q=manta` with
+        Wikidata's "Giant oceanic manta ray" on the row no longer says `matched "Manta
+        birostris"` - the display explains it now. Strip the Wikidata name and the bafflement
+        the hint exists for is back, so the hint is too.
+        """
+        db = _empty_db()
+        entities = {
+            "entities": {
+                "Q1": _entity(
+                    "Q1",
+                    aphia_id="1015526",
+                    taxon_name="Mobula birostris",
+                    rank_item=_SPECIES_RANK_ITEM,
+                    label="giant oceanic manta ray",
+                )
+            }
+        }
+        with _registers(
+            by_vernacular=[MANTA_SYNONYM_RECORD],
+            wikidata_search={"query": {"search": [{"title": "Q1"}]}},
+            wikidata_entities=entities,
+        ):
+            named = await species_service.search_species(db, "manta")
+        with _registers(by_vernacular=[MANTA_SYNONYM_RECORD]):
+            bare = await species_service.search_species(db, "manta")
+
+        assert [(r.common_name, r.matched_name) for r in named.results] == [("Giant oceanic manta ray", None)]
+        assert [(r.common_name, r.matched_name) for r in bare.results] == [(None, "Manta birostris")]
+
+    @pytest.mark.asyncio
+    async def test_the_annotation_contributes_no_rows_of_its_own(self, no_redis: None):
+        """The duplicate class that made an earlier design reject ajax outright: its ids are
+        raw and unfolded, so `whale` returns two "blue whale" rows under different ids with
+        nothing marking the second as an unaccepted homonym. A row source would have to fold
+        them; an annotation simply never sees them."""
+        db = _empty_db()
+        with _registers(ajax=[_ajax_row(380449, "Balaenoptera musculus", "blue whale")]):
+            response = await species_service.search_species(db, "whale")
+
+        assert response.results == []
 
 
 class TestChoosingTheDisplayName:
@@ -991,6 +1441,73 @@ class TestCaching:
         assert set(fake_redis.expiries.values()) == {species_service._HIT_TTL_SECONDS}
 
     @pytest.mark.asyncio
+    async def test_a_failed_annotation_keeps_the_rows_and_takes_the_short_ttl(self, fake_redis: FakeRedis):
+        """The ajax leg adds no rows, so losing it costs nothing a diver can see - which is
+        exactly why the hour is worth paying for. Left on the month, the flagship query would
+        cache *unexplained* for thirty days and the feature would be invisible for a month
+        precisely where it matters. The hour is the price of self-healing.
+        """
+        db = _empty_db()
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "AjaxAphiaRecordsByNamePart" in url:
+                raise httpx.ConnectError("the ajax call is down")
+            if "AphiaRecordsByVernacular" in url:
+                return httpx.Response(200, json=[_worms_record(137102, "Orcinus orca")])
+            if "wbgetentities" in url:
+                return httpx.Response(200, json={"entities": {}})
+            if "wikidata" in url:
+                return httpx.Response(200, json={"query": {"search": []}})
+            return httpx.Response(200, json=[])
+
+        with _Providers(handle):
+            response = await species_service.search_species(db, "killer whale")
+
+        assert [(r.scientific_name, r.matched_name) for r in response.results] == [("Orcinus orca", None)]
+        assert set(fake_redis.expiries.values()) == {species_service._MISS_TTL_SECONDS}
+
+    @pytest.mark.asyncio
+    async def test_an_empty_annotation_is_a_complete_answer_not_a_failure(self, fake_redis: FakeRedis):
+        """WoRMS says "no match" with a 204 that `_request` already maps to `[]`, and the ajax
+        endpoint is no different. "Nothing to explain" must not be dragged down to the short
+        TTL along with "we could not ask"."""
+        db = _empty_db()
+        with _registers(by_vernacular=[_worms_record(137102, "Orcinus orca")], ajax=[]):
+            await species_service.search_species(db, "killer whale")
+
+        assert set(fake_redis.expiries.values()) == {species_service._HIT_TTL_SECONDS}
+
+    @pytest.mark.asyncio
+    async def test_a_hung_annotation_gives_up_at_its_own_budget_not_the_searchs(self, fake_redis: FakeRedis):
+        """`_request`'s own bounds sit far above `_SEARCH_BUDGET_SECONDS`, so without an inner
+        one a hung ajax call would have the whole by-vernacular source cancelled by the search
+        budget - throwing away rows that had already arrived, which is worse than every case
+        this design accepts. The budget is patched down here; what is under test is that the
+        source answers at the *inner* bound rather than the outer one.
+        """
+        db = _empty_db()
+        real_worms = species_service._worms
+
+        async def hang_on_the_annotation(endpoint: str, segment: Any, params: Any = None) -> Any:
+            if endpoint.startswith("Ajax"):
+                await anyio.sleep(species_service._SEARCH_BUDGET_SECONDS * 10)
+            return await real_worms(endpoint, segment, params)
+
+        with (
+            _registers(by_vernacular=[_worms_record(137102, "Orcinus orca")]),
+            patch.object(species_service, "_worms", hang_on_the_annotation),
+            patch.object(species_service, "_AJAX_ANNOTATION_BUDGET_SECONDS", 0.05),
+        ):
+            started = anyio.current_time()
+            response = await species_service.search_species(db, "killer whale")
+            elapsed = anyio.current_time() - started
+
+        assert [r.scientific_name for r in response.results] == ["Orcinus orca"]
+        assert elapsed < species_service._SEARCH_BUDGET_SECONDS, "the search waited out its own budget"
+        assert set(fake_redis.expiries.values()) == {species_service._MISS_TTL_SECONDS}
+
+    @pytest.mark.asyncio
     async def test_the_cached_entry_holds_no_local_uuid(self, fake_redis: FakeRedis):
         """Whether a species is in the catalog changes the moment somebody resolves it.
         Freezing that into a month-long entry would have the picker keep offering to resolve
@@ -1049,6 +1566,29 @@ class TestOutboundRequests:
 
         by_name = [url for url in providers.urls() if "AphiaRecordsByName" in url]
         assert by_name and all("marine_only=false" in url for url in by_name)
+
+    @pytest.mark.asyncio
+    async def test_the_annotation_call_carries_the_parameters_it_cannot_work_without(self, no_redis: None):
+        """Three measured traps in one URL. `max_matches` defaults to twenty and, above its
+        ceiling of fifty, is *discarded* rather than clamped - so asking for a hundred returns
+        fewer rows than asking for fifty. `marine_only` is not inert here whatever it does on
+        the record endpoints: `Astyanax` returns 11 rows under `true` and 50 under `false`,
+        and the documented default disagrees with the observed one. And no `languages[]`
+        filter is sent at all, on the owner's cross-language ruling - a Spanish "samborca" is
+        what explains a shad on `?q=orca`.
+        """
+        db = _empty_db()
+        with _registers(by_vernacular=[_worms_record(137102, "Orcinus orca")]) as providers:
+            await species_service.search_species(db, "orca")
+
+        ajax = [url for url in providers.urls() if "AjaxAphiaRecordsByNamePart" in url]
+        assert len(ajax) == 1, "the annotation call went out more than once, or not at all"
+        params = parse_qs(urlparse(ajax[0]).query)
+        assert params["combine_vernaculars"] == ["true"]
+        assert params["marine_only"] == ["false"]
+        assert params["max_matches"] == [str(species_service._AJAX_MAX_MATCHES)]
+        assert 0 < species_service._AJAX_MAX_MATCHES <= 50, "above the ceiling the value is discarded, not clamped"
+        assert not [key for key in params if key.startswith("languages")]
 
     @pytest.mark.asyncio
     async def test_wikidata_is_filtered_to_entities_carrying_an_aphia_id(self, no_redis: None):

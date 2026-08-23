@@ -8233,6 +8233,15 @@ search still finds it. Search folds the same way without a second request, becau
 `matched_name` — which the web picker renders, because a row showing a binomial the diver did not
 type is otherwise baffling.
 
+**"Otherwise" does real work in that sentence, and the hint now follows it.** The field used to be
+set on every folded row. It is nulled wherever the row's own visible names already answer the query
+— any match, not merely an identical string — which is what `SpeciesSearchResult` has promised all
+along ("null when the display name already explains the match") and what the ranking key reads. So
+`?q=manta` no longer says `matched "Manta birostris"` beneath "Giant oceanic manta ray": the display
+explains the match, and a second name beside it is noise rather than help. Type the full binomial
+and the hint is back, because then nothing visible accounts for the row. The bafflement recorded
+above is therefore the precise condition the hint survives under, not a reason to render it always.
+
 The unique `aphia_id` is also what turns two divers resolving the same new species at the same
 instant into an `IntegrityError` the service recovers from (rollback, re-select, return the winner's
 row) rather than a duplicate taxon nobody notices.
@@ -8294,13 +8303,11 @@ Two consequences worth stating, because both were found by a client rendering it
   species a diver spotted outranks its genus on the page — and under an order that reads rank, a
   blanket sentinel is not a missing caption but a wrong position.
 
-  **Nothing sorts on `rank` yet, and that is the intended order of arrival rather than an
-  oversight.** `_ordered` still keys on name match alone, and no client sorts on the field either;
-  the ordering change is separate and lands after this one. Filling the rank first is deliberate —
-  an order introduced ahead of the fill would have run against a Wikidata side where every row
-  carried the sentinel, which is the one arrangement guaranteed to sort those rows wrongly. Read the
-  ordering sentences in this section as the reason the fill exists, not as a description of code
-  that is here.
+  **The order that reversal was made for is here now**, one release behind the fill — which was the
+  intended arrival order rather than a delay. An order introduced ahead of the fill would have run
+  against a Wikidata side where every row carried the sentinel, the one arrangement guaranteed to
+  sort those rows wrongly. `_ordered` reads the field through `_rank_tier`, and *Search ranks on
+  what the diver can read* below is where that tier is argued.
 
   What is derived is also narrower than what was refused — P105 is *taxon rank*, Wikidata's own
   statement of the thing, not an inference from "instance of".
@@ -8354,6 +8361,160 @@ escapes turn up: the enumeration is the defence, and the sentinel is not.
 The alternative — leaving the fields null — was rejected because both columns are `NOT NULL` on a
 resolved row, and a schema whose optionality differs between a search hit and the catalog row it
 becomes is a worse contract than a sentinel that says the same thing in both places.
+
+### Search ranks on what the diver can read
+
+The order used to be alphabetical on a column most rows are not displaying. `_ordered` had three
+buckets — exact, prefix, everything else — judged against every name a row carried, and tie-broke on
+the raw `scientific_name`. So `?q=whale` opened with nine A-to-B binomials (*Balaena*,
+*Balaenoptera*, *Barbourisia*, *Berardius*…) and the blue whale, the humpback and the sperm whale
+were all past the 25-row cut, and `?q=orca` put the killer whale at position 17 under two
+indistinguishable bare "Orcadia" genus rows. Neither is random; both are alphabetical on a string
+the diver is not reading.
+
+**One helper answers "how well does this name match", and everything that has to rank, choose or cut
+asks it.** `_match_bucket` returns exact, prefix, word boundary, substring, none. Word boundary is
+what separates "blue whale" from *Barbourisia rufa*; `\b` covers multi-word queries and hyphens for
+free; a plural lands one bucket lower, which is the right place for it.
+
+**Prefix sits above word boundary, and the cost is known and accepted.** It means "Whale louse
+family" (*Cyamidae*) and "Clownfish disease" (*Brooklynella hostilis*, a parasitic ciliate) rank
+high on their queries. It also means "Whale shark" opens `?q=whale`, and divers log whale sharks
+constantly and baleen whales almost never — the first-word compounds people actually mean stay on
+top. Each intruder displays the very name that earned its position, so the page explains itself.
+Ranking a query-as-final-word compound higher instead, on English right-headedness, would have
+dropped "Whale shark" to about position 11.
+
+**The key's first term is whether the diver can see why the row is there.** In order:
+
+1. **Visible before hidden.** A row placed by a `scientific_name` or `common_name` match outranks
+   every row placed only by its `matched_name` hint, however good that hint is. The measured case:
+   the genus *Orcinus* contains no "orca" anywhere on screen and is placed entirely by its synonym —
+   an *exact* hint — and it must not beat a row whose own binomial merely contains the query.
+2. **The bucket of whichever name placed the row.** Visible rows by their visible bucket,
+   hint-placed rows by their hint's, so `?q=swordfish` puts *Orcinus orca* — which really does carry
+   "swordfish" as a WoRMS vernacular — second and explained, rather than tied with the actual
+   swordfish for the top.
+3. **The rank tier.** Species and below, then the `"unknown"` sentinel, then genus and above. The
+   owner's ruling: a diver is most interested in the species they spotted. See below.
+4. **Named before bare**, which is what stops two nameless genus rows opening a page above the
+   animal anyone typing that word means.
+5. **The displayed name, casefolded** — the string the diver is reading, and no more capitals-first
+   artefact from comparing raw `str`s.
+6. **`aphia_id`**, so the order is total and cannot depend on merge order even in theory.
+
+Ranking on the best bucket over *all* the names was the first attempt and it failed in review
+simulation: *Balaena mysticetus* carries nine "whale" vernaculars, two of them prefix hits, so a row
+displaying "Bowhead whale" jumped over "Blue whale" explained by a name nobody typed. Hence the
+split between what places a row and what merely explains it.
+
+**The rank tier is a rule, not two enumerations, and the direction is the whole of it.** Membership
+in a closed set — species, subspecies, variety, subvariety, forma, subforma, form, mutatio, every
+below-species name in WoRMS's own closed vocabulary — decides the top tier; the sentinel sits in the
+middle; *everything else known* falls to the bottom by default. An earlier draft enumerated the
+higher tier instead, and every rank left out of that list (superclass, infraorder, subtribe,
+section…) would have floated to the middle, above the genus and family rows the ruling exists to put
+it under. Defaulting downward cannot invert that way. What the rule cannot defend against is a rank
+that never becomes a string: an unmapped P105 item leaves the row on `"unknown"` and lands
+middle-tier, which is why `_WIKIDATA_RANK_BY_QID` is enumerated against a closed vocabulary up front
+rather than grown as escapes appear.
+
+**Coarse on purpose, because the underlying field is not stable enough to sort finely.** The
+`"unknown"` section above records both ways `rank` moves between two identical searches — a taxon
+neither register ranks, and two registers that rank the same taxon differently (*Mysticeti*:
+`Superfamily` from WoRMS, `Parvorder` from Wikidata). Three tiers absorb both; a rank ladder would
+not.
+
+**`status` and `source` stay out of the key entirely.** `status` is a nomenclatural fact about a
+name, not a statement about how well the row answers what was typed — and the fold already
+normalises it, so every folded row reads `accepted` regardless. `source` would make the page depend
+on which register happened to answer inside the budget, which is the property the rest of this
+design spends effort removing.
+
+**`_local_search`'s SQL is deliberately not brought along, and the divergence has a name.** The
+catalog query keeps its own three-way `match_rank` and applies `LIMIT _MAX_RESULTS` under it, so the
+moment one instance's catalog holds more than that many matches for a single query, the SQL can cut
+a row the Python key would have ranked first — and no test would catch it, because a mocked session
+tests the code around a query and never the query. The catalog is empty at launch and refills one
+resolve at a time, so it is a long way from that threshold. The fix belongs with the `pg_trgm`
+escalation whenever that reopens; this paragraph exists so the symptom has a name the first time it
+appears.
+
+### The ajax endpoint annotates rows; it never makes them
+
+`AphiaRecordsByVernacular` returns rows that matched on a common name and cannot say which one — an
+`AphiaRecord` has 28 keys and not one of them is a vernacular. So a search for "turtle" returned
+*Batis maritima*, a saltmarsh plant, in second place with nothing on screen to account for it.
+`AjaxAphiaRecordsByNamePart?combine_vernaculars=true` is the only WoRMS endpoint that knows, and it
+chains inside `_worms_by_vernacular` purely to fill `matched_name`.
+
+**Annotation rather than a second row source, on three measurements.** Its taxa are a subset of the
+record endpoint's everywhere sampled (`whale`: all 11 of its ids sit on by-vernacular's first page;
+`clownfish`: identical two-row sets). It is useless for some queries — `orca` spends its whole row
+budget on `Orca*` scientific-name prefixes and omits the animal, while by-vernacular has it. And its
+rows are raw unfolded ids with no `valid_AphiaID` and no `status`, so the `whale` answer contains
+two "blue whale" rows under different ids, the second an unaccepted homonym whose accepted taxon is
+the *fin* whale. Using them as rows would need a per-page fold call and would ship that duplicate
+class. The one thing it uniquely knows is the vername string, and that is all this takes — which is
+also why `has_more` never sees it and the source count is unchanged.
+
+**`max_matches=50` is mandatory, and the trap is that over-asking makes it worse.** The parameter
+defaults to twenty, its ceiling is fifty, and a value above the ceiling is *discarded* rather than
+clamped: `max_matches=100` and `max_matches=51` both return the twenty-row default, so asking for a
+hundred yields fewer rows than asking for fifty. Measured across five variants of the same call —
+the bare endpoint gives 20 rows over 4 ids for `whale`, and the parameter gives 50 rows over 11.
+
+**`marine_only=false` is sent explicitly and is not inert here**, whatever it does elsewhere:
+`Astyanax` returns 11 rows under `true` and 50 under `false`, and the endpoint's *observed* default
+behaves like `false` while its documentation says `true`. A default that disagrees with its own
+documentation is exactly the kind not to depend on.
+
+**No `languages[]` filter, on the owner's ruling: every hit explains itself in whatever language the
+match happened.** The English-only rule governs the *display* name, not the explanation. `?q=orca`
+without the filter yields nine vernames across five languages, and each one turns a mystery row into
+an explained one — "samborca" (Spanish) on a shad, "gran rorcal" on the blue whale, "borcaku"
+(Albanian) on a brambling. A Dutch name for a duck would be disqualifying as a name on a dive card;
+as `matched "kaneeltaling"` it is precisely what accounts for a duck on an eel page. The payoff is
+smaller than it looks on today's flagship queries — their ajax answers are almost entirely English,
+and the busiest pages cut the foreign-language rows at `_MAX_RESULTS` anyway — but the call is the
+same either way, and a foreign vernacular typed directly is what it is really for.
+
+**Nothing may rely on ajax ordering or ajax coverage.** Rows come back alphabetically by
+`displayname`, case-insensitively, and nothing else: vernacular and scientific-name matches
+interleave in one alphabetical run, and a taxon's several vernames sit adjacent in no particular
+order. *Orcinus orca* being the first `swordfish` row is the accident of "Orcinus" < "Remora" \<
+"Xiphias", not the endpoint promoting an exact vernacular match — a design that read it as promotion
+would have named the orca "swordfish" and ranked it first. So the vername a taxon keeps is chosen by
+best match bucket, then English, then casefolded alphabetical order: name-intrinsic tie-breaks,
+because the chosen vername reaches the sort key and arrival order there would let WoRMS decide page
+order between two identical searches. Coverage is the same story: `vername` is null on every
+scientific-name match, plenty of taxa never appear, and those rows sink to the tail unexplained,
+which is where an unexplainable row belongs.
+
+**A slow annotation must never cost the records, so it has a budget of its own.** `_request`'s
+bounds (15 s read, 30 s deadline) sit far above `_SEARCH_BUDGET_SECONDS`, so without an inner one a
+hung ajax call would have the whole by-vernacular source cancelled by the search budget — losing
+rows that had already arrived. `_AJAX_ANNOTATION_BUDGET_SECONDS` is calibrated against a bound
+rather than a median because the latency itself moves: repeated twenty-call samples of the same URL
+measured medians of 0.5–0.9 s and maxima of 1.9–3.8 s, with an 8.5 s outlier in a separate burst.
+Expiry is therefore a live case, not an eliminated one, and it degrades exactly like a fast failure:
+the rows go out unannotated and the entry keeps the hour TTL. The wait is real and priced — the task
+group cannot exit until the hung leg is reaped, so a record page that answered in half a second
+still holds the source for the full budget on precisely the slow minutes annotations are least
+likely to arrive.
+
+**Coupling a lost annotation to the short TTL is a choice, not an inheritance.** No rows were lost,
+so the month could have stood — and that would cache the flagship query *unexplained* for thirty
+days, making the feature invisible for a month exactly where it matters. The hour is the price of
+self-healing: one extra fan-out per affected query per hour. An *empty* ajax answer is a complete
+one, though — WoRMS says "no match" with the 204 `_request` already maps to `[]` — so only a failure
+or the budget expiring drops `ok`.
+
+The cost that is worth stating plainly: search now takes three of WoRMS's self-imposed 120 calls a
+minute instead of two, and `_claim_provider_slot` is first-come across both legs, so on a saturated
+minute either can lose the slot. A denied annotation ships the rows unannotated; a denied *record*
+leg costs the source its rows for that entry. Both land on the same hour TTL, both are bounded
+because cache hits ask no provider anything, and both are gone when the burst is.
 
 ### Test fixtures in a global table are visible to real accounts
 

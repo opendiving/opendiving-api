@@ -76,8 +76,11 @@ async def read_species_search(
     would make a form look broken over an optional convenience. `has_more` means the answer
     was cut: keep typing rather than expecting the rest.
 
-    A superseded name resolves to the accepted taxon, with the name that matched reported as
-    `matched_name` - searching *Manta birostris* returns *Mobula birostris*.
+    A superseded name resolves to the accepted taxon - searching *Manta birostris* returns
+    *Mobula birostris*. `matched_name` then reports what actually matched, and only where the
+    row's own names do not already explain it: a synonym the diver typed, or a common name in
+    any language. Results are ordered by how well each row answers the query, with species
+    ahead of the genera and families above them.
     """
     await _enforce_species_limit(current_user["id"])
     # Normalized here as well as in the service, so the shape the cache key is built from is
