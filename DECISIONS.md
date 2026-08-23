@@ -7886,16 +7886,32 @@ diver typing "clownfish" would not find Nemo. `AphiaRecordsByVernacular/clownfis
 two records for a genus with about thirty species. GBIF cannot fill the gap either — its
 `species/suggest` matches scientific names only.
 
-Wikidata can, and is licence-clean: property **P850** is the WoRMS AphiaID, so
-`srsearch=clownfish haswbstatement:P850` returns taxa that WoRMS also knows, keyed by the identifier
-both sides share. That shared key is the whole hinge — without it there would be nothing to merge
-two registers *on*. Wikidata content is CC0, and the same entity carries P18 (image), which is why
-`wikidata_qid` is stored now even though nothing renders it: it makes iteration 2's photos nearly
-free.
+Wikidata can, and is licence-clean: property **P850** is the WoRMS AphiaID, so a CirrusSearch for
+`clownfish haswbstatement:P850` returns taxa that WoRMS also knows, keyed by the identifier both
+sides share. (The parameter that carries it differs between the two calls this app makes — see
+*Wikidata's search asks for names* below.) That shared key is the whole hinge — without it there
+would be nothing to merge two registers *on*. Wikidata content is CC0, and the same entity carries
+P18 (image), which is why `wikidata_qid` is stored now even though nothing renders it: it makes
+iteration 2's photos nearly free.
 
 So the division of labour is fixed: **WoRMS owns the taxonomy** (scientific names, synonyms, the
 accepted-taxon mapping) and **Wikidata owns the common names**. A merged hit is a WoRMS record with
 a Wikidata name on it.
+
+**That division is now a statement about *ordering* as well as about names.** WoRMS cannot rank at
+all: its OpenAPI spec carries no sort or order parameter on any endpoint, and invented ones
+(`sort=relevance`, `orderby=rank`) are silently ignored — each returned the byte-identical response,
+still alphabetical. So WoRMS's contribution arrives alphabetically and is truncated alphabetically,
+which is how a search for "whale" came to be A-through-C with the humpback, the orca and the sperm
+whale all past the cut. CirrusSearch ranks the way a diver would want, and asking it for fifty
+candidates rather than ten is what puts the taxa people actually type at the top of the page. So
+**Wikidata owns breadth and order for named taxa**, **WoRMS owns identity and the accepted-taxon
+fold**, and neither register is asked for the thing it is bad at.
+
+The corollary is what bounds the enrichment cut two sections down, and it is the reason that cut is
+affordable to be wrong about: a scientific-name match is WoRMS by-name's job, so a candidate
+Wikidata discards still reaches the page from the other register. What the cut can cost is that
+row's Wikidata *name*, never the row.
 
 **P850 gets an entity into the search; P225 is what lets it become a row.** An item can carry an
 AphiaID and no taxon name at all, and while the English label stood in for the missing binomial the
@@ -7991,8 +8007,107 @@ not. A feature that breaks harder the more ordinary the input is exactly the kin
 
 Chunked at four rather than raising the cap: the cap is a bound on what a hostile or broken host can
 make this process buffer, and tuning it up to accommodate an unbounded payload gives that up for a
-payload we can simply ask for in pieces. Four leaves roughly a two-fold margin against the heaviest
-entities measured. The chunks run concurrently and share the provider throttle.
+payload we can simply ask for in pieces. The chunks run concurrently and share the provider
+throttle.
+
+**No margin is quoted here, and the omission is deliberate.** An earlier version of this section
+claimed a roughly two-fold one, and it does not survive re-measurement: how much room a four-QID
+chunk leaves depends entirely on which taxa land in it, and two review samples of the worst
+realistic chunk came out at different fractions of the cap on different days — both comfortably
+under it, neither near that figure. The cliff is sample-specific, so the honest claim is the bound
+and not a number, and the code comment beside the constant carries no figure either. Restating a
+moving number only gives it a second place to be wrong.
+
+**The chunk of four survived the search getting five times wider**, which is worth recording because
+the arithmetic looks alarming from the outside. The search returns fifty candidates now rather than
+ten, but `_WIKIDATA_ENRICH_LIMIT` cuts them back *before* any entity is fetched, so `wbgetentities`
+sees sixteen ids in four concurrent chunks where it used to see ten in three. What grew is the
+**candidate** list, which costs one light call however wide it is; what gets enriched is bounded by
+its own constant rather than by the search's width. The extra chunk is not free — it is roughly a
+third more draws against a cap these samples straddle — but chunking also *bounded* what going over
+costs, and that is worth being precise about rather than carrying the old severity forward: a chunk
+over the cap now loses its own four candidates and drops `ok`, which puts the merged page on the
+hour TTL. The other chunks still land. Losing every Wikidata row to one oversized response was the
+pre-chunking behaviour described above, and it is exactly what asking in pieces stopped. So the cost
+is bounded and self-healing, and it is the reason `_WIKIDATA_ENRICH_LIMIT` is written as a product
+of this constant rather than as a number of its own.
+
+### Wikidata's search asks for names, and its shapes are measured
+
+Search and resolve ask Wikidata two different questions and get two differently shaped answers, and
+reading either as the other fails **silently** — it looks exactly like a register with nothing to
+say. So both shapes are written down here, because none of them is guessable and every one of them
+has a way of passing a test while breaking a page.
+
+**Search asks `generator=search` with `prop=entityterms`; resolve asks `list=search`.** Resolve
+already holds the AphiaID, so it wants one entity by exact statement and nothing more. Search wants
+breadth — fifty candidates in CirrusSearch's order, with just enough of each to decide which are
+worth paying for. `entityterms` is what makes that affordable: fifty candidates with their English
+label and aliases measured **8,190 bytes**, where the same fifty *with* their claims run to well
+over a megabyte. There is no server-side claim filter to split the difference with —
+`&property=P850` *adds* 62 bytes rather than removing any — so the shape of the call is the only
+lever available, and the two-phase split is that lever being pulled.
+
+The measured shapes a reader has to honour:
+
+- **`query.pages` is an object keyed by stringified pageid, and its key order is not the relevance
+  order.** On the live `whale` answer the first three keys carry indices 31, 30 and 1. Each page's
+  `index` is contiguous from 1 and is the only thing that restores what CirrusSearch ranked. Since
+  the enrichment cut keeps the *head* of that list, a reader that iterates the object instead of
+  sorting on `index` throws away the wrong end of it — and builds a perfectly plausible page while
+  doing so, which is why the test fixture hands its pages over deliberately out of order.
+- **`entityterms` omits a key rather than emptying it, independently for `label` and `alias`.**
+  Q733595, the front-runner for `nudibranch`, carries an alias and **no English label at all**; 22
+  of that query's 50 pages carry no `alias` key. Any consumer falls back label → alias → the
+  binomial that arrives later with the entity. A page with no `entityterms` whatsoever was never
+  observed, and is handled anyway.
+- **`entityterms` aliases are identical to `wbgetentities` aliases, order included** (verified on
+  Q26843). That is what lets a term picked out of a candidate be quoted back verbatim as the row's
+  `matched_name` — the two halves of the call agree about what the taxon is called.
+- **There is no `totalhits` on this variant, and `continue` is its only truncation signal** — and
+  `continue` is not the whole truth. `nudibranch` returns fifty pages with **no** `continue`,
+  because fifty is the entire result set, and the enrichment cut then discards most of them. So the
+  flag this app reports is `continue`-present **or** more candidates than the cut enriches. Reading
+  only the first would tell a diver the page was complete while two thirds of it had been thrown
+  away.
+- **The empty answer is exactly `{"batchcomplete": ""}` — twenty bytes, no `query` key at all.**
+  This asymmetry is why the search grew a second reader rather than a wider first one: `list=search`
+  answers a miss with `{"batchcomplete":"","query":{"searchinfo":{"totalhits":0},"search":[]}}`,
+  which still carries `query.search`. A reader written for one variant reports the other's
+  **failures** as an empty register, and that is precisely the confusion that gets a half-answer
+  pinned under the thirty-day TTL.
+- **Errors are HTTP 200 with a top-level `error` object** on both variants — `missingparam` and
+  `badvalue` measured. Nothing about the transport says anything went wrong.
+
+`gsrlimit` has an anonymous ceiling of 500; 501 comes back with a "must be between 1 and 500"
+warning instead of the page that was asked for. Fifty is nowhere near it, and the ceiling that
+actually binds is a different one — below.
+
+**The cut is aligned with the page ordering, not identical to it, and the gap is recorded rather
+than papered over.** Candidates are scored with the same `_match_bucket` the final ordering uses, so
+"whale shark" survives wherever CirrusSearch happened to put it in the fifty. But the final key also
+scores `scientific_name`, which is P225 and does not exist until the entities arrive — so a taxon
+whose terms never mention its binomial can be cut here even though the final key would have ranked
+it first. Q472616 is the live shape: its terms say "Clownfish", its P225 says "Amphiprioninae". What
+that costs is bounded by the division of labour above, and is the row's Wikidata *name* rather than
+the row. The asymmetry runs the other way too, harmlessly: the cut scores *every* term while the
+final key sees only the *chosen* display name, so a candidate can survive on an alias the row never
+displays and then rank a bucket lower than it was admitted at.
+
+**One ceiling here is not self-imposed.** Wikimedia's anonymous throttle returned HTTP 429 to
+`wbgetentities&props=claims` after roughly 28 heavy calls in about 90 seconds from one client — an
+order of magnitude below this app's own 300-per-60-s Wikidata cap, which therefore does not protect
+the heavy path at all. (A single measurement, deliberately never repeated: reproducing it means
+abusing the endpoint, and the conclusion needs only its order of magnitude.) A typing burst is
+**all-cold by construction** — every new prefix is a new cache key — so warm entries absorb repeats
+and never the burst itself; two or three fresh words in a minute can reach it. The failure shape is
+already the designed one: a 429 becomes `None` through `raise_for_status()`, so the log line reads
+"request failed (HTTPStatusError)" rather than anything about rate limits — worth knowing before
+grepping — and then `ok=False`, the hour TTL, and Wikidata rows missing from that one entry until
+the next cold ask. **`_WIKIDATA_ENRICH_LIMIT` is the lever**, not the search width: it was sized to
+the four-chunk budget rather than to this ceiling, and an instance seeing 429s should lower it, or
+authenticate to Wikimedia and raise the real ceiling. Recorded rather than mitigated in code,
+because slowing every search to spare the burst case is the worse trade on one machine.
 
 ### The WoRMS search term goes in the URL *path*, so it must be percent-encoded
 
