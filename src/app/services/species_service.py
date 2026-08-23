@@ -116,10 +116,13 @@ _MAX_RESULTS = 25
 # WoRMS pages its list endpoints at 50. Search never asks for page 2: more than fifty raw
 # hits for one typed fragment is what `has_more` exists to say. Resolve is the exception -
 # `_worms_synonyms` walks every page, because the list it returns vets a name this app then
-# stores forever. Wikidata's search is asked for ten, which is plenty once it is merged into
-# WoRMS's fifty.
+# stores forever. Wikidata's search is asked for the same fifty, and used to be asked for ten:
+# that was 2% of what CirrusSearch will rank, and the candidates a diver actually means sat
+# past the cut, which was the whole of "the good rows are missing" on the Wikidata side. Fifty
+# is affordable only because the search asks for *names* rather than claims - the expensive
+# half is cut back to `_WIKIDATA_ENRICH_LIMIT` before a single entity is fetched.
 _WORMS_PAGE_SIZE = 50
-_WIKIDATA_SEARCH_LIMIT = 10
+_WIKIDATA_SEARCH_LIMIT = 50
 
 # The ajax endpoint's row budget, and it has nothing to do with `_WORMS_PAGE_SIZE` above
 # beyond happening to be the same number. **It must be sent, and it must not be exceeded**:
@@ -131,8 +134,23 @@ _AJAX_MAX_MATCHES = 50
 # How many entities to ask `wbgetentities` for at once. Small on purpose - see
 # `_wikidata_entities`: a taxon entity with all its claims runs ~50 KB, so a batch of ten
 # regularly exceeds `_MAX_RESPONSE_BYTES` and costs the whole Wikidata contribution. Four
-# leaves roughly a two-fold margin against the heaviest entities measured.
+# keeps the heaviest realistic chunk under the cap, and no margin is quoted here on purpose:
+# how much room is left depends entirely on which taxa land in the chunk, and two measurements
+# of the worst realistic four-QID chunk came out at different fractions of the cap on
+# different days. A figure here would only be a second place to be wrong about something that
+# moves.
 _WIKIDATA_ENTITY_BATCH = 4
+
+# How many Phase-1 candidates survive to be enriched. Written as a product because the batch
+# above is the decision this one derives from: four chunks of entity fetches is the budget, so
+# a change there carries through rather than leaving two numbers to reconcile by hand.
+#
+# It is also the knob that trades breadth against Wikimedia's *anonymous* request ceiling,
+# which is an order of magnitude below this app's own self-imposed Wikidata cap and is reached
+# by heavy `props=claims` calls rather than by searches - so an instance seeing 429s should
+# lower this rather than `_WIKIDATA_SEARCH_LIMIT`, which costs one light call however wide it
+# is set.
+_WIKIDATA_ENRICH_LIMIT = 4 * _WIKIDATA_ENTITY_BATCH
 
 # A taxon's name does not change - that is rather the point of a nomenclatural register - so
 # a hit is held for a month. A *miss* is held for an hour, because an empty answer is far
@@ -144,7 +162,7 @@ _MISS_TTL_SECONDS = 60 * 60
 # Bumped whenever the cached shape or the way it is composed changes. What is cached is the
 # *normalized, merged* remote list rather than raw provider payloads, so a change to the
 # normalizer has to invalidate the old entries - a new prefix does that without a flush.
-_CACHE_VERSION = "v4"
+_CACHE_VERSION = "v5"
 
 # Wikidata's "WoRMS AphiaID" property. The single hinge the whole two-source design turns
 # on: without a shared key there would be nothing to merge two registers *on*.
@@ -288,6 +306,27 @@ class _WikidataEntity:
     # one whose rank item is not in the map, both of which become the `"unknown"` sentinel on
     # the way out.
     rank: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _WikidataPage:
+    """One search candidate, before anything has been fetched about it.
+
+    The search asks for `entityterms` rather than claims, which is the whole reason it can ask
+    for fifty candidates at all - the same fifty *with* their claims run to hundreds of times
+    the payload. What comes back per candidate is a QID and the entity's English names, and
+    those names are enough to do the two jobs that have to happen before the expensive fetch:
+    decide which candidates are worth enriching, and remember which name the diver's query
+    actually hit. Everything else about the taxon - its binomial, its rank - still needs the
+    entity.
+    """
+
+    qid: str
+    # Label first, then aliases in the order Wikidata listed them. The order is load-bearing:
+    # it breaks ties between equally good matches, and it is measured identical to the order
+    # `wbgetentities` returns, so a term chosen here is the same string the entity would have
+    # offered. Either key can be absent from a page independently, so this can be empty.
+    terms: tuple[str, ...]
 
 
 # -------------- caching --------------
@@ -533,6 +572,28 @@ def _match_bucket(query: str, name: str) -> int:
     if query in folded:
         return _MATCH_SUBSTRING
     return _MATCH_NONE
+
+
+def _best_matching_term(terms: tuple[str, ...], query: str) -> tuple[int, str | None]:
+    """The best bucket over `terms`, and the term that earned it.
+
+    Both answers come from one pass because the Wikidata search needs both and they have to
+    agree: the bucket decides which candidates survive the cut before enrichment, and the term
+    is what the surviving row quotes back as `matched_name`. Asking twice would let a candidate
+    be admitted on the strength of one name and then explained by a different one.
+
+    **Term order is the tie-break**, which is why this replaces only on a strictly better
+    bucket: callers pass the label first and the aliases in Wikidata's own order, so the most
+    representative name wins among equals. `(_MATCH_NONE, None)` means nothing here answers the
+    query at all - a candidate carried by breadth that has nothing to say for itself.
+    """
+    best_bucket = _MATCH_NONE
+    best_term: str | None = None
+    for term in terms:
+        bucket = _match_bucket(query, term)
+        if bucket < best_bucket:
+            best_bucket, best_term = bucket, term
+    return best_bucket, best_term
 
 
 # Every rank at or below species in WoRMS's own closed vocabulary (`AphiaTaxonRanksByID`),
@@ -854,8 +915,16 @@ def _claim_entity_id(claims: dict[str, Any], prop: str) -> str | None:
     return None
 
 
-def _wikidata_result(entity: _WikidataEntity) -> SpeciesSearchResult | None:
+def _wikidata_result(entity: _WikidataEntity, matched_name: str | None = None) -> SpeciesSearchResult | None:
     """A Wikidata entity as a search hit, or `None` for an item carrying no taxon name.
+
+    **`matched_name` is the term the search matched on**, handed down from the candidate's
+    `entityterms` because that is the only place it exists - an entity fetch says what the
+    taxon is called but not which of those names the diver's query hit. It is what keeps
+    *Orcinus orca* honest on `?q=whale`: the row displays "Orca gladiator", which accounts for
+    nothing, and `matched "orca whale"` is why it is on the page. Under the ranking key a hint
+    places a row only where the visible names place it nowhere, so explaining a row never
+    promotes it.
 
     **P225 or no row.** The English label used to stand in when the entity had no taxon name,
     and the row it built was one this app could not stand behind: `?q=orca` opened with two
@@ -891,6 +960,16 @@ def _wikidata_result(entity: _WikidataEntity) -> SpeciesSearchResult | None:
         return None
 
     common_name = _choose_common_name(scientific_name=scientific_name, label=entity.label, aliases=entity.aliases)
+
+    # A term that merely repeats what the row already displays explains nothing, which is the
+    # schema's own contract for the field. This catches what a single source can see; the
+    # merged-list pass catches what it cannot - a `common_name` some other source supplied.
+    displayed = {scientific_name.casefold()}
+    if common_name is not None:
+        displayed.add(common_name.casefold())
+    if matched_name is not None and matched_name.casefold() in displayed:
+        matched_name = None
+
     return SpeciesSearchResult(
         aphia_id=entity.aphia_id,
         uuid=None,
@@ -909,9 +988,11 @@ def _wikidata_result(entity: _WikidataEntity) -> SpeciesSearchResult | None:
         # registers disagree about, recorded in that same section.
         rank=entity.rank or "unknown",
         # Wikidata has nothing to say about nomenclatural status, so this one stays a
-        # sentinel outright - the merge fills it from WoRMS wherever WoRMS answered.
+        # sentinel outright - the merge fills it from WoRMS wherever WoRMS answered. It is
+        # deliberately *not* keyed on `matched_name`: the two say different things, and the
+        # WoRMS side of this module had that coupling and had to have it taken out.
         status="unknown",
-        matched_name=None,
+        matched_name=matched_name,
         source="wikidata",
         attribution=_WIKIDATA_ATTRIBUTION,
     )
@@ -1095,30 +1176,155 @@ def _worms_page(rows: Any, vernames: dict[int, str] | None = None) -> _SourceAns
 async def _wikidata_search(query: str) -> _SourceAnswer:
     """Common names and aliases, via CirrusSearch filtered to entities that carry an AphiaID.
 
-    Two chained steps, counting as one provider against the throttle: the search returns QIDs
-    and nothing else useful, so the entities have to be fetched to get P850 at all. The
-    `haswbstatement:P850` filter is what keeps the result set to taxa WoRMS also knows, which
-    is what makes the merge possible.
+    Two chained phases, counting as one provider against the throttle, and the split between
+    them is what makes breadth affordable at all.
+
+    **Phase 1 asks for names, not claims.** `generator=search` with `prop=entityterms` returns
+    fifty candidates and their English label and aliases in about eight kilobytes; the same
+    fifty entities *with* their claims run to well over a megabyte - samples have ranged from
+    roughly two hundred to over three hundred times the payload. There is no server-side claim
+    filter to split the difference with, so the shape of the call is the only lever, and this
+    is it: the search can be wide precisely because it asks for so little per hit.
+
+    **Phase 2 enriches only the candidates worth enriching.** The terms Phase 1 carries are
+    enough to score a candidate with the same `_match_bucket` the page ordering uses, so the
+    fifty are pre-ranked and cut to `_WIKIDATA_ENRICH_LIMIT` before a single entity is fetched.
+
+    That cut is *aligned* with `_ordered` rather than identical to it, and the difference is
+    worth knowing before trusting it. `_ordered` also scores `scientific_name`, which is P225
+    and does not exist until Phase 2 - so a taxon whose terms never mention its binomial can be
+    cut here even though the final key would have ranked it first (Q472616 is the live shape:
+    its terms say "Clownfish", its P225 says "Amphiprioninae"). The exposure is bounded by the
+    division of labour rather than by luck: a scientific-name match is WoRMS by-name's job, so
+    the row still arrives - what the cut can cost is that row's Wikidata *name*, not the row.
+    It runs the other way too, harmlessly: the cut scores every term while the final key sees
+    only the *chosen* display name, so a candidate can survive on an alias the row never shows
+    and then rank a bucket lower than it was admitted at.
+
+    The `haswbstatement:P850` filter is what keeps the result set to taxa WoRMS also knows,
+    which is what makes the merge possible.
     """
     payload = await _wikidata(
         {
             "action": "query",
-            "list": "search",
-            "srsearch": f"{query} haswbstatement:{_APHIA_PROPERTY}",
-            "srlimit": _WIKIDATA_SEARCH_LIMIT,
+            "generator": "search",
+            "gsrsearch": f"{query} haswbstatement:{_APHIA_PROPERTY}",
+            "gsrlimit": _WIKIDATA_SEARCH_LIMIT,
+            "prop": "entityterms",
+            "wbetlanguage": "en",
+            "wbetterms": "label|alias",
         }
     )
-    qids = _wikidata_qids(payload)
-    if qids is None:
+    pages = _wikidata_search_pages(payload)
+    if pages is None:
         # Not a search response at all: transport failure, or a 200 carrying an error. Either
         # way this source learned nothing, which is not the same as finding nothing.
         return _SourceAnswer([], False, ok=False)
-    if not qids:
+    if not pages:
         return _SourceAnswer([], False, ok=True)
 
-    entities, entities_ok = await _wikidata_entities(qids)
-    results = [result for entity in entities if (result := _wikidata_result(entity)) is not None]
-    return _SourceAnswer(results, len(qids) >= _WIKIDATA_SEARCH_LIMIT, ok=entities_ok)
+    # **Two ways this page can be truncated, and Wikidata knows about only one of them.** It
+    # sets `continue` when it held hits back; the cut below is this app's own truncation and is
+    # invisible from there. `nudibranch` is what makes the second clause non-theoretical -
+    # fifty candidates with no `continue` at all, because fifty is the whole result set, and
+    # thirty-four of them discarded here. On a `continue`-only flag that page would claim to be
+    # complete while most of it had been thrown away.
+    truncated = (isinstance(payload, dict) and "continue" in payload) or len(pages) > _WIKIDATA_ENRICH_LIMIT
+
+    # Stable, so CirrusSearch's own relevance order survives *inside* a bucket. That order is
+    # better than anything this app could compute from a label and a handful of aliases, and
+    # the bucket only overrules it where a candidate plainly answers the typed query better.
+    scored = [(_best_matching_term(page.terms, query), page) for page in pages]
+    scored.sort(key=lambda entry: entry[0][0])
+    survivors = scored[:_WIKIDATA_ENRICH_LIMIT]
+
+    hints = {page.qid: term for (_, term), page in survivors}
+    entities, entities_ok = await _wikidata_entities([page.qid for _, page in survivors])
+    results = [result for entity in entities if (result := _wikidata_result(entity, hints.get(entity.qid))) is not None]
+    return _SourceAnswer(results, truncated, ok=entities_ok)
+
+
+def _wikidata_search_pages(payload: Any) -> list[_WikidataPage] | None:
+    """The candidates a search returned, in CirrusSearch's order - `[]` for a search that
+    matched nothing, or `None` for a response that was not a search result at all.
+
+    **The same three outcomes `_wikidata_qids` has, for the same reason**, and this exists as a
+    second reader rather than as a change to that one because `generator=search` and
+    `list=search` are differently shaped answers to differently shaped questions. Resolve still
+    asks `list=search` for one entity by exact statement and keeps its own reader.
+
+    Three measured shapes drive everything here:
+
+    - **`query.pages` is an object keyed by stringified pageid, and that key order is not the
+      relevance order.** Each page carries `index`, contiguous from 1, and it is the only thing
+      that can put them back in the order CirrusSearch ranked them - iterating the object gets
+      pageid order, which is arbitrary. Measured on `whale`: the first three keys carry indices
+      31, 30 and 1.
+    - **`entityterms` omits a key rather than emptying it.** Q733595, the `nudibranch`
+      front-runner, has no English label at all - its page is
+      `{"entityterms": {"alias": ["Nudibranchs"]}}` - and 22 of that query's 50 pages carry no
+      `alias` key. A page with no `entityterms` whatsoever was never observed across the
+      sampled payloads, and is handled anyway rather than assumed away.
+    - **An empty result is `{"batchcomplete": ""}` with no `query` key at all** - twenty bytes,
+      measured stable across distinct no-match queries. This is exactly where the two search
+      shapes diverge: `list=search` answers a miss with `query.search` *present* and empty, so
+      a reader that treats a missing key as "nothing found" would call every one of this
+      variant's failures an empty register. Hence "no `query`, but `batchcomplete`" is the only
+      shape that means empty, and anything else unrecognizable is a failure.
+
+    Errors arrive as **HTTP 200 with a top-level `error` object**, exactly as on the other
+    variant, so nothing about the transport says anything went wrong.
+    """
+    if not isinstance(payload, dict):
+        return None
+    if "error" in payload:
+        error = payload["error"]
+        code = error.get("code") if isinstance(error, dict) else None
+        logger.warning("Wikidata refused a search (%s).", code or "unknown")
+        return None
+    if "query" not in payload:
+        return [] if "batchcomplete" in payload else None
+
+    query = payload["query"]
+    if not isinstance(query, dict) or not isinstance(pages := query.get("pages"), dict):
+        # A 200 that is neither an error nor a generator result - a proxy, a CDN page rendered
+        # as JSON, or an API change. Not this app's business to interpret, and definitely not
+        # an empty register.
+        return None
+
+    ranked: list[tuple[int, int, _WikidataPage]] = []
+    for page in pages.values():
+        if not isinstance(page, dict):
+            continue
+        qid = _text(page.get("title"), _QID_MAX_LENGTH)
+        if qid is None:
+            continue
+        index = page.get("index")
+        # A page with no usable `index` cannot be placed in the relevance order at all, so it
+        # sorts last rather than being dropped or landing wherever the JSON happened to put it.
+        unplaced, position = (0, index) if isinstance(index, int) else (1, 0)
+        ranked.append((unplaced, position, _WikidataPage(qid=qid, terms=_page_terms(page))))
+
+    ranked.sort(key=lambda entry: (entry[0], entry[1]))
+    return [page for _, _, page in ranked]
+
+
+def _page_terms(page: dict[str, Any]) -> tuple[str, ...]:
+    """One candidate's English names, label first and aliases after.
+
+    The order is fixed here rather than left to however the payload iterated, because it is the
+    tie-break for which term ends up explaining a row. Both keys are optional independently -
+    see `_wikidata_search_pages` - and neither is trusted to be a list of strings.
+    """
+    entityterms = page.get("entityterms")
+    if not isinstance(entityterms, dict):
+        return ()
+    terms: list[str] = []
+    for key in ("label", "alias"):
+        values = entityterms.get(key)
+        if isinstance(values, list):
+            terms.extend(term for value in values if (term := _text(value)) is not None)
+    return tuple(terms)
 
 
 def _wikidata_qids(payload: Any) -> list[str] | None:
@@ -1134,6 +1340,15 @@ def _wikidata_qids(payload: Any) -> list[str] | None:
 
     `None` is also what a `None` payload maps to, so the transport failure and the
     application-level failure travel the same path from here on.
+
+    **Only `resolve_species`'s exact-statement lookup reaches this now.** Search asks
+    `generator=search` and reads it with `_wikidata_search_pages`, so the thirty-day cache
+    entry described above is that reader's problem rather than this one's; what is left here is
+    `_wikidata_by_aphia_id`, which collapses `None` and `[]` into "no entity to enrich with"
+    because a resolve degrades to a row without a qid either way. The three outcomes still earn
+    their keep on that path for the middle paragraph's reason - a 200 carrying an error must
+    not read as a QID, or resolve would store a row pointing at whatever came back - and that
+    is what the resolve-path test pins.
     """
     if not isinstance(payload, dict):
         return None
