@@ -64,6 +64,20 @@ _REAL_ASYNC_CLIENT = httpx.AsyncClient
 
 CURRENT_USER = {"id": 7, "uuid": uuid7(), "username": "ada", "is_superuser": False}
 
+# Wikidata's taxonomic-rank items, named because a bare QID in a payload says nothing to the
+# next reader. Verified against the live entities: *Orcinus orca* (Q26843) and the swordfish
+# carry the species item, the genus *Orca* (Q41156273) the genus one, the subgenus *Orca*
+# (Q61884050 - the item with an AphiaID and no taxon name) the subgenus one, and *Mysticeti*
+# carries the parvorder and the suborder, in that order, as two live statements.
+_SPECIES_RANK_ITEM = "Q7432"
+_GENUS_RANK_ITEM = "Q34740"
+_SUBGENUS_RANK_ITEM = "Q3238261"
+_PARVORDER_RANK_ITEM = "Q6311258"
+_SUBORDER_RANK_ITEM = "Q5867959"
+# A real taxonomic-rank item outside WoRMS's vocabulary, so deliberately absent from the map:
+# "cultivar", which is what an unmapped rank looks like when one turns up.
+_UNMAPPED_RANK_ITEM = "Q4886"
+
 # *Amphiprion ocellaris* as WoRMS actually sends it - the accepted, species-rank record the
 # whole feature is demonstrated on. Trimmed to the fields this app reads, keeping WoRMS's own
 # key spellings (`scientificname`, the bare `class`/`order`, the 1/0 habitat flags), because
@@ -126,8 +140,9 @@ ORCA_WIKIDATA_ENTITIES = {
                 "en": [{"value": "Orca gladiator"}, {"value": "orca whale"}, {"value": "killer whale"}],
             },
             "claims": {
-                "P850": [{"mainsnak": {"datavalue": {"value": "137102"}}}],
-                "P225": [{"mainsnak": {"datavalue": {"value": "Orcinus orca"}}}],
+                "P850": [{"rank": "normal", "mainsnak": {"datavalue": {"value": "137102"}}}],
+                "P225": [{"rank": "normal", "mainsnak": {"datavalue": {"value": "Orcinus orca"}}}],
+                "P105": [{"rank": "normal", "mainsnak": {"datavalue": {"value": {"id": _SPECIES_RANK_ITEM}}}}],
             },
         }
     }
@@ -142,13 +157,37 @@ WIKIDATA_ENTITIES = {
             "labels": {"en": {"language": "en", "value": "Amphiprion ocellaris"}},
             "aliases": {"en": [{"value": "ocellaris clownfish"}, {"value": "Common clownfish"}]},
             "claims": {
-                # External identifiers are strings in Wikidata, whatever they look like.
-                "P850": [{"mainsnak": {"datavalue": {"value": "278400"}}}],
-                "P225": [{"mainsnak": {"datavalue": {"value": "Amphiprion ocellaris"}}}],
+                # External identifiers are strings in Wikidata, whatever they look like;
+                # P105's value is an *item*, so it arrives as a dict carrying its QID. Every
+                # statement carries its own `rank`, which is how Wikidata says which of
+                # several values is current - trimmed out of these payloads until the reader
+                # started honouring it.
+                "P850": [{"rank": "normal", "mainsnak": {"datavalue": {"value": "278400"}}}],
+                "P225": [{"rank": "normal", "mainsnak": {"datavalue": {"value": "Amphiprion ocellaris"}}}],
+                "P105": [{"rank": "normal", "mainsnak": {"datavalue": {"value": {"id": _SPECIES_RANK_ITEM}}}}],
             },
         }
     }
 }
+
+
+def _entity(
+    qid: str, *, aphia_id: str, taxon_name: str | None, rank_item: str | None = None, label: str | None = None
+) -> dict[str, Any]:
+    """One `wbgetentities` entity in the live shape, with only the pieces a test cares about.
+
+    `taxon_name=None` is the shape the P225 gate exists for: an item tagged with an AphiaID
+    that names no taxon at all.
+    """
+    claims: dict[str, Any] = {"P850": [{"rank": "normal", "mainsnak": {"datavalue": {"value": aphia_id}}}]}
+    if taxon_name is not None:
+        claims["P225"] = [{"rank": "normal", "mainsnak": {"datavalue": {"value": taxon_name}}}]
+    if rank_item is not None:
+        claims["P105"] = [{"rank": "normal", "mainsnak": {"datavalue": {"value": {"id": rank_item}}}}]
+    entity: dict[str, Any] = {"claims": claims}
+    if label is not None:
+        entity["labels"] = {"en": {"language": "en", "value": label}}
+    return entity
 
 
 @pytest.fixture(scope="module")
@@ -371,6 +410,9 @@ class TestMergingTwoRegisters:
         assert [(r.aphia_id, r.common_name, r.source) for r in response.results] == [
             (278400, "Ocellaris clownfish", "wikidata")
         ]
+        # No WoRMS record behind this row, and it still says what the taxon is: P105 is where
+        # that comes from, and it is why the row is not stranded on the sentinel.
+        assert response.results[0].rank == "Species"
 
     @pytest.mark.asyncio
     async def test_an_unaccepted_name_folds_onto_the_accepted_taxon(self, no_redis: None):
@@ -412,6 +454,147 @@ class TestMergingTwoRegisters:
             response = await species_service.search_species(db, "amphiprion ocellaris")
 
         assert [r.scientific_name for r in response.results] == ["Amphiprion ocellaris", "Amphiprion percula"]
+
+
+class TestWhatAnEntityIsWorth:
+    """What a Wikidata entity has to carry to become a row, and what it says about the taxon.
+
+    Two claims decide both. **P225 is the admission ticket**: an item with an AphiaID and no
+    taxon name is not a taxon this app can stand behind, however confidently its label reads.
+    **P105 is the rank**, translated through an explicit QID map into WoRMS's own spelling, so
+    a Wikidata-only row and the WoRMS row it may merge with never disagree about what a rank
+    is called.
+    """
+
+    @pytest.mark.asyncio
+    async def test_an_item_with_no_taxon_name_builds_no_row(self, no_redis: None):
+        """The live `?q=orca` defect, in the two items that caused it. Both are labelled
+        "Orca", both carry an AphiaID, and only one carries a taxon name - so the page opened
+        with two indistinguishable bare rows, and nothing merged over either of them.
+
+        The surviving row's rank is asserted here too, because the pair is exactly where a
+        genus and a subgenus are told apart by nothing else.
+        """
+        db = _empty_db()
+        entities = {
+            "entities": {
+                "Q41156273": _entity("Q41156273", aphia_id="380520", taxon_name="Orca", rank_item=_GENUS_RANK_ITEM),
+                "Q61884050": _entity(
+                    "Q61884050", aphia_id="383535", taxon_name=None, rank_item=_SUBGENUS_RANK_ITEM, label="Orca"
+                ),
+            }
+        }
+        search = {"query": {"search": [{"title": "Q41156273"}, {"title": "Q61884050"}]}}
+        with _registers(wikidata_search=search, wikidata_entities=entities):
+            response = await species_service.search_species(db, "orca")
+
+        assert [(r.aphia_id, r.scientific_name, r.rank) for r in response.results] == [(380520, "Orca", "Genus")]
+
+    @pytest.mark.asyncio
+    async def test_an_unmapped_rank_item_stays_the_sentinel(self, no_redis: None):
+        """The recorded residual, pinned so it is a known shape rather than a surprise. A rank
+        item outside the map leaves the row saying it does not know, which is honest - and it
+        is the one outcome that orders between the ranks rather than below them."""
+        db = _empty_db()
+        entities = {
+            "entities": {
+                "Q1": _entity("Q1", aphia_id="278400", taxon_name="Amphiprion ocellaris", rank_item=_UNMAPPED_RANK_ITEM)
+            }
+        }
+        with _registers(wikidata_search={"query": {"search": [{"title": "Q1"}]}}, wikidata_entities=entities):
+            response = await species_service.search_species(db, "amphiprion")
+
+        assert [r.rank for r in response.results] == ["unknown"]
+
+    @pytest.mark.asyncio
+    async def test_an_entity_with_no_rank_claim_at_all_stays_the_sentinel(self, no_redis: None):
+        db = _empty_db()
+        entities = {"entities": {"Q1": _entity("Q1", aphia_id="278400", taxon_name="Amphiprion ocellaris")}}
+        with _registers(wikidata_search={"query": {"search": [{"title": "Q1"}]}}, wikidata_entities=entities):
+            response = await species_service.search_species(db, "amphiprion")
+
+        assert [r.rank for r in response.results] == ["unknown"]
+
+    @pytest.mark.asyncio
+    async def test_worms_still_owns_the_rank_where_both_registers_answered(self, no_redis: None):
+        """Merge precedence is unchanged by any of this: WoRMS owns the taxonomy, so its rank
+        stands even when Wikidata now has one of its own to offer. Asserted with the two
+        disagreeing, because agreeing proves nothing."""
+        db = _empty_db()
+        entities = {
+            "entities": {
+                "Q1": _entity("Q1", aphia_id="278400", taxon_name="Amphiprion ocellaris", rank_item=_GENUS_RANK_ITEM)
+            }
+        }
+        with _registers(
+            by_name=[CLOWNFISH_RECORD],
+            wikidata_search={"query": {"search": [{"title": "Q1"}]}},
+            wikidata_entities=entities,
+        ):
+            response = await species_service.search_species(db, "amphiprion ocellaris")
+
+        assert [(r.rank, r.source) for r in response.results] == [("Species", "worms")]
+
+    @pytest.mark.asyncio
+    async def test_two_live_rank_statements_take_the_first(self, no_redis: None):
+        """*Mysticeti* is the live case: a parvorder statement and a suborder statement, both
+        `normal`, neither disowned. Serialization order decides, which makes the answer the
+        same for every reader of a given entity revision - the property this reads P105 for at
+        all."""
+        db = _empty_db()
+        claims = {
+            "P850": [{"rank": "normal", "mainsnak": {"datavalue": {"value": "148724"}}}],
+            "P225": [{"rank": "normal", "mainsnak": {"datavalue": {"value": "Mysticeti"}}}],
+            "P105": [
+                {"rank": "normal", "mainsnak": {"datavalue": {"value": {"id": _PARVORDER_RANK_ITEM}}}},
+                {"rank": "normal", "mainsnak": {"datavalue": {"value": {"id": _SUBORDER_RANK_ITEM}}}},
+            ],
+        }
+        entities = {"entities": {"Q168366": {"claims": claims}}}
+        with _registers(wikidata_search={"query": {"search": [{"title": "Q168366"}]}}, wikidata_entities=entities):
+            response = await species_service.search_species(db, "mysticeti")
+
+        assert [r.rank for r in response.results] == ["Parvorder"]
+
+    @pytest.mark.asyncio
+    async def test_a_deprecated_statement_loses_to_the_one_beneath_it(self, no_redis: None):
+        """`deprecated` is Wikidata saying the community ruled a value wrong. Reading claims in
+        serialization order let it win on position alone, which is how a disowned rank - or a
+        disowned AphiaID - reaches a diver."""
+        db = _empty_db()
+        claims = {
+            "P850": [{"rank": "normal", "mainsnak": {"datavalue": {"value": "278400"}}}],
+            "P225": [{"rank": "normal", "mainsnak": {"datavalue": {"value": "Amphiprion ocellaris"}}}],
+            "P105": [
+                {"rank": "deprecated", "mainsnak": {"datavalue": {"value": {"id": _GENUS_RANK_ITEM}}}},
+                {"rank": "normal", "mainsnak": {"datavalue": {"value": {"id": _SPECIES_RANK_ITEM}}}},
+            ],
+        }
+        entities = {"entities": {"Q1": {"claims": claims}}}
+        with _registers(wikidata_search={"query": {"search": [{"title": "Q1"}]}}, wikidata_entities=entities):
+            response = await species_service.search_species(db, "amphiprion")
+
+        assert [r.rank for r in response.results] == ["Species"]
+
+    @pytest.mark.asyncio
+    async def test_a_preferred_statement_wins_from_further_down_the_list(self, no_redis: None):
+        """The other half of the same rule, and the reason position alone was never the answer:
+        `preferred` is how Wikidata marks the current value where several are true, and it does
+        not have to be written first."""
+        db = _empty_db()
+        claims = {
+            "P850": [{"rank": "normal", "mainsnak": {"datavalue": {"value": "278400"}}}],
+            "P225": [{"rank": "normal", "mainsnak": {"datavalue": {"value": "Amphiprion ocellaris"}}}],
+            "P105": [
+                {"rank": "normal", "mainsnak": {"datavalue": {"value": {"id": _GENUS_RANK_ITEM}}}},
+                {"rank": "preferred", "mainsnak": {"datavalue": {"value": {"id": _SPECIES_RANK_ITEM}}}},
+            ],
+        }
+        entities = {"entities": {"Q1": {"claims": claims}}}
+        with _registers(wikidata_search={"query": {"search": [{"title": "Q1"}]}}, wikidata_entities=entities):
+            response = await species_service.search_species(db, "amphiprion")
+
+        assert [r.rank for r in response.results] == ["Species"]
 
 
 class TestChoosingTheDisplayName:
@@ -991,6 +1174,32 @@ class TestResolve:
         # and `ILIKE` does not care, so there is nothing to gain by rewriting what a register
         # actually said.
         assert ("ocellaris clownfish", "common", "wikidata") in names
+
+    @pytest.mark.asyncio
+    async def test_a_deprecated_aphia_id_never_wins_on_the_write_path(self, no_redis: None):
+        """The claim reader is shared, so the statement-rank rule reaches the one path that
+        writes a row nobody rewrites - and this is where it is pinned.
+
+        The assertion sits on the entity rather than on the stored `Species` because that is
+        where the difference is visible: `resolve_species` takes its identity and its
+        taxonomy from the WoRMS record and reads only the entity's qid and its English names.
+        A deprecated AphiaID winning here would not corrupt the row's identity, then; it
+        would mean this leg had matched on a withdrawn identifier, which is the fact worth
+        catching before it grows a consumer.
+        """
+        claims = {
+            "P850": [
+                {"rank": "deprecated", "mainsnak": {"datavalue": {"value": "105857"}}},
+                {"rank": "normal", "mainsnak": {"datavalue": {"value": "278400"}}},
+            ],
+            "P225": [{"rank": "normal", "mainsnak": {"datavalue": {"value": "Amphiprion ocellaris"}}}],
+        }
+        entities = {"entities": {"Q1126155": {"claims": claims}}}
+        with _registers(wikidata_search={"query": {"search": [{"title": "Q1126155"}]}}, wikidata_entities=entities):
+            entity = await species_service._wikidata_by_aphia_id(278400)
+
+        assert entity is not None
+        assert (entity.qid, entity.aphia_id) == ("Q1126155", 278400)
 
     @pytest.mark.asyncio
     async def test_an_existing_species_is_returned_without_asking_anyone(self, no_redis: None):

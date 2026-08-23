@@ -7897,6 +7897,31 @@ So the division of labour is fixed: **WoRMS owns the taxonomy** (scientific name
 accepted-taxon mapping) and **Wikidata owns the common names**. A merged hit is a WoRMS record with
 a Wikidata name on it.
 
+**P850 gets an entity into the search; P225 is what lets it become a row.** An item can carry an
+AphiaID and no taxon name at all, and while the English label stood in for the missing binomial the
+result was visible on the flagship query: `?q=orca` opened with **two indistinguishable bare "Orca"
+rows**, one of them an item whose only English name is the word the diver typed. A taxon item with
+no taxon name is not a taxon this app can stand behind, so the search drops it. The cost was weighed
+rather than missed — a dropped entity also leaves the *merge*, so a WoRMS row at the same AphiaID
+loses the Wikidata name it would otherwise have gained. Measured exposure when the gate went in: one
+P225-less item among the entities behind the flagship queries, and no WoRMS row carried its AphiaID.
+
+**Resolve keeps the label fallback and needs no gate**, by construction rather than by care: nothing
+there reads an entity for a binomial. `resolve_species` takes identity and taxonomy from the WoRMS
+record and asks the entity only for its qid and its English names, and the fallback lives in
+`_wikidata_result`, which only the search path reaches. So the write path — the one that produces a
+row nobody rewrites — is untouched by the drop.
+
+**Claims are read statement-rank first, not in serialization order.** Wikidata marks a value
+`deprecated` when the community has ruled it wrong, and `preferred` when several are true and one is
+current; both markers sit on the *statement* rather than on the value. Taking the first statement in
+the JSON, which is what this reader did, let a disowned AphiaID or a superseded binomial win on
+position alone. Deprecated statements are skipped, preferred ones come first, and the rest keep
+serialization order — deterministic for a given entity revision, applied to every property this
+reads rather than only to the obviously multi-valued one, and the one part of the entity semantics
+that reaches `resolve_species`, which is why it is pinned by a test there rather than only on the
+search path.
+
 ### The timeouts are measured, and copying the geocoder's broke the feature
 
 The first draft took `services/geocoding_service.py`'s constants wholesale — 5 s per read, 10 s
@@ -8216,29 +8241,64 @@ made. `rank` and `status` are plain `VARCHAR` passed through rather than `StrEnu
 unlike `GearItem.type`: those are WoRMS's open vocabularies, they grow without asking us, and a new
 rank must not turn into a failed resolve.
 
-**`"unknown"` is a real value on the wire, and it is ours rather than WoRMS's.** A search hit that
-only Wikidata matched has no WoRMS record behind it, so there is no rank or status to report;
-`_wikidata_result` writes the literal string `"unknown"` for both, and `_worms_taxon` does the same
-for a record that arrived without one. **It is most of a typical page, not a rare edge case** —
-`?q=manta` returns a pile of *Manta* synonyms that Wikidata knows and the WoRMS query for that
-fragment did not.
+**WoRMS is no longer the only source of a rank string, which is why the spelling is pinned even
+though the column is free.** Wikidata's P105 ("taxon rank") fills `rank` on search rows WoRMS never
+returned, through an explicit QID-to-name map in `species_service`, and every entry in that map is
+spelled WoRMS's way wherever WoRMS has a spelling — down to `"Phylum (Division)"`, which is what
+WoRMS actually calls the botanical rank (measured on *Rhodophyta*, AphiaID 852), and `"Forma"` where
+Wikidata's label reads "form". The rule behind that is one rank, one string: the client sorts and
+displays this field, so the same rank arriving under two names depending on which register a row
+came from would read as two ranks. The keys are enumerated against WoRMS's own closed vocabulary
+(`AphiaTaxonRanksByID`, thirty distinct names across its kingdoms) rather than collected as they
+turn up, plus two entries outside it — **Parvorder**, which Wikidata uses and WoRMS does not
+(*Mysticeti* carries it), and **Clade**, the common non-Linnaean rank. One WoRMS name has no
+counterpart at all: *Mutatio*, for which Wikidata has no taxonomic-rank item, so nothing can ever
+produce that string from P105. None of this turns the column into an enum — an unmapped item falls
+to the sentinel described next rather than failing anything, and a rank WoRMS invents tomorrow still
+passes straight through.
 
-No count is quoted here on purpose, because the proportion is not a property of the data: it is a
-function of whether WoRMS answered inside `_SEARCH_BUDGET_SECONDS` on that particular request. Two
-sessions measuring the same query hours apart got seven of ten and nine of ten, and both were right
-— the slower WoRMS is, the more of the page is Wikidata-only and therefore rank-less. A figure here
-would be a second place to be wrong about something that legitimately moves between two consecutive
-requests.
+**`"unknown"` is a real value on the wire, and it is ours rather than WoRMS's.** A search hit that
+only Wikidata matched has no WoRMS record behind it; `_wikidata_result` writes the literal string
+`"unknown"` wherever it has nothing to report, and `_worms_taxon` does the same for a record that
+arrived without one.
+
+**How much of a page the sentinel covers changed, and the two fields parted company when it did.**
+This section used to claim, in bold, that it was most of a typical page rather than a rare edge case
+— `?q=manta` returning a pile of *Manta* synonyms Wikidata knew and the WoRMS query for that
+fragment did not. That claim is **struck**, not annotated around, because it stopped being true of
+`rank`: P105 now fills the rank on a Wikidata-only row wherever the entity carries one and the map
+covers it, which on the queries this feature exists for is nearly every row. It remains true of
+**`status`** — Wikidata has nothing to say about nomenclatural status, so a Wikidata-only row still
+reports `"unknown"` there every single time, and a page that is mostly Wikidata is still mostly
+status-less.
+
+No count is quoted for either, on purpose, because the proportion is not a property of the data: it
+is a function of whether WoRMS answered inside `_SEARCH_BUDGET_SECONDS` on that particular request.
+Two sessions measuring the same query hours apart got seven of ten and nine of ten, and both were
+right — the slower WoRMS is, the more of the page is Wikidata-only. A figure here would be a second
+place to be wrong about something that legitimately moves between two consecutive requests.
 
 Two consequences worth stating, because both were found by a client rendering it:
 
 - **Clients must not display it raw.** "Manta americana, unknown" reads as a claim about the animal
   rather than about our not having classified the name, so the web picker drops the hint when the
   rank is `"unknown"`. That is a display decision and belongs on the client — the API's job is to be
-  honest that it does not know, not to guess a rank from an entity's "instance of" claims.
+  honest about what it does not know.
+
+  **This bullet used to end by refusing to derive a rank from an entity's claims, and that refusal
+  is reversed here along with the premise it rested on.** It was right while rank was context nobody
+  read: a second property lookup and a mapping table, spent on a caption. Rank becomes a sort input
+  — the search order puts species and below ahead of genus and above, so the species a diver spotted
+  outranks its genus on the page — and under an order that reads rank, a blanket sentinel is not a
+  missing caption but a wrong position. The fill lands ahead of the ordering that consumes it,
+  deliberately: an order introduced first would have run against a Wikidata side where every row
+  carried the sentinel. What is derived is also narrower than what was refused — P105 is *taxon
+  rank*, Wikidata's own statement of the thing, not an inference from "instance of".
+
 - **The merge treats it as a placeholder, not a claim** (`_merge_result`): a real rank from either
   source displaces it, which is what makes a hit both registers matched come out with WoRMS's
   taxonomy rather than whichever source happened to be written first.
+
 - **A persisted catalog row can carry it too**, which is the half that gets reasoned away. The
   tempting inference is "`resolve_species` 503s rather than invent a row, so anything in the catalog
   came from an authoritative record, so its rank is real" — and the premise is true while the
@@ -8248,6 +8308,22 @@ Two consequences worth stating, because both were found by a client rendering it
   a dive can both be `"unknown"`. A client guard against it on the *detail* card is live code, not
   defensive padding — this exact inference was made independently on the web side and came within a
   commit of documenting that guard as unreachable.
+
+**What P105 bounds, and what it does not.** It gives a Wikidata-sourced row a rank with no WoRMS
+involvement at all, which is what stops a Wikidata-heavy page ordering as though nothing on it had a
+rank. It does not make the field stable between requests. Where a row sorts can still differ across
+two identical searches, but only for a taxon that fails on *both* sides at once: its WoRMS record
+omits `rank` — the fallback two bullets up, and the same trap as the "WoRMS always has one"
+inference — **and** its Wikidata item carries no P105, or one the map does not cover. Needing both
+is what makes the residual small enough to accept rather than absent.
+
+The unmapped-item half is worth naming precisely, because its direction is not the safe one. An
+unmapped rank item produces `"unknown"`, and `"unknown"` sorts *between* the ranks rather than below
+them — so an omitted order or phylum would sit above every genus and family row instead of beneath
+them, inverting the very ruling the sort exists for. Falling back to a sentinel is only safe for
+ranks no register emits. That is why the map is enumerated against a closed vocabulary up front and
+carries **Clade** besides, rather than being filled in as escapes turn up: the enumeration is the
+defence, and the sentinel is not.
 
 The alternative — leaving the fields null — was rejected because both columns are `NOT NULL` on a
 resolved row, and a schema whose optionality differs between a search hit and the catalog row it
