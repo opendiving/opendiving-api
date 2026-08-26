@@ -51,14 +51,13 @@ from src.app.models.user import User
 from src.app.schemas.auth import (
     EmailCodeVerifyRequest,
     EmailVerifyRequest,
-    GoogleAuthRequest,
     ProfileCompletionRequest,
     RestoreRequest,
 )
 from src.app.services.auth_service import AuthenticatedUser, DeletionPending, OnboardingRequired, resolve_identity
 from tests.conftest import db_available
 from tests.helpers.generators import create_user
-from tests.helpers.mocks import stub_claim
+from tests.helpers.mocks import google_auth_body, stub_claim
 
 USER_UUID = uuid_pkg.uuid4()
 REQUEST_UUID = uuid_pkg.uuid4()
@@ -236,16 +235,18 @@ class TestTheOutcomeOnEveryEntryPoint:
     async def test_google(self, mock_db):
         with (
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.exchange_google_code", new_callable=AsyncMock) as exchange,
             patch("src.app.api.v1.auth.verify_google_id_token", new_callable=AsyncMock) as verify,
             patch("src.app.services.auth_service.crud_authentication_providers") as providers,
             patch("src.app.services.auth_service.crud_users") as users,
         ):
+            exchange.return_value = "an-id-token"
             verify.return_value = GoogleUserInfo(google_id="g-1", email="gone@example.com", name="Gone")
             providers.get = AsyncMock(return_value=None)
             users.get = AsyncMock(return_value=_pending_row())
 
             response = Mock()
-            outcome = await auth_with_google(_request(), GoogleAuthRequest(credential="good"), response, mock_db)
+            outcome = await auth_with_google(_request(), google_auth_body(), response, mock_db)
 
             self._assert_offered_the_account_back(outcome, response)
 

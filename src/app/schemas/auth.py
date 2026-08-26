@@ -93,11 +93,38 @@ class LinkCheckResponse(BaseModel):
 
 # -------------- google --------------
 class GoogleAuthRequest(BaseModel):
+    """`POST /auth/google` - what the browser comes back from Google holding.
+
+    No Google code runs in the visitor's browser: the web app builds an authorization URL
+    itself and performs a top-level navigation to it, and Google returns the visitor to
+    `{FRONTEND_URL}/auth/google/callback` with an authorization code in the query string.
+    That code, the PKCE verifier the same attempt generated, and the redirect URI the
+    browser actually used are the three things this server needs to redeem it.
+
+    There is deliberately no `credential` field any more. `extra="forbid"` means a body
+    still carrying one is a 422 rather than a silently ignored key, which is what a moved
+    contract should do to a client that has not moved with it.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    # The ID token (a JWT) returned to the frontend by Google Identity Services after
-    # the user picks an account.
-    credential: str
+    # The single-use authorization code from Google's `?code=` parameter. Worthless
+    # without `GOOGLE_CLIENT_SECRET` and the verifier below, which is why it is safe for
+    # it to have travelled through the browser at all.
+    code: Annotated[str, Field(min_length=1, max_length=2048)]
+
+    # The PKCE verifier whose SHA-256 the browser sent to the authorization endpoint as
+    # `code_challenge`. Length and alphabet are exactly what RFC 7636 §4.1 specifies, so a
+    # malformed one is a 422 naming the field rather than an `invalid_grant` from Google
+    # that names nothing - which is the shape a verifier built with standard base64 instead
+    # of base64url arrives in, since `+` and `/` are outside the unreserved set.
+    code_verifier: Annotated[str, Field(min_length=43, max_length=128, pattern=r"^[A-Za-z0-9\-._~]+$")]
+
+    # The `redirect_uri` the browser used, echoed back because Google requires the
+    # exchange to repeat it - and checked against `FRONTEND_URL` first, which is what
+    # turns a misconfigured deployment into this app's own error. Bounded because the
+    # refusal quotes it back.
+    redirect_uri: Annotated[str, Field(min_length=1, max_length=2048)]
 
 
 # -------------- profile completion --------------

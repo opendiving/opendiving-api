@@ -159,6 +159,79 @@ class TestEveryDeployedEnvironmentRequiresARelay:
         assert settings.SMTP_HOST is None
 
 
+class TestGoogleSignInNeedsBothHalvesOfItsClient:
+    """Signing in with Google redeems an authorization code at Google's token endpoint,
+    which takes the client secret as well as the id. An instance with only the id renders
+    the button and 401s every click, and the web app - which decides whether to render it
+    from its *own* `GOOGLE_CLIENT_ID` - has no way to learn that the API is short a secret.
+    So startup refuses rather than degrading.
+
+    **Every case here names both variables explicitly**, and that is not belt-and-braces.
+    `GOOGLE_CLIENT_ID` is a class-level default read from `src/.env` at import time, so a
+    test that omits it is testing whatever the developer running it happens to have
+    configured - which is a different guard on their machine than in CI, where there is no
+    `src/.env` at all.
+    """
+
+    def test_an_id_without_a_secret_fails_startup(self):
+        with pytest.raises(ValueError, match="GOOGLE_CLIENT_SECRET"):
+            _settings(GOOGLE_CLIENT_ID="an-id.apps.googleusercontent.com", GOOGLE_CLIENT_SECRET=None)
+
+    def test_the_error_names_both_variables_and_what_to_do(self):
+        with pytest.raises(ValueError) as raised:
+            _settings(GOOGLE_CLIENT_ID="an-id.apps.googleusercontent.com", GOOGLE_CLIENT_SECRET=None)
+
+        message = str(raised.value)
+        assert "GOOGLE_CLIENT_ID" in message
+        assert "GOOGLE_CLIENT_SECRET" in message
+        assert "Google Cloud Console" in message
+
+    @pytest.mark.parametrize("secret", ["", "   "])
+    def test_a_blank_secret_is_not_a_secret(self, secret: str):
+        """`SecretStr("")` is truthy - it defines no `__bool__` - so a plain falsiness check
+        would let an empty variable through and fail at the first sign-in instead.
+        """
+        with pytest.raises(ValueError, match="GOOGLE_CLIENT_SECRET"):
+            _settings(GOOGLE_CLIENT_ID="an-id.apps.googleusercontent.com", GOOGLE_CLIENT_SECRET=secret)
+
+    def test_both_halves_is_the_configuration_that_boots(self):
+        settings = _settings(
+            GOOGLE_CLIENT_ID="an-id.apps.googleusercontent.com", GOOGLE_CLIENT_SECRET="a-real-looking-secret"
+        )
+
+        assert settings.GOOGLE_CLIENT_SECRET is not None
+        assert settings.GOOGLE_CLIENT_SECRET.get_secret_value() == "a-real-looking-secret"
+
+    def test_neither_half_is_an_instance_with_google_sign_in_switched_off(self):
+        settings = _settings(GOOGLE_CLIENT_ID=None, GOOGLE_CLIENT_SECRET=None)
+
+        assert settings.GOOGLE_CLIENT_ID is None
+
+    def test_a_stray_secret_without_an_id_is_not_worth_failing_over(self):
+        """Only one direction is guarded. Google sign-in is off either way, and a leftover
+        variable is not a broken instance.
+        """
+        settings = _settings(GOOGLE_CLIENT_ID=None, GOOGLE_CLIENT_SECRET="left-behind")
+
+        assert settings.GOOGLE_CLIENT_ID is None
+
+    def test_the_secret_has_no_default(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("GOOGLE_CLIENT_SECRET", raising=False)
+
+        assert _config_loaded_without_an_env_file(tmp_path, monkeypatch).settings.GOOGLE_CLIENT_SECRET is None
+
+    def test_it_does_not_render_itself(self):
+        """`SecretStr`, unlike the bare `str | None` its neighbours use, so a settings
+        object reaching a traceback or a log line cannot spill it.
+        """
+        settings = _settings(
+            GOOGLE_CLIENT_ID="an-id.apps.googleusercontent.com", GOOGLE_CLIENT_SECRET="a-real-looking-secret"
+        )
+
+        assert "a-real-looking-secret" not in repr(settings.GOOGLE_CLIENT_SECRET)
+        assert "a-real-looking-secret" not in str(settings.GOOGLE_CLIENT_SECRET)
+
+
 class TestTheFirstSuperuserAddressHasNoDefault:
     """`ADMIN_EMAIL` used to default to `admin@admin.com`, a real domain belonging to
     somebody else. Sign-in is passwordless and keyed on the address, so

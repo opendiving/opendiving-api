@@ -115,6 +115,56 @@ Two consequences worth knowing before you edit it:
 
 `SITE_URL` is the web app's own origin and should move with it.
 
+### Setting up Google sign-in
+
+Google sign-in needs an OAuth client of your own, created once in the
+[Google Cloud Console](https://console.cloud.google.com/apis/credentials). It is the only optional
+feature here that requires anything outside this instance, and there is no shared or default client
+to fall back on — an OAuth client is tied to the exact URLs it will redirect to, so it has to be
+yours.
+
+Create credentials of type **OAuth client ID**, application type **Web application**. Two things
+come out of it and both go in your `.env`:
+
+| From the Console  | Into `.env`            | Secret?                                                                                           |
+| ----------------- | ---------------------- | ------------------------------------------------------------------------------------------------- |
+| **Client ID**     | `GOOGLE_CLIENT_ID`     | No. It travels in a URL the visitor can read, and the web app uses it too.                        |
+| **Client secret** | `GOOGLE_CLIENT_SECRET` | **Yes.** It stays on the API. Never put it anywhere the browser or the `web` container can reach. |
+
+Then register, on that same client:
+
+- **Authorized redirect URI** — `{FRONTEND_URL}/auth/google/callback`, exactly. For the default
+  install that is `https://dive.example.com/auth/google/callback`; locally it is
+  `http://localhost:3000/auth/google/callback`. This is where Google sends the visitor back.
+
+**Upgrading an instance that already had Google sign-in?** That client almost certainly has no
+redirect URI at all — the previous flow never sent one, so a client created for it carries an
+authorized JavaScript *origin* and nothing else, and the gap is invisible until the first sign-in
+attempt after the upgrade. Add the redirect URI above. The origin already on it does no harm and can
+stay.
+
+Google constrains both lists the same way, and has done all along — this is not a new restriction,
+only one that was never written down here:
+
+- **Redirect URIs must use HTTPS**, with `http://localhost` URIs exempt.
+- **The host cannot be a raw IP address**, with localhost IPs exempt.
+
+So a plain-HTTP instance on a LAN address has never been able to offer Google sign-in and still
+cannot: there is no redirect URI Google will accept for it. That instance has the emailed link and
+code, which serve it fully. It is the same eligibility question passkeys have, for a different
+reason, and the same fix — a real hostname and a certificate the browser trusts.
+
+Three separate things can be wrong here, and each says so differently:
+
+- **`GOOGLE_CLIENT_ID` set with no `GOOGLE_CLIENT_SECRET`** — the API refuses to start, naming both
+  variables. It fails at startup rather than at the first click because the web app decides whether
+  to show the button from its own copy of the client id and cannot know the API is short a secret.
+- **`FRONTEND_URL` disagreeing with the origin visitors actually reach** — `POST /auth/google`
+  answers 400 naming `FRONTEND_URL`, from this app.
+- **A redirect URI you have not registered** — Google refuses the exchange and sign-in answers 401.
+  Set `LOG_LEVEL=DEBUG` and the API logs the short reason Google gave (`redirect_uri_mismatch`,
+  `invalid_client`, …). Nothing from Google's answer is logged above that level, deliberately.
+
 ### When something is down
 
 The three methods fail independently, which is most of the argument for having three:
@@ -157,6 +207,7 @@ records are in Postgres, and the uploaded files themselves are on the `files-dat
 | `CONTACT_FORM_EMAIL`                                        | *(none)*  | Where the contact form delivers. Unset, that endpoint answers 503 and the form is off.                                                                                                                                          |
 | `CONTACT_EMAIL`                                             | *(none)*  | Shown on the contact page as a fallback. Display only.                                                                                                                                                                          |
 | `GOOGLE_CLIENT_ID`                                          | *(none)*  | Offers Google Sign-In, and loads Google's script for every signed-out visitor — read [Third-party calls](#third-party-calls) before setting it. Unset, the button is hidden and `accounts.google.com` leaves the web app's CSP. |
+| `GOOGLE_CLIENT_SECRET`                                      | *(none)*  | The other half of that OAuth client, and a real secret. Required whenever `GOOGLE_CLIENT_ID` is set — the API refuses to start without it. See [Setting up Google sign-in](#setting-up-google-sign-in).                         |
 | `MAP_TILE_URL`, `MAP_TILE_URL_DARK`, `MAP_TILE_ATTRIBUTION` | Carto     | The basemap behind every map the web app draws — see [Third-party calls](#third-party-calls). The CSP follows these automatically.                                                                                              |
 | `GEOCODER_URL`                                              | Nominatim | Turns a map pin into a place name, server-side. Set to `""` to switch geocoding off entirely.                                                                                                                                   |
 | `WORMS_API_URL`, `WIKIDATA_API_URL`                         | public    | The species picker's two registers, also called server-side.                                                                                                                                                                    |

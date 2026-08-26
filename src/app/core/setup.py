@@ -38,10 +38,10 @@ from .utils import cache
 configure_logging(settings.LOG_LEVEL)
 
 # httpx logs every request it makes at INFO as `HTTP Request: GET <full url> "..."`, and
-# `services.geocoding_service` - the app's only outbound HTTP client - sends
-# `GEOCODER_API_KEY` as a query parameter, which is where Nominatim-compatible mirrors want
-# it. So at INFO the key is written into whatever collects this app's logs, defeating the
-# care that service takes to log the request *path* and never the built URL.
+# `services.geocoding_service` sends `GEOCODER_API_KEY` as a query parameter, which is where
+# Nominatim-compatible mirrors want it. So at INFO the key is written into whatever collects
+# this app's logs, defeating the care that service takes to log the request *path* and never
+# the built URL.
 #
 # Pinned after `configure_logging` and independently of `LOG_LEVEL`, so that turning the app
 # up to DEBUG to chase a problem does not also start writing the key out. WARNING rather

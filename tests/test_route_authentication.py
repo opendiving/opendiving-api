@@ -43,7 +43,10 @@ ANONYMOUS_BY_DESIGN: dict[tuple[str, str], str] = {
         "POST",
         "/api/v1/auth/email/verify-code",
     ): "Redeems the code from the same email as that link, at the same point in the flow.",
-    ("POST", "/api/v1/auth/google"): "Redeems a Google ID token; same position in the flow as email/verify.",
+    (
+        "POST",
+        "/api/v1/auth/google",
+    ): "Redeems a Google authorization code; same position in the flow as email/verify.",
     ("POST", "/api/v1/auth/complete"): "Turns an onboarding token into an account - there is no account yet.",
     (
         "POST",

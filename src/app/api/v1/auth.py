@@ -38,7 +38,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.config import settings
 from ...core.db.database import async_get_db, release_read_transaction
-from ...core.exceptions.http_exceptions import DuplicateValueException, UnauthorizedException
+from ...core.exceptions.http_exceptions import (
+    BadRequestException,
+    DuplicateValueException,
+    UnauthorizedException,
+)
 from ...core.schemas import OnboardingTokenData
 from ...core.security import (
     TokenType,
@@ -46,6 +50,7 @@ from ...core.security import (
     blacklist_tokens,
     create_onboarding_token,
     create_restore_token,
+    exchange_google_code,
     generate_secure_token,
     generate_sign_in_code,
     hash_sign_in_code,
@@ -455,9 +460,27 @@ async def auth_with_google(
     response: Response,
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> AuthOutcome:
-    """Verifies a Google ID token and either signs the caller in (existing account,
-    linking the Google provider first if it hasn't been already) or hands back an
+    """Redeems a Google authorization code and either signs the caller in (existing
+    account, linking the Google provider first if it hasn't been already) or hands back an
     onboarding session (new account).
+
+    The visitor's browser never loads or runs anything of Google's. It navigates to
+    Google's authorization endpoint, comes back to `{FRONTEND_URL}/auth/google/callback`
+    with a single-use code, and posts that code here; this server redeems it at Google's
+    token endpoint with `GOOGLE_CLIENT_SECRET` and the PKCE verifier, and verifies the ID
+    token that comes back. Nothing Google issues that identifies anyone ever passes through
+    the browser.
+
+    Three distinct failures, which is the point of the shape:
+
+    - **400** - the `redirect_uri` is not the one this instance's `FRONTEND_URL` derives.
+      A diagnostic rather than a control (Google binds the code to the URI it saw, and will
+      not accept an unregistered one), and it exists so a `FRONTEND_URL` disagreeing with
+      the origin the visitor reached fails here, naming the setting, rather than as a
+      `redirect_uri_mismatch` that names neither.
+    - **401** - Google refused the code, or the ID token it returned does not check out.
+    - **503** - Google could not be reached. Raised from `exchange_google_code`, and
+      deliberately not the 401: this server failing is not the visitor's credential failing.
     """
     await enforce_rate_limit(
         f"auth:google:ip:{client_ip(request)}",
@@ -465,7 +488,21 @@ async def auth_with_google(
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
 
-    google_user = await verify_google_id_token(body.credential)
+    expected_redirect_uri = settings.google_redirect_uri
+    if body.redirect_uri != expected_redirect_uri:
+        raise BadRequestException(
+            f"This instance expects Google to redirect to {expected_redirect_uri}, but the sign-in "
+            f"attempt used {body.redirect_uri}. Set FRONTEND_URL to the origin visitors actually "
+            "reach, and register that callback URL against your Google OAuth client."
+        )
+
+    id_token = await exchange_google_code(
+        code=body.code, code_verifier=body.code_verifier, redirect_uri=body.redirect_uri
+    )
+    if id_token is None:
+        raise UnauthorizedException("Invalid Google credential.")
+
+    google_user = await verify_google_id_token(id_token)
     if google_user is None:
         raise UnauthorizedException("Invalid Google credential.")
 

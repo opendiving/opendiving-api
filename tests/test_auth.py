@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from fastapi import Response
+from fastapi import HTTPException, Response
 from jose import jwt
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
@@ -21,8 +21,13 @@ from src.app.api.v1.auth import (
     verify_email_code,
     verify_email_link,
 )
-from src.app.core.config import settings
-from src.app.core.exceptions.http_exceptions import DuplicateValueException, RateLimitException, UnauthorizedException
+from src.app.core.config import FrontendSettings, settings
+from src.app.core.exceptions.http_exceptions import (
+    BadRequestException,
+    DuplicateValueException,
+    RateLimitException,
+    UnauthorizedException,
+)
 from src.app.core.schemas import GoogleUserInfo, OnboardingTokenData
 from src.app.core.security import ALGORITHM, SECRET_KEY, hash_sign_in_code
 from src.app.schemas.auth import (
@@ -33,7 +38,7 @@ from src.app.schemas.auth import (
     ProfileCompletionRequest,
 )
 from src.app.services.user_avatars import StoredAvatar
-from tests.helpers.mocks import claimed_used_at_sql, stub_claim
+from tests.helpers.mocks import GOOGLE_CODE_VERIFIER, claimed_used_at_sql, google_auth_body, stub_claim
 
 # Every sign-in path subjects its tokens to this, not to the account's username - see
 # `services.auth_service.issue_tokens`.
@@ -55,6 +60,11 @@ def _created_row(request_uuid: uuid_pkg.UUID = REQUEST_UUID) -> Mock:
     the model: `request_email_link` reads `.uuid` off it to answer with a `request_id`.
     """
     return Mock(uuid=request_uuid)
+
+
+# What `google_auth_body` builds bodies against, named here because these tests assert on
+# it as well as send it.
+FRONTEND_CALLBACK = settings.google_redirect_uri
 
 
 class TestRequestEmailLink:
@@ -750,19 +760,145 @@ class TestEmailCodeVerifyRequestSchema:
             EmailCodeVerifyRequest(request_id=REQUEST_UUID, code=typed)
 
 
-class TestAuthWithGoogle:
-    """`POST /auth/google`."""
+class TestGoogleAuthRequestShape:
+    """The body `POST /auth/google` accepts, now that the browser sends a code."""
+
+    def test_the_old_credential_field_is_refused_rather_than_ignored(self):
+        """`extra="forbid"`, so a client still sending a GIS ID token gets a 422 that names
+        the field. A moved contract must not accept a body it will silently do nothing with.
+        """
+        with pytest.raises(ValidationError):
+            GoogleAuthRequest(
+                code="an-authorization-code",
+                code_verifier=GOOGLE_CODE_VERIFIER,
+                redirect_uri=FRONTEND_CALLBACK,
+                credential="an-id-token",
+            )
+
+    def test_the_credential_only_body_the_old_client_sent_is_refused(self):
+        with pytest.raises(ValidationError):
+            GoogleAuthRequest(credential="an-id-token")
+
+    @pytest.mark.parametrize("verifier", ["a" * 42, "a" * 129, ""])
+    def test_a_verifier_outside_rfc_7636s_bounds_is_a_422(self, verifier: str):
+        """43-128 characters, per RFC 7636 §4.1. Rejected here so a malformed verifier
+        names the field rather than coming back as an `invalid_grant` from Google that
+        names nothing.
+        """
+        with pytest.raises(ValidationError):
+            google_auth_body(code_verifier=verifier)
+
+    @pytest.mark.parametrize("verifier", ["a" * 42 + "+", "a" * 42 + "/", "a" * 42 + "="])
+    def test_a_verifier_outside_rfc_7636s_alphabet_is_a_422(self, verifier: str):
+        """The unreserved set only. This is the shape a verifier built with standard base64
+        rather than base64url arrives in, and catching it here beats an `invalid_grant`.
+        """
+        with pytest.raises(ValidationError):
+            google_auth_body(code_verifier=verifier)
+
+    def test_the_alphabet_rfc_7636_does_allow_is_accepted(self):
+        verifier = "AZaz09-._~" + "a" * 33
+
+        assert google_auth_body(code_verifier=verifier).code_verifier == verifier
+
+    @pytest.mark.parametrize("verifier", ["a" * 43, "a" * 128])
+    def test_both_ends_of_that_range_are_accepted(self, verifier: str):
+        assert google_auth_body(code_verifier=verifier).code_verifier == verifier
+
+    def test_an_empty_code_is_a_422(self):
+        with pytest.raises(ValidationError):
+            google_auth_body(code="")
+
+
+class TestGoogleRedirectUriIsChecked:
+    """The `redirect_uri` the browser used has to be the one `FRONTEND_URL` derives.
+
+    A diagnostic rather than a security control - Google binds the code to the URI it saw
+    and will not accept an unregistered one - so what these pin is that a `FRONTEND_URL`
+    disagreeing with the origin the visitor reached fails *here*, in this app's own error,
+    rather than as a `redirect_uri_mismatch` that names neither setting.
+    """
+
+    def test_the_uri_is_derived_from_frontend_url(self):
+        assert settings.google_redirect_uri.endswith("/auth/google/callback")
+
+    @pytest.mark.parametrize("frontend_url", ["https://dive.example.com", "https://dive.example.com/"])
+    def test_a_trailing_slash_on_frontend_url_does_not_double_up(self, frontend_url: str):
+        """Rebuilt from the parse, exactly as `passkey_origin` is, because a trailing slash
+        is the most ordinary way to write a URL variable and would otherwise produce a
+        `//auth/google/callback` that matches nothing Google has registered.
+        """
+        derived = FrontendSettings(FRONTEND_URL=frontend_url).google_redirect_uri
+
+        assert derived == "https://dive.example.com/auth/google/callback"
 
     @pytest.mark.asyncio
-    async def test_invalid_credential_raises_unauthorized(self, mock_db):
+    async def test_a_different_redirect_uri_is_refused_before_google_is_called(self, mock_db):
         with (
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.exchange_google_code", new_callable=AsyncMock) as exchange,
+        ):
+            with pytest.raises(BadRequestException) as raised:
+                await auth_with_google(
+                    _request(), google_auth_body(redirect_uri="https://evil.example.com/callback"), Mock(), mock_db
+                )
+
+            # The whole point of refusing here rather than at Google: nothing was spent.
+            exchange.assert_not_called()
+            detail = str(raised.value.detail)
+            assert "FRONTEND_URL" in detail
+            assert "https://evil.example.com/callback" in detail
+            assert FRONTEND_CALLBACK in detail
+
+
+class TestAuthWithGoogle:
+    """`POST /auth/google` - redeeming an authorization code."""
+
+    @pytest.mark.asyncio
+    async def test_a_code_google_refuses_raises_unauthorized(self, mock_db):
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.exchange_google_code", new_callable=AsyncMock) as exchange,
             patch("src.app.api.v1.auth.verify_google_id_token", new_callable=AsyncMock) as mock_verify,
         ):
+            exchange.return_value = None
+
+            with pytest.raises(UnauthorizedException):
+                await auth_with_google(_request(), google_auth_body(), Mock(), mock_db)
+
+            # An unredeemed code has no token to verify - the second call must not happen.
+            mock_verify.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_id_token_that_does_not_check_out_raises_unauthorized(self, mock_db):
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.exchange_google_code", new_callable=AsyncMock) as exchange,
+            patch("src.app.api.v1.auth.verify_google_id_token", new_callable=AsyncMock) as mock_verify,
+        ):
+            exchange.return_value = "an-id-token"
             mock_verify.return_value = None
 
             with pytest.raises(UnauthorizedException):
-                await auth_with_google(_request(), GoogleAuthRequest(credential="bad"), Mock(), mock_db)
+                await auth_with_google(_request(), google_auth_body(), Mock(), mock_db)
+
+    @pytest.mark.asyncio
+    async def test_google_being_unreachable_is_not_reported_as_a_bad_credential(self, mock_db):
+        """A 503 from the exchange travels out as a 503. Reporting "invalid credential" for
+        this server's own outage would send the visitor to re-try something that was never
+        their problem.
+        """
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.exchange_google_code", new_callable=AsyncMock) as exchange,
+        ):
+            exchange.side_effect = HTTPException(status_code=503, detail="unreachable")
+
+            with pytest.raises(HTTPException) as raised:
+                await auth_with_google(_request(), google_auth_body(), Mock(), mock_db)
+
+            assert raised.value.status_code == 503
+            assert not isinstance(raised.value, UnauthorizedException)
 
     @pytest.mark.asyncio
     async def test_existing_google_user_signs_in(self, mock_db):
@@ -771,20 +907,49 @@ class TestAuthWithGoogle:
 
         with (
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.exchange_google_code", new_callable=AsyncMock) as exchange,
             patch("src.app.api.v1.auth.verify_google_id_token", new_callable=AsyncMock) as mock_verify,
             patch("src.app.services.auth_service.crud_authentication_providers") as mock_providers,
             patch("src.app.services.auth_service.crud_users") as mock_users,
         ):
+            exchange.return_value = "an-id-token"
             mock_verify.return_value = google_user
             mock_providers.get = AsyncMock(return_value={"user_id": 1})
             mock_users.get = AsyncMock(return_value=db_user)
 
             response = Mock()
-            outcome = await auth_with_google(_request(), GoogleAuthRequest(credential="good"), response, mock_db)
+            outcome = await auth_with_google(_request(), google_auth_body(), response, mock_db)
 
             assert outcome.status == "authenticated"
             response.set_cookie.assert_called_once()
             mock_providers.get.assert_called_once_with(db=mock_db, provider="google", provider_user_id="g-123")
+
+    @pytest.mark.asyncio
+    async def test_all_three_body_fields_reach_the_exchange(self, mock_db):
+        """The verifier is what makes the code useless to anyone who intercepted it, and
+        the redirect URI is what Google matches against its registration - so both have to
+        travel, not just the code.
+        """
+        google_user = GoogleUserInfo(google_id="g-123", email="user@example.com", name="Jane Doe")
+
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.exchange_google_code", new_callable=AsyncMock) as exchange,
+            patch("src.app.api.v1.auth.verify_google_id_token", new_callable=AsyncMock) as mock_verify,
+            patch("src.app.services.auth_service.crud_authentication_providers") as mock_providers,
+            patch("src.app.services.auth_service.crud_users") as mock_users,
+        ):
+            exchange.return_value = "an-id-token"
+            mock_verify.return_value = google_user
+            mock_providers.get = AsyncMock(return_value=None)
+            mock_users.get = AsyncMock(return_value=None)
+
+            await auth_with_google(_request(), google_auth_body(code="the-code"), Mock(), mock_db)
+
+            exchange.assert_awaited_once_with(
+                code="the-code", code_verifier=GOOGLE_CODE_VERIFIER, redirect_uri=FRONTEND_CALLBACK
+            )
+            mock_verify.assert_awaited_once_with("an-id-token")
 
     @pytest.mark.asyncio
     async def test_links_existing_email_account(self, mock_db):
@@ -801,17 +966,19 @@ class TestAuthWithGoogle:
 
         with (
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.exchange_google_code", new_callable=AsyncMock) as exchange,
             patch("src.app.api.v1.auth.verify_google_id_token", new_callable=AsyncMock) as mock_verify,
             patch("src.app.services.auth_service.crud_authentication_providers") as mock_providers,
             patch("src.app.services.auth_service.crud_users") as mock_users,
         ):
+            exchange.return_value = "an-id-token"
             mock_verify.return_value = google_user
             mock_providers.get = AsyncMock(return_value=None)
             mock_providers.exists = AsyncMock(return_value=False)
             mock_providers.create = AsyncMock(return_value=None)
             mock_users.get = AsyncMock(return_value=existing_user)
 
-            outcome = await auth_with_google(_request(), GoogleAuthRequest(credential="good"), Mock(), mock_db)
+            outcome = await auth_with_google(_request(), google_auth_body(), Mock(), mock_db)
 
             assert outcome.status == "authenticated"
             mock_providers.create.assert_called_once()
@@ -828,15 +995,17 @@ class TestAuthWithGoogle:
 
         with (
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.exchange_google_code", new_callable=AsyncMock) as exchange,
             patch("src.app.api.v1.auth.verify_google_id_token", new_callable=AsyncMock) as mock_verify,
             patch("src.app.services.auth_service.crud_authentication_providers") as mock_providers,
             patch("src.app.services.auth_service.crud_users") as mock_users,
         ):
+            exchange.return_value = "an-id-token"
             mock_verify.return_value = google_user
             mock_providers.get = AsyncMock(return_value=None)
             mock_users.get = AsyncMock(return_value=None)
 
-            outcome = await auth_with_google(_request(), GoogleAuthRequest(credential="good"), Mock(), mock_db)
+            outcome = await auth_with_google(_request(), google_auth_body(), Mock(), mock_db)
 
             assert outcome.status == "onboarding_required"
             assert outcome.email == "newperson@example.com"

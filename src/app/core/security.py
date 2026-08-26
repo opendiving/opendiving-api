@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import secrets
 import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
@@ -6,6 +7,8 @@ from enum import StrEnum
 from typing import Any
 
 import anyio
+import httpx
+from fastapi import HTTPException
 from fastapi.security import OAuth2PasswordBearer
 from google.auth.exceptions import GoogleAuthError
 from google.auth.transport import requests as google_requests
@@ -25,6 +28,8 @@ from .schemas import (
     TokenBlacklistRead,
     TokenData,
 )
+
+logger = logging.getLogger(__name__)
 
 SECRET_KEY: SecretStr = settings.SECRET_KEY
 ALGORITHM = settings.ALGORITHM
@@ -112,22 +117,137 @@ def hash_sign_in_code(code: str) -> str:
     return hashlib.sha256(code.encode()).hexdigest()
 
 
-# -------------- google id token verification --------------
-async def verify_google_id_token(credential: str) -> GoogleUserInfo | None:
-    """Verify a Google Identity Services ID token and extract the account info from it.
+# -------------- google authorization code exchange --------------
+# `token_endpoint` from the OpenID discovery document at
+# <https://accounts.google.com/.well-known/openid-configuration>, which is also the only
+# thing that documents Google's PKCE support: it advertises
+# `"code_challenge_methods_supported": ["plain", "S256"]`, and neither of Google's web-flow
+# guides mentions PKCE at all. Confirmed still advertised on 2026-08-27.
+#
+# Hard-coded rather than discovered at startup. Fetching the document would buy a URL that
+# has not moved in a decade, at the cost of one more thing that can be down when the app
+# boots.
+_GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 
-    Parameters
-    ----------
-    credential: str
-        The `credential` JWT returned to the frontend by Google's Identity Services
-        library, forwarded here unmodified.
+# Set by hand to match this repo's other outbound calls rather than to supply a bound that
+# would otherwise be missing - httpx defaults to 5 seconds anyway. `services.geocoding_
+# service` is the precedent, including the deadline below: the timeout is per socket read,
+# so a host that dribbles bytes is bounded by the deadline and by nothing else.
+_GOOGLE_TOKEN_TIMEOUT = httpx.Timeout(5.0)
+_GOOGLE_TOKEN_DEADLINE_SECONDS = 10.0
+
+_GOOGLE_UNAVAILABLE = "Could not reach Google to complete the sign-in. Please try again."
+
+
+def _google_error_code(response: httpx.Response) -> str:
+    """The short OAuth `error` enum from a refusal, for a DEBUG line and nothing else.
+
+    Deliberately narrow. Google's refusal body carries an `error_description` alongside the
+    enum, and this app's rule is that nothing from a Google token response reaches a log
+    line at a level that ships - so the description is never read, and even the enum only
+    appears under `LOG_LEVEL=DEBUG`, which is what an operator turns on to find out whether
+    they are looking at `invalid_client` (a wrong secret) or `redirect_uri_mismatch` (a
+    redirect URI nobody registered).
+    """
+    try:
+        payload = response.json()
+    except ValueError:
+        return "unreadable"
+    return str(payload.get("error", "unnamed")) if isinstance(payload, dict) else "unnamed"
+
+
+async def exchange_google_code(*, code: str, code_verifier: str, redirect_uri: str) -> str | None:
+    """Redeem a Google authorization code for the ID token it stands for.
+
+    One POST, form-encoded as RFC 6749 §4.1.3 requires, carrying both halves of the OAuth
+    client plus the PKCE verifier whose challenge the browser sent to the authorization
+    endpoint. `httpx` rather than `google-auth-oauthlib`: it is already a dependency, and a
+    second Google library would be a new supply-chain surface for one HTTP call.
+
+    **Two failures, deliberately not one.** `None` means Google looked at the code and said
+    no - expired, already redeemed, or a `redirect_uri`/verifier that does not match what it
+    saw - which is a 401 to the caller. Google being unreachable, answering 5xx, or
+    answering something that is not JSON is *this server* failing to do its job and raises
+    503 from here, because reporting it to a visitor as a bad credential would send them to
+    re-try a sign-in that was never their problem.
+
+    Nothing from the response is logged beyond a status code (see `_google_error_code`), and
+    the secret only ever travels in the request body - never in the URL, and `core.setup`
+    pins httpx's own logger to WARNING regardless of `LOG_LEVEL`, so nothing about the
+    request is written out from there either.
+    """
+    if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_CLIENT_SECRET:
+        # Unreachable on a running instance - `Settings._require_google_client_secret`
+        # refuses to boot a half-configured one, and the endpoint above is only useful with
+        # an id. Kept so this function has an answer rather than an AttributeError.
+        return None
+
+    form = {
+        "code": code,
+        "client_id": settings.GOOGLE_CLIENT_ID,
+        "client_secret": settings.GOOGLE_CLIENT_SECRET.get_secret_value(),
+        "code_verifier": code_verifier,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    }
+
+    try:
+        with anyio.fail_after(_GOOGLE_TOKEN_DEADLINE_SECONDS):
+            # A client per call, as everywhere else here: sign-in with Google is not hot
+            # enough for a pooled connection to still be warm, and a module-level client
+            # would need lifespan wiring to be closed.
+            async with httpx.AsyncClient(timeout=_GOOGLE_TOKEN_TIMEOUT) as client:
+                response = await client.post(_GOOGLE_TOKEN_ENDPOINT, data=form)
+    except (httpx.HTTPError, TimeoutError) as exc:
+        logger.warning("Could not reach Google's token endpoint (%s).", type(exc).__name__)
+        # A raw `HTTPException`: `core/exceptions/http_exceptions.py` has no class for 503,
+        # same as `api/v1/contact.py` and `services/species_service.py`.
+        raise HTTPException(status_code=503, detail=_GOOGLE_UNAVAILABLE) from None
+
+    if response.status_code >= 500:
+        logger.warning("Google's token endpoint answered %s.", response.status_code)
+        raise HTTPException(status_code=503, detail=_GOOGLE_UNAVAILABLE)
+
+    if response.status_code != 200:
+        logger.warning("Google refused an authorization code exchange (HTTP %s).", response.status_code)
+        if logger.isEnabledFor(logging.DEBUG):
+            # Guarded rather than left to the logger, so that a body this app has decided
+            # not to log is not even parsed on the ordinary path.
+            logger.debug("Google's refusal named error=%s.", _google_error_code(response))
+        return None
+
+    try:
+        payload = response.json()
+    except ValueError:
+        logger.warning("Google's token endpoint answered %s with a body that is not JSON.", response.status_code)
+        raise HTTPException(status_code=503, detail=_GOOGLE_UNAVAILABLE) from None
+
+    id_token = payload.get("id_token") if isinstance(payload, dict) else None
+    if not isinstance(id_token, str) or not id_token:
+        # A 200 with no ID token means the scope did not include `openid`, which is a
+        # mistake in the authorization URL rather than anything the visitor did.
+        logger.warning("Google's token response carried no id_token.")
+        return None
+    return id_token
+
+
+# -------------- google id token verification --------------
+async def verify_google_id_token(id_token: str) -> GoogleUserInfo | None:
+    """Verify a Google ID token and extract the account info from it.
+
+    The token arrives from `exchange_google_code` above - straight from Google's token
+    endpoint over TLS, never through the browser. OIDC permits skipping signature
+    verification on a token received that way, and this does it anyway: the same call also
+    enforces `email_verified`, the presence of `email` and `sub`, and - through `audience` -
+    that the token was issued for *this* app's OAuth client, which is what catches a
+    half-swapped configuration. Keeping it also keeps `GoogleUserInfo` construction in one
+    place.
 
     Returns
     -------
     GoogleUserInfo | None
-        The verified account info if `credential` is a genuine, non-expired Google ID
-        token issued for this app (checked via the `aud` claim matching
-        `settings.GOOGLE_CLIENT_ID`) and its email is Google-verified, `None` otherwise.
+        The verified account info, or `None` if the token is not a genuine, non-expired
+        Google ID token for this client with a Google-verified email.
     """
     if not settings.GOOGLE_CLIENT_ID:
         return None
@@ -143,7 +263,7 @@ async def verify_google_id_token(credential: str) -> GoogleUserInfo | None:
         # duration of a round trip to Google, so it goes to a worker thread - the same
         # treatment `services.email_service` gives its equally blocking SMTP client.
         verified: dict[str, Any] = google_id_token.verify_oauth2_token(
-            credential, google_requests.Request(), audience=settings.GOOGLE_CLIENT_ID
+            id_token, google_requests.Request(), audience=settings.GOOGLE_CLIENT_ID
         )
         return verified
 
