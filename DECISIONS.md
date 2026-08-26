@@ -11408,6 +11408,12 @@ picture meant creating an account on someone else's website. The API's half of t
 its row in `docs/self-hosting/configuration.md`. With it gone, *Third-party calls* from the browser
 is map tiles and nothing else.
 
+**Annotation, later:** that last sentence was only ever true of an instance with `GOOGLE_CLIENT_ID`
+unset. Google's sign-in script is a second browser-side call on any instance that offers Google
+sign-in, and it loads before anyone chooses it. The claim above stands for what the Gravatar removal
+achieved; *Third-party calls* now names both. See *"The operator docs carry the consent duty,
+because the privacy page is part of what ships"*.
+
 ### Two columns, not a `user_avatar` table
 
 The table option was the obvious symmetry — it would mirror `certification_file` exactly — and it
@@ -11792,3 +11798,62 @@ sign-in email is written to the API log, magic link and six-digit code included,
 for whoever's account they belong to — so the bug form's logs field says to read the lines before
 pasting them. Local development is exactly the configuration that produces those log lines, and
 exactly the configuration a bug reporter is most likely to be running.
+
+## The operator docs carry the consent duty, because the privacy page is part of what ships
+
+The web image serves a `/privacy` page, and an operator installing this project publishes it under
+their own name whether or not they read it. That makes it configuration surface rather than somebody
+else's copy: it asserts things about *this* instance — no analytics, no advertising storage, no
+cookie banner because there is nothing to ask about — and those assertions are only true for as long
+as the operator does not add any. `docs/self-hosting/configuration.md` now says so under
+*Third-party calls*, because the page cannot warn its own operator and nothing else in this
+repository was addressing them.
+
+The duty being handed over is a real one and it moves with the deployment. Under ePrivacy the
+obligation to obtain consent before storing on or reading from a visitor's device falls on whoever
+operates the service, and that is the self-hoster, not this project — the same division already
+recorded for erasure under *"Deleting an account is two changes with a fortnight between them"*,
+where the operator is the controller. Adding a tracker is therefore not a configuration change with
+a documentation footnote; it is the operator taking on a compliance obligation the shipped page
+currently says they do not have, and the docs say that plainly rather than implying the image keeps
+covering them.
+
+**The CSP is not the guarantee the docs used to claim it was.** The old sentence said the web app's
+Content-Security-Policy "structurally forbids" adding analytics without changing the policy, and
+that promises more than it delivers in two directions. `script-src` carries `'strict-dynamic'`, so a
+script bundled into the web app's own build is trusted transitively and needs no policy edit at all
+— an analytics package added to `package.json` loads fine. And `connect-src` allows `'self'`, so
+anything reporting to the instance's own origin is ordinary first-party traffic. What the policy
+actually constrains is the *destination*: a `fetch`, `XMLHttpRequest`, WebSocket or `sendBeacon`
+aimed at a third-party collector is refused until `connect-src` names it. The docs are scoped to
+that claim now. Overstating a technical control in an operator document is worse than omitting it,
+because it invites the reader to skip the duty above on the strength of a guard that would not hold.
+
+### `REFRESH_TOKEN_EXPIRE_DAYS` joins the "before you change the number" list
+
+It was documented nowhere under `docs/` and it should have been, for the same reason
+`ACCOUNT_DELETION_GRACE_DAYS` is: the web image quotes it back to divers as prose. Two lines say
+"about a week" — the note under the sign-in button and the privacy page's section on the sign-in
+cookie — and neither reads the setting, so an instance that changes it ships two sentences that no
+longer describe it. Its `## Sign-in` entry says that, and says the other half a self-hoster is
+likely to get wrong: this is an inactivity window rather than a session length, because the cookie
+is single-use and each refresh restarts the clock (`services/auth_service.py`,
+`core/security.py:create_refresh_token`). "Sessions last a week" is the natural misreading, and it
+is wrong in the direction that makes an operator shorten the number to fix a problem they do not
+have.
+
+### The admin panel's cookies are named as a category, never individually
+
+`/privacy` §10.4 tells divers that an instance with the admin panel on sets session cookies for
+whoever administers it, and points at these docs rather than describing them — so *The admin panel*
+had to have somewhere for that pointer to land, and now does. It deliberately gives no cookie names
+and no count. Those cookies belong to `crudadmin`, which this project pins with a `>=0.4.2` floor
+rather than an exact version, so both are a dependency's internals and either could change on an
+upgrade with nothing here to notice. Names do appear elsewhere in this repository — `session_id` in
+`middleware/client_cache_middleware.py` and its tests, and `session_id` and `csrf_token` together in
+*"Keying on the cookie rather than on the mount path"* above — but in both places they are evidence
+for an argument about caching, sitting beside the reasoning that produced them, where a stale name
+is visibly a stale name. Copying them into an operator's configuration reference would turn the same
+strings into an inventory, read as current by someone who has no reason to check. An operator who
+wants the list can read it out of their own browser, which is the copy that is true for the version
+they are running.

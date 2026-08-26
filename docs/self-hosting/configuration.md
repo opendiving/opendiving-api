@@ -60,6 +60,21 @@ of it still has working sign-in as long as mail is delivered.
 | `PASSKEY_OPTIONS_RATE_LIMIT_PER_IP`    | `240`   | Per IP, per `MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS`. High because one is minted per signed-out page view that offers passkey autofill, and an office behind one NAT gateway is a single IP here. |
 | `PASSKEY_VERIFY_RATE_LIMIT_PER_IP`     | `30`    | Per IP, same window.                                                                                                                                                                            |
 | `PASSKEY_REGISTER_RATE_LIMIT_PER_USER` | `10`    | Per signed-in account, same window.                                                                                                                                                             |
+| `REFRESH_TOKEN_EXPIRE_DAYS`            | `7`     | How long a browser stays signed in **without the app being used**. A rolling window, not a session length — read below before changing it.                                                      |
+
+**Two things worth knowing before you change the number.** The refresh cookie is single-use: each
+time it is spent a fresh one replaces it with the clock started again, so this setting bounds
+*inactivity* rather than the session. A browser used every day stays signed in indefinitely; one
+left alone for longer than this asks for a sign-in link again. That is the behaviour the web app
+describes, so raising or lowering it changes what the app does rather than only how long a token
+lives.
+
+And the number is quoted back to divers in two places the web image ships as prose — the note under
+the sign-in button and the bundled privacy page's section on the sign-in cookie, both of which say
+"about a week" from the default of 7. Neither reads this setting, so an instance that changes it has
+two lines of copy that no longer match it. It is the same coupling as the privacy page's "within 30
+days" against [account deletion](#account-deletion), and the same remedy: pick a number your own
+copy can honestly stand behind, or expect to edit those two lines.
 
 There is deliberately **no on/off switch for passkeys**. The browser's own capability detection is
 the switch: where a ceremony cannot work the web app hides the option rather than offering one that
@@ -137,14 +152,14 @@ records are in Postgres, and the uploaded files themselves are on the `files-dat
 
 ## Optional features
 
-| Variable                                                    | Default   | What it does                                                                                                                    |
-| ----------------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `CONTACT_FORM_EMAIL`                                        | *(none)*  | Where the contact form delivers. Unset, that endpoint answers 503 and the form is off.                                          |
-| `CONTACT_EMAIL`                                             | *(none)*  | Shown on the contact page as a fallback. Display only.                                                                          |
-| `GOOGLE_CLIENT_ID`                                          | *(none)*  | Offers Google Sign-In. Unset, the button is hidden and `accounts.google.com` leaves the web app's CSP. See [Sign-in](#sign-in). |
-| `MAP_TILE_URL`, `MAP_TILE_URL_DARK`, `MAP_TILE_ATTRIBUTION` | Carto     | The dive-site picker's basemap. The web app's CSP follows these automatically.                                                  |
-| `GEOCODER_URL`                                              | Nominatim | Turns a map pin into a place name, server-side. Set to `""` to switch geocoding off entirely.                                   |
-| `WORMS_API_URL`, `WIKIDATA_API_URL`                         | public    | The species picker's two registers, also called server-side.                                                                    |
+| Variable                                                    | Default   | What it does                                                                                                                                                                                                                    |
+| ----------------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTACT_FORM_EMAIL`                                        | *(none)*  | Where the contact form delivers. Unset, that endpoint answers 503 and the form is off.                                                                                                                                          |
+| `CONTACT_EMAIL`                                             | *(none)*  | Shown on the contact page as a fallback. Display only.                                                                                                                                                                          |
+| `GOOGLE_CLIENT_ID`                                          | *(none)*  | Offers Google Sign-In, and loads Google's script for every signed-out visitor — read [Third-party calls](#third-party-calls) before setting it. Unset, the button is hidden and `accounts.google.com` leaves the web app's CSP. |
+| `MAP_TILE_URL`, `MAP_TILE_URL_DARK`, `MAP_TILE_ATTRIBUTION` | Carto     | The basemap behind every map the web app draws — see [Third-party calls](#third-party-calls). The CSP follows these automatically.                                                                                              |
+| `GEOCODER_URL`                                              | Nominatim | Turns a map pin into a place name, server-side. Set to `""` to switch geocoding off entirely.                                                                                                                                   |
+| `WORMS_API_URL`, `WIKIDATA_API_URL`                         | public    | The species picker's two registers, also called server-side.                                                                                                                                                                    |
 
 ### Account deletion
 
@@ -201,6 +216,15 @@ shipped value covers the bundled Caddy.
 Running your own proxy? Route `/admin` to `api:8000` yourself — the web container carries only
 `/api/v1` — and make sure your proxy is in `TRUSTED_PROXY_IPS` **and** sets `X-Forwarded-Proto`.
 
+**The panel signs its administrators in with cookies of its own**, set under `CRUD_ADMIN_MOUNT_PATH`
+when someone logs in to it. They are part of the surface you operate rather than anything a diver
+meets: nobody using the app receives one, and they exist only in the browser of whoever administers
+this copy. That is why the bundled privacy page — written for the people whose dives your instance
+holds — does not describe them, and points operators here instead. They belong to `crudadmin` and
+their names are its business, not this app's, so read them out of your own browser rather than from
+a list here that a dependency upgrade could quietly falsify. Leave the panel off, as it ships, and
+there are none.
+
 **Turning it on gives you a second copy of personal data, and account deletion does not reach it.**
 The panel keeps its own tables — `admin_event_log`, a row per action with the admin's address and
 user agent, and `admin_audit_log`, which for every create, update and delete stores the row's JSON
@@ -234,11 +258,29 @@ this copy. Leave the panel off, as it ships, and none of this exists.
 
 Nothing here phones home. What the app can be told to contact:
 
-- **From the browser**: map tiles, and only those — the dive-site picker only, and only the `z/x/y`
-  of the area shown. Nothing else, including profile pictures: an avatar is stored on your own files
+- **From the browser**: map tiles, and — only where you have set `GOOGLE_CLIENT_ID` — Google's
+  sign-in code. Nothing else, profile pictures included: an avatar is stored on your own files
   volume and served by your own API. (Gravatar used to be an option here, disclosing a hash of every
   signed-in user's email address and their IP to Automattic on every page. It is gone, along with
   its `GRAVATAR_ENABLED` variable.)
+
+  **Tiles** are requested wherever a map is on screen, and carry only the `z/x/y` of the area shown.
+  Five surfaces draw one: the form to add or edit a dive site, a dive site's own page, the form to
+  add or edit a trip, a trip with places on it, and the page of a dive that has a position — from
+  the site it was logged at, or from the GPS reading in the file it was imported from. The two forms
+  load a map as soon as they open; the other three load none when there is nothing to show. Your
+  tile provider therefore sees a visitor's IP address and roughly where they dive, and nothing else
+  — not their account, their dive log, or the name of anything on the map. Point `MAP_TILE_URL` at a
+  tile server you run and none of that leaves your machine.
+
+  **Google's sign-in code** loads from `accounts.google.com` as the front page or the sign-in page
+  appears, before anyone has chosen Google and whether or not they ever do — so Google sees that
+  visitor's IP address and browser at that moment, and may set cookies of its own under its own
+  policy, which neither you nor this app can see. Narrowing it so that nothing reaches Google until
+  the button is actually clicked is a separate change already in hand. Until then, leaving
+  `GOOGLE_CLIENT_ID` unset is what avoids it entirely: the button disappears, and so does the
+  bundled privacy page's section disclosing this.
+
 - **From the server**: the geocoder and the two species registers, on cache misses only. A pinned
   coordinate or a typed search string goes out; nothing identifying the diver does, and the source
   IP is your server's. Both are configurable, and the geocoder can be switched off outright. One
@@ -247,5 +289,20 @@ Nothing here phones home. What the app can be told to contact:
   again — and stores it on your files volume. It is best-effort; a failure just means that account
   starts with initials.
 
-There is no analytics of any kind, and the web app's Content-Security-Policy structurally forbids
-adding some without also changing the policy.
+There is no analytics of any kind. The web app's Content-Security-Policy narrows where anything
+could be *sent*: `connect-src` names this instance's own origin and its API, plus
+`accounts.google.com` where Google sign-in is configured, so a `fetch`, an `XMLHttpRequest`, a
+WebSocket or a `navigator.sendBeacon` aimed at a third-party collector is refused by the browser
+until the policy itself is widened. Take that for what it is and no more — it constrains
+destinations, not dependencies. Script bundled into the web app loads under `'strict-dynamic'`,
+because your own build already vouches for it, and anything reporting back to this instance's own
+origin passes as ordinary first-party traffic.
+
+**Add any of it and the consent duty is yours.** The `/privacy` page is part of the web image, and
+it describes exactly the posture above: nothing here is advertising or analytics, which is the whole
+reason it offers no cookie banner. Add a tracker, an analytics script, an advertising tag or any new
+third-party subresource to your copy and two things happen together — that page stops being true of
+your instance, and asking for consent *before* the storage or access happens becomes an obligation
+on you, along with building the flow that collects it. Under ePrivacy that duty falls on whoever
+operates the service, which is you and not this project, and nothing in the image can discharge it
+on your behalf.
