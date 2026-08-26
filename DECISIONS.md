@@ -11849,8 +11849,11 @@ whoever administers it, and points at these docs rather than describing them —
 had to have somewhere for that pointer to land, and now does. It deliberately gives no cookie names
 and no count. Those cookies belong to `crudadmin`, which this project pins with a `>=0.4.2` floor
 rather than an exact version, so both are a dependency's internals and either could change on an
-upgrade with nothing here to notice. The one name that appears anywhere in this repository is
-`session_id`, in `middleware/client_cache_middleware.py`, and it is there because the cache
-middleware must treat a cookie as a credential — a detail of that middleware's reasoning, not a
-published inventory. An operator who wants the list can read it out of their own browser, which is
-the copy that is true for the version they are running.
+upgrade with nothing here to notice. Names do appear elsewhere in this repository — `session_id` in
+`middleware/client_cache_middleware.py` and its tests, and `session_id` and `csrf_token` together in
+*"Keying on the cookie rather than on the mount path"* above — but in both places they are evidence
+for an argument about caching, sitting beside the reasoning that produced them, where a stale name
+is visibly a stale name. Copying them into an operator's configuration reference would turn the same
+strings into an inventory, read as current by someone who has no reason to check. An operator who
+wants the list can read it out of their own browser, which is the copy that is true for the version
+they are running.
