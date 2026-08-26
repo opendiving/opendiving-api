@@ -152,14 +152,14 @@ records are in Postgres, and the uploaded files themselves are on the `files-dat
 
 ## Optional features
 
-| Variable                                                    | Default   | What it does                                                                                                                       |
-| ----------------------------------------------------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `CONTACT_FORM_EMAIL`                                        | *(none)*  | Where the contact form delivers. Unset, that endpoint answers 503 and the form is off.                                             |
-| `CONTACT_EMAIL`                                             | *(none)*  | Shown on the contact page as a fallback. Display only.                                                                             |
-| `GOOGLE_CLIENT_ID`                                          | *(none)*  | Offers Google Sign-In. Unset, the button is hidden and `accounts.google.com` leaves the web app's CSP. See [Sign-in](#sign-in).    |
-| `MAP_TILE_URL`, `MAP_TILE_URL_DARK`, `MAP_TILE_ATTRIBUTION` | Carto     | The basemap behind every map the web app draws — see [Third-party calls](#third-party-calls). The CSP follows these automatically. |
-| `GEOCODER_URL`                                              | Nominatim | Turns a map pin into a place name, server-side. Set to `""` to switch geocoding off entirely.                                      |
-| `WORMS_API_URL`, `WIKIDATA_API_URL`                         | public    | The species picker's two registers, also called server-side.                                                                       |
+| Variable                                                    | Default   | What it does                                                                                                                                                                                                                    |
+| ----------------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTACT_FORM_EMAIL`                                        | *(none)*  | Where the contact form delivers. Unset, that endpoint answers 503 and the form is off.                                                                                                                                          |
+| `CONTACT_EMAIL`                                             | *(none)*  | Shown on the contact page as a fallback. Display only.                                                                                                                                                                          |
+| `GOOGLE_CLIENT_ID`                                          | *(none)*  | Offers Google Sign-In, and loads Google's script for every signed-out visitor — read [Third-party calls](#third-party-calls) before setting it. Unset, the button is hidden and `accounts.google.com` leaves the web app's CSP. |
+| `MAP_TILE_URL`, `MAP_TILE_URL_DARK`, `MAP_TILE_ATTRIBUTION` | Carto     | The basemap behind every map the web app draws — see [Third-party calls](#third-party-calls). The CSP follows these automatically.                                                                                              |
+| `GEOCODER_URL`                                              | Nominatim | Turns a map pin into a place name, server-side. Set to `""` to switch geocoding off entirely.                                                                                                                                   |
+| `WORMS_API_URL`, `WIKIDATA_API_URL`                         | public    | The species picker's two registers, also called server-side.                                                                                                                                                                    |
 
 ### Account deletion
 
