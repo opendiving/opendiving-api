@@ -11391,6 +11391,13 @@ biometric gesture have no side-effect-free look-before-you-click step; on those 
 the button never *says* the wrong thing — it is that redeeming the credential never *does* the wrong
 thing, and that holds on all four.
 
+> **Annotation, later: "a Google dialog" is no longer the shape of that path.** Google sign-in is a
+> top-level navigation out to `accounts.google.com` and back, not a dialog over a page of this app's
+> — see *"Google sign-in is an authorization code this server redeems, not an ID token the browser
+> hands over"*. The argument is unchanged, and if anything easier to make: a visitor who has left
+> for Google and returned carrying a code has committed to redeeming it, and there is no moment in
+> between at which this app could have shown them anything.
+
 One asymmetry the screen has to disclose: `verify_email_code` claims the request before resolving
 the identity, so a code spent on reaching the restore screen is spent, and closing that tab costs a
 fresh code. The magic link leaves its token unused — the precheck marks nothing — so the same
@@ -11419,6 +11426,15 @@ unset. Google's sign-in script is a second browser-side call on any instance tha
 sign-in, and it loads before anyone chooses it. The claim above stands for what the Gravatar removal
 achieved; *Third-party calls* now names both. See *"The operator docs carry the consent duty,
 because the privacy page is part of what ships"*.
+
+**Annotation, later still:** and now the original sentence is true again, on every instance rather
+than only the unconfigured ones. Google sign-in stopped loading anything into the browser — it is a
+top-level navigation the visitor triggers by pressing the button, and the code it comes back with is
+redeemed server-side — so *Third-party calls* from the browser is map tiles and nothing else,
+whichever way `GOOGLE_CLIENT_ID` is set. The annotation above is left standing because it is the
+record of the interval between the two changes, not because it still describes the code. See
+*"Google sign-in is an authorization code this server redeems, not an ID token the browser hands
+over"*.
 
 ### Two columns, not a `user_avatar` table
 
