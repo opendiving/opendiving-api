@@ -136,7 +136,10 @@ _GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 _GOOGLE_TOKEN_TIMEOUT = httpx.Timeout(5.0)
 _GOOGLE_TOKEN_DEADLINE_SECONDS = 10.0
 
-_GOOGLE_UNAVAILABLE = "Could not reach Google to complete the sign-in. Please try again."
+# Four paths answer with this - Google unreachable, throttling, failing, or answering
+# something unparseable - so it says what did not happen rather than why. "Could not reach
+# Google" would be a guess that is wrong on three of the four.
+_GOOGLE_UNAVAILABLE = "Could not complete the sign-in with Google. Please try again."
 
 
 def _google_error_code(response: httpx.Response) -> str:
