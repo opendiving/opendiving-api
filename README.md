@@ -133,8 +133,12 @@ FRONTEND_URL="http://localhost:3000"
 # your users' support requests to somebody else's inbox.
 CONTACT_FORM_EMAIL="you@example.com"
 
-# Optional: Google Sign-In (must match the frontend's NEXT_PUBLIC_GOOGLE_CLIENT_ID)
+# Optional: Google Sign-In. Both halves of one OAuth client, or neither - an id with no
+# secret refuses to start. The id must match the frontend's NEXT_PUBLIC_GOOGLE_CLIENT_ID;
+# the secret stays here. Register {FRONTEND_URL}/auth/google/callback as an Authorized
+# redirect URI on that client.
 GOOGLE_CLIENT_ID="your-client-id.apps.googleusercontent.com"
+GOOGLE_CLIENT_SECRET="your-client-secret"
 ```
 
 Token lifetimes, rate limits, and the rest have sensible defaults — they're in `src/.env.example`

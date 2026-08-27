@@ -157,6 +157,14 @@ One endpoint (`POST /auth/google`) covers both a brand-new Google sign-in and on
 that already exists (either created via Google before, or via email and now linking Google for the
 first time).
 
+This is the OAuth 2.0 authorization code flow with PKCE, built by hand. **No code of Google's runs
+in the visitor's browser at any point**, and nothing reaches Google until the button is pressed: the
+web app composes an authorization URL itself and performs a top-level navigation to it. What comes
+back through the browser is a single-use authorization code, which is worthless to anyone who
+intercepts it — redeeming it takes `GOOGLE_CLIENT_SECRET`, which never leaves this server, and the
+PKCE verifier, which never leaves the browser that generated it. The ID token identifying the diver
+travels only between Google and this API.
+
 ```mermaid
 sequenceDiagram
     participant U as User
@@ -166,11 +174,16 @@ sequenceDiagram
     participant DB as Database
 
     U->>FE: Clicks "Continue with Google"
-    FE->>Google: Google Identity Services popup
-    Google-->>FE: ID token (credential)
-    FE->>API: POST /auth/google {credential}
-    API->>Google: Verify ID token signature
-    Google-->>API: sub, email (verified), name, avatar
+    Note over FE: Generates a state and a PKCE verifier,\nstores both, sends only the verifier's SHA-256
+    FE->>Google: Top-level navigation to accounts.google.com\nresponse_type=code, scope=openid email profile,\nstate, code_challenge, code_challenge_method=S256
+    Note over U,Google: The account chooser is Google's own page\non Google's own origin
+    Google-->>FE: Redirect back to {FRONTEND_URL}/auth/google/callback\ncarrying the authorization code and the state
+    FE->>FE: state names a stored attempt,\nelse nothing is exchanged
+    FE->>API: POST /auth/google\n{code, code_verifier, redirect_uri}
+    API->>API: redirect_uri is the one FRONTEND_URL derives,\nelse 400 naming FRONTEND_URL
+    API->>Google: POST oauth2.googleapis.com/token\ncode, client_id, client_secret, code_verifier,\nredirect_uri, grant_type=authorization_code
+    Google-->>API: id_token (401 if Google refuses the code,\n503 if Google cannot be reached)
+    API->>API: Verify the ID token: signature, aud,\nemail_verified -> sub, email, name, avatar
 
     alt Google sub already linked to an account
         API->>DB: resolve_identity -> account found by provider id
@@ -190,6 +203,22 @@ sequenceDiagram
     end
     FE->>U: Redirect to /dashboard
 ```
+
+**No `nonce`, deliberately.** A nonce binds an ID token to the request that asked for it, and the
+replay it defends against is of a token that travelled through the browser — the implicit flow. Here
+the ID token never touches the browser: it arrives over TLS straight from Google's token endpoint,
+in exchange for a single-use code that cannot be redeemed without both the client secret and the
+PKCE verifier. Google enforces the parameter for `response_type=id_token` and not for
+`response_type=code`, exactly as OpenID Connect Core specifies (§3.1.2.1 makes it optional for this
+flow, §3.2.2.1 required for the implicit one). Google's own OpenID Connect page marks it
+"(Required)" in a parameter table that serves both flows at once, which is where the apparent
+contradiction comes from; the flow-specific
+[OAuth 2.0 for Web Server Applications](https://developers.google.com/identity/protocols/oauth2/web-server)
+page lists it among the required parameters of neither.
+
+**PKCE support is real but undocumented in Google's guides.** What establishes it is the OpenID
+discovery document at <https://accounts.google.com/.well-known/openid-configuration>, which
+advertises `"code_challenge_methods_supported": ["plain", "S256"]`. Cite that rather than a guide.
 
 #### 4. Sign in with a passkey
 
@@ -283,7 +312,7 @@ sequenceDiagram
     participant DB as Database
 
     Note over U,DB: Account already exists, created via email magic link
-    U->>API: POST /auth/google {credential} (same verified email)
+    U->>API: POST /auth/google {code, code_verifier, redirect_uri}\n(redeems to the same verified email)
     API->>DB: No AuthenticationProvider row for\n(provider=google, provider_user_id=sub)
     API->>DB: Look up account by email -> found
     API->>DB: Create AuthenticationProvider\n(user_id, provider=google, provider_user_id=sub)

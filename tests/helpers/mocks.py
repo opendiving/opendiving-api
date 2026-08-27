@@ -5,8 +5,30 @@ from unittest.mock import AsyncMock, Mock
 from fastapi.encoders import jsonable_encoder
 
 from src.app import models
+from src.app.core.config import settings
 from src.app.core.schemas import TokenBlacklistCreate, TokenBlacklistRead
+from src.app.schemas.auth import GoogleAuthRequest
 from tests.conftest import fake
+
+# The shortest PKCE verifier RFC 7636 §4.1 allows, which is also what 32 random bytes
+# base64url-encode to and therefore what the web app actually sends.
+GOOGLE_CODE_VERIFIER = "a" * 43
+
+
+def google_auth_body(**overrides: Any) -> GoogleAuthRequest:
+    """A `POST /auth/google` body whose `redirect_uri` this instance will accept.
+
+    That URI is read off the setting rather than written out, because it is derived from
+    `FRONTEND_URL` and no test here should depend on what the `src/.env` a given run picked
+    up happens to say. `tests.test_auth.TestGoogleRedirectUriIsChecked` pins the derivation
+    itself against known values instead.
+    """
+    body: dict[str, Any] = {
+        "code": "an-authorization-code",
+        "code_verifier": GOOGLE_CODE_VERIFIER,
+        "redirect_uri": settings.google_redirect_uri,
+    }
+    return GoogleAuthRequest(**{**body, **overrides})
 
 
 class FrozenSecurityClock:

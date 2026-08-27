@@ -173,11 +173,28 @@ class FirstUserSettings(BaseSettings):
 
 class GoogleAuthSettings(BaseSettings):
     # OAuth 2.0 client ID from the Google Cloud Console, shared with the frontend
-    # (`NEXT_PUBLIC_GOOGLE_CLIENT_ID`) - it's used there to request an ID token and
-    # here, as the expected `aud` claim, to verify that token actually belongs to
-    # this app rather than some other Google OAuth client. Not a secret - safe to
-    # ship to the browser - so there's no accompanying `GOOGLE_CLIENT_SECRET`.
+    # (`NEXT_PUBLIC_GOOGLE_CLIENT_ID`) - it's used there to build the authorization URL
+    # the visitor is sent to, and here both to exchange the code that comes back and, as
+    # the expected `aud` claim, to verify that the resulting ID token belongs to this app
+    # rather than some other Google OAuth client. Not a secret; it rides in a URL the
+    # visitor can read.
     GOOGLE_CLIENT_ID: str | None = config("GOOGLE_CLIENT_ID", default=None)
+
+    # The other half of that client, and the one value here that genuinely is a secret:
+    # it is what lets this server redeem an authorization code at Google's token
+    # endpoint, and it never leaves the server - not to the browser, not to the `web`
+    # container (see the `environment:` block in `deploy/docker-compose.yml`, which names
+    # `GOOGLE_CLIENT_ID` and deliberately not this).
+    #
+    # `SecretStr` rather than the bare `str | None` that `SMTP_PASSWORD` and
+    # `GEOCODER_API_KEY` beside it use: those predate this, and a value that must not
+    # reach a log line is better served by a type whose `repr` cannot spill it into a
+    # traceback than by everyone remembering. `Settings` is never dumped anywhere, but
+    # "never" is a property to hold structurally.
+    #
+    # Setting `GOOGLE_CLIENT_ID` without this fails startup - see
+    # `Settings._require_google_client_secret`.
+    GOOGLE_CLIENT_SECRET: SecretStr | None = config("GOOGLE_CLIENT_SECRET", default=None, cast=SecretStr)
 
 
 class MagicLinkSettings(BaseSettings):
@@ -461,6 +478,27 @@ class FrontendSettings(BaseSettings):
         parsed = urlparse(self.FRONTEND_URL)
         return f"{parsed.scheme}://{parsed.netloc}"
 
+    @property
+    def google_redirect_uri(self) -> str:
+        """Where Google sends the visitor back after they approve the sign-in, and the
+        `redirect_uri` this server will exchange an authorization code against.
+
+        Rebuilt from the parse rather than concatenated, for the reason `passkey_origin`
+        above gives: a `FRONTEND_URL` with a trailing slash is the most ordinary way to
+        write a URL variable, and `{FRONTEND_URL}/auth/google/callback` would then produce
+        a double slash that Google matches against nothing it has registered.
+
+        Derived rather than configured, so there is no second place for it to be wrong -
+        but the browser still *sends* the URI it used, and `POST /auth/google` refuses to
+        exchange against any other. That comparison is a diagnostic rather than a control:
+        Google already binds a code to the URI it saw and will not accept one it has no
+        registration for, so what the check buys is that a `FRONTEND_URL` disagreeing with
+        the origin the visitor actually reached fails in this app's own error, naming this
+        setting, instead of as a `redirect_uri_mismatch` from Google that names neither.
+        """
+        parsed = urlparse(self.FRONTEND_URL)
+        return f"{parsed.scheme}://{parsed.netloc}/auth/google/callback"
+
 
 class PasskeySettings(BaseSettings):
     """Everything passkeys need beyond `FRONTEND_URL`, all defaulted - registering one
@@ -734,6 +772,51 @@ class Settings(
                 "passwordless, so without a mail relay nobody can sign in at all - including the "
                 "first user. Point SMTP_* at any relay you trust, or run this instance as "
                 "ENVIRONMENT=local."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_google_client_secret(self) -> Self:
+        """Refuses to boot an instance that offers Google sign-in but cannot complete one.
+
+        The browser never receives a token from Google any more: it comes back with an
+        authorization code, and this server redeems that code at Google's token endpoint -
+        which takes both halves of the OAuth client. So a `GOOGLE_CLIENT_ID` with no secret
+        is an instance that renders the button and then 401s every click.
+
+        Refusing rather than warning and treating Google as unconfigured, because the
+        warning cannot be made to work end to end. The web app decides whether to render
+        the button from **its own** `GOOGLE_CLIENT_ID` and has no way to learn that the API
+        lacks a secret, so degrading here would leave a visible button that always fails.
+        Failing startup puts the error where the mistake was made, which is the same
+        argument `_require_from_address_with_smtp` above makes.
+
+        What this guarantees is exactly one thing: *an API that is running has both halves
+        of its Google credentials.* It does not promise that sign-in works - a `FRONTEND_URL`
+        disagreeing with the origin the visitor reached still breaks it (`POST /auth/google`
+        says so, naming the setting), and a redirect URI not registered in the Google Cloud
+        Console still breaks it at Google. Three failures, three distinct messages, none of
+        them silent.
+
+        Only this direction. A secret with no client id is an instance with Google sign-in
+        switched off and one stray variable, which is harmless and not worth a startup
+        failure.
+
+        This lives on the combined class rather than on `GoogleAuthSettings`, where both
+        fields are declared, because a cross-field validator has to see the whole settings
+        object - the same reason the four validators around it are here.
+        """
+        if not self.GOOGLE_CLIENT_ID:
+            return self
+
+        secret = self.GOOGLE_CLIENT_SECRET.get_secret_value().strip() if self.GOOGLE_CLIENT_SECRET else ""
+        if not secret:
+            raise ValueError(
+                "GOOGLE_CLIENT_ID is set but GOOGLE_CLIENT_SECRET is not. Signing in with Google "
+                "now redeems an authorization code at Google's token endpoint, which needs both "
+                "halves of the OAuth client. Copy the client secret from the same Google Cloud "
+                "Console credential the id came from, or unset GOOGLE_CLIENT_ID to turn Google "
+                "sign-in off."
             )
         return self
 

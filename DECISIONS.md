@@ -670,6 +670,12 @@ Identity Services *button* (via `@react-oauth/google`), which hands back a signe
 secret). The backend never sees or handles a Google client secret - the ID-token flow doesn't need
 one.
 
+> **No longer true of the client secret**, and the sentence is left standing only because the rest
+> of this section is history. The ID-token flow itself is gone: `POST /auth/google` redeems an
+> authorization code, which takes a `GOOGLE_CLIENT_SECRET` the backend very much does handle. See
+> *"Google sign-in is an authorization code this server redeems, not an ID token the browser hands
+> over"* below.
+
 Account matching, in order:
 
 1. Look up by `User.google_id` (the token's `sub` claim) - the common case for a returning Google
@@ -11857,3 +11863,155 @@ is visibly a stale name. Copying them into an operator's configuration reference
 strings into an inventory, read as current by someone who has no reason to check. An operator who
 wants the list can read it out of their own browser, which is the copy that is true for the version
 they are running.
+
+## Google sign-in is an authorization code this server redeems, not an ID token the browser hands over
+
+`POST /auth/google` used to take a `credential` - the ID-token JWT Google Identity Services handed
+the frontend after the visitor picked an account - and verify it. It now takes
+`{code, code_verifier, redirect_uri}`, redeems that code at `https://oauth2.googleapis.com/token`
+with `GOOGLE_CLIENT_SECRET`, and verifies the `id_token` that comes back. Everything from
+`resolve_identity` downward is untouched: `provider_user_id` is Google's `sub` claim in both flows,
+so there is no schema change and no migration, and the avatar import still reads `picture`.
+
+**Why, in one sentence: so that nothing of Google's runs in a signed-out visitor's browser.** The
+old flow injected `accounts.google.com/gsi/client` at component mount, which meant every visitor to
+the front page and the sign-in page - by definition signed out - had their IP address and user agent
+disclosed to Google before choosing anything, and gave Google the opportunity to set cookies of its
+own. Measured against the live GIS client: five requests to two Google-controlled origins on one
+signed-out page load. WP29 Opinion 04/2012 §3.7, on the analogous social plug-in shape, is that
+consent from logged-out visitors is needed before a third party can set cookies that way, and
+disclosure does not cure it. Clicking "Continue with Google" *is* the visitor requesting that
+service, so contacting Google only then is both the fix and the consent. It is the same instinct as
+the Gravatar removal above: the unconditional third-party browser call goes away rather than being
+disclosed.
+
+The browser half is a hand-built authorization URL and a top-level navigation. Google's own SDK for
+the code flow, `google.accounts.oauth2.initCodeClient`, ships inside the same `gsi/client` bundle,
+so choosing it would have loaded Google's script anyway and bought nothing. Two facade designs -
+deferring the script behind a click - were considered and rejected for the same reason: both leave a
+"Google's code runs in your browser" paragraph on the privacy page.
+
+**PKCE came for free with that decision, and is the one place where doing it by hand beat the SDK
+outright.** `initCodeClient`'s `CodeClientConfig` has no `code_challenge` field at all, so every
+facade option and the GIS code flow would have shipped without PKCE. Building the URL by hand is
+what makes it possible. Google's support for it is real but documented in only one place: the OpenID
+discovery document at <https://accounts.google.com/.well-known/openid-configuration> advertises
+`"code_challenge_methods_supported": ["plain", "S256"]`, and neither of Google's web-flow guides
+mentions PKCE. Cite the discovery document, not a guide.
+
+**No `nonce`, and that was measured rather than read.** Google's OpenID Connect page marks `nonce`
+"(Required)" in its *Authentication URI parameters* table while the prose beside it says the
+parameter "enables replay protection when present". Probing the authorization endpoint settles it:
+`response_type=code` is accepted without one, with or without a `code_challenge`, and
+`response_type=id_token` without one is refused with "Nonce required for response_type id_token."
+That is OIDC Core exactly - §3.1.2.1 makes it OPTIONAL for the code flow, §3.2.2.1 REQUIRED for the
+implicit one - and the contradiction on Google's page is one parameter table serving both flows. The
+threat a nonce answers is replay of a token that travelled through the browser, and here the ID
+token never does: it arrives over TLS straight from the token endpoint in exchange for a single-use
+code that cannot be redeemed without both the client secret and the verifier. Adding one would mean
+a third value marshalled through browser storage and the request body for no threat that is open.
+Anyone grepping Google's *OAuth 2.0 for Web Server Applications* page for `nonce` will find the word
+two dozen times; all but one of those are the DPoP proof section (`DPoP-Nonce`, the `nonce` claim,
+`use_dpop_nonce`) and the remaining one is inside the `state` description. None is the OIDC
+authentication nonce.
+
+### The boot guard refuses rather than degrading
+
+`Settings._require_google_client_secret` fails startup on a `GOOGLE_CLIENT_ID` with no
+`GOOGLE_CLIENT_SECRET`. The alternative - warn and treat Google as unconfigured - cannot be made to
+work end to end, and that is the whole argument: the web app decides whether to render the button
+from **its own** `GOOGLE_CLIENT_ID` and has no channel by which to learn that the API is short a
+secret, so degrading would leave a visible button that 401s on every click. Failing at startup puts
+the error where the mistake was made, which is what `_require_from_address_with_smtp` and
+`_reject_placeholder_secret_key` beside it already do.
+
+What it guarantees is narrow and worth stating narrowly: *an API that is running has both halves of
+its Google credentials.* It does not promise sign-in works. Three distinct things can still be
+wrong, and each has its own message - a `FRONTEND_URL` disagreeing with the origin the visitor
+reached (400 from `auth_with_google`, naming the setting), a redirect URI nobody registered (Google
+refuses, 401), and Google being unreachable (503). None of them is silent.
+
+**It fires at import, and that is worth knowing before it surprises someone.** `GOOGLE_CLIENT_ID` is
+a class-level default evaluated when `core/config.py` is imported - `config = Config(env_path)`
+reads `src/.env`, and the module ends with `settings = Settings()`. So in any checkout whose
+`src/.env` carries a client id and no secret, `pytest` dies at collection and `api`, `worker` and
+`admin_init` all fail to start. Adding the variable is the fix; a placeholder is enough to get the
+suite and the stack running, because the guard checks presence rather than validity. CI is
+unaffected for an uninteresting reason - it has no `src/.env`, so it has no client id either, which
+is also why "no existing test constructs `Settings` with `GOOGLE_CLIENT_ID` set" is true and does
+not mean what it sounds like. Nothing has to *construct* it; the value is a default read from a
+file. That is why `TestGoogleSignInNeedsBothHalvesOfItsClient` names both variables explicitly in
+every case: a test that omits one is testing whatever the machine running it happens to have
+configured.
+
+### The `redirect_uri` in the request body is a diagnostic, not a control
+
+The handler compares `body.redirect_uri` byte-for-byte against `FRONTEND_URL`'s
+`/auth/google/callback` and refuses anything else with a 400 naming the setting. **Mistaking this
+for a security control is how it gets removed later**, so: Google already binds a code to the URI it
+saw, and a URI not registered against the client cannot be used at all, which is why accepting the
+field from the browser is not a hole.
+
+What it buys is that a `FRONTEND_URL` disagreeing with the origin the visitor actually reached fails
+*here*, in this app's own error naming this app's own setting, instead of at Google as a
+`redirect_uri_mismatch` that names neither and surfaces only inside the API's exchange response.
+Deriving the URI server-side and ignoring the browser's was the first draft and is rejected for
+exactly that reason: it makes the two derivations diverge in silence. `google_redirect_uri` is
+rebuilt from the parse rather than concatenated, the way `passkey_origin` beside it is, so a
+`FRONTEND_URL` with a trailing slash does not produce a `//auth/google/callback` that matches
+nothing.
+
+### "Google said no" and "Google was not there" are different responses
+
+Every rejection used to be one `UnauthorizedException("Invalid Google credential.")`. It still is
+for a token endpoint answering 4xx - an expired code, a replayed one, a `redirect_uri_mismatch` -
+because that is genuinely a bad credential. A network failure or a 5xx from Google is **this
+server** failing to do its job, and reporting it to the visitor as a bad credential sends them to
+re-try something that was never their problem. `exchange_google_code` raises a 503 for those,
+following `api/v1/contact.py` and `services/species_service.py` in raising a bare `HTTPException`
+because `core/exceptions/http_exceptions.py` has no class for that status.
+
+**429 is the one 4xx sorted with the 5xx**, and it is worth naming because the split otherwise reads
+as a status-code range. The question the branch answers is not "which side of 500 is this" but "is
+this the visitor's credential or this server's problem": a throttled or quota-exhausted client is
+the second, and "try signing in again" is the one piece of advice that cannot help there.
+
+### Nothing of the token response is logged, and the secret is a `SecretStr`
+
+`GOOGLE_CLIENT_SECRET` is the first genuinely secret Google value in this repo, and it is typed
+`SecretStr` where `SMTP_PASSWORD` and `GEOCODER_API_KEY` beside it are bare `str | None`. Those
+predate this; a value that must not reach a log line is better served by a type whose `repr` cannot
+spill it into a traceback than by everyone remembering. `SecretStr("")` is truthy - it defines no
+`__bool__` - so the guard checks `.get_secret_value().strip()` rather than falsiness, or an empty
+variable would pass startup and fail at the first sign-in.
+
+The secret travels only in the request body, and httpx's own request log line is the URL and the
+status, so it cannot leak that way either. Google's response is not logged at all above DEBUG: a
+refusal writes its HTTP status at WARNING and the short OAuth `error` enum at DEBUG, and the
+`error_description` is never read. That split is deliberate rather than squeamish - the enum is what
+distinguishes `invalid_client` from `redirect_uri_mismatch` for an operator debugging a fresh
+install, and `LOG_LEVEL=DEBUG` is the documented way to see it.
+
+### The outbound call has a seam because the tests need one
+
+`exchange_google_code` is imported into `api/v1/auth.py`'s namespace so the endpoint tests can patch
+`src.app.api.v1.auth.exchange_google_code`, exactly as they already patch `verify_google_id_token`.
+This is not a style preference: those tests patch the helper rather than the library, so an exchange
+call added without such a seam would reach the network during `pytest`. `respx` is not a dependency
+here and this repo's convention for outbound calls is `patch`/`AsyncMock` - or, where the request
+itself is the thing worth asserting, a real `httpx.AsyncClient` over an `httpx.MockTransport`, which
+is what `TestExchangeGoogleCode` uses to read the form Google would actually have received.
+
+`httpx` was already a dependency, so no new one is introduced. `google-auth-oauthlib` would have
+been a new supply-chain surface for a single HTTP call and was rejected.
+
+### The client secret must never reach the `web` service
+
+`deploy/docker-compose.yml` needs no change for this variable, and the obvious edit to it is a
+security bug. `api`, `worker` and `admin_init` take `env_file: .env`, so a new variable in `.env`
+reaches all three with nothing to add. The `web:` service deliberately does not - its own comment
+says why, that a compromised Node process must not be able to read the database credentials out of
+its own environment - and instead names each variable it uses, `GOOGLE_CLIENT_ID` among them.
+**`GOOGLE_CLIENT_SECRET` must never be added to that block.** The browser half of this flow never
+sees the secret, so the Node process has no use for it, and adding it would break the one rule this
+whole section rests on.

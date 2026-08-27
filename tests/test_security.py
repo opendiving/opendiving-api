@@ -1,12 +1,18 @@
 """Unit tests for the auth/security helpers."""
 
+import logging
 import uuid as uuid_pkg
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, patch
+from urllib.parse import parse_qsl
 
+import httpx
 import pytest
+from fastapi import HTTPException
 from jose import jwt
+from pydantic import SecretStr
 
 from src.app.core.schemas import GoogleUserInfo, OnboardingTokenData
 from src.app.core.security import (
@@ -18,6 +24,7 @@ from src.app.core.security import (
     create_access_token,
     create_onboarding_token,
     create_refresh_token,
+    exchange_google_code,
     generate_secure_token,
     hash_token,
     verify_google_id_token,
@@ -292,6 +299,261 @@ class TestOnboardingTokens:
             result = await verify_onboarding_token("not-a-valid-jwt", mock_db)
 
             assert result is None
+
+
+_REAL_ASYNC_CLIENT = httpx.AsyncClient
+
+GOOGLE_CLIENT_SECRET = "the-client-secret-nobody-may-see"
+
+
+class _GoogleTokenEndpoint:
+    """An `httpx.MockTransport` in place of the one `AsyncClient` `exchange_google_code`
+    opens, following `tests/test_geocoding.py`.
+
+    A real client over a fake transport rather than a mocked client, so the request these
+    tests read is the one httpx would actually have put on the wire - which is the only way
+    "the form carries a `code_verifier`" is worth asserting.
+    """
+
+    def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
+        self.requests: list[httpx.Request] = []
+        self._handler = handler
+        self._patcher: Any = None
+
+    def _record(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        return self._handler(request)
+
+    def __enter__(self) -> _GoogleTokenEndpoint:
+        # `_REAL_ASYNC_CLIENT`, not `httpx.AsyncClient`: `core.security` reaches the class
+        # through the same module object this file imported, so the patch below replaces it
+        # here too and building one inside the factory would recurse into the mock.
+        def build(**kwargs: Any) -> httpx.AsyncClient:
+            return _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(self._record), **kwargs)
+
+        self._patcher = patch("src.app.core.security.httpx.AsyncClient", side_effect=build)
+        self._patcher.start()
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        self._patcher.stop()
+
+    @property
+    def form(self) -> dict[str, str]:
+        """The single request's body, parsed back out of its form encoding."""
+        assert len(self.requests) == 1
+        return dict(parse_qsl(self.requests[0].content.decode()))
+
+
+def _answers(payload: Any, status_code: int = 200) -> _GoogleTokenEndpoint:
+    return _GoogleTokenEndpoint(lambda request: httpx.Response(status_code, json=payload))
+
+
+def _google_configured(client_id: str | None = "client-id", secret: str | None = GOOGLE_CLIENT_SECRET) -> Any:
+    """Both halves of the OAuth client, as a running instance is guaranteed to have them
+    (`Settings._require_google_client_secret` refuses to boot without both)."""
+    patcher = patch("src.app.core.security.settings")
+    mock_settings = patcher.start()
+    mock_settings.GOOGLE_CLIENT_ID = client_id
+    mock_settings.GOOGLE_CLIENT_SECRET = SecretStr(secret) if secret is not None else None
+    return patcher
+
+
+class TestExchangeGoogleCode:
+    """Redeeming an authorization code at Google's token endpoint.
+
+    The two things worth pinning here are what goes *out* - a code with no PKCE verifier or
+    no client secret is not an exchange Google will complete - and that "Google said no" and
+    "Google was not there" stay two different answers all the way up.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_form_carries_everything_google_needs(self):
+        patcher = _google_configured()
+        try:
+            with _answers({"id_token": "an-id-token"}) as endpoint:
+                await exchange_google_code(
+                    code="the-code", code_verifier="the-verifier", redirect_uri="https://dive.example.com/cb"
+                )
+        finally:
+            patcher.stop()
+
+        assert endpoint.form == {
+            "code": "the-code",
+            "client_id": "client-id",
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "code_verifier": "the-verifier",
+            "redirect_uri": "https://dive.example.com/cb",
+            "grant_type": "authorization_code",
+        }
+
+    @pytest.mark.asyncio
+    async def test_it_posts_to_googles_token_endpoint(self):
+        patcher = _google_configured()
+        try:
+            with _answers({"id_token": "an-id-token"}) as endpoint:
+                await exchange_google_code(code="c", code_verifier="v", redirect_uri="https://dive.example.com/cb")
+        finally:
+            patcher.stop()
+
+        assert endpoint.requests[0].method == "POST"
+        assert str(endpoint.requests[0].url) == "https://oauth2.googleapis.com/token"
+
+    @pytest.mark.asyncio
+    async def test_the_id_token_is_what_comes_back(self):
+        patcher = _google_configured()
+        try:
+            with _answers({"access_token": "at", "id_token": "an-id-token", "token_type": "Bearer"}):
+                result = await exchange_google_code(
+                    code="c", code_verifier="v", redirect_uri="https://dive.example.com/cb"
+                )
+        finally:
+            patcher.stop()
+
+        assert result == "an-id-token"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status_code", [400, 401, 403])
+    async def test_a_code_google_rejects_is_none_rather_than_an_outage(self, status_code: int):
+        """An expired, replayed or mismatched code is the caller's problem and becomes a 401
+        upstream. It must not be dressed up as this server failing."""
+        patcher = _google_configured()
+        try:
+            with _answers({"error": "invalid_grant"}, status_code=status_code):
+                result = await exchange_google_code(
+                    code="c", code_verifier="v", redirect_uri="https://dive.example.com/cb"
+                )
+        finally:
+            patcher.stop()
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_a_two_hundred_carrying_no_id_token_is_none(self):
+        patcher = _google_configured()
+        try:
+            with _answers({"access_token": "at", "token_type": "Bearer"}):
+                result = await exchange_google_code(
+                    code="c", code_verifier="v", redirect_uri="https://dive.example.com/cb"
+                )
+        finally:
+            patcher.stop()
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_whose_body_is_unreadable_is_still_only_a_refusal(self, caplog):
+        """A middlebox answering the 4xx with an HTML page must not turn a bad code into an
+        exception raised while trying to read the reason.
+        """
+        patcher = _google_configured()
+        try:
+            with caplog.at_level(logging.DEBUG):
+                with _GoogleTokenEndpoint(lambda request: httpx.Response(400, text="<html>blocked</html>")):
+                    result = await exchange_google_code(
+                        code="c", code_verifier="v", redirect_uri="https://dive.example.com/cb"
+                    )
+        finally:
+            patcher.stop()
+
+        assert result is None
+        assert "unreadable" in "\n".join(record.getMessage() for record in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_being_throttled_by_google_is_not_a_bad_credential_either(self):
+        """429 sits with the 5xx despite being a 4xx. A quota this server has exhausted is
+        not a code the visitor got wrong, and "try signing in again" is the one piece of
+        advice that cannot help.
+        """
+        patcher = _google_configured()
+        try:
+            with _answers({"error": "rate_limit_exceeded"}, status_code=429):
+                with pytest.raises(HTTPException) as raised:
+                    await exchange_google_code(code="c", code_verifier="v", redirect_uri="https://dive.example.com/cb")
+        finally:
+            patcher.stop()
+
+        assert raised.value.status_code == 503
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status_code", [500, 502, 503])
+    async def test_google_failing_is_a_503_not_a_bad_credential(self, status_code: int):
+        patcher = _google_configured()
+        try:
+            with _answers({"error": "backend_error"}, status_code=status_code):
+                with pytest.raises(HTTPException) as raised:
+                    await exchange_google_code(code="c", code_verifier="v", redirect_uri="https://dive.example.com/cb")
+        finally:
+            patcher.stop()
+
+        assert raised.value.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_google_being_unreachable_is_a_503(self):
+        def refuse(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("no route to host", request=request)
+
+        patcher = _google_configured()
+        try:
+            with _GoogleTokenEndpoint(refuse):
+                with pytest.raises(HTTPException) as raised:
+                    await exchange_google_code(code="c", code_verifier="v", redirect_uri="https://dive.example.com/cb")
+        finally:
+            patcher.stop()
+
+        assert raised.value.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_a_body_that_is_not_json_is_a_503(self):
+        patcher = _google_configured()
+        try:
+            with _GoogleTokenEndpoint(lambda request: httpx.Response(200, text="<html>an error page</html>")):
+                with pytest.raises(HTTPException) as raised:
+                    await exchange_google_code(code="c", code_verifier="v", redirect_uri="https://dive.example.com/cb")
+        finally:
+            patcher.stop()
+
+        assert raised.value.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_an_unconfigured_instance_contacts_nobody(self):
+        patcher = _google_configured(client_id=None, secret=None)
+        try:
+            with _answers({"id_token": "an-id-token"}) as endpoint:
+                result = await exchange_google_code(
+                    code="c", code_verifier="v", redirect_uri="https://dive.example.com/cb"
+                )
+        finally:
+            patcher.stop()
+
+        assert result is None
+        assert endpoint.requests == []
+
+    @pytest.mark.asyncio
+    async def test_the_client_secret_never_reaches_a_log_line(self, caplog):
+        """`GOOGLE_CLIENT_SECRET` is the first genuinely secret Google value here, and logs
+        get collected, shipped and kept. Nothing from Google's response is logged either -
+        the refusal below carries an `error_description`, and only the status code is
+        written at a level that ships.
+        """
+        patcher = _google_configured()
+        try:
+            with caplog.at_level(logging.DEBUG):
+                with _answers(
+                    {"error": "invalid_client", "error_description": "Unauthorized: bad client secret"},
+                    status_code=401,
+                ):
+                    await exchange_google_code(code="c", code_verifier="v", redirect_uri="https://dive.example.com/cb")
+        finally:
+            patcher.stop()
+
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        assert GOOGLE_CLIENT_SECRET not in logged
+        assert "Unauthorized: bad client secret" not in logged
+        # The short OAuth enum is the one thing that is kept, and only under DEBUG.
+        assert "invalid_client" in logged
+        shipped = "\n".join(r.getMessage() for r in caplog.records if r.levelno >= logging.INFO)
+        assert "invalid_client" not in shipped
 
 
 class TestVerifyGoogleIdToken:
