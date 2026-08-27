@@ -11971,6 +11971,11 @@ re-try something that was never their problem. `exchange_google_code` raises a 5
 following `api/v1/contact.py` and `services/species_service.py` in raising a bare `HTTPException`
 because `core/exceptions/http_exceptions.py` has no class for that status.
 
+**429 is the one 4xx sorted with the 5xx**, and it is worth naming because the split otherwise reads
+as a status-code range. The question the branch answers is not "which side of 500 is this" but "is
+this the visitor's credential or this server's problem": a throttled or quota-exhausted client is
+the second, and "try signing in again" is the one piece of advice that cannot help there.
+
 ### Nothing of the token response is logged, and the secret is a `SecretStr`
 
 `GOOGLE_CLIENT_SECRET` is the first genuinely secret Google value in this repo, and it is typed

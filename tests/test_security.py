@@ -460,6 +460,22 @@ class TestExchangeGoogleCode:
         assert "unreadable" in "\n".join(record.getMessage() for record in caplog.records)
 
     @pytest.mark.asyncio
+    async def test_being_throttled_by_google_is_not_a_bad_credential_either(self):
+        """429 sits with the 5xx despite being a 4xx. A quota this server has exhausted is
+        not a code the visitor got wrong, and "try signing in again" is the one piece of
+        advice that cannot help.
+        """
+        patcher = _google_configured()
+        try:
+            with _answers({"error": "rate_limit_exceeded"}, status_code=429):
+                with pytest.raises(HTTPException) as raised:
+                    await exchange_google_code(code="c", code_verifier="v", redirect_uri="https://dive.example.com/cb")
+        finally:
+            patcher.stop()
+
+        assert raised.value.status_code == 503
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("status_code", [500, 502, 503])
     async def test_google_failing_is_a_503_not_a_bad_credential(self, status_code: int):
         patcher = _google_configured()

@@ -166,10 +166,10 @@ async def exchange_google_code(*, code: str, code_verifier: str, redirect_uri: s
 
     **Two failures, deliberately not one.** `None` means Google looked at the code and said
     no - expired, already redeemed, or a `redirect_uri`/verifier that does not match what it
-    saw - which is a 401 to the caller. Google being unreachable, answering 5xx, or
-    answering something that is not JSON is *this server* failing to do its job and raises
-    503 from here, because reporting it to a visitor as a bad credential would send them to
-    re-try a sign-in that was never their problem.
+    saw - which is a 401 to the caller. Google being unreachable, throttling this client,
+    answering 5xx, or answering something that is not JSON is *this server* failing to do
+    its job and raises 503 from here, because reporting it to a visitor as a bad credential
+    would send them to re-try a sign-in that was never their problem.
 
     Nothing from the response is logged beyond a status code (see `_google_error_code`), and
     the secret only ever travels in the request body - never in the URL, and `core.setup`
@@ -204,7 +204,11 @@ async def exchange_google_code(*, code: str, code_verifier: str, redirect_uri: s
         # same as `api/v1/contact.py` and `services/species_service.py`.
         raise HTTPException(status_code=503, detail=_GOOGLE_UNAVAILABLE) from None
 
-    if response.status_code >= 500:
+    if response.status_code >= 500 or response.status_code == 429:
+        # 429 sits with the 5xx rather than with the refusals below, even though it is a
+        # 4xx: a throttled or quota-exhausted client is this server unable to complete the
+        # exchange, not a visitor holding a bad code, and telling them to try signing in
+        # again is the one piece of advice that cannot help.
         logger.warning("Google's token endpoint answered %s.", response.status_code)
         raise HTTPException(status_code=503, detail=_GOOGLE_UNAVAILABLE)
 

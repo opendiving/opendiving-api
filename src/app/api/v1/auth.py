@@ -479,8 +479,9 @@ async def auth_with_google(
       the origin the visitor reached fails here, naming the setting, rather than as a
       `redirect_uri_mismatch` that names neither.
     - **401** - Google refused the code, or the ID token it returned does not check out.
-    - **503** - Google could not be reached. Raised from `exchange_google_code`, and
-      deliberately not the 401: this server failing is not the visitor's credential failing.
+    - **503** - Google could not be reached, failed, or throttled this server. Raised from
+      `exchange_google_code`, and deliberately not the 401: this server failing is not the
+      visitor's credential failing.
     """
     await enforce_rate_limit(
         f"auth:google:ip:{client_ip(request)}",
