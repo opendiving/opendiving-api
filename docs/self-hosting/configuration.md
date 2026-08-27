@@ -181,6 +181,13 @@ everyone out of an app — but a passkey challenge **is** the replay protection,
 unreachable the passkey endpoints answer 503 rather than verifying a ceremony without one. Email
 sign-in is pure Postgres and is unaffected.
 
+The `Google` row covers two different reachability problems, and only one of them is the visitor's.
+Their browser has to reach `accounts.google.com` to sign in at all, and **your API has to reach
+`oauth2.googleapis.com`** to redeem the code they come back with. So an instance with filtered
+outbound traffic can have Google sign-in fail on a network that looks perfectly healthy from the
+diver's side, with a 503 rather than a rejected credential. The other two methods are unaffected,
+which is the row as drawn.
+
 ## Database, cache, migrations
 
 `POSTGRES_SERVER`, `POSTGRES_PORT`, `REDIS_CACHE_HOST` and `REDIS_QUEUE_HOST` are set by the compose
@@ -202,15 +209,15 @@ records are in Postgres, and the uploaded files themselves are on the `files-dat
 
 ## Optional features
 
-| Variable                                                    | Default   | What it does                                                                                                                                                                                                                    |
-| ----------------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CONTACT_FORM_EMAIL`                                        | *(none)*  | Where the contact form delivers. Unset, that endpoint answers 503 and the form is off.                                                                                                                                          |
-| `CONTACT_EMAIL`                                             | *(none)*  | Shown on the contact page as a fallback. Display only.                                                                                                                                                                          |
-| `GOOGLE_CLIENT_ID`                                          | *(none)*  | Offers Google Sign-In, and loads Google's script for every signed-out visitor — read [Third-party calls](#third-party-calls) before setting it. Unset, the button is hidden and `accounts.google.com` leaves the web app's CSP. |
-| `GOOGLE_CLIENT_SECRET`                                      | *(none)*  | The other half of that OAuth client, and a real secret. Required whenever `GOOGLE_CLIENT_ID` is set — the API refuses to start without it. See [Setting up Google sign-in](#setting-up-google-sign-in).                         |
-| `MAP_TILE_URL`, `MAP_TILE_URL_DARK`, `MAP_TILE_ATTRIBUTION` | Carto     | The basemap behind every map the web app draws — see [Third-party calls](#third-party-calls). The CSP follows these automatically.                                                                                              |
-| `GEOCODER_URL`                                              | Nominatim | Turns a map pin into a place name, server-side. Set to `""` to switch geocoding off entirely.                                                                                                                                   |
-| `WORMS_API_URL`, `WIKIDATA_API_URL`                         | public    | The species picker's two registers, also called server-side.                                                                                                                                                                    |
+| Variable                                                    | Default   | What it does                                                                                                                                                                                                                                           |
+| ----------------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `CONTACT_FORM_EMAIL`                                        | *(none)*  | Where the contact form delivers. Unset, that endpoint answers 503 and the form is off.                                                                                                                                                                 |
+| `CONTACT_EMAIL`                                             | *(none)*  | Shown on the contact page as a fallback. Display only.                                                                                                                                                                                                 |
+| `GOOGLE_CLIENT_ID`                                          | *(none)*  | Offers Google Sign-In, which needs an OAuth client of your own — see [Setting up Google sign-in](#setting-up-google-sign-in). Nothing of Google's loads in a visitor's browser; pressing the button takes them to Google. Unset, the button is hidden. |
+| `GOOGLE_CLIENT_SECRET`                                      | *(none)*  | The other half of that OAuth client, and a real secret. Required whenever `GOOGLE_CLIENT_ID` is set — the API refuses to start without it. See [Setting up Google sign-in](#setting-up-google-sign-in).                                                |
+| `MAP_TILE_URL`, `MAP_TILE_URL_DARK`, `MAP_TILE_ATTRIBUTION` | Carto     | The basemap behind every map the web app draws — see [Third-party calls](#third-party-calls). The CSP follows these automatically.                                                                                                                     |
+| `GEOCODER_URL`                                              | Nominatim | Turns a map pin into a place name, server-side. Set to `""` to switch geocoding off entirely.                                                                                                                                                          |
+| `WORMS_API_URL`, `WIKIDATA_API_URL`                         | public    | The species picker's two registers, also called server-side.                                                                                                                                                                                           |
 
 ### Account deletion
 
@@ -309,11 +316,10 @@ this copy. Leave the panel off, as it ships, and none of this exists.
 
 Nothing here phones home. What the app can be told to contact:
 
-- **From the browser**: map tiles, and — only where you have set `GOOGLE_CLIENT_ID` — Google's
-  sign-in code. Nothing else, profile pictures included: an avatar is stored on your own files
-  volume and served by your own API. (Gravatar used to be an option here, disclosing a hash of every
-  signed-in user's email address and their IP to Automattic on every page. It is gone, along with
-  its `GRAVATAR_ENABLED` variable.)
+- **From the browser**: map tiles. Nothing else, in any configuration, profile pictures included: an
+  avatar is stored on your own files volume and served by your own API. (Gravatar used to be an
+  option here, disclosing a hash of every signed-in user's email address and their IP to Automattic
+  on every page. It is gone, along with its `GRAVATAR_ENABLED` variable.)
 
   **Tiles** are requested wherever a map is on screen, and carry only the `z/x/y` of the area shown.
   Five surfaces draw one: the form to add or edit a dive site, a dive site's own page, the form to
@@ -324,30 +330,40 @@ Nothing here phones home. What the app can be told to contact:
   — not their account, their dive log, or the name of anything on the map. Point `MAP_TILE_URL` at a
   tile server you run and none of that leaves your machine.
 
-  **Google's sign-in code** loads from `accounts.google.com` as the front page or the sign-in page
-  appears, before anyone has chosen Google and whether or not they ever do — so Google sees that
-  visitor's IP address and browser at that moment, and may set cookies of its own under its own
-  policy, which neither you nor this app can see. Narrowing it so that nothing reaches Google until
-  the button is actually clicked is a separate change already in hand. Until then, leaving
-  `GOOGLE_CLIENT_ID` unset is what avoids it entirely: the button disappears, and so does the
-  bundled privacy page's section disclosing this.
+  **Google sign-in is deliberately absent from that bullet**, and it is worth saying why rather than
+  leaving it to be inferred. With `GOOGLE_CLIENT_ID` set, no page this app serves fetches, embeds or
+  executes anything of Google's — the front page and the sign-in page included, and whether or not
+  the visitor ever intends to use the button. What pressing "Continue with Google" does is send the
+  browser *away*: a top-level navigation to `accounts.google.com`, where the visitor is on Google's
+  own site under Google's own policy. Whatever Google stores at that point, it stores as the site
+  being visited rather than as a third party embedded in yours. The URL necessarily tells Google
+  which instance sent them — it has to carry your client id and the address to come back to — and
+  that, together with whatever they choose to do on Google's own page, is the whole of it. They
+  return carrying a one-time code, and turning that code into a sign-in happens between your API and
+  Google, never in the browser.
+
+  Leaving `GOOGLE_CLIENT_ID` unset still removes the option entirely: no button, and the bundled
+  privacy page has no Google section at all.
 
 - **From the server**: the geocoder and the two species registers, on cache misses only. A pinned
   coordinate or a typed search string goes out; nothing identifying the diver does, and the source
-  IP is your server's. Both are configurable, and the geocoder can be switched off outright. One
-  more, only if you have set `GOOGLE_CLIENT_ID`: when somebody signs up with Google, the API fetches
-  their Google profile picture once — from `googleusercontent.com`, at account creation and never
-  again — and stores it on your files volume. It is best-effort; a failure just means that account
-  starts with initials.
+  IP is your server's. Both are configurable, and the geocoder can be switched off outright. Two
+  more, only if you have set `GOOGLE_CLIENT_ID`. **Every Google sign-in redeems its authorization
+  code** at `oauth2.googleapis.com`, over TLS from your server, using `GOOGLE_CLIENT_SECRET` — that
+  call is on the sign-in path itself, so an instance whose outbound traffic is filtered has to allow
+  it. And **when somebody signs up with Google**, the API fetches their Google profile picture once
+  — from `googleusercontent.com`, at account creation and never again — and stores it on your files
+  volume. That one is best-effort; a failure just means the account starts with initials.
 
 There is no analytics of any kind. The web app's Content-Security-Policy narrows where anything
-could be *sent*: `connect-src` names this instance's own origin and its API, plus
-`accounts.google.com` where Google sign-in is configured, so a `fetch`, an `XMLHttpRequest`, a
-WebSocket or a `navigator.sendBeacon` aimed at a third-party collector is refused by the browser
-until the policy itself is widened. Take that for what it is and no more — it constrains
-destinations, not dependencies. Script bundled into the web app loads under `'strict-dynamic'`,
-because your own build already vouches for it, and anything reporting back to this instance's own
-origin passes as ordinary first-party traffic.
+could be *sent*: `connect-src` names this instance's own origin and its API and nothing else, in
+every configuration, so a `fetch`, an `XMLHttpRequest`, a WebSocket or a `navigator.sendBeacon`
+aimed at a third-party collector is refused by the browser until the policy itself is widened.
+Google sign-in needs no exception to that and is granted none — a navigation is not a fetch, and
+CSP's fetch directives govern what a page loads rather than where the visitor goes next. Take that
+for what it is and no more — it constrains destinations, not dependencies. Script bundled into the
+web app loads under `'strict-dynamic'`, because your own build already vouches for it, and anything
+reporting back to this instance's own origin passes as ordinary first-party traffic.
 
 **Add any of it and the consent duty is yours.** The `/privacy` page is part of the web image, and
 it describes exactly the posture above: nothing here is advertising or analytics, which is the whole

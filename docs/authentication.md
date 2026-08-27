@@ -416,10 +416,11 @@ sequenceDiagram
 On the magic-link path only, `GET /auth/email/verify/check` answers `valid=true` **plus**
 `deletion_pending` and `purge_after`, so the landing page can label the button *Restore my account*
 rather than *Sign in* before anything is spent. The other three have no side-effect-free precheck -
-a typed code, a Google dialog and a biometric gesture are all commitments - so they show the same
-outcome on a screen after the POST. Note the asymmetry that follows: `POST /auth/email/verify-code`
-claims the request before resolving, so a code spent on reaching the offer is spent, while the
-link's token is untouched by the precheck and stays reopenable until it expires.
+a typed code, a round trip out to Google and a biometric gesture are all commitments - so they show
+the same outcome on a screen after the POST. Note the asymmetry that follows:
+`POST /auth/email/verify-code` claims the request before resolving, so a code spent on reaching the
+offer is spent, while the link's token is untouched by the precheck and stays reopenable until it
+expires.
 
 The restore token is its own `TokenType`, is single-use, and expires with
 `ONBOARDING_TOKEN_EXPIRE_MINUTES`. It is never emailed: the deletion confirmation tells the user to
