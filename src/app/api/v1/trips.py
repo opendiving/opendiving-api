@@ -16,6 +16,7 @@ from ...core.exceptions.http_exceptions import (
     NotFoundException,
     UnprocessableEntityException,
 )
+from ...core.schemas import validate_date_range
 from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
@@ -36,7 +37,6 @@ from ...schemas.trip import (
     TripRead,
     TripReadInternal,
     TripUpdateRequest,
-    validate_date_range,
 )
 from ...services.cache_invalidation import invalidate_dive_caches
 

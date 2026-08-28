@@ -54,6 +54,17 @@ class Certification(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     instructor_number: Mapped[str | None] = mapped_column(String(64), default=None)
     # The dive shop, resort or club that ran the course.
     training_center: Mapped[str | None] = mapped_column(String(255), default=None)
+    # The training course this card came out of, if the diver recorded one - the first
+    # reference a certification has ever carried, and the same shape as `dive.trip_id`.
+    # One course can issue several certifications (TDI's combined Advanced Nitrox + Deco
+    # Procedures); a certification names at most one course.
+    #
+    # `ON DELETE SET NULL` fires even for a soft-deleted certification, whose row is still
+    # there to be updated - which is correct: a hidden card must not go on naming a course
+    # that no longer exists.
+    course_id: Mapped[int | None] = mapped_column(
+        ForeignKey("course.id", ondelete="SET NULL"), default=None, index=True
+    )
     notes: Mapped[str] = mapped_column(Text, default="")
 
     @declared_attr.directive

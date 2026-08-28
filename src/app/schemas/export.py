@@ -2,9 +2,10 @@
 
 This is the half of the export that answers *"rebuild my logbook"*, where the UDDF
 document answers *"take my dives anywhere"*. UDDF is a dive-interchange format and has no
-slot for gear sets, service history, c-card records, a cylinder's `role` or `usage`, or
-the order a drift dive visited its sites; all of that lives here, alongside everything
-UDDF does carry, so nothing a diver entered is reachable only through the lossy file.
+slot for gear sets, service history, c-card records, training courses, a cylinder's
+`role` or `usage`, or the order a drift dive visited its sites; all of that lives here,
+alongside everything UDDF does carry, so nothing a diver entered is reachable only through
+the lossy file.
 
 **Versioned from day one.** `format` and `version` are the first two keys so that a
 reader can dispatch on them before parsing anything else, and `version` is an integer
@@ -33,6 +34,7 @@ from pydantic import BaseModel, Field
 
 from ..core.schemas import PublicUUIDSchema
 from .certification import CertificationAgency, CertificationSide
+from .course import CourseStatus
 from .dive import DiveStartTime, WaterType
 from .dive_mixture import DiveMixtureBase
 from .dive_profile import DiveProfileRead
@@ -144,6 +146,7 @@ class ExportDive(PublicUUIDSchema):
     exit_latitude: float | None = None
     exit_longitude: float | None = None
     trip_uuid: uuid_pkg.UUID | None = None
+    course_uuid: uuid_pkg.UUID | None = None
     dive_site_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In visit order")]
     gear_item_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In the diver's own order")]
     species_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In spotting order")]
@@ -184,6 +187,29 @@ class ExportTrip(PublicUUIDSchema):
     ]
     start_date: date
     end_date: date | None = None
+    notes: str
+    created_at: datetime
+
+
+class ExportCourse(PublicUUIDSchema):
+    """One training course, with no reference of its own.
+
+    The link is on the *children*: an `ExportDive` and an `ExportCertification` each carry
+    a `course_uuid`, so a reader rebuilds the grouping by walking those rather than by
+    reading a list here. Same direction as `ExportTrip`, and for the same reason - the
+    course is the thing that keeps existing when a dive is deleted.
+    """
+
+    name: str
+    agency: CertificationAgency
+    agency_other: str | None = None
+    status: CourseStatus
+    start_date: date | None = None
+    end_date: date | None = None
+    instructor_name: str | None = None
+    instructor_number: str | None = None
+    training_center: str | None = None
+    cost: str | None = None
     notes: str
     created_at: datetime
 
@@ -276,6 +302,7 @@ class ExportCertification(PublicUUIDSchema):
     instructor_name: str | None = None
     instructor_number: str | None = None
     training_center: str | None = None
+    course_uuid: uuid_pkg.UUID | None = None
     notes: str
     files: Annotated[list[ExportCertificationFile], Field(default_factory=list)]
     created_at: datetime
@@ -299,6 +326,7 @@ class ExportEnvelope(BaseModel):
     user: ExportUser
     dives: Annotated[list[ExportDive], Field(default_factory=list)]
     trips: Annotated[list[ExportTrip], Field(default_factory=list)]
+    courses: Annotated[list[ExportCourse], Field(default_factory=list)]
     dive_sites: Annotated[list[ExportDiveSite], Field(default_factory=list)]
     species: Annotated[list[ExportSpecies], Field(default_factory=list)]
     gear_items: Annotated[list[ExportGearItem], Field(default_factory=list)]

@@ -1,5 +1,5 @@
 import uuid as uuid_pkg
-from datetime import datetime
+from datetime import date, datetime
 from typing import ClassVar, Self
 
 from pydantic import BaseModel, model_validator
@@ -8,6 +8,24 @@ from pydantic import BaseModel, model_validator
 # columns in Postgres (VARCHAR(n) and TEXT perform identically there), so this
 # limit exists purely to keep payloads sane - not because of any storage constraint.
 NOTES_MAX_LENGTH = 10_000
+
+DATE_RANGE_MESSAGE = "end_date must be on or after start_date"
+
+
+def validate_date_range(start_date: date | None, end_date: date | None) -> None:
+    """The one place a `start_date`/`end_date` pair's ordering is decided.
+
+    Shared by `TripBase`/`TripUpdate` and `CourseBase`/`CourseUpdate`, and public because
+    `patch_trip`/`patch_course` each have to re-run it on a merged stored+incoming pair -
+    the one case an update schema cannot see, since a PATCH may carry either date alone.
+    Only `course` has a CHECK constraint underneath it; on `trip` this is the whole
+    enforcement.
+
+    Lives here rather than beside either resource so the two cannot drift apart into two
+    spellings of the same rule.
+    """
+    if start_date is not None and end_date is not None and end_date < start_date:
+        raise ValueError(DATE_RANGE_MESSAGE)
 
 
 class HealthCheck(BaseModel):

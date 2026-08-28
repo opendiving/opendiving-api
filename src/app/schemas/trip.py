@@ -4,7 +4,7 @@ from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls
+from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls, validate_date_range
 from .dive_site import WholeCoordinatePair
 
 MAX_TRIP_LOCATIONS = 20
@@ -12,18 +12,6 @@ MAX_TRIP_LOCATIONS = 20
 BBOX_MESSAGE = "bbox_south, bbox_north, bbox_west and bbox_east must be set together"
 BBOX_NEEDS_COORDINATES_MESSAGE = "a bounding box needs latitude and longitude"
 BBOX_ORDER_MESSAGE = "bbox_south must be less than or equal to bbox_north"
-DATE_RANGE_MESSAGE = "end_date must be on or after start_date"
-
-
-def validate_date_range(start_date: date | None, end_date: date | None) -> None:
-    """The one place the trip date ordering is decided.
-
-    Public because `patch_trip` has to re-run it on a merged stored+incoming pair, which
-    is the one case `TripUpdate` below cannot see - and no CHECK constraint underneath
-    would catch what slips past.
-    """
-    if start_date is not None and end_date is not None and end_date < start_date:
-        raise ValueError(DATE_RANGE_MESSAGE)
 
 
 class TripLocationInput(WholeCoordinatePair):

@@ -26,17 +26,25 @@ class OwnedResourceCache[InternalT, PublicT]:
 
     Resources whose read/list logic does more than a straight `get_multi`/`get` plus a shape
     conversion don't fit this shape and should keep their own hand-written cache helpers
-    instead of forcing themselves through this factory. The five that opt out, and why:
+    instead of forcing themselves through this factory. The six that opt out, and why:
 
-    - `dives.py` - enriches each row with related trips/dive sites/gear and supports several
-      extra filters.
+    - `dives.py` - enriches each row with related trips/courses/dive sites/gear and supports
+      several extra filters.
     - `gear_items.py` - carries an extra `include_archived` dimension in the cache key *and*
       batches a service-schedule lookup across the page for the service badge.
-    - `certifications.py` - batches a card-file lookup across the page.
+    - `certifications.py` - batches a card-file lookup across the page, and resolves each
+      row's course uuid in a second batched query.
     - `trips.py` - batches a `trip_location` lookup across the page and embeds the rows, and
       searches an EXISTS over that child table rather than columns of its own. It still
       constructs one of these for `list_cache_key_prefix` and `invalidate_list`, so its
       hand-rolled helpers keep the key shapes this factory defines.
+    - `courses.py` - the one that opts out for a **different reason**: not enrichment, an
+      ordering. `GET /courses` sorts `start_date DESC NULLS LAST` with a `uuid` tie-break,
+      and no path through this factory can produce it - `get_multi` and
+      `core/utils/search.py::search_multi` both resolve a sort column to a bare `desc()`,
+      with no `nullslast()` reachable and (in `search_multi`'s case) only one sort column by
+      signature. So one hand-written `select()` serves both its searched and unsearched
+      branches. Like `trips.py` it still constructs one of these for the key shapes.
     - `passkeys.py` - the odd one out, and for the opposite reason: it is not *enriched*, it
       is not cached at all. `GET /user/passkeys` is unpaginated and returns the handful of
       rows registration lets an account accumulate, and nothing anywhere embeds a credential
@@ -49,7 +57,8 @@ class OwnedResourceCache[InternalT, PublicT]:
     Adding a generic hook for it would complicate the factory for its two remaining
     straightforward users (dive sites, gear sets) to serve four callers that each need
     something different; the duplication is the cheaper side of that trade. Revisit if the
-    enrichment shape ever converges.
+    enrichment shape ever converges. `courses.py` would still be outside it either way -
+    a hook for a second query does not buy an `ORDER BY` clause.
     """
 
     def __init__(
