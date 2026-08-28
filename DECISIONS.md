@@ -65,7 +65,7 @@ working directory. The CLI still goes through `alembic.ini`, where reconfiguring
 walk misses it - and a table that is in the database but not in `target_metadata` is not skipped, it
 is `op.drop_table`'d. It gets an explicit import. In the other direction, CRUDAdmin's own tables
 (`admin_user`, `admin_session`, `admin_event_log`, `admin_audit_log`) appear in the database
-whenever `CRUD_ADMIN_DB_URL` points at the app's Postgres, which is what the deploy bundle does;
+whenever `CRUD_ADMIN_DB_URL` points at the app's Postgres, which is what the install bundle does;
 they are declared on CRUDAdmin's `DeclarativeBase`, so autogenerate would write four more
 `drop_table`s. An `include_name` hook filters the `admin_` prefix.
 
@@ -9024,8 +9024,8 @@ rejection would not protect anything, it would stop the local stack coming up at
 therefore a live password from the first `docker compose up`, survivable only because
 `docker-compose.yml` binds Postgres to `127.0.0.1`. An earlier draft of the template header claimed
 "nothing in this file is a working credential", which was the one sentence in it that was false; it
-now names this exception and says what makes it survivable. The deploy bundle is where this stops
-being acceptable, and it gets its own template.
+now names this exception and says what makes it survivable. The install bundle is where this stops
+being acceptable, and it gets its own template - `example.env`, next door.
 
 While that section was being reworked, `APP_VERSION="0.1.0"` came out of it — **but the setting now
 defaults from `importlib.metadata.version("opendiving-api")`**, not from nothing. Deleting the line
@@ -9156,7 +9156,7 @@ returned `{"status": "healthy"}` from a process that could not reach either data
 
 **The image's `HEALTHCHECK` runs `/health/ready`.** That is the check `docker compose ps` reports
 and the one a `depends_on: condition: service_healthy` waits on, and a dependent asking that
-question wants "can serve", not "has a process" — the deploy bundle's web container gating on `api`
+question wants "can serve", not "has a process" — the install bundle's web container gating on `api`
 is exactly this. Docker has no restart-on-unhealthy policy, so the strict check cannot produce the
 restart loop that argues against it: a datastore outage surfaces as a red status column and nothing
 else. `/health` is what stays correct for anything that *does* restart on failure, which is why it
@@ -9365,11 +9365,12 @@ was never going to become the file people install: serving both audiences from o
 comment saying "delete these six stanzas before deploying", which nobody does.
 
 What people install is a separate bundle - a compose file of pulled images, a `Caddyfile` and an
-`example.env` - and it lives in [opendiving/opendiving](https://github.com/opendiving/opendiving)
-rather than in the `deploy/` directory it used to occupy here. It was product-level all along: it
-pins `ghcr.io/opendiving/opendiving-web` alongside the api image, and sets `SITE_URL`, `MAP_TILE_*`
-and the rest of the web container's environment, none of which this repository has any use for. It
-sat here only because this is where it was first written.
+`example.env`, called the *deploy bundle* everywhere in this file until now - and it lives in
+[opendiving/opendiving](https://github.com/opendiving/opendiving) rather than in the `deploy/`
+directory it used to occupy here. It was product-level all along: it pins
+`ghcr.io/opendiving/opendiving-web` alongside the api image, and sets `SITE_URL`, `MAP_TILE_*` and
+the rest of the web container's environment, none of which this repository has any use for. It sat
+here only because this is where it was first written.
 
 **Its reasoning travelled with it rather than being summarized here** - the `proxy` profile and the
 bring-your-own-proxy escape hatch, the network subnet pinned so `TRUSTED_PROXY_IPS` can name it, why
@@ -9536,7 +9537,7 @@ they did not configure reads as a bug in the app.
 ### This is a breaking change, and that is the point
 
 An existing staging instance with no relay stops booting. Nothing is deployed anywhere yet
-(`AGENTS.md`), so there is no instance to migrate today — but the deploy bundle ships to
+(`AGENTS.md`), so there is no instance to migrate today — but the install bundle ships to
 self-hosters, so it is worth being explicit that the fix is to configure `SMTP_*` or to set
 `ENVIRONMENT=local`, and that a startup failure is the intended outcome rather than a regression.
 
