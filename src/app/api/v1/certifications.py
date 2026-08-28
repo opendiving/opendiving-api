@@ -11,7 +11,11 @@ from ...core.exceptions.http_exceptions import ForbiddenException, NotFoundExcep
 from ...core.utils.cache import cache
 from ...core.utils.pagination import clamp_pagination
 from ...core.utils.uploads import content_disposition_attachment
-from ...crud.crud_certifications import crud_certifications, get_expiring_overview_for_user
+from ...crud.crud_certifications import (
+    crud_certifications,
+    get_certifications_page,
+    get_expiring_overview_for_user,
+)
 from ...crud.crud_courses import get_course_uuids_by_ids, resolve_course_id_for_user
 from ...schemas.certification import (
     CertificationAgency,
@@ -179,23 +183,17 @@ async def _cached_read_certifications(
     and for the same reason: the filter is a dimension the answer varies on, so it has to
     appear in the key.
     """
-    filters: dict[str, Any] = {"user_id": user_id, "is_deleted": False}
-    if course_id is not None:
-        filters["course_id"] = course_id
-
-    data = await crud_certifications.get_multi(
+    # Not `get_multi`: the list wants dateless cards *last*, and `sort_orders` cannot say
+    # `NULLS LAST` - see `_LIST_ORDER` in `crud_certifications`.
+    data = await get_certifications_page(
         db=db,
+        user_id=user_id,
         offset=compute_offset(page, items_per_page),
         limit=items_per_page,
-        # Newest certification first, matching `ix_certification_user_id_certified_on`.
-        # `uuid` breaks ties: it's uuid7, so it orders by creation time, which keeps
-        # pagination stable across pages when several cards share a date (or have none).
-        sort_columns=["certified_on", "uuid"],
-        sort_orders=["desc", "desc"],
-        **filters,
+        course_id=course_id,
     )
-    # One batched query for the whole page's card files rather than one per row.
-    # `get_multi` passes no `schema_to_select`, so each row still carries its internal `id`.
+    # One batched query for the whole page's card files rather than one per row. The rows
+    # are whole-table dicts, so each still carries its internal `id`.
     files_by_certification = await get_file_infos_for_certifications(
         db=db, certification_ids=[item["id"] for item in data["data"]]
     )

@@ -75,6 +75,13 @@ class Certification(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
             # AND is_deleted = false ORDER BY certified_on DESC NULLS LAST`. Newest first
             # is the useful order here (unlike gear, which sorts by name) - a diver's most
             # recent certification is the one they are usually being asked to show.
+            #
+            # The null placement is load-bearing on both sides: an index built `NULLS
+            # LAST` cannot serve a query that asks for the default `NULLS FIRST`, so the
+            # reader spells its own out - see `_LIST_ORDER` in `crud_certifications`. The
+            # reader's trailing `uuid` tiebreak is deliberately not a third column here;
+            # it only orders cards that already share a date, which Postgres can sort
+            # incrementally on top of this index.
             Index(
                 "ix_certification_user_id_certified_on",
                 "user_id",

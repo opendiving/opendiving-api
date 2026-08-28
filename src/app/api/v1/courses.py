@@ -4,7 +4,6 @@ from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
-from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
@@ -18,9 +17,7 @@ from ...core.schemas import validate_date_range
 from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
-from ...core.utils.search import search_clause
-from ...crud.crud_courses import crud_courses
-from ...models.course import Course
+from ...crud.crud_courses import COURSE_SEARCH_COLUMNS, crud_courses, get_courses_page
 from ...schemas.certification import CertificationAgency, validate_agency_pairing
 from ...schemas.course import CourseCreate, CourseCreateInternal, CourseRead, CourseReadInternal, CourseUpdate
 from ...services.cache_invalidation import (
@@ -30,21 +27,6 @@ from ...services.cache_invalidation import (
 )
 
 router = APIRouter(tags=["courses"])
-
-COURSE_SEARCH_COLUMNS = ("name",)
-
-# Most recent course first, with the dateless ones last rather than first: a `planned`
-# course has no dates yet, and so does a completed one somebody back-filled without them -
-# so "no date" cannot be read as "soonest". `uuid` breaks ties (uuid7, so it orders by
-# creation time), which is what keeps pagination stable across pages when several courses
-# share a start date or have none.
-#
-# This ordering is the whole reason the reads below are hand-rolled rather than built with
-# `OwnedResourceCache`: neither `get_multi` nor `search_multi` can express it. Both resolve
-# a sort column to a bare `desc()`, with no `nullslast()` reachable and no second column to
-# break ties on - `search_multi` takes a single `sort_column` by signature. Trips get away
-# with `get_multi` only because `trip.start_date` is `NOT NULL`.
-_LIST_ORDER = (Course.start_date.desc().nulls_last(), Course.uuid.desc())
 
 
 def _to_public_course(db_course: CourseReadInternal | dict[str, Any], *, user_uuid: uuid_pkg.UUID) -> CourseRead:
@@ -118,14 +100,6 @@ async def _get_owned_course(db: AsyncSession, uuid: uuid_pkg.UUID, current_user:
     )
 
 
-def _list_conditions(user_id: int, term: str) -> tuple[ColumnElement[bool], ...]:
-    """The `WHERE` clauses for one page of a user's courses, searched or not."""
-    conditions: tuple[ColumnElement[bool], ...] = (Course.user_id == user_id,)
-    if term:
-        conditions += (search_clause(Course, COURSE_SEARCH_COLUMNS, term),)
-    return conditions
-
-
 @router.post("/course", response_model=CourseRead, status_code=201)
 async def write_course(
     request: Request,
@@ -178,27 +152,14 @@ async def _cached_read_courses(
     the placeholders in the key prefix this borrows from `_course_cache`, which is what
     keeps the keys byte-identical to the ones `invalidate_course_caches` sweeps.
 
-    One hand-written `select()` serves both the searched and the unsearched branch, rather
-    than the `search_multi`/`get_multi` pair every other list resource uses - see
-    `_LIST_ORDER` for why neither can produce this ordering.
+    `get_courses_page` serves both the searched and the unsearched branch from one
+    hand-written `select()`, rather than the `search_multi`/`get_multi` pair every other
+    list resource uses - see its docstring for why neither can produce this ordering.
     """
-    conditions = _list_conditions(user_id=user_id, term=(search or "").strip())
-
-    total_count = await db.scalar(select(func.count()).select_from(Course).where(*conditions))
-    rows = (
-        await db.execute(
-            select(*Course.__table__.columns)
-            .where(*conditions)
-            .order_by(*_LIST_ORDER)
-            .offset(compute_offset(page, items_per_page))
-            .limit(items_per_page)
-        )
-    ).mappings()
-
-    courses_data: dict[str, Any] = {
-        "data": [_to_public_course(dict(row), user_uuid=user_uuid).model_dump() for row in rows],
-        "total_count": total_count or 0,
-    }
+    courses_data = await get_courses_page(
+        db=db, user_id=user_id, offset=compute_offset(page, items_per_page), limit=items_per_page, search=search
+    )
+    courses_data["data"] = [_to_public_course(row, user_uuid=user_uuid).model_dump() for row in courses_data["data"]]
 
     response: dict[str, Any] = paginated_response(crud_data=courses_data, page=page, items_per_page=items_per_page)
     return response
