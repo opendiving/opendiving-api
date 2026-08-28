@@ -10869,19 +10869,25 @@ certificate moves it.
 
 ## Signing is enforced by two local hooks, because GitHub cannot do it yet
 
-**Superseded in three particulars** by *"Signing stopped being a demand on contributors, and the
-hook learned to check"* at the end of this file. (i) The opening claim below, that every commit here
-is meant to be signed - the commits in an outside contributor's pull request are exempt, and
-`CONTRIBUTING.md` no longer asks for them. (ii) The instruction below to target **every branch**
+**Superseded in four particulars**, the first three by *"Signing stopped being a demand on
+contributors, and the hook learned to check"* and the fourth by *"The hook script is repo content;
+what wires it up is not"*, both at the end of this file. (i) The opening claim below, that every
+commit here is meant to be signed - the commits in an outside contributor's pull request are exempt,
+and `CONTRIBUTING.md` no longer asks for them. (ii) The instruction below to target **every branch**
 with the `required_signatures` ruleset the day this repo goes public - it is every branch *except*
 `main`, because with required signatures on `main` GitHub refuses to squash-merge a pull request you
 did not author, and squash is the only merge method enabled here, so every outside PR would be
 unmergeable on day one. (iii) The description below of the Claude hook as rejecting the offending
 command outright - it now asks git first and rejects only where the key that command would disable
-is reported on. Everything else here stands and is why the section is kept whole: that no git
-setting can prevent an inline override, the pre-push hook's mechanics and its `%G?`-of-`N`
-reasoning, the committed-past-`.claude/*` forensics, the Python-version fail-open note, and the
-bare-command-substitution post-mortem.
+is reported on. (iv) The claim below that the Claude hook is committed - the *script* is, and the
+`.claude/*` pattern forensics below are why it can be, but the `PreToolUse` registration that points
+at it is not: it moved to the untracked `.claude/settings.local.json`, and the ignore file's one
+exception line is `!.claude/hooks/` now rather than `!.claude/settings.json`. The paragraph's
+reasoning about what reaches an agent checkout is correct and is exactly what that move gives up.
+Everything else here stands and is why the section is kept whole: that no git setting can prevent an
+inline override, the pre-push hook's mechanics and its `%G?`-of-`N` reasoning, the
+committed-past-`.claude/*` forensics as they bear on the script and the pattern, the Python-version
+fail-open note, and the bare-command-substitution post-mortem.
 
 Every commit in this repo is meant to be signed, and for a while roughly half of them were. The tell
 was two pull requests opened minutes apart from the same machine by the same identity: this repo's
@@ -11816,11 +11822,15 @@ fail-open trap the section above records - any exception escaping `main()` exits
 system treats any exit but 2 as non-blocking, so a raise inside the gate would delete the guard
 without a word.
 
-**The gate, not the gitignore, is what scopes enforcement.** The temptation, once the hook is
+**The gate, not the gitignore, is what scopes enforcement.** ~~The temptation, once the hook is
 conditional, is to make it "local" by moving its registration to `.claude/settings.local.json`. That
 would break the committed-hook property the section above spends three paragraphs establishing:
 agent sessions run in fresh checkouts under `.claude/worktrees/`, and only committed files reach
-them.
+them.~~ **Overridden** - the registration moved there anyway, and not because the objection is
+wrong: it holds exactly as written for an `api-N-*` worktree, and the guard really does stop firing
+there. The script stays committed. See *"The hook script is repo content; what wires it up is not"*
+at the end of this file; the heading here holds either way, since what scopes enforcement is still
+the gate rather than the ignore rule.
 
 **And the verification, because this file has none.** `.claude/` is outside `ruff`'s roots
 (`src tests scripts`) and no CI job reads it, so the only check the hook gets is running it by hand
@@ -12574,3 +12584,59 @@ UDDF gets nothing, and `<divetrip>` is the near miss rather than the answer: it 
 date range, but a training course is not a trip, and writing one there would have an importer read
 "PADI Open Water" as a holiday alongside the real trips already in that element. See *"What UDDF
 3.2.2 has no slot for"*.
+
+## The hook script is repo content; what wires it up is not
+
+`.claude/settings.json` held exactly one thing — the `PreToolUse` entry pointing Claude Code at
+`.claude/hooks/no-unsigned-commits.py` — and it was committed past `.claude/*` on a premise the
+ignore file stated outright: agents work in fresh checkouts under `.claude/worktrees/`, so a rule
+that stays uncommitted never reaches the sessions it is meant to constrain. It is gone, and the
+registration lives in the untracked `.claude/settings.local.json` beside it. The script stays
+committed — it is about working on *this* repo, the same kind of artifact as `AGENTS.md`, and a
+clone has the same use for it. What is left is a division rather than a demotion: the guard is
+repository content, switching it on is machine configuration, which is the arrangement
+`.githooks/pre-push` has had all along.
+
+**The premise was true, and giving it up costs something real — so be clear what.** It is tempting
+to decide the cost is imaginary, because an untracked `.claude/` file *does* turn up in agent
+checkouts: `settings.local.json` is present in the randomly-named worktrees Claude Code creates for
+its own sessions, written at session start rather than checked out. That is real and it is not
+general. The `api-N-*` worktrees this repo's branches are actually built in come from a plain
+`git worktree add`, which checks out tracked files and nothing else, and at the time of writing five
+of the six on this machine have no `settings.local.json` at all. The mechanism is the proof rather
+than the count, and the sixth is why that distinction is worth drawing: it has one, holding an
+`autoMemoryDirectory` and no hook registration, written into it by hand by a session working there
+long after the worktree was created. A future reader who finds that file and concludes this
+paragraph is wrong will have sampled the artefact instead of the mechanism, which is the same
+inversion in miniature. So an `api-N-*` session gets the script with nothing wired to it, and the
+`PreToolUse` guard does not fire there.
+
+What holds the line instead is `.githooks/pre-push`, which linked worktrees inherit through
+`core.hooksPath` on the parent clone, so it still refuses the push. The trade is a guard that
+stopped a bad commit being written for one that stops it leaving the machine. For a clone the
+arithmetic never mattered: the hook fires only on a command that *disables* signing, so it did
+nothing in a checkout where signing is not configured, and `CONTRIBUTING.md` stopped asking
+contributors to configure it.
+
+This overrides a paragraph that saw it coming and ruled it out — *"The gate, not the gitignore, is
+what scopes enforcement"*, under *"Signing stopped being a demand on contributors"*, which named
+moving the registration to `settings.local.json` as the temptation to resist. Its objection was
+correct on the facts, as the paragraph above concedes; it is overridden by a decision about what
+this repository should carry, not defeated by an argument. Its heading survives and so does its
+reasoning.
+
+**A registration nobody can find is not a registration.** Untracking the file removes the only copy
+of the JSON anyone had, so `CONTRIBUTING.md`'s *For maintainers* section carries it verbatim, next
+to the `git config core.hooksPath .githooks` line it is the counterpart of — and says the thing that
+makes the two different: `core.hooksPath` is inherited by linked worktrees, and pasting a file into
+`.claude/` is not. Without that, a fresh clone ships a hook script with no recipe to wire it up, and
+the guard quietly ceases to exist rather than being deliberately declined.
+
+**Ignoring the script as well would not do what it looks like.** Untracking a tracked file does not
+preserve it: the first `git pull` after such a change deletes it from the working tree, because the
+path is tracked in the merge base and ignored in the branch, and since it is ignored afterwards
+`git status` reports nothing. `settings.local.json` would then point at a file that no longer
+exists, and a missing command exits non-zero-but-not-2 — non-blocking, per the fail-open note above.
+The guard would have gone quiet in the primary checkout too, not just the worktrees. The same
+mechanism is why `settings.json` needs no cleanup step: it is untracked *and* deleted here, so a
+pull removes it from every other checkout on its own.

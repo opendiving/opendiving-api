@@ -198,10 +198,17 @@ cython_debug/
 
 # Claude Code working directory (agent worktrees, launch config). Hundreds of MB
 # of scratch checkouts - never wanted in a commit or a Docker build context.
-# The hook config is the exception: agents work in fresh worktree checkouts, so a
-# rule that stays uncommitted never reaches the sessions it is meant to constrain.
-# That is also why the pattern is `.claude/*` - git cannot re-include a path whose
-# parent directory is excluded outright.
+# `.claude/hooks/` is the exception, because the script in it is about working on
+# this repo, the same argument AGENTS.md wins on. What *registers* that script as
+# a PreToolUse hook is not: it lives in the untracked `.claude/settings.local.json`,
+# per machine, the same arrangement `.githooks/pre-push` has.
+# That costs something real. Agents work in fresh worktree checkouts and a plain
+# `git worktree add` copies nothing untracked, so an `api-N-*` session gets the
+# script with nothing wired to it and the PreToolUse guard does not fire there -
+# `.githooks/pre-push`, inherited through `core.hooksPath`, is what refuses the
+# push instead. See DECISIONS.md, and CONTRIBUTING.md for the registration to
+# paste into a fresh clone.
+# The pattern is `.claude/*` because git cannot re-include a path whose parent
+# directory is excluded outright.
 .claude/*
-!.claude/settings.json
 !.claude/hooks/

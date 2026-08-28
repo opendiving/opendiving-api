@@ -78,13 +78,16 @@ after editing one rather than matching the wrapping by hand.
 - **Never switch commit signing off on the git command line.** Where signing is on in the git
   configuration you are running under, overriding it inline buys nothing - it is the move an agent
   reaches for when it fears a hanging commit, and what it leaves behind is a PR whose every commit
-  reads *Unverified* on GitHub. Two guards say so there: a `PreToolUse` hook
-  (`.claude/hooks/no-unsigned-commits.py`), which asks git first and only blocks when signing is
-  actually on, and `.githooks/pre-push` wherever a maintainer has enabled it. Where signing is *not*
-  configured, commit normally and do not set it up - your commits do not need to be signed, because
-  PRs are squash-merged and GitHub signs the commit that lands on `main`. If signing is on and
-  genuinely fails, report the error instead of routing around it. See *"Signing stopped being a
-  demand on contributors, and the hook learned to check"* in `DECISIONS.md`.
+  reads *Unverified* on GitHub. Two guards say so there, and neither is on everywhere: a
+  `PreToolUse` hook (`.claude/hooks/no-unsigned-commits.py`), which asks git first and only blocks
+  when signing is actually on, and `.githooks/pre-push` wherever a maintainer has enabled it. The
+  hook's script is committed but its registration is not - that lives in the untracked
+  `.claude/settings.local.json` (`CONTRIBUTING.md`, *For maintainers*), so in a worktree made by a
+  plain `git worktree add` nothing is wired to the script and the push hook is the only guard left.
+  Where signing is *not* configured, commit normally and do not set it up - your commits do not need
+  to be signed, because PRs are squash-merged and GitHub signs the commit that lands on `main`. If
+  signing is on and genuinely fails, report the error instead of routing around it. See *"Signing
+  stopped being a demand on contributors, and the hook learned to check"* in `DECISIONS.md`.
 
 Test, lint, format and type-check commands are in `CONTRIBUTING.md`.
 
