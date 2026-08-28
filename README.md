@@ -1,43 +1,22 @@
 # OpenDiving API
 
-**The backend for [OpenDiving](https://github.com/opendiving/opendiving-web) — a self-hosted,
-open-source dive log.** FastAPI + PostgreSQL + Redis, one `docker compose up` away.
+**The backend component of [OpenDiving](https://github.com/opendiving/opendiving) — a self-hosted,
+open-source dive log.** FastAPI + PostgreSQL + Redis.
 
 Your dive history should outlive any app. This API keeps it in your own Postgres database, stores
 the original dive-computer export alongside every imported dive, and serves it all over a clean,
 documented REST API — so your data is never more than one `curl` away.
 
-## Install it
+## Looking to run OpenDiving?
 
-One command, once you have edited six values — a domain, a key, a database password and a mail
-relay:
+**Start at [opendiving/opendiving](https://github.com/opendiving/opendiving).** That is the front
+door: the pitch, the four-command install, the release the compose file comes from, and every
+self-hosting guide — installing, configuring, reverse proxies, backup and restore, upgrades and
+troubleshooting.
 
-```bash
-mkdir opendiving && cd opendiving
-curl -LO https://github.com/opendiving/opendiving-api/releases/latest/download/docker-compose.yml
-curl -LO https://github.com/opendiving/opendiving-api/releases/latest/download/Caddyfile
-curl -Lo .env https://github.com/opendiving/opendiving-api/releases/latest/download/example.env
-$EDITOR .env
-docker compose up -d
-```
-
-That is the whole product — the API, the web app, PostgreSQL, Redis, the background worker, and
-Caddy terminating TLS with a certificate it gets itself. Prebuilt images for amd64 and arm64, so a
-Raspberry Pi runs the same bytes as a VPS; migrations apply themselves on startup, so an upgrade is
-`docker compose pull && docker compose up -d`; and a backup is two artifacts — a `pg_dump` and a tar
-of the files volume the uploaded dive-computer exports and c-card images live on.
-
-| Guide                                                   |                                                |
-| ------------------------------------------------------- | ---------------------------------------------- |
-| [Install](docs/self-hosting/install.md)                 | The four commands, what you need, what starts  |
-| [Configuration](docs/self-hosting/configuration.md)     | Every setting, grouped — and which six matter  |
-| [Reverse proxy](docs/self-hosting/reverse-proxy.md)     | Bring your own, or run on a LAN with no domain |
-| [Backup & restore](docs/self-hosting/backup-restore.md) | The dump, the files volume, and the drill      |
-| [Upgrade](docs/self-hosting/upgrade.md)                 | Pull, up, done — and the stance on downgrades  |
-| [Troubleshooting](docs/self-hosting/troubleshooting.md) | Certificates, mail, rate limits, starting over |
-
-The bundle itself is [`deploy/`](deploy/) in this repository; releases publish those three files as
-artifacts, which is what the `curl` lines above fetch.
+This repository is one of the two application containers that install brings up, alongside
+[opendiving-web](https://github.com/opendiving/opendiving-web). It publishes an image and nothing
+else; what is here is the source, and the notes for working on it.
 
 ## What it does
 
@@ -82,8 +61,8 @@ artifacts, which is what the `curl` lines above fetch.
 ## Running it from source
 
 For working on it, rather than for running it — this compose file builds from `./src`, mounts it for
-live reload, and publishes the API and Postgres on the host. To *use* OpenDiving, install it with
-the bundle above instead.
+live reload, and publishes the API and Postgres on the host. To *use* OpenDiving, install it from
+[opendiving/opendiving](https://github.com/opendiving/opendiving) instead.
 
 ```bash
 git clone https://github.com/opendiving/opendiving-api.git
@@ -101,8 +80,8 @@ frontend.
 ### Configuration
 
 An *installed* instance is configured through the `.env` beside its compose file —
-[docs/self-hosting/configuration.md](docs/self-hosting/configuration.md) is the reference for that
-one. From source, everything is configured through `src/.env`, which starts as a copy of
+[the configuration reference](https://github.com/opendiving/opendiving/blob/main/docs/configuration.md)
+covers that one. From source, everything is configured through `src/.env`, which starts as a copy of
 [`src/.env.example`](src/.env.example) — every setting is listed and commented there. `SECRET_KEY`
 is not optional: it signs every token the API issues, the template's value is published in this
 repository, and the app **refuses to start** on it rather than letting a deployment run on a key
@@ -220,10 +199,11 @@ curl http://localhost:8000/api/v1/dive/{uuid}/profile -H "Authorization: Bearer 
 
 ## Related repositories
 
-|                                                                |                                      |
-| -------------------------------------------------------------- | ------------------------------------ |
-| [opendiving-web](https://github.com/opendiving/opendiving-web) | Next.js frontend (screenshots there) |
-| [opendiving-ios](https://github.com/opendiving/opendiving-ios) | SwiftUI app (early scaffold, parked) |
+|                                                                |                                                     |
+| -------------------------------------------------------------- | --------------------------------------------------- |
+| [opendiving](https://github.com/opendiving/opendiving)         | **The front door** — install, docs, and the release |
+| [opendiving-web](https://github.com/opendiving/opendiving-web) | Next.js web app                                     |
+| [opendiving-ios](https://github.com/opendiving/opendiving-ios) | SwiftUI app (early scaffold, parked)                |
 
 ## License
 

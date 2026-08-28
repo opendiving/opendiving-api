@@ -183,7 +183,8 @@ class GoogleAuthSettings(BaseSettings):
     # The other half of that client, and the one value here that genuinely is a secret:
     # it is what lets this server redeem an authorization code at Google's token
     # endpoint, and it never leaves the server - not to the browser, not to the `web`
-    # container (see the `environment:` block in `deploy/docker-compose.yml`, which names
+    # container (see the `environment:` block in the install bundle's compose file,
+    # https://github.com/opendiving/opendiving/blob/main/docker-compose.yml, which names
     # `GOOGLE_CLIENT_ID` and deliberately not this).
     #
     # `SecretStr` rather than the bare `str | None` that `SMTP_PASSWORD` and
@@ -446,8 +447,8 @@ class FrontendSettings(BaseSettings):
     # Changing its hostname orphans every registered passkey, because browsers scope a
     # credential to the RP ID it was created under and will not offer it to another. The
     # magic link is the recovery path when that happens. `src/.env.example` carries the same
-    # warning where an operator sets this, and `docs/self-hosting/configuration.md` has the
-    # operator-facing version under "Sign-in".
+    # warning where an operator sets this, and the operator-facing version is under "Sign-in"
+    # in https://github.com/opendiving/opendiving/blob/main/docs/configuration.md
     FRONTEND_URL: str = config("FRONTEND_URL", default="http://localhost:3000")
 
     @property
@@ -555,7 +556,8 @@ class AccountDeletionSettings(BaseSettings):
     # 14 rather than 30, and the reason is a published sentence: the bundled privacy page
     # promises erasure "within 30 days", and a 30-day window swept hourly lands at "30
     # days and change". Raising this past roughly 29 makes that sentence false for the
-    # instance - `docs/self-hosting/configuration.md` says so.
+    # instance - https://github.com/opendiving/opendiving/blob/main/docs/configuration.md
+    # says so.
     ACCOUNT_DELETION_GRACE_DAYS: int = config("ACCOUNT_DELETION_GRACE_DAYS", default=14)
 
     # Fixed-window per-user limit over `MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS`, because

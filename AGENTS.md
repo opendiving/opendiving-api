@@ -24,16 +24,17 @@ after editing one rather than matching the wrapping by hand.
 - Runs in: Docker Compose — `db` (postgres), `redis`, `api`, `worker` (arq), and `admin_init`
   (one-shot, seeds the admin panel before `api` starts)
 
-- **Two compose files, and they are not variants of each other.** The root `docker-compose.yml` is
-  for development: it builds from `./src`, bind-mounts it, and publishes the API and Postgres on the
-  host. `deploy/docker-compose.yml` is what people install — pulled images, digest-pinned
-  third-party ones, a bundled Caddy under the `proxy` profile, and nothing published but 80/443. It
-  is uploaded as a release artifact along with `deploy/Caddyfile` and `deploy/example.env`, so a
-  change to any of the three ships on the next tag. Anything that changes how the app is
-  *configured* (a new required setting, a renamed one, a new service) has to be made in both, and
-  `docs/self-hosting/` is where an installer reads about it. Nothing that runs from the published
-  image may depend on `src/` being present — only the installed `app` package and `migrations/` are
-  in it.
+- **One compose file here, and it is the development one.** The root `docker-compose.yml` builds
+  from `./src`, bind-mounts it, and publishes the API and Postgres on the host. What people
+  *install* is the bundle in [opendiving/opendiving](https://github.com/opendiving/opendiving) —
+  pulled images, digest-pinned third-party ones, a bundled Caddy under the `proxy` profile, and
+  nothing published but 80/443 — released from that repository along with its `Caddyfile` and
+  `example.env`. Anything that changes how the app is *configured* (a new required setting, a
+  renamed one, a new service) has to be made in **both repositories**, and
+  [that repository's `docs/`](https://github.com/opendiving/opendiving/tree/main/docs) is where an
+  installer reads about it — a change made only here reaches no install at all. Nothing that runs
+  from the published image may depend on `src/` being present — only the installed `app` package and
+  `migrations/` are in it.
 
 - **Schema changes**: every one ships an Alembic revision. `alembic upgrade head` runs in the API's
   lifespan (`core/setup.py`), so a schema change reaches a database — yours or a self-hoster's — by
