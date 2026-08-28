@@ -6,23 +6,36 @@ Like `test_gear.py`, these cover the pieces that are pure logic and so need no d
 the public/internal shape conversion, the `agency`/`agency_other` pairing rules, the
 upload size guard, and - most importantly - the content-type sniffing that decides what
 bytes we are willing to store and later serve back. Endpoint behaviour on top of a live
-Postgres/Redis is exercised end to end by hand (see DECISIONS.md), not here.
+Postgres/Redis is otherwise exercised end to end by hand (see DECISIONS.md), not here.
+
+The one exception is `TestListOrderingAgainstPostgres`, which needs a real database
+because what it pins *is* a Postgres semantic - `DESC` defaulting to `NULLS FIRST`. It
+skips itself when no database is reachable; on a developer's machine that needs
+`POSTGRES_SERVER=localhost`. See CONTRIBUTING.md.
 """
 
 import io
 from datetime import UTC, date, datetime
 from fnmatch import fnmatch
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException, Response, UploadFile
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
-from src.app.api.v1.certifications import _to_public_certification, _validate_agency_pairing
+from src.app.api.v1.certifications import (
+    _cached_read_certifications,
+    _to_public_certification,
+    _validate_agency_pairing,
+)
 from src.app.core.exceptions.http_exceptions import UnprocessableEntityException
 from src.app.core.utils.uploads import content_disposition_attachment, read_upload_within_limit, safe_filename
-from src.app.crud.crud_certifications import get_expiring_overview_for_user
+from src.app.crud.crud_certifications import get_certifications_page, get_expiring_overview_for_user
+from src.app.models.user import User
 from src.app.schemas.certification import (
     CertificationAgency,
     CertificationBase,
@@ -37,6 +50,13 @@ from src.app.services.certification_files import (
     UnsupportedCardFileError,
     sniff_content_type,
 )
+from tests.conftest import db_available
+from tests.helpers.generators import create_certification
+
+# The `@cache` decorator would need Redis and would serve a hit without re-running the
+# body, which is the opposite of what the ordering tests assert. `__wrapped__` is the
+# undecorated function.
+_read_certifications_uncached = cast(Any, _cached_read_certifications).__wrapped__
 
 JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"\x00" * 32
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
@@ -463,3 +483,105 @@ class TestExpiringOverview:
         # would leave a stale renewals list behind - `invalidate_certification_caches`
         # sweeps exactly that one pattern and nothing calls anything extra for this route.
         assert fnmatch("user_1_certifications_expiring", "user_1_certification*")
+
+
+class TestListOrderingSql:
+    """`GET /certifications` orders `certified_on DESC NULLS LAST`, and the `NULLS LAST`
+    is the whole point: Postgres's default for `DESC` is `NULLS FIRST`, which floats every
+    dateless card above the diver's most recent one *and* leaves
+    `ix_certification_user_id_certified_on` - built `NULLS LAST` - unable to serve the
+    query.
+
+    Asserts on the compiled statement, so it runs with no database. The behaviour that
+    statement produces is pinned separately by `TestListOrderingAgainstPostgres`.
+    """
+
+    def _db(self) -> MagicMock:
+        db = MagicMock()
+        db.scalar = AsyncMock(return_value=0)
+        db.execute = AsyncMock(return_value=MagicMock(mappings=lambda: []))
+        return db
+
+    @pytest.mark.asyncio
+    async def test_orders_newest_first_with_dateless_cards_last(self) -> None:
+        db = self._db()
+
+        await get_certifications_page(db, user_id=1, offset=0, limit=10)
+
+        statement = str(db.execute.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
+        assert "ORDER BY certification.certified_on DESC NULLS LAST, certification.uuid DESC" in statement
+
+    @pytest.mark.asyncio
+    async def test_is_scoped_to_the_caller_and_excludes_deleted_rows(self) -> None:
+        db = self._db()
+
+        await get_certifications_page(db, user_id=7, offset=0, limit=10)
+
+        statement = str(db.execute.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
+        assert "certification.user_id = 7" in statement
+        assert "certification.is_deleted IS false" in statement
+
+    @pytest.mark.asyncio
+    async def test_counts_the_same_rows_it_pages_over(self) -> None:
+        # A `total_count` taken over a different set than the page would make
+        # `has_more` lie - the count query has to carry the identical conditions.
+        db = self._db()
+
+        await get_certifications_page(db, user_id=7, offset=20, limit=10)
+
+        count_statement = str(db.scalar.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
+        assert "count(*)" in count_statement
+        assert "certification.user_id = 7" in count_statement
+        assert "certification.is_deleted IS false" in count_statement
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestListOrderingAgainstPostgres:
+    """The same ordering, through the real reader and a real Postgres.
+
+    `TestListOrderingSql` can only say what SQL we emit; whether `NULLS LAST` puts the
+    dateless cards where a diver expects them is a property of the database, and this is
+    the half that would have caught the bug had the list been written this way from the
+    start.
+    """
+
+    @pytest.mark.asyncio
+    async def test_dateless_cards_sort_below_every_dated_one(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        undated_first = create_certification(db, diver)
+        older = create_certification(db, diver, certified_on=date(2015, 3, 2))
+        undated_second = create_certification(db, diver)
+        newest = create_certification(db, diver, certified_on=date(2024, 7, 19))
+
+        page = await _read_certifications_uncached(
+            request=None, user_id=diver.id, user_uuid=diver.uuid, db=async_db, page=1, items_per_page=10
+        )
+
+        # Dated cards newest first, then the dateless ones - which tie on `certified_on`
+        # and so fall back to `uuid DESC`, i.e. most recently created first.
+        assert [row["name"] for row in page["data"]] == [
+            newest.name,
+            older.name,
+            undated_second.name,
+            undated_first.name,
+        ]
+
+    @pytest.mark.asyncio
+    async def test_the_first_page_is_not_all_dateless_cards(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        """The user-visible shape of the bug: with `NULLS FIRST` a diver holding a few
+        undated cards opens their list and sees only those, with the certification they
+        were actually asked for pushed onto page two."""
+        for _ in range(3):
+            create_certification(db, diver)
+        newest = create_certification(db, diver, certified_on=date(2024, 7, 19))
+
+        page = await _read_certifications_uncached(
+            request=None, user_id=diver.id, user_uuid=diver.uuid, db=async_db, page=1, items_per_page=2
+        )
+
+        assert [row["name"] for row in page["data"]][0] == newest.name
+        assert page["total_count"] == 4
+        assert page["has_more"] is True

@@ -12248,3 +12248,62 @@ No migration accompanies this. A `CheckConstraint` was the other way to close th
 taken: it would answer with an `IntegrityError` that nothing on this route maps to a 422, giving a
 500 for the case the schema already answers cleanly on create, and it cannot express "only when a
 date was sent".
+
+## The certification list spells out `NULLS LAST`, because `get_multi` cannot
+
+`ix_certification_user_id_certified_on` has been `(user_id, certified_on DESC NULLS LAST)` since it
+was added, and its comment said it served `read_certifications`. It did not. The reader went through
+`crud_certifications.get_multi(sort_columns=["certified_on", "uuid"], sort_orders=["desc", "desc"])`,
+and fastcrud's `SortProcessor` turns `"desc"` into a bare `desc(column)` - which in Postgres means
+`NULLS FIRST`. Two consequences, and the second is the one that shows up in a screenshot:
+
+- The index could not serve the query at all. An index's null placement is part of its order; a scan
+  ordered `NULLS LAST` cannot answer an `ORDER BY` asking for `NULLS FIRST`.
+- Every certification with no `certified_on` sorted **above** the diver's most recent card. A diver
+  holding three undated cards and one from 2024 opened `GET /certifications?items_per_page=2` and
+  saw only the undated three's leading pair; the card they are actually asked for at a shop was on
+  page two.
+
+Fixed on the query side rather than by flipping the index, because dateless-last is what the list is
+for. The order now lives in `_LIST_ORDER` in `crud/crud_certifications.py`
+(`certified_on.desc().nulls_last(), uuid.desc()`), the same shape as `_INFO_ORDER` in
+`crud_gear_service_schedules`, and `get_certifications_page` is a hand-written `select()` returning
+the `{"data": [...], "total_count": n}` shape `get_multi` returns - whole-table dicts, so the route
+still reads the internal `id` its batched card-file lookup needs. `search_multi` in
+`core/utils/search.py` is the other place a list query outgrew `get_multi`; this is the second.
+
+**`get_multi` cannot express this.** `sort_orders` is a list of `'asc'`/`'desc'` strings and
+`SortProcessor` has no null-placement parameter, so there is no argument that would have fixed this
+in place - which is worth knowing before reaching for `sort_columns` on any nullable column. The
+sibling cases are all safe today for a reason that is easy to lose: `gear_service.py` sorts
+`next_due_on` **ascending**, and Postgres's default for `ASC` is already `NULLS LAST`. Sort that
+same column descending one day and the same bug arrives.
+
+Measured, on a 200k-row copy of the table with 4000 rows for the user in question, because "the
+index cannot serve it" is the kind of claim that deserves an `EXPLAIN`:
+
+```text
+DESC NULLS LAST -> Index Scan using c_idx (rows=86) + Incremental Sort, Presorted Key: certified_on
+DESC            -> Bitmap Heap Scan (rows=4000, Heap Blocks: 1471) + full top-N sort
+```
+
+The `uuid DESC` tiebreak is deliberately *not* a third index column. It only orders cards that
+already share a date, which the incremental sort above handles on top of the two-column index; a
+third column would widen every entry to settle a tie most divers never have.
+
+Two things about reproducing that plan, both of which cost a while:
+
+- The partial predicate has to be written the way SQLAlchemy writes it. `WHERE is_deleted IS FALSE`
+  in the index and `AND is_deleted = false` in the query is not a match Postgres's predicate proof
+  makes - it seq-scans, and it keeps seq-scanning with `enable_seqscan = off`, which reads as "the
+  index is useless" rather than "the predicate does not line up". `.is_(False)`, which is what the
+  model and the query both use, emits `IS false` on both sides.
+- The dev database has two certifications in it. Any plan taken there says nothing; the numbers
+  above come from a `create temp table` + `generate_series` copy inside a transaction that was
+  rolled back.
+
+Pinned by `TestListOrderingSql` (compiled SQL, no database) and `TestListOrderingAgainstPostgres` in
+`tests/test_certifications.py`. The second one needs a real Postgres on purpose: what it asserts
+*is* a Postgres semantic, and SQLite - had the suite used one - sorts `DESC` nulls last, so it would
+have passed against the broken query. Both fail if `.nulls_last()` is removed, which is how they
+were checked.
