@@ -294,9 +294,15 @@ class DiveGasUse(BaseModel):
     plan gas off these figures.
 
     The figures describe **the cylinders accounted for**, which on a single-cylinder dive
-    is the dive. On a multi-cylinder one they are the totals over `tanks`, and
-    `attributed_seconds`/`duration_seconds` are what say how much of the dive that covers -
-    a staged deco bottle with no pressures logged contributes neither its gas nor its time.
+    is the dive. On a multi-cylinder dive whose import recorded which gas was breathed when,
+    they are the totals over `tanks`, and `attributed_seconds`/`duration_seconds` are what
+    say how much of the dive that covers - a staged deco bottle with no pressures logged
+    contributes neither its gas nor its time.
+
+    On a dive whose cylinders are *all* flagged as breathed in parallel - a sidemount pair
+    or independent doubles - they are the whole dive again: the litres of every cylinder,
+    over the dive's own duration and average depth. `tanks` is then empty and both seconds
+    fields are null, because that derivation needs no attribution and so has none to report.
     """
 
     gas_used: Annotated[float, Field(examples=[1800.0], description="Gas breathed, in liters at surface pressure")]
@@ -314,8 +320,11 @@ class DiveGasUse(BaseModel):
             examples=[1.19],
             description="Surface air consumption in bar per minute. Only meaningful alongside this dive's cylinder "
             "volume, but it's what a pressure gauge actually shows. **Null on a multi-cylinder dive**, where there "
-            "is no such thing: 10 bar out of an 11 L stage and 10 bar out of a 22 L twinset are different amounts of "
-            "gas. Each entry in `tanks` carries its own, which is meaningful because a tank has one volume.",
+            "is generally no such thing: 10 bar out of an 11 L stage and 10 bar out of a 22 L twinset are different "
+            "amounts of gas. Each entry in `tanks` carries its own, which is meaningful because a tank has one "
+            "volume. The one exception is a dive whose cylinders are all flagged as breathed in parallel **and are "
+            "of exactly equal volume**, where this is their pooled figure - the mean drop across them per "
+            "surface-minute, which is what the same pair logged as a single manifolded cylinder would report.",
         ),
     ]
     tanks: Annotated[
@@ -323,8 +332,10 @@ class DiveGasUse(BaseModel):
         Field(
             default_factory=list,
             description="Per-cylinder breakdown, on a dive whose import recorded which gas was breathed when. Empty "
-            "on a single-cylinder dive, where the figures above already describe the one tank. May hold a single "
-            "entry: a two-cylinder dive whose deco bottle logged no pressures is the commonest shape there is.",
+            "on a single-cylinder dive, where the figures above already describe the one tank, and empty on a dive "
+            "computed by summing a flagged parallel set, which needs no attribution and so has none to break down. "
+            "May hold a single entry: a two-cylinder dive whose deco bottle logged no pressures is the commonest "
+            "shape there is.",
         ),
     ]
     attributed_seconds: Annotated[
@@ -332,8 +343,9 @@ class DiveGasUse(BaseModel):
         Field(
             default=None,
             examples=[2355],
-            description="Seconds of the dive the figures above account for, when they come from `tanks`. Null when "
-            "the dive has one cylinder and the whole dive is accounted for.",
+            description="Seconds of the dive the figures above account for, when they come from `tanks`. Null "
+            "whenever the whole dive is accounted for and there is no fraction to report: a single-cylinder dive, "
+            "and a flagged parallel set summed over the dive's own duration.",
         ),
     ]
     duration_seconds: Annotated[

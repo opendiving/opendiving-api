@@ -33,6 +33,40 @@ class GasRole(StrEnum):
     OXYGEN = "oxygen"
 
 
+class TankUsage(StrEnum):
+    """How a cylinder was breathed, which is not what it was carried for.
+
+    Orthogonal to `GasRole`, and the reason the two are separate columns: a diver can
+    carry a `bottom` gas in a sidemount pair and a `deco` bottle staged on the same dive,
+    and it is *this* fact that decides whether consumption can be summed.
+
+    - `parallel` - a sidemount pair or independent doubles, breathed alternately at the
+      same depth. Their litres are additive against the dive's own average depth and
+      duration, which is what `compute_parallel_gas_use` does with them.
+    - `staged` - a bottle breathed at its own depth. Deliberately documentary today: it
+      changes no arithmetic, because summing it against the whole dive's average depth is
+      the exact misattribution the multi-cylinder refusal exists to prevent. It is the
+      honest answer for the cylinder that is not parallel, and the hook for the
+      per-mixture time-on-gas work that would compute it properly.
+
+    Null means "not recorded", and is what every stored row says until a diver answers:
+    no format this app parses carries the distinction (see DECISIONS.md).
+
+    `parallel` is declared first because clients take list order from the enum, the same
+    rule `GasRole` states - and parallel is the answer that does something, so it leads.
+    A third `manifolded` value was considered and rejected as purely documentary: a
+    manifolded twinset is already logged as *one* cylinder at the pair's combined water
+    capacity with a single shared pressure, and computes correctly today.
+
+    Like `GasRole` and `GearType`, it has no mirroring DB `CHECK`: it is a Pydantic field
+    on every write path including the admin panel, and a DB copy of the list would need a
+    `DROP`/`ADD CONSTRAINT` each time the vocabulary grew.
+    """
+
+    PARALLEL = "parallel"
+    STAGED = "staged"
+
+
 class DiveMixtureBase(BaseModel):
     """The shape a mixture is read back in - and deliberately the *unbounded* one.
 
@@ -84,6 +118,18 @@ class DiveMixtureBase(BaseModel):
     role: Annotated[
         GasRole | None,
         Field(default=None, examples=[GasRole.BOTTOM], description="What the cylinder was carried for"),
+    ]
+    usage: Annotated[
+        TankUsage | None,
+        Field(
+            default=None,
+            examples=[TankUsage.PARALLEL],
+            description="How the cylinder was breathed, which is not what it was carried for. `parallel` is a "
+            "sidemount pair or independent doubles breathed alternately at the same depth; `staged` is a bottle "
+            "breathed at its own depth. Null is 'not recorded' - no dive-computer format carries the distinction, so "
+            "an import never sets it. A dive whose cylinders are *all* `parallel` gets a gas-consumption figure by "
+            "summing their litres, which is otherwise unavailable without per-cylinder gas switches.",
+        ),
     ]
 
 
@@ -148,3 +194,4 @@ class DiveMixtureUpdate(BaseModel):
         int | None, Field(default=None, ge=0, description="How the source export identifies this cylinder")
     ]
     role: Annotated[GasRole | None, Field(default=None, description="What the cylinder was carried for")]
+    usage: Annotated[TankUsage | None, Field(default=None, description="How the cylinder was breathed")]

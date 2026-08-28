@@ -2,9 +2,9 @@
 
 This is the half of the export that answers *"rebuild my logbook"*, where the UDDF
 document answers *"take my dives anywhere"*. UDDF is a dive-interchange format and has no
-slot for gear sets, service history, c-card records, a cylinder's `role`, or the order a
-drift dive visited its sites; all of that lives here, alongside everything UDDF does
-carry, so nothing a diver entered is reachable only through the lossy file.
+slot for gear sets, service history, c-card records, a cylinder's `role` or `usage`, or
+the order a drift dive visited its sites; all of that lives here, alongside everything
+UDDF does carry, so nothing a diver entered is reachable only through the lossy file.
 
 **Versioned from day one.** `format` and `version` are the first two keys so that a
 reader can dispatch on them before parsing anything else, and `version` is an integer

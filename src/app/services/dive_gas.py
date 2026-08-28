@@ -4,13 +4,17 @@ Everything above `gas_use_history` is deliberately pure: no session, no ORM, no 
 its own, so the rules can be tested exhaustively without a database (see
 `tests/test_dive_gas.py`). Same split as `services/gear_service.py`.
 
-Two derivations, and `resolve_gas_use` is the one entry point that picks between them.
+Three derivations, and `resolve_gas_use` is the one entry point that picks between them.
 `compute_gas_use` handles a single cylinder off the dive's own duration and average depth.
 `compute_multi_tank_gas_use` handles several, off `dive_profile.gas_attribution` - which
 gas was breathed for how long and how deep, read out of the dive computer's own gas
 switches. The second is what the first's multi-cylinder refusal was always waiting for:
 "there's nothing to say which of them were breathed at what depth" stopped being true once
-the profile extractor started recording it.
+the profile extractor started recording it. `compute_parallel_gas_use` is the third and the
+narrowest: when every cylinder is flagged `parallel` - a sidemount pair or independent
+doubles - the diver has answered that question themselves, and litres breathed alternately
+at one depth simply add up, with no attribution needed. It is a fallback, tried only where
+the second declines.
 
 Unlike `gear_service`'s `service_status`, this has *no* twin in the web app, and shouldn't
 grow one. Service status depends on today's date, which is why the browser has to derive
@@ -30,7 +34,7 @@ from ..core.utils.datetime_offset import combine_start_time
 from ..crud.crud_dive_mixtures import get_mixtures_for_dives
 from ..models.dive import Dive
 from ..schemas.dive import DiveGasUse, DiveGasUsePoint, DiveTankGasUse
-from ..schemas.dive_mixture import DiveMixtureRead
+from ..schemas.dive_mixture import DiveMixtureRead, TankUsage
 from ..schemas.dive_profile import DEPTH_SCALE, GasAttribution
 from .dive_profiles import ProfileGasAttribution, get_gas_attribution_for_dives
 
@@ -72,9 +76,9 @@ def compute_gas_use(
       pair's combined water capacity (see `VOLUME_OPTIONS` in the web app) and a single
       shared pressure, which is exactly right. Genuinely staged cylinders need per-mixture
       time-on-gas and depth-on-gas, which is what `compute_multi_tank_gas_use` takes and
-      this function is deliberately not given: the two derivations stay separable, so a
-      dive with one cylinder is computed the same way it was before per-tank attribution
-      existed.
+      this function is deliberately not given; a sidemount pair needs neither, and is
+      `compute_parallel_gas_use`'s. All three derivations stay separable, so a dive with
+      one cylinder is computed the same way it was before either of the others existed.
     - **No average depth**, or a nonsensical one. Max depth is not a substitute: a dive
       spends only a moment there, so it would understate consumption by a wide margin.
     - **Either cylinder pressure missing.** Half a pressure pair says nothing.
@@ -212,8 +216,14 @@ def _tank_arithmetic(mixture: DiveMixtureRead, attributed: GasAttribution) -> _T
 #
 # Deliberately not applied to `compute_gas_use`: a single cylinder is divided by the dive's
 # own duration, so there is no segmentation to go wrong, and adding a ceiling there would
-# change a long-standing figure - which is exactly what the split between the two
-# derivations exists to prevent.
+# change a long-standing figure - which is exactly what the split between the derivations
+# exists to prevent.
+#
+# **And not to `compute_parallel_gas_use` either**, for the same reason rather than a new
+# one: a flagged pair is divided by the whole dive's duration and the whole dive's average
+# depth, so it has no per-tank stretches to have segmented wrongly. The ceiling would also
+# break the equivalence that path is built on - the same physical pair logged as one
+# manifolded row would return a figure where two honest flagged rows returned `None`.
 #
 # **And deliberately one-sided.** The mirror fault exists - a switch recorded *early* gives
 # a cylinder more time than it was breathed, and its rate comes out too low - but there is
@@ -333,6 +343,96 @@ def compute_multi_tank_gas_use(
     )
 
 
+def compute_parallel_gas_use(
+    *,
+    duration: int,
+    avg_depth: float | None,
+    mixtures: Sequence[DiveMixtureRead],
+) -> DiveGasUse | None:
+    """Consumption for a dive breathed off a flagged parallel set, or `None`.
+
+    A sidemount pair or independent doubles is the one multi-cylinder shape whose litres
+    are simply additive: the cylinders are breathed alternately at the *same* depth over
+    the *same* dive, so the misattribution `compute_gas_use`'s multi-cylinder refusal
+    exists to prevent cannot happen here. `2 x 11.1 L x 92.5 bar` and `11.1 L x 185 bar`
+    describe the same 2 054 L, which is why the two honest rows and the one dishonest row
+    a diver might have written instead agree to the litre.
+
+    What makes that safe is the diver's own answer, not a guess: every mixture has to
+    carry `usage == TankUsage.PARALLEL`. The conditions, all of which must hold:
+
+    - **At least two cylinders, every one of them flagged `parallel`.** A mixed set - a
+      pair plus an unflagged bottle, or plus one explicitly `staged` - returns `None`. A
+      partial sum is worse than nothing: the bottle's litres would be missing from the
+      numerator while the whole dive stayed in the denominator, quietly reporting an RMV
+      that is too *low*. Same honesty rule the multi-tank path applies, and the one
+      Subsurface applies to its own airuse sum.
+    - **An average depth and a duration**, both of them the dive's own. This path has no
+      profile behind it and wants none - it is the rescue for dives that have no usable
+      attribution at all.
+    - **Both pressures on every cylinder.** One missing pressure anywhere refuses the
+      whole dive, for the reason above: the cylinder was carried and probably breathed,
+      and there is no way to leave it out honestly.
+    - **A total drop above zero.** Per-row drops are summed rather than each being
+      required positive, because a zero-drop row is the unused pony bottle `_pressure_used`
+      documents - it contributes zero litres, and the denominator is still right, since the
+      diver breathed the other cylinder for the whole dive. Only a set that says *nothing*
+      came out of any cylinder has no figure to give. Individual drops cannot come out
+      negative on a stored row (`ck_dive_mixture_pressure_order`).
+
+    `sac_bar_per_min` is pooled - the mean drop across the cylinders per surface-minute -
+    **only when every volume is exactly equal**, and `None` otherwise. That is the
+    constraint Shearwater imposes for its own pooled sidemount SAC and Garmin imposes at
+    pairing time, and it is what makes the figure honest: bar/min is a rate against a known
+    volume, so pooling drops across a 11.1 L and a 12 L would be averaging two different
+    amounts of gas. Equal volumes make it exactly the figure the same pair logged as one
+    manifolded row would report, since `sum(V * d_i) = nV * (sum(d_i) / n)`. Equality is
+    tested exactly rather than within a tolerance: volumes come from the app's own presets
+    or from one diver's hand, and a tolerance would invent a convention no agency defines.
+
+    `tanks` is empty. Per-tank rates need time-on-gas, which is exactly what a dive with no
+    attribution does not have, and per-tank *litres* alone would be a half-populated
+    `DiveTankGasUse` - the whole-object-or-nothing rule `DiveGasUse` is built on.
+
+    `MAX_PLAUSIBLE_RMV` is deliberately not applied; see the comment on it.
+    """
+    if len(mixtures) < 2:
+        return None
+    if any(mixture.usage is not TankUsage.PARALLEL for mixture in mixtures):
+        return None
+    if avg_depth is None or avg_depth <= 0 or duration <= 0:
+        return None
+    if any(mixture.volume <= 0 for mixture in mixtures):
+        return None
+    if any(mixture.start_pressure is None or mixture.end_pressure is None for mixture in mixtures):
+        return None
+
+    # Narrowed by the guard above; re-derived rather than carried so the types stay honest.
+    drops = [
+        mixture.start_pressure - mixture.end_pressure
+        for mixture in mixtures
+        if mixture.start_pressure is not None and mixture.end_pressure is not None
+    ]
+    if sum(drops) <= 0:
+        return None
+
+    gas_used = sum(drop * mixture.volume for drop, mixture in zip(drops, mixtures, strict=True))
+    ambient_pressure = 1 + avg_depth / METERS_PER_BAR
+    surface_minutes = ambient_pressure * (duration / 60)
+
+    volumes = {mixture.volume for mixture in mixtures}
+    pooled_sac = (sum(drops) / len(drops)) / surface_minutes if len(volumes) == 1 else None
+
+    return DiveGasUse(
+        gas_used=round(gas_used, 2),
+        rmv=round(gas_used / surface_minutes, 2),
+        sac_bar_per_min=None if pooled_sac is None else round(pooled_sac, 2),
+        tanks=[],
+        attributed_seconds=None,
+        duration_seconds=None,
+    )
+
+
 def resolve_gas_use(
     *,
     duration: int,
@@ -340,21 +440,38 @@ def resolve_gas_use(
     mixtures: Sequence[DiveMixtureRead],
     attribution: ProfileGasAttribution | None = None,
 ) -> DiveGasUse | None:
-    """Whichever of the two derivations this dive supports.
+    """Whichever of the three derivations this dive supports.
 
-    The split is on cylinder count and nothing else, so neither path can change what the
-    other already returns: one cylinder is `compute_gas_use`'s, exactly as before Phase 4,
-    and several are `compute_multi_tank_gas_use`'s. In particular a single-cylinder dive
-    with a profile is *not* re-derived from the profile's mean depth - the dive's own
-    `avg_depth` is the diver's record and may have been edited, and swapping which number
-    a long-standing figure comes from is not a change to make in passing.
+    Cylinder count picks the first candidate - one is `compute_gas_use`'s, exactly as
+    before Phase 4, and several are `compute_multi_tank_gas_use`'s - and count alone is no
+    longer the whole rule, as it was until the parallel flag existed. Where the multi-tank
+    path declines *and* every mixture is flagged `parallel`, `compute_parallel_gas_use`
+    gets a turn.
+
+    **Attribution wins over the flag**, which is why the fallback is second rather than
+    gated ahead of it. A dive whose profile attributed time and depth per cylinder yields
+    a strictly richer answer - per-tank litres, rates, seconds and mean depths - and a
+    diver flagging a pair that the device *did* record switches for must not lose it. What
+    the fallback rescues is the set that returns `None` today: no profile, no switches, or
+    the refusal a cylinder with real pressures and no attribution entry triggers - the
+    sidemount pair the computer saw as one gas.
+
+    No existing path changed what it returns. `compute_gas_use` and
+    `compute_multi_tank_gas_use` are untouched, and an unflagged multi-cylinder dive still
+    says nothing. In particular a single-cylinder dive with a profile is *not* re-derived
+    from the profile's mean depth - the dive's own `avg_depth` is the diver's record and
+    may have been edited, and swapping which number a long-standing figure comes from is
+    not a change to make in passing.
 
     Every caller that turns a dive into a response goes through here rather than choosing,
     so the rule lives in one place.
     """
     if len(mixtures) == 1:
         return compute_gas_use(duration=duration, avg_depth=avg_depth, mixtures=mixtures)
-    return compute_multi_tank_gas_use(mixtures=mixtures, attribution=attribution or ProfileGasAttribution())
+    attributed = compute_multi_tank_gas_use(mixtures=mixtures, attribution=attribution or ProfileGasAttribution())
+    if attributed is not None:
+        return attributed
+    return compute_parallel_gas_use(duration=duration, avg_depth=avg_depth, mixtures=mixtures)
 
 
 async def gas_use_history(db: AsyncSession, user_id: int) -> list[DiveGasUsePoint]:

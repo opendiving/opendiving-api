@@ -31,7 +31,7 @@ from uuid6 import uuid7
 from src.app.api.v1 import dives as dives_module
 from src.app.core.exceptions.http_exceptions import UnprocessableEntityException
 from src.app.schemas.dive import DiveCreateRequest, DiveUpdate, DiveUpdateRequest, WaterType
-from src.app.schemas.dive_mixture import GasRole
+from src.app.schemas.dive_mixture import GasRole, TankUsage
 
 TRIP_UUID = uuid7()
 # The one species uuid the stubbed resolver refuses, so the "not found" branch is reachable
@@ -264,11 +264,45 @@ class TestMixtureFieldsAreClosed:
 
     def test_the_surviving_mixture_fields_still_validate(self) -> None:
         values = DiveUpdateRequest.model_validate(
-            {"mixtures": [{"volume": 12.0, "oxygen": 32.0, "helium": 0.0, "po2_limit": 1.4, "role": "deco"}]}
+            {
+                "mixtures": [
+                    {
+                        "volume": 12.0,
+                        "oxygen": 32.0,
+                        "helium": 0.0,
+                        "po2_limit": 1.4,
+                        "role": "deco",
+                        "usage": "staged",
+                    }
+                ]
+            }
         )
 
         assert values.mixtures is not None
         assert values.mixtures[0].role is GasRole.DECO
+        assert values.mixtures[0].usage is TankUsage.STAGED
+
+    def test_a_mixture_with_no_usage_reads_back_as_not_recorded(self) -> None:
+        """Null is the answer for every cylinder until a diver gives another one - no
+        dive-computer format carries the distinction, so no import can set it.
+        """
+        values = DiveUpdateRequest.model_validate({"mixtures": [{"volume": 12.0, "oxygen": 21.0, "helium": 0.0}]})
+
+        assert values.mixtures is not None
+        assert values.mixtures[0].usage is None
+
+    @pytest.mark.parametrize("bad", ["manifolded", "Parallel", "sidemount", ""])
+    def test_a_usage_outside_the_vocabulary_is_refused(self, bad: str) -> None:
+        """The closed vocabulary is enforced in Pydantic and nowhere else - there is no DB
+        `CHECK`, the same call as `GasRole` and `GearType`. So this is the whole guard, and
+        `"manifolded"` is here because it is the value that was considered and rejected.
+        """
+        with pytest.raises(ValidationError) as exc_info:
+            DiveUpdateRequest.model_validate(
+                {"mixtures": [{"volume": 12.0, "oxygen": 21.0, "helium": 0.0, "usage": bad}]}
+            )
+
+        assert "usage" in str(exc_info.value)
 
 
 class TestWaterTypeAndAltitude:

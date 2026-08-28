@@ -6,7 +6,8 @@
   spreadsheet.
 - `envelope.py` writes **`export.json`**, the complete structured copy, including
   everything UDDF has no slot for - gear sets, service history, c-cards, per-cylinder
-  role, multi-site visit order - so nothing is reachable only through the lossy file.
+  role and usage, multi-site visit order - so nothing is reachable only through the lossy
+  file.
 - `archive.py` puts all of the above in one zip alongside every stored dive-computer
   export and c-card image.
 

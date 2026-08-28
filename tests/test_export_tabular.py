@@ -25,6 +25,7 @@ from src.app.services.export.tabular import (
     DIVES_HEADER,
     GEAR_ITEMS_HEADER,
     GEAR_SERVICE_HEADER,
+    MIXTURES_HEADER,
     SPECIES_HEADER,
     TRIPS_HEADER,
     _utc_offset,
@@ -112,9 +113,15 @@ class TestDivesCsv:
         assert rows[1][DIVES_HEADER.index("dive_sites")] == "Shark Reef; Yolanda"
 
     def test_cylinders_read_the_way_a_diver_says_them(self):
+        """Role and usage are separate parenthesised tokens rather than one - they are
+        orthogonal facts, and a bottle can be `(deco)` without being `(staged)`.
+        """
         rows = _parse(_render(write_dives_csv(full_bundle())))
         assert rows[1][DIVES_HEADER.index("cylinders")] == "EAN32 12L 200->70bar"
-        assert rows[2][DIVES_HEADER.index("cylinders")] == "21/35 24L 232->90bar (bottom); EAN50 11.1L 200bar (deco)"
+        assert (
+            rows[2][DIVES_HEADER.index("cylinders")]
+            == "21/35 24L 232->90bar (bottom); EAN50 11.1L 200bar (deco) (staged)"
+        )
 
     def test_a_cylinder_with_no_pressures_says_only_what_it_knows(self):
         bundle = build_bundle(
@@ -176,6 +183,16 @@ class TestTheNormalizedFiles:
         rows = _parse(_render(write_mixtures_csv(full_bundle())))
         assert len(rows) == 4  # header + one cylinder on dive 1, two on dive 2
         assert rows[2][2:6] == ["21/35", "21.0", "35.0", "24.0"]
+
+    def test_mixtures_carry_the_role_and_usage_as_their_values(self):
+        """Both are enums on the read schema, so a bare `str()` would write
+        `GasRole.DECO` into a spreadsheet cell. An unanswered cylinder is empty, not
+        `None`.
+        """
+        rows = _parse(_render(write_mixtures_csv(full_bundle())))
+        role, usage = MIXTURES_HEADER.index("role"), MIXTURES_HEADER.index("usage")
+
+        assert [(row[role], row[usage]) for row in rows[1:]] == [("", ""), ("bottom", ""), ("deco", "staged")]
 
     def test_trips_count_the_dives_that_reference_them(self):
         rows = _parse(_render(write_trips_csv(full_bundle())))

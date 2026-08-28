@@ -406,7 +406,21 @@ def full_bundle() -> ExportBundle:
                     gas_number=1,
                     role="bottom",
                 ),
-                mixture(id=3, volume=11.1, oxygen=50.0, start_pressure=200.0, po2_limit=1.6, gas_number=2, role="deco"),
+                # `usage="staged"` is what this cylinder actually is - an EAN50 bottle
+                # breathed on the ascent, not a sidemount pair - and it is here so the
+                # column is exercised by both the `cylinders` cell and `mixtures.csv`. It
+                # moves no gas figure: the set is not all-`parallel`, so the additive
+                # branch declines it exactly as it declines every unflagged dive.
+                mixture(
+                    id=3,
+                    volume=11.1,
+                    oxygen=50.0,
+                    start_pressure=200.0,
+                    po2_limit=1.6,
+                    gas_number=2,
+                    role="deco",
+                    usage="staged",
+                ),
             ],
         },
         site_ids_by_dive={1: [1, 2], 2: [2]},

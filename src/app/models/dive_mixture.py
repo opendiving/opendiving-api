@@ -34,6 +34,13 @@ class DiveMixture(Base):
     # What the cylinder was carried for - see `GasRole` (`schemas/dive_mixture.py`) for
     # the vocabulary and for why this is not the gas *name* synthesis that was rejected.
     role: Mapped[str | None] = mapped_column(String(20), default=None)
+    # *How* the cylinder was breathed, which is the orthogonal fact to `role` and the one
+    # gas consumption needs - see `TankUsage` (`schemas/dive_mixture.py`). `parallel` is a
+    # sidemount pair or independent doubles, breathed alternately at the same depth, whose
+    # litres are additive; `staged` is a bottle breathed at its own depth, which is not.
+    # Null means "not recorded", which is every row until a diver says otherwise: no file
+    # format this app parses carries the distinction.
+    usage: Mapped[str | None] = mapped_column(String(20), default=None)
 
     __table_args__ = (
         # Mirrors the frontend's Zod validation (`lib/validations/dive.ts`) at the DB
