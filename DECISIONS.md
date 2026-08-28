@@ -10512,6 +10512,40 @@ back into `bytea` is a path nobody will run, and pretending otherwise ships unte
 Postgres does not reclaim the dropped columns' pages without a `VACUUM FULL`. Not automated: a
 rewrite of both tables under an exclusive lock is the operator's call, not a migration's.
 
+### The two messages that reach an operator name a URL, not a repo path
+
+`warn_if_files_volume_looks_empty`'s CRITICAL and this revision's `downgrade` refusal both send
+their reader to `backup-restore.md`, and both used to spell it
+`docs/self-hosting/backup-restore.md`. That reader is running the published image and has no
+checkout, so a repo-relative path resolved to nothing for precisely the audience the two messages
+exist for — and the copy of that document an operator is meant to read is the one published in
+`opendiving/opendiving`. Both now name
+`https://github.com/opendiving/opendiving/blob/main/docs/backup-restore.md`.
+
+These are the only two doc references the running app says out loud. Every other one in `src/` is a
+comment or a line in the config template, read by somebody who does have a tree in front of them,
+and a relative path is the right spelling there.
+
+Three details that look arbitrary and are not:
+
+- **The URL is last and carries no trailing period.** Terminals and log viewers that linkify a
+  message routinely swallow the punctuation into the href, and the moment an operator discovers
+  their files volume is missing is the worst one to hand them a 404.
+- **`blob/main`, not a release tag.** An operator on any version wants the current instructions, and
+  the restore procedure is not versioned with the image.
+- **`opendiving/opendiving` is private until the public launch**, so the link 404s for a signed-out
+  reader today. Deliberate rather than premature: no release has been cut in any of these
+  repositories, so nothing has ever put these strings in front of an operator, and the link is
+  correct by the time one exists.
+
+This is the first `github.com/opendiving/opendiving/` reference in this repository.
+`blob/main/<path>` is the shape to follow for the rest — it is already what the issue templates use
+for cross-repo file links, and unlike `tree/main` it renders a file.
+
+`tests/test_operator_messages.py` pins both messages. What it asserts is not the wording but that
+the URL is there and no bare `docs/` path survives beside it, which is the property that would
+otherwise be lost quietly.
+
 ## The sign-in email carries a code as well as a link
 
 `POST /auth/email/request` now mints two credentials for one `authentication_request` row: the magic

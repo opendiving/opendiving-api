@@ -156,5 +156,6 @@ def upgrade() -> None:
 def downgrade() -> None:
     raise NotImplementedError(
         "There is no path back from the files volume into bytea columns. Restore from a "
-        "backup taken before the upgrade - see docs/self-hosting/backup-restore.md."
+        "backup taken before the upgrade - see "
+        "https://github.com/opendiving/opendiving/blob/main/docs/backup-restore.md"
     )
