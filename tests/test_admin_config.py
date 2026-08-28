@@ -10,6 +10,7 @@ interface behind a known credential. These tests pin the guard that replaced tha
 import pytest
 
 from src.app.core.config import LEGACY_DEFAULT_ADMIN_PASSWORD, EnvironmentOption, Settings
+from tests.helpers.model_metadata import diver_owned_hard_deleted, soft_deleting_models
 
 
 def _settings(**overrides):
@@ -74,20 +75,37 @@ class TestAdminPasswordIsRequiredInProduction:
             _settings(CRUD_ADMIN_ALLOWED_IPS="203.0.113.7")
 
 
-class TestHardDeletedModelsCannotBeDeletedFromThePanel:
-    """The five models that hard-delete are registered without `"delete"`.
+# The models the panel registers, derived rather than listed, so that a new one cannot arrive
+# with a `delete` button nobody noticed. Both sets are named by class name because the
+# assertions below read `views.py` as text - importing `register_admin_views` means
+# constructing a `CRUDAdmin`, which wants a database.
+#
+# `NOT_IN_THE_PANEL` is what the diver-owned hard-delete predicate reaches that `views.py`
+# deliberately leaves out: sign-in state and passkeys are not logbook rows, and a `DiveFile`
+# is a payload on the volume that no create/update form could meaningfully accept (`views.py`
+# says the same about `CertificationFile`, which the predicate does not reach - it has no
+# `user_id`). `User` is the one soft-deleting model registered without `delete`, and for its
+# own reason: the account-deletion flow, not this one.
+NOT_IN_THE_PANEL = {"AuthenticationRequest", "DiveFile", "WebauthnCredential", "User"}
+PANEL_HARD_DELETED = sorted({model.__name__ for model in diver_owned_hard_deleted()} - NOT_IN_THE_PANEL)
+PANEL_SOFT_DELETING = sorted({model.__name__ for model in soft_deleting_models()} - NOT_IN_THE_PANEL)
 
-    Asserted against the source for the same reason `TestDefaults` below is - importing
+
+class TestHardDeletedModelsCannotBeDeletedFromThePanel:
+    """The diver-owned models that hard-delete are registered without `"delete"`.
+
+    Which models those are is read off the models themselves rather than listed here, for
+    the reason `test_hard_delete.py` sets out at length: a new one copied from `GearSet`
+    would otherwise arrive with no case anywhere and nothing would fail. The rest is
+    asserted against the source for the same reason `TestDefaults` below is - importing
     `register_admin_views` means constructing a `CRUDAdmin`, which wants a database - and
     it is worth asserting at all because the button looks harmless and is not. FastCRUD's
-    `delete` branches on whether the model carries `is_deleted`; since these five lost it,
-    the panel's delete would take the `DELETE FROM` branch and destroy the row, its
-    schedules, its service records and every join row through the FK cascades. With **no
-    cache invalidation**, which is route-level only, so Redis would go on serving the
-    deleted rows for the rest of the TTL.
+    `delete` branches on whether the model carries `is_deleted`; since these lost it, the
+    panel's delete would take the `DELETE FROM` branch and destroy the row, its schedules,
+    its service records and every join row through the FK cascades. With **no cache
+    invalidation**, which is route-level only, so Redis would go on serving the deleted
+    rows for the rest of the TTL.
     """
-
-    HARD_DELETED = ("DiveSite", "Trip", "GearItem", "GearServiceSchedule", "GearSet")
 
     @staticmethod
     def _views_source() -> str:
@@ -95,30 +113,30 @@ class TestHardDeletedModelsCannotBeDeletedFromThePanel:
 
         return (Path(__file__).resolve().parents[1] / "src" / "app" / "admin" / "views.py").read_text()
 
-    @pytest.mark.parametrize("model", HARD_DELETED)
-    def test_the_view_is_registered_without_delete(self, model: str):
-        source = self._views_source()
+    @classmethod
+    def _actions_for(cls, model: str) -> str:
+        source = cls._views_source()
+        assert f"model={model}," in source, f"{model} is not registered with the admin panel at all"
         block = source[source.index(f"model={model},") :]
-        actions = block[block.index("allowed_actions=") : block.index("\n    )")]
+        return block[block.index("allowed_actions=") : block.index("\n    )")]
+
+    @pytest.mark.parametrize("model", PANEL_HARD_DELETED)
+    def test_the_view_is_registered_without_delete(self, model: str):
+        actions = self._actions_for(model)
 
         assert '"delete"' not in actions, model
         assert '"view", "create", "update"' in actions, model
 
-    def test_the_soft_deleting_models_keep_theirs(self):
-        """The distinction is soft-delete, not caution: `Dive`, `GearServiceRecord` and
-        `Certification` still flag a row rather than removing it, so the panel's delete
-        stays what it always was for them."""
-        source = self._views_source()
-
-        for model in ("Dive", "GearServiceRecord", "Certification"):
-            block = source[source.index(f"model={model},") :]
-            actions = block[block.index("allowed_actions=") : block.index("\n    )")]
-            assert '"delete"' in actions, model
+    @pytest.mark.parametrize("model", PANEL_SOFT_DELETING)
+    def test_the_soft_deleting_models_keep_theirs(self, model: str):
+        """The distinction is soft-delete, not caution: these still flag a row rather than
+        removing it, so the panel's delete stays what it always was for them."""
+        assert '"delete"' in self._actions_for(model), model
 
 
 class TestTheGlobalCatalogCannotBeDeletedFromThePanel:
     """`Species` and `SpeciesName` are registered without `"delete"` too, but for a
-    different reason than the five hard-deleted models above.
+    different reason than the diver-owned hard-deleted models above.
 
     Those are one diver's rows. A species is **everybody's**: deleting one takes every
     `dive_species` row pointing at it through the FK cascade, silently removing a sighting
