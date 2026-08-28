@@ -12316,15 +12316,31 @@ The first kind asks the models and fails by name on anything it does not recogni
 
 - `test_migrations.py::TestMigrationsCoverEveryModel` diffs `Base.metadata.tables` against the DDL
   an offline `alembic upgrade head` emits, so a table no revision creates is a failure.
+
 - `test_user_cascade.py::TestEveryForeignKeyIntoUserCascades` walks `Base.metadata` for foreign keys
   into `user.id` left without `ondelete="CASCADE"`.
+
 - `test_ownership.py::TestEveryUuidRouteIsAccountedFor` enumerates the app's real route table and
   fails on a `{uuid}` route not listed there; `TestEveryOwnedRouteUsesIt` greps the route files for
   the hand-rolled ownership block that `fetch_owned_or_raise` replaced.
-- `test_hard_delete.py::TestTheRegistryIsComplete` names any diver-owned, hard-deleting model that
-  has no case in that file and no documented reason for having no delete of its own. The predicate
-  behind it is `tests/helpers/model_metadata.py`, which `test_admin_config.py` also builds its two
-  panel parametrize lists from, so neither file hand-lists model names any more.
+
+- `test_hard_delete.py::TestTheRegistryIsComplete` names any hard-deleting model with a public
+  `uuid` that has neither a case in that file nor a recorded reason for having no delete of its own,
+  and fails in the other direction too on a registration the models no longer back. The predicates
+  live in `tests/helpers/model_metadata.py`, which `test_admin_config.py` builds both its panel
+  parametrize lists from, so the model names those two files used to hand-copy are now derived from
+  one place.
+
+  Two things in that helper are load-bearing and easy to undo. It enumerates by walking
+  `app/models/` from disk and reading SQLAlchemy's mapper registry, **not** `models/__init__.py`: a
+  model wired into its own `crud_*` module is mapped and migrated whether or not the package
+  re-exports it, and the coverage test above cannot see a model that is on neither side of its
+  comparison. And it filters on `uuid` rather than `user_id`, because ownership is the filter that
+  loses models quietly - `DiveProfile` and `CertificationFile` are one diver's rows with no
+  `user_id` column at all, so scoping on it would drop them, and anything later added in their
+  shape, without a decision being made. What is written down is only which addressable models are
+  *not* a diver's own resource, with the reason for each; the positive set falls out of the
+  subtraction.
 
 The second kind is a hand-written list, and a model that is not in it is not a failure - it is
 absent, with every test still green. **Adding a model means walking the inventory below by hand,

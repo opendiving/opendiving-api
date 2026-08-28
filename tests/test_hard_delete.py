@@ -50,15 +50,12 @@ from src.app.crud.crud_gear_service_schedules import (
 )
 from src.app.crud.crud_gear_sets import crud_gear_sets, gear_set_name_exists
 from src.app.crud.crud_trips import crud_trips, trip_name_exists
-from src.app.models.authentication_request import AuthenticationRequest
-from src.app.models.dive_file import DiveFile
 from src.app.models.dive_site import DiveSite
 from src.app.models.gear_item import GearItem
 from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.gear_set import GearSet
 from src.app.models.trip import Trip
 from src.app.models.user import User
-from src.app.models.webauthn_credential import WebauthnCredential
 from src.app.schemas.dive_site import DiveSiteReadInternal
 from src.app.schemas.gear_item import GearItemReadInternal
 from src.app.schemas.gear_set import GearSetReadInternal
@@ -72,7 +69,12 @@ from tests.helpers.generators import (
     create_gear_set,
     create_trip,
 )
-from tests.helpers.model_metadata import diver_owned_hard_deleted, soft_deleting_models
+from tests.helpers.model_metadata import (
+    NOT_A_DIVERS_OWN_RESOURCE,
+    addressable_hard_deleted,
+    divers_own_hard_deleted,
+    soft_deleting_models,
+)
 
 needs_a_database = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
@@ -180,32 +182,36 @@ class TestTheRegistryIsComplete:
 
     The three classes below are the behaviour, and none of them can notice a resource that
     was never registered - a new model copied from `GearSet`, hard-deleting like it, simply
-    has no case and every test still passes. This is the half that fails.
+    has no case and every test still passes. This is the half that fails, in both
+    directions, against `tests/helpers/model_metadata.py`.
     """
 
-    NOT_A_DIVER_FACING_RESOURCE = {
-        AuthenticationRequest: (
-            "Sign-in state, not a logbook row. Nothing offers a delete of it - rows expire and are "
-            "swept on a cron - so there is no delete for a case to exercise."
-        ),
-        DiveFile: (
-            "Reached through its dive rather than by a CRUD delete of its own: the upload routes own "
-            "its lifecycle, and `test_dive_files.py` covers them along with the files volume."
-        ),
-        WebauthnCredential: (
-            "A passkey, removed through the account's own credential routes, which `test_passkeys.py` "
-            "covers together with the last-credential guard gating them."
-        ),
-    }
-
-    def test_every_diver_owned_hard_deleting_model_has_a_registration(self) -> None:
+    def test_every_hard_deleting_resource_has_a_registration(self) -> None:
         """Add the model to `HARD_DELETED_RESOURCES` and the three classes below cover it;
-        add it to `NOT_A_DIVER_FACING_RESOURCE`, with the reason, if it has no delete of
-        its own. Leaving it in neither is what this refuses.
+        add it to `NOT_A_DIVERS_OWN_RESOURCE`, with the reason, if it has no delete of its
+        own. Leaving it in neither is what this refuses.
         """
-        unregistered = diver_owned_hard_deleted() - set(HARD_DELETED_RESOURCES) - set(self.NOT_A_DIVER_FACING_RESOURCE)
+        unregistered = divers_own_hard_deleted() - set(HARD_DELETED_RESOURCES)
 
         assert sorted(model.__name__ for model in unregistered) == []
+
+    def test_nothing_is_registered_that_the_models_no_longer_call_a_resource(self) -> None:
+        """The same check from the other end. An entry left here for a model that has since
+        been renamed, removed or made a child of something else would go on passing every
+        case below against a resource the app no longer has.
+        """
+        stale = set(HARD_DELETED_RESOURCES) - divers_own_hard_deleted()
+
+        assert sorted(model.__name__ for model in stale) == []
+
+    def test_no_exclusion_names_a_model_that_is_no_longer_addressable(self) -> None:
+        """`NOT_A_DIVERS_OWN_RESOURCE` is keyed by class name, so a renamed model leaves a
+        key matching nothing - which is not an error but an exemption that has stopped
+        being read, and would go on excusing the renamed model from the check above.
+        """
+        dangling = set(NOT_A_DIVERS_OWN_RESOURCE) - {model.__name__ for model in addressable_hard_deleted()}
+
+        assert sorted(dangling) == []
 
     def test_nothing_registered_here_has_gone_back_to_soft_deleting(self) -> None:
         """The other direction, and the cheap half of what `TestTheRowIsActuallyRemoved`

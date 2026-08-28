@@ -10,7 +10,7 @@ interface behind a known credential. These tests pin the guard that replaced tha
 import pytest
 
 from src.app.core.config import LEGACY_DEFAULT_ADMIN_PASSWORD, EnvironmentOption, Settings
-from tests.helpers.model_metadata import diver_owned_hard_deleted, soft_deleting_models
+from tests.helpers.model_metadata import divers_own_hard_deleted, soft_deleting_models
 
 
 def _settings(**overrides):
@@ -75,24 +75,20 @@ class TestAdminPasswordIsRequiredInProduction:
             _settings(CRUD_ADMIN_ALLOWED_IPS="203.0.113.7")
 
 
-# The models the panel registers, derived rather than listed, so that a new one cannot arrive
-# with a `delete` button nobody noticed. Both sets are named by class name because the
-# assertions below read `views.py` as text - importing `register_admin_views` means
-# constructing a `CRUDAdmin`, which wants a database.
+# Derived rather than listed, so a model cannot arrive in the panel with a `delete` button
+# nobody noticed. Both are named by class name because the assertions below read `views.py`
+# as text - importing `register_admin_views` means constructing a `CRUDAdmin`, which wants a
+# database. `tests/helpers/model_metadata.py` holds the predicates and the reason each model
+# it excludes is excluded; `test_hard_delete.py` is what fails when a new one is neither.
 #
-# `NOT_IN_THE_PANEL` is what the diver-owned hard-delete predicate reaches that `views.py`
-# deliberately leaves out: sign-in state and passkeys are not logbook rows, and a `DiveFile`
-# is a payload on the volume that no create/update form could meaningfully accept (`views.py`
-# says the same about `CertificationFile`, which the predicate does not reach - it has no
-# `user_id`). `User` is the one soft-deleting model registered without `delete`, and for its
-# own reason: the account-deletion flow, not this one.
-NOT_IN_THE_PANEL = {"AuthenticationRequest", "DiveFile", "WebauthnCredential", "User"}
-PANEL_HARD_DELETED = sorted({model.__name__ for model in diver_owned_hard_deleted()} - NOT_IN_THE_PANEL)
-PANEL_SOFT_DELETING = sorted({model.__name__ for model in soft_deleting_models()} - NOT_IN_THE_PANEL)
+# `User` is the one soft-deleting model the panel registers without `delete`, and for its own
+# reason: the account-deletion flow, not this one.
+PANEL_HARD_DELETED = sorted(model.__name__ for model in divers_own_hard_deleted())
+PANEL_SOFT_DELETING = sorted({model.__name__ for model in soft_deleting_models()} - {"User"})
 
 
 class TestHardDeletedModelsCannotBeDeletedFromThePanel:
-    """The diver-owned models that hard-delete are registered without `"delete"`.
+    """The models a diver deletes one of, which hard-delete, are registered without `"delete"`.
 
     Which models those are is read off the models themselves rather than listed here, for
     the reason `test_hard_delete.py` sets out at length: a new one copied from `GearSet`
