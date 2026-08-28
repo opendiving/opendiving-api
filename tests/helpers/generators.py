@@ -60,6 +60,24 @@ def create_trip(db: Session, user: models.User) -> models.Trip:
     )
 
 
+def create_certification(db: Session, user: models.User, *, certified_on: date | None = None) -> models.Certification:
+    """A certification of this user's.
+
+    `certified_on` defaults to `None` on purpose: a card with no date is the case
+    `_LIST_ORDER` in `crud_certifications` exists for, and the fixture should make one
+    without ceremony.
+    """
+    return _persist(
+        db,
+        models.Certification(
+            user_id=user.id,
+            agency="padi",
+            name=f"Advanced Open Water {uuid7().hex[-8:]}",
+            certified_on=certified_on,
+        ),
+    )
+
+
 def create_gear_item(db: Session, user: models.User, *, is_archived: bool = False) -> models.GearItem:
     """A gear item of this user's. Uniquely named for the same reason as the rest, and
     doubly so here: `ux_gear_item_user_id_brand_name_lower` is a real unique index over
