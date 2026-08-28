@@ -6394,10 +6394,31 @@ when it is skipped.
 
 ## The project instructions live in AGENTS.md, and CLAUDE.md is an import
 
-`CLAUDE.md` used to hold everything. It now holds a `@AGENTS.md` import and the one line that is
-genuinely about Claude Code — that the parent `opendiving/CLAUDE.md` loads alongside it, which
-describes Claude's directory walk and would be false in a file other agents read. The instructions
-themselves moved to `AGENTS.md` unchanged.
+`CLAUDE.md` used to hold everything. It now holds a `@AGENTS.md` import and a `## Running the tests`
+section. The instructions themselves moved to `AGENTS.md` unchanged.
+
+It briefly also held a paragraph saying the parent `opendiving/CLAUDE.md` loads alongside it — kept
+in this file rather than `AGENTS.md` because it described Claude's directory walk and would have
+been false in a file other agents read. That paragraph is gone now, for a reason that outranks where
+it belonged: it could not act on either reader. That parent loads by directory ancestry whether or
+not this file mentions it, so an agent working there learns nothing it can use, and a standalone
+clone has no parent to load and nothing to do with knowing one exists elsewhere. The
+maintainer-facing half — why `CLAUDE.md` is a bare import at all — survives in the HTML comment at
+the top of the file, which is stripped before the file enters context and so costs nothing to keep.
+
+The tempting second reason — that it named a private repository in a file that ships publicly — does
+not survive being written down. This file ships in the same clone, and explaining the removal at all
+requires naming the same parent, so that argument would defeat itself on the page. Inertness is the
+whole of it.
+
+**What is left beneath the import is no longer Claude-specific, which is worth noticing rather than
+smoothing over.** The removed paragraph was the one genuinely Claude-shaped thing in the file: it
+described Claude's own directory walk, which is why it lived here rather than in `AGENTS.md`.
+`## Running the tests` is not that. Its two caveats — how many invocations mypy takes, and
+`POSTGRES_SERVER` deciding whether the Postgres-backed tests run or skip — apply to anyone running
+this suite, they restate `CONTRIBUTING.md`, and sitting in `CLAUDE.md` puts them where no agent
+reading only `AGENTS.md` will ever see them. Moving them into `AGENTS.md` or dropping them as
+duplication is a separate change, and has not been made.
 
 `AGENTS.md` is the cross-tool convention, so one file serves every coding agent rather than a copy
 per tool that drifts apart. Claude Code does not read it natively; the documented bridge is exactly

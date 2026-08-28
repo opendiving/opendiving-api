@@ -10,12 +10,6 @@ import is what loads it. Only genuinely Claude-specific instructions belong bene
 
 @AGENTS.md
 
-# Claude Code
-
-In the maintainer's private umbrella checkout, project-wide conventions live in the parent
-`opendiving/CLAUDE.md`, which loads alongside this file when Claude starts here. A standalone clone
-of this repo has no such parent, and needs nothing beyond this file.
-
 ## Running the tests
 
 `CONTRIBUTING.md` is the single source of truth for the commands. Two caveats it states that are
