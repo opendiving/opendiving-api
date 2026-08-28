@@ -81,9 +81,12 @@ class Course(Base, PublicUUIDMixin, TimestampMixin):
             CheckConstraint("end_date >= start_date", name="ck_course_date_range"),
             # Serves `_cached_read_courses` (`GET /courses`): `WHERE user_id = ... ORDER BY
             # start_date DESC NULLS LAST`. `certification`'s ordering index without the
-            # partial `WHERE`, since courses have no `is_deleted` - and unlike that one,
-            # the query really does emit `NULLS LAST`, which is what lets this index serve
-            # it (see `_LIST_ORDER` in `api/v1/courses.py`).
+            # partial `WHERE`, since courses have no `is_deleted`. The null placement is
+            # load-bearing on both sides: an index built `NULLS LAST` cannot serve a query
+            # that asks for the default `NULLS FIRST`, so the reader spells its own out -
+            # see `_LIST_ORDER` in `crud_courses`. The reader's trailing `uuid` tiebreak is
+            # deliberately not a third column here; it only orders courses that already
+            # share a date, which Postgres sorts incrementally on top of this index.
             Index(
                 "ix_course_user_id_start_date",
                 "user_id",

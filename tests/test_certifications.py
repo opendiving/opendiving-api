@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException, Response, UploadFile
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
@@ -309,6 +310,105 @@ class TestPatchCourseLink:
             await self._patch({"course_uuid": str(uuid7())})
 
         assert "update_data" not in captured
+
+
+class TestACourseThatVanishesMidWrite:
+    """The race the resolve-then-write shape leaves open: `resolve_course_id_for_user`
+    answers, a concurrent `DELETE /course/{uuid}` hard-deletes the row, and the write then
+    violates `certification_course_id_fkey`.
+
+    Narrow, but the answer has to be the 422 a foreign or missing uuid already gets rather
+    than a raw 500 - from the caller's side the two are the same thing, and the dive routes
+    have answered that way for the identical FK since `_fk_error_detail` gained its branch.
+    A constraint the handler does not recognize has to come back out untouched, or a real
+    bug elsewhere would be reported as a missing course.
+    """
+
+    @staticmethod
+    def _integrity_error(constraint: str) -> IntegrityError:
+        return IntegrityError("write", {}, Exception(f'violates foreign key constraint "{constraint}"'))
+
+    @pytest.fixture
+    def failing_write(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+        stubs: dict[str, Any] = {"db": MagicMock(), "invalidate": AsyncMock()}
+        stubs["db"].rollback = AsyncMock()
+        monkeypatch.setattr(
+            certifications_module, "_get_owned_certification", AsyncMock(return_value=_internal_certification())
+        )
+        monkeypatch.setattr(certifications_module, "resolve_course_id_for_user", AsyncMock(return_value=88))
+        monkeypatch.setattr(certifications_module, "invalidate_certification_caches", stubs["invalidate"])
+        return stubs
+
+    @pytest.mark.asyncio
+    async def test_the_create_path_answers_422_and_rolls_back(
+        self, failing_write: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            certifications_module.crud_certifications,
+            "create",
+            AsyncMock(side_effect=self._integrity_error("certification_course_id_fkey")),
+        )
+        user_uuid = uuid7()
+        body = CertificationCreate.model_validate(
+            {"user_uuid": str(user_uuid), "agency": "tdi", "name": "Advanced Nitrox", "course_uuid": str(uuid7())}
+        )
+
+        with pytest.raises(UnprocessableEntityException, match="Course not found"):
+            await certifications_module.write_certification(
+                request=MagicMock(),
+                certification=body,
+                current_user={"id": 1, "uuid": user_uuid},
+                db=failing_write["db"],
+            )
+
+        # The rollback is not decoration: the aborted transaction would refuse every
+        # command the route ran afterwards, the cache invalidation included.
+        failing_write["db"].rollback.assert_awaited_once()
+        failing_write["invalidate"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_patch_path_answers_422_and_rolls_back(
+        self, failing_write: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            certifications_module.crud_certifications,
+            "update",
+            AsyncMock(side_effect=self._integrity_error("certification_course_id_fkey")),
+        )
+
+        with pytest.raises(UnprocessableEntityException, match="Course not found"):
+            await certifications_module.patch_certification(
+                request=MagicMock(),
+                uuid=uuid7(),
+                values=CertificationUpdateRequest.model_validate({"course_uuid": str(uuid7())}),
+                current_user={"id": 1, "uuid": uuid7()},
+                db=failing_write["db"],
+            )
+
+        failing_write["db"].rollback.assert_awaited_once()
+        failing_write["invalidate"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_any_other_constraint_comes_back_out_untouched(
+        self, failing_write: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reporting an unrecognized violation as "Course not found." would send the caller
+        after the wrong thing entirely - the failure `_fk_error_detail`'s own comment
+        records for the dive routes."""
+        monkeypatch.setattr(
+            certifications_module.crud_certifications,
+            "update",
+            AsyncMock(side_effect=self._integrity_error("certification_user_id_fkey")),
+        )
+
+        with pytest.raises(IntegrityError):
+            await certifications_module.patch_certification(
+                request=MagicMock(),
+                uuid=uuid7(),
+                values=CertificationUpdateRequest.model_validate({"course_uuid": str(uuid7())}),
+                current_user={"id": 1, "uuid": uuid7()},
+                db=failing_write["db"],
+            )
 
 
 class TestContentTypeSniffing:

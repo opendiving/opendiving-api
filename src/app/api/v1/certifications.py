@@ -1,8 +1,9 @@
 import uuid as uuid_pkg
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, NoReturn, cast
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
@@ -47,6 +48,35 @@ router = APIRouter(tags=["certifications"])
 # `DUE_OVERVIEW_LIMIT` in `gear_service.py`; a diver holding 200 expiring certifications
 # is not the case this card is sized for, and `truncated` tells them so.
 EXPIRING_OVERVIEW_LIMIT = 200
+
+# The one integrity failure a certification write can hit. `course_id` is the only FK on
+# this table that a request can set, and it is resolved by a separate query - so a course
+# hard-deleted in the window between `resolve_course_id_for_user` and the write reaches
+# Postgres as a violation of this constraint.
+#
+# 422 rather than a raw 500, and the same sentence a foreign or missing uuid already gets:
+# from the caller's side the two are the same thing, and the dive routes answer that way
+# for the identical FK (`_fk_error_detail` in `dives.py`). This is the narrow shape of
+# that helper rather than a copy of it - the other constraints on this table are `NOT
+# NULL`s the schemas already refuse, so there is nothing else here to translate.
+_COURSE_FK_CONSTRAINT = "certification_course_id_fkey"
+
+
+async def _refuse_a_vanished_course(db: AsyncSession, exc: IntegrityError) -> NoReturn:
+    """Turn a lost `course_id` reference into the 422 the rest of the API gives for one.
+
+    Rolls back first: the failed statement leaves the session in an aborted transaction,
+    and anything the route did afterwards (a cache invalidation, say) would run against a
+    connection that refuses every command. Matches `write_dive`'s handling.
+
+    Re-raises anything else untouched. A constraint this does not recognize is a bug
+    somewhere else, and dressing it as "Course not found." would send the caller after the
+    wrong thing - the failure `_fk_error_detail`'s own comment records.
+    """
+    await db.rollback()
+    if _COURSE_FK_CONSTRAINT in str(exc.orig):
+        raise UnprocessableEntityException("Course not found.") from exc
+    raise exc
 
 
 def _to_public_certification(
@@ -142,9 +172,12 @@ async def write_certification(
         user_id=current_user["id"],
         course_id=course_id,
     )
-    created = await crud_certifications.create(
-        db=db, object=certification_internal, schema_to_select=CertificationReadInternal, return_as_model=True
-    )
+    try:
+        created = await crud_certifications.create(
+            db=db, object=certification_internal, schema_to_select=CertificationReadInternal, return_as_model=True
+        )
+    except IntegrityError as e:
+        await _refuse_a_vanished_course(db, e)
     await invalidate_certification_caches(current_user["id"])
 
     return _to_public_certification(
@@ -340,7 +373,10 @@ async def patch_certification(
             update_data["course_id"] = course_id
 
     if update_data:
-        await crud_certifications.update(db=db, object=update_data, uuid=uuid)
+        try:
+            await crud_certifications.update(db=db, object=update_data, uuid=uuid)
+        except IntegrityError as e:
+            await _refuse_a_vanished_course(db, e)
         await invalidate_certification_caches(db_certification.user_id)
 
     return {"message": "Certification updated"}
