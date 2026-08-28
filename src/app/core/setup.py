@@ -117,7 +117,7 @@ async def warn_if_files_volume_looks_empty() -> None:
         logger.critical(
             "The database has %d stored file row(s) but the files volume at %s is empty - it looks "
             "unmounted or not yet restored, and file downloads will fail until it is. See "
-            "docs/self-hosting/backup-restore.md.",
+            "https://github.com/opendiving/opendiving/blob/main/docs/backup-restore.md",
             rows,
             settings.FILE_STORAGE_DIR,
         )
