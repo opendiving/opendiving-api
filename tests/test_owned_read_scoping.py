@@ -156,6 +156,7 @@ class TestTheDiveReadsScopeThatLookup:
                 page=1,
                 items_per_page=10,
                 trip_id=None,
+                course_id=None,
                 dive_site_id=None,
                 gear_item_id=None,
             )

@@ -1,7 +1,7 @@
 from typing import Any
 
 from fastcrud import FastCRUD
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.certification import Certification
@@ -30,6 +30,10 @@ crud_certifications = CRUDCertification(Certification)
 # lookup is the plain `crud_certifications.get(uuid=...)` the routes already do. The
 # file rows that *do* hang off a certification are reached by its internal `id`, which
 # the route already holds from that same lookup - see `services/certification_files.py`.
+#
+# A certification now references something itself - `certification.course_id` - but that
+# is the other direction and needs no helper here: `crud_courses` owns both translations,
+# and the certification routes call them.
 
 
 # The certification list's order: newest card first, cards with no date at all last.
@@ -47,17 +51,28 @@ crud_certifications = CRUDCertification(Certification)
 _LIST_ORDER = (Certification.certified_on.desc().nulls_last(), Certification.uuid.desc())
 
 
-async def get_certifications_page(db: AsyncSession, *, user_id: int, offset: int, limit: int) -> dict[str, Any]:
+async def get_certifications_page(
+    db: AsyncSession, *, user_id: int, offset: int, limit: int, course_id: int | None = None
+) -> dict[str, Any]:
     """One page of a diver's certifications, newest first, in the same
     `{"data": [...], "total_count": n}` shape `crud.get_multi` returns.
 
     Hand-written for `_LIST_ORDER` alone - `get_multi` cannot ask for `NULLS LAST`. Rows
     come back as plain dicts of every table column, matching `get_multi` called without a
     `schema_to_select`, so the caller still reads the internal `id` it needs to batch its
-    card-file lookup. Mirrors `search_multi` in `core/utils/search.py`, the other place a
-    list query outgrew `get_multi`.
+    card-file and course lookups. Mirrors `search_multi` in `core/utils/search.py`, the
+    other place a list query outgrew `get_multi`.
+
+    `course_id` narrows the page to the cards one training course issued, which is what a
+    course's own page reads. It is the internal id rather than the public uuid because the
+    route resolves that once and puts the same value in the cache key.
     """
-    conditions = (Certification.user_id == user_id, Certification.is_deleted.is_(False))
+    conditions: tuple[ColumnElement[bool], ...] = (
+        Certification.user_id == user_id,
+        Certification.is_deleted.is_(False),
+    )
+    if course_id is not None:
+        conditions += (Certification.course_id == course_id,)
 
     total_count = await db.scalar(select(func.count()).select_from(Certification).where(*conditions))
     rows = (

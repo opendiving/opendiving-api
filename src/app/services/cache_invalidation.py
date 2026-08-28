@@ -6,10 +6,14 @@ names/brands/types (`GearItemInfo`). So renaming a dive site, dragging its marke
 or renaming a gear item makes every cached dive that references it stale, even
 though the dive row itself never changed.
 
+The same holds for a course: a dive read and a certification read each carry the
+uuid of the course they point at, so deleting one changes what all three
+families say.
+
 These helpers live here rather than in the route modules so `dives.py`,
-`gear_items.py` and `dive_sites.py` can all reach them without importing each
-other (which would be circular - `dives.py` already invalidates gear caches, and
-gear now has to invalidate dive caches).
+`gear_items.py`, `dive_sites.py` and `courses.py` can all reach them without
+importing each other (which would be circular - `dives.py` already invalidates
+gear caches, and gear now has to invalidate dive caches).
 
 Both work by pattern, which is only possible because every affected cache key is
 user-scoped. See `read_dive`/`_cached_read_dives` and `gear_items.py` for the key
@@ -49,6 +53,21 @@ async def invalidate_certification_caches(user_id: int) -> None:
     `certification` column moved.
     """
     await delete_keys_by_pattern(f"user_{user_id}_certification*")
+
+
+async def invalidate_course_caches(user_id: int) -> None:
+    """Drop every cached course read for a user.
+
+    Both cache keys share the `user_{id}_course` prefix (`..._courses:page_...` and
+    `..._course:{uuid}`), so one pattern covers the lot and nothing else starts with it -
+    the same shape as certifications, and deliberately *not* the dive prefix's problem,
+    where `user_{id}_dive*` would also sweep the dive-*site* list.
+
+    Deleting a course additionally calls `invalidate_dive_caches` and
+    `invalidate_certification_caches`: both those reads carry the course's uuid, and the
+    `ON DELETE SET NULL` just made every one of them read back `course_uuid: null`.
+    """
+    await delete_keys_by_pattern(f"user_{user_id}_course*")
 
 
 async def invalidate_gear_caches(user_id: int) -> None:

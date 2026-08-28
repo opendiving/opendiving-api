@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 from src.app.core.db.database import Base
 from src.app.models.certification import Certification
 from src.app.models.certification_file import CertificationFile
+from src.app.models.course import Course
 from src.app.models.dive import Dive
 from src.app.models.dive_dive_site import DiveDiveSite
 from src.app.models.dive_file import DiveFile
@@ -46,6 +47,7 @@ from src.app.models.user import User
 from src.app.models.user_dive_stats import UserDiveStats
 from tests.conftest import db_available
 from tests.helpers.generators import (
+    create_course,
     create_dive,
     create_dive_site,
     create_gear_item,
@@ -79,8 +81,13 @@ class TestEveryForeignKeyIntoUserCascades:
 
 @pytest.mark.skipif(not db_available(), reason="No database connection available")
 class TestDeletingAUserTakesEverythingWithIt:
-    """One user, one row in each of the ten tables that gained a cascade, plus the
+    """One user, one row in each of the eleven tables the account owns, plus the
     second-order rows that hang off those - then a single `DELETE`.
+
+    Ten of the eleven are the ones `48781087b2b3` had to redeclare; `course` is the first
+    table added since, and it declared `ON DELETE CASCADE` from the outset - which is
+    exactly the case the metadata sweep above cannot distinguish from a table that got it
+    right by accident, so it is seeded here too.
 
     Second-order coverage is not decoration. `certification_file`, `dive_file`,
     `dive_dive_site`, `gear_set_item` and `trip_location` are the tables that would be left
@@ -101,6 +108,7 @@ class TestDeletingAUserTakesEverythingWithIt:
         dive = create_dive(db, diver)
         site = create_dive_site(db, diver)
         trip = create_trip(db, diver)
+        create_course(db, diver)
         item = create_gear_item(db, diver)
         schedule = create_gear_service_schedule(db, diver, item)
         create_gear_service_record(db, diver, item, schedule=schedule)
@@ -144,8 +152,8 @@ class TestDeletingAUserTakesEverythingWithIt:
 
     def test_the_delete_succeeds_and_leaves_no_owned_row_behind(self, db: Session, populated_diver: User) -> None:
         """The `DELETE` itself is half the assertion: before this change it raised
-        `ForeignKeyViolation` on the first of the ten, which is why nothing could purge an
-        account that had ever logged a dive."""
+        `ForeignKeyViolation` on the first of the ten it declared, which is why nothing
+        could purge an account that had ever logged a dive."""
         user_id = populated_diver.id
 
         db.execute(text('DELETE FROM "user" WHERE id = :id'), {"id": user_id})
@@ -154,6 +162,7 @@ class TestDeletingAUserTakesEverythingWithIt:
         assert db.get(User, user_id) is None
         for model in (
             Certification,
+            Course,
             Dive,
             DiveFile,
             DiveSite,
@@ -168,7 +177,7 @@ class TestDeletingAUserTakesEverythingWithIt:
 
     def test_the_rows_that_hang_off_those_go_too(self, db: Session, populated_diver: User) -> None:
         """A cascade that stopped one level short would leave these orphaned rather than
-        raising, so counting only the ten above would pass while they stayed."""
+        raising, so counting only the eleven above would pass while they stayed."""
         second_order = {
             model: int(db.execute(select(func.count()).select_from(model)).scalar_one())
             for model in (CertificationFile, DiveDiveSite, GearSetItem, TripLocation)

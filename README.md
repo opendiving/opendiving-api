@@ -40,6 +40,10 @@ else; what is here is the source, and the notes for working on it.
 - **Gear** — items, gear sets with default weights, service **schedules** (by months and/or dives),
   service history, a due-soon endpoint, and a scheduled email reminder digest.
 - **Certifications** — c-card records with front/back card images.
+- **Training courses** — the course a card came out of and the dives logged on it, with the agency,
+  status, instructor, training centre and what it cost. No mainstream logbook models this: the
+  agency apps tie dives to a course *or* cards to a course, and none of them let the record outlive
+  the agency.
 - **Full export** — everything out in open formats (UDDF, CSV, and a complete JSON + original-files
   archive) in one request. Owner-only, never cached; the UDDF validates against the 3.2.2 schema.
 - **Passwordless auth** — email sign-in (over SMTP, so any relay or provider works), Google Sign-In,
@@ -156,10 +160,11 @@ restore) and **user** (profile, avatar, email change, dive statistics, gas-use h
 deletion); **dives**, the bulk of it, with their **files** — upload an export, read the per-sample
 profile back — alongside **trips**, **dive sites**, the shared **species** catalog a dive can
 reference, and a **geocoding** helper for naming a site pinned on a map; **gear** as items, sets,
-service schedules and service records; **certifications** with their card images; and **export** in
-UDDF, CSV or full-archive form. All of those want a bearer token. The ones that don't are
-**contact**, the auth routes themselves, and the two health checks — `/health` says the process is
-up, `/health/ready` says Postgres and Redis answered, and 503s when they didn't.
+service schedules and service records; **certifications** with their card images and the **courses**
+that issued them; and **export** in UDDF, CSV or full-archive form. All of those want a bearer
+token. The ones that don't are **contact**, the auth routes themselves, and the two health checks —
+`/health` says the process is up, `/health/ready` says Postgres and Redis answered, and 503s when
+they didn't.
 
 A typical import flow:
 

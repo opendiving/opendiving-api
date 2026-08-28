@@ -6,7 +6,9 @@ field being *omitted* and being sent as an explicit `null`:
 
 * `trip_uuid` is nullable, so an explicit null is the only way to detach a dive from its
   trip. The web client relies on this - it is how "remove from trip" is implemented - and
-  the whole thing rests on one `model_fields_set` branch that had no test.
+  the whole thing rests on one `model_fields_set` branch that had no test. `course_uuid`
+  is the same field with the same branch, added later, and gets the same coverage rather
+  than being trusted to the symmetry.
 * `dive_number`/`start_time`/`duration`/`notes` are `NOT NULL`, so an explicit null is
   simply invalid, and used to surface as a 422 reading "Invalid reference: a related
   record does not exist." - a foreign-key message for a not-null problem.
@@ -34,6 +36,7 @@ from src.app.schemas.dive import DiveCreateRequest, DiveUpdate, DiveUpdateReques
 from src.app.schemas.dive_mixture import GasRole, TankUsage
 
 TRIP_UUID = uuid7()
+COURSE_UUID = uuid7()
 # The one species uuid the stubbed resolver refuses, so the "not found" branch is reachable
 # without a database.
 UNKNOWN_SPECIES_UUID = uuid7()
@@ -69,6 +72,7 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(dives_module, "_get_owned_dive", AsyncMock(return_value=db_dive))
     monkeypatch.setattr(dives_module.crud_dives, "update", fake_update)
     monkeypatch.setattr(dives_module, "resolve_trip_id_for_user", AsyncMock(return_value=77))
+    monkeypatch.setattr(dives_module, "resolve_course_id_for_user", AsyncMock(return_value=88))
     monkeypatch.setattr(dives_module, "resolve_species_ids", AsyncMock(side_effect=_fake_resolve_species))
     monkeypatch.setattr(dives_module, "replace_species_for_dive", AsyncMock(side_effect=_record_species))
     monkeypatch.setattr(dives_module, "recalculate_dive_stats", AsyncMock())
@@ -135,6 +139,54 @@ class TestTripDetach:
             await _patch(DiveUpdateRequest.model_validate({"trip_uuid": str(TRIP_UUID)}))
 
         assert "update_data" not in captured
+
+
+class TestCourseDetach:
+    """The `course_uuid` twin of `TestTripDetach`, on the branch that arrived with courses.
+
+    Written out rather than parametrized with the trip cases: the two resolve through
+    different helpers and answer with different messages, and a shared parametrize would
+    pass with either branch deleted as long as the other survived.
+    """
+
+    @pytest.mark.asyncio
+    async def test_explicit_null_detaches_the_dive(self, captured: dict[str, Any]) -> None:
+        await _patch(DiveUpdateRequest.model_validate({"course_uuid": None}))
+
+        assert captured["update_data"]["course_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_an_omitted_key_leaves_the_course_alone(self, captured: dict[str, Any]) -> None:
+        await _patch(DiveUpdateRequest.model_validate({"notes": "Viz was better than forecast"}))
+
+        assert "course_id" not in captured["update_data"]
+
+    @pytest.mark.asyncio
+    async def test_a_uuid_is_translated_to_the_internal_id(self, captured: dict[str, Any]) -> None:
+        await _patch(DiveUpdateRequest.model_validate({"course_uuid": str(COURSE_UUID)}))
+
+        assert captured["update_data"]["course_id"] == 88
+        assert "course_uuid" not in captured["update_data"]
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_course_is_rejected_before_the_write(
+        self, captured: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(dives_module, "resolve_course_id_for_user", AsyncMock(return_value=None))
+
+        with pytest.raises(UnprocessableEntityException, match="Course not found"):
+            await _patch(DiveUpdateRequest.model_validate({"course_uuid": str(COURSE_UUID)}))
+
+        assert "update_data" not in captured
+
+    @pytest.mark.asyncio
+    async def test_detaching_from_both_at_once_works(self, captured: dict[str, Any]) -> None:
+        """The two branches are independent, and a diver clearing both in one edit is the
+        ordinary way a mis-tagged training dive gets fixed."""
+        await _patch(DiveUpdateRequest.model_validate({"trip_uuid": None, "course_uuid": None}))
+
+        assert captured["update_data"]["trip_id"] is None
+        assert captured["update_data"]["course_id"] is None
 
 
 class TestSpeciesReplacement:

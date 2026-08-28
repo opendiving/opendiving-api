@@ -96,11 +96,11 @@ async def fetch_owned_or_raise[OwnedRowT: OwnedRow](
     `include_deleted` exists for the routes that legitimately act on a soft-deleted row
     (restoring a certification, say) - everything else wants the default. Both it and the
     filter it controls apply only to the models that still carry the column: `Certification`
-    is the last one routed through here, and `Trip`/`DiveSite`/`GearItem`/`GearSet` are hard
-    -deleted now. The check is on the model rather than unconditional because FastCRUD's
-    `get_model_column` raises `ValueError` for a column the model lacks instead of ignoring
-    it, so an unconditional filter would turn every `GET`/`PATCH`/`DELETE` on those four
-    into a 500.
+    is the last one routed through here, and `Trip`/`DiveSite`/`Course`/`GearItem`/`GearSet`
+    are hard-deleted now. The check is on the model rather than unconditional because
+    FastCRUD's `get_model_column` raises `ValueError` for a column the model lacks instead
+    of ignoring it, so an unconditional filter would turn every `GET`/`PATCH`/`DELETE` on
+    those five into a 500.
 
     Note the two intentional non-users: `api.v1.gear_service._owned_gear_item` and
     `api.v1.gear_sets._resolve_item_ids` answer 422 for both cases, because there the

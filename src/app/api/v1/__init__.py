@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from .auth import router as auth_router
 from .certifications import router as certifications_router
 from .contact import router as contact_router
+from .courses import router as courses_router
 from .dive_sites import router as dive_sites_router
 from .dives import router as dives_router
 from .export import router as export_router
@@ -22,6 +23,7 @@ router.include_router(auth_router)
 router.include_router(users_router)
 router.include_router(passkeys_router)
 router.include_router(trips_router)
+router.include_router(courses_router)
 router.include_router(dive_sites_router)
 router.include_router(geocoding_router)
 router.include_router(gear_items_router)

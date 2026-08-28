@@ -101,6 +101,7 @@ class TestInventory:
             "csv/dives.csv",
             "csv/mixtures.csv",
             "csv/trips.csv",
+            "csv/courses.csv",
             "csv/dive-sites.csv",
             "csv/species.csv",
             "csv/gear-items.csv",

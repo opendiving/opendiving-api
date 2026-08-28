@@ -2,9 +2,10 @@
 
 Every writer in this package (UDDF, CSV, `export.json`) needs the same graph, so it is
 read once into an `ExportBundle` and handed to all three rather than each of them
-issuing its own queries. The read is deliberately flat: a fixed twenty-two `SELECT`s over
+issuing its own queries. The read is deliberately flat: a fixed twenty-three `SELECT`s over
 whole tables scoped to one `user_id`, with no per-dive query anywhere. A logbook is a few
-hundred dives and a handful of sites, trips and gear items, so "load the lot" costs less
+hundred dives and a handful of sites, trips, courses and gear items, so "load the lot" costs
+less
 than the round trips a lazier shape would need - and the archive walks all of it anyway.
 
 **The two things this does not load are the binary payloads**: uploaded exports and card
@@ -40,6 +41,7 @@ from ...crud.crud_dive_mixtures import get_mixtures_for_dives
 from ...crud.crud_trip_locations import get_locations_for_trips
 from ...models.certification import Certification
 from ...models.certification_file import CertificationFile
+from ...models.course import Course
 from ...models.dive import Dive
 from ...models.dive_dive_site import DiveDiveSite
 from ...models.dive_file import DiveFile
@@ -90,6 +92,7 @@ class ExportBundle:
     # Keyed for every trip in `trips`, so a trip nobody named a place for reads as an empty
     # list rather than a `KeyError` in a writer - same contract as the `*_by_dive` maps.
     locations_by_trip: dict[int, list[TripLocationRead]]
+    courses: list[Course]
     dive_sites: list[DiveSite]
     gear_items: list[GearItem]
     # The species this user's live dives reference, and only those. Unlike every other list
@@ -110,6 +113,7 @@ class ExportBundle:
     cert_file_sha256: dict[tuple[int, str], str]
 
     trip_by_id: dict[int, Trip] = field(init=False)
+    course_by_id: dict[int, Course] = field(init=False)
     dive_site_by_id: dict[int, DiveSite] = field(init=False)
     gear_item_by_id: dict[int, GearItem] = field(init=False)
     species_by_id: dict[int, Species] = field(init=False)
@@ -120,6 +124,7 @@ class ExportBundle:
         # derived from the lists above rather than independent inputs, so building them
         # here keeps the two from ever drifting apart at a call site.
         object.__setattr__(self, "trip_by_id", {trip.id: trip for trip in self.trips})
+        object.__setattr__(self, "course_by_id", {course.id: course for course in self.courses})
         object.__setattr__(self, "dive_site_by_id", {site.id: site for site in self.dive_sites})
         object.__setattr__(self, "gear_item_by_id", {item.id: item for item in self.gear_items})
         object.__setattr__(self, "species_by_id", {species.id: species for species in self.species})
@@ -157,6 +162,15 @@ class ExportBundle:
         """The dive's trip, or `None` - which is what a dive whose trip was deleted has,
         the FK's `ON DELETE SET NULL` having cleared the column."""
         return None if dive.trip_id is None else self.trip_by_id.get(dive.trip_id)
+
+    def course_for(self, row: Dive | Certification) -> Course | None:
+        """The training course a dive was logged on, or that issued a certification.
+
+        One method for both because `course_id` means the same thing on either row, and
+        both answer `None` the same way: the FK's `ON DELETE SET NULL` clears the column
+        when the course goes, so a stale id never reaches this.
+        """
+        return None if row.course_id is None else self.course_by_id.get(row.course_id)
 
 
 async def _ordered_ids_by_dive(
@@ -227,8 +241,8 @@ async def _owned(db: AsyncSession, model: Any, *, user_id: int, order_by: Any) -
     """One user's rows from a table, in a stable order - the live ones, where the table
     still has a notion of liveness.
 
-    Three of the eight tables read through here soft-delete (`Dive`, `GearServiceRecord`,
-    `Certification`); the other five hard-delete, and asking a `Trip` for `is_deleted`
+    Three of the nine tables read through here soft-delete (`Dive`, `GearServiceRecord`,
+    `Certification`); the other six hard-delete, and asking a `Trip` for `is_deleted`
     would be an `AttributeError` rather than a filter that quietly matches everything. The
     check is on the model rather than a per-call flag so that a soft-deleting table added
     to this bundle later is filtered by default: the failure mode of forgetting is a
@@ -264,7 +278,9 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
     `dive_ids` comes from `dives`, `item_ids_by_set` from `gear_sets`, `locations_by_trip`
     from `trips`, `cert_files_by_cert` from `certifications`, and `species` from the join
     rows `_ordered_ids_by_dive` read. Reorder on those, not on
-    the strength of the resurrection having gone.
+    the strength of the resurrection having gone. `courses` has no such dependency - it is
+    read beside `trips` because that is where it belongs to a reader, not because anything
+    needs it there.
     """
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if user is None:
@@ -297,6 +313,10 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
         db, GearServiceSchedule, user_id=user_id, order_by=(GearServiceSchedule.gear_item_id, GearServiceSchedule.id)
     )
     trips = await _owned(db, Trip, user_id=user_id, order_by=(Trip.start_date, Trip.id))
+    # `id` breaks ties rather than `uuid`, matching every other collection here: the
+    # bundle's contract is a stable order run after run, not the list endpoint's ordering
+    # (which runs newest-first with the dateless rows last).
+    courses = await _owned(db, Course, user_id=user_id, order_by=(Course.start_date, Course.id))
     dive_sites = await _owned(db, DiveSite, user_id=user_id, order_by=(DiveSite.name, DiveSite.id))
     gear_items = await _owned(db, GearItem, user_id=user_id, order_by=(GearItem.name, GearItem.id))
     certifications = await _owned(
@@ -316,6 +336,7 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
         trips=trips,
         # After the `trips` read above, which is what supplies the ids.
         locations_by_trip=await get_locations_for_trips(db=db, trip_ids=[trip.id for trip in trips]),
+        courses=courses,
         dive_sites=dive_sites,
         gear_items=gear_items,
         # After `_ordered_ids_by_dive` above, which is what says which species to read.

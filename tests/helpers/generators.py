@@ -60,7 +60,13 @@ def create_trip(db: Session, user: models.User) -> models.Trip:
     )
 
 
-def create_certification(db: Session, user: models.User, *, certified_on: date | None = None) -> models.Certification:
+def create_certification(
+    db: Session,
+    user: models.User,
+    *,
+    certified_on: date | None = None,
+    course: models.Course | None = None,
+) -> models.Certification:
     """A certification of this user's.
 
     `certified_on` defaults to `None` on purpose: a card with no date is the case
@@ -74,6 +80,32 @@ def create_certification(db: Session, user: models.User, *, certified_on: date |
             agency="padi",
             name=f"Advanced Open Water {uuid7().hex[-8:]}",
             certified_on=certified_on,
+            course_id=course.id if course is not None else None,
+        ),
+    )
+
+
+def create_course(db: Session, user: models.User, *, start_date: date | None = date(2026, 3, 2)) -> models.Course:
+    """A training course of this user's.
+
+    Uniquely named like the rest of these, though for a weaker reason than most: `course`
+    carries **no** per-user unique index (a course retaken later is legitimately the same
+    name twice), so this is only about telling fixture rows apart in a developer's own
+    database rather than about avoiding a collision the API would refuse.
+
+    `start_date` is settable and nullable because a dateless course is the case
+    `_LIST_ORDER` in `crud_courses` exists for - the `NULLS LAST` half of that ordering has
+    no other way to be exercised.
+    """
+    return _persist(
+        db,
+        models.Course(
+            user_id=user.id,
+            name=f"Advanced Nitrox {uuid7().hex[-8:]}",
+            agency="tdi",
+            status="completed",
+            start_date=start_date,
+            notes="",
         ),
     )
 
@@ -184,13 +216,19 @@ def create_species(db: Session, *, aphia_id: int | None = None, **overrides: Any
 
 
 def create_dive(
-    db: Session, user: models.User, *, trip: models.Trip | None = None, is_deleted: bool = False
+    db: Session,
+    user: models.User,
+    *,
+    trip: models.Trip | None = None,
+    course: models.Course | None = None,
+    is_deleted: bool = False,
 ) -> models.Dive:
     return _persist(
         db,
         models.Dive(
             user_id=user.id,
             trip_id=trip.id if trip is not None else None,
+            course_id=course.id if course is not None else None,
             dive_number=1,
             start_time=datetime(2026, 6, 1, 9, 0, tzinfo=UTC),
             duration=1800,

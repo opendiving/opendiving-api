@@ -30,6 +30,7 @@ from src.app.services.export.tabular import (
     TRIPS_HEADER,
     _utc_offset,
     write_certifications_csv,
+    write_courses_csv,
     write_dive_sites_csv,
     write_dives_csv,
     write_gear_items_csv,
@@ -42,10 +43,16 @@ from tests.helpers.export import UUIDS, build_bundle, full_bundle, make_dive, mi
 
 GOLDEN = Path(__file__).parent / "fixtures" / "export" / "dives.csv"
 
+# Every file in `CSV_WRITERS` except `dives.csv`, which is the flat one. Hand-written and
+# therefore able to go short - `test_every_normalized_file_is_headed_even_when_empty` is
+# the only thing it feeds, and a writer left out of it is simply not covered there.
+# `write_species_csv` was missing until courses were added; both are here now.
 _NORMALIZED_WRITERS = (
     write_mixtures_csv,
     write_trips_csv,
+    write_courses_csv,
     write_dive_sites_csv,
+    write_species_csv,
     write_gear_items_csv,
     write_gear_service_csv,
     write_certifications_csv,
@@ -107,6 +114,14 @@ class TestDivesCsv:
         assert rows[1][DIVES_HEADER.index("altitude_m")] == "0"
         assert rows[2][DIVES_HEADER.index("water_type")] == ""
         assert rows[2][DIVES_HEADER.index("altitude_m")] == ""
+
+    def test_only_the_dive_on_a_course_names_one(self):
+        """The `course` cell mirrors `trip` beside it: the dive logged on the course names
+        it, and the two that were not are empty rather than inheriting anything."""
+        rows = _parse(_render(write_dives_csv(full_bundle())))
+        column = DIVES_HEADER.index("course")
+
+        assert [row[column] for row in rows[1:]] == ["Advanced Nitrox + Decompression Procedures", "", ""]
 
     def test_sites_are_joined_in_visit_order(self):
         rows = _parse(_render(write_dives_csv(full_bundle())))
@@ -280,11 +295,11 @@ class TestTheNormalizedFiles:
             assert len(_parse(_render(writer(empty)))) == 1, writer.__name__
 
     def test_every_file_carries_the_byte_order_mark_not_just_dives(self):
-        """`dive-sites.csv`, `trips.csv` and `certifications.csv` hold the same free text
-        as `dives.csv`, and a diver who unzips the archive and double-clicks one hits the
-        same Excel mojibake. Pinned across all eight so a file added later cannot quietly
-        be the exception."""
+        """`dive-sites.csv`, `trips.csv`, `courses.csv` and `certifications.csv` hold the
+        same free text as `dives.csv`, and a diver who unzips the archive and double-clicks
+        one hits the same Excel mojibake. Pinned across all nine so a file added later
+        cannot quietly be the exception."""
         bundle = full_bundle()
-        assert len(CSV_WRITERS) == 8
+        assert len(CSV_WRITERS) == 9
         for filename, writer in CSV_WRITERS:
             assert _render(writer(bundle)).startswith(BOM), filename

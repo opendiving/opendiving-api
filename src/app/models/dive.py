@@ -59,6 +59,12 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     water_type: Mapped[str | None] = mapped_column(String(32), default=None)
     altitude: Mapped[int | None] = mapped_column(Integer, default=None)
     trip_id: Mapped[int | None] = mapped_column(ForeignKey("trip.id", ondelete="SET NULL"), default=None, index=True)
+    # The training course this dive was logged on, if any - character-for-character the
+    # shape of `trip_id` above, and for the same reasons: deleting the course leaves the
+    # dive with the link cleared rather than taking the dive with it.
+    course_id: Mapped[int | None] = mapped_column(
+        ForeignKey("course.id", ondelete="SET NULL"), default=None, index=True
+    )
 
     # Oxygen-exposure and surface-pressure readings, written **only** by the import path
     # (`services/dive_files.py::store_dive_file`) and never through the dive form. They

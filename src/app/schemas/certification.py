@@ -39,6 +39,31 @@ class CertificationAgency(StrEnum):
     OTHER = "other"
 
 
+AGENCY_OTHER_REQUIRED_MESSAGE = "agency_other is required when agency is 'other'"
+AGENCY_OTHER_NOT_ALLOWED_MESSAGE = "agency_other may only be set when agency is 'other'"
+
+
+def validate_agency_pairing(agency: CertificationAgency, agency_other: str | None) -> None:
+    """The one place the `agency`/`agency_other` pairing is decided.
+
+    Public because four callers need the same rule and must not spell it four ways:
+    `CertificationBase` and `CourseBase` check it on a whole-object write, and
+    `patch_certification`/`patch_course` re-check it on a PATCH's merged stored+incoming
+    values, which is the case neither schema can see. Only the reporting differs - a
+    `ValueError` here is a per-field 422 from the schema, and the flat `{"detail": ...}`
+    from a route.
+
+    Rejecting `agency_other` alongside a *named* agency (rather than quietly ignoring it)
+    keeps the stored row unambiguous: a row with `agency="padi"` can never also carry a
+    stray agency name some future read path might decide to display.
+    """
+    if agency == CertificationAgency.OTHER:
+        if not (agency_other or "").strip():
+            raise ValueError(AGENCY_OTHER_REQUIRED_MESSAGE)
+    elif agency_other is not None:
+        raise ValueError(AGENCY_OTHER_NOT_ALLOWED_MESSAGE)
+
+
 class CertificationSide(StrEnum):
     """Which face of the physical card a stored file shows.
 
@@ -95,17 +120,7 @@ class CertificationBase(BaseModel):
 
     @model_validator(mode="after")
     def _check_agency_other(self) -> Self:
-        """`agency_other` is meaningful only alongside `agency == OTHER`.
-
-        Rejecting it in the other direction too (rather than quietly ignoring it) keeps
-        the stored row unambiguous: a certification with `agency="padi"` can never also
-        carry a stray agency name that some future read path might decide to display.
-        """
-        if self.agency == CertificationAgency.OTHER:
-            if not (self.agency_other or "").strip():
-                raise ValueError("agency_other is required when agency is 'other'")
-        elif self.agency_other is not None:
-            raise ValueError("agency_other may only be set when agency is 'other'")
+        validate_agency_pairing(self.agency, self.agency_other)
         return self
 
 
@@ -115,6 +130,13 @@ class CertificationRead(CertificationBase, PublicUUIDSchema):
     """
 
     user_uuid: uuid_pkg.UUID
+    # The training course this card came out of, if the diver recorded one. Filled in by
+    # all three producers - both cached readers resolve it in a batched lookup, and
+    # `write_certification` passes the value straight from the request.
+    course_uuid: Annotated[
+        uuid_pkg.UUID | None,
+        Field(default=None, description="Public id of the training course this certification came from"),
+    ]
     # The card images this certification has, as metadata only - see
     # `CertificationFileInfo`. Empty for a certification entered but not yet photographed.
     files: Annotated[
@@ -127,24 +149,42 @@ class CertificationRead(CertificationBase, PublicUUIDSchema):
 class CertificationReadInternal(CertificationBase, PublicUUIDSchema):
     """Mirrors the actual `certification` table columns (integer PK/FK), for server-side
     lookups only - never returned directly over the API (use `CertificationRead` for the
-    public shape, which additionally resolves `user_id` to the owning user's `uuid`).
+    public shape, which additionally resolves `user_id`/`course_id` to the owning user's
+    and the course's `uuid`).
     """
 
     id: int
     user_id: int
+    course_id: int | None = None
     created_at: datetime
 
 
 class CertificationCreate(CertificationBase):
+    """Request body for creating a certification.
+
+    `course_uuid` sits here rather than on `CertificationBase`, and that placement is
+    load-bearing: `CertificationCreateInternal` inherits the base and is CRUDAdmin's
+    create form for `Certification`, so a non-column `course_uuid` on the base would land
+    in the admin form as a field the panel could not resolve - the trap
+    `TripUpdateRequest`'s docstring records.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     user_uuid: Annotated[uuid_pkg.UUID, Field(description="Public id of the user this certification belongs to")]
+    course_uuid: Annotated[
+        uuid_pkg.UUID | None,
+        Field(default=None, description="Public id of the training course this certification came from"),
+    ]
 
 
 class CertificationCreateInternal(CertificationBase):
     model_config = ConfigDict(extra="forbid")
 
     user_id: int
+    # The column, not the uuid - so the admin create form gets a field it can actually
+    # fill, matching how `DiveCreateInternal` exposes `trip_id`.
+    course_id: int | None = None
 
 
 class CertificationUpdate(RejectsExplicitNulls):
@@ -173,6 +213,24 @@ class CertificationUpdate(RejectsExplicitNulls):
     instructor_number: Annotated[str | None, Field(default=None, max_length=64)]
     training_center: Annotated[str | None, Field(default=None, max_length=255)]
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
+
+
+class CertificationUpdateRequest(CertificationUpdate):
+    """Request body for updating a certification, including re-pointing it at a course.
+
+    Separate from `CertificationUpdate` rather than a field on it because
+    `CertificationUpdate` is CRUDAdmin's Certification form schema (and the shape
+    `test_update_explicit_nulls.py` sweeps against the `certification` table's columns),
+    and `course_uuid` is neither a column nor something the admin form could resolve - the
+    same split, and the same reason, as `TripUpdateRequest`.
+
+    Omit `course_uuid` and the existing link is left alone; send `null` and it is cleared.
+    """
+
+    course_uuid: Annotated[
+        uuid_pkg.UUID | None,
+        Field(default=None, description="Public id of the training course this certification came from"),
+    ]
 
 
 class CertificationUpdateInternal(CertificationUpdate):

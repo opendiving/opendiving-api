@@ -5329,7 +5329,10 @@ proposed in both directions.
 - **CNS and OTU.** `informationafterdiveType` has no oxygen-exposure element at all. The only
   `<cns>`/`<otu>` in the schema are children of `<waypoint>`, and what we store is a pair of
   end-of-dive scalars, not a per-sample series.
-- **Gas `role`, gear sets, service schedules and history, c-card records.** No elements exist.
+- **Gas `role`, gear sets, service schedules and history, c-card records, training courses.** No
+  elements exist. A course is the near miss: `<divetrip>` has a name and a date range, but a
+  training course is not a trip, and writing one there would have an importer read "PADI Open Water"
+  as a holiday alongside the real trips already in that element.
 
 **Three the proposal expected to lose, and the schema allows after all:**
 
@@ -5437,7 +5440,7 @@ likely destination for this file, and the BOM is the only in-band way to tell it
 `csv`, pandas, R and every other programmatic reader either strip it (`encoding="utf-8-sig"`) or
 tolerate it in the first header cell.
 
-**All seven carry it, including the normalized set inside the archive.** The first version put it on
+**All nine carry it, including the normalized set inside the archive.** The first version put it on
 `dives.csv` alone, reasoning that `csv/mixtures.csv` and its neighbours are joined by a script
 rather than opened in a spreadsheet, where a leading `﻿` in a header name is a nuisance. That did
 not survive review: `dive-sites.csv`, `trips.csv` and `certifications.csv` carry the same free text
@@ -12326,10 +12329,12 @@ The first kind asks the models and fails by name on anything it does not recogni
 
 - `test_hard_delete.py::TestTheRegistryIsComplete` names any hard-deleting model with a public
   `uuid` that has neither a case in that file nor a recorded reason for having no delete of its own,
-  and fails in the other direction too on a registration the models no longer back. The predicates
-  live in `tests/helpers/model_metadata.py`, which `test_admin_config.py` builds both its panel
-  parametrize lists from, so the model names those two files used to hand-copy are now derived from
-  one place.
+  and fails in the other direction too on a registration the models no longer back. It also derives
+  which registrations may omit a `name_exists` check, from whether the model declares a unique index
+  over anything but `uuid` - so the one exemption that class allows cannot be taken by leaving a
+  field out. The predicates live in `tests/helpers/model_metadata.py`, which `test_admin_config.py`
+  builds both its panel parametrize lists from, so the model names those two files used to hand-copy
+  are now derived from one place.
 
   Two things in that helper are load-bearing and easy to undo. It enumerates by walking
   `app/models/` from disk and reading SQLAlchemy's mapper registry, **not** `models/__init__.py`: a
@@ -12351,11 +12356,12 @@ wrong would be worse than an honest list: it would look like coverage.
 ### The inventory
 
 - **`tests/test_picker_search.py`, `TestListCacheKeys`** - three `parametrize` lists over
-  `[_dive_site_cache, _trip_cache]`. A third `OwnedResourceCache` with a `search` segment is not
-  checked for the three things these pin: the term being part of the key, page and page size
-  surviving alongside it, and the whole key still sitting under the `user_{id}_{resource}:*` prefix
-  that `invalidate_list` purges. The last one is the one that bites - a key outside the wildcard
-  serves stale rows after a rename, and only after the TTL does it come right.
+  `[_dive_site_cache, _trip_cache, _course_cache]`. A fourth `OwnedResourceCache` with a `search`
+  segment is not checked for the three things these pin: the term being part of the key, page and
+  page size surviving alongside it, and the whole key still sitting under the
+  `user_{id}_{resource}:*` prefix that `invalidate_list` purges. The last one is the one that bites
+  \- a key outside the wildcard serves stale rows after a rename, and only after the TTL does it come
+  right.
 - **`tests/test_picker_search.py`, the search-column lists** - `TestSearchClause`'s `parametrize`
   and the module-level `test_the_model_columns_the_search_reads_actually_exist`. Both name
   `(model, columns)` pairs, and `Trip` is in the second but deliberately not the first, because
@@ -12372,7 +12378,10 @@ wrong would be worse than an honest list: it would look like coverage.
   `TestArchivedItemsStillComeThrough`. These pin loaders that are *not* reachable through today's
   callers, which is the whole reason they are tested; there is correspondingly no route table or
   model attribute to enumerate them from. A new batched loader added beside the four gear ones gets
-  no archived-items case unless somebody writes it.
+  no archived-items case unless somebody writes it. The list is also not confined to this file:
+  `get_course_uuids_by_ids` mirrors `get_trip_uuids_by_ids` exactly and its scoping case lives in
+  `tests/test_courses.py::TestCourseUuidLookupScoping`, with the rest of the courses suite — so a
+  resource being absent *here* is not evidence it is uncovered.
 - **`tests/test_user_cascade.py`, the `populated_diver` fixture and its two model tuples** - the
   fixture seeds one row per table the cascade touches, one tuple counts the owned tables down to
   zero after the delete, and a second counts the tables that hang off those. A new table with a
@@ -12397,3 +12406,150 @@ still has, and they cluster in the same files as the inventory above. `test_hard
 and are not any more - they were rewritten to countless phrasing when their lists became
 derivations, which is the only fix that holds. Where the list has to stay, prefer "these" to a
 number; a number buys nothing a reader could not count and is one model away from being a lie.
+
+## Courses are the grouping entity trips could not be
+
+A `Course` is a trip without a location: dives point at it the way they point at a trip, and
+certifications gained the first reference they have ever carried. `crud_certifications` had said
+"nothing references a certification" since it was written; now something does, in the other
+direction.
+
+Most of it is the trip family copied. What follows is only the places it deliberately is not.
+
+### One certification, at most one course — not a join table
+
+Research found no agency construct where a single card comes out of two courses. A PADI referral is
+administratively one course completed in segments, ReActivate reissues the same card rather than
+certifying anew, and SSI's recognition ratings come from no single course at all — those simply
+carry no link. The one construct a single link cannot express is a diver logging GUE Fundamentals
+Part 1 and Part 2 as two rows feeding one card, and GUE itself credits the completing part.
+
+So the reference is a nullable `certification.course_id`, the shape of `dive.trip_id`. A join table
+would have bought that edge case at the cost of replace-wholesale semantics, resolver helpers and
+multi-select UI on both sides. The *other* direction is the whole point and is unconstrained: one
+course yields many certifications, which is what TDI's combined Advanced Nitrox + Decompression
+Procedures actually is.
+
+### No per-user unique name, diverging from `Trip`
+
+`ux_trip_user_id_name_lower` has no counterpart on `course`, and there is no `course_name_exists`
+helper in front of one. A course failed once and retaken later is legitimately the same name twice —
+the same reasoning that left `certification` without a unique index.
+
+That divergence had to be taught to `tests/test_hard_delete.py`, whose three behavioural classes run
+over one registry. `Course` is in it and takes the first two — the row really goes, a second delete
+is a 404 — but `TestADeletedNameFreesItsSlot` has nothing to assert for a resource whose name was
+never exclusive, so `Resource.name_exists` is optional and that class runs over the entries that
+supply one. The exemption is **derived, not declared**:
+`test_only_a_resource_without_a_natural_key_may_omit_its_name_check` requires the set omitting the
+check to equal the set of registered models with no unique index over anything but `uuid`. Both
+directions, so leaving the field out is not a way to skip a case, and a `Course` that ever did gain
+a unique name fails there until the helper and the entry arrive with it.
+
+Read *"Case-insensitive per-user uniqueness (trips, dive sites)"* above as the pattern this
+knowingly declines rather than as one it forgot.
+
+### Both dates are nullable, and three layers keep them ordered
+
+`Trip.start_date` is `NOT NULL`; a course's is not, because a `planned` course has no dates yet and
+a referral course spans months with fuzzy edges. That makes the invariant harder rather than easier:
+**a stored course never has `end_date < start_date`, whichever route wrote it**, and three layers
+carry it.
+
+1. `CourseBase`'s both-present check, for clean 422s on create.
+2. `patch_course`'s merged check — the incoming date against the *stored* one when only one arrives.
+   This is the shape [api #127](https://github.com/opendiving/opendiving-api/pull/127) added for
+   trips, and it is the layer a PATCH schema cannot supply: `CourseUpdate` sees only what was sent.
+3. `ck_course_date_range` on the table. CRUDAdmin writes through `CourseUpdate`, where a lone date
+   slips past layer 1 and never reaches layer 2, so without the constraint the panel could store an
+   inverted range. SQL NULL semantics make it vacuous when either date is absent, which is exactly
+   right — a course with only an end date recorded is a real row.
+
+`trip` carries no equivalent constraint. That is a fact about an existing table, not a precedent: a
+fresh table gets it for free, and `CheckConstraint`s in `__table_args__` are picked up by
+autogenerate.
+
+The same three-layer shape covers `agency`/`agency_other`, minus the constraint — that pairing is
+deliberately not mirrored in the database, for the reason `models/certification.py` gives.
+
+**Both rules moved to one definition rather than being copied.** `validate_date_range` and
+`DATE_RANGE_MESSAGE` are in `core/schemas.py` now (they were in `schemas/trip.py`), and
+`validate_agency_pairing` with its two messages is in `schemas/certification.py`. Four callers each
+— two whole-object schemas and two routes — and the routes differ only in reporting, a `ValueError`
+being a per-field 422 from a schema and the flat `{"detail": ...}` from a handler. Copying either
+rule into `schemas/course.py` would have been the third and fourth spellings of one sentence.
+
+### The list read is hand-rolled for an ordering, not for an enrichment
+
+`GET /courses` sorts `start_date DESC NULLS LAST` with a `uuid` tie-break, and **no path through
+`OwnedResourceCache` can produce it.** `get_multi`'s `sort_orders` is `'asc'`/`'desc'` and cannot
+express null placement; `core/utils/search.py::search_multi` builds a bare `.desc()`/`.asc()` from a
+*single* `sort_column`, so neither the null placement nor the tie-break is reachable there either.
+Trips get away with `search_multi` only because `trip.start_date` is `NOT NULL`.
+
+So `crud_courses.get_courses_page` is one hand-written `select()` serving **both** branches,
+searched and unsearched — which is what makes courses different from the four resources that opt out
+of the factory for an enrichment, and different from `get_certifications_page` (added by
+[api #129](https://github.com/opendiving/opendiving-api/pull/129)), which needed the same treatment
+for one branch because certifications are not searchable. That distinction is now written into
+`OwnedResourceCache`'s own docstring, which is where the next resource-adding agent will read it.
+
+The behaviour matters as much as the index: a `planned` course has no dates, and so does a completed
+one somebody back-filled without them, so "no date" must not be read as "soonest". With Postgres's
+default `NULLS FIRST` a diver with two planned courses opens the list and sees only those.
+
+What courses *do* take from trips is the cache-key shape and nothing else. `courses.py` keeps an
+`OwnedResourceCache` alive purely for `list_cache_key_prefix` and `invalidate_list`, and its
+non-empty `search_columns` is what keeps the `:search:{search}` segment in the key — the invariant
+being that **every dimension a list read varies on appears in its key**: page, size, search term.
+
+### Deleting a course invalidates three cache families
+
+`invalidate_course_caches` sweeps `user_{id}_course*` — one pattern, because both key shapes share
+that prefix and nothing else starts with it, the same arrangement certifications use rather than the
+two-pattern care dives need.
+
+`erase_course` then calls `invalidate_dive_caches` **and** `invalidate_certification_caches` as
+well, unconditionally. Both of those reads now carry the course's uuid, and the FK's
+`ON DELETE SET NULL` has just rewritten every row that pointed here — so skipping either would leave
+cached reads naming a course fresh ones no longer do, for the rest of the TTL. `erase_trip` already
+does the dive half for exactly this reason; courses are the first resource where it is two.
+
+No `move_dives_to` equivalent, unlike `DELETE /trip/{uuid}`. A trip groups a whole holiday's dives
+and moving them elsewhere is a real operation; a deleted course simply unlinks, which the FK does
+itself.
+
+### `CertificationUpdateRequest`, and where `course_uuid` may not sit
+
+`CertificationUpdate` is CRUDAdmin's registered form schema for `Certification`, and
+`CertificationCreateInternal` inherits `CertificationBase`. A non-column `course_uuid` on either
+would land in the admin form as a field the panel renders and cannot resolve — the exact trap
+`TripUpdateRequest`'s docstring records. So:
+
+- the API's PATCH body is `CertificationUpdateRequest(CertificationUpdate)`, carrying `course_uuid`;
+- on the create side `course_uuid` sits on `CertificationCreate` itself, never on the base;
+- the internal schemas carry `course_id`, the column — which is what the admin *create* form should
+  offer, matching how `DiveCreateInternal` already exposes `trip_id`.
+
+The certification admin views were **not** re-registered on column-shaped internal schemas the way
+the dive views are. That would be cleaner symmetry and a wider admin refactor than this change
+wanted.
+
+`CertificationRead` gains `course_uuid`, and all **three** of its producers fill it: both cached
+readers run the batched `get_course_uuids_by_ids`, and `write_certification` passes the value
+straight from the request. `_to_public_certification` stays a synchronous pure function that takes
+the resolved value from its callers — `course_id` joins its exclusion set the way `trip_id` does in
+`_to_public_dive`.
+
+### DiveJSON is not part of this
+
+The API's export is its own `export.json`; DiveJSON is not wired into the app. Once it is, a
+`courses` collection is a clean candidate — the spec already defines certifications with the same
+instructor/training-center fields, its cross-reference grammar is `*_uuid` members, and its
+service-record→schedule link is precedent for exactly this optional child-side reference. Until then
+nothing here mentions it.
+
+UDDF gets nothing, and `<divetrip>` is the near miss rather than the answer: it has a name and a
+date range, but a training course is not a trip, and writing one there would have an importer read
+"PADI Open Water" as a holiday alongside the real trips already in that element. See *"What UDDF
+3.2.2 has no slot for"*.

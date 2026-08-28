@@ -77,6 +77,19 @@ class TestWhatUddfCannotHold:
         assert [c["name"] for c in document["certifications"]] == ["Open Water Diver"]
 
     @pytest.mark.asyncio
+    async def test_training_courses_are_here_with_every_attribute(self, monkeypatch):
+        """UDDF's nearest element is `<divetrip>`, which a training course is not - so this
+        file is the only place a course survives the export at all."""
+        document = await _render(full_bundle(), monkeypatch)
+        (course,) = document["courses"]
+
+        assert course["name"] == "Advanced Nitrox + Decompression Procedures"
+        assert (course["agency"], course["status"]) == ("tdi", "completed")
+        assert (course["start_date"], course["end_date"]) == ("2026-03-02", "2026-03-06")
+        assert (course["instructor_name"], course["instructor_number"]) == ("Jae Kim", "TDI-88121")
+        assert (course["training_center"], course["cost"]) == ("Blue Ocean", "EUR 1450")
+
+    @pytest.mark.asyncio
     async def test_both_account_preferences_travel_with_the_logbook(self, monkeypatch):
         """`/export/archive` promises nothing in the account is reachable only through the
         app, and these two are the whole of what an account can be set to.
@@ -160,6 +173,18 @@ class TestReferences:
             str(UUIDS["gear-suit"]),
         ]
         assert document["gear_service_records"][0]["gear_service_schedule_uuid"] == str(UUIDS["schedule"])
+
+    @pytest.mark.asyncio
+    async def test_both_kinds_of_child_point_at_the_course_by_uuid(self, monkeypatch):
+        """The grouping is expressed on the children, not as a list on the course - so a
+        reader rebuilds it by walking `dives` and `certifications`. Both directions are
+        asserted because they are two independent mappings in `envelope.py`."""
+        document = await _render(full_bundle(), monkeypatch)
+
+        assert document["dives"][0]["course_uuid"] == str(UUIDS["course"])
+        assert document["certifications"][0]["course_uuid"] == str(UUIDS["course"])
+        # And the dives that were not on it say so, rather than inheriting the reference.
+        assert [dive["course_uuid"] for dive in document["dives"][1:]] == [None, None]
 
     @pytest.mark.asyncio
     async def test_a_dive_site_carries_its_coordinates(self, monkeypatch):

@@ -105,8 +105,8 @@ async def export_uddf(
     UDDF is the open interchange format Subsurface, divelogs.de and MacDive import, so
     this is the file to hand another program. It carries the dives, their sites, trips,
     gases, cylinders, gear and full sample profiles - but not the things the format has no
-    slot for (gear sets, service history, c-cards, per-cylinder role and usage, the deco
-    ceiling).
+    slot for (gear sets, service history, c-cards, training courses, per-cylinder role and
+    usage, the deco ceiling).
     For a copy that holds everything, use `/export/archive`.
     """
     await _enforce_export_limit(current_user["id"])
@@ -127,8 +127,8 @@ async def export_csv(
     """Download the caller's dives as a single spreadsheet-ready CSV.
 
     One row per dive with the related records flattened into readable cells - the file to
-    open in Excel, Numbers or a notebook. The normalized set (cylinders, trips, sites,
-    gear, service history, certifications) ships inside `/export/archive`.
+    open in Excel, Numbers or a notebook. The normalized set (cylinders, trips, courses,
+    sites, gear, service history, certifications) ships inside `/export/archive`.
     """
     await _enforce_export_limit(current_user["id"])
     bundle = await load_export_bundle(db, user_id=current_user["id"])

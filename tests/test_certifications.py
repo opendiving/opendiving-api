@@ -23,10 +23,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException, Response, UploadFile
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
+from src.app.api.v1 import certifications as certifications_module
 from src.app.api.v1.certifications import (
     _cached_read_certifications,
     _to_public_certification,
@@ -43,6 +45,7 @@ from src.app.schemas.certification import (
     CertificationFileInfo,
     CertificationReadInternal,
     CertificationSide,
+    CertificationUpdateRequest,
 )
 from src.app.services.cache_invalidation import invalidate_certification_caches
 from src.app.services.certification_files import (
@@ -51,7 +54,7 @@ from src.app.services.certification_files import (
     sniff_content_type,
 )
 from tests.conftest import db_available
-from tests.helpers.generators import create_certification
+from tests.helpers.generators import create_certification, create_course
 
 # The `@cache` decorator would need Redis and would serve a hit without re-running the
 # body, which is the opposite of what the ordering tests assert. `__wrapped__` is the
@@ -199,6 +202,213 @@ class TestPatchAgencyPairing:
     def test_valid_merges_pass(self) -> None:
         _validate_agency_pairing(CertificationAgency.OTHER, "FFESSM")
         _validate_agency_pairing(CertificationAgency.PADI, None)
+
+
+class TestTheCourseLink:
+    """`course_uuid` on a certification - the first reference a card has ever carried, and
+    the only one whose *whole* path is new rather than mirrored from a dive.
+
+    The two things worth pinning here are the ones a symmetry argument would skip: the
+    field sits on `CertificationCreate`/`CertificationUpdateRequest` rather than on
+    `CertificationBase`/`CertificationUpdate`, because those two are CRUDAdmin's form
+    schemas and a non-column field on either lands in the admin form; and
+    `_to_public_certification` takes the resolved uuid as an argument rather than looking
+    it up, which is what keeps it a synchronous pure function with three callers.
+    """
+
+    def test_the_admin_form_schemas_carry_no_course_uuid(self) -> None:
+        """The trap `TripUpdateRequest`'s docstring records. `CertificationUpdate` is the
+        panel's Certification form and `CertificationCreateInternal` inherits
+        `CertificationBase`, so a `course_uuid` on either would be a field the panel
+        renders and cannot resolve."""
+        from src.app.schemas.certification import CertificationCreateInternal, CertificationUpdate
+
+        assert "course_uuid" not in CertificationUpdate.model_fields
+        assert "course_uuid" not in CertificationBase.model_fields
+        assert "course_uuid" not in CertificationCreateInternal.model_fields
+        # The column, though, is exactly what the admin *create* form should offer -
+        # matching how `DiveCreateInternal` exposes `trip_id`.
+        assert "course_id" in CertificationCreateInternal.model_fields
+
+    def test_the_request_schemas_carry_it(self) -> None:
+        assert "course_uuid" in CertificationCreate.model_fields
+        assert "course_uuid" in CertificationUpdateRequest.model_fields
+
+    def test_the_public_shape_reports_the_course_it_is_given(self) -> None:
+        course_uuid = uuid7()
+
+        public = _to_public_certification(
+            _internal_certification(course_id=5), user_uuid=uuid7(), course_uuid=course_uuid
+        )
+
+        assert public.course_uuid == course_uuid
+        # The internal FK must never reach the public shape, exactly as `user_id` does not.
+        assert "course_id" not in public.model_dump()
+
+    def test_a_certification_with_no_course_reports_none(self) -> None:
+        public = _to_public_certification(_internal_certification(), user_uuid=uuid7())
+
+        assert public.course_uuid is None
+
+
+class TestPatchCourseLink:
+    """The `model_fields_set` branch on `patch_certification`, which is what tells an
+    explicit `course_uuid: null` (detach) from an omitted key (leave alone). Without it a
+    diver clearing the field gets "Certification updated" and no change at all."""
+
+    @pytest.fixture
+    def captured(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+        seen: dict[str, Any] = {}
+
+        async def fake_update(*, db: Any, object: dict, uuid: Any) -> None:
+            seen["update_data"] = object
+
+        stored = _internal_certification()
+        monkeypatch.setattr(certifications_module, "_get_owned_certification", AsyncMock(return_value=stored))
+        monkeypatch.setattr(certifications_module.crud_certifications, "update", fake_update)
+        monkeypatch.setattr(certifications_module, "resolve_course_id_for_user", AsyncMock(return_value=88))
+        monkeypatch.setattr(certifications_module, "invalidate_certification_caches", AsyncMock())
+        return seen
+
+    async def _patch(self, body: dict[str, Any]) -> None:
+        await certifications_module.patch_certification(
+            request=MagicMock(),
+            uuid=uuid7(),
+            values=CertificationUpdateRequest.model_validate(body),
+            current_user={"id": 1, "uuid": uuid7()},
+            db=MagicMock(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_explicit_null_detaches_the_card(self, captured: dict[str, Any]) -> None:
+        await self._patch({"course_uuid": None})
+
+        assert captured["update_data"]["course_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_an_omitted_key_leaves_the_course_alone(self, captured: dict[str, Any]) -> None:
+        # `notes` is here only so `update_data` is non-empty - the route skips the write
+        # otherwise, which would pass this test for the wrong reason.
+        await self._patch({"notes": "Card reprinted 2024"})
+
+        assert "course_id" not in captured["update_data"]
+
+    @pytest.mark.asyncio
+    async def test_a_uuid_is_translated_to_the_internal_id(self, captured: dict[str, Any]) -> None:
+        await self._patch({"course_uuid": str(uuid7())})
+
+        assert captured["update_data"]["course_id"] == 88
+        assert "course_uuid" not in captured["update_data"]
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_course_is_rejected_before_the_write(
+        self, captured: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(certifications_module, "resolve_course_id_for_user", AsyncMock(return_value=None))
+
+        with pytest.raises(UnprocessableEntityException, match="Course not found"):
+            await self._patch({"course_uuid": str(uuid7())})
+
+        assert "update_data" not in captured
+
+
+class TestACourseThatVanishesMidWrite:
+    """The race the resolve-then-write shape leaves open: `resolve_course_id_for_user`
+    answers, a concurrent `DELETE /course/{uuid}` hard-deletes the row, and the write then
+    violates `certification_course_id_fkey`.
+
+    Narrow, but the answer has to be the 422 a foreign or missing uuid already gets rather
+    than a raw 500 - from the caller's side the two are the same thing, and the dive routes
+    have answered that way for the identical FK since `_fk_error_detail` gained its branch.
+    A constraint the handler does not recognize has to come back out untouched, or a real
+    bug elsewhere would be reported as a missing course.
+    """
+
+    @staticmethod
+    def _integrity_error(constraint: str) -> IntegrityError:
+        return IntegrityError("write", {}, Exception(f'violates foreign key constraint "{constraint}"'))
+
+    @pytest.fixture
+    def failing_write(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+        stubs: dict[str, Any] = {"db": MagicMock(), "invalidate": AsyncMock()}
+        stubs["db"].rollback = AsyncMock()
+        monkeypatch.setattr(
+            certifications_module, "_get_owned_certification", AsyncMock(return_value=_internal_certification())
+        )
+        monkeypatch.setattr(certifications_module, "resolve_course_id_for_user", AsyncMock(return_value=88))
+        monkeypatch.setattr(certifications_module, "invalidate_certification_caches", stubs["invalidate"])
+        return stubs
+
+    @pytest.mark.asyncio
+    async def test_the_create_path_answers_422_and_rolls_back(
+        self, failing_write: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            certifications_module.crud_certifications,
+            "create",
+            AsyncMock(side_effect=self._integrity_error("certification_course_id_fkey")),
+        )
+        user_uuid = uuid7()
+        body = CertificationCreate.model_validate(
+            {"user_uuid": str(user_uuid), "agency": "tdi", "name": "Advanced Nitrox", "course_uuid": str(uuid7())}
+        )
+
+        with pytest.raises(UnprocessableEntityException, match="Course not found"):
+            await certifications_module.write_certification(
+                request=MagicMock(),
+                certification=body,
+                current_user={"id": 1, "uuid": user_uuid},
+                db=failing_write["db"],
+            )
+
+        # The rollback is not decoration: the aborted transaction would refuse every
+        # command the route ran afterwards, the cache invalidation included.
+        failing_write["db"].rollback.assert_awaited_once()
+        failing_write["invalidate"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_patch_path_answers_422_and_rolls_back(
+        self, failing_write: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            certifications_module.crud_certifications,
+            "update",
+            AsyncMock(side_effect=self._integrity_error("certification_course_id_fkey")),
+        )
+
+        with pytest.raises(UnprocessableEntityException, match="Course not found"):
+            await certifications_module.patch_certification(
+                request=MagicMock(),
+                uuid=uuid7(),
+                values=CertificationUpdateRequest.model_validate({"course_uuid": str(uuid7())}),
+                current_user={"id": 1, "uuid": uuid7()},
+                db=failing_write["db"],
+            )
+
+        failing_write["db"].rollback.assert_awaited_once()
+        failing_write["invalidate"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_any_other_constraint_comes_back_out_untouched(
+        self, failing_write: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reporting an unrecognized violation as "Course not found." would send the caller
+        after the wrong thing entirely - the failure `_fk_error_detail`'s own comment
+        records for the dive routes."""
+        monkeypatch.setattr(
+            certifications_module.crud_certifications,
+            "update",
+            AsyncMock(side_effect=self._integrity_error("certification_user_id_fkey")),
+        )
+
+        with pytest.raises(IntegrityError):
+            await certifications_module.patch_certification(
+                request=MagicMock(),
+                uuid=uuid7(),
+                values=CertificationUpdateRequest.model_validate({"course_uuid": str(uuid7())}),
+                current_user={"id": 1, "uuid": uuid7()},
+                db=failing_write["db"],
+            )
 
 
 class TestContentTypeSniffing:
@@ -555,7 +765,13 @@ class TestListOrderingAgainstPostgres:
         newest = create_certification(db, diver, certified_on=date(2024, 7, 19))
 
         page = await _read_certifications_uncached(
-            request=None, user_id=diver.id, user_uuid=diver.uuid, db=async_db, page=1, items_per_page=10
+            request=None,
+            user_id=diver.id,
+            user_uuid=diver.uuid,
+            db=async_db,
+            page=1,
+            items_per_page=10,
+            course_id=None,
         )
 
         # Dated cards newest first, then the dateless ones - which tie on `certified_on`
@@ -566,6 +782,38 @@ class TestListOrderingAgainstPostgres:
             undated_second.name,
             undated_first.name,
         ]
+
+    @pytest.mark.asyncio
+    async def test_the_course_filter_narrows_to_the_cards_that_course_issued(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        """What the course page reads. One course can issue several cards - TDI's combined
+        Advanced Nitrox + Deco Procedures is the case - so the filter has to keep both and
+        drop the unrelated one."""
+        course = create_course(db, diver)
+        first = create_certification(db, diver, course=course)
+        second = create_certification(db, diver, course=course)
+        unrelated = create_certification(db, diver)
+
+        page = await get_certifications_page(db=async_db, user_id=diver.id, offset=0, limit=10, course_id=course.id)
+
+        assert {row["name"] for row in page["data"]} == {first.name, second.name}
+        assert unrelated.name not in {row["name"] for row in page["data"]}
+        assert page["total_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_no_course_filter_returns_the_whole_list(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        """The default has to stay "all of them" - a filter that leaked into the unfiltered
+        path would empty every diver's certification list."""
+        course = create_course(db, diver)
+        create_certification(db, diver, course=course)
+        create_certification(db, diver)
+
+        page = await get_certifications_page(db=async_db, user_id=diver.id, offset=0, limit=10)
+
+        assert page["total_count"] == 2
 
     @pytest.mark.asyncio
     async def test_the_first_page_is_not_all_dateless_cards(
@@ -579,7 +827,13 @@ class TestListOrderingAgainstPostgres:
         newest = create_certification(db, diver, certified_on=date(2024, 7, 19))
 
         page = await _read_certifications_uncached(
-            request=None, user_id=diver.id, user_uuid=diver.uuid, db=async_db, page=1, items_per_page=2
+            request=None,
+            user_id=diver.id,
+            user_uuid=diver.uuid,
+            db=async_db,
+            page=1,
+            items_per_page=2,
+            course_id=None,
         )
 
         assert [row["name"] for row in page["data"]][0] == newest.name

@@ -15,6 +15,9 @@ tests all stub `delete`, which is exactly the layer in question.
 The second is that a name frees its slot. The `ux_*` indexes behind these resources were
 partial on `is_deleted` so a diver could reuse a deleted site's name; hard delete gives
 that for free, and the app-level `*_name_exists` checks in front of them have to agree.
+Not every resource has such a slot - `Course` deliberately has no per-user unique name, a
+course retaken later being legitimately the same name twice - so `name_exists` is optional
+and `TestTheRegistryIsComplete` derives which entries may leave it out.
 
 `HARD_DELETED_RESOURCES` is what all three of those classes run over, and
 `TestTheRegistryIsComplete` is what keeps it honest - it reads the models rather than a
@@ -29,10 +32,10 @@ CONTRIBUTING.md.
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import Table, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -40,6 +43,7 @@ from src.app.api.dependencies import fetch_owned_or_raise
 from src.app.api.v1.gear_service import _owned_gear_item
 from src.app.core.db.database import Base
 from src.app.core.exceptions.http_exceptions import NotFoundException
+from src.app.crud.crud_courses import crud_courses
 from src.app.crud.crud_dive_sites import crud_dive_sites, dive_site_name_exists
 from src.app.crud.crud_gear_items import crud_gear_items, gear_item_name_exists
 from src.app.crud.crud_gear_service_records import crud_gear_service_records
@@ -50,18 +54,21 @@ from src.app.crud.crud_gear_service_schedules import (
 )
 from src.app.crud.crud_gear_sets import crud_gear_sets, gear_set_name_exists
 from src.app.crud.crud_trips import crud_trips, trip_name_exists
+from src.app.models.course import Course
 from src.app.models.dive_site import DiveSite
 from src.app.models.gear_item import GearItem
 from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.gear_set import GearSet
 from src.app.models.trip import Trip
 from src.app.models.user import User
+from src.app.schemas.course import CourseReadInternal
 from src.app.schemas.dive_site import DiveSiteReadInternal
 from src.app.schemas.gear_item import GearItemReadInternal
 from src.app.schemas.gear_set import GearSetReadInternal
 from src.app.schemas.trip import TripReadInternal
 from tests.conftest import db_available
 from tests.helpers.generators import (
+    create_course,
     create_dive_site,
     create_gear_item,
     create_gear_service_record,
@@ -92,7 +99,10 @@ class Resource:
     crud: Any
     create: Callable[[Session, User], Any]
     resolve: Callable[[AsyncSession, User, Any], Awaitable[Any]]
-    name_exists: Callable[[AsyncSession, User, Any], Awaitable[bool]]
+    # `None` for a resource with no per-user unique slot to free, which is a real design
+    # position rather than an omission - see `TestTheRegistryIsComplete`, which derives who
+    # may say `None` from the models' own indexes so it cannot be used to skip a case.
+    name_exists: Callable[[AsyncSession, User, Any], Awaitable[bool]] | None = None
 
 
 def _resolves_through_fetch_owned(crud: Any, schema: type) -> Callable[[AsyncSession, User, Any], Awaitable[Any]]:
@@ -123,6 +133,15 @@ async def _resolve_schedule(session: AsyncSession, diver: User, row: Any) -> Any
 
 
 HARD_DELETED_RESOURCES: dict[type[Base], Resource] = {
+    Course: Resource(
+        crud=crud_courses,
+        create=create_course,
+        resolve=_resolves_through_fetch_owned(crud_courses, CourseReadInternal),
+        # No `name_exists`, and no `course_name_exists` helper to point it at: `course`
+        # carries no per-user unique index, because a course failed once and retaken later
+        # is legitimately the same name twice. The same reasoning that left `certification`
+        # without one.
+    ),
     Trip: Resource(
         crud=crud_trips,
         create=create_trip,
@@ -163,13 +182,41 @@ HARD_DELETED_RESOURCES: dict[type[Base], Resource] = {
     ),
 }
 
+
+def _sorted_registrations() -> list[tuple[type[Base], Resource]]:
+    return sorted(HARD_DELETED_RESOURCES.items(), key=lambda entry: entry[0].__name__)
+
+
 each_resource = pytest.mark.parametrize(
+    "resource",
+    [pytest.param(resource, id=model.__name__) for model, resource in _sorted_registrations()],
+)
+
+# The name-slot class alone runs over a subset: a resource with no per-user unique index has
+# no slot to free, so there is nothing for it to assert. Which resources may sit this out is
+# not this list's decision - `TestTheRegistryIsComplete` derives it from the models.
+each_resource_with_a_name_slot = pytest.mark.parametrize(
     "resource",
     [
         pytest.param(resource, id=model.__name__)
-        for model, resource in sorted(HARD_DELETED_RESOURCES.items(), key=lambda entry: entry[0].__name__)
+        for model, resource in _sorted_registrations()
+        if resource.name_exists is not None
     ],
 )
+
+
+def _declares_a_natural_key(model: type[Base]) -> bool:
+    """Whether the model has a unique index over something other than its public `uuid`.
+
+    That is what a `*_name_exists` helper is the friendly-422 half of. Every model here has
+    a unique `ix_*_uuid`, so the uuid one is filtered out rather than counted - keying on
+    "has any unique index" would say every resource has a name slot and quietly make the
+    exemption below unreachable.
+    """
+    # `cast` because `__table__` is typed `FromClause`, which carries `columns` but not
+    # `indexes` - the mapped attribute really is a `Table`.
+    table = cast(Table, model.__table__)
+    return any(index.unique and {column.name for column in index.columns} != {"uuid"} for index in table.indexes)
 
 
 async def _count(async_db: AsyncSession, model: Any, row_id: int) -> int:
@@ -221,6 +268,25 @@ class TestTheRegistryIsComplete:
         resurrected = set(HARD_DELETED_RESOURCES) & soft_deleting_models()
 
         assert sorted(model.__name__ for model in resurrected) == []
+
+    def test_only_a_resource_without_a_natural_key_may_omit_its_name_check(self) -> None:
+        """`name_exists=None` is an exemption from `TestADeletedNameFreesItsSlot`, so it has
+        to be derived rather than taken on trust - otherwise it is a way to skip a real case
+        by leaving a field out, and the one thing that class pins would go untested for
+        whichever resource did it.
+
+        Both directions. A resource that declares a `ux_*` index and omits the check has
+        silently dropped its coverage; one that supplies a check with no unique index behind
+        it is asserting against a slot that was never exclusive, which passes and means
+        nothing. If a `Course` ever does gain a unique name, this is what fails until the
+        helper and the entry arrive with it.
+        """
+        exempt = {model.__name__ for model, resource in HARD_DELETED_RESOURCES.items() if resource.name_exists is None}
+        without_a_natural_key = {
+            model.__name__ for model in HARD_DELETED_RESOURCES if not _declares_a_natural_key(model)
+        }
+
+        assert exempt == without_a_natural_key
 
     def test_each_registration_points_at_the_crud_for_its_own_model(self) -> None:
         """A copy-pasted entry left pointing at the neighbour's `crud_*` would exercise that
@@ -282,13 +348,17 @@ class TestADeletedNameFreesItsSlot:
     Both halves lost it together; a helper that kept one would refuse a name the index
     would happily accept, which reads to the diver as "that name is taken" for a row that
     does not exist.
+
+    Only the resources that *have* such a slot, which is not all of them - see
+    `each_resource_with_a_name_slot`.
     """
 
-    @each_resource
+    @each_resource_with_a_name_slot
     @pytest.mark.asyncio
     async def test_the_slot_is_free_again(
         self, resource: Resource, db: Session, async_db: AsyncSession, diver: User
     ) -> None:
+        assert resource.name_exists is not None  # narrowed by the parametrize above
         row = resource.create(db, diver)
         assert await resource.name_exists(async_db, diver, row) is True
 

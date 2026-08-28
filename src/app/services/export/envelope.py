@@ -29,12 +29,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...core.config import settings
 from ...core.utils.datetime_offset import combine_start_time
 from ...models.dive import Dive
+from ...schemas.certification import CertificationAgency
+from ...schemas.course import CourseStatus
 from ...schemas.dive_mixture import DiveMixtureBase, DiveMixtureRead
 from ...schemas.export import (
     EXPORT_FORMAT,
     EXPORT_VERSION,
     ExportCertification,
     ExportCertificationFile,
+    ExportCourse,
     ExportDive,
     ExportDiveFile,
     ExportDiveSite,
@@ -101,6 +104,7 @@ def _dive(bundle: ExportBundle, dive: Dive, *, profile: LoadedProfile | None, pa
         )
 
     trip = bundle.trip_for(dive)
+    course = bundle.course_for(dive)
     return ExportDive(
         uuid=dive.uuid,
         dive_number=dive.dive_number,
@@ -126,6 +130,7 @@ def _dive(bundle: ExportBundle, dive: Dive, *, profile: LoadedProfile | None, pa
         exit_latitude=dive.exit_latitude,
         exit_longitude=dive.exit_longitude,
         trip_uuid=None if trip is None else trip.uuid,
+        course_uuid=None if course is None else course.uuid,
         dive_site_uuids=[site.uuid for site in bundle.sites_for(dive)],
         gear_item_uuids=[item.uuid for item in bundle.gear_for(dive)],
         species_uuids=[species.uuid for species in bundle.species_for(dive)],
@@ -157,6 +162,7 @@ def _certifications(bundle: ExportBundle, paths: ArchivePaths | None) -> list[Ex
             # Same race as a dive's export - see `_dive`.
             if (digest := bundle.cert_file_sha256.get((certification.id, info.side.value))) is not None
         ]
+        course = bundle.course_for(certification)
         exported.append(
             ExportCertification(
                 uuid=certification.uuid,
@@ -169,6 +175,7 @@ def _certifications(bundle: ExportBundle, paths: ArchivePaths | None) -> list[Ex
                 instructor_name=certification.instructor_name,
                 instructor_number=certification.instructor_number,
                 training_center=certification.training_center,
+                course_uuid=None if course is None else course.uuid,
                 notes=certification.notes,
                 files=files,
                 created_at=certification.created_at,
@@ -199,6 +206,27 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     created_at=trip.created_at,
                 )
                 for trip in bundle.trips
+            ],
+        ),
+        (
+            "courses",
+            [
+                ExportCourse(
+                    uuid=course.uuid,
+                    name=course.name,
+                    agency=CertificationAgency(course.agency),
+                    agency_other=course.agency_other,
+                    status=CourseStatus(course.status),
+                    start_date=course.start_date,
+                    end_date=course.end_date,
+                    instructor_name=course.instructor_name,
+                    instructor_number=course.instructor_number,
+                    training_center=course.training_center,
+                    cost=course.cost,
+                    notes=course.notes,
+                    created_at=course.created_at,
+                )
+                for course in bundle.courses
             ],
         ),
         (

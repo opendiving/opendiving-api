@@ -16,6 +16,7 @@ from ...core.exceptions.http_exceptions import (
     NotFoundException,
     UnprocessableEntityException,
 )
+from ...core.schemas import validate_date_range
 from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
@@ -36,7 +37,6 @@ from ...schemas.trip import (
     TripRead,
     TripReadInternal,
     TripUpdateRequest,
-    validate_date_range,
 )
 from ...services.cache_invalidation import invalidate_dive_caches
 
@@ -70,9 +70,11 @@ def _validate_merged_date_range(start_date: date | None, end_date: date | None) 
     same shape as `_validate_agency_pairing` in `certifications.py`. The `trip` table has
     no CHECK constraint behind it, so nothing else would refuse the reversed range.
 
-    The comparison itself stays in the schema so the two paths cannot drift apart; only
-    the way it is reported differs, a `ValueError` there being a per-field 422 and this
-    one the flat `{"detail": ...}` every other route-level refusal returns.
+    The comparison itself lives in `core/schemas.validate_date_range` so no two of its
+    callers can drift apart - `TripBase`/`TripUpdate` and `CourseBase`/`CourseUpdate` on
+    the whole-object side, `patch_trip` and `patch_course` on this one. Only the way it is
+    reported differs, a `ValueError` there being a per-field 422 and this one the flat
+    `{"detail": ...}` every other route-level refusal returns.
     """
     try:
         validate_date_range(start_date, end_date)
