@@ -80,6 +80,11 @@ class TestSearchClause:
         # both have to match, and neither has the term in both columns. Trips are not here
         # any more - they search one column and an EXISTS over `trip_location`, which is
         # `trips.py::_search_conditions` rather than `search_clause`.
+        #
+        # Courses are absent for a third reason again: they *do* go through `search_clause`,
+        # but over one column, so there is no OR for this to find. Only the multi-column
+        # resources belong here; every searchable model is checked for the columns actually
+        # existing by the module-level test at the bottom of this file.
         assert " OR " in sql
         for column in columns:
             assert f"{table}.{column} ILIKE '%dahab%'" in sql

@@ -32,10 +32,10 @@ CONTRIBUTING.md.
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import Table, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -213,9 +213,10 @@ def _declares_a_natural_key(model: type[Base]) -> bool:
     "has any unique index" would say every resource has a name slot and quietly make the
     exemption below unreachable.
     """
-    return any(
-        index.unique and {column.name for column in index.columns} != {"uuid"} for index in model.__table__.indexes
-    )
+    # `cast` because `__table__` is typed `FromClause`, which carries `columns` but not
+    # `indexes` - the mapped attribute really is a `Table`.
+    table = cast(Table, model.__table__)
+    return any(index.unique and {column.name for column in index.columns} != {"uuid"} for index in table.indexes)
 
 
 async def _count(async_db: AsyncSession, model: Any, row_id: int) -> int:
