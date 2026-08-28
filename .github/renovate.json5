@@ -62,10 +62,12 @@
   // `pinDigests: true` - or the `helpers:pinGitHubActionDigests` preset - would flatten all
   // three into one style and break the first outright.
   //
-  // The install bundle digest-pins its third-party images and lives in
-  // https://github.com/opendiving/opendiving, with its own Renovate config set to `false`
-  // for the same reason: nothing there is built, so a digest is the only thing standing
-  // between an operator's `pull` and whatever upstream published this morning.
+  // The install bundle digest-pins its third-party images by hand, and lives in
+  // https://github.com/opendiving/opendiving. Its config sets `pinDigests: false` too - but
+  // for the opposite argument, and its own comment says so. Nothing there is *built* at all,
+  // so there is no floating base to protect; the flag is false so that Renovate renews the
+  // pins already written rather than normalising the style away. Same value, different
+  // reason, and neither is the default worth inheriting by accident.
   "pinDigests": false,
 
   // The transitive half. `uv.lock` pins the whole resolved tree, and a CVE is at least as
