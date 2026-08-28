@@ -297,8 +297,8 @@ spends it fastest.
 
 ## For maintainers
 
-Commits pushed to this repository's own branches are signed, and a hook keeps them that way. Once
-per clone:
+Commits pushed to this repository's own branches are signed, and two hooks keep them that way. Both
+ship with the repository and neither switches itself on. Once per clone:
 
 ```bash
 git config core.hooksPath .githooks
@@ -307,9 +307,37 @@ git config core.hooksPath .githooks
 `.githooks/pre-push` then refuses to push a commit carrying no signature at all. Linked worktrees
 share the setting, so that single command covers them too.
 
-That instruction lives here rather than in *Getting set up* because it is not a contributor's
-problem: the commits in a pull request do not need to be signed, and enabling this hook in a clone
-that does not sign only walls you out of your own push.
+The second is `.claude/hooks/no-unsigned-commits.py`, which stops a Claude Code session running a
+command that switches signing off — earlier than the push hook, while there is still nothing to
+rewrite. The script is committed; what registers it is not, so paste this into
+`.claude/settings.local.json`, which is untracked and yours:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/no-unsigned-commits.py"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+That file already exists in most clones — merge the `hooks` key in rather than overwriting it. And
+unlike `core.hooksPath`, this one does **not** reach linked worktrees: `git worktree add` copies
+nothing untracked, so a worktree gets the script with nothing wired to it and the push hook is the
+only guard there. Paste it again per worktree if you want the earlier one back.
+
+Both instructions live here rather than in *Getting set up* because neither is a contributor's
+problem: the commits in a pull request do not need to be signed, and enabling the push hook in a
+clone that does not sign only walls you out of your own push.
 
 ## Cutting a release
 

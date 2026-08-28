@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """Block a Bash command that switches off signing git reports as on.
 
-Wired up as a PreToolUse hook on Bash in .claude/settings.json. It exists
+Wired up as a PreToolUse hook on Bash in .claude/settings.local.json,
+which is untracked: the script ships with the repository, registering it
+is per machine, the same arrangement .githooks/pre-push has, and
+CONTRIBUTING.md's *For maintainers* section carries the JSON to paste.
+So it does not fire in a worktree made by a plain `git worktree add`,
+which copies nothing untracked - there .githooks/pre-push is the only
+guard left, and it refuses the push rather than the commit. It exists
 because `git -c commit.gpgsign=false commit` overrides every config file,
 which is what an agent reaches for when it fears a commit is about to hang
 - and what it leaves behind is a PR of commits GitHub marks Unverified.
