@@ -9771,10 +9771,14 @@ Anyone adding a role address to a document here should read that web section fir
 implies is that a published address is a claim about infrastructure, and the only way to keep the
 two honest is to create the mailbox in the same change that names it.
 
-The same applies to the copy that has to exist in `opendiving-web` — the policy covers a product
-released in lockstep, and a finder who lands on the frontend repo needs the same instructions. An
-org-level `.github` repository would serve both from one file and is the better answer if a third
-repo ever wants it; two copies are the cheaper one while there are two.
+The same applies to the copy that has to exist in `opendiving-web` — the policy covers one product
+released in lockstep, and a finder who lands on the frontend repo needs the same instructions.
+`opendiving/opendiving` now carries a third `SECURITY.md`, and it is deliberately *not* a copy: it
+routes on the operator/app line rather than restating this one. All three name the same two channels
+regardless, so `security@opendiving.app` is a claim made in three files now, and the org-wide custom
+security configuration above has met the "once three repos want the same answer" condition it was
+waiting on. Neither that nor an org-level `.github` repository is set up; three files is where this
+stands, recorded rather than defended.
 
 ## A pin is a promise to renew, and nothing here was renewing them
 
