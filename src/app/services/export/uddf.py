@@ -24,7 +24,11 @@ reading the XSD, and all three are exported in `export.json`/CSV instead:
 - **CNS and OTU.** `informationafterdiveType` has no oxygen-exposure element at all (the
   only `<cns>`/`<otu>` in the schema are children of `<waypoint>`, and we store end-of-dive
   scalars rather than a per-sample series).
-- **Gas `role`, tank `usage` and service schedules.** No slot for any of them. UDDF has no
+- **Gas `role`, tank `usage`, service schedules and training courses.** No slot for any
+  of them. A course is the one that looks close to having one - `<divetrip>` carries a
+  name and a date range - but a training course is not a trip, and folding it in would
+  make an importer read "PADI Open Water" as a holiday and collide with the real trips
+  already emitted there. UDDF has no
   manifold or sidemount representation at all: every cylinder is its own `<tankdata>`
   linking a shared `<mix>`, and the closest the spec comes is an aside on `<tankpressure>`
   that a linked double-tank measured at one pressure may omit the tank reference. So there

@@ -9,7 +9,7 @@ writer faithfully renders whatever bundle it is handed.
 So the two assertions that matter are the boring ones - only the caller's rows, and
 nothing soft-deleted - and they are asserted per table rather than once for dives, since
 each table applies them itself. The second only has three tables left to be wrong about:
-`Dive`, `GearServiceRecord` and `Certification` still soft-delete, and the other five are
+`Dive`, `GearServiceRecord` and `Certification` still soft-delete, and the other six are
 hard-deleted, so `_owned` skips a filter it cannot express rather than one it forgot.
 
 Like `test_dive_check_constraints.py`, these are skipped when no database is reachable.
@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 
 from src.app.core.db.database import async_engine, local_session
 from src.app.models.certification import Certification
+from src.app.models.course import Course
 from src.app.models.dive import Dive
 from src.app.models.dive_dive_site import DiveDiveSite
 from src.app.models.dive_gear_item import DiveGearItem
@@ -124,6 +125,8 @@ class TestScoping:
                 DiveSite(user_id=stranger.id, name="Theirs", notes=""),
                 Trip(user_id=owner.id, name="Mine", start_date=date(2026, 6, 1), notes=""),
                 Trip(user_id=stranger.id, name="Theirs", start_date=date(2026, 6, 1), notes=""),
+                Course(user_id=owner.id, name="Mine", agency="tdi", status="completed", notes=""),
+                Course(user_id=stranger.id, name="Theirs", agency="tdi", status="completed", notes=""),
                 GearItem(user_id=owner.id, name="Mine", notes=""),
                 GearItem(user_id=stranger.id, name="Theirs", notes=""),
                 Certification(user_id=owner.id, agency="padi", name="Mine", notes=""),
@@ -135,6 +138,7 @@ class TestScoping:
         bundle = await _load(owner.id)
         assert [site.name for site in bundle.dive_sites] == ["Mine"]
         assert [trip.name for trip in bundle.trips] == ["Mine"]
+        assert [course.name for course in bundle.courses] == ["Mine"]
         assert [item.name for item in bundle.gear_items] == ["Mine"]
         assert [cert.name for cert in bundle.certifications] == ["Mine"]
 

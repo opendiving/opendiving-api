@@ -1,7 +1,7 @@
 from typing import Any
 
 from fastcrud import FastCRUD
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.certification import Certification
@@ -67,7 +67,10 @@ async def get_certifications_page(
     course's own page reads. It is the internal id rather than the public uuid because the
     route resolves that once and puts the same value in the cache key.
     """
-    conditions = (Certification.user_id == user_id, Certification.is_deleted.is_(False))
+    conditions: tuple[ColumnElement[bool], ...] = (
+        Certification.user_id == user_id,
+        Certification.is_deleted.is_(False),
+    )
     if course_id is not None:
         conditions += (Certification.course_id == course_id,)
 

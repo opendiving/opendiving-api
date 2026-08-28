@@ -7,14 +7,16 @@ which any other test states.
 
 The first is that `crud_X.delete` really issues a `DELETE`. FastCRUD branches on whether
 the model carries `is_deleted` and silently flags the row instead when it does, so
-re-adding `SoftDeleteMixin` to any of these five - or to a sixth model added later, by
+re-adding `SoftDeleteMixin` to any of these six - or to a seventh model added later, by
 copying one of them - would turn every cascade in this change back off with no test
 failing anywhere. These call the CRUD layer rather than the route deliberately: the route
 tests all stub `delete`, which is exactly the layer in question.
 
 The second is that a name frees its slot. The five `ux_*` indexes were partial on
 `is_deleted` so a diver could reuse a deleted site's name; hard delete gives that for
-free, and the app-level `*_name_exists` checks in front of them have to agree.
+free, and the app-level `*_name_exists` checks in front of them have to agree. `Course` is
+deliberately absent from that half and only that half: it has no per-user unique name to
+free, so there is no `course_name_exists` for `TestADeletedNameFreesItsSlot` to cover.
 
 Skipped when no database is reachable. On a developer's machine that means
 `POSTGRES_SERVER=localhost` (`src/.env` points at the compose hostname, which does not
@@ -31,6 +33,7 @@ from sqlalchemy.orm import Session
 from src.app.api.dependencies import fetch_owned_or_raise
 from src.app.api.v1.gear_service import _owned_gear_item
 from src.app.core.exceptions.http_exceptions import NotFoundException
+from src.app.crud.crud_courses import crud_courses
 from src.app.crud.crud_dive_sites import crud_dive_sites, dive_site_name_exists
 from src.app.crud.crud_gear_items import crud_gear_items, gear_item_name_exists
 from src.app.crud.crud_gear_service_records import crud_gear_service_records
@@ -41,18 +44,21 @@ from src.app.crud.crud_gear_service_schedules import (
 )
 from src.app.crud.crud_gear_sets import crud_gear_sets, gear_set_name_exists
 from src.app.crud.crud_trips import crud_trips, trip_name_exists
+from src.app.models.course import Course
 from src.app.models.dive_site import DiveSite
 from src.app.models.gear_item import GearItem
 from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.gear_set import GearSet
 from src.app.models.trip import Trip
 from src.app.models.user import User
+from src.app.schemas.course import CourseReadInternal
 from src.app.schemas.dive_site import DiveSiteReadInternal
 from src.app.schemas.gear_item import GearItemReadInternal
 from src.app.schemas.gear_set import GearSetReadInternal
 from src.app.schemas.trip import TripReadInternal
 from tests.conftest import db_available
 from tests.helpers.generators import (
+    create_course,
     create_dive_site,
     create_gear_item,
     create_gear_service_record,
@@ -80,6 +86,14 @@ class TestTheRowIsActuallyRemoved:
         await crud_trips.delete(db=async_db, uuid=trip.uuid)
 
         assert await _count(async_db, Trip, trip.id) == 0
+
+    @pytest.mark.asyncio
+    async def test_deleting_a_course(self, db: Session, async_db: AsyncSession, diver: User) -> None:
+        course = create_course(db, diver)
+
+        await crud_courses.delete(db=async_db, uuid=course.uuid)
+
+        assert await _count(async_db, Course, course.id) == 0
 
     @pytest.mark.asyncio
     async def test_deleting_a_dive_site(self, db: Session, async_db: AsyncSession, diver: User) -> None:
@@ -142,6 +156,14 @@ class TestASecondDeleteIsA404:
 
         with pytest.raises(NotFoundException):
             await self._owned(async_db, crud_trips, trip.uuid, diver, TripReadInternal)
+
+    @pytest.mark.asyncio
+    async def test_a_deleted_course_no_longer_resolves(self, db: Session, async_db: AsyncSession, diver: User) -> None:
+        course = create_course(db, diver)
+        await crud_courses.delete(db=async_db, uuid=course.uuid)
+
+        with pytest.raises(NotFoundException):
+            await self._owned(async_db, crud_courses, course.uuid, diver, CourseReadInternal)
 
     @pytest.mark.asyncio
     async def test_a_deleted_site_no_longer_resolves(self, db: Session, async_db: AsyncSession, diver: User) -> None:

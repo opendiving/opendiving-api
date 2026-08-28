@@ -52,6 +52,7 @@ from uuid6 import uuid7
 
 from src.app.api.v1 import trips as trips_module
 from src.app.core.exceptions.http_exceptions import NotFoundException, UnprocessableEntityException
+from src.app.core.schemas import DATE_RANGE_MESSAGE
 from src.app.core.utils import cache as cache_module
 from src.app.crud.crud_trip_locations import get_locations_for_trip, replace_locations_for_trip
 from src.app.models.trip import Trip
@@ -62,7 +63,6 @@ from src.app.schemas.trip import (
     BBOX_MESSAGE,
     BBOX_NEEDS_COORDINATES_MESSAGE,
     BBOX_ORDER_MESSAGE,
-    DATE_RANGE_MESSAGE,
     MAX_TRIP_LOCATIONS,
     TripCreate,
     TripLocationInput,

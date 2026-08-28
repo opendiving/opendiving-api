@@ -99,9 +99,10 @@ something to look up, not to restate it.
 - **Cache keys stay user-scoped** (`user_{id}_...`) — pattern invalidation depends on it.
 - **Mutations invalidate whatever *embeds* the record**, not just the record. →
   `services/cache_invalidation.py`
-- **New per-user owned resource → `OwnedResourceCache`**; hand-roll only for reads that enrich rows
-  with a second query, or skip caching entirely when nothing embeds the rows. → its class docstring,
-  which names every resource that opts out and why (the count was stated here, and went stale)
+- **New per-user owned resource → `OwnedResourceCache`**; hand-roll for reads that enrich rows with
+  a second query *or* need an `ORDER BY` the factory cannot express (`NULLS LAST`, a tie-break
+  column), and skip caching entirely when nothing embeds the rows. → its class docstring, which
+  names every resource that opts out and why (the count was stated here, and went stale)
 - **New update schema → `RejectsExplicitNulls`**, listing the fields whose columns are `NOT NULL`.
   Every PATCH field is typed `T | None`, so without it an explicit `null` reaches the UPDATE and
   comes back as a 500. → *"Update schemas refuse an explicit null for a `NOT NULL` column"*

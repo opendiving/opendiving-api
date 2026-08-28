@@ -75,19 +75,19 @@ class TestAdminPasswordIsRequiredInProduction:
 
 
 class TestHardDeletedModelsCannotBeDeletedFromThePanel:
-    """The five models that hard-delete are registered without `"delete"`.
+    """The six models that hard-delete are registered without `"delete"`.
 
     Asserted against the source for the same reason `TestDefaults` below is - importing
     `register_admin_views` means constructing a `CRUDAdmin`, which wants a database - and
     it is worth asserting at all because the button looks harmless and is not. FastCRUD's
-    `delete` branches on whether the model carries `is_deleted`; since these five lost it,
-    the panel's delete would take the `DELETE FROM` branch and destroy the row, its
+    `delete` branches on whether the model carries `is_deleted`; since none of these six
+    has it, the panel's delete would take the `DELETE FROM` branch and destroy the row, its
     schedules, its service records and every join row through the FK cascades. With **no
     cache invalidation**, which is route-level only, so Redis would go on serving the
     deleted rows for the rest of the TTL.
     """
 
-    HARD_DELETED = ("DiveSite", "Trip", "GearItem", "GearServiceSchedule", "GearSet")
+    HARD_DELETED = ("DiveSite", "Trip", "Course", "GearItem", "GearServiceSchedule", "GearSet")
 
     @staticmethod
     def _views_source() -> str:
@@ -118,7 +118,7 @@ class TestHardDeletedModelsCannotBeDeletedFromThePanel:
 
 class TestTheGlobalCatalogCannotBeDeletedFromThePanel:
     """`Species` and `SpeciesName` are registered without `"delete"` too, but for a
-    different reason than the five hard-deleted models above.
+    different reason than the six hard-deleted models above.
 
     Those are one diver's rows. A species is **everybody's**: deleting one takes every
     `dive_species` row pointing at it through the FK cascade, silently removing a sighting

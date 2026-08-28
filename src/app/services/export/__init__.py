@@ -5,9 +5,9 @@
 - `tabular.py` writes the **CSV** set, headed by the flat `dives.csv` a diver opens in a
   spreadsheet.
 - `envelope.py` writes **`export.json`**, the complete structured copy, including
-  everything UDDF has no slot for - gear sets, service history, c-cards, per-cylinder
-  role and usage, multi-site visit order - so nothing is reachable only through the lossy
-  file.
+  everything UDDF has no slot for - gear sets, service history, c-cards, training courses,
+  per-cylinder role and usage, multi-site visit order - so nothing is reachable only
+  through the lossy file.
 - `archive.py` puts all of the above in one zip alongside every stored dive-computer
   export and c-card image.
 

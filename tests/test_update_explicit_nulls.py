@@ -37,6 +37,7 @@ from src.app.core.schemas import RejectsExplicitNulls
 from src.app.core.setup import create_application
 from src.app.core.utils import cache as cache_module
 from src.app.models.certification import Certification
+from src.app.models.course import Course
 from src.app.models.dive import Dive
 from src.app.models.dive_site import DiveSite
 from src.app.models.gear_item import GearItem
@@ -47,6 +48,7 @@ from src.app.models.trip import Trip
 from src.app.models.user import User
 from src.app.models.webauthn_credential import WebauthnCredential
 from src.app.schemas.certification import CertificationUpdate
+from src.app.schemas.course import CourseUpdate
 from src.app.schemas.dive import DiveUpdate
 from src.app.schemas.dive_site import DiveSiteUpdate
 from src.app.schemas.gear_item import GearItemUpdate
@@ -68,6 +70,7 @@ SCHEMAS_AND_TABLES: list[tuple[type[RejectsExplicitNulls], Any]] = [
     (GearItemUpdate, GearItem),
     (GearSetUpdate, GearSet),
     (CertificationUpdate, Certification),
+    (CourseUpdate, Course),
     (GearServiceScheduleUpdate, GearServiceSchedule),
     (GearServiceRecordUpdate, GearServiceRecord),
     (UserUpdate, User),

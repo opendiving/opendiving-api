@@ -9,7 +9,9 @@ from ..core.utils.search import search_clause
 from ..models.course import Course
 from ..schemas.course import CourseCreateInternal, CourseReadInternal, CourseUpdate, CourseUpdateInternal
 
-CRUDCourse = FastCRUD[Course, CourseCreateInternal, CourseUpdate, CourseUpdateInternal, CourseUpdate, CourseReadInternal]
+CRUDCourse = FastCRUD[
+    Course, CourseCreateInternal, CourseUpdate, CourseUpdateInternal, CourseUpdate, CourseReadInternal
+]
 crud_courses = CRUDCourse(Course)
 
 # What a `search=` term is matched against. One column today; kept a tuple so the search

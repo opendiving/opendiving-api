@@ -5,7 +5,7 @@ Layout, and what each member is for:
 ```
 export.json          the complete structured export - see schemas/export.py
 dives.uddf           the same bytes GET /export/uddf serves
-csv/dives.csv        the flat spreadsheet view, plus six normalized files beside it
+csv/dives.csv        the flat spreadsheet view, plus eight normalized files beside it
 avatar.webp          the diver's profile picture, if they have one
 files/...            every stored dive-computer export, under a per-dive name
 certifications/...   both sides of every stored c-card
@@ -20,7 +20,7 @@ stream without a temp file at all but costs a runtime dependency and a `Content-
 hurts; do not start there.
 
 **The CSV members are written on the event loop.** `_write_text_stream` drains a whole
-synchronous generator with no await in it, so each of the seven is an uninterrupted
+synchronous generator with no await in it, so each of the nine is an uninterrupted
 stretch of CPU - about 7 ms for the largest (`dives.csv`) over a 500-dive corpus, and
 proportional from there. Unlike `/export/csv`, which hands its drain to a thread, this one
 sits inside the open `ZipFile` and cannot simply be moved off; the two document writers

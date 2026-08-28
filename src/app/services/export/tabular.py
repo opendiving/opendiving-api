@@ -69,6 +69,9 @@ DIVES_HEADER = (
     "water_type",
     "altitude_m",
     "trip",
+    # The course a training dive was logged on, as its *name* - the same shape as `trip`
+    # beside it. `courses.csv` carries the uuid that actually joins the two files.
+    "course",
     "dive_sites",
     "species",
     "cylinders",
@@ -143,6 +146,7 @@ def _dive_row(bundle: ExportBundle, dive: Dive) -> tuple[Any, ...]:
         attribution=bundle.attribution_by_dive.get(dive.id),
     )
     trip = bundle.trip_for(dive)
+    course = bundle.course_for(dive)
     source_file = bundle.file_by_dive[dive.id]
     return (
         dive.dive_number,
@@ -158,6 +162,7 @@ def _dive_row(bundle: ExportBundle, dive: Dive) -> tuple[Any, ...]:
         dive.water_type,
         dive.altitude,
         None if trip is None else trip.name,
+        None if course is None else course.name,
         "; ".join(site.name for site in bundle.sites_for(dive)),
         # Scientific names, not the common ones a diver reads on the dive page: they are
         # unambiguous, every row has one (a common name is often null), and a spreadsheet
@@ -251,6 +256,61 @@ def write_trips_csv(bundle: ExportBundle) -> Iterator[str]:
             )
 
     return _rows_to_csv(TRIPS_HEADER, rows())
+
+
+COURSES_HEADER = (
+    "name",
+    "agency",
+    "status",
+    "start_date",
+    "end_date",
+    "instructor_name",
+    "instructor_number",
+    "training_center",
+    "cost",
+    "dives",
+    "certifications",
+    "notes",
+    "course_uuid",
+)
+
+
+def write_courses_csv(bundle: ExportBundle) -> Iterator[str]:
+    """One row per training course, with how many dives were logged on it and how many
+    cards it issued - the two things a course is *for*, which a reader would otherwise have
+    to derive by joining `dives.csv` and `certifications.csv` back on the uuid."""
+    dive_counts: dict[int, int] = {}
+    for dive in bundle.dives:
+        if dive.course_id is not None:
+            dive_counts[dive.course_id] = dive_counts.get(dive.course_id, 0) + 1
+
+    certification_counts: dict[int, int] = {}
+    for certification in bundle.certifications:
+        if certification.course_id is not None:
+            certification_counts[certification.course_id] = certification_counts.get(certification.course_id, 0) + 1
+
+    def rows() -> Iterator[tuple[Any, ...]]:
+        for course in bundle.courses:
+            yield (
+                course.name,
+                # `agency_other` is the whole point of `OTHER`, so the column shows the
+                # agency the diver actually named rather than the enum's escape hatch -
+                # the same rule `write_certifications_csv` applies.
+                course.agency_other or course.agency,
+                course.status,
+                None if course.start_date is None else course.start_date.isoformat(),
+                None if course.end_date is None else course.end_date.isoformat(),
+                course.instructor_name,
+                course.instructor_number,
+                course.training_center,
+                course.cost,
+                dive_counts.get(course.id, 0),
+                certification_counts.get(course.id, 0),
+                course.notes,
+                str(course.uuid),
+            )
+
+    return _rows_to_csv(COURSES_HEADER, rows())
 
 
 DIVE_SITES_HEADER = ("name", "location", "latitude", "longitude", "dives", "notes", "dive_site_uuid")
@@ -429,6 +489,10 @@ CERTIFICATIONS_HEADER = (
     "instructor_name",
     "instructor_number",
     "training_center",
+    # The course that issued this card, as its *name* - the same shape as `dives.csv`'s
+    # `course` column, and new surface rather than a mirror of anything: a certification
+    # has never carried a reference before.
+    "course",
     "notes",
     "certification_uuid",
 )
@@ -448,6 +512,7 @@ def write_certifications_csv(bundle: ExportBundle) -> Iterator[str]:
                 certification.instructor_name,
                 certification.instructor_number,
                 certification.training_center,
+                None if (course := bundle.course_for(certification)) is None else course.name,
                 certification.notes,
                 str(certification.uuid),
             )
@@ -460,6 +525,7 @@ CSV_WRITERS = (
     ("dives.csv", write_dives_csv),
     ("mixtures.csv", write_mixtures_csv),
     ("trips.csv", write_trips_csv),
+    ("courses.csv", write_courses_csv),
     ("dive-sites.csv", write_dive_sites_csv),
     ("species.csv", write_species_csv),
     ("gear-items.csv", write_gear_items_csv),

@@ -24,6 +24,7 @@ from ...core.utils.cache import cache
 from ...core.utils.datetime_offset import combine_start_time, split_start_time
 from ...core.utils.pagination import clamp_pagination
 from ...core.utils.uploads import content_disposition_attachment, read_upload_within_limit
+from ...crud.crud_courses import get_course_uuids_by_ids, resolve_course_id_for_user
 from ...crud.crud_dive_dive_sites import (
     get_dive_sites_for_dive,
     get_dive_sites_for_dives,
@@ -40,7 +41,6 @@ from ...crud.crud_dive_species import (
     get_species_for_dive,
     replace_species_for_dive,
 )
-from ...crud.crud_courses import get_course_uuids_by_ids, resolve_course_id_for_user
 from ...crud.crud_dives import crud_dives
 from ...crud.crud_gear_items import resolve_gear_item_ids_for_user
 from ...crud.crud_species import resolve_species_ids
@@ -174,6 +174,42 @@ def _mixture_error_detail(exc: IntegrityError) -> str:
         if constraint in msg:
             return detail
     return "Invalid gas mixture."
+
+
+async def _link_updates(db: AsyncSession, values: DiveUpdateRequest, owner_id: int) -> dict[str, int | None]:
+    """The `trip_id`/`course_id` half of a PATCH's update data.
+
+    Both are optional references the caller names by public uuid, and both have to tell an
+    explicit `null` (detach) from an omitted key (leave alone) - which is what
+    `model_fields_set` answers and the value alone cannot. A uuid that is not the caller's
+    own resolves to `None` and is refused, so someone else's stays unprobeable.
+
+    Lifted out of `patch_dive` rather than written inline twice: the second copy is what
+    pushed that handler past the complexity ceiling, and two near-identical branches in a
+    handler that long is exactly where the next reference would be added to only one of
+    them.
+    """
+    updates: dict[str, int | None] = {}
+
+    if "trip_uuid" in values.model_fields_set:
+        if values.trip_uuid is None:
+            updates["trip_id"] = None
+        else:
+            trip_id = await resolve_trip_id_for_user(db=db, trip_uuid=values.trip_uuid, user_id=owner_id)
+            if trip_id is None:
+                raise UnprocessableEntityException("Trip not found.")
+            updates["trip_id"] = trip_id
+
+    if "course_uuid" in values.model_fields_set:
+        if values.course_uuid is None:
+            updates["course_id"] = None
+        else:
+            course_id = await resolve_course_id_for_user(db=db, course_uuid=values.course_uuid, user_id=owner_id)
+            if course_id is None:
+                raise UnprocessableEntityException("Course not found.")
+            updates["course_id"] = course_id
+
+    return updates
 
 
 async def _get_owned_dive(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> DiveReadInternal:
@@ -840,8 +876,8 @@ async def patch_dive(
         exclude_unset=True,
     )
 
-    # Keyed off `model_fields_set`, matching the `trip_uuid` branch below, so the two
-    # optional-field branches in this route read the same way. `DiveUpdate` rejects an
+    # Keyed off `model_fields_set`, matching the reference branches in `_link_updates`,
+    # so every optional-field branch on this path reads the same way. `DiveUpdate` rejects an
     # explicit null for `start_time` (the column is `NOT NULL`), so a field that is set
     # is always a real datetime here - which is what stops a null slipping past this
     # branch into the update and leaving `utc_offset_minutes` describing the *old* time.
@@ -850,23 +886,7 @@ async def patch_dive(
         update_data["start_time"] = utc_start_time
         update_data["utc_offset_minutes"] = utc_offset_minutes
 
-    if "trip_uuid" in values.model_fields_set:
-        if values.trip_uuid is None:
-            update_data["trip_id"] = None
-        else:
-            trip_id = await resolve_trip_id_for_user(db=db, trip_uuid=values.trip_uuid, user_id=owner_id)
-            if trip_id is None:
-                raise UnprocessableEntityException("Trip not found.")
-            update_data["trip_id"] = trip_id
-
-    if "course_uuid" in values.model_fields_set:
-        if values.course_uuid is None:
-            update_data["course_id"] = None
-        else:
-            course_id = await resolve_course_id_for_user(db=db, course_uuid=values.course_uuid, user_id=owner_id)
-            if course_id is None:
-                raise UnprocessableEntityException("Course not found.")
-            update_data["course_id"] = course_id
+    update_data.update(await _link_updates(db, values, owner_id))
 
     dive_site_ids: list[int] | None = None
     if values.dive_site_uuids is not None:

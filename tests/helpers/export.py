@@ -17,6 +17,7 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 from src.app.models.certification import Certification
+from src.app.models.course import Course
 from src.app.models.dive import Dive
 from src.app.models.dive_site import DiveSite
 from src.app.models.gear_item import GearItem
@@ -48,6 +49,7 @@ UUIDS = {
             "site-reef",
             "site-wall",
             "trip",
+            "course",
             "gear-regulator",
             "gear-regulator-2",
             "gear-suit",
@@ -139,6 +141,7 @@ def build_bundle(
     profile_by_dive: dict[int, DiveProfileInfo | None] | None = None,
     trips: list[Trip] | None = None,
     locations_by_trip: dict[int, list[TripLocationRead]] | None = None,
+    courses: list[Course] | None = None,
     dive_sites: list[DiveSite] | None = None,
     gear_items: list[GearItem] | None = None,
     species: list[Species] | None = None,
@@ -181,6 +184,7 @@ def build_bundle(
         attribution_by_dive={dive_id: ProfileGasAttribution() for dive_id in dive_ids},
         trips=trips or [],
         locations_by_trip={**{trip.id: [] for trip in (trips or [])}, **(locations_by_trip or {})},
+        courses=courses or [],
         dive_sites=dive_sites or [],
         gear_items=gear_items or [],
         species=species or [],
@@ -248,6 +252,29 @@ def full_bundle() -> ExportBundle:
         ),
         TripLocationRead(name="Ras Mohammed"),
     ]
+    # A completed course with every optional field filled in, so nothing about it is
+    # exercised only by its absence. The `air` dive is logged on it and the certification
+    # came out of it, which is the whole point of the entity: one course, both kinds of
+    # child. The `trimix` and `bare` dives are deliberately not on it, so a writer that
+    # emitted the course name unconditionally would be caught.
+    course = _with_id(
+        Course(
+            user_id=1,
+            name="Advanced Nitrox + Decompression Procedures",
+            agency="tdi",
+            status="completed",
+            start_date=date(2026, 3, 2),
+            end_date=date(2026, 3, 6),
+            instructor_name="Jae Kim",
+            instructor_number="TDI-88121",
+            training_center="Blue Ocean",
+            cost="EUR 1450",
+            notes="Two deco dives to 45 m",
+            uuid=UUIDS["course"],
+            created_at=CREATED_AT,
+        ),
+        1,
+    )
     regulator = _with_id(
         GearItem(
             user_id=1,
@@ -322,6 +349,7 @@ def full_bundle() -> ExportBundle:
             name="Open Water Diver",
             certification_number="1234567",
             certified_on=date(2019, 6, 1),
+            course_id=1,
             notes="",
             uuid=UUIDS["certification"],
             created_at=CREATED_AT,
@@ -344,6 +372,7 @@ def full_bundle() -> ExportBundle:
         # that have to emit it and in the CSV cell that has to show it.
         altitude=0,
         trip_id=1,
+        course_id=1,
         notes='Strong current, "the wall" was worth it.\nSaw a thresher.',
         cns_end=8.0,
         otu_end=21.0,
@@ -442,6 +471,7 @@ def full_bundle() -> ExportBundle:
         },
         trips=[trip],
         locations_by_trip={1: trip_locations},
+        courses=[course],
         dive_sites=[reef, wall],
         gear_items=[regulator, second_regulator, suit, untyped],
         # Ordered by scientific name, matching `load_export_bundle`'s pre-sorted contract.
