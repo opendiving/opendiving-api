@@ -12224,3 +12224,39 @@ litres, cylinders sum without restriction; pressure-domain rates do not. Equalit
 **exactly**, not within a tolerance: volumes come from the app's own presets or from one diver's
 hand, so they either match or the diver meant them not to, and a tolerance would invent a threshold
 no agency defines.
+
+## A trip's date range is re-checked against the stored row on PATCH
+
+`TripBase.check_date_range` refuses `end_date < start_date`, which covers `POST /trip` completely
+because a create carries the whole object. `TripUpdate` inherits the same validator and it is almost
+useless there: a PATCH body holds only the keys the client sent, so the check fires only in the one
+case where *both* dates arrive together. `{"end_date": "2026-02-28"}` against a trip starting
+2026-03-01 passed validation, passed the route, and was written - and there is no `CheckConstraint`
+on `trip`, so the database stored a trip that ended before it began.
+
+`patch_trip` now merges the incoming dates over the stored ones and re-runs the rule, the same shape
+`_validate_agency_pairing` uses for `agency`/`agency_other` (see *"`agency_other` is validated
+against `agency` in two places"*). The guard is keyed off which keys were *sent*, not off the merged
+result being valid: a rename must never be refused for a range the caller did not touch, and a trip
+whose stored range is already reversed - every one written before this - stays editable.
+
+Where this differs from the certification precedent is that the comparison is not duplicated.
+`_validate_date_range` in `schemas/trip.py` became the public `validate_date_range`, and the route
+calls it inside a `try` that re-raises the `ValueError` as `UnprocessableEntityException`. The
+certification pair repeats both message strings in both files, which works because they are string
+equality; a date ordering has a boundary (equal dates are a one-day trip, not a reversed range) and
+two copies of a comparison are two places for that boundary to move. Only the *reporting* differs
+between the paths: a schema `ValueError` surfaces as 422 with `detail` as an array of per-field
+objects, the route's exception as the flat `{"detail": "..."}`. Both are 422 and the web client
+normalizes them through `getApiErrorMessage`, so this is not a contract difference clients can trip
+on.
+
+`end_date` is deliberately not in `TripUpdate.NON_NULLABLE_FIELDS` - an open-ended trip is a real
+state - so `{"end_date": null}` merges to `None` and can never conflict. `start_date` is on that
+list, so an explicit null is refused before this guard is reached. Neither is a special case in the
+merge; both fall out of `update_data.get(key, stored)` plus the `is not None` in the rule itself.
+
+No migration accompanies this. A `CheckConstraint` was the other way to close the hole and was not
+taken: it would answer with an `IntegrityError` that nothing on this route maps to a 422, giving a
+500 for the case the schema already answers cleanly on create, and it cannot express "only when a
+date was sent".
