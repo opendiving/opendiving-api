@@ -65,7 +65,7 @@ working directory. The CLI still goes through `alembic.ini`, where reconfiguring
 walk misses it - and a table that is in the database but not in `target_metadata` is not skipped, it
 is `op.drop_table`'d. It gets an explicit import. In the other direction, CRUDAdmin's own tables
 (`admin_user`, `admin_session`, `admin_event_log`, `admin_audit_log`) appear in the database
-whenever `CRUD_ADMIN_DB_URL` points at the app's Postgres, which is what the deploy bundle does;
+whenever `CRUD_ADMIN_DB_URL` points at the app's Postgres, which is what the install bundle does;
 they are declared on CRUDAdmin's `DeclarativeBase`, so autogenerate would write four more
 `drop_table`s. An `include_name` hook filters the `admin_` prefix.
 
@@ -9024,8 +9024,8 @@ rejection would not protect anything, it would stop the local stack coming up at
 therefore a live password from the first `docker compose up`, survivable only because
 `docker-compose.yml` binds Postgres to `127.0.0.1`. An earlier draft of the template header claimed
 "nothing in this file is a working credential", which was the one sentence in it that was false; it
-now names this exception and says what makes it survivable. The deploy bundle is where this stops
-being acceptable, and it gets its own template.
+now names this exception and says what makes it survivable. The install bundle is where this stops
+being acceptable, and it gets its own template - `example.env`, next door.
 
 While that section was being reworked, `APP_VERSION="0.1.0"` came out of it — **but the setting now
 defaults from `importlib.metadata.version("opendiving-api")`**, not from nothing. Deleting the line
@@ -9156,7 +9156,7 @@ returned `{"status": "healthy"}` from a process that could not reach either data
 
 **The image's `HEALTHCHECK` runs `/health/ready`.** That is the check `docker compose ps` reports
 and the one a `depends_on: condition: service_healthy` waits on, and a dependent asking that
-question wants "can serve", not "has a process" — the deploy bundle's web container gating on `api`
+question wants "can serve", not "has a process" — the install bundle's web container gating on `api`
 is exactly this. Docker has no restart-on-unhealthy policy, so the strict check cannot produce the
 restart loop that argues against it: a datastore outage surfaces as a red status column and nothing
 else. `/health` is what stays correct for anything that *does* restart on failure, which is why it
@@ -9309,13 +9309,13 @@ leaves untagged blobs and no image anyone can pull by name, so a failed build is
 is also why `fail-fast: false` is safe here, and worth having: both architectures report rather than
 the first failure hiding the second.
 
-**The tag has to agree with `pyproject.toml`.** Both repos are tagged by hand, in lockstep, on the
-same version - so tagging a commit whose manifest still reads the old version is the slip the ritual
-will eventually make. A `v*` build (the tag trigger, or a dispatch pointed at a `v*` ref) reads the
-version out of `pyproject.toml` with `tomllib` and fails before a layer is built if they disagree.
-Failing *there* is what makes recovery trivial: nothing was published, so the tag can be deleted,
-the bump fixed, and the tag re-cut. Immutability starts at publish. What the guard cannot catch - a
-tag on any commit at or after the bump - is inherent and accepted.
+**The tag has to agree with `pyproject.toml`.** All three repositories are tagged by hand, in
+lockstep, on the same version - so tagging a commit whose manifest still reads the old version is
+the slip the ritual will eventually make. A `v*` build (the tag trigger, or a dispatch pointed at a
+`v*` ref) reads the version out of `pyproject.toml` with `tomllib` and fails before a layer is built
+if they disagree. Failing *there* is what makes recovery trivial: nothing was published, so the tag
+can be deleted, the bump fixed, and the tag re-cut. Immutability starts at publish. What the guard
+cannot catch - a tag on any commit at or after the bump - is inherent and accepted.
 
 **The commit is resolved once and passed down.** `github.sha` is the tip of whichever branch a
 dispatch was launched from, not the ref being built, so every sha here comes from the working tree
@@ -9327,8 +9327,10 @@ behind one manifest.
 `gh release create --draft --generate-notes` runs after the manifest exists, so a failed build never
 produces a release. What it produces is a skeleton categorised by `.github/release.yml`; the
 headline paragraph and the **Breaking** section are written by hand before it goes out (see the
-release checklist in `CONTRIBUTING.md`). It is the one job that needs `contents: write`, granted to
-it alone rather than to the whole file, which stays on `contents: read` plus `packages: write`.
+release checklist in `CONTRIBUTING.md`). It carries **no assets** - it used to attach the three
+install files, and *The install bundle lives next door* is why it no longer does. It is the one job
+that needs `contents: write`, granted to it alone rather than to the whole file, which stays on
+`contents: read` plus `packages: write`.
 
 ## The PR title becomes a label, in a job of its own
 
@@ -9354,90 +9356,54 @@ enforces it and the array of labels the job owns. It is already written out in p
 `CONTRIBUTING.md`, which is a copy that a person reads and notices; two copies inside one file would
 have been the pair that drifts unread.
 
-## The deploy bundle is three files, and the development compose file is not one of them
+## The install bundle lives next door, and this compose file is the development one
 
-`deploy/docker-compose.yml`, `deploy/Caddyfile` and `deploy/example.env` are what an installation
-is: three `curl`s and `docker compose up -d`, the shape Immich, Linkwarden and Wanderer all
-converged on. They are uploaded as **release artifacts** by `publish-image.yml`, so
-`releases/latest/download/docker-compose.yml` is a stable URL that always names the newest published
-release - a repository path would be a `main` that may be ahead of every published image.
+The root `docker-compose.yml` builds from `./src`, bind-mounts it over the image, runs
+`uvicorn --reload`, and publishes the API on every interface and Postgres on the loopback - four
+properties that are right for development and wrong the moment anyone else can reach the machine. It
+was never going to become the file people install: serving both audiences from one file means a
+comment saying "delete these six stanzas before deploying", which nobody does.
 
-The template is `deploy/example.env`, not the `deploy/.env.example` that would match `src/`, because
-**GitHub renames a release asset whose name begins with a dot**: uploaded as `.env.example` it is
-stored as `default.env.example`, the workflow goes green, and the documented
-`.../download/.env.example` URL 404s on the first release that ships it. Confirmed by uploading one
-to a scratch repository and fetching both URLs. Immich's `example.env` is the same workaround, which
-is worth knowing before someone renames it back for consistency.
+What people install is a separate bundle - a compose file of pulled images, a `Caddyfile` and an
+`example.env`, called the *deploy bundle* everywhere in this file until now - and it lives in
+[opendiving/opendiving](https://github.com/opendiving/opendiving) rather than in the `deploy/`
+directory it used to occupy here. It was product-level all along: it pins
+`ghcr.io/opendiving/opendiving-web` alongside the api image, and sets `SITE_URL`, `MAP_TILE_*` and
+the rest of the web container's environment, none of which this repository has any use for. It sat
+here only because this is where it was first written.
 
-The root `docker-compose.yml` was never going to become that file. It builds from source,
-bind-mounts `./src` over the image, runs `uvicorn --reload`, and publishes the API on every
-interface and Postgres on the loopback - four properties that are right for development and wrong
-the moment anyone else can reach the machine. Trying to serve both audiences from one file means a
-comment saying "delete these six stanzas before deploying", which nobody does. Two files, each
-honest about what it is, and `AGENTS.md` carries the obligation to change both when the
-configuration contract moves.
+**Its reasoning travelled with it rather than being summarized here** - the `proxy` profile and the
+bring-your-own-proxy escape hatch, the network subnet pinned so `TRUSTED_PROXY_IPS` can name it, why
+`web` and `db` are handed variables one at a time instead of `env_file: .env`, why the third-party
+images are digest-pinned while the two OpenDiving ones float on `${OPENDIVING_VERSION}`, and why the
+env template is `example.env` and not `.env.example`. All of it is in that file's own comments and
+in that repository's `DECISIONS.md`, which is where the file is. A second copy here is the one that
+would go stale, and it would go stale silently: nothing in this repository's CI can read that tree.
 
-**Nothing runs but Caddy's ports.** `web`, `api`, `db` and `redis` are `expose`d to the compose
-network only. Caddy holds 80, 443 and 443/udp, gets its certificate from `DOMAIN`, and routes
-`/api/v1*`, `/admin*`, `/docs`, `/redoc` and `/openapi.json` to `api:8000` with everything else to
-`web:3000`. The four API-side paths beyond `/api/v1` are the ones a plain "everything to the web
-app" file hides: they mount on the *API*, so an enabled admin panel and the OpenAPI docs would 404
-with nothing to suggest why.
+**What stays here is the obligation.** Anything that changes how this app is *configured* - a new
+required setting, a renamed one, a new service - is a two-repository change, because the compose
+file an operator actually runs is over there. A setting added only here reaches no install at all,
+and nothing warns you. `AGENTS.md` carries that as a rule; this is why it is one.
 
-**Caddy sits under a `proxy` profile, activated by `COMPOSE_PROFILES=proxy` in the shipped `.env`.**
-A box already running Traefik or Nginx Proxy Manager cannot have this bundle binding 80/443, and
-that is a first-class setup rather than an edge case - so the escape hatch is commenting out one
-line, not editing the compose file. What a BYO-proxy user points at is `web:3000` alone: the web
-container carries `/api/v1` through to the API itself, so it is a complete single upstream and there
-is no path-splitting to get wrong. The two things they *do* have to do are in
-`docs/self-hosting/reverse-proxy.md`: add their proxy to `TRUSTED_PROXY_IPS`, and route `/admin`
-themselves if they turn the panel on.
+**Three consequences worth naming, because each was a live behaviour of this repository until the
+move:**
 
-**`FRONTEND_URL` is derived from `DOMAIN`, not asked for twice.** Five user-facing URL builders hang
-off it - the magic link, the email-change confirmation, three links in the gear digest - plus the
-API's single allowed CORS origin, and its built-in default is `http://localhost:3000`. An install
-that left it alone would email sign-in links pointing at the recipient's own laptop, which is not a
-degraded instance but a dead one, since sign-in is passwordless. `SITE_URL` for the web container is
-derived the same way. Both stay overridable in `.env`, because the LAN/plain-HTTP instance is the
-case where `https://${DOMAIN}` is wrong in both halves. Verified end to end: with
-`DOMAIN=dives.example.com` and no `FRONTEND_URL`, the logged link reads
-`https://dives.example.com/auth/verify?token=…`.
-
-**The network's subnet is pinned to `172.29.0.0/16`, and `TRUSTED_PROXY_IPS` names it.** The API
-believes `X-Forwarded-For` only from an address it was told to trust, so the preset has to match the
-network the bundled Caddy actually sits on - and Docker's default pool assigns that per machine.
-Measured both ways on the running bundle: with the preset, the magic-link limiter keys on the real
-client address; with `TRUSTED_PROXY_IPS` commented out, every caller keys on `172.29.0.7`, Caddy's
-own container address - one shared bucket for the whole instance, which is the failure "Per-IP rate
-limits need to know which proxy to believe" above describes. Forging the header from outside is
-still refused: Caddy appends the true peer, that entry is not in the trusted range, and the walk
-stops there. An operator whose host already uses that subnet changes it in two places, and the
-compose file says so where the subnet is written.
-
-**Third-party images are digest-pinned; the two OpenDiving ones are not.** `postgres:18`,
-`redis:8-alpine` and `caddy:2.10-alpine` carry `@sha256:…`, which is what makes
-`docker compose pull` fetch the bytes this bundle was tested against rather than whatever the tag
-moved to - the Immich precedent, and what keeps Renovate/Watchtower users safe. The api and web
-images move on `${OPENDIVING_VERSION:-latest}` instead, because *that* is the version the operator
-is choosing; pinning them by digest would make an upgrade an edit to the compose file rather than to
-`.env`.
-
-**Only `api`, `worker` and `admin_init` get `env_file: .env`.** `web` and `db` are handed the
-variables they need, one by one, through `environment:`. The file holds `SECRET_KEY`,
-`POSTGRES_PASSWORD` and `SMTP_PASSWORD`; the Node process has no use for any of them, and a
-compromised one should not be able to read the database credentials out of its own environment. The
-cost is a list to maintain in the compose file when the web app gains a setting, which `AGENTS.md`
-names as an obligation. Blank is treated as unset on that side (`runtime-config.ts` trims and falls
-through), so `MAP_TILE_URL: ${MAP_TILE_URL:-}` on an install that set nothing leaves the built-in
-default in place rather than clearing it.
-
-**`CRUD_ADMIN_DB_URL` is derived unconditionally**, pointing the panel's own tables at the app's
-Postgres. Left unset it is a SQLite file inside one container, which four gunicorn workers cannot
-share - the panel then looks initialized and every login fails. Deriving it costs nothing when the
-panel is off, which is the default. The one sharp edge is that this URL is built by string
-interpolation rather than by the percent-encoding `postgres_uri()` applies, so a `POSTGRES_PASSWORD`
-containing `@`, `/`, `:` or `#` has to be encoded by hand; both the compose file and
-`deploy/example.env` say so where the value is set.
+- **The release here stopped carrying artifacts.** `publish-image.yml`'s `draft-release` job used to
+  attach the three install files to every `v*` release, which made this repository's release
+  simultaneously the api's component release *and* the product's - and is why the guard it carried
+  could only ever check half of what it was guarding. The job stays: delete it and api becomes the
+  only one of the three repositories with no component release, with `.github/release.yml` and the
+  title-to-label plumbing left as dead config. It now opens a draft with generated notes and nothing
+  else, which is what `opendiving-web`'s job already does. Attaching the files is the product
+  repository's, and so is the check no per-repository workflow can make: refuse to publish unless
+  *both* images exist at that version, on both architectures.
+- **Renovate here stopped watching the bundle's digests.** The `matchFileNames` rule and its
+  `prBodyNotes` - the note that a security bump merged here does not reach any install until the
+  next tag - went with the file to the repository that has it now.
+- **Operator issues route next door.** Installing, upgrading, backing up and configuring belong
+  where the bundle and the docs are; a defect in the API, the worker or the parsers belongs here. It
+  is a soft line on purpose, so the issue templates invite rather than gate - told to guess, people
+  guess wrong, and an issue in the wrong repository costs one move.
 
 ## `admin_init` moved into the app package, because `src/` is not in the image
 
@@ -9445,8 +9411,9 @@ The one-shot that creates the admin panel's tables ran as `python -m src.scripts
 and the shipped image contains neither `src/scripts/` nor `src/app/` - only the installed `app`
 package at `/code/app` and the migrations beside it. The command worked in development for one
 reason: the development compose file bind-mounts `./src` over the container. Pointed at a published
-image it fails with `No module named src`, which is exactly what `deploy/docker-compose.yml` would
-have done on its first run.
+image it fails with `No module named src`, which is exactly what
+[the install bundle's compose file](https://github.com/opendiving/opendiving/blob/main/docker-compose.yml)
+would have done on its first run.
 
 So `main()` moved to `app/admin/initialize.py`, next to the `create_admin_interface()` it calls, and
 both compose files now run `python -m app.admin.initialize`. The maintenance scripts that remain in
@@ -9466,11 +9433,12 @@ shipped `ENVIRONMENT=production` is a check that agrees with you for the wrong r
 
 ## The panel needs forwarded headers, and `TRUSTED_PROXY_IPS` is the one knob for them
 
-`deploy/docker-compose.yml` sets `FORWARDED_ALLOW_IPS` from `TRUSTED_PROXY_IPS`. Gunicorn reads that
-variable from the environment and hands it to uvicorn's `ProxyHeadersMiddleware`, which rewrites the
-request's `scheme` from `X-Forwarded-Proto` and its `client` from `X-Forwarded-For` - for peers on
-that list only. Without it the app sees every request as plain `http` from Caddy's own address, and
-the admin panel breaks in two ways that look like anything but a proxy problem:
+[The install bundle's compose file](https://github.com/opendiving/opendiving/blob/main/docker-compose.yml)
+sets `FORWARDED_ALLOW_IPS` from `TRUSTED_PROXY_IPS`. Gunicorn reads that variable from the
+environment and hands it to uvicorn's `ProxyHeadersMiddleware`, which rewrites the request's
+`scheme` from `X-Forwarded-Proto` and its `client` from `X-Forwarded-For` - for peers on that list
+only. Without it the app sees every request as plain `http` from Caddy's own address, and the admin
+panel breaks in two ways that look like anything but a proxy problem:
 
 - **An infinite redirect.** `create_admin_interface()` passes `enforce_https=True` on
   `ENVIRONMENT=production`, which installs CRUDAdmin's `HTTPSRedirectMiddleware`. It 301s any
@@ -9555,10 +9523,11 @@ send for, is broken in precisely the way a production one is.
 
 Stated positively, because the negative framing is what produced the bug. `local` is the one
 environment where reading the link out of the logs is the *documented sign-in flow* — `README.md`
-and `docs/self-hosting/troubleshooting.md` both tell you to `docker compose logs api | grep`. Every
-other value is a deployment someone other than the developer can reach. A new `EnvironmentOption`
-added later therefore inherits the safe side by default, which the old `== PRODUCTION` shape would
-not have.
+and
+[the troubleshooting guide](https://github.com/opendiving/opendiving/blob/main/docs/troubleshooting.md)
+both tell you to `docker compose logs api | grep`. Every other value is a deployment someone other
+than the developer can reach. A new `EnvironmentOption` added later therefore inherits the safe side
+by default, which the old `== PRODUCTION` shape would not have.
 
 The startup error interpolates the configured environment
 (`ENVIRONMENT is staging but SMTP_HOST is not set`) rather than saying `production`. Whoever hits
@@ -9568,7 +9537,7 @@ they did not configure reads as a bug in the app.
 ### This is a breaking change, and that is the point
 
 An existing staging instance with no relay stops booting. Nothing is deployed anywhere yet
-(`AGENTS.md`), so there is no instance to migrate today — but the deploy bundle ships to
+(`AGENTS.md`), so there is no instance to migrate today — but the install bundle ships to
 self-hosters, so it is worth being explicit that the fix is to configure `SMTP_*` or to set
 `ENVIRONMENT=local`, and that a startup failure is the intended outcome rather than a regression.
 
@@ -9802,18 +9771,22 @@ Anyone adding a role address to a document here should read that web section fir
 implies is that a published address is a claim about infrastructure, and the only way to keep the
 two honest is to create the mailbox in the same change that names it.
 
-The same applies to the copy that has to exist in `opendiving-web` — the policy covers a product
-released in lockstep, and a finder who lands on the frontend repo needs the same instructions. An
-org-level `.github` repository would serve both from one file and is the better answer if a third
-repo ever wants it; two copies are the cheaper one while there are two.
+The same applies to the copy that has to exist in `opendiving-web` — the policy covers one product
+released in lockstep, and a finder who lands on the frontend repo needs the same instructions.
+`opendiving/opendiving` now carries a third `SECURITY.md`, and it is deliberately *not* a copy: it
+routes on the operator/app line rather than restating this one. All three name the same two channels
+regardless, so `security@opendiving.app` is a claim made in three files now, and the org-wide custom
+security configuration above has met the "once three repos want the same answer" condition it was
+waiting on. Neither that nor an org-level `.github` repository is set up; three files is where this
+stands, recorded rather than defended.
 
 ## A pin is a promise to renew, and nothing here was renewing them
 
-`deploy/docker-compose.yml` pins `postgres:18`, `redis:8-alpine` and `caddy:2.10-alpine` to digests,
-for the reasons the section above gives, and that was the whole of the story: no Renovate config, no
-`.github/dependabot.yml`, no audit or image-scan step in any of the five workflows. The pins were
-frozen at whatever those images were the day someone wrote them down and would stay there until a
-human happened to look.
+The install bundle pins `postgres:18`, `redis:8-alpine` and `caddy:2.10-alpine` to digests, for the
+reasons *The install bundle lives next door* gives — and it was still in this repository when this
+was written — and that was the whole of the story: no Renovate config, no `.github/dependabot.yml`,
+no audit or image-scan step in any of the five workflows. The pins were frozen at whatever those
+images were the day someone wrote them down and would stay there until a human happened to look.
 
 **That is strictly worse than not pinning at all, and it is worth being precise about why**, because
 it is the part a future reader will otherwise undo. A floating tag and a stale digest have the same
@@ -9838,9 +9811,9 @@ rather than a default, and the Renovate config is written so that neither style 
 the other: `pinDigests` is `false`, and the `helpers:pinGitHubActionDigests` preset is deliberately
 not extended.
 
-**The `Dockerfile` floats on purpose, and the inconsistency with `deploy/` is the point.**
+**The `Dockerfile` floats on purpose, and the inconsistency with the install bundle is the point.**
 `ghcr.io/astral-sh/uv:python3.14-bookworm-slim` and `python:3.14-slim-bookworm` carry no digest, and
-digest-pinning them "for consistency" would break the CVE story outright. `deploy/` is *pulled*: no
+digest-pinning them "for consistency" would break the CVE story outright. The bundle is *pulled*: no
 build happens on the operator's machine, so the digest is the only thing standing between them and
 whatever upstream pushed this morning. The `Dockerfile` is *built*, and the one sanctioned remedy
 for a base-image CVE — dispatch Publish Image at the old `v` tag, per `CONTRIBUTING.md` — works
@@ -9858,11 +9831,11 @@ at all; and its groups are scoped to a single ecosystem, which makes the coordin
 below inexpressible. Verified rather than assumed, by running
 `renovate --platform=local --dry-run=extract` against this repository before committing to it: 76
 dependencies across `pyproject.toml` (with `uv.lock` correctly picked up as its lock file),
-`Dockerfile`, `deploy/docker-compose.yml`, `docker-compose.yml`, `.python-version` and all five
-workflows. The same run is what confirms the pinning styles survive — `docker/login-action` comes
-back with both a `currentDigest` and a `currentValue` of `v4.6.0`, so the SHA and its trailing
-version comment are renewed together, while `actions/checkout` comes back with no digest at all and
-stays a tag.
+`Dockerfile`, both compose files — the install bundle's was still in this repository then —
+`.python-version` and all five workflows. The same run is what confirms the pinning styles survive —
+`docker/login-action` comes back with both a `currentDigest` and a `currentValue` of `v4.6.0`, so
+the SHA and its trailing version comment are renewed together, while `actions/checkout` comes back
+with no digest at all and stays a tag.
 
 **A Python version is held back rather than automated.** `requires-python = "~=3.14.0"`, ruff's
 `target-version = "py314"`, `.python-version` and the two `Dockerfile` base tags have to move
@@ -10010,14 +9983,15 @@ finding is a new patch release, and the issue body now says so per row rather th
 
 ## Security headers are the app's, not the proxy's
 
-`deploy/Caddyfile` routes five paths — `/api/v1*`, `/admin*`, `/docs`, `/redoc`, `/openapi.json` —
-straight to `api:8000`, so nothing the web container sets reaches any of them. The comment on the
-`web` handler directly below said the web app "sets its own security headers, HSTS included … so
-there is nothing to add here", which was true of that handler and read as if it covered the site.
-Nothing filled the gap on the API side either: CRUDAdmin ships no security headers at all (grep the
-installed package — there are none), the API set none globally, and Caddy adds none by default. So
-`/admin`, a full create/update/delete interface over `User`, `Dive`, `GearItem` and everything else
-in `admin/views.py`, was served framable.
+[The bundled `Caddyfile`](https://github.com/opendiving/opendiving/blob/main/Caddyfile) routes five
+paths — `/api/v1*`, `/admin*`, `/docs`, `/redoc`, `/openapi.json` — straight to `api:8000`, so
+nothing the web container sets reaches any of them. The comment on the `web` handler directly below
+said the web app "sets its own security headers, HSTS included … so there is nothing to add here",
+which was true of that handler and read as if it covered the site. Nothing filled the gap on the API
+side either: CRUDAdmin ships no security headers at all (grep the installed package — there are
+none), the API set none globally, and Caddy adds none by default. So `/admin`, a full
+create/update/delete interface over `User`, `Dive`, `GearItem` and everything else in
+`admin/views.py`, was served framable.
 
 **Not urgent, and the PR should not be read as though it were.** Two things already blunt it. First,
 CRUDAdmin's session cookie is `SameSite=strict` outside debug mode (`crudadmin/session/manager.py`'s
@@ -10032,11 +10006,12 @@ HTML behind that matcher at all.
 
 **The fix is `SecurityHeadersMiddleware`, not a `header` block in the Caddyfile**, and the choice is
 the substance of this section. The obvious move is the proxy: it is where headers conventionally
-live, and `deploy/Caddyfile` is a release artifact that ships on the next tag anyway. It was
+live, and the bundled `Caddyfile` is a release artifact that ships on the next tag anyway. It was
 rejected because it fixes one deployment shape. The bundled Caddy is under the `proxy` profile and
-plenty of installs run nginx, Traefik or NPM instead — `docs/self-hosting/reverse-proxy.md` exists
-for exactly those — and a config file this repository never sees cannot be given a header by a
-change made here. A doc paragraph is guidance, not a control, and most installs will not read it.
+plenty of installs run nginx, Traefik or NPM instead —
+[the reverse-proxy guide](https://github.com/opendiving/opendiving/blob/main/docs/reverse-proxy.md)
+exists for exactly those — and a config file this repository never sees cannot be given a header by
+a change made here. A doc paragraph is guidance, not a control, and most installs will not read it.
 
 The counter-argument is that the app is asserting policy about a surface it does not own, and it
 does not hold up: `/admin` is mounted on this FastAPI app in `main.py` and `/docs` is a route in
@@ -10093,16 +10068,16 @@ Starlette's own `Internal Server Error` string with nothing worth framing, and r
 `ServerErrorMiddleware` means not using `add_middleware` at all.
 
 **The bring-your-own-proxy half is documentation, and it now tells operators to do nothing.**
-`docs/self-hosting/reverse-proxy.md` covered forwarded headers thoroughly and said nothing about
-response headers. Its new step 6 says both containers set their own and lists the three ways to undo
-that, all of which take deliberate typing: `proxy_hide_header`, an `add_header` of your own — nginx
-*appends* rather than replaces, and while a duplicated `X-Frame-Options` fails closed (a conflicting
-value blocks the frame rather than being discarded, so the danger there is getting a policy you did
-not type), a duplicated `Content-Security-Policy` is enforced *alongside* the app's rather than
-instead of it, which is how a site-wide `default-src 'self'` at the proxy blocks the admin panel's
-webfont — and losing `X-Forwarded-Proto`, without which the web app never emits HSTS at all. An
-operator who would rather own HSTS at the proxy sets `WEB_HSTS=off` and sends it there; the point is
-that one thing sends it.
+[The reverse-proxy guide](https://github.com/opendiving/opendiving/blob/main/docs/reverse-proxy.md)
+covered forwarded headers thoroughly and said nothing about response headers. Its new step 6 says
+both containers set their own and lists the three ways to undo that, all of which take deliberate
+typing: `proxy_hide_header`, an `add_header` of your own — nginx *appends* rather than replaces, and
+while a duplicated `X-Frame-Options` fails closed (a conflicting value blocks the frame rather than
+being discarded, so the danger there is getting a policy you did not type), a duplicated
+`Content-Security-Policy` is enforced *alongside* the app's rather than instead of it, which is how
+a site-wide `default-src 'self'` at the proxy blocks the admin panel's webfont — and losing
+`X-Forwarded-Proto`, without which the web app never emits HSTS at all. An operator who would rather
+own HSTS at the proxy sets `WEB_HSTS=off` and sends it there; the point is that one thing sends it.
 
 ## `public` requires the absence of every credential, not just a bearer token
 
@@ -10152,11 +10127,11 @@ ones doing the work*, and they are a third-party middleware's headers on a depen
 and bumps. An app that labels a cookie-authenticated GET publicly cacheable is relying on
 `crudadmin` to keep saving it, on exactly the paths `crudadmin` has already decided not to.
 
-Nothing in `deploy/` caches either — Caddy does not by default and the bundle adds no cache module —
-so even the three affected rows need an intermediary the operator put there (a corporate proxy, a
-CDN in front of the bundle) to reach a shared cache at all. That is the second reason this is not
-urgent, and it is also why the app has to be right about it regardless: the header is a *claim* made
-to caches the app will never see.
+Nothing in the install bundle caches either — Caddy does not by default and the bundle adds no cache
+module — so even the three affected rows need an intermediary the operator put there (a corporate
+proxy, a CDN in front of the bundle) to reach a shared cache at all. That is the second reason this
+is not urgent, and it is also why the app has to be right about it regardless: the header is a
+*claim* made to caches the app will never see.
 
 ### Keying on the cookie rather than on the mount path
 
@@ -10178,15 +10153,15 @@ have been precise. `Cookie` won for three reasons, in order of weight.
   of known session cookie names, for the same reason: a name list is one more thing to keep in step
   with every auth surface, and getting it wrong fails open.
 
-Two costs, both accepted. In the deploy bundle the API and the web app are one origin (see
-`deploy/Caddyfile`) and the app's `refresh_token` cookie is set without a `path`, so a signed-in
-browser sends it on every API read — those reads are now `private, no-store` even where the data is
-public. Anonymous visitors, who are the ones a shared cache exists for, still get
-`public, max-age=60`, and CRUDAdmin scopes its own `session_id` and `csrf_token` cookies to
-`<mount_path>/`, so they never reach `/api/v1` at all. Separately, the panel's static assets are
-`no-store` for a signed-in admin, which costs a re-fetch of a 94 KB favicon per page view on the
-lowest-traffic surface in the app. Carving `/static/` out would mean reintroducing exactly the
-path-matching this section just argued against, for that.
+Two costs, both accepted. In the install bundle the API and the web app are one origin (see its
+[`Caddyfile`](https://github.com/opendiving/opendiving/blob/main/Caddyfile)) and the app's
+`refresh_token` cookie is set without a `path`, so a signed-in browser sends it on every API read —
+those reads are now `private, no-store` even where the data is public. Anonymous visitors, who are
+the ones a shared cache exists for, still get `public, max-age=60`, and CRUDAdmin scopes its own
+`session_id` and `csrf_token` cookies to `<mount_path>/`, so they never reach `/api/v1` at all.
+Separately, the panel's static assets are `no-store` for a signed-in admin, which costs a re-fetch
+of a 94 KB favicon per page view on the lowest-traffic surface in the app. Carving `/static/` out
+would mean reintroducing exactly the path-matching this section just argued against, for that.
 
 ### The public branch had to grow a `Vary`
 
@@ -10482,8 +10457,10 @@ query that has nothing to do with files.
 two-artifact one that stays honest: dump the database first, copy the files volume second. Files are
 written before their rows commit and never mutated, so a copy taken after the dump is a superset of
 what the dump references — except a file *deleted* between the two steps, which leaves one dangling
-row in the restore. That window is named in `docs/self-hosting/backup-restore.md`, with "stop the
-stack first" as the exactness option. Same order Immich documents, for the same reason.
+row in the restore. That window is named in
+[the backup-and-restore guide](https://github.com/opendiving/opendiving/blob/main/docs/backup-restore.md),
+with "stop the stack first" as the exactness option. Same order Immich documents, for the same
+reason.
 
 Also given up: single-transaction atomicity between bytes and rows, replaced by the ordering rule
 and the sweeper above.
@@ -10522,9 +10499,11 @@ exist for — and the copy of that document an operator is meant to read is the 
 `opendiving/opendiving`. Both now name
 `https://github.com/opendiving/opendiving/blob/main/docs/backup-restore.md`.
 
-These are the only two doc references the running app says out loud. Every other one in `src/` is a
-comment or a line in the config template, read by somebody who does have a tree in front of them,
-and a relative path is the right spelling there.
+These are the only two doc references the running app says out loud, which is why they went first.
+Every other one in `src/` is a comment or a line in the config template, read by somebody who does
+have a tree in front of them — and a relative path was the right spelling there for exactly as long
+as that tree still held the file. It stopped holding it when the install bundle and the self-hosting
+docs left this repository, and those comments became absolute URLs too.
 
 Three details that look arbitrary and are not:
 
@@ -10538,9 +10517,11 @@ Three details that look arbitrary and are not:
   repositories, so nothing has ever put these strings in front of an operator, and the link is
   correct by the time one exists.
 
-This is the first `github.com/opendiving/opendiving/` reference in this repository.
-`blob/main/<path>` is the shape to follow for the rest — it is already what the issue templates use
-for cross-repo file links, and unlike `tree/main` it renders a file.
+This was the first `github.com/opendiving/opendiving/` reference in this repository, and
+`blob/main/<path>` became the shape for the rest of them — it is already what the issue templates
+use for cross-repo file links, and unlike `tree/main` it renders a file. `tree/main/<path>` is its
+counterpart for a directory; GitHub 301s `blob` on a directory to `tree`, so getting it backwards
+redirects instead of failing and nothing tells you.
 
 `tests/test_operator_messages.py` pins both messages. What it asserts is not the wording but that
 the URL is there and no bare `docs/` path survives beside it, which is the property that would
@@ -10853,12 +10834,14 @@ docs: an operator asking "why is there no passkey option on my instance" is aski
 server-side state can answer** — nothing was configured, nothing failed, and the API never learns
 that a browser declined to offer the ceremony. Only the deployment's own shape explains it.
 
-So `docs/self-hosting/configuration.md` carries the rules as an eligibility list rather than a
-setting (HTTPS, a hostname, `localhost` exempt, IP addresses never), `reverse-proxy.md` says it
-where the plain-HTTP LAN instance is described, and `troubleshooting.md` answers the symptom
-directly. The trap the docs exist for is the IP-address one: `https://192.168.1.10` is a secure
-context, so the browser offers WebAuthn and *then* throws — which reads as a certificate problem and
-is not one, and no amount of fixing the certificate moves it.
+So
+[the configuration reference](https://github.com/opendiving/opendiving/blob/main/docs/configuration.md)
+carries the rules as an eligibility list rather than a setting (HTTPS, a hostname, `localhost`
+exempt, IP addresses never), its `reverse-proxy.md` says it where the plain-HTTP LAN instance is
+described, and its `troubleshooting.md` answers the symptom directly. The trap the docs exist for is
+the IP-address one: `https://192.168.1.10` is a secure context, so the browser offers WebAuthn and
+*then* throws — which reads as a certificate problem and is not one, and no amount of fixing the
+certificate moves it.
 
 ## Signing is enforced by two local hooks, because GitHub cannot do it yet
 
@@ -11267,20 +11250,21 @@ their address and user agent, and `admin_audit_log`, which for every create, upd
 stores the affected row's JSON state before and after. `User` is registered for `view`/`create`/
 `update` (`admin/views.py`), so an operator editing a diver by hand writes that diver's email into
 an audit row. `CRUD_ADMIN_TRACK_EVENTS` gates both tables and defaults to `True`, and
-`deploy/docker-compose.yml` points `CRUD_ADMIN_DB_URL` at the app's own Postgres — so on a real
-install this is not a far-off SQLite file, it is more tables in the same database the purge is
-running in.
+[the install bundle's compose file](https://github.com/opendiving/opendiving/blob/main/docker-compose.yml)
+points `CRUD_ADMIN_DB_URL` at the app's own Postgres — so on a real install this is not a far-off
+SQLite file, it is more tables in the same database the purge is running in.
 
 The purge still does not touch them, and that is a decision rather than an oversight. They carry no
 foreign key to `user`, so nothing happens by default; adding the delete deliberately would mean a
 data-subject request editing the record of what *an operator* did, which is the one thing an audit
 log exists to be proof of. An audit log a subject can rewrite is worth nothing. So the boundary is
 drawn at the app's own data, and the second copy becomes the operator's retention duty —
-`docs/self-hosting/configuration.md` says so under both the deletion knob and the panel, with the
-`DELETE` to run, because `crudadmin` ships a `cleanup_old_logs` helper that nothing in this app
-calls. Same shape as `sweep_orphaned_files.py`: a reclaim path that exists and is not wired to
-anything is a documentation duty, not a guarantee. The panel is off by default, which is why this is
-a paragraph in the operator docs and not code.
+[the configuration reference](https://github.com/opendiving/opendiving/blob/main/docs/configuration.md)
+says so under both the deletion knob and the panel, with the `DELETE` to run, because `crudadmin`
+ships a `cleanup_old_logs` helper that nothing in this app calls. Same shape as
+`sweep_orphaned_files.py`: a reclaim path that exists and is not wired to anything is a
+documentation duty, not a guarantee. The panel is off by default, which is why this is a paragraph
+in the operator docs and not code.
 
 Same shape as the backup paragraph in `backup-restore.md`: the honest answer to "does erasure reach
 this?" is no, and saying so beats a purge that pretends to.
@@ -11464,9 +11448,11 @@ What Gravatar cost is worth recording, because it is the argument for doing this
 by default, so a default install had no pictures anywhere; turning it on disclosed a SHA-256 of
 every signed-in user's email address plus their IP to Automattic on every page; and changing your
 picture meant creating an account on someone else's website. The API's half of the teardown is the
-`GRAVATAR_ENABLED` passthrough in `deploy/docker-compose.yml`, its `deploy/example.env` block and
-its row in `docs/self-hosting/configuration.md`. With it gone, *Third-party calls* from the browser
-is map tiles and nothing else.
+`GRAVATAR_ENABLED` passthrough in
+[the install bundle's compose file](https://github.com/opendiving/opendiving/blob/main/docker-compose.yml),
+its `example.env` block and its row in
+[the configuration reference](https://github.com/opendiving/opendiving/blob/main/docs/configuration.md).
+With it gone, *Third-party calls* from the browser is map tiles and nothing else.
 
 **Annotation, later:** that last sentence was only ever true of an instance with `GOOGLE_CLIENT_ID`
 unset. Google's sign-in script is a second browser-side call on any instance that offers Google
@@ -11604,7 +11590,8 @@ against four workers in the shipped image, and no per-decode figure survives bei
 400\. One at a time costs nothing real — a realistic upload is tens of milliseconds through this,
 uploads are rare, and the input that would make the queue matter is the hostile one. With it, ~90 MB
 is a per-worker ceiling and the shipped four workers cost at most ~360 MB between them, against a
-documented install minimum of 1 GB for the whole stack ([install.md](docs/self-hosting/install.md)).
+documented install minimum of 1 GB for the whole stack
+([install.md](https://github.com/opendiving/opendiving/blob/main/docs/install.md)).
 
 Worth generalizing, because the next image feature will meet it: **an accept-side limit in pixels is
 not a limit in bytes of memory.** The gap between them is whatever the format's compression ratio
@@ -11874,9 +11861,10 @@ The web image serves a `/privacy` page, and an operator installing this project 
 their own name whether or not they read it. That makes it configuration surface rather than somebody
 else's copy: it asserts things about *this* instance — no analytics, no advertising storage, no
 cookie banner because there is nothing to ask about — and those assertions are only true for as long
-as the operator does not add any. `docs/self-hosting/configuration.md` now says so under
-*Third-party calls*, because the page cannot warn its own operator and nothing else in this
-repository was addressing them.
+as the operator does not add any.
+[The configuration reference](https://github.com/opendiving/opendiving/blob/main/docs/configuration.md)
+now says so under *Third-party calls*, because the page cannot warn its own operator and nothing
+else in this repository was addressing them.
 
 The duty being handed over is a real one and it moves with the deployment. Under ePrivacy the
 obligation to obtain consent before storing on or reading from a visitor's device falls on whoever
@@ -12070,14 +12058,14 @@ been a new supply-chain surface for a single HTTP call and was rejected.
 
 ### The client secret must never reach the `web` service
 
-`deploy/docker-compose.yml` needs no change for this variable, and the obvious edit to it is a
-security bug. `api`, `worker` and `admin_init` take `env_file: .env`, so a new variable in `.env`
-reaches all three with nothing to add. The `web:` service deliberately does not - its own comment
-says why, that a compromised Node process must not be able to read the database credentials out of
-its own environment - and instead names each variable it uses, `GOOGLE_CLIENT_ID` among them.
-**`GOOGLE_CLIENT_SECRET` must never be added to that block.** The browser half of this flow never
-sees the secret, so the Node process has no use for it, and adding it would break the one rule this
-whole section rests on.
+[The install bundle's compose file](https://github.com/opendiving/opendiving/blob/main/docker-compose.yml)
+needs no change for this variable, and the obvious edit to it is a security bug. `api`, `worker` and
+`admin_init` take `env_file: .env`, so a new variable in `.env` reaches all three with nothing to
+add. The `web:` service deliberately does not - its own comment says why, that a compromised Node
+process must not be able to read the database credentials out of its own environment - and instead
+names each variable it uses, `GOOGLE_CLIENT_ID` among them. **`GOOGLE_CLIENT_SECRET` must never be
+added to that block.** The browser half of this flow never sees the secret, so the Node process has
+no use for it, and adding it would break the one rule this whole section rests on.
 
 ## `DiveMixture.usage` is how a cylinder was breathed, and it is what makes a sidemount pair summable
 

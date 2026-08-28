@@ -313,19 +313,27 @@ that does not sign only walls you out of your own push.
 
 ## Cutting a release
 
+**A release here is a component release**: the `opendiving-api` image, and notes recording what went
+into it. The *product* release — the version both images are tagged with, plus the three files that
+install them — is cut in [opendiving/opendiving](https://github.com/opendiving/opendiving), last of
+the three, and
+[its CONTRIBUTING.md](https://github.com/opendiving/opendiving/blob/main/CONTRIBUTING.md) is the
+ritual as a whole. This section is the api half of it.
+
 Releases are cut deliberately, never minted per merge. A version is an event self-hosters read
 before they pull, and a stream of releases whose notes are one PR title each trains people onto
 `latest` — the tag you least want someone following. Accumulate until the window tells a coherent
 story, until a fix somebody is waiting on lands, or until anything needs a pinnable reference:
 pre-launch that means "whenever useful", after launch expect every one to four weeks.
 
-Versions move in lockstep with [opendiving-web](https://github.com/opendiving/opendiving-web): one
-product version, tagged in both repos, so `opendiving-api:0.4.0` and `opendiving-web:0.4.0` are
-always a matched pair. That is also why no release tool runs here — semantic-release and
+Versions move in lockstep across all three repositories — this one,
+[opendiving-web](https://github.com/opendiving/opendiving-web) and the product repository: one
+product version, so `opendiving-api:0.4.0`, `opendiving-web:0.4.0` and release `v0.4.0` over there
+are always a matched set. That is also why no release tool runs here — semantic-release and
 release-please both compute a version per repo from that repo's own commits, which drifts apart on
 the first api-only fix and then has to be forced back by hand at every release afterwards.
 
-**Pick the number** by looking at both repos' windows together:
+**Pick the number** by looking at all three repos' windows together:
 
 | The window contains                                                                            | Pre-1.0 | From 1.0.0 |
 | ---------------------------------------------------------------------------------------------- | ------- | ---------- |
@@ -344,11 +352,13 @@ Every PR title is a conventional commit subject, so the breaking half of that ta
 git log --format=%s v0.3.0..main | grep -E '^[a-z]+(\([^)]+\))?!:'
 ```
 
-Then, in both repos:
+Then, in the two code repos:
 
 1. Bump `version` in `pyproject.toml` (and `package.json` in the web repo) — one small PR each,
    titled `chore: release v0.4.0`. Nothing else carries a version number: the API reads its own from
-   the installed package metadata.
+   the installed package metadata, and the product repository has no manifest to bump on purpose —
+   the check that matters there is "do both images exist at this version", which is stronger than
+   any local record of what the version is supposed to be.
 
 2. Tag the bump commit and push the tag:
 
@@ -363,21 +373,19 @@ Then, in both repos:
    whose name disagrees with the manifest version is refused the same way, before anything is built
    — so nothing was published, and the fix is to delete the tag, correct the bump, and re-cut it.
 
-4. The api workflow opens a **draft** release with generated notes, and attaches
-   `deploy/docker-compose.yml`, `deploy/Caddyfile` and `deploy/example.env` to it — those three
-   files *are* the install, and `releases/latest/download/<name>` is the URL the docs tell people to
-   `curl`. Check they are there. Write the headline paragraph and confirm the **Breaking** section:
-   say "None" in so many words when it is empty, because generated notes simply omit an empty
-   category and silence is not an answer someone deciding whether to upgrade can use. A change to
-   the deploy bundle that an existing install has to copy — a new required variable, a new service —
-   belongs in that section, since `docker compose pull` does not update the compose file.
+4. The same run opens a **draft** release here with generated notes and **no assets** — the three
+   install files are attached by the product repository's release, which is the one an operator
+   downloads from. Write the headline paragraph and confirm the **Breaking** section: say "None" in
+   so many words when it is empty, because generated notes simply omit an empty category and silence
+   is not an answer someone deciding whether to upgrade can use. A change an existing install has to
+   copy into its own `.env` or compose file — a new required variable, a new service — belongs in
+   that section, since `docker compose pull` does not update the compose file. Then publish.
 
-5. Before publishing, check that `ghcr.io/opendiving/opendiving-web:0.4.0` exists, or that its
-   workflow is green. Tagging the api and forgetting the web repo breaks every pinned install of
-   that version, and no per-repo check can catch it.
-
-6. Publish. The web repo's release is plumbing — self-hosters read this one — so it can go out as
-   generated.
+5. **Tag the product repository last**, once both images are green. Its **Release** workflow checks
+   that `ghcr.io/opendiving/opendiving-api:0.4.0` and `ghcr.io/opendiving/opendiving-web:0.4.0` both
+   exist with both architectures and refuses to publish anything if either is missing — the check
+   that replaced the by-eye "is the web image there?" step this section used to carry, and the one
+   no per-repo workflow can make. The steps are in that repository's `CONTRIBUTING.md`.
 
 The first release cut this way is `v0.2.0`. Both manifests already read `0.1.0`, and `v0.1.0` is
 spoken for: it is the clock-starter for
@@ -434,11 +442,11 @@ That is about a change you are proposing rather than about what is deployed, so 
 issue. It ignores findings with no fix published, because there is no move to make on those.
 
 **Version bumps.** `.github/renovate.json5` is the other half: it watches `uv.lock` and
-`pyproject.toml`, both `Dockerfile` base images, the three digest-pinned images in
-`deploy/docker-compose.yml`, the development compose file, and every pinned GitHub Action. Routine
-updates arrive in one batch on Monday morning; a vulnerability-driven one ignores the schedule and
-is titled `fix(deps):`, so it lands in the Fixes section of the release notes rather than among the
-chores.
+`pyproject.toml`, both `Dockerfile` base images, the development compose file's third-party images,
+and every pinned GitHub Action. Routine updates arrive in one batch on Monday morning; a
+vulnerability-driven one ignores the schedule and is titled `fix(deps):`, so it lands in the Fixes
+section of the release notes rather than among the chores. The install bundle's own digests are
+renewed by the product repository's Renovate config, not by this one.
 
 > **Renovate has to be enabled once, by hand, and until it is that file does nothing.** Install the
 > [Renovate GitHub App](https://github.com/apps/renovate) on the `opendiving` org — it reads

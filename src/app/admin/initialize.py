@@ -83,8 +83,9 @@ async def main() -> None:
     `src/app/` are both absent from it, so a `python -m src.scripts.initialize_admin`
     entrypoint could only ever run against a bind-mounted source tree. That was invisible
     while the only compose file was the development one, which mounts `./src`, and became
-    a broken `admin_init` service the moment `deploy/docker-compose.yml` ran the published
-    image instead.
+    a broken `admin_init` service the moment the install bundle's compose file
+    (https://github.com/opendiving/opendiving/blob/main/docker-compose.yml) ran the
+    published image instead.
 
     Why this isn't in the app's lifespan: it used to be, and the lifespan runs once *per
     worker*. Under `gunicorn -w 4` the four workers raced to create the same tables and

@@ -65,18 +65,19 @@ a vulnerability we will say so plainly and explain why.
 | Anything older          | No — upgrade to the newest |
 
 This project is pre-1.0. Under `0.x`, a minor version is allowed to break things, and versions move
-in lockstep with [opendiving-web](https://github.com/opendiving/opendiving-web) — one product
-version tagged in both repos. There is no long-term support branch and no backports to older minors:
-a security fix lands on `main` and ships in the next release, and self-hosters pick it up the way
-they pick up everything else.
+in lockstep with [opendiving-web](https://github.com/opendiving/opendiving-web) and
+[opendiving/opendiving](https://github.com/opendiving/opendiving) — one product version, tagged in
+all three. There is no long-term support branch and no backports to older minors: a security fix
+lands on `main` and ships in the next release, and self-hosters pick it up the way they pick up
+everything else.
 
 ```bash
 docker compose pull && docker compose up -d
 ```
 
 Database migrations run themselves on startup, so upgrading is those two commands plus the release
-notes — see [docs/self-hosting/upgrade.md](docs/self-hosting/upgrade.md). If you have pinned
-`OPENDIVING_VERSION`, move the pin.
+notes — see [the upgrade guide](https://github.com/opendiving/opendiving/blob/main/docs/upgrade.md).
+If you have pinned `OPENDIVING_VERSION`, move the pin.
 
 A published version is never repointed, so a fix in our own code always arrives as a *new* version
 number rather than as a rebuilt tag you might already be running. The single exception is a
@@ -92,12 +93,19 @@ In that case `docker compose pull` is the whole fix even with a version pinned.
   cache key scoping, upload handling and the dive-computer parsers, rate limiting, anything that
   serves one account's data to another.
 - The admin panel as shipped, including its defaults.
-- The install bundle — `deploy/docker-compose.yml`, `deploy/Caddyfile`, `deploy/example.env` — and
-  anything unsafe about the configuration a fresh install ends up with by following
-  [docs/self-hosting/install.md](docs/self-hosting/install.md).
+
+**The install bundle and the self-hosting docs are not here.** `docker-compose.yml`, `Caddyfile`,
+`example.env` and everything an operator reads live in
+[opendiving/opendiving](https://github.com/opendiving/opendiving), and a defect in *those* — a
+service exposed that shouldn't be, a dangerous default, a digest pinned to a known-vulnerable image,
+an instruction that tells an operator to do something unsafe — goes through
+[that repository's SECURITY.md](https://github.com/opendiving/opendiving/blob/main/SECURITY.md).
+Same maintainer either way, so a report that arrives here is moved rather than turned away.
 
 **Out of scope** — how a particular instance was set up. Self-hosting puts real security decisions
-on the operator, and [docs/self-hosting/](docs/self-hosting/) is where they are documented:
+on the operator, and
+[the self-hosting docs](https://github.com/opendiving/opendiving/tree/main/docs) are where they are
+documented:
 
 - `TRUSTED_PROXY_IPS` naming the wrong network, so the API believes an `X-Forwarded-For` it
   shouldn't and every per-IP rate limit reads the wrong address.
@@ -106,10 +114,12 @@ on the operator, and [docs/self-hosting/](docs/self-hosting/) is where they are 
 - A weak `POSTGRES_PASSWORD` or `SECRET_KEY`, a Postgres port published to the world, an
   unmaintained host, an out-of-date reverse proxy.
 
-The line is whether the report describes something *we* can fix by changing this repository. A
-defect in the shipped code is report-worthy; a misconfiguration of your own instance is a support
-question — start with [docs/self-hosting/troubleshooting.md](docs/self-hosting/troubleshooting.md)
-and open a normal issue if that doesn't get you there.
+The line is whether the report describes something *we* can fix by changing code we ship. A defect
+in the shipped code is report-worthy; a misconfiguration of your own instance is a support question
+— start with
+[troubleshooting](https://github.com/opendiving/opendiving/blob/main/docs/troubleshooting.md) and
+open an issue in [opendiving/opendiving](https://github.com/opendiving/opendiving/issues) if that
+doesn't get you there.
 
 Reports that are only a scanner's output, a missing hardening header with no demonstrated impact, or
 a best-practice recommendation with no attack behind it are welcome as ordinary issues, but they are

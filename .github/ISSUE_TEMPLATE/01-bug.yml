@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in the API, the worker or the install behaves wrongly
+description: Something in the API or the worker behaves wrongly
 labels: [bug]
 body:
   - type: markdown
@@ -7,6 +7,11 @@ body:
       value: |
         Found a **security** problem instead? Don't file it here — [SECURITY.md](https://github.com/opendiving/opendiving-api/blob/main/SECURITY.md)
         has the private channel. Every self-hosted instance is exposed for as long as a public issue is open.
+
+        Stuck **installing, upgrading, backing up or configuring** an instance? That belongs in
+        [opendiving/opendiving](https://github.com/opendiving/opendiving/issues/new), where the install
+        bundle and the self-hosting docs live. Same maintainer reads both, so file it wherever looks
+        right rather than agonising — it will be moved if it landed on the wrong side.
 
   - type: input
     id: version
@@ -22,7 +27,7 @@ body:
     attributes:
       label: How is it installed?
       options:
-        - Release bundle — the compose file and prebuilt images from a release
+        - Install bundle — the compose file and prebuilt images, from opendiving/opendiving
         - From source — docker compose up in a clone of this repository
         - Host tooling — uv run against the app directly, no container
         - Something else (say so below)

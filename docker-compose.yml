@@ -13,8 +13,9 @@ services:
     env_file:
       - ./src/.env
     # Development only: the API on the host, on every interface. A deployment publishes
-    # nothing but the proxy - see `deploy/docker-compose.yml`, where this service is
-    # `expose`d to the compose network and reached through Caddy.
+    # nothing but the proxy - see the install bundle's compose file at
+    # https://github.com/opendiving/opendiving/blob/main/docker-compose.yml, where this
+    # service is `expose`d to the compose network and reached through Caddy.
     ports:
       - "8000:8000"
     # Wait for the datastores to answer, not merely to have been started - otherwise the

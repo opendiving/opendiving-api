@@ -10,11 +10,19 @@ contact_links:
       Report it privately here, never as a public issue — every self-hosted instance is exposed for
       as long as it takes to cut a release. No GitHub account? security@opendiving.app.
 
-  - name: Question, or stuck installing
+  - name: Installing, upgrading, backing up or configuring
+    url: https://github.com/opendiving/opendiving/issues/new
+    about: >-
+      The install bundle and the self-hosting docs live in opendiving/opendiving, and issues about
+      running an instance belong there with them. Troubleshooting docs first if you haven't read
+      them. Same maintainer either way, so if you can't tell which side it is, file it wherever
+      looks right and it will be moved.
+
+  - name: Question about the API itself
     url: https://github.com/opendiving/opendiving-api/discussions
     about: >-
-      Ask in Discussions. Troubleshooting docs first if you haven't read them; an install that is
-      misconfigured rather than broken gets answered faster there than in the tracker.
+      Endpoints, parsers, the schema, running it from source — anything about this codebase rather
+      than about an instance. Ask in Discussions; it gets answered faster there than in the tracker.
 
   - name: Something in the web app
     url: https://github.com/opendiving/opendiving-web/issues/new/choose

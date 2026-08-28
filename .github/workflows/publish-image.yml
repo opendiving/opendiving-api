@@ -387,11 +387,12 @@ jobs:
             printf '%s\n' "$TAGS" | sed 's/^/- `/; s/$/`/'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # This is the release self-hosters read, so the draft is opened for every version build
-  # and finished by hand: `.github/release.yml` sorts the PRs by the labels `pr-title.yml`
-  # applies, and the headline paragraph and the Breaking section are written before it is
-  # published. The ritual is in CONTRIBUTING.md. It runs after `merge`, so a build that
-  # failed leaves no release behind and the tag is free to be deleted and re-cut.
+  # A release exists for the notes, not for the artifacts - the install bundle and its
+  # assets are published by `opendiving/opendiving`, and this repository's release is the
+  # record of what went into the image an operator pulls. `.github/release.yml` sorts the
+  # PRs by the labels `pr-title.yml` applies; the human writes the headline and the
+  # Breaking section, per CONTRIBUTING.md, and publishes. It runs after `merge`, so a build
+  # that failed leaves no release behind and the tag is free to be deleted and re-cut.
   draft-release:
     needs: [prepare, merge]
     if: needs.prepare.outputs.version != ''
@@ -400,42 +401,15 @@ jobs:
       contents: write
 
     steps:
-      # The deploy bundle is attached to the release, so the commit it was built from has
-      # to be on disk. The resolved sha rather than the ref, for the reason `build` uses
-      # it: what ships beside an image must be what that image was built from.
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.prepare.outputs.sha }}
-          persist-credentials: false
-
-      # An install is `curl` of these three files and `docker compose up -d`, so they are
-      # release *artifacts* rather than paths in a repository someone has to find and
-      # match to a version: `releases/latest/download/<name>` is a stable URL that always
-      # names the newest published release, and `releases/download/vX.Y.Z/<name>` pins one.
-      #
-      # The template is `deploy/example.env` and not `deploy/.env.example`, which is the
-      # name the rest of this repository uses, because **GitHub renames a release asset
-      # whose name starts with a dot**: uploaded as `.env.example` it is stored as
-      # `default.env.example`, and the documented `.../download/.env.example` URL 404s
-      # while the workflow goes green. Verified by uploading one. Immich's `example.env`
-      # is the same workaround. Do not "fix" the name back.
-      # The compose file's default image tag is `latest`, which is why pinning the
-      # download matters less than pinning `OPENDIVING_VERSION` in `.env` - both are
-      # documented in docs/self-hosting/.
-      #
-      # Uploaded before the notes are written, so a draft that is sitting there waiting for
-      # its Breaking section already carries them.
-      - name: Open a draft release with the deploy bundle attached
+      - name: Open a draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           TAG: v${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
-          ASSETS=(deploy/docker-compose.yml deploy/Caddyfile deploy/example.env)
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists - refreshing its deploy bundle only."
-            gh release upload "$TAG" "${ASSETS[@]}" --clobber
+            echo "Release $TAG already exists - leaving it as it is."
             exit 0
           fi
-          gh release create "$TAG" --draft --generate-notes --title "$TAG" "${ASSETS[@]}"
+          gh release create "$TAG" --draft --generate-notes --title "$TAG"

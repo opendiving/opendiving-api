@@ -73,7 +73,8 @@ MAX_AVATAR_PIXELS = 50_000_000
 # - This one judges what will actually be rasterized. Take it away and a 7000x7000 PNG -
 #   which `draft` cannot help with, because only JPEG can decode at a fraction of scale -
 #   costs 200 to 640 MB of resident memory depending on its mode, measured, against a
-#   documented install minimum of **1 GB for the whole stack** (docs/self-hosting/install.md).
+#   documented install minimum of **1 GB for the whole stack**
+#   (https://github.com/opendiving/opendiving/blob/main/docs/install.md).
 #
 # **Measure this per format, not per mode, and measure it rather than reasoning about it.**
 # Two review rounds went on figures that were true of whatever input the author happened to

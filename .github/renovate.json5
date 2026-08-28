@@ -11,9 +11,9 @@
   // end. CONTRIBUTING.md, "Staying on top of CVEs", is where that step is written down.
   //
   // Renovate rather than Dependabot, and not for the reason usually given. Dependabot has had
-  // a `docker-compose` ecosystem since February 2025, so `deploy/docker-compose.yml`'s three
-  // digests are reachable to it after all. What it has no ecosystem for is **uv** - and
-  // `uv.lock` is what the shipped image installs from (`uv sync --locked` in the Dockerfile),
+  // a `docker-compose` ecosystem since February 2025, so the development compose file's
+  // third-party images are reachable to it after all. What it has no ecosystem for is **uv** -
+  // and `uv.lock` is what the shipped image installs from (`uv sync --locked` in the Dockerfile),
   // so under Dependabot the entire Python dependency tree would go unwatched. It also cannot
   // read `.python-version`, and its groups are scoped to one ecosystem, which makes the
   // coordinated Python move below inexpressible. Any one of the three would be worth working
@@ -43,23 +43,31 @@
   // UTC; no `timezone` is set because nothing here cares which morning it is.
   "schedule": ["before 9am on monday"],
 
-  // Load-bearing, and the default only by luck. This repository pins in two styles on
+  // Load-bearing, and the default only by luck. This repository pins in several styles on
   // purpose, and Renovate's job is to renew whichever it finds rather than to normalise:
   //
-  //   - `deploy/docker-compose.yml` pins postgres/redis/caddy to `tag@sha256:...` because
-  //     nothing is built there - an operator *pulls*, so a floating tag would hand them
-  //     whatever upstream pushed today and this bundle was never tested against.
   //   - `Dockerfile` floats on `python:3.14-slim-bookworm` and the uv image because that one
   //     *is* built, and the float is what makes the CVE rebuild in CONTRIBUTING.md work at
   //     all: re-running Publish Image at an old `v` tag picks up the patched Debian packages
   //     precisely because the base is resolved at build time. Digest-pin it and that rebuild
   //     reproduces the vulnerable base byte for byte and fixes nothing.
+  //   - The development `docker-compose.yml` pins `postgres` and `redis` on a bare major and
+  //     `axllent/mailpit` on `v1.30`, which is the widest tag that image publishes - wide
+  //     enough to pick up patches on a `pull`, narrow enough that two machines a year apart
+  //     are not running different majors and unaware of it.
   //   - `.github/workflows/*` pins first-party actions on a major tag (`actions/checkout@v7`)
   //     and third-party ones by SHA with a trailing version comment. Renovate updates the
   //     SHA *and* the comment, and leaves the tags as tags.
   //
   // `pinDigests: true` - or the `helpers:pinGitHubActionDigests` preset - would flatten all
-  // three into one style and break the second outright.
+  // three into one style and break the first outright.
+  //
+  // The install bundle digest-pins its third-party images by hand, and lives in
+  // https://github.com/opendiving/opendiving. Its config sets `pinDigests: false` too - but
+  // for the opposite argument, and its own comment says so. Nothing there is *built* at all,
+  // so there is no floating base to protect; the flag is false so that Renovate renews the
+  // pins already written rather than normalising the style away. Same value, different
+  // reason, and neither is the default worth inheriting by accident.
   "pinDigests": false,
 
   // The transitive half. `uv.lock` pins the whole resolved tree, and a CVE is at least as
@@ -102,16 +110,6 @@
       "matchPackageNames": ["python", "ghcr.io/astral-sh/uv"],
       "groupName": "Python runtime",
       "dependencyDashboardApproval": true,
-    },
-    {
-      // The deploy bundle is not code anyone runs from this repository - it is three files
-      // uploaded as release assets, so a digest bumped here reaches an install on the next
-      // tag and not before. Worth saying in the PR, because the instinct on a security bump
-      // is that merging it shipped it.
-      "matchFileNames": ["deploy/docker-compose.yml"],
-      "prBodyNotes": [
-        "This file ships as a **release asset**, so merging this does not reach any existing install: the new digest travels on the next `vX.Y.Z` tag, and only for someone who re-downloads `docker-compose.yml`. See CONTRIBUTING.md, \"Cutting a release\".",
-      ],
     },
   ],
 }

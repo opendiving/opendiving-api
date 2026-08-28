@@ -7,10 +7,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
     Why the app and not the proxy
     -----------------------------
-        The bundled `deploy/Caddyfile` routes `/api/v1*`, `/admin*` and the three docs
-        paths straight to this app, so nothing the web container sets reaches them - and
-        a bring-your-own-proxy install (`docs/self-hosting/reverse-proxy.md`) is a config
-        file this repository never sees. Setting them here is the only version of this
+        The bundled `Caddyfile` (https://github.com/opendiving/opendiving/blob/main/Caddyfile)
+        routes `/api/v1*`, `/admin*` and the three docs paths straight to this app, so
+        nothing the web container sets reaches them - and a bring-your-own-proxy install
+        (https://github.com/opendiving/opendiving/blob/main/docs/reverse-proxy.md) is a
+        config file this repository never sees. Setting them here is the only version of this
         that holds for *every* deployment shape, including a developer's `docker compose
         up`, and it is a policy about this app's own responses rather than about a
         surface someone else owns: `/admin` is mounted on this FastAPI app and `/docs`

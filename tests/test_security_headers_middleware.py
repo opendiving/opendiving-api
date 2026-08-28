@@ -1,10 +1,11 @@
 """Unit tests for `SecurityHeadersMiddleware`.
 
-The gap these pin down: `deploy/Caddyfile` routes `/api/v1*`, `/admin*` and the docs
-paths straight to the API, so the web app's headers never reach them, and neither Caddy
-nor CRUDAdmin adds any of its own. `/admin` - a full create/update/delete interface over
-every model - was therefore served framable, and a bring-your-own-proxy install got
-nothing at all.
+The gap these pin down: the install bundle's `Caddyfile`
+(https://github.com/opendiving/opendiving/blob/main/Caddyfile) routes `/api/v1*`, `/admin*`
+and the docs paths straight to the API, so the web app's headers never reach them, and
+neither Caddy nor CRUDAdmin adds any of its own. `/admin` - a full create/update/delete
+interface over every model - was therefore served framable, and a bring-your-own-proxy
+install got nothing at all.
 """
 
 import pytest
