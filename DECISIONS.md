@@ -4556,6 +4556,13 @@ carrying gas switches - `compute_gas_use` returns `None` for anything but exactl
 rule is right for staged deco bottles breathed at different depths and wrong for a sidemount pair
 breathed alternately at the same depth, which is additive and could be summed safely.
 
+**Closed since**, by `DiveMixture.usage` and `compute_parallel_gas_use` - see *"`DiveMixture.usage`
+is how a cylinder was breathed, and it is what makes a sidemount pair summable"* below. The
+paragraph above stays as the record of what the pressure band surfaced and how long it stood open:
+the last sentence is the whole design, written a plan before it was built. Dive 276 gets its figure
+back the day its two rows are flagged `parallel` by hand - there is no backfill, because nothing in
+any file says which two-cylinder dives were parallel.
+
 ## The mixture backfill joins on position, so the read it joins against must be ordered
 
 `merge_mixture_fields` lines parsed cylinders up with stored ones **by position** — mixtures are
@@ -5131,20 +5138,26 @@ degenerate one — it is what every multi-gas dive in the corpus produces. A cli
 one-entry `tanks` as "not really a per-tank dive" would hide the only figure those dives have.
 
 **`sac_bar_per_min` is null on the multi-cylinder path**, and is the one figure that does not sum.
-Litres and RMV do, because both are already volumes at the surface; bar/min is a rate only against a
-known cylinder volume, and 10 bar out of an 11 L stage is not 10 bar out of a 22 L twinset. The
-field was briefly given a definition instead — total gas over total volume over total
-surface-minutes, what one cylinder of their combined size would have shown, which does reduce to
-`compute_gas_use`'s formula for a single tank — and that was dropped. It is arithmetically sound and
-practically useless: a diver reads bar/min to plan against a *specific* cylinder, and a combined
-figure is plannable against neither of them. Each entry in `tanks` carries its own, which is
-meaningful because a tank has one volume. The web app reached the same conclusion independently and
-typed the field `number | null` before this side did.
+*(Amended: reversed for one case, a flagged `parallel` set of exactly equal volumes - see "The
+pooled `sac_bar_per_min`, and why the equal-volume case reverses a recorded rejection" below. The
+objection stated here is what that case removes, so the reasoning stands everywhere else.)* Litres
+and RMV do, because both are already volumes at the surface; bar/min is a rate only against a known
+cylinder volume, and 10 bar out of an 11 L stage is not 10 bar out of a 22 L twinset. The field was
+briefly given a definition instead — total gas over total volume over total surface-minutes, what
+one cylinder of their combined size would have shown, which does reduce to `compute_gas_use`'s
+formula for a single tank — and that was dropped. It is arithmetically sound and practically
+useless: a diver reads bar/min to plan against a *specific* cylinder, and a combined figure is
+plannable against neither of them. Each entry in `tanks` carries its own, which is meaningful
+because a tank has one volume. The web app reached the same conclusion independently and typed the
+field `number | null` before this side did.
 
-**`resolve_gas_use` is the only entry point**, and it dispatches on cylinder count alone. A
-single-cylinder dive with a profile is deliberately *not* re-derived from the profile's mean depth:
-`avg_depth` is the diver's record and may have been edited, and changing which number a
-long-standing figure comes from is not a change to make in passing.
+**`resolve_gas_use` is the only entry point**, and it dispatches on cylinder count alone. *(Amended:
+count alone stopped being the whole rule when `TankUsage` landed - see "`resolve_gas_use` no longer
+dispatches on cylinder count alone" below. It is still the only entry point, and neither existing
+path changed what it returns.)* A single-cylinder dive with a profile is deliberately *not*
+re-derived from the profile's mean depth: `avg_depth` is the diver's record and may have been
+edited, and changing which number a long-standing figure comes from is not a change to make in
+passing.
 
 Two consequences for clients:
 
@@ -12031,3 +12044,149 @@ its own environment - and instead names each variable it uses, `GOOGLE_CLIENT_ID
 **`GOOGLE_CLIENT_SECRET` must never be added to that block.** The browser half of this flow never
 sees the secret, so the Node process has no use for it, and adding it would break the one rule this
 whole section rests on.
+
+## `DiveMixture.usage` is how a cylinder was breathed, and it is what makes a sidemount pair summable
+
+`dive_mixture` gained a nullable `usage` column, typed by `TankUsage` (`schemas/dive_mixture.py`) -
+`parallel` or `staged`, null for "not recorded". It is the `parallel`/`staged` discriminator *"Gas
+use is computed on read, never stored"* named as the minimum a sidemount pair would need, and it
+closes the gap *"A real gap this surfaced, deliberately out of scope"* left open.
+
+**It is orthogonal to `role`, and that is why it is a second column rather than more values on the
+first.** `role` is what a cylinder was carried *for*; `usage` is how it was *breathed*. A diver can
+carry a `bottom` gas in a sidemount pair and a `deco` bottle staged on the same dive, and only the
+second fact decides whether litres can be summed. Folding them together would have made
+`bottom`/`deco` and `parallel`/`staged` mutually exclusive, which they are not.
+
+**Only `parallel` changes any arithmetic.** `staged` is honest documentation: it is the right answer
+for a bottle breathed at its own depth, and computing it properly needs the per-mixture time-on-gas
+and depth-on-gas that the section above says is still unbuilt. It is here so a diver who has
+answered the question for one cylinder can answer it for all of them, which is also what lets a
+deliberately mixed set be told apart from a half-filled one. A third `manifolded` value was
+considered and rejected as purely documentary - a manifolded twinset is already logged as **one**
+cylinder at the pair's combined water capacity with a single shared pressure, and computes correctly
+today. Adding a value that changes nothing and describes an encoding the app does not use would have
+been a third answer to a two-answer question.
+
+**No DB `CHECK`**, the same call as `GasRole`, `GearType` and `WaterType`: a closed vocabulary on a
+`VARCHAR(20)` validated by Pydantic on every write path including the admin panel, where a DB copy
+of the list would cost a `DROP`/`ADD CONSTRAINT` per new member. The migration is a plain nullable
+`ADD COLUMN` with no server default, so none of the two-step dance a `NOT NULL` addition needs
+applies.
+
+**The parse-layer `DiveMixtureSchema` deliberately does not carry the field**, and neither does
+`merge_mixture_fields`'s fill-only tuple. No format this app parses records the distinction: Suunto
+XML/JSON and FIT have no independent-vs-manifolded metadata at all, UDDF gives every cylinder its
+own `<tankdata>` with no grouping, and the only machine-readable sidemount signal found anywhere is
+libdivecomputer's `DC_USAGE_SIDEMOUNT`, out of Shearwater *binary* logs - a format not parsed here.
+A parse-schema field no parser can fill is dead weight, which is the same no-dead-weight rule that
+trimmed the parse schemas in the other direction. If a source ever appears, the field joins the
+parse schema and the fill-only tuple together, and not before. The flag could never serve as the
+mixture backfill's join discriminator in any case: a sidemount pair's two rows share one
+`(oxygen, helium)`, which is exactly the positionally-indistinguishable shape that join already has
+to live with.
+
+**Every write path gains it and one cannot clear it.** `DiveMixtureBase` carries it, so it flows
+into `DiveMixtureCreate`, `DiveMixtureRead` and `export.json` (the envelope re-wraps reads as
+`DiveMixtureBase`). `DiveMixtureUpdate` gains it too and stays off `RejectsExplicitNulls` like every
+other field on it - not because null means clear, but because CRUDAdmin's form handler drops blank
+fields before the schema is built, so an explicit `None` never reaches it on any path. The practical
+consequence is identical to `role`'s and is not a new asymmetry: the admin panel cannot un-flag a
+cylinder, and the app's own dive form is where that happens.
+
+### `compute_parallel_gas_use`: additive litres for a flagged parallel set
+
+A sidemount pair or independent doubles is the one multi-cylinder shape whose consumption is simply
+additive - the cylinders are breathed alternately at the *same* depth over the *same* dive, so the
+misattribution the multi-cylinder refusal exists to prevent cannot arise. Dive 276 is the proof and
+the test: `11.1 x (415-230) = 2 x 11.1 x 92.5 = 2053.5 L`, so the summed-into-one-cylinder encoding
+the pressure band caught and the two honest flagged rows agree to the litre.
+
+What makes that safe is the diver's own answer rather than an inference. The guards, all required:
+
+- **At least two cylinders, every one flagged `parallel`.** A mixed set - a pair plus an unflagged
+  bottle, or plus one explicitly `staged` - returns `None`. This is the short-numerator trap the
+  earlier section names: the unflagged bottle's litres would be missing while the whole dive stayed
+  in the denominator, quietly reporting an RMV that is too *low*. Subsurface's `calculate_airuse()`
+  suppresses on the same rule.
+- **An average depth and a duration, both the dive's own.** There is no profile behind this path and
+  it wants none - it exists for dives that have no usable attribution at all.
+- **Both pressures on every cylinder.** One missing pressure refuses the whole dive, for the reason
+  above.
+- **A total drop above zero**, summed rather than required positive per row. A zero-drop row is the
+  carried-but-untouched cylinder `_pressure_used` documents: it contributes zero litres, and the
+  denominator is still right, because the diver breathed the other cylinder for the whole dive.
+  Requiring every row to be positive would refuse a real and ordinary dive. Individual drops cannot
+  come out negative on a stored row (`ck_dive_mixture_pressure_order`).
+
+`tanks` is empty and both seconds fields are null. Per-tank *rates* need time-on-gas, which is
+precisely what an unattributed dive has not got, and per-tank litres alone would be a half-populated
+`DiveTankGasUse` - the whole-object-or-nothing rule `DiveGasUse` is built on.
+
+**`MAX_PLAUSIBLE_RMV` is deliberately not applied**, and it is the same exemption `compute_gas_use`
+already has rather than a new one: this path divides by the dive's own duration and the dive's own
+average depth, so it has no per-tank stretches to have segmented wrongly, and the ceiling exists for
+segmentation artefacts alone. Applying it here would also break the equivalence below - one 22.2 L
+manifolded row would return a figure where the same physical dive as two flagged 11.1 L rows
+returned `None`.
+
+### `resolve_gas_use` no longer dispatches on cylinder count alone
+
+*"A multi-cylinder figure covers the cylinders it can account for"* says `resolve_gas_use`
+"dispatches on cylinder count alone", and the `resolve_gas_use` docstring said "the split is on
+cylinder count and nothing else". **That is no longer true**, and the invariant it protected is
+worth restating in its new form. Count still picks the first candidate - one cylinder is
+`compute_gas_use`'s, several are `compute_multi_tank_gas_use`'s - and then, where the multi-tank
+path declines *and* every mixture is flagged `parallel`, `compute_parallel_gas_use` gets a turn.
+
+**Attribution wins over the flag**, which is why the fallback is second rather than gated ahead. A
+dive whose profile attributed time and depth per cylinder yields a strictly richer answer - per-tank
+litres, rates, seconds and mean depths - and a diver who flags a pair their computer *did* record
+switches for must not lose it by answering a question truthfully. What the fallback rescues is
+exactly the set that returned `None` before: no profile, no switches, or the refusal a cylinder with
+real pressures and no attribution entry triggers - the sidemount pair the computer saw as one gas,
+which is one of the two ways to reach that refusal the earlier section already names.
+
+What the old invariant really protected is intact, and is the part to keep: **no existing path
+changed what it returns.** `compute_gas_use` and `compute_multi_tank_gas_use` are untouched, and an
+unflagged multi-cylinder dive still says nothing. The new derivation is a third function reached
+only through a flag no import can set, so a dive's figure can only change after its owner edits it.
+
+All three `resolve_gas_use` callers get the fallback with no change of their own - the dive read,
+the CSV export and `gas_use_history` - so the dashboard RMV trendline gains points retroactively as
+divers flag their pairs, the same client consequence the earlier section predicted for attribution
+improvements. Gas use stays computed on read, never stored, and stays cache-safe: the inputs are
+still row-only, with no clock.
+
+### The pooled `sac_bar_per_min`, and why the equal-volume case reverses a recorded rejection
+
+*"A multi-cylinder figure covers the cylinders it can account for"* records `sac_bar_per_min` as
+null on the multi-cylinder path, and records a combined definition being considered and dropped as
+"arithmetically sound and practically useless". **That rejection is reversed for one case only**: a
+flagged parallel set whose cylinders are of *exactly equal volume*, where the figure is the mean
+drop across them per surface-minute.
+
+The reversal is narrow because the original objection was narrow. What made a combined bar/min
+useless was that it was plannable against neither cylinder - 10 bar out of an 11 L stage is not 10
+bar out of a 22 L twinset. Equal volumes remove that objection entirely: there is one cylinder size,
+so the pooled figure is a rate a diver can read against the gauge in front of them. And it is not a
+new convention invented here - it is what a sidemount diver's own computer shows. Shearwater's
+sidemount mode pools the two tanks' gas quantity for SAC and GTR and states the constraint outright
+in its release notes ("The tanks must be the same size"); Garmin's Descent Mk3 imposes the same
+equal-volume rule at pairing time ("Both transceivers must be installed on equal volume tanks"),
+though its manual stops short of stating a SAC convention, so the pooled-SAC rule itself is
+Shearwater's alone.
+
+**The manifolded-equivalence identity is the argument that decides it.** The same physical pair
+logged the way this app has always logged a twinset - one row, combined volume `nV`, one shared drop
+`d` - reports `sac = d / surface_minutes`. Two honest flagged rows report
+`(sum(d_i) / n) / surface_minutes`, and their litres are `sum(V * d_i) = nV * (sum(d_i) / n)`. The
+two encodings of one dive therefore agree on `gas_used`, `rmv` **and** `sac_bar_per_min`. Any other
+definition of the pooled figure - or none - would have made the honest encoding report less than the
+dishonest one, which is the opposite of what this whole change is for.
+
+**Unequal volumes return `None` for SAC while `gas_used` and `rmv` still compute.** Working in
+litres, cylinders sum without restriction; pressure-domain rates do not. Equality is tested
+**exactly**, not within a tolerance: volumes come from the app's own presets or from one diver's
+hand, so they either match or the diver meant them not to, and a tolerance would invent a threshold
+no agency defines.

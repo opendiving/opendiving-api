@@ -24,8 +24,14 @@ reading the XSD, and all three are exported in `export.json`/CSV instead:
 - **CNS and OTU.** `informationafterdiveType` has no oxygen-exposure element at all (the
   only `<cns>`/`<otu>` in the schema are children of `<waypoint>`, and we store end-of-dive
   scalars rather than a per-sample series).
-- **Gas `role` and service schedules.** No slot for either. `po2_limit`, by contrast,
-  *does* map - `<mix><maximumpo2>` - which is why mixes dedupe on it below.
+- **Gas `role`, tank `usage` and service schedules.** No slot for any of them. UDDF has no
+  manifold or sidemount representation at all: every cylinder is its own `<tankdata>`
+  linking a shared `<mix>`, and the closest the spec comes is an aside on `<tankpressure>`
+  that a linked double-tank measured at one pressure may omit the tank reference. So there
+  is nothing to write `usage` into and nothing to read it back from. `po2_limit`, by
+  contrast, *does* map - `<mix><maximumpo2>` - which is why mixes dedupe on it below.
+  `usage` deliberately stays out of that dedup key: it is a property of the cylinder, not
+  of the gas, and folding it in would split one `<mix>` into two for no reason UDDF knows.
 
 Output is deterministic: fixed element order, fixed id derivation, and mixes sorted by
 their fractions rather than by encounter. Golden-file tests depend on that, and so does

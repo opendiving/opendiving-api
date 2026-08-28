@@ -91,10 +91,17 @@ class TestWhatUddfCannotHold:
         assert document["dives"][0]["max_depth"] == 28.4
 
     @pytest.mark.asyncio
-    async def test_the_per_cylinder_role_and_ppo2_limit_survive(self, monkeypatch):
+    async def test_the_per_cylinder_role_ppo2_limit_and_usage_survive(self, monkeypatch):
+        """The three fields UDDF has no slot for, which is why `export.json` exists.
+        `usage` rides in for free on `DiveMixtureBase` - the envelope re-wraps every read
+        as that schema - so this is what would catch it silently not doing so.
+        """
         document = await _render(full_bundle(), monkeypatch)
         mixtures = document["dives"][1]["mixtures"]
-        assert [(m["role"], m["po2_limit"]) for m in mixtures] == [("bottom", 1.4), ("deco", 1.6)]
+        assert [(m["role"], m["po2_limit"], m["usage"]) for m in mixtures] == [
+            ("bottom", 1.4, None),
+            ("deco", 1.6, "staged"),
+        ]
 
     @pytest.mark.asyncio
     async def test_multi_site_visit_order_is_a_list_not_a_primary_site(self, monkeypatch):

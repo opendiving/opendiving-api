@@ -120,6 +120,8 @@ def _cylinder_summary(mixture: DiveMixtureRead) -> str:
         parts.append(f"{mixture.start_pressure:g}bar")
     if mixture.role is not None:
         parts.append(f"({mixture.role.value})")
+    if mixture.usage is not None:
+        parts.append(f"({mixture.usage.value})")
     return " ".join(parts)
 
 
@@ -196,6 +198,7 @@ MIXTURES_HEADER = (
     "po2_limit_bar",
     "gas_number",
     "role",
+    "usage",
 )
 
 
@@ -217,6 +220,7 @@ def write_mixtures_csv(bundle: ExportBundle) -> Iterator[str]:
                     mixture.po2_limit,
                     mixture.gas_number,
                     None if mixture.role is None else mixture.role.value,
+                    None if mixture.usage is None else mixture.usage.value,
                 )
 
     return _rows_to_csv(MIXTURES_HEADER, rows())
