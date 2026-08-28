@@ -16,6 +16,10 @@ Those places used to be one free-text `trip.location` column and are now ordered
 * search moved from two columns of one table to a name-OR-EXISTS over the child table,
   which is why `test_picker_search.py` no longer has Trip in it.
 
+One thing here is not about locations at all: `TestPatchTrip` also covers the trip's date
+range, which `TripUpdate` can only check when both dates arrive together, so the route
+re-checks the merged pair against the stored row.
+
 Mostly without a database: the route's collaborators are stubbed and the assertions are
 on what it hands them (the `test_dive_update.py` style), and the search clause is asserted
 as compiled SQL like `test_picker_search.py` does for the others.
@@ -58,6 +62,7 @@ from src.app.schemas.trip import (
     BBOX_MESSAGE,
     BBOX_NEEDS_COORDINATES_MESSAGE,
     BBOX_ORDER_MESSAGE,
+    DATE_RANGE_MESSAGE,
     MAX_TRIP_LOCATIONS,
     TripCreate,
     TripLocationInput,
@@ -371,6 +376,73 @@ class TestPatchTrip:
         write_collaborators["update"].assert_not_awaited()
         write_collaborators["replace_locations"].assert_not_awaited()
         write_collaborators["invalidate_list"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "body",
+        [
+            # The stored trip runs 2026-03-01 to 2026-03-12. Either date alone can cross
+            # the other, and `TripUpdate` sees only what was sent.
+            pytest.param({"end_date": "2026-02-28"}, id="end_date-before-the-stored-start"),
+            pytest.param({"start_date": "2026-03-13"}, id="start_date-after-the-stored-end"),
+        ],
+    )
+    async def test_one_date_may_not_cross_the_stored_other(
+        self, write_collaborators: dict[str, Any], body: dict[str, Any]
+    ) -> None:
+        """The gap this closes. `TripUpdate.check_date_range` only fires when both dates
+        arrive together, and the `trip` table has no CHECK constraint, so a single-date
+        PATCH used to write a trip that ends before it begins."""
+        with pytest.raises(UnprocessableEntityException) as excinfo:
+            await _patch(body)
+
+        assert DATE_RANGE_MESSAGE in str(excinfo.value.detail)
+        write_collaborators["update"].assert_not_awaited()
+        write_collaborators["invalidate_list"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param({"end_date": "2026-03-13"}, id="end_date-after-the-stored-start"),
+            # Equal dates are a one-day trip, not a reversed range.
+            pytest.param({"end_date": "2026-03-01"}, id="end_date-on-the-stored-start"),
+            pytest.param({"start_date": "2026-03-12"}, id="start_date-on-the-stored-end"),
+            # `end_date` is the one nullable half: an open-ended trip is a real state, so
+            # clearing it can never conflict with whatever start date is stored.
+            pytest.param({"end_date": None}, id="end_date-cleared"),
+        ],
+    )
+    async def test_a_date_that_still_orders_is_written(
+        self, write_collaborators: dict[str, Any], body: dict[str, Any]
+    ) -> None:
+        await _patch(body)
+
+        write_collaborators["update"].assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_an_open_ended_trip_takes_any_start_date(self, write_collaborators: dict[str, Any]) -> None:
+        """Nothing to cross when the stored `end_date` is null, so the merge must not read
+        the missing half as a reason to refuse."""
+        stored = _internal_trip()
+        stored.end_date = None
+        write_collaborators["owned"].return_value = stored
+
+        await _patch({"start_date": "2030-01-01"})
+
+        write_collaborators["update"].assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_an_edit_that_names_no_date_is_never_range_checked(self, write_collaborators: dict[str, Any]) -> None:
+        """The merged check is keyed off which keys were sent, not off the stored row, so
+        a rename can never be refused for a range the caller did not touch."""
+        stored = _internal_trip()
+        stored.end_date = date(2020, 1, 1)
+        write_collaborators["owned"].return_value = stored
+
+        await _patch({"name": "Cebu 2026"})
+
+        write_collaborators["update"].assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_a_failed_location_write_rolls_back_and_is_a_422(self, write_collaborators: dict[str, Any]) -> None:

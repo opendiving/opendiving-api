@@ -1,4 +1,5 @@
 import uuid as uuid_pkg
+from datetime import date
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -35,6 +36,7 @@ from ...schemas.trip import (
     TripRead,
     TripReadInternal,
     TripUpdateRequest,
+    validate_date_range,
 )
 from ...services.cache_invalidation import invalidate_dive_caches
 
@@ -58,6 +60,24 @@ _LOCATION_ERROR_DETAIL = "Trip locations could not be saved."
 # seeing no change.
 _SORT_COLUMN = "start_date"
 _SORT_ORDER = "desc"
+
+
+def _validate_merged_date_range(start_date: date | None, end_date: date | None) -> None:
+    """Enforce `end_date >= start_date` on a PATCH's merged result.
+
+    `TripBase` already does this for whole-object writes, but a PATCH may carry either
+    date alone, so the pairing is only checkable once merged over the stored row - the
+    same shape as `_validate_agency_pairing` in `certifications.py`. The `trip` table has
+    no CHECK constraint behind it, so nothing else would refuse the reversed range.
+
+    The comparison itself stays in the schema so the two paths cannot drift apart; only
+    the way it is reported differs, a `ValueError` there being a per-field 422 and this
+    one the flat `{"detail": ...}` every other route-level refusal returns.
+    """
+    try:
+        validate_date_range(start_date, end_date)
+    except ValueError as e:
+        raise UnprocessableEntityException(str(e)) from e
 
 
 async def _get_owned_trip(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> TripReadInternal:
@@ -344,9 +364,11 @@ async def patch_trip(
     """Partially update a trip; omitted fields are left untouched.
 
     404 unless the caller owns it, exactly as for a trip that doesn't exist. Renaming to
-    a name the caller already has on another trip is a 422. `locations` is replaced
-    wholesale when present rather than merged, so sending a shorter list removes the
-    difference and an empty list clears them; omitting the key leaves them alone.
+    a name the caller already has on another trip is a 422. `start_date` and `end_date`
+    are validated as a pair against the resulting values, so moving either one past the
+    stored other is a 422 rather than a trip that ends before it began. `locations` is
+    replaced wholesale when present rather than merged, so sending a shorter list removes
+    the difference and an empty list clears them; omitting the key leaves them alone.
     """
     db_trip = await _get_owned_trip(db, uuid, current_user)
 
@@ -356,6 +378,12 @@ async def patch_trip(
         raise DuplicateValueException("A trip with this name already exists")
 
     update_data = values.model_dump(exclude={"locations"}, exclude_unset=True)
+    if "start_date" in update_data or "end_date" in update_data:
+        _validate_merged_date_range(
+            update_data.get("start_date", db_trip.start_date),
+            update_data.get("end_date", db_trip.end_date),
+        )
+
     if update_data:
         await crud_trips.update(db=db, object=update_data, uuid=uuid)
 
