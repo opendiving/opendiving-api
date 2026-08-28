@@ -12307,3 +12307,77 @@ Pinned by `TestListOrderingSql` (compiled SQL, no database) and `TestListOrderin
 *is* a Postgres semantic, and SQLite - had the suite used one - sorts `DESC` nulls last, so it would
 have passed against the broken query. Both fail if `.nulls_last()` is removed, which is how they
 were checked.
+
+## The test registrations that fail on nothing, and the inventory to walk when a model is added
+
+Two kinds of registration live in `tests/`, and they behave oppositely when a model is added.
+
+The first kind asks the models and fails by name on anything it does not recognise:
+
+- `test_migrations.py::TestMigrationsCoverEveryModel` diffs `Base.metadata.tables` against the DDL
+  an offline `alembic upgrade head` emits, so a table no revision creates is a failure.
+- `test_user_cascade.py::TestEveryForeignKeyIntoUserCascades` walks `Base.metadata` for foreign keys
+  into `user.id` left without `ondelete="CASCADE"`.
+- `test_ownership.py::TestEveryUuidRouteIsAccountedFor` enumerates the app's real route table and
+  fails on a `{uuid}` route not listed there; `TestEveryOwnedRouteUsesIt` greps the route files for
+  the hand-rolled ownership block that `fetch_owned_or_raise` replaced.
+- `test_hard_delete.py::TestTheRegistryIsComplete` names any diver-owned, hard-deleting model that
+  has no case in that file and no documented reason for having no delete of its own. The predicate
+  behind it is `tests/helpers/model_metadata.py`, which `test_admin_config.py` also builds its two
+  panel parametrize lists from, so neither file hand-lists model names any more.
+
+The second kind is a hand-written list, and a model that is not in it is not a failure - it is
+absent, with every test still green. **Adding a model means walking the inventory below by hand,
+because nothing in the suite will tell you that you skipped one.** They are listed here rather than
+converted because each encodes a judgement no predicate supplies, and a derivation that guessed
+wrong would be worse than an honest list: it would look like coverage.
+
+### The inventory
+
+- **`tests/test_picker_search.py`, `TestListCacheKeys`** - three `parametrize` lists over
+  `[_dive_site_cache, _trip_cache]`. A third `OwnedResourceCache` with a `search` segment is not
+  checked for the three things these pin: the term being part of the key, page and page size
+  surviving alongside it, and the whole key still sitting under the `user_{id}_{resource}:*` prefix
+  that `invalidate_list` purges. The last one is the one that bites - a key outside the wildcard
+  serves stale rows after a rename, and only after the TTL does it come right.
+- **`tests/test_picker_search.py`, the search-column lists** - `TestSearchClause`'s `parametrize`
+  and the module-level `test_the_model_columns_the_search_reads_actually_exist`. Both name
+  `(model, columns)` pairs, and `Trip` is in the second but deliberately not the first, because
+  trips search one column plus an `EXISTS` over `trip_location` and so go through
+  `trips.py::_search_conditions` rather than `search_clause`. That distinction is exactly the
+  judgement a sweep over the models could not make.
+- **`tests/test_picker_search.py`, `test_every_list_endpoint_clamps`** - a dict of route file to
+  handler name. Its own docstring records the bug it replaces, where most list endpoints did not
+  clamp at all; a new list endpoint copied from an old one is unbounded again and absent from the
+  dict, which is silence twice over. Deriving it would mean deciding from the source what counts as
+  a list endpoint, which is the part that needs a person.
+- **`tests/test_owned_read_scoping.py`, the per-helper classes** - `TestTripUuidLookupScoping`,
+  `TestTheDiveReadsScopeThatLookup`, `TestOwnedGearItemIsScopedToTheCaller` and
+  `TestArchivedItemsStillComeThrough`. These pin loaders that are *not* reachable through today's
+  callers, which is the whole reason they are tested; there is correspondingly no route table or
+  model attribute to enumerate them from. A new batched loader added beside the four gear ones gets
+  no archived-items case unless somebody writes it.
+- **`tests/test_user_cascade.py`, the `populated_diver` fixture and its two model tuples** - the
+  fixture seeds one row per table the cascade touches, one tuple counts the owned tables down to
+  zero after the delete, and a second counts the tables that hang off those. A new table with a
+  `user_id` gets its `ondelete` checked by `TestEveryForeignKeyIntoUserCascades`, so the schema half
+  is covered; what is not is the *behaviour* half - the fixture never seeds a row in it, so the
+  delete never meets one, and the second-order tuple has no way to know a new child table exists.
+
+### The counts in the prose go stale too
+
+Docstrings across `tests/` name the size of the set they describe, and the ones describing a
+*current* set are wrong the moment it grows. Regenerate the candidates with:
+
+```bash
+git grep -nwE 'four|five|six|seven|eight|nine|ten|eleven' -- tests/
+```
+
+Most hits are historical and do not rot - "the security audit fixed seven defects", "it used to be
+seven hand-rolled copies", "three of eight list endpoints clamped": those counted something that
+happened once and stays counted. The ones to re-read are the hits that count a set the codebase
+still has, and they cluster in the same files as the inventory above. `test_hard_delete.py` and
+`test_admin_config.py` used to be on that list ("these five", "the five models that hard-delete")
+and are not any more - they were rewritten to countless phrasing when their lists became
+derivations, which is the only fix that holds. Where the list has to stay, prefer "these" to a
+number; a number buys nothing a reader could not count and is one model away from being a lie.
