@@ -12,10 +12,9 @@ Two halves, and they fail on different things:
   the guard against a *new* model reaching `user.id` with a plain `ForeignKey("user.id")` -
   the copy-paste that eight of the ten originals were.
 - `TestDeletingAUserTakesEverythingWithIt` needs Postgres, because the models' opinion and
-  the database's are separate facts and only the second one governs a real delete. Note
-  that `conftest._ensure_tables` uses `create_all`, which never alters an existing table:
-  on a dev database that has not run `alembic upgrade head` since this change, the delete
-  below fails - correctly, since that database really would refuse it.
+  the database's are separate facts and only the second one governs a real delete. It runs
+  against the suite's own database, which `conftest._ensure_tables` migrates to `head`, so
+  the `ondelete` rules revision `48781087b2b3` declares are the ones being read here.
 
 Skipped when no database is reachable. On a developer's machine that means
 `POSTGRES_SERVER=localhost` (`src/.env` points at the compose hostname, which does not

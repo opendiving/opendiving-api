@@ -102,6 +102,22 @@ below), so this is about getting the answer before you push rather than after �
 silent and a green local run looks identical either way, so it is easy to spend a review round
 believing those tests ran.
 
+**That run does not touch the database the stack serves from.** `tests/conftest.py` appends `_test`
+to whatever `POSTGRES_DB` names — `opendive_test` with the stock `src/.env` — creates it on the same
+server if it isn't there, and brings it up to `head` with the migrations. So the command above needs
+the stack up for its Postgres and nothing more; the dev database keeps its own rows, and the test
+rows accumulate somewhere disposable. Disposing of it is one statement, and the next run rebuilds it
+from empty:
+
+```bash
+docker compose exec db psql -U postgres -c 'DROP DATABASE opendive_test'
+```
+
+Worth knowing before you go looking: that database is migrated, not `create_all`ed, so a model
+change you have not yet generated a revision for fails these tests rather than passing them. And a
+database left at a revision from a branch you have since left cannot be upgraded from — the suite
+says so, and names the drop above.
+
 Alternatively use the containerised suite, where `db` resolves and nothing needs overriding — note
 that `docker-compose.test.yml` is an *overlay*, so it has to be passed alongside the base file
 rather than on its own:
@@ -119,9 +135,9 @@ skip from an unreachable database. The suite has no deliberate skips today, and 
 means reworking that step in `.github/workflows/tests.yml` — against the `SKIPPED` lines `-rs`
 prints, say — rather than filling in a slot that already exists.
 
-Two things to know when you do run them against a live database: they write to whatever `POSTGRES_*`
-resolves to — your dev database, by default — and the `create_user` helper commits a row per test
-that nothing cleans up afterwards, so expect a scattering of faker-named users to accumulate.
+One thing to know when you do run them against a live database: the `create_user` helper commits a
+row per test that nothing cleans up afterwards, so expect a scattering of uuid-named users to
+accumulate in that `_test` database.
 
 Ruff is configured with `fix = true`, so `uv run ruff check src tests scripts` will repair what it
 can on its own, and `uv run ruff format src tests scripts` handles the rest. Line length is 120.

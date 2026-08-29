@@ -94,18 +94,18 @@ jobs:
       - name: Install package with dev dependencies
         run: uv sync --extra dev
 
-      # Two jobs in one, and the order is what makes both of them work. `upgrade head`
-      # against the service container's untouched database exercises the shipped install
-      # path - every revision, from empty - which nothing else here does: the suite builds
-      # its schema with `create_all` (tests/conftest.py) and would be perfectly green
-      # against migrations that have never run. `check` then autogenerates against the
-      # database that upgrade just built and fails if it finds any difference, so a model
+      # `check` is the half that cannot be got anywhere else: it autogenerates against a
+      # database the migrations just built and fails if it finds any difference, so a model
       # changed without a matching revision fails the PR rather than the first deploy.
+      # `upgrade head` is what gives it that database, from empty - the shipped install
+      # path, every revision in order.
       #
-      # Before the test step, not after: `create_all` would otherwise have made the tables
-      # already and `upgrade head` would die on the first `CREATE TABLE`. Running first
-      # also means the DB-backed tests execute against a migration-built schema, which is
-      # the one that ships.
+      # This runs against `POSTGRES_DB` (`postgres`); the suite runs against its own
+      # database, `postgres_test`, which `tests/conftest.py` creates and migrates itself.
+      # The two were the same database until a suite run corrupted a developer's dev
+      # database the same way, and the step no longer has to come before the tests to avoid
+      # colliding with them. It stays first because a drift failure is cheaper to read than
+      # a suite that failed on a column nobody generated a revision for.
       - name: Run migrations and check for model drift
         working-directory: src
         run: |

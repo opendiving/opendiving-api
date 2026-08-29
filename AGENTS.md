@@ -38,9 +38,9 @@ after editing one rather than matching the wrapping by hand.
 
 - **Schema changes**: every one ships an Alembic revision. `alembic upgrade head` runs in the API's
   lifespan (`core/setup.py`), so a schema change reaches a database — yours or a self-hoster's — by
-  the container starting, and nothing else. `create_all()` is gone from the app; the only place it
-  survives is `tests/conftest.py`, which builds the test schema straight from the models. To change
-  the schema:
+  the container starting, and nothing else. `create_all()` is gone entirely: the test suite used to
+  build its schema that way, and now migrates its own database (`tests/conftest.py`) like everything
+  else. To change the schema:
 
   1. Add the field to the model in `src/app/models/` and the schema in `src/app/schemas/`.
   2. `cd src && uv run alembic revision --autogenerate -m "what changed"`, then **read the generated

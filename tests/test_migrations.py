@@ -1,9 +1,10 @@
 """Unit tests for the Alembic setup that the API applies on startup.
 
-Nothing here needs a database. The one test that would - "does `upgrade head` actually
-build the right schema?" - is CI's job (`.github/workflows/tests.yml` runs it against an
-empty Postgres and then `alembic check`s the result), because it needs a database it is
-allowed to create tables in and the suite's is the developer's own.
+Nothing here needs a database. `upgrade head` does get run for real once per session, by
+`conftest._ensure_tables` against the suite's own database - but what pins the *result* is
+CI's `alembic check` (`.github/workflows/tests.yml`), which autogenerates against a
+freshly migrated database and fails on any difference. That comparison is what no test in
+here can make.
 """
 
 import contextlib
@@ -81,9 +82,9 @@ class TestMigrationsCoverEveryModel:
     def test_every_table_the_models_declare_is_created_by_a_revision(self):
         """The failure this catches is a model added without a revision - and the nastier
         one, a model in a module `migrations/env.py` never imports, which autogenerate
-        cannot see and so writes nothing for. Both look completely healthy locally, because
-        the test suite builds its schema from `Base.metadata` directly
-        (`conftest._ensure_tables`) and never consults the revisions at all.
+        cannot see and so writes nothing for. This runs without a database, which is the
+        point: it names the missing revision from the models' own side, where a run against
+        a live database says only that some column does not exist.
         """
         created = set(re.findall(r'CREATE TABLE (?:IF NOT EXISTS )?"?([a-z_]+)"?', _offline_upgrade_sql()))
 
