@@ -28,7 +28,7 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 from src.app.api import router
-from src.app.api.dependencies import fetch_owned_or_raise, get_current_user
+from src.app.api.dependencies import current_session_uuid, fetch_owned_or_raise, get_current_user
 from src.app.core.config import settings
 from src.app.core.exceptions.http_exceptions import NotFoundException
 from src.app.core.setup import create_application
@@ -392,6 +392,14 @@ FETCH_OWNED_ROUTES = [
         for method, extra in _CRUD_METHODS
         if method != "GET"
     ),
+    # DELETE alone: a session has no single-item GET or PATCH - `GET /user/sessions` returns
+    # the caller's whole live list and there is nothing about a row a diver may edit.
+    OwnedRoute(
+        "DELETE",
+        "/api/v1/user/session/{uuid}",
+        "src.app.api.v1.sessions:crud_user_sessions",
+        "Session not found",
+    ),
 ]
 
 # The other family. These six resolve ownership in SQL rather than through
@@ -435,6 +443,7 @@ UNOWNED_ROUTES: dict[tuple[str, str], str] = {
 OWNER_ID = 7
 SOMEONE_ELSE_ID = 8
 OWNER = {"id": OWNER_ID, "uuid": uuid_pkg.uuid4(), "username": "ada", "is_superuser": False}
+CALLERS_SESSION = uuid_pkg.uuid4()
 
 
 @pytest.fixture(scope="module")
@@ -457,7 +466,20 @@ def owned_app() -> Any:
 
 @pytest.fixture
 def signed_in_client(owned_app: Any) -> Generator[TestClient]:
+    """A caller who is signed in, which now means two things rather than one.
+
+    `current_session_uuid` is overridden alongside `get_current_user` because
+    `DELETE /user/session/{uuid}` depends on both, and that one reaches `oauth2_scheme`
+    directly - so without this the request 401s on a missing `Authorization` header before
+    the ownership check it is here to exercise ever runs, and the route reads as broken
+    when the fixture is what is incomplete.
+
+    A uuid nothing else uses, so the route's current-session 409 can never fire here: these
+    cases are about somebody *else's* row, and a collision would swap the 404 they assert
+    for a conflict.
+    """
     owned_app.dependency_overrides[get_current_user] = lambda: OWNER
+    owned_app.dependency_overrides[current_session_uuid] = lambda: CALLERS_SESSION
     try:
         with TestClient(owned_app) as test_client:
             yield test_client

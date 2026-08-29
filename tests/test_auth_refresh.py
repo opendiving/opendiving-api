@@ -20,6 +20,8 @@ from fastapi import Response
 from src.app.api.v1.auth import _elapsed, refresh_access_token
 from src.app.core.exceptions.http_exceptions import UnauthorizedException
 from src.app.core.schemas import TokenData
+from src.app.core.utils.request_context import RequestContext
+from src.app.schemas.user_session import UserSessionReadInternal
 from src.app.services.auth_service import issue_tokens
 from tests.conftest import db_available
 from tests.helpers.mocks import FakeTokenBlacklist, FrozenSecurityClock
@@ -27,11 +29,22 @@ from tests.helpers.mocks import FakeTokenBlacklist, FrozenSecurityClock
 USER_UUID = uuid_pkg.uuid4()
 AUTH_LOGGER = "src.app.api.v1.auth"
 
+# Every token mint now records the device it was minted from, onto the session row.
+CONTEXT = RequestContext(ip="203.0.113.7", user_agent="Mozilla/5.0 (X11; Linux x86_64) TestAgent/1.0")
+
 
 def _request(cookies: dict[str, str]) -> Mock:
+    """This module's own double, because the one in `tests.helpers.mocks` carries no
+    cookies and the cookie is the whole credential here.
+
+    `headers` is a real mapping for the reason that one documents: `RequestContext`
+    reads the User-Agent off it and slices the result, which a bare child mock turns into
+    a `TypeError` raised from inside the endpoint.
+    """
     request = Mock()
     request.cookies = cookies
     request.client.host = "203.0.113.7"
+    request.headers = {"user-agent": CONTEXT.user_agent}
     return request
 
 
@@ -48,38 +61,87 @@ def _refresh_cookie(response: Response) -> str:
     return jar["refresh_token"].value
 
 
+USER_ID = 1
+
+# The `sid` a verified refresh token carries. A `TokenData` without one is a token minted
+# before sessions existed, which is its own case below.
+SESSION_UUID = uuid_pkg.uuid4()
+
+
 class FakeUsers:
-    """Stand-in for `crud_users` holding exactly one account, applied the way FastCRUD's
-    `exists` applies its keyword filters: every one has to match.
+    """Stand-in for `crud_users` holding exactly one account, applied the way FastCRUD
+    applies its keyword filters: every one has to match.
 
     An unknown column compares against `None` and so fails, which is the point - a lookup
     that filtered on a field the row doesn't carry would quietly answer "no such account"
     against real Postgres too, and this fake refuses it rather than passing.
+
+    `get` alongside `exists` because the endpoint stopped asking whether the account exists
+    and started asking *which* one it is: the session lookup that follows needs the integer
+    id, so a bare boolean is no longer enough to serve this path.
     """
 
     def __init__(self, user_uuid: uuid_pkg.UUID, is_deleted: bool = False) -> None:
-        self.row: dict[str, Any] = {"uuid": user_uuid, "is_deleted": is_deleted}
+        self.row: dict[str, Any] = {"id": USER_ID, "uuid": user_uuid, "is_deleted": is_deleted}
         self.filters: list[dict[str, Any]] = []
 
-    async def exists(self, db: Any, **filters: Any) -> bool:
+    def _matches(self, filters: dict[str, Any]) -> bool:
         self.filters.append(filters)
         return all(self.row.get(field) == value for field, value in filters.items())
 
+    async def exists(self, db: Any, **filters: Any) -> bool:
+        return self._matches(filters)
+
+    async def get(self, db: Any, **filters: Any) -> dict[str, Any] | None:
+        return self.row if self._matches(filters) else None
+
+
+class FakeSessions:
+    """The live-session lookup `POST /auth/refresh` makes, answering for whatever `sid` it
+    is handed.
+
+    Deliberately permissive: these tests are about *rotation*, and a store that refused
+    would fail every one of them for a reason that has nothing to do with what they pin.
+    The cases where the lookup must answer `None` - revoked, expired, another account's -
+    are pinned against real Postgres in `test_sessions.py`, which is the only place they
+    mean anything.
+    """
+
+    def __init__(self) -> None:
+        self.asked: list[uuid_pkg.UUID] = []
+
+    async def __call__(self, db: Any, *, session_uuid: uuid_pkg.UUID, user_id: int) -> UserSessionReadInternal:
+        self.asked.append(session_uuid)
+        now = datetime.now(UTC)
+        return UserSessionReadInternal(
+            id=1,
+            uuid=session_uuid,
+            user_id=user_id,
+            expires_at=now + timedelta(days=7),
+            ip="203.0.113.7",
+            user_agent="TestAgent/1.0",
+            created_at=now,
+            last_used_at=now,
+            revoked_at=None,
+        )
+
 
 class SignedInAccount:
-    """Refreshing is now a question about the account, not just about the token, so every
-    test that expects a *successful* exchange has to supply a live one.
+    """Refreshing is now a question about the account and its session, not just about the
+    token, so every test that expects a *successful* exchange has to supply both.
 
-    `mock_db` would supply it by accident: a spec'd `AsyncSession` answers every call
+    `mock_db` would supply them by accident: a spec'd `AsyncSession` answers every call
     with another mock, which FastCRUD's `exists` reads as a row - and leaves an
     un-awaited coroutine behind while doing it. Tests that pass because a mock is truthy
-    would also pass with the liveness check deleted, so the account is stated here
-    instead.
+    would also pass with the checks deleted, so both are stated here instead.
     """
 
     @pytest.fixture(autouse=True)
     def _live_account(self):
-        with patch("src.app.api.v1.auth.crud_users", FakeUsers(USER_UUID)):
+        with (
+            patch("src.app.api.v1.auth.crud_users", FakeUsers(USER_UUID)),
+            patch("src.app.api.v1.auth.live_session_for", FakeSessions()),
+        ):
             yield
 
 
@@ -129,7 +191,7 @@ class TestRefreshAccessToken(SignedInAccount):
             patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as mock_issue,
         ):
-            mock_verify.return_value = TokenData(user_uuid=USER_UUID)
+            mock_verify.return_value = TokenData(user_uuid=USER_UUID, session_uuid=SESSION_UUID)
             mock_issue.return_value = {"access_token": "new-access-token", "token_type": "bearer"}
 
             result = await refresh_access_token(_request({"refresh_token": "good-token"}), response, mock_db)
@@ -138,7 +200,12 @@ class TestRefreshAccessToken(SignedInAccount):
             # A fresh refresh cookie is set on the same response, not just an access token.
             # The replacement carries the presented token's subject through unchanged -
             # which is safe only because that subject is an immutable uuid.
-            mock_issue.assert_called_once_with(response, USER_UUID)
+            # The replacement continues the presented token's session rather than
+            # starting a new one - `sid` is what survives rotation, and passing it back
+            # in is the whole mechanism.
+            assert mock_issue.await_args.args == (response, USER_UUID)
+            assert mock_issue.await_args.kwargs["session_uuid"] == SESSION_UUID
+            assert mock_issue.await_args.kwargs["user_id"] == USER_ID
 
     @pytest.mark.asyncio
     async def test_presented_refresh_token_is_rotated_out(self, mock_db):
@@ -150,7 +217,7 @@ class TestRefreshAccessToken(SignedInAccount):
             patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock) as mock_blacklist,
             patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as mock_issue,
         ):
-            mock_verify.return_value = TokenData(user_uuid=USER_UUID)
+            mock_verify.return_value = TokenData(user_uuid=USER_UUID, session_uuid=SESSION_UUID)
             mock_issue.return_value = {"access_token": "new-access-token", "token_type": "bearer"}
 
             await refresh_access_token(_request({"refresh_token": "good-token"}), Mock(), mock_db)
@@ -183,7 +250,7 @@ class TestRefreshRotationWithRealTokens(SignedInAccount):
             patch("src.app.core.security.datetime", FrozenSecurityClock),
         ):
             sign_in = Response()
-            await issue_tokens(sign_in, USER_UUID)
+            await issue_tokens(sign_in, USER_UUID, db=mock_db, context=CONTEXT, user_id=USER_ID)
             original = _refresh_cookie(sign_in)
 
             rotated_response = Response()
@@ -213,7 +280,7 @@ class TestRefreshRotationWithRealTokens(SignedInAccount):
             patch("src.app.core.security.datetime", FrozenSecurityClock),
         ):
             sign_in = Response()
-            await issue_tokens(sign_in, USER_UUID)
+            await issue_tokens(sign_in, USER_UUID, db=mock_db, context=CONTEXT, user_id=USER_ID)
             original = _refresh_cookie(sign_in)
 
             await refresh_access_token(_request({"refresh_token": original}), Response(), mock_db)
@@ -234,8 +301,8 @@ class TestRefreshRotationWithRealTokens(SignedInAccount):
             patch("src.app.core.security.datetime", FrozenSecurityClock),
         ):
             first_device, second_device = Response(), Response()
-            first_tokens = await issue_tokens(first_device, USER_UUID)
-            second_tokens = await issue_tokens(second_device, USER_UUID)
+            first_tokens = await issue_tokens(first_device, USER_UUID, db=mock_db, context=CONTEXT, user_id=USER_ID)
+            second_tokens = await issue_tokens(second_device, USER_UUID, db=mock_db, context=CONTEXT, user_id=USER_ID)
 
             assert first_tokens["access_token"] != second_tokens["access_token"]
 
@@ -263,7 +330,7 @@ class TestRefreshTokenReuseLogging(SignedInAccount):
     async def _spent_token(self, mock_db) -> str:
         """Sign in and refresh once, returning the cookie that was spent doing so."""
         sign_in = Response()
-        await issue_tokens(sign_in, USER_UUID)
+        await issue_tokens(sign_in, USER_UUID, db=mock_db, context=CONTEXT, user_id=USER_ID)
         spent = _refresh_cookie(sign_in)
         await refresh_access_token(_request({"refresh_token": spent}), Response(), mock_db)
         return spent
@@ -376,7 +443,7 @@ class TestRefreshRequiresALiveAccount:
             patch("src.app.api.v1.auth.verify_token", new_callable=AsyncMock) as mock_verify,
             patch("src.app.api.v1.auth.crud_users", FakeUsers(USER_UUID, is_deleted=True)),
         ):
-            mock_verify.return_value = TokenData(user_uuid=USER_UUID)
+            mock_verify.return_value = TokenData(user_uuid=USER_UUID, session_uuid=SESSION_UUID)
 
             with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
                 await refresh_access_token(_request({"refresh_token": "good-token"}), Mock(), mock_db)
@@ -390,7 +457,7 @@ class TestRefreshRequiresALiveAccount:
             patch("src.app.api.v1.auth.verify_token", new_callable=AsyncMock) as mock_verify,
             patch("src.app.api.v1.auth.crud_users", FakeUsers(uuid_pkg.uuid4())),
         ):
-            mock_verify.return_value = TokenData(user_uuid=USER_UUID)
+            mock_verify.return_value = TokenData(user_uuid=USER_UUID, session_uuid=SESSION_UUID)
 
             with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
                 await refresh_access_token(_request({"refresh_token": "good-token"}), Mock(), mock_db)
@@ -406,10 +473,11 @@ class TestRefreshRequiresALiveAccount:
         with (
             patch("src.app.api.v1.auth.verify_token", new_callable=AsyncMock) as mock_verify,
             patch("src.app.api.v1.auth.crud_users", users),
+            patch("src.app.api.v1.auth.live_session_for", FakeSessions()),
             patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock),
         ):
-            mock_verify.return_value = TokenData(user_uuid=USER_UUID)
+            mock_verify.return_value = TokenData(user_uuid=USER_UUID, session_uuid=SESSION_UUID)
 
             await refresh_access_token(_request({"refresh_token": "good-token"}), Mock(), mock_db)
 
@@ -427,7 +495,7 @@ class TestRefreshRequiresALiveAccount:
             patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock) as mock_blacklist,
             patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as mock_issue,
         ):
-            mock_verify.return_value = TokenData(user_uuid=USER_UUID)
+            mock_verify.return_value = TokenData(user_uuid=USER_UUID, session_uuid=SESSION_UUID)
 
             with pytest.raises(UnauthorizedException):
                 await refresh_access_token(_request({"refresh_token": "good-token"}), Mock(), mock_db)
@@ -445,7 +513,7 @@ class TestRefreshRequiresALiveAccount:
             patch("src.app.api.v1.auth.verify_token", new_callable=AsyncMock) as mock_verify,
             patch("src.app.api.v1.auth.crud_users", FakeUsers(USER_UUID, is_deleted=True)),
         ):
-            mock_verify.return_value = TokenData(user_uuid=USER_UUID)
+            mock_verify.return_value = TokenData(user_uuid=USER_UUID, session_uuid=SESSION_UUID)
 
             with pytest.raises(UnauthorizedException) as deleted:
                 await refresh_access_token(_request({"refresh_token": "good-token"}), Mock(), mock_db)
@@ -479,7 +547,7 @@ class TestRefreshLivenessAgainstPostgres:
 
         with patch("src.app.core.security.crud_token_blacklist", blacklist):
             phone = Response()
-            await issue_tokens(phone, diver.uuid)
+            await issue_tokens(phone, diver.uuid, db=async_db, context=CONTEXT, user_id=diver.id)
 
             rotated = Response()
             await refresh_access_token(_request({"refresh_token": _refresh_cookie(phone)}), rotated, async_db)
@@ -502,7 +570,7 @@ class TestRefreshLivenessAgainstPostgres:
 
         with patch("src.app.core.security.crud_token_blacklist", blacklist):
             phone = Response()
-            await issue_tokens(phone, diver.uuid)
+            await issue_tokens(phone, diver.uuid, db=async_db, context=CONTEXT, user_id=diver.id)
             cookie = _refresh_cookie(phone)
 
             diver.is_deleted = True
@@ -523,7 +591,7 @@ class TestRefreshLivenessAgainstPostgres:
             assert _refresh_cookie(restored) != cookie
 
     @pytest.mark.asyncio
-    async def test_a_subject_with_no_row_cannot_refresh(self, async_db):
+    async def test_a_subject_with_no_row_cannot_refresh(self, async_db, diver):
         """What a cookie minted before the purge names once the row is gone. Nothing has
         ever resolved that uuid, so this is the first thing that notices.
         """
@@ -531,7 +599,10 @@ class TestRefreshLivenessAgainstPostgres:
 
         with patch("src.app.core.security.crud_token_blacklist", blacklist):
             never_existed = Response()
-            await issue_tokens(never_existed, uuid_pkg.uuid4())
+            # A real `user_id`, because the session row's FK needs one - but a subject
+            # uuid that resolves to nothing, which is the purged-account case. The
+            # account lookup is what refuses this, before the session is ever consulted.
+            await issue_tokens(never_existed, uuid_pkg.uuid4(), db=async_db, context=CONTEXT, user_id=diver.id)
 
             with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
                 await refresh_access_token(

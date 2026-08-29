@@ -31,8 +31,11 @@ from webauthn.helpers.structs import (
 
 from ..core.config import settings
 from ..core.exceptions.http_exceptions import BadRequestException, UnauthorizedException
+from ..core.utils.request_context import RequestContext
+from ..crud.crud_auth_audit_events import record_auth_event
 from ..crud.crud_users import crud_users
 from ..crud.crud_webauthn_credentials import crud_webauthn_credentials, record_assertion
+from ..schemas.auth_audit_event import AuthEventType
 from ..schemas.webauthn_credential import (
     WebauthnCredentialCreateInternal,
     WebauthnCredentialReadInternal,
@@ -160,13 +163,19 @@ async def start_registration(*, db: AsyncSession, user: dict[str, Any]) -> dict[
 
 
 async def finish_registration(
-    *, db: AsyncSession, user: dict[str, Any], credential: dict[str, Any], name: str
+    *, db: AsyncSession, user: dict[str, Any], credential: dict[str, Any], name: str, context: RequestContext
 ) -> WebauthnCredentialReadInternal:
     """Verify an attestation and store the credential it attests to.
 
     The 10-credential ceiling is re-checked here as well as in `start_registration`: the
     first check is what lets the UI say so before a biometric prompt, this one is the one
     that holds when two tabs each got options while the account was at nine.
+
+    The passkey-added audit event is written **here rather than in the route**, because the
+    credential's own insert commits inside this function - so this is the only place the
+    event can join the transaction it belongs to. A failed registration therefore leaves no
+    row saying one succeeded. The ordinary failures above are deliberately not events: a
+    bad ceremony is expected, is logged at `info`, and is the caller's own problem.
     """
     challenge = await consume_registration_challenge(user["id"])
     if challenge is None:
@@ -212,7 +221,20 @@ async def finish_registration(
             ),
             schema_to_select=WebauthnCredentialReadInternal,
             return_as_model=True,
+            commit=False,
         )
+        # Never the credential id, the public key or the AAGUID: the event records that a
+        # passkey was added, not which one. The row's own uuid is what identifies it, and
+        # this table deliberately keys on nothing.
+        await record_auth_event(
+            db,
+            event_type=AuthEventType.PASSKEY_ADDED,
+            context=context,
+            user_id=user["id"],
+            provider="passkey",
+            commit=False,
+        )
+        await db.commit()
     except IntegrityError:
         # `credential_id` is unique across *all* users, and the check above only sees this
         # one's rows - so a collision with somebody else's credential arrives here instead.
@@ -244,7 +266,7 @@ async def start_sign_in() -> tuple[str, dict[str, Any]]:
 
 
 async def finish_sign_in(
-    *, db: AsyncSession, flow_id: str, credential: dict[str, Any]
+    *, db: AsyncSession, flow_id: str, credential: dict[str, Any], context: RequestContext
 ) -> AuthenticatedUser | DeletionPending:
     """Verify an assertion and resolve it to the account that owns the credential.
 
@@ -264,6 +286,12 @@ async def finish_sign_in(
     valid assertion is not that someone, and telling *them* their account is pending
     deletion discloses nothing they are not already entitled to. Moved earlier, the same
     branch would be a credential-existence oracle for anyone who could name an id.
+
+    **No sign-in-succeeded event here**, deliberately: this is the third resolve site, but
+    its caller still funnels through `_start_onboarding_or_sign_in`, which is where that
+    event is emitted for all four providers. Writing one here would double-count it, and
+    would additionally record the `DeletionPending` branch below - which mints no tokens
+    and signs nobody in - as a sign-in.
     """
     challenge = await consume_sign_in_challenge(flow_id)
     if challenge is None:
@@ -290,7 +318,7 @@ async def finish_sign_in(
             credential_current_sign_count=stored.sign_count,
         )
     except (WebAuthnException, ValueError) as exc:
-        _warn_if_counter_regressed(credential, stored)
+        await _record_if_counter_regressed(db, credential, stored, context)
         logger.info("A passkey assertion for credential %s failed verification: %s", stored.uuid, exc)
         raise UnauthorizedException(_SIGN_IN_FAILED) from None
 
@@ -305,6 +333,9 @@ async def finish_sign_in(
         # "the button never *does* the wrong thing" true here too. The counter simply stays
         # where it was; the authenticator's own is ahead, so the next assertion (after a
         # restore, or another look at this screen) verifies exactly as it would have.
+        #
+        # The restore-offered event is not written here either, for the same reason: the
+        # funnel writes it, once, for all four providers.
         return DeletionPending.for_row(user)
 
     recorded = await record_assertion(
@@ -320,12 +351,14 @@ async def finish_sign_in(
         # gets to mint a session.
         raise UnauthorizedException(_SIGN_IN_FAILED)
 
-    return AuthenticatedUser(user=user)
+    return AuthenticatedUser(user=user, provider="passkey")
 
 
-def _warn_if_counter_regressed(credential: dict[str, Any], stored: WebauthnCredentialReadInternal) -> None:
-    """Log the one assertion failure that means something: a signature counter that went
-    backwards, which is the cloned-authenticator signal.
+async def _record_if_counter_regressed(
+    db: AsyncSession, credential: dict[str, Any], stored: WebauthnCredentialReadInternal, context: RequestContext
+) -> None:
+    """Log *and record* the one assertion failure that means something: a signature counter
+    that went backwards, which is the cloned-authenticator signal.
 
     py_webauthn already rejects it inside `verify_authentication_response`, so the app's
     job is only the line - and it earns it by doing the stored-vs-presented comparison
@@ -334,6 +367,17 @@ def _warn_if_counter_regressed(credential: dict[str, Any], stored: WebauthnCrede
     is: the app configures no logging of its own and `uvicorn` configures only its own
     loggers, so anything below it is dropped on the floor in exactly the session where
     someone is trying to work out what happened.
+
+    That `WARNING` level is also what puts this in the audit trail at all. The criteria
+    that select an event site are mostly about *writes*, and this site writes nothing - a
+    failure the code itself deems rare and meaningful is a class those criteria
+    structurally cannot reach, so it is its own criterion. The event carries the
+    credential's owner, which is the one identity a failed assertion has already
+    established.
+
+    **Committed here, before the caller raises.** `finish_sign_in` follows this with an
+    `UnauthorizedException` and `async_get_db` does not commit on unwind, so a row left in
+    flight would be silently dropped on exactly the path it exists for.
 
     A synced passkey reports `0` forever and `0 -> 0` is not a regression - the guard is
     "we have seen this counter move at all, and it has not moved since".
@@ -350,6 +394,14 @@ def _warn_if_counter_regressed(credential: dict[str, Any], stored: WebauthnCrede
         stored.user_id,
         presented,
         stored.sign_count,
+    )
+
+    await record_auth_event(
+        db,
+        event_type=AuthEventType.PASSKEY_COUNTER_REGRESSED,
+        context=context,
+        user_id=stored.user_id,
+        provider="passkey",
     )
 
 

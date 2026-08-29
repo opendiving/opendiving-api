@@ -318,24 +318,48 @@ def _new_jti() -> str:
     return uuid_pkg.uuid4().hex
 
 
-async def create_access_token(data: dict[str, Any], expires_delta: timedelta | None = None) -> str:
+def _session_claim(session_uuid: uuid_pkg.UUID) -> dict[str, str]:
+    """The `sid` claim, on both halves of the pair.
+
+    **`sid` and `jti` are not the same identifier and neither replaces the other.** `jti`
+    is per-*issuance*, which is what makes blacklisting a token by value a per-issuance
+    revocation (see `_new_jti`); `sid` names the *device*, and is deliberately carried
+    unchanged across every rotation, so it is the one thing about a session that survives
+    `/auth/refresh` spending the cookie and minting an unrelated replacement.
+
+    That identifier is what `DECISIONS.md` §"A reused refresh token is a `WARNING`" recorded
+    as the missing prerequisite for its *Tier 3 - family revocation*. Tier 3 is still not
+    implemented: a detected replay records an event and logs, and revokes nothing.
+    """
+    return {"sid": str(session_uuid)}
+
+
+async def create_access_token(
+    data: dict[str, Any], expires_delta: timedelta | None = None, session_uuid: uuid_pkg.UUID | None = None
+) -> str:
     to_encode = data.copy()
     if expires_delta:
         expire = datetime.now(UTC).replace(tzinfo=None) + expires_delta
     else:
         expire = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire, "jti": _new_jti(), "token_type": TokenType.ACCESS})
+    if session_uuid is not None:
+        to_encode.update(_session_claim(session_uuid))
     encoded_jwt: str = jwt.encode(to_encode, SECRET_KEY.get_secret_value(), algorithm=ALGORITHM)
     return encoded_jwt
 
 
-async def create_refresh_token(data: dict[str, Any], expires_delta: timedelta | None = None) -> str:
+async def create_refresh_token(
+    data: dict[str, Any], expires_delta: timedelta | None = None, session_uuid: uuid_pkg.UUID | None = None
+) -> str:
     to_encode = data.copy()
     if expires_delta:
         expire = datetime.now(UTC).replace(tzinfo=None) + expires_delta
     else:
         expire = datetime.now(UTC).replace(tzinfo=None) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
     to_encode.update({"exp": expire, "jti": _new_jti(), "token_type": TokenType.REFRESH})
+    if session_uuid is not None:
+        to_encode.update(_session_claim(session_uuid))
     encoded_jwt: str = jwt.encode(to_encode, SECRET_KEY.get_secret_value(), algorithm=ALGORITHM)
     return encoded_jwt
 
@@ -352,6 +376,11 @@ async def verify_token(token: str, expected_token_type: TokenType, db: AsyncSess
     `ValueError` covers a `sub` that isn't a uuid at all. That is a 401 rather than the
     500 an escaping exception would produce, which is what any token minted before the
     subject became the user's `uuid` (it used to be their username) now gets.
+
+    The `sid` claim rides back on `TokenData` and is *not* validated here - this function
+    says nothing about whether the session it names is still live, only what the token
+    claims. `POST /auth/refresh` is the one caller that asks the second question, against
+    the database, before it will mint a replacement.
     """
     is_blacklisted = await crud_token_blacklist.exists(db, token=token)
     if is_blacklisted:
@@ -365,10 +394,47 @@ async def verify_token(token: str, expected_token_type: TokenType, db: AsyncSess
         if subject is None or token_type != expected_token_type:
             return None
 
-        return TokenData(user_uuid=uuid_pkg.UUID(subject))
+        return TokenData(user_uuid=uuid_pkg.UUID(subject), session_uuid=_session_id(payload))
 
     except JWTError, ValueError:
         return None
+
+
+def _session_id(payload: dict[str, Any]) -> uuid_pkg.UUID | None:
+    """The `sid` claim off an already-decoded payload, or `None` if it is absent or is not
+    a uuid.
+
+    Absent is the ordinary case for one access-token lifetime after this feature ships, and
+    for any token minted by an older build. Unparseable is not reachable through anything
+    this app signs, and is tolerated rather than raised for the same reason `verify_token`
+    tolerates a non-uuid `sub`: an escaping `ValueError` on a decode path is a 500 where a
+    401 belongs.
+    """
+    raw = payload.get("sid")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return uuid_pkg.UUID(raw)
+    except ValueError:
+        return None
+
+
+def token_session_id(token: str) -> uuid_pkg.UUID | None:
+    """The `sid` of a token whose validity has *already been established elsewhere*.
+
+    Signature and expiry are still enforced (`jwt.decode` does both), but the blacklist and
+    `token_type` checks are not - so this must never be the basis of an authorization
+    decision, exactly as `token_subject` must not. The callers are routes whose sibling
+    dependency `get_current_user` has already run `verify_token` over this same string and
+    let the request through; all this adds is one more claim off it, without a second
+    blacklist round trip on a path that has already paid for one.
+    """
+    try:
+        payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+
+    return _session_id(payload)
 
 
 async def revocation_time(token: str, db: AsyncSession) -> datetime | None:

@@ -22,6 +22,7 @@ Skipped when no database is reachable. On a developer's machine that means
 resolve on the host); CI sets it and fails the job if anything skips. See CONTRIBUTING.md.
 """
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -29,6 +30,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from src.app.core.db.database import Base
+from src.app.models.auth_audit_event import AuthAuditEvent
 from src.app.models.certification import Certification
 from src.app.models.certification_file import CertificationFile
 from src.app.models.course import Course
@@ -45,6 +47,8 @@ from src.app.models.trip import Trip
 from src.app.models.trip_location import TripLocation
 from src.app.models.user import User
 from src.app.models.user_dive_stats import UserDiveStats
+from src.app.models.user_session import UserSession
+from src.app.schemas.auth_audit_event import AuthEventType
 from tests.conftest import db_available
 from tests.helpers.generators import (
     create_course,
@@ -81,13 +85,16 @@ class TestEveryForeignKeyIntoUserCascades:
 
 @pytest.mark.skipif(not db_available(), reason="No database connection available")
 class TestDeletingAUserTakesEverythingWithIt:
-    """One user, one row in each of the eleven tables the account owns, plus the
-    second-order rows that hang off those - then a single `DELETE`.
+    """One user, one row in each of the tables the account owns, plus the second-order rows
+    that hang off those - then a single `DELETE`.
 
-    Ten of the eleven are the ones `48781087b2b3` had to redeclare; `course` is the first
-    table added since, and it declared `ON DELETE CASCADE` from the outset - which is
-    exactly the case the metadata sweep above cannot distinguish from a table that got it
-    right by accident, so it is seeded here too.
+    Most of them are the ten `48781087b2b3` had to redeclare. The rest are tables added
+    since - `course`, then `user_session` and `auth_audit_event` - each of which declared
+    `ON DELETE CASCADE` from the outset, which is exactly the case the metadata sweep above
+    cannot distinguish from a table that got it right by accident, so they are seeded here
+    too. (No count in this sentence on purpose: the previous one said "eleven" and was one
+    model away from being wrong, which `DECISIONS.md` §"The counts in the prose go stale
+    too" is about.)
 
     Second-order coverage is not decoration. `certification_file`, `dive_file`,
     `dive_dive_site`, `gear_set_item` and `trip_location` are the tables that would be left
@@ -121,6 +128,23 @@ class TestDeletingAUserTakesEverythingWithIt:
                 DiveDiveSite(dive_id=dive.id, dive_site_id=site.id),
                 GearSetItem(gear_set_id=gear_set.id, gear_item_id=item.id),
                 TripLocation(trip_id=trip.id, name="Moalboal"),
+                UserSession(
+                    user_id=diver.id,
+                    expires_at=datetime.now(UTC) + timedelta(days=7),
+                    ip="203.0.113.7",
+                    user_agent="Mozilla/5.0",
+                ),
+                # The *account-tied* audit row, which is the one the cascade is responsible
+                # for. Its user-less sibling carries no FK to follow and is erased by the
+                # purge's by-email arm instead - pinned in `test_account_deletion.py`, which
+                # is where that statement lives.
+                AuthAuditEvent(
+                    event_type=AuthEventType.SIGN_IN_SUCCEEDED,
+                    ip="203.0.113.7",
+                    user_agent="Mozilla/5.0",
+                    user_id=diver.id,
+                    provider="email",
+                ),
             ]
         )
         db.flush()
@@ -161,6 +185,7 @@ class TestDeletingAUserTakesEverythingWithIt:
 
         assert db.get(User, user_id) is None
         for model in (
+            AuthAuditEvent,
             Certification,
             Course,
             Dive,
@@ -172,6 +197,7 @@ class TestDeletingAUserTakesEverythingWithIt:
             GearSet,
             Trip,
             UserDiveStats,
+            UserSession,
         ):
             assert self._remaining(db, model, user_id) == 0, f"{model.__tablename__} survived the cascade"
 

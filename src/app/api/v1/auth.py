@@ -27,6 +27,7 @@ left over from the old password-based flow.
 
 import hmac
 import logging
+import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, cast
 
@@ -57,6 +58,7 @@ from ...core.security import (
     hash_token,
     oauth2_scheme,
     revocation_time,
+    token_session_id,
     token_subject,
     verify_google_id_token,
     verify_onboarding_token,
@@ -65,12 +67,15 @@ from ...core.security import (
 )
 from ...core.utils.client_ip import client_ip
 from ...core.utils.rate_limit import enforce_rate_limit
+from ...core.utils.request_context import RequestContext
+from ...crud.crud_auth_audit_events import record_auth_event
 from ...crud.crud_authentication_providers import crud_authentication_providers
 from ...crud.crud_authentication_requests import (
     claim_authentication_request,
     crud_authentication_requests,
     register_failed_code_attempt,
 )
+from ...crud.crud_user_sessions import live_session_for, revoke_session
 from ...crud.crud_users import crud_users
 from ...models.user import User
 from ...schemas.auth import (
@@ -84,6 +89,7 @@ from ...schemas.auth import (
     ProfileCompletionRequest,
     RestoreRequest,
 )
+from ...schemas.auth_audit_event import AuthEventType
 from ...schemas.authentication_provider import AuthenticationProviderCreate
 from ...schemas.authentication_request import (
     AuthenticationRequestCreate,
@@ -134,7 +140,11 @@ def _has_expired(auth_request: dict[str, Any]) -> bool:
 
 
 async def _start_onboarding_or_sign_in(
-    response: Response, outcome: AuthenticatedUser | OnboardingRequired | DeletionPending
+    response: Response,
+    outcome: AuthenticatedUser | OnboardingRequired | DeletionPending,
+    *,
+    db: AsyncSession,
+    context: RequestContext,
 ) -> AuthOutcome:
     """Turn a verified identity into a signed-in session, an onboarding handoff, or the
     offer of a deleted account back.
@@ -158,9 +168,24 @@ async def _start_onboarding_or_sign_in(
     exists only because a signed-in user registered it. It comes through here rather than
     calling `issue_tokens` directly: token shape, cookie mechanics and every future outcome
     variant then stay in one place instead of two that have to be kept in step.
+
+    **All three audit events for a verified identity are emitted here, and sign-in-succeeded
+    is emitted here *only*.** All four providers reach this function - including passkeys,
+    whose resolve site is `finish_sign_in` rather than `resolve_identity`, and which funnels
+    through here anyway - so emitting at the resolve sites instead would double-count, and
+    emitting inside `finish_sign_in` would additionally record its `DeletionPending`
+    outcome, which mints no tokens and signs nobody in. That is why `AuthenticatedUser`
+    carries the provider: it is the one thing this site cannot work out for itself.
     """
     if isinstance(outcome, AuthenticatedUser):
-        tokens = await issue_tokens(response, outcome.user["uuid"])
+        tokens = await issue_tokens(response, outcome.user["uuid"], db=db, context=context, user_id=outcome.user["id"])
+        await record_auth_event(
+            db,
+            event_type=AuthEventType.SIGN_IN_SUCCEEDED,
+            context=context,
+            user_id=outcome.user["id"],
+            provider=outcome.provider,
+        )
         return AuthOutcome(status="authenticated", **tokens)
 
     if isinstance(outcome, DeletionPending):
@@ -169,9 +194,13 @@ async def _start_onboarding_or_sign_in(
         # to this caller is not a leak - reaching this line took a magic link sent to that
         # inbox, a code from it, a Google identity linked to the account, or possession of a
         # registered authenticator.
+        restore_token = await create_restore_token(outcome.user["uuid"])
+        await record_auth_event(
+            db, event_type=AuthEventType.RESTORE_OFFERED, context=context, user_id=outcome.user["id"]
+        )
         return AuthOutcome(
             status="deletion_pending",
-            restore_token=await create_restore_token(outcome.user["uuid"]),
+            restore_token=restore_token,
             purge_after=outcome.purge_after,
             email=outcome.user["email"],
         )
@@ -185,6 +214,18 @@ async def _start_onboarding_or_sign_in(
             avatar=outcome.avatar,
         )
     )
+    # "Registration-request creation": there is no registration table, so the onboarding
+    # JWT *is* the registration request, and this is the one place it is minted. The row is
+    # written user-less because no account exists yet - one of the three genuinely
+    # pre-account events, carrying only the address, and swept on the 7-day tier.
+    await record_auth_event(
+        db,
+        event_type=AuthEventType.ONBOARDING_STARTED,
+        context=context,
+        email=outcome.email,
+        provider=outcome.provider,
+    )
+
     # `avatar` is deliberately not on the response, while the onboarding *token* above
     # carries it: the URL is an input to `POST /auth/complete`, which fetches the bytes and
     # stores them as the new account's avatar, and no client ever renders it. Sending it
@@ -259,6 +300,17 @@ async def request_email_link(
         ),
         schema_to_select=AuthenticationRequestRead,
         return_as_model=True,
+    )
+
+    # **Always user-less, and that is the whole point.** This endpoint "never even queries
+    # `crud_users`" - the enumeration protection here is structural rather than a
+    # response-shaping trick, and looking the address up to fill in a `user_id` would
+    # reverse that guarantee verbatim, in a call no diff reviewer would connect to the
+    # paragraph 11,000 lines away that it contradicts. The row carries the address and
+    # nothing else, which is exactly what `authentication_request` already stores, for
+    # about the same length of time.
+    await record_auth_event(
+        db, event_type=AuthEventType.AUTH_REQUEST_CREATED, context=RequestContext.from_request(request), email=email
     )
 
     magic_link_url = f"{settings.FRONTEND_URL}/auth/verify?token={raw_token}"
@@ -379,8 +431,9 @@ async def verify_email_link(
     if not await claim_authentication_request(db, request_id=auth_request["id"]):
         raise UnauthorizedException("This sign-in link has already been used.")
 
-    outcome = await resolve_identity(db=db, provider="email", email=auth_request["email"])
-    return await _start_onboarding_or_sign_in(response, outcome)
+    context = RequestContext.from_request(request)
+    outcome = await resolve_identity(db=db, provider="email", email=auth_request["email"], context=context)
+    return await _start_onboarding_or_sign_in(response, outcome, db=db, context=context)
 
 
 @router.post("/email/verify-code", response_model=AuthOutcome)
@@ -435,11 +488,23 @@ async def verify_email_code(
     ):
         raise UnauthorizedException(_CODE_REJECTED)
 
+    context = RequestContext.from_request(request)
+
     if not hmac.compare_digest(auth_request["code_hash"], hash_sign_in_code(body.code)):
         # Charged before the 401 is raised, and atomically - the cap is the whole defense
         # of a six-digit secret, so it must not be walkable by firing guesses in parallel.
         await register_failed_code_attempt(
             db, request_id=auth_request["id"], max_attempts=settings.SIGN_IN_CODE_ATTEMPTS_MAX
+        )
+        # Committed before the raise, like the attempt charge above it: `async_get_db` does
+        # not commit on unwind, so a row left in flight on this path is silently lost.
+        # Never the code or its digest - the fact of the failure, never the artifact.
+        await record_auth_event(
+            db,
+            event_type=AuthEventType.SIGN_IN_CODE_FAILED,
+            context=context,
+            email=auth_request["email"],
+            provider="email",
         )
         raise UnauthorizedException(_CODE_REJECTED)
 
@@ -449,8 +514,8 @@ async def verify_email_code(
     if not await claim_authentication_request(db, request_id=auth_request["id"]):
         raise UnauthorizedException(_CODE_REJECTED)
 
-    outcome = await resolve_identity(db=db, provider="email", email=auth_request["email"])
-    return await _start_onboarding_or_sign_in(response, outcome)
+    outcome = await resolve_identity(db=db, provider="email", email=auth_request["email"], context=context)
+    return await _start_onboarding_or_sign_in(response, outcome, db=db, context=context)
 
 
 @router.post("/google", response_model=AuthOutcome)
@@ -507,15 +572,17 @@ async def auth_with_google(
     if google_user is None:
         raise UnauthorizedException("Invalid Google credential.")
 
+    context = RequestContext.from_request(request)
     outcome = await resolve_identity(
         db=db,
         provider="google",
         email=google_user.email,
+        context=context,
         provider_user_id=google_user.google_id,
         name=google_user.name,
         avatar=google_user.avatar,
     )
-    return await _start_onboarding_or_sign_in(response, outcome)
+    return await _start_onboarding_or_sign_in(response, outcome, db=db, context=context)
 
 
 @router.post("/passkey/options", response_model=PasskeySignInOptions)
@@ -578,8 +645,9 @@ async def passkey_sign_in_verify(
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
 
-    outcome = await finish_sign_in(db=db, flow_id=body.flow_id, credential=body.credential)
-    return await _start_onboarding_or_sign_in(response, outcome)
+    context = RequestContext.from_request(request)
+    outcome = await finish_sign_in(db=db, flow_id=body.flow_id, credential=body.credential, context=context)
+    return await _start_onboarding_or_sign_in(response, outcome, db=db, context=context)
 
 
 @router.post("/complete", response_model=AuthOutcome)
@@ -639,6 +707,8 @@ async def complete_profile(
         avatar_sha256=avatar.sha256 if avatar else None,
     )
 
+    context = RequestContext.from_request(request)
+
     try:
         created_user = await crud_users.create(
             db=db, object=user_internal, commit=False, schema_to_select=UserReadInternal, return_as_model=True
@@ -650,6 +720,18 @@ async def complete_profile(
             ),
             commit=False,
         )
+        # "Registration-request completion", in the same transaction as the account it
+        # records - so an account that fails to be created leaves no event saying it was.
+        # One event for the whole act: the provider row above gets none of its own, because
+        # a second row would record account creation twice.
+        await record_auth_event(
+            db,
+            event_type=AuthEventType.ACCOUNT_CREATED,
+            context=context,
+            user_id=created_user.id,
+            provider=token_data.provider,
+            commit=False,
+        )
         await db.commit()
     except IntegrityError:
         await db.rollback()
@@ -659,7 +741,7 @@ async def complete_profile(
     # never create (or attempt to create) a second account.
     await blacklist_token(body.onboarding_token, db)
 
-    tokens = await issue_tokens(response, created_user.uuid)
+    tokens = await issue_tokens(response, created_user.uuid, db=db, context=context, user_id=created_user.id)
     return AuthOutcome(status="authenticated", **tokens)
 
 
@@ -736,7 +818,10 @@ async def restore_account(
         await db.rollback()
         raise UnauthorizedException(_RESTORE_REJECTED) from None
 
-    tokens = await issue_tokens(response, user_uuid)
+    context = RequestContext.from_request(request)
+    await record_auth_event(db, event_type=AuthEventType.ACCOUNT_RESTORED, context=context, user_id=locked.id)
+
+    tokens = await issue_tokens(response, user_uuid, db=db, context=context, user_id=locked.id)
     return AuthOutcome(status="authenticated", **tokens)
 
 
@@ -754,7 +839,25 @@ def _elapsed(since: datetime) -> str:
     return str(timedelta(seconds=round(seconds)))
 
 
-async def _warn_if_revoked(refresh_token: str, db: AsyncSession) -> None:
+# How long after a token was revoked a re-presentation stops being explicable as the
+# documented two-tab rotation race and starts being worth an audit row.
+#
+# The race resolves in **milliseconds** - two tabs refreshing at the same instant, the
+# loser landing on this exact branch - and is benign, documented and not especially rare
+# (`DECISIONS.md` §"A reused refresh token is a `WARNING`", *The hard part: telling theft
+# from the documented race*). An unconditioned audit row would therefore put that same
+# cry-wolf defect straight into the audit table, which is what `token_blacklist.revoked_at`
+# was added to fix in the log line.
+#
+# Five seconds is three orders of magnitude above the race and negligible against theft,
+# which is replayed minutes or hours later. **Only the audit row is conditioned**: the
+# `WARNING` still fires for every presentation, gap attached, exactly as before - so
+# nothing that was visible has become invisible, and a row's mere existence now means
+# replay-not-race.
+_REFRESH_REPLAY_AUDIT_THRESHOLD = timedelta(seconds=5)
+
+
+async def _warn_if_revoked(refresh_token: str, db: AsyncSession, context: RequestContext) -> None:
     """Log a refresh token that failed verification *because it had been revoked*, which
     is the strongest evidence available that a refresh cookie has been stolen.
 
@@ -781,13 +884,40 @@ async def _warn_if_revoked(refresh_token: str, db: AsyncSession) -> None:
     if revoked_at is None:
         return
 
+    subject = token_subject(refresh_token)
     logger.warning(
         "A revoked refresh token was presented (subject: %s) %s after it was revoked. Under a second is "
         "the two-tab rotation race POST /auth/refresh documents; a longer gap is worth investigating as "
         "a stolen cookie.",
-        token_subject(refresh_token) or "unknown",
+        subject or "unknown",
         _elapsed(revoked_at),
     )
+
+    if datetime.now(UTC) - revoked_at < _REFRESH_REPLAY_AUDIT_THRESHOLD:
+        # The race, not a replay. See `_REFRESH_REPLAY_AUDIT_THRESHOLD`.
+        return
+
+    # The subject resolves to an account with one indexed read, and the cost of that read
+    # is bounded by construction: it is only reached past the threshold, which the benign
+    # case never is. `None` when the account has already been purged - that row satisfies
+    # neither arm of the erasure and is bounded by the user-less retention tier alone.
+    #
+    # A deliberate amendment to the *Nothing is logged* posture of `DECISIONS.md` §"A
+    # refresh token is only as alive as its account": that bullet is about a *deleted
+    # account's* devices refreshing on their own schedule, which is recurring and expected.
+    # A replay past this threshold is neither.
+    user_id: int | None = None
+    if subject is not None:
+        try:
+            user = await crud_users.get(db=db, uuid=uuid_pkg.UUID(subject))
+        except ValueError:
+            user = None
+        if user is not None:
+            user_id = cast(dict[str, Any], user)["id"]
+
+    # Committed before the caller raises its 401, since `async_get_db` does not commit on
+    # unwind and this is the row the whole conditioning exists to write.
+    await record_auth_event(db, event_type=AuthEventType.REFRESH_REPLAY_DETECTED, context=context, user_id=user_id)
 
 
 @router.post("/refresh")
@@ -814,6 +944,16 @@ async def refresh_access_token(
     A token that verifies is not the same thing as an account that still exists, so the
     subject is resolved before a replacement pair is minted, and a deleted account 401s
     here. Same message as every other failure, for the same oracle reason.
+
+    **Nor is it the same thing as a session that is still live.** The presented token's
+    `sid` has to resolve to an unrevoked, unexpired row belonging to this subject, which is
+    what makes "sign out my other devices" mean anything: revoking a row kills its refresh
+    at the next rotation. A token carrying no `sid` at all - anything minted before this
+    feature - fails that check and the diver signs in again. That is a one-time global
+    sign-out on upgrade, and deliberately not shimmed.
+
+    All four ways to fail here answer the same uniform 401 the endpoint already answered,
+    which is the property `DECISIONS.md` pins rather than one this change gets to relax.
     """
     await enforce_rate_limit(
         f"auth:refresh:ip:{client_ip(request)}",
@@ -825,10 +965,12 @@ async def refresh_access_token(
     if not refresh_token:
         raise UnauthorizedException("Refresh token missing.")
 
+    context = RequestContext.from_request(request)
+
     user_data = await verify_token(refresh_token, TokenType.REFRESH, db)
     if not user_data:
         # Only reached on a failure, so the extra lookup costs nothing on the happy path.
-        await _warn_if_revoked(refresh_token, db)
+        await _warn_if_revoked(refresh_token, db, context)
         raise UnauthorizedException("Invalid refresh token.")
 
     # Neither `verify_token` nor `issue_tokens` touches the `user` table, so without this
@@ -840,18 +982,36 @@ async def refresh_access_token(
     # Asked before the token is spent, so a request that answers 401 writes nothing - and
     # so a soft delete that is reversed leaves the account's other sessions intact, having
     # made them inert rather than destroyed them.
-    if not await crud_users.exists(db=db, uuid=user_data.user_uuid, is_deleted=False):
+    account = await crud_users.get(db=db, uuid=user_data.user_uuid, is_deleted=False)
+    if account is None:
+        raise UnauthorizedException("Invalid refresh token.")
+    user_id = cast(dict[str, Any], account)["id"]
+
+    # Asked before the token is spent, for the same reason: a refresh against a revoked
+    # session must leave that session revoked rather than additionally burning the cookie,
+    # so nothing about the failed request is a write.
+    if user_data.session_uuid is None:
+        raise UnauthorizedException("Invalid refresh token.")
+    session = await live_session_for(db, session_uuid=user_data.session_uuid, user_id=user_id)
+    if session is None:
         raise UnauthorizedException("Invalid refresh token.")
 
     # Spend the presented token before minting its replacement, so a crash between the
     # two leaves the caller signed out rather than holding two live refresh tokens.
     await blacklist_token(refresh_token, db)
 
-    return await issue_tokens(response, user_data.user_uuid)
+    # The same `sid`, deliberately: rotation replaces the credential and continues the
+    # session, which is the whole difference this table makes. No audit event - an ordinary
+    # rotation is once per access-token lifetime per device, which is the recurring,
+    # expected class the standing rule excludes, and `last_used_at` already records it.
+    return await issue_tokens(
+        response, user_data.user_uuid, db=db, context=context, user_id=user_id, session_uuid=session.uuid
+    )
 
 
 @router.post("/logout")
 async def logout(
+    request: Request,
     response: Response,
     access_token: str = Depends(oauth2_scheme),
     refresh_token: str | None = Cookie(None, alias="refresh_token"),
@@ -859,15 +1019,44 @@ async def logout(
 ) -> dict[str, str]:
     """End the caller's session.
 
-    Blacklists both the access and refresh tokens and clears the refresh cookie, so the
-    pair stops working immediately rather than remaining valid until expiry. 401 when no
-    refresh cookie is present or either token fails to decode.
+    Blacklists both the access and refresh tokens, stamps `revoked_at` on the session row
+    they belong to, and clears the refresh cookie - so the pair stops working immediately
+    rather than remaining valid until expiry, and the row stops appearing in
+    `GET /user/sessions` on the account's other devices. 401 when no refresh cookie is
+    present or either token fails to decode.
+
+    This route authenticates on `oauth2_scheme` alone - no `get_current_user`, so there is
+    no `current_user` dict to take an id from - and resolves its subject from the presented
+    access token the way `_warn_if_revoked` already does. One indexed read, on a route
+    nobody calls in a loop.
     """
     try:
         if not refresh_token:
             raise UnauthorizedException("Refresh token not found")
 
         await blacklist_tokens(access_token=access_token, refresh_token=refresh_token, db=db)
+
+        session_uuid = token_session_id(access_token)
+        if session_uuid is not None:
+            await revoke_session(db, session_uuid=session_uuid)
+
+        subject = token_subject(access_token)
+        user_id: int | None = None
+        if subject is not None:
+            try:
+                user = await crud_users.get(db=db, uuid=uuid_pkg.UUID(subject))
+            except ValueError:
+                user = None
+            if user is not None:
+                user_id = cast(dict[str, Any], user)["id"]
+
+        # Commits the revoke above with it - `record_auth_event` commits by default and
+        # the revoke deliberately does not, so signing out and recording that you did are
+        # one transaction.
+        await record_auth_event(
+            db, event_type=AuthEventType.LOGOUT, context=RequestContext.from_request(request), user_id=user_id
+        )
+
         response.delete_cookie(key="refresh_token")
 
         return {"message": "Logged out successfully"}

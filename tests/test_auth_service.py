@@ -9,6 +9,7 @@ import pytest
 from jose import jwt
 
 from src.app.core.security import ALGORITHM, SECRET_KEY
+from src.app.core.utils.request_context import RequestContext
 from src.app.services.auth_service import (
     AuthenticatedUser,
     OnboardingRequired,
@@ -16,13 +17,17 @@ from src.app.services.auth_service import (
     resolve_identity,
 )
 
+# Both functions now record where the request came from - `issue_tokens` onto the session
+# row it mints, `resolve_identity` onto the provider-linked audit event.
+CONTEXT = RequestContext(ip="203.0.113.7", user_agent="Mozilla/5.0 (X11; Linux x86_64) TestAgent/1.0")
+
 
 class TestIssueTokens:
     @pytest.mark.asyncio
-    async def test_sets_refresh_cookie_and_returns_access_token(self):
+    async def test_sets_refresh_cookie_and_returns_access_token(self, mock_db):
         response = Mock()
 
-        tokens = await issue_tokens(response, uuid_pkg.uuid4())
+        tokens = await issue_tokens(response, uuid_pkg.uuid4(), db=mock_db, context=CONTEXT, user_id=7)
 
         assert tokens["token_type"] == "bearer"
         assert "access_token" in tokens
@@ -34,7 +39,7 @@ class TestIssueTokens:
         assert kwargs["secure"] is True
 
     @pytest.mark.asyncio
-    async def test_the_cookie_can_be_issued_without_secure_for_a_plain_http_instance(self):
+    async def test_the_cookie_can_be_issued_without_secure_for_a_plain_http_instance(self, mock_db):
         """`AUTH_COOKIE_SECURE=false` is the escape hatch for a LAN instance with no
         certificate, where a `Secure` cookie is dropped by the browser without a word and
         the symptom is "signed out on every reload" with nothing in any log.
@@ -45,12 +50,12 @@ class TestIssueTokens:
             mock_settings.REFRESH_TOKEN_EXPIRE_DAYS = 7
             mock_settings.AUTH_COOKIE_SECURE = False
 
-            await issue_tokens(response, uuid_pkg.uuid4())
+            await issue_tokens(response, uuid_pkg.uuid4(), db=mock_db, context=CONTEXT, user_id=7)
 
         assert response.set_cookie.call_args.kwargs["secure"] is False
 
     @pytest.mark.asyncio
-    async def test_both_tokens_are_subjected_to_the_user_uuid(self):
+    async def test_both_tokens_are_subjected_to_the_user_uuid(self, mock_db):
         """The security property the whole flow rests on: a session names the one
         identifier its owner cannot change and nobody else can ever claim. A username
         subject would let a renamed-away handle be re-registered by an attacker, whose
@@ -59,7 +64,7 @@ class TestIssueTokens:
         response = Mock()
         user_uuid = uuid_pkg.uuid4()
 
-        tokens = await issue_tokens(response, user_uuid)
+        tokens = await issue_tokens(response, user_uuid, db=mock_db, context=CONTEXT, user_id=7)
 
         access_payload = jwt.decode(tokens["access_token"], SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
         refresh_cookie = response.set_cookie.call_args.kwargs["value"]
@@ -80,7 +85,7 @@ class TestResolveIdentity:
             mock_users.get = AsyncMock(return_value={"id": 7, "username": "someone", "is_deleted": False})
 
             outcome = await resolve_identity(
-                mock_db, provider="google", email="someone@example.com", provider_user_id="g-1"
+                mock_db, provider="google", email="someone@example.com", provider_user_id="g-1", context=CONTEXT
             )
 
             assert isinstance(outcome, AuthenticatedUser)
@@ -101,7 +106,7 @@ class TestResolveIdentity:
             mock_users.get = AsyncMock(return_value={"id": 3, "username": "existing", "is_deleted": False})
 
             outcome = await resolve_identity(
-                mock_db, provider="google", email="existing@example.com", provider_user_id="g-2"
+                mock_db, provider="google", email="existing@example.com", provider_user_id="g-2", context=CONTEXT
             )
 
             assert isinstance(outcome, AuthenticatedUser)
@@ -122,7 +127,7 @@ class TestResolveIdentity:
             mock_providers.create = AsyncMock(return_value=None)
             mock_users.get = AsyncMock(return_value={"id": 3, "username": "existing", "is_deleted": False})
 
-            outcome = await resolve_identity(mock_db, provider="email", email="existing@example.com")
+            outcome = await resolve_identity(mock_db, provider="email", email="existing@example.com", context=CONTEXT)
 
             assert isinstance(outcome, AuthenticatedUser)
             mock_providers.create.assert_not_called()
@@ -137,7 +142,13 @@ class TestResolveIdentity:
             mock_users.get = AsyncMock(return_value=None)
 
             outcome = await resolve_identity(
-                mock_db, provider="google", email="new@example.com", provider_user_id="g-3", name="New", avatar="a"
+                mock_db,
+                provider="google",
+                email="new@example.com",
+                provider_user_id="g-3",
+                name="New",
+                avatar="a",
+                context=CONTEXT,
             )
 
             assert isinstance(outcome, OnboardingRequired)

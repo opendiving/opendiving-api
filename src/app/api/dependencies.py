@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.db.database import async_get_db
 from ..core.exceptions.http_exceptions import ForbiddenException, NotFoundException, UnauthorizedException
-from ..core.security import TokenType, oauth2_scheme, verify_token
+from ..core.security import TokenType, oauth2_scheme, token_session_id, verify_token
 from ..crud.crud_users import crud_users
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,30 @@ async def get_current_user(
         return user
 
     raise UnauthorizedException("User not authenticated.")
+
+
+async def current_session_uuid(token: Annotated[str, Depends(oauth2_scheme)]) -> uuid_pkg.UUID | None:
+    """The `user_session` row the caller's access token was minted for, or `None`.
+
+    **A sibling of `get_current_user`, deliberately not a change to it.** That function's
+    return type is the account dict every owned-resource check compares against, and
+    widening it to carry a second, unrelated identifier would touch every route in the app
+    to serve three. So the `sid` is asked for separately, by the handful of routes that
+    need it: the two session-revoke routes, the sessions list, and `DELETE /user`.
+
+    **Not an authorization decision, and it must never become one.** It decodes rather than
+    verifying: signature and expiry still hold (`jwt.decode` enforces both), but the
+    blacklist and `token_type` checks are `get_current_user`'s, running over this same
+    string on the same request. A route that took this without also depending on
+    `get_current_user` would be trusting a claim nothing had authorized - every current
+    caller does, and `test_route_authentication.py` is what would notice if one stopped.
+
+    `None` on two paths that need no distinguishing: a token minted before sessions existed
+    carries no `sid` at all, and one that fails to decode has already been rejected by the
+    dependency beside this one. In both cases the effect is the same - nothing is marked as
+    the current device for that token's remaining minutes.
+    """
+    return token_session_id(token)
 
 
 async def get_current_superuser(current_user: Annotated[dict, Depends(get_current_user)]) -> dict:

@@ -95,6 +95,18 @@ class TokenData(BaseModel):
 
     user_uuid: uuid_pkg.UUID
 
+    # The `user_session` row this token belongs to, carried unchanged across every
+    # rotation. `None` for a token minted before sessions existed - such a token's next
+    # refresh 401s and the diver signs in again, which is a one-time global sign-out on
+    # upgrade and the whole of the compatibility story (there is no shim).
+    #
+    # A field rather than a second return type: `verify_token` runs on every authenticated
+    # request, and widening its return into a discriminated result is the change
+    # `DECISIONS.md` §"A reused refresh token is a `WARNING`" rejected for reshaping the
+    # hottest path in the app. Reading one more claim off a payload already decoded costs
+    # nothing, and `get_current_user` simply does not look at it.
+    session_uuid: uuid_pkg.UUID | None = None
+
 
 # -------------- google auth --------------
 class GoogleUserInfo(BaseModel):

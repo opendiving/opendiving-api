@@ -10,6 +10,7 @@ compose hostname. CI sets it and fails the job if anything skips. See CONTRIBUTI
 """
 
 import logging
+import uuid as uuid_pkg
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -32,6 +33,7 @@ from src.app.models.user import User
 from src.app.services import blob_store
 from tests.conftest import db_available
 from tests.helpers.generators import create_dive, create_user
+from tests.helpers.mocks import fake_request
 
 
 class _EraseSession(AsyncMock):
@@ -59,15 +61,29 @@ def _sql(statement: Any) -> str:
     return str(statement).replace("\n", " ")
 
 
+# The session the caller is signed in with, which `DELETE /user` revokes alongside
+# blacklisting the pair it was handed. Every *other* session on the account is deliberately
+# left alone - see the endpoint's docstring, and `TestEraseUser` below.
+SESSION_UUID = uuid7()
+
+
 class TestEraseUser:
     """The request half. Always the caller's own account - there is no other to target."""
 
     @staticmethod
-    def _call(session: _EraseSession, current_user: dict, *, refresh_token: str | None, response: Any = None):
+    def _call(
+        session: _EraseSession,
+        current_user: dict,
+        *,
+        refresh_token: str | None,
+        response: Any = None,
+        session_uuid: uuid_pkg.UUID | None = SESSION_UUID,
+    ):
         return erase_user(
-            request=Mock(),
+            request=fake_request(),
             response=response or Mock(),
             current_user=current_user,
+            session_uuid=session_uuid,
             db=session,
             access_token="mock_access_token",
             refresh_token=refresh_token,

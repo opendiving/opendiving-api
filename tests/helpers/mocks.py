@@ -15,6 +15,25 @@ from tests.conftest import fake
 GOOGLE_CODE_VERIFIER = "a" * 43
 
 
+def fake_request(ip: str = "1.2.3.4", user_agent: str = "Mozilla/5.0 (X11; Linux x86_64) TestAgent/1.0") -> Mock:
+    """A stand-in for `Request` carrying the two things every auth route now reads off one.
+
+    `test_auth.py` and `test_account_restore.py` each had their own three-line copy of this
+    when `client_ip` was the only reader; `RequestContext` added a second attribute and made
+    the third copy the moment to share it.
+
+    **`headers` has to be a real mapping**, which is the part a bare `Mock()` gets wrong in
+    a way that is hard to read: `.get("user-agent", "")` on a mock answers with another
+    mock, `RequestContext` slices that to its length bound, and the `TypeError` surfaces
+    from inside whatever route is under test rather than pointing at the double. `client` is
+    a mock because `client_ip` only reaches `.host` on it.
+    """
+    request = Mock()
+    request.client = Mock(host=ip)
+    request.headers = {"user-agent": user_agent}
+    return request
+
+
 def google_auth_body(**overrides: Any) -> GoogleAuthRequest:
     """A `POST /auth/google` body whose `redirect_uri` this instance will accept.
 
@@ -123,5 +142,14 @@ def claimed_used_at_sql(mock_db: Any) -> str:
     Enough to assert the `used_at IS NULL` predicate is actually in the `WHERE` clause,
     which is the entire point of the statement - an unconditional `UPDATE` would satisfy
     every other assertion in these tests.
+
+    Searched out of `call_args_list` by table rather than read off `call_args`, which is
+    only ever the *last* statement. The sign-in paths now execute more than one: minting a
+    session runs a cap eviction against `user_session` after the claim, so the last
+    statement is no longer the one being asserted on - and reading it would have made this
+    helper quietly assert something else.
     """
-    return str(mock_db.execute.call_args.args[0])
+    statements = [str(call.args[0]) for call in mock_db.execute.call_args_list if call.args]
+    claims = [statement for statement in statements if "UPDATE authentication_request" in statement]
+    assert claims, f"no authentication_request UPDATE was executed; saw: {statements}"
+    return claims[-1]

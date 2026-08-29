@@ -13,6 +13,7 @@ from .gear_sets import router as gear_sets_router
 from .geocoding import router as geocoding_router
 from .health import router as health_router
 from .passkeys import router as passkeys_router
+from .sessions import router as sessions_router
 from .species import router as species_router
 from .trips import router as trips_router
 from .users import router as users_router
@@ -22,6 +23,7 @@ router.include_router(health_router)
 router.include_router(auth_router)
 router.include_router(users_router)
 router.include_router(passkeys_router)
+router.include_router(sessions_router)
 router.include_router(trips_router)
 router.include_router(courses_router)
 router.include_router(dive_sites_router)

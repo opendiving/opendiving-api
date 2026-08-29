@@ -46,6 +46,7 @@ from src.app.core.security import (
     verify_onboarding_token,
     verify_restore_token,
 )
+from src.app.core.utils.request_context import RequestContext
 from src.app.core.worker.functions import purge_deleted_accounts
 from src.app.models.user import User
 from src.app.schemas.auth import (
@@ -57,7 +58,7 @@ from src.app.schemas.auth import (
 from src.app.services.auth_service import AuthenticatedUser, DeletionPending, OnboardingRequired, resolve_identity
 from tests.conftest import db_available
 from tests.helpers.generators import create_user
-from tests.helpers.mocks import google_auth_body, stub_claim
+from tests.helpers.mocks import fake_request, google_auth_body, stub_claim
 
 USER_UUID = uuid_pkg.uuid4()
 REQUEST_UUID = uuid_pkg.uuid4()
@@ -66,10 +67,11 @@ DELETED_AT = datetime.now(UTC) - timedelta(days=2)
 PURGE_AFTER = DELETED_AT + timedelta(days=settings.ACCOUNT_DELETION_GRACE_DAYS)
 
 
-def _request(ip: str = "1.2.3.4") -> Mock:
-    request = Mock()
-    request.client = Mock(host=ip)
-    return request
+_request = fake_request
+
+# `resolve_identity` records a provider-linked audit event on the one branch that
+# writes a link, so it now needs to know where the request came from.
+CONTEXT = RequestContext(ip="1.2.3.4", user_agent="Mozilla/5.0 (X11; Linux x86_64) TestAgent/1.0")
 
 
 def _pending_row(email: str = "gone@example.com", *, deleted_at: datetime | None = DELETED_AT) -> dict[str, Any]:
@@ -107,7 +109,7 @@ class TestResolveIdentityAgainstADeletedAccount:
         ):
             users.get = AsyncMock(return_value=_pending_row())
 
-            outcome = await resolve_identity(mock_db, provider="email", email="gone@example.com")
+            outcome = await resolve_identity(mock_db, provider="email", email="gone@example.com", context=CONTEXT)
 
             assert isinstance(outcome, DeletionPending)
             assert outcome.purge_after == PURGE_AFTER
@@ -134,7 +136,7 @@ class TestResolveIdentityAgainstADeletedAccount:
             users.get = AsyncMock(return_value=_pending_row(email="new-address@example.com"))
 
             outcome = await resolve_identity(
-                mock_db, provider="google", email="the-old-one@example.com", provider_user_id="g-1"
+                mock_db, provider="google", email="the-old-one@example.com", provider_user_id="g-1", context=CONTEXT
             )
 
             assert isinstance(outcome, DeletionPending)
@@ -152,7 +154,7 @@ class TestResolveIdentityAgainstADeletedAccount:
         ):
             users.get = AsyncMock(return_value=None)
 
-            outcome = await resolve_identity(mock_db, provider="email", email="gone@example.com")
+            outcome = await resolve_identity(mock_db, provider="email", email="gone@example.com", context=CONTEXT)
 
             assert isinstance(outcome, OnboardingRequired)
 
@@ -166,7 +168,7 @@ class TestResolveIdentityAgainstADeletedAccount:
         ):
             users.get = AsyncMock(return_value=_pending_row(deleted_at=None))
 
-            outcome = await resolve_identity(mock_db, provider="email", email="gone@example.com")
+            outcome = await resolve_identity(mock_db, provider="email", email="gone@example.com", context=CONTEXT)
 
             assert isinstance(outcome, DeletionPending)
             assert outcome.purge_after is None
@@ -595,7 +597,7 @@ class TestRestoreAgainstPostgres:
         email, diver_uuid = diver.email, diver.uuid
         db.expunge_all()
 
-        pending = await resolve_identity(async_db, provider="email", email=email)
+        pending = await resolve_identity(async_db, provider="email", email=email, context=CONTEXT)
         assert isinstance(pending, DeletionPending)
 
         token = await create_restore_token(diver_uuid)
@@ -604,4 +606,6 @@ class TestRestoreAgainstPostgres:
                 request=_request(), body=RestoreRequest(restore_token=token), response=Mock(), db=async_db
             )
 
-        assert isinstance(await resolve_identity(async_db, provider="email", email=email), AuthenticatedUser)
+        assert isinstance(
+            await resolve_identity(async_db, provider="email", email=email, context=CONTEXT), AuthenticatedUser
+        )

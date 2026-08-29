@@ -11,7 +11,7 @@ answers the same three from its own resolve site - `services.passkey_service.fin
 
 import uuid as uuid_pkg
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from fastapi import Response
@@ -19,12 +19,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.config import settings
 from ..core.security import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token, create_refresh_token
+from ..core.utils.request_context import RequestContext
+from ..crud.crud_auth_audit_events import record_auth_event
 from ..crud.crud_authentication_providers import crud_authentication_providers
+from ..crud.crud_user_sessions import MAX_LIVE_SESSIONS_PER_USER, evict_stalest_sessions, touch_session
 from ..crud.crud_users import crud_users
+from ..models.user_session import UserSession
+from ..schemas.auth_audit_event import AuthEventType
 from ..schemas.authentication_provider import AuthenticationProviderCreate
 
 
-async def issue_tokens(response: Response, user_uuid: uuid_pkg.UUID) -> dict[str, str]:
+async def issue_tokens(
+    response: Response,
+    user_uuid: uuid_pkg.UUID,
+    *,
+    db: AsyncSession,
+    context: RequestContext,
+    user_id: int,
+    session_uuid: uuid_pkg.UUID | None = None,
+) -> dict[str, str]:
     """Creates a fresh access/refresh token pair for the user with public id
     `user_uuid`, sets the refresh token as an httpOnly cookie on `response`, and
     returns the access token - the common tail end of every flow that signs a user in.
@@ -37,13 +50,35 @@ async def issue_tokens(response: Response, user_uuid: uuid_pkg.UUID) -> dict[str
     liveness check that endpoint now makes does not close that, because the stolen name
     resolves perfectly well to whoever holds it. The same defect signed the *renaming* user
     out permanently. See DECISIONS.md.
+
+    **This is also the one place a `user_session` row is created or continued**, which is
+    what makes "every token-minting path has exactly one session" a property of the code
+    rather than of four call sites remembering. `session_uuid` is the fork: `None` mints a
+    new row (a sign-in on any provider, an account creation, a restore), and a value
+    continues the row a refresh is rotating - stamping `last_used_at` and sliding
+    `expires_at` out to match the cookie that is about to be set.
+
+    Both tokens then carry that row's uuid as `sid`. The refresh half is what
+    `/auth/refresh` checks against the database before it will rotate anything; the access
+    half exists so `GET /user/sessions` can mark one row "This device" without a second
+    credential to keep in step.
     """
     subject = str(user_uuid)
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = await create_access_token(data={"sub": subject}, expires_delta=access_token_expires)
-
-    refresh_token = await create_refresh_token(data={"sub": subject})
     max_age = settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
+    expires_at = datetime.now(UTC) + timedelta(seconds=max_age)
+
+    if session_uuid is None:
+        session_uuid = await _start_session(db, user_id=user_id, context=context, expires_at=expires_at)
+    else:
+        await touch_session(db, session_uuid=session_uuid, expires_at=expires_at)
+        await db.commit()
+
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = await create_access_token(
+        data={"sub": subject}, expires_delta=access_token_expires, session_uuid=session_uuid
+    )
+
+    refresh_token = await create_refresh_token(data={"sub": subject}, session_uuid=session_uuid)
 
     response.set_cookie(
         key="refresh_token",
@@ -60,11 +95,41 @@ async def issue_tokens(response: Response, user_uuid: uuid_pkg.UUID) -> dict[str
     return {"access_token": access_token, "token_type": "bearer"}
 
 
+async def _start_session(
+    db: AsyncSession, *, user_id: int, context: RequestContext, expires_at: datetime
+) -> uuid_pkg.UUID:
+    """Insert one session row, evicting down to the cap first, in one transaction.
+
+    Eviction runs **before** the insert and keeps `MAX_LIVE_SESSIONS_PER_USER - 1` rows, so
+    the account is at the cap and not one over once this one lands. Doing it after would
+    make the new session a candidate for its own eviction on the tie-break, which is the
+    one row that certainly should not go.
+
+    A plain `db.add` rather than `crud_user_sessions.create`, and the reason is the return
+    value: the only thing this needs back is the `uuid`, which `PublicUUIDMixin` generates
+    client-side with `uuid7` at construction. FastCRUD's `create` would read the row back to
+    hand it over, so the round trip buys a value we already hold.
+    """
+    await evict_stalest_sessions(db, user_id=user_id, keep=MAX_LIVE_SESSIONS_PER_USER - 1)
+    session = UserSession(user_id=user_id, expires_at=expires_at, ip=context.ip, user_agent=context.user_agent)
+    db.add(session)
+    # One commit for the eviction and the insert together: an account must never be left
+    # having lost a session to make room for one that then failed to arrive.
+    await db.commit()
+    return session.uuid
+
+
 @dataclass
 class AuthenticatedUser:
-    """An existing account was found for the verified identity - ready to sign in."""
+    """An existing account was found for the verified identity - ready to sign in.
+
+    `provider` is threaded through from whichever resolve site answered, because
+    "sign-in succeeded" is emitted once at the shared funnel and the provider is the one
+    thing the funnel cannot work out for itself.
+    """
 
     user: dict[str, Any]
+    provider: str
 
 
 @dataclass
@@ -116,6 +181,7 @@ async def resolve_identity(
     *,
     provider: str,
     email: str,
+    context: RequestContext,
     provider_user_id: str | None = None,
     name: str | None = None,
     avatar: str | None = None,
@@ -143,6 +209,11 @@ async def resolve_identity(
     the filter, the second would miss on the address, and they would fall through to
     `OnboardingRequired` - and `/auth/complete` would hand them a **second account** while
     the first sat waiting to be purged.
+
+    The implicit link in branch 2 is the *only* provider-linked audit event. The provider
+    row `POST /auth/complete` writes inside its own transaction is deliberately not one:
+    it is part of creating the account, which already has an event, and a second row would
+    record one act twice.
     """
     if provider_user_id is not None:
         existing_link = await crud_authentication_providers.get(
@@ -154,7 +225,7 @@ async def resolve_identity(
                 linked_user = cast(dict[str, Any], linked_user)
                 if linked_user["is_deleted"]:
                     return DeletionPending.for_row(linked_user)
-                return AuthenticatedUser(user=linked_user)
+                return AuthenticatedUser(user=linked_user, provider=provider)
 
     user = await crud_users.get(db=db, email=email)
     if user is not None:
@@ -172,8 +243,22 @@ async def resolve_identity(
                 object=AuthenticationProviderCreate(
                     user_id=user["id"], provider=provider, provider_user_id=provider_user_id
                 ),
+                commit=False,
             )
-        return AuthenticatedUser(user=user)
+            # In the link's own transaction: the event and the row it records land or roll
+            # back together, which is the general rule wherever the event has a write to
+            # join. `crud_authentication_providers.create` would otherwise commit on its
+            # own, so `commit=False` above is what leaves a transaction to join at all.
+            await record_auth_event(
+                db,
+                event_type=AuthEventType.PROVIDER_LINKED,
+                context=context,
+                user_id=user["id"],
+                provider=provider,
+                commit=False,
+            )
+            await db.commit()
+        return AuthenticatedUser(user=user, provider=provider)
 
     return OnboardingRequired(
         email=email, provider=provider, provider_user_id=provider_user_id, name=name, avatar=avatar

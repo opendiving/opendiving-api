@@ -5,7 +5,7 @@ takes effect - directly setting `email` via `PATCH /user` is no longer possible
 """
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import Response
@@ -28,13 +28,9 @@ from src.app.models.authentication_request import AuthenticationRequest
 from src.app.models.user import User
 from src.app.schemas.email_change import EmailChangeRequest, EmailChangeVerifyRequest
 from tests.conftest import db_available, unique_email
-from tests.helpers.mocks import claimed_used_at_sql, stub_claim
+from tests.helpers.mocks import claimed_used_at_sql, fake_request, stub_claim
 
-
-def _request(ip: str = "1.2.3.4") -> Mock:
-    request = Mock()
-    request.client = Mock(host=ip)
-    return request
+_request = fake_request
 
 
 def _used_at(db: Session, request_id: int) -> datetime | None:
