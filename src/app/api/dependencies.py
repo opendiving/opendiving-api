@@ -41,7 +41,7 @@ async def current_session_uuid(token: Annotated[str, Depends(oauth2_scheme)]) ->
     **A sibling of `get_current_user`, deliberately not a change to it.** That function's
     return type is the account dict every owned-resource check compares against, and
     widening it to carry a second, unrelated identifier would touch every route in the app
-    to serve three. So the `sid` is asked for separately, by the handful of routes that
+    to serve four. So the `sid` is asked for separately, by the handful of routes that
     need it: the two session-revoke routes, the sessions list, and `DELETE /user`.
 
     **Not an authorization decision, and it must never become one.** It decodes rather than

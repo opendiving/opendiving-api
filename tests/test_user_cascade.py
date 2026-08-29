@@ -136,8 +136,9 @@ class TestDeletingAUserTakesEverythingWithIt:
                 ),
                 # The *account-tied* audit row, which is the one the cascade is responsible
                 # for. Its user-less sibling carries no FK to follow and is erased by the
-                # purge's by-email arm instead - pinned in `test_account_deletion.py`, which
-                # is where that statement lives.
+                # purge's by-email arm instead - pinned in
+                # `test_auth_audit.py::TestErasureReachesBothArms`, which also asserts the
+                # half this file cannot: that the cascade genuinely does *not* reach it.
                 AuthAuditEvent(
                     event_type=AuthEventType.SIGN_IN_SUCCEEDED,
                     ip="203.0.113.7",

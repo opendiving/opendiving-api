@@ -10781,13 +10781,20 @@ stored) is the cloned-authenticator signal, and rejecting it blocks the clone wh
 — whose counter is ahead — keeps working.
 
 py_webauthn already raises on exactly that comparison inside `verify_authentication_response`, so
-the app's job is only the log line. `_warn_if_counter_regressed` earns it by re-doing the
+the app's job is the *record* of it. `_record_if_counter_regressed` earns that by re-doing the
 stored-vs-presented comparison against the assertion's own `authenticatorData`, **never** by parsing
 the library's exception message — that string is a thing any release can reword, and a security log
 that goes quiet on a dependency bump is worse than none. `WARNING` for the same reason refresh-token
 reuse is one (see *"A reused refresh token is a `WARNING`"*): the app configures no logging of its
 own and `uvicorn` configures only its own loggers, so anything below it is dropped on the floor in
 exactly the session where someone is trying to work out what happened.
+
+**It writes an audit row as well as the line now**, which is also why the function is no longer
+called `_warn_if_counter_regressed`. That `WARNING` level is what put it in the trail at all: the
+criteria selecting an event site are otherwise about *writes*, and this site writes nothing of its
+own — see *"The auth audit trail is persist-only, and its erasure has two arms"*, whose criterion
+(e) exists for this case and the refresh replay. The row commits before `finish_sign_in` raises its
+401, since `async_get_db` does not commit on unwind.
 
 ### One 401 for every way an assertion can fail
 
