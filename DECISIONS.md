@@ -8759,14 +8759,17 @@ because cache hits ask no provider anything, and both are gone when the burst is
 
 ### Test fixtures in a global table are visible to real accounts
 
-The suite's Postgres-backed tests write real rows to the developer's own database and nothing cleans
-them up - `unique_username`'s docstring records that as a deliberate trade, and it is fine for every
-table that came before this one, because those rows hang off a fixture `user_id` and no real account
-can see them.
+The suite's Postgres-backed tests write real rows and nothing cleans them up - `unique_username`'s
+docstring records that as a deliberate trade, and it is fine for every table that came before this
+one, because those rows hang off a fixture `user_id` and no other account can see them.
 
 `species` broke that assumption the moment it existed: a fixture row is in *everyone's* picker. This
-was found the boring way — a developer cleared the catalog by hand, the next `pytest` run put thirty
-rows straight back, and `?q=clownfish` was topped by test data.
+was found the boring way — those rows landed in the developer's own database back then, so a
+developer cleared the catalog by hand, the next `pytest` run put thirty rows straight back, and
+`?q=clownfish` was topped by test data. The suite writes to a database of its own now (*"The suite
+has its own database, and builds it with the migrations"*), which shrinks the blast radius to one
+disposable database and changes nothing about the rule below: within that database a global-table
+fixture is still visible to every account the tests create.
 
 The fix is naming, not cleanup: `create_species` writes `zzfixture-species-<hex>` and the
 `species_name` fixtures write `zzfixture-name-<hex>`, so no query a diver would type can reach them.
@@ -11262,12 +11265,14 @@ The second-order half is not decoration: a cascade stopping one level short woul
 `certification_file`, `dive_dive_site`, `gear_set_item` and `trip_location` silently rather than
 raising, so counting only the ten would pass while they stayed.
 
-One trap in running it. `conftest._ensure_tables` builds the test schema with `create_all`, which
-creates missing tables and **never alters an existing one** — so on a dev database that has not run
-`alembic upgrade head` since this change, the Postgres half fails. That is the correct outcome, not
-a fixture bug: that database really would refuse the delete. And per CONTRIBUTING.md the whole class
-skips silently without `POSTGRES_SERVER=localhost`, so a green run on the host proves nothing until
-you have checked it did not skip.
+One trap in running it, and it used to be two. `conftest._ensure_tables` built the test schema with
+`create_all`, which creates missing tables and never alters an existing one, so the `ondelete` rules
+this revision adds never reached a database that already had the tables and the Postgres half failed
+— correctly, since that database really would have refused the delete. It migrates the suite's own
+database now (*"The suite has its own database, and builds it with the migrations"*), so the rules
+under test are the ones this revision declares. What remains is that per CONTRIBUTING.md the whole
+class skips silently without `POSTGRES_SERVER=localhost`, so a green run on the host proves nothing
+until you have checked it did not skip.
 
 ## Deleting an account is two changes with a fortnight between them
 
