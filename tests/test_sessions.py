@@ -55,7 +55,7 @@ from src.app.models.user_session import UserSession
 from src.app.schemas.user_session import UserSessionReadInternal, to_public_session
 from src.app.services.auth_service import issue_tokens
 from tests.conftest import db_available
-from tests.helpers.mocks import FakeTokenBlacklist, fake_request
+from tests.helpers.mocks import FakeTokenBlacklist, awaited_kwargs, fake_request
 
 CONTEXT = RequestContext(ip="203.0.113.7", user_agent="Mozilla/5.0 (X11; Linux x86_64) TestAgent/1.0")
 
@@ -153,7 +153,7 @@ class TestRevokeOneSession:
             await erase_session(fake_request(), other, _caller(), uuid7(), mock_db)
 
         revoke.assert_awaited_once()
-        assert revoke.await_args.kwargs["session_uuid"] == other
+        assert awaited_kwargs(revoke)["session_uuid"] == other
 
     @pytest.mark.asyncio
     async def test_ownership_is_resolved_before_anything_else(self, mock_db) -> None:
@@ -199,7 +199,7 @@ class TestRevokeOtherSessions:
 
             await erase_other_sessions(fake_request(), _caller(), mine, mock_db)
 
-        assert revoke.await_args.kwargs["except_uuid"] == mine
+        assert awaited_kwargs(revoke)["except_uuid"] == mine
 
     @pytest.mark.asyncio
     async def test_one_event_covers_the_whole_action(self, mock_db) -> None:

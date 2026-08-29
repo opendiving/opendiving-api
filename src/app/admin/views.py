@@ -86,8 +86,10 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         allowed_actions={"view"},
     )
 
-    # Both auth tables are registered **view-only**, and neither is one of the six above -
-    # the reason is different, so it is written here rather than borrowed.
+    # Both auth tables are registered **view-only**, and for a reason of their own rather
+    # than either of the two already written down below - not the hard-delete-cascade
+    # argument the six diver-owned resources take, and not the everybody's-row argument
+    # `Species` takes.
     #
     # A `user_session` row is a live credential's backing state. A panel that could create
     # one would be a panel that mints a session for an account, and one that could edit one

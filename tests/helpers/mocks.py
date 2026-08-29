@@ -15,6 +15,19 @@ from tests.conftest import fake
 GOOGLE_CODE_VERIFIER = "a" * 43
 
 
+def awaited_kwargs(recorder: Any, index: int = -1) -> dict[str, Any]:
+    """The keyword arguments of one awaited call, narrowed for mypy and for the reader.
+
+    `AsyncMock.await_args` is typed `_Call | None`, so reading `.kwargs` off it does not
+    type-check - and asserting it is not `None` first is worth doing anyway: a call that
+    never happened then fails as "the mock was never awaited" rather than as an
+    `AttributeError` on `None`, which names neither the mock nor the expectation.
+    """
+    calls = recorder.await_args_list
+    assert calls, "the mock was never awaited"
+    return dict(calls[index].kwargs)
+
+
 def fake_request(ip: str = "1.2.3.4", user_agent: str = "Mozilla/5.0 (X11; Linux x86_64) TestAgent/1.0") -> Mock:
     """A stand-in for `Request` carrying the two things every auth route now reads off one.
 

@@ -7,7 +7,8 @@ There is a single entry point into the app: email, Google, or a passkey - no pas
 sign up flow. See `src/app/api/v1/auth.py` for the endpoints (`/auth/email/request`,
 `/auth/email/verify`, `/auth/email/verify-code`, `/auth/google`, `/auth/passkey/options`,
 `/auth/passkey/verify`, `/auth/complete`, `/auth/restore`), `src/app/api/v1/passkeys.py` for
-managing the passkeys on an account, and `DECISIONS.md` for the full design rationale.
+managing the passkeys on an account, `src/app/api/v1/sessions.py` for listing and revoking the
+devices signed in to one, and `DECISIONS.md` for the full design rationale.
 
 The email path offers **two ways to finish, backed by one record**. `POST /auth/email/request`
 emails a magic link *and* a six-digit code, and either completes the sign-in - whichever is used
@@ -322,21 +323,36 @@ sequenceDiagram
 
 #### 7. Session refresh & logout
 
+Refresh **rotates**: the presented cookie is spent and an unrelated replacement is minted, so a
+leaked cookie has a much shorter useful life than the `REFRESH_TOKEN_EXPIRE_DAYS` window. What
+survives that rotation is the `sid` claim, which names the `user_session` row rather than the
+issuance — see *Sessions* below for the row and what checks it.
+
 ```mermaid
 sequenceDiagram
     participant FE as Frontend
     participant API as API
+    participant DB as Database
 
     Note over FE,API: Access token expired, httpOnly\nrefresh_token cookie still valid
     FE->>API: POST /auth/refresh (cookie sent automatically)
-    API->>API: Verify refresh token
-    API-->>FE: New access_token
+    API->>API: Verify refresh token (signature, expiry,\ntoken_type, not blacklisted)
+    API->>DB: Account still live? (uuid, is_deleted = false)
+    API->>DB: Session live? (sid unrevoked, unexpired,\nand belongs to this subject)
+    Note over API,DB: Both asked *before* the token is spent,\nso a 401 writes nothing
+    API->>DB: Blacklist the presented token
+    API->>DB: Stamp last_used_at, slide expires_at
+    API-->>FE: New access_token + new refresh cookie,\ncarrying the same sid
 
     Note over FE,API: User signs out
     FE->>API: POST /auth/logout (Bearer access_token)
-    API->>API: Blacklist access + refresh token
+    API->>DB: Blacklist access + refresh token,\nstamp revoked_at on this session
     API-->>FE: refresh_token cookie cleared
 ```
+
+Every way that exchange can fail answers the same 401 with the same body — a revoked session, an
+expired one, another account's, a deleted account and unparseable garbage are deliberately
+indistinguishable, so the endpoint is never an oracle for whether a given cookie was ever real.
 
 #### 8. Changing an account's email
 
@@ -427,6 +443,68 @@ The restore token is its own `TokenType`, is single-use, and expires with
 sign in, because a restore link sitting in an inbox for a fortnight would be a standing key to an
 account its owner asked to have destroyed. See `DECISIONS.md` for the full reasoning, including how
 the row lock settles the race with the purge job.
+
+### Sessions
+
+Every sign-in, account creation and restore writes a `user_session` row, and both tokens in the pair
+carry its public uuid as a `sid` claim. That claim is what makes a session a thing you can see and
+end:
+
+- `GET /user/sessions` - the caller's live sessions, most recently used first. Each row carries when
+  it was created, when it was last used, the IP it was seen from, the raw `User-Agent` string, and
+  `current` for the one the request itself was made with.
+- `DELETE /user/session/{uuid}` - sign one other device out. Someone else's uuid is a 404, exactly
+  as for one that does not exist; **the caller's own session is a 409**, because ending your own
+  session is what `POST /auth/logout` is - it also has to clear the cookie and blacklist the
+  presented pair.
+- `DELETE /user/sessions` - sign every *other* device out, and report how many that was.
+
+Three things are worth knowing about what a revoke does.
+
+**It ends the refresh, not the access token.** A revoked row cannot rotate anything, so the device
+is signed out at its next `/auth/refresh`; the access token it already holds stays valid for up to
+`ACCESS_TOKEN_EXPIRE_MINUTES`. That is the same shape `DELETE /user` has always had.
+
+**`expires_at` is an inactivity window, not a session length.** Each refresh stamps `last_used_at`
+and slides the expiry out by `REFRESH_TOKEN_EXPIRE_DAYS`, so a browser in daily use never expires
+and one left alone for that long does. Changing the setting changes both.
+
+**Live sessions are capped at 100 per account**, and creating one past the cap revokes the
+least-recently-used row - by `last_used_at`, never by creation order, so a browser in daily use is
+never signed out to make room for a dormant one.
+
+`sid` does **not** replace `jti`. The `jti` identifies one issuance and is what makes blacklisting a
+token by value a per-issuance revocation; `sid` identifies the device and is carried unchanged
+across every rotation. Detecting a replayed refresh token still revokes nothing - it records an
+event and logs a line, as before.
+
+**Upgrading signs everyone out once.** A refresh cookie minted before this feature carries no `sid`,
+so its next refresh answers 401 and the diver signs in again. There is no compatibility shim, and
+nothing else about the account is affected.
+
+### The auth audit trail
+
+Auth events are recorded in `auth_audit_event`: sign-ins with their provider, account creation and
+restore, provider links, passkeys added and removed, email changes, deletion requests, logouts,
+session revocations, and the two failures the app considers rare and meaningful - a replayed refresh
+token and a regressed passkey signature counter.
+
+A row carries when, where (the request's IP and `User-Agent`) and who - an account id where the
+request had already established one, and an email address for the three genuinely pre-account events
+(an auth request created, a sign-in code failed, onboarding started). It **never** carries a token,
+a token hash, a sign-in code or its digest.
+
+Nothing in the API returns these rows; they are visible to an operator through the admin panel at
+`/admin`, registered read-only. Retention is fixed rather than configurable: 90 days for events tied
+to an account, and 7 days for the user-less ones - the same window an `authentication_request` row
+already gets, since those are the rows that name an address belonging to somebody who may never have
+signed up. Deleting an account erases its events with it, on both arms: the account-tied rows follow
+the foreign key, and the user-less ones are deleted by email.
+
+**One thing to get right in your deployment.** The `ip` on both tables is whatever `client_ip`
+resolves, so an instance behind a reverse proxy that has not set `TRUSTED_PROXY_IPS` records the
+*proxy's* address on every row - the same misconfiguration the install bundle's `example.env`
+already warns about for rate limiting, with the same fix.
 
 Sign-in emails go out over SMTP - any relay works, and any provider will give you one. Set these in
 `src/.env`:

@@ -41,6 +41,7 @@ from src.app.models.user import User
 from src.app.models.user_session import UserSession
 from src.app.schemas.auth_audit_event import AuthEventType
 from tests.conftest import db_available, unique_email
+from tests.helpers.mocks import awaited_kwargs
 
 CONTEXT = RequestContext(ip="203.0.113.7", user_agent="Mozilla/5.0 (X11; Linux x86_64) TestAgent/1.0")
 
@@ -166,7 +167,7 @@ class TestWhichSitesWriteAnEvent:
             await request_email_link(_request(), EmailAuthRequest(email="Someone@Example.com"), mock_db)
 
         recorder.assert_awaited_once()
-        written = recorder.await_args.kwargs
+        written = awaited_kwargs(recorder)
         assert written["event_type"] is AuthEventType.AUTH_REQUEST_CREATED
         assert "user_id" not in written or written["user_id"] is None
         assert written["email"] == "someone@example.com"
@@ -202,7 +203,7 @@ class TestWhichSitesWriteAnEvent:
 
         assert self._events(recorder) == [AuthEventType.SIGN_IN_CODE_FAILED]
         # The default, which is what commits it - and the reason the default is `True`.
-        assert recorder.await_args.kwargs.get("commit", True) is True
+        assert awaited_kwargs(recorder).get("commit", True) is True
 
     @pytest.mark.asyncio
     async def test_a_wrong_code_records_no_digest_of_it(self, mock_db) -> None:
@@ -234,7 +235,7 @@ class TestWhichSitesWriteAnEvent:
                     _request(), EmailCodeVerifyRequest(request_id=uuid7(), code="123456"), Mock(), mock_db
                 )
 
-        recorded = str(recorder.await_args.kwargs)
+        recorded = str(awaited_kwargs(recorder))
         assert "123456" not in recorded
         assert "0" * 64 not in recorded
 
@@ -259,8 +260,8 @@ class TestWhichSitesWriteAnEvent:
             )
 
         assert self._events(recorder) == [AuthEventType.SIGN_IN_SUCCEEDED]
-        assert recorder.await_args.kwargs["provider"] == "passkey"
-        assert recorder.await_args.kwargs["user_id"] == 7
+        assert awaited_kwargs(recorder)["provider"] == "passkey"
+        assert awaited_kwargs(recorder)["user_id"] == 7
 
     @pytest.mark.asyncio
     async def test_onboarding_writes_a_user_less_event(self, mock_db) -> None:
@@ -285,8 +286,8 @@ class TestWhichSitesWriteAnEvent:
             )
 
         assert self._events(recorder) == [AuthEventType.ONBOARDING_STARTED]
-        assert recorder.await_args.kwargs["email"] == "new@example.com"
-        assert recorder.await_args.kwargs.get("user_id") is None
+        assert awaited_kwargs(recorder)["email"] == "new@example.com"
+        assert awaited_kwargs(recorder).get("user_id") is None
 
     @pytest.mark.asyncio
     async def test_being_offered_a_restore_writes_one(self, mock_db) -> None:
@@ -307,7 +308,7 @@ class TestWhichSitesWriteAnEvent:
             await _start_onboarding_or_sign_in(Mock(), DeletionPending.for_row(row), db=mock_db, context=CONTEXT)
 
         assert self._events(recorder) == [AuthEventType.RESTORE_OFFERED]
-        assert recorder.await_args.kwargs["user_id"] == 9
+        assert awaited_kwargs(recorder)["user_id"] == 9
 
 
 class TestTheNamedExclusions:
@@ -413,7 +414,7 @@ class TestTheNamedExclusions:
         assert events == [AuthEventType.ACCOUNT_CREATED]
         # In the account's own transaction, so a creation that fails leaves no row claiming
         # it succeeded.
-        assert recorder.await_args.kwargs["commit"] is False
+        assert awaited_kwargs(recorder)["commit"] is False
 
     @pytest.mark.asyncio
     async def test_superseding_a_live_request_writes_nothing_of_its_own(self, mock_db) -> None:
@@ -495,8 +496,8 @@ class TestTheRefreshReplayThreshold:
             await _warn_if_revoked("a-token", mock_db, CONTEXT)
 
         recorder.assert_awaited_once()
-        assert recorder.await_args.kwargs["event_type"] is AuthEventType.REFRESH_REPLAY_DETECTED
-        assert recorder.await_args.kwargs["user_id"] == 7
+        assert awaited_kwargs(recorder)["event_type"] is AuthEventType.REFRESH_REPLAY_DETECTED
+        assert awaited_kwargs(recorder)["user_id"] == 7
 
     @pytest.mark.asyncio
     async def test_a_replay_for_a_purged_account_still_writes_a_user_less_row(self, mock_db) -> None:
@@ -516,7 +517,7 @@ class TestTheRefreshReplayThreshold:
 
             await _warn_if_revoked("a-token", mock_db, CONTEXT)
 
-        assert recorder.await_args.kwargs["user_id"] is None
+        assert awaited_kwargs(recorder)["user_id"] is None
 
     @pytest.mark.asyncio
     async def test_a_token_that_was_never_revoked_is_silent(self, mock_db, caplog) -> None:
