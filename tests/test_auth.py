@@ -38,7 +38,13 @@ from src.app.schemas.auth import (
     ProfileCompletionRequest,
 )
 from src.app.services.user_avatars import StoredAvatar
-from tests.helpers.mocks import GOOGLE_CODE_VERIFIER, claimed_used_at_sql, google_auth_body, stub_claim
+from tests.helpers.mocks import (
+    GOOGLE_CODE_VERIFIER,
+    claimed_used_at_sql,
+    fake_request,
+    google_auth_body,
+    stub_claim,
+)
 
 # Every sign-in path subjects its tokens to this, not to the account's username - see
 # `services.auth_service.issue_tokens`.
@@ -49,10 +55,8 @@ USER_UUID = uuid_pkg.uuid4()
 REQUEST_UUID = uuid_pkg.uuid4()
 
 
-def _request(ip: str = "1.2.3.4") -> Mock:
-    request = Mock()
-    request.client = Mock(host=ip)
-    return request
+# Shared with `test_account_restore.py`, which had the identical copy of it.
+_request = fake_request
 
 
 def _created_row(request_uuid: uuid_pkg.UUID = REQUEST_UUID) -> Mock:
@@ -477,9 +481,16 @@ class TestVerifyEmailLink:
             assert outcome.status == "authenticated"
             assert outcome.access_token is not None
             response.set_cookie.assert_called_once()
-            mock_db.execute.assert_called_once()
+            # The claim runs exactly once - two would mean the single-use gate had been
+            # opened twice on one request. Counted by table rather than by total statements,
+            # which is no longer one: minting the session runs a cap eviction of its own.
+            claims = [
+                call.args[0]
+                for call in mock_db.execute.call_args_list
+                if call.args and "UPDATE authentication_request" in str(call.args[0])
+            ]
+            assert len(claims) == 1
             assert "used_at IS NULL" in claimed_used_at_sql(mock_db)
-            mock_db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_new_user_gets_onboarding_session(self, mock_db):
@@ -1111,7 +1122,13 @@ class TestCompleteProfile:
             assert provider_kwargs["object"].provider == "google"
             assert provider_kwargs["object"].provider_user_id == "g-1"
             assert provider_kwargs["commit"] is False
-            mock_db.commit.assert_called_once()
+            # Two commits, and which is which is the assertion: the account transaction -
+            # user, provider link and the account-created audit event, all `commit=False`
+            # above so they land together - and then the session `issue_tokens` mints. A
+            # third would mean something inside the account transaction had started
+            # committing on its own, which is exactly what the `commit=False` kwargs above
+            # exist to prevent.
+            assert mock_db.commit.await_count == 2
             mock_blacklist.assert_called_once_with("good", mock_db)
             response.set_cookie.assert_called_once()
 

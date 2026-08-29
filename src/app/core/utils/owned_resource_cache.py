@@ -26,7 +26,7 @@ class OwnedResourceCache[InternalT, PublicT]:
 
     Resources whose read/list logic does more than a straight `get_multi`/`get` plus a shape
     conversion don't fit this shape and should keep their own hand-written cache helpers
-    instead of forcing themselves through this factory. The six that opt out, and why:
+    instead of forcing themselves through this factory. The seven that opt out, and why:
 
     - `dives.py` - enriches each row with related trips/courses/dive sites/gear and supports
       several extra filters.
@@ -50,6 +50,13 @@ class OwnedResourceCache[InternalT, PublicT]:
       rows registration lets an account accumulate, and nothing anywhere embeds a credential
       - so there is no page to cache and no invalidation obligation to get wrong. Caching it
       would be inventing a thing that can go stale.
+    - `sessions.py` - also uncached, but for a reason neither of the others has: caching
+      `GET /user/sessions` would be a **correctness** bug rather than a staleness trade. The
+      response carries `current: bool` per row, resolved from the requesting token's `sid`,
+      so it varies by *credential* and not merely by user - and every key here is
+      user-scoped by design (`user_{id}_...`, which is what pattern invalidation depends
+      on). One device's "This device" marker would be served to another. The rows are also
+      unpaginated, capped and embedded by nothing, so there is no page worth the risk.
 
     In each of the first four the enrichment is a second query whose results have to be
     zipped back into the page before conversion, which is precisely the step this factory has

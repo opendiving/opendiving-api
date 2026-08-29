@@ -1,3 +1,4 @@
+from .auth_audit_event import AuthAuditEvent
 from .authentication_provider import AuthenticationProvider
 from .authentication_request import AuthenticationRequest
 from .certification import Certification
@@ -22,4 +23,5 @@ from .trip import Trip
 from .trip_location import TripLocation
 from .user import User
 from .user_dive_stats import UserDiveStats
+from .user_session import UserSession
 from .webauthn_credential import WebauthnCredential

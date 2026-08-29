@@ -9,6 +9,9 @@ from arq.worker import Worker
 from sqlalchemy import CursorResult, and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ...crud.crud_auth_audit_events import expired_event_predicate
+from ...crud.crud_user_sessions import swept_session_predicate
+from ...models.auth_audit_event import AuthAuditEvent
 from ...models.authentication_request import AuthenticationRequest
 from ...models.certification import Certification
 from ...models.certification_file import CertificationFile
@@ -16,6 +19,7 @@ from ...models.dive_file import DiveFile
 from ...models.gear_item import GearItem
 from ...models.gear_service_schedule import GearServiceSchedule
 from ...models.user import User
+from ...models.user_session import UserSession
 from ...schemas.gear_service import ServiceStatus
 from ...services import blob_store
 from ...services.email_service import send_gear_service_digest_email
@@ -51,6 +55,31 @@ configure_logging(settings.LOG_LEVEL)
 # invalid rather than confirming - the same answer `check_email_change_link` already
 # gives that link, since it rejects a used row outright.
 AUTHENTICATION_REQUEST_RETENTION = timedelta(days=7)
+
+# How long an audit event is kept, in two tiers - and the split is the substance rather than
+# a refinement of it.
+#
+# **Ninety days for a row tied to an account.** Long enough to answer "when did somebody
+# last sign in to this, and from where" after the fact, which is the whole reason an auth
+# trail exists, and bounded because storing an IP indefinitely is storing an online
+# identifier indefinitely.
+#
+# **Seven days for a row with `user_id IS NULL`.** Those are the genuinely pre-account
+# events - an auth request created, a sign-in code failed, onboarding started - and each
+# carries an email address typed by somebody who may never have signed up. Recording "an
+# auth request for `<email>`" puts in the operator's database exactly what
+# `authentication_request.email` already puts there, which is a defensible equivalence only
+# if it holds for *duration* as well as for content: an address that survives thirteen times
+# longer here than it does there is a new retention decision wearing an old one's clothes.
+# So this tier matches `AUTHENTICATION_REQUEST_RETENTION` deliberately, and the two should
+# move together or not at all.
+#
+# Neither is a `Settings` field, following `AUTHENTICATION_REQUEST_RETENTION`'s own
+# deliberate non-configurability - and with the same second benefit: no new setting means
+# nothing to add to the install bundle's `example.env` or its configuration reference,
+# which are in a different repository.
+AUTH_AUDIT_RETENTION = timedelta(days=90)
+AUTH_AUDIT_ANONYMOUS_RETENTION = AUTHENTICATION_REQUEST_RETENTION
 
 
 # -------- background tasks --------
@@ -126,6 +155,80 @@ async def purge_expired_authentication_requests(ctx: dict[Any, Any]) -> str:
     return f"Purged {purged} expired authentication request(s)"
 
 
+async def purge_expired_user_sessions(ctx: dict[Any, Any]) -> str:
+    """Delete `user_session` rows that can no longer authenticate anything - past their own
+    `expires_at`, or revoked.
+
+    The criterion is exactly the complement of the liveness predicate the refresh path and
+    the list endpoint share (`crud_user_sessions._live`), which is why both live in that one
+    module: the two drifting apart would either strand rows forever or delete live ones.
+
+    No retention margin, unlike `purge_expired_authentication_requests` - and the asymmetry
+    is the point. That table's margin protects a documented *leniency*, where a spent row is
+    still read to explain itself; nothing here reads a dead session for any reason. A
+    revoked row is deleted rather than kept as a tombstone because the audit trail is what
+    records that a session was revoked, and this table is not a second copy of it.
+
+    `expires_at` is `DateTime(timezone=True)`, so the comparison is UTC-aware for the reason
+    `purge_expired_tokens` spells out.
+
+    One `DELETE` reporting its own `rowcount`, like the sibling above it: Core has no
+    objection to matching nothing, so there is no count-then-delete window to open.
+    """
+    now = datetime.now(UTC)
+    async with local_session() as db:
+        result = cast(CursorResult, await db.execute(delete(UserSession).where(swept_session_predicate(now))))
+        # Read before the commit: the count belongs to the statement, not the transaction.
+        purged = result.rowcount
+        await db.commit()
+
+    if purged == 0:
+        logging.info("No dead sessions to purge")
+        return "No dead sessions to purge"
+
+    logging.info("Purged %d dead session(s)", purged)
+    return f"Purged {purged} dead session(s)"
+
+
+async def purge_expired_auth_audit_events(ctx: dict[Any, Any]) -> str:
+    """Delete `auth_audit_event` rows past their tier's retention.
+
+    Two tiers in one statement - see `AUTH_AUDIT_RETENTION` and
+    `AUTH_AUDIT_ANONYMOUS_RETENTION` for why an account-tied row lives thirteen times longer
+    than a user-less one, and why the shorter number is not independently chosen.
+
+    This is the *only* thing that bounds a user-less row. The account purge's by-email arm
+    reaches the ones whose address later became an account and was then deleted; every other
+    address that was typed into a sign-in form and never went anywhere is bounded here and
+    nowhere else - the same division `authentication_request` already has, where the cron is
+    the primary mechanism and the per-account delete covers what is younger than it.
+
+    Both cutoffs come from one `now`, so a single sweep reasons about a single instant.
+    """
+    now = datetime.now(UTC)
+    async with local_session() as db:
+        result = cast(
+            CursorResult,
+            await db.execute(
+                delete(AuthAuditEvent).where(
+                    expired_event_predicate(
+                        account_cutoff=now - AUTH_AUDIT_RETENTION,
+                        anonymous_cutoff=now - AUTH_AUDIT_ANONYMOUS_RETENTION,
+                    )
+                )
+            ),
+        )
+        purged = result.rowcount
+        await db.commit()
+
+    if purged == 0:
+        logging.info("No expired auth audit events to purge")
+        return "No expired auth audit events to purge"
+
+    logging.info("Purged %d expired auth audit event(s)", purged)
+    return f"Purged {purged} expired auth audit event(s)"
+
+
 # One sweep's worth of accounts. The work per account is a cascade delete over every dive,
 # site, gear item and c-card the diver ever had - user 1 on one developer's machine carries
 # 531 dives and 147 dive sites - so an unbounded batch is a job that can hold locks for
@@ -195,10 +298,19 @@ async def _purge_one_account(db: AsyncSession, *, user_id: int, email: str, cuto
     follow. Nothing short of storing every historical address would close that, and the
     seven-day sweep bounds it anyway.
 
+    **`auth_audit_event` needs the identical second arm, and for the identical reason.**
+    Its account-tied rows go down the FK cascade with the `DELETE FROM "user"` below, but
+    the pre-account ones - auth request created, sign-in code failed, onboarding started -
+    are written with `user_id IS NULL` on purpose (`request_email_link` structurally cannot
+    know whether an account exists, and making it find out would be the enumeration
+    guarantee reversed), so no cascade will ever reach them. Without this statement, "audit
+    rows are erased with the account" would be false for exactly the rows that name an
+    address - and it is partial in the same way, and bounded by the same kind of sweep.
     """
     keys = await _collect_stored_file_keys(db, user_id)
 
     await db.execute(delete(AuthenticationRequest).where(AuthenticationRequest.email == email))
+    await db.execute(delete(AuthAuditEvent).where(AuthAuditEvent.email == email))
     result = cast(
         CursorResult,
         await db.execute(
@@ -211,8 +323,8 @@ async def _purge_one_account(db: AsyncSession, *, user_id: int, email: str, cuto
         ),
     )
     if result.rowcount == 0:
-        # Rolls back the `authentication_request` delete above with it - a restored account
-        # keeps its sign-in history like any other.
+        # Rolls back both by-email deletes above with it - a restored account keeps its
+        # sign-in history and its audit trail like any other.
         await db.rollback()
         logging.info("Account %d was restored before the purge reached it; nothing deleted", user_id)
         return False

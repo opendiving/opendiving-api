@@ -4,8 +4,10 @@ from arq.cron import cron
 from ...core.config import settings
 from .functions import (
     purge_deleted_accounts,
+    purge_expired_auth_audit_events,
     purge_expired_authentication_requests,
     purge_expired_tokens,
+    purge_expired_user_sessions,
     send_gear_service_digests,
     shutdown,
     startup,
@@ -24,6 +26,14 @@ class WorkerSettings:
         # restart loop costs nothing but a no-op DELETE. Two tiny statements against
         # different tables don't contend, so they share the hour mark.
         cron(purge_expired_authentication_requests, minute=0, run_at_startup=True),
+        # Both new sweeps join the same hour mark on the same criterion the comment above
+        # states: idempotent housekeeping that deletes only rows already past their own
+        # expiry (or, for a session, already revoked), so a restart loop costs a no-op
+        # `DELETE`. Neither destroys anything a diver could ask for back - a dead session
+        # cannot authenticate and an expired audit row has aged out of its retention - which
+        # is what keeps them on this side of the line `purge_deleted_accounts` sits on.
+        cron(purge_expired_user_sessions, minute=0, run_at_startup=True),
+        cron(purge_expired_auth_audit_events, minute=0, run_at_startup=True),
         # Hourly, so `ACCOUNT_DELETION_GRACE_DAYS=0` behaves the way an operator setting
         # it to zero expects, and at :30 so it doesn't contend with the two sweeps on the
         # hour mark. No `run_at_startup`, and that is the difference that matters: those

@@ -1,5 +1,6 @@
 from crudadmin import CRUDAdmin
 
+from ..models.auth_audit_event import AuthAuditEvent
 from ..models.certification import Certification
 from ..models.course import Course
 from ..models.dive import Dive
@@ -19,6 +20,8 @@ from ..models.trip import Trip
 from ..models.trip_location import TripLocation
 from ..models.user import User
 from ..models.user_dive_stats import UserDiveStats
+from ..models.user_session import UserSession
+from ..schemas.auth_audit_event import AuthAuditEventCreateInternal
 from ..schemas.certification import CertificationCreateInternal, CertificationUpdate
 from ..schemas.course import CourseCreateInternal, CourseUpdate
 from ..schemas.dive import DiveCreateInternal, DiveUpdateInternal
@@ -47,6 +50,7 @@ from ..schemas.trip import TripCreateInternal, TripUpdate
 from ..schemas.trip_location import TripLocationCreate, TripLocationUpdate
 from ..schemas.user import UserAdminUpdate, UserCreateInternal
 from ..schemas.user_dive_stats import UserDiveStatsUpdate
+from ..schemas.user_session import UserSessionCreateInternal
 
 
 def register_admin_views(admin: CRUDAdmin) -> None:
@@ -79,6 +83,37 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         model=UserDiveStats,
         create_schema=UserDiveStatsUpdate,
         update_schema=UserDiveStatsUpdate,
+        allowed_actions={"view"},
+    )
+
+    # Both auth tables are registered **view-only**, and for a reason of their own rather
+    # than either of the two already written down below - not the hard-delete-cascade
+    # argument the six diver-owned resources take, and not the everybody's-row argument
+    # `Species` takes.
+    #
+    # A `user_session` row is a live credential's backing state. A panel that could create
+    # one would be a panel that mints a session for an account, and one that could edit one
+    # could push `expires_at` out or clear `revoked_at`, which is un-revoking a device the
+    # diver deliberately signed out. Deleting one is not dangerous so much as pointless: the
+    # revoke path is `DELETE /user/session/{uuid}` and the cron sweep removes the row after.
+    # `AuthAuditEvent` is the stronger case of the same argument - an audit trail whose rows
+    # can be edited or removed by hand is worth nothing as evidence, which is the reasoning
+    # the account purge already applies to `admin_audit_log` from the other direction.
+    #
+    # `UserSession` reaching this without a `"delete"` is legal only because it is exempt in
+    # `NOT_A_DIVERS_OWN_RESOURCE`; `test_admin_config.py` derives its parametrize list from
+    # that registry and would otherwise *require* `"create"` and `"update"` here.
+    admin.add_view(
+        model=UserSession,
+        create_schema=UserSessionCreateInternal,
+        update_schema=UserSessionCreateInternal,
+        allowed_actions={"view"},
+    )
+
+    admin.add_view(
+        model=AuthAuditEvent,
+        create_schema=AuthAuditEventCreateInternal,
+        update_schema=AuthAuditEventCreateInternal,
         allowed_actions={"view"},
     )
 

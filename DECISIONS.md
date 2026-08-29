@@ -10781,13 +10781,20 @@ stored) is the cloned-authenticator signal, and rejecting it blocks the clone wh
 — whose counter is ahead — keeps working.
 
 py_webauthn already raises on exactly that comparison inside `verify_authentication_response`, so
-the app's job is only the log line. `_warn_if_counter_regressed` earns it by re-doing the
+the app's job is the *record* of it. `_record_if_counter_regressed` earns that by re-doing the
 stored-vs-presented comparison against the assertion's own `authenticatorData`, **never** by parsing
 the library's exception message — that string is a thing any release can reword, and a security log
 that goes quiet on a dependency bump is worse than none. `WARNING` for the same reason refresh-token
 reuse is one (see *"A reused refresh token is a `WARNING`"*): the app configures no logging of its
 own and `uvicorn` configures only its own loggers, so anything below it is dropped on the floor in
 exactly the session where someone is trying to work out what happened.
+
+**It writes an audit row as well as the line now**, which is also why the function is no longer
+called `_warn_if_counter_regressed`. That `WARNING` level is what put it in the trail at all: the
+criteria selecting an event site are otherwise about *writes*, and this site writes nothing of its
+own — see *"The auth audit trail is persist-only, and its erasure has two arms"*, whose criterion
+(e) exists for this case and the refresh replay. The row commits before `finish_sign_in` raises its
+401, since `async_get_db` does not commit on unwind.
 
 ### One 401 for every way an assertion can fail
 
@@ -10804,13 +10811,18 @@ submissions of one assertion advances the row, and only that one mints a session
 filtered `update` cannot express it — see *"A filter on a FastCRUD `update` is a `count()`, not an
 atomic condition"*.
 
-### `GET /user/passkeys` is not cached, which makes it the fifth `OwnedResourceCache` opt-out
+### `GET /user/passkeys` is not cached, which makes it the sixth `OwnedResourceCache` opt-out
 
 Every other owned resource goes through that factory. This one is unpaginated, a handful of rows,
 and embedded by nothing anywhere — so there is no page worth caching and no invalidation obligation
-to get wrong. Caching it would be inventing a thing that can go stale. The other four opt out for
-the opposite reason (their reads enrich rows with a second query); the class docstring lists all
-five.
+to get wrong. Caching it would be inventing a thing that can go stale. Four of the others opt out
+for the opposite reason (their reads enrich rows with a second query), `courses.py` for an ordering
+the factory cannot express, and `sessions.py` because *its* response varies by credential rather
+than by user; the class docstring lists all seven.
+
+Both ordinals in this heading and paragraph were stale before they were corrected here — written
+when there were five, left alone when courses became the sixth, and only re-derived when sessions
+arrived to make seven. Prefer counting the docstring's list to trusting a number written beside it.
 
 The list's own `limit` is `_LIST_LIMIT`, deliberately *above* `PASSKEY_MAX_CREDENTIALS_PER_USER`
 rather than equal to it. The cap is enforced at registration, so lowering the setting afterwards
@@ -12640,3 +12652,255 @@ exists, and a missing command exits non-zero-but-not-2 — non-blocking, per the
 The guard would have gone quiet in the primary checkout too, not just the worktrees. The same
 mechanism is why `settings.json` needs no cleanup step: it is untracked *and* deleted here, so a
 pull removes it from every other checkout on its own.
+
+## Refresh tokens grew a session behind them, and `sid` is what survives rotation
+
+A refresh token was a stateless JWT: `create_refresh_token` signed `{sub, exp, jti, token_type}` and
+nothing was written anywhere. Three questions therefore had no answer at all rather than a slow one
+— "which devices am I signed in on", "sign my other devices out", and "which of these is *this* one"
+— and the only token table was `token_blacklist`, a deny-list with four columns and deliberately no
+`user_id`.
+
+`user_session` is that missing state, and the whole design turns on one distinction:
+
+- **`jti` identifies an issuance.** It is what makes revoking a token by value a per-issuance
+  revocation, and it changes on every rotation (see *"Every revocable token carries a `jti`"*).
+- **`sid` identifies a device.** It is minted once with the session row and carried **unchanged**
+  across every rotation, which is what gives a session continuity that spend-then-mint destroys.
+
+That second identifier is the prerequisite *"A reused refresh token is a `WARNING`"* recorded as
+missing for its **Tier 3 — family revocation**, and it has now arrived. **Tier 3 itself is still not
+implemented**, deliberately: a detected replay records an event and logs a line, exactly as before,
+and revokes nothing. Read that section's *What was deliberately not done* as still current except
+for the sentence saying no lineage identifier exists.
+
+### The row is created in `issue_tokens`, which is why "one session per mint" is not a checklist
+
+Every path that signs anyone in already funnels through `issue_tokens` — the shared
+`_start_onboarding_or_sign_in` (all four providers), `POST /auth/complete`, `POST /auth/restore`,
+and `POST /auth/refresh`. Putting session creation anywhere else would have made "every minting path
+creates exactly one session" a property of four call sites remembering; putting it *there* makes it
+a property of the function they all reach. `session_uuid=None` starts a row, a value continues one.
+
+The eviction inside it has a trap worth recording, because it was written the wrong way round first
+and every count-based assertion still passed. The cap statement is
+`ORDER BY last_used_at DESC ... OFFSET keep`, which reads backwards: **`OFFSET` keeps what it
+skips**, so the rows to skip are the ones to *retain*. Sorted ascending it evicts exactly the right
+*number* of rows and precisely the wrong *ones* — every session in daily use, sparing the idle ones.
+The test that caught it asserts which row survived rather than how many did, and that is the only
+kind of assertion that can.
+
+Eviction is by `last_used_at` and not `created_at`, a deliberate departure from GitLab's documented
+oldest-deleted: a diver's oldest browser is usually their busiest, and signing it out to make room
+for ninety-nine idle ones is the opposite of what the cap is for.
+
+### The refresh path asks a third question now, and answers it with the same 401
+
+`POST /auth/refresh` already asked whether the token verified and whether the account was still
+live. It now also asks whether the token's `sid` resolves to an unrevoked, unexpired row belonging
+to that subject — which is what makes "sign out my other devices" mean anything, since revoking a
+row is what kills its refresh at the next rotation.
+
+All four failures answer the **same** uniform 401 the endpoint already answered. That uniformity is
+a property `DECISIONS.md` pins rather than one this change was free to relax, and the session lookup
+is a single statement precisely so there is nothing for the route to tell apart.
+
+Both the account lookup and the session lookup happen **before** the presented token is spent, so a
+request that answers 401 writes nothing — the same ordering, for the same reason, as the liveness
+check that preceded it.
+
+**Access tokens are not session-checked per request.** Revoking a session kills its refresh
+immediately; the outstanding access token survives up to `ACCESS_TOKEN_EXPIRE_MINUTES`. That is the
+shape `DELETE /user` has always had, and the alternative — a liveness query inside
+`get_current_user` — buys at most half an hour of promptness for a database read on every
+authenticated request in the app.
+
+### Everyone is signed out once, and that is the whole compatibility story
+
+A refresh cookie minted before this carries no `sid`, so its next refresh 401s and the diver signs
+in again. No shim. *There is no production* (umbrella `CLAUDE.md`), and for a future self-hoster a
+one-time sign-out on upgrade is a clean event rather than corruption — which is what the `!` in the
+PR title names.
+
+### `DELETE /user` revokes its own session and no others
+
+It stamps `revoked_at` on the session it was called with, alongside blacklisting the pair it was
+handed. It touches no other row, and that is load-bearing rather than an omission: the other devices
+are already inert (`get_current_user` filters `is_deleted=False`, and `/auth/refresh` re-resolves
+the account), and leaving them *unrevoked* is what lets `POST /auth/restore` bring the account back
+with its sessions intact. See *"A refresh token is only as alive as its account"* — "a restore that
+silently signed every other device out would be a worse answer". A diver who does want them gone has
+`DELETE /user/sessions`.
+
+### `UserSession` is exempt from the hard-delete registry, with its own reason
+
+It goes in `NOT_A_DIVERS_OWN_RESOURCE`, not `HARD_DELETED_RESOURCES`, because
+`DELETE /user/session/{uuid}` **revokes** — it stamps `revoked_at`, and the cron sweep removes the
+row afterwards. All three of that file's behaviour classes assert the row is actually gone, which is
+the opposite of what is true here, and a second revoke is a success rather than the 404 they expect.
+
+`AuthenticationRequest` is the nearest precedent and **its reason cannot be reused**: that one turns
+on "nothing offers a delete of it", and this resource offers exactly such a delete. Nothing tests a
+reason's truth, so a copied one would have sat in the registry permanently saying something false.
+
+That exemption is also what keeps `UserSession` out of `PANEL_HARD_DELETED`, which
+`tests/test_admin_config.py` derives from `divers_own_hard_deleted()` — without it, the parametrized
+case there would *require* the panel registration to carry `"create"` and `"update"`, which is the
+last thing a table of live credentials should have.
+
+### `GET /user/sessions` is the seventh opt-out, and the first for a correctness reason
+
+Every other uncached list here is a staleness trade. This one **cannot be cached correctly at all**:
+the response carries `current: bool` per row, resolved from the requesting token's `sid`, so it
+varies by *credential* — while every cache key in this app is user-scoped by design, which is what
+pattern invalidation depends on. A cached entry would serve one device's "This device" marker to
+another, which is a wrong answer rather than an old one.
+
+`current` is resolved by `api.dependencies.current_session_uuid`, a sibling of `get_current_user`
+rather than a change to it: that function's return type is the account dict every ownership check
+compares against, and widening it to carry a second identifier would touch every route in the app to
+serve four. The sibling decodes rather than verifies — `get_current_user` runs `verify_token` over
+the same string on the same request — so it must never be a route's only auth dependency.
+
+## The auth audit trail is persist-only, and its erasure has two arms
+
+Nothing logged a successful authentication, an account creation or a provider link. The durable
+trace of an email sign-in was `authentication_request.used_at`, which the hourly sweep deletes a
+week after the row expires.
+
+`auth_audit_event` records them. **Persist-only in this version**: rows are written here and read
+through the admin panel, and no API route returns one. That is what keeps the enumeration-oracle
+discipline untouched — it constrains *responses*, and no response exposes these.
+
+### Membership is a rule, and the exclusions are half of it
+
+A site emits an event when it (a) commits a row to an auth table, (b) mints a session, onboarding or
+restore token, (c) revokes a credential at its owner's request, (d) ends, revokes or detects the
+replay of a session at the caller's request, or (e) **logs a `WARNING` for a failure the code itself
+deems rare and meaningful** — which is its own criterion because the write-based ones structurally
+cannot reach it, and is how the passkey counter regression got in.
+
+The exclusions follow the *Nothing is logged* bullet of *"A refresh token is only as alive as its
+account"*, which contrasts a recurring expected event with one that is rare and means something.
+Excluded on those grounds: ordinary refresh rotations (once per access-token lifetime per device,
+and `last_used_at` already records the liveness); session-cap evictions; passkey renames (the
+credential's power is unchanged); superseding your own pending auth request (housekeeping of the new
+request's creation, which *is* the event); the provider row inside `POST /auth/complete`'s
+transaction (part of creating the account, whose one event already exists); failed passkey
+ceremonies; the passkey-notice delivery failure; and the generic 401/400s across the auth surface.
+
+`tests/test_auth_audit.py` tests the exclusions as explicitly as the events, because a suite that
+only checked the positive cases would pass just as well against a version that logged every
+rotation.
+
+### `user_id` is set only where the request already holds the account
+
+Three events are user-less **by design** rather than by omission: auth request created, sign-in code
+failed, and onboarding started. `request_email_link` "never even queries `crud_users`" — the
+enumeration protection there is structural, the code path genuinely cannot distinguish an existing
+account from a new one (*"Unified auth flow"*) — and an audit-time lookup to fill in a `user_id`
+would reverse that guarantee verbatim, in a `crud_users` call no diff reviewer would connect to the
+paragraph eleven thousand lines away that it contradicts.
+
+Everything downstream of a resolved identity carries the id it already had. Two sites work slightly
+harder for it and both are bounded: `POST /auth/logout` authenticates on `oauth2_scheme` alone and
+resolves its subject from the presented access token the way `_warn_if_revoked` already does, and
+the refresh-replay event resolves the token's subject with one indexed read — rare by construction,
+since it is only reached past the threshold below.
+
+### The replay event is conditioned on elapsed time; the log line still is not
+
+The two-tab rotation race lands on the same branch a stolen cookie does, resolves in milliseconds,
+and is benign, documented and not especially rare. An unconditioned audit row would have put the
+cry-wolf defect `token_blacklist.revoked_at` was added to fix straight into the audit table.
+
+So the **row** is written only past `_REFRESH_REPLAY_AUDIT_THRESHOLD` (five seconds — three orders
+of magnitude above the race, negligible against a theft replayed minutes or hours later), and a
+row's existence therefore means replay-not-race. The **`WARNING` still fires for every
+presentation**, gap attached, exactly as before: nothing that was visible has become invisible.
+
+### Retention is two tiers, and the short one is not independently chosen
+
+Account-tied events are swept after 90 days. Events with `user_id IS NULL` are swept after **7**,
+and that number is `AUTHENTICATION_REQUEST_RETENTION` rather than a second opinion about the same
+question. The argument for storing an address here at all is that recording "an auth request for
+`<email>`" puts in the operator's database exactly what `authentication_request.email` already puts
+there — and that equivalence holds for *duration* as well as content only if the two sweeps agree.
+An address surviving thirteen times longer here would be a new retention decision wearing an old
+one's clothes.
+
+Both are module constants beside the sweep, not `Settings` fields, following
+`AUTHENTICATION_REQUEST_RETENTION`'s own deliberate non-configurability — and with a second benefit:
+no new setting means nothing to add to the install bundle's `example.env` or its configuration
+reference, which live in a different repository.
+
+### The FK cascade reaches only half the rows
+
+Account-tied rows go down the `ON DELETE CASCADE` with the purge's `DELETE FROM "user"`. The
+user-less ones carry an email and no `user_id`, so **no cascade will ever reach them** — and
+`_purge_one_account` deletes those **by email**, the identical second arm `authentication_request`
+already needed. Without it, "audit rows are erased with the account" would be false for exactly the
+rows that name an address.
+
+It is partial in the same way its precedent is: `verify_email_change` rewrites `user.email` in
+place, so rows created under an address the account has since moved off carry an email the purge
+cannot name. The 7-day tier bounds those, as it bounds every address that never became an account at
+all — and as it bounds the one row that satisfies neither arm, a replay detected for an account
+already purged, which carries no user and no email.
+
+*Rejected alternative:* treating this as an operator security log that survives deletion. It would
+need a user reference without a FK (the cascade suite fails any FK into `user.id` that is not
+`CASCADE`) plus registry exemptions with written reasons — and the operator already keeps an
+independent trail either way, since the panel's own `admin_event_log`/`admin_audit_log` survive
+purges by design (*"The admin panel's own log is a second copy, and the purge leaves it alone"*).
+
+### Failures propagate, and a write on an error path commits first
+
+No swallowed exceptions and no fire-and-forget: an audit trail that silently drops rows when the
+database is unhappy loses exactly the events worth having, since the interesting ones cluster around
+the moment something is going wrong.
+
+Where the event has a write to join it commits with it (`commit=False`) — the account and its
+provider row, the email change and its claim, the credential and its registration — so a thing that
+fails to happen leaves no row saying it did. Everywhere else the write commits on its own, and
+**that includes every path about to raise**: `async_get_db` does not commit on unwind, so a row left
+in flight on a 401 is silently lost. Two events fire on exactly such a path — the refresh replay,
+and the passkey counter regression, which `finish_sign_in` follows immediately with an
+`UnauthorizedException`. `register_failed_code_attempt` already commits before its own 401 for the
+same reason.
+
+### What a row may never contain
+
+Tokens, token hashes, codes, code hashes: **the fact of the artifact, never the artifact** (OWASP's
+never-log list). The enforcement is structural rather than a review habit — `record_auth_event` is
+the only writer, the schema is `extra="forbid"`, and the table has no free-text column to put one
+in. `tests/test_auth_audit.py` pins the column set, so adding a column that *could* hold a secret
+fails there before any call site could fill it.
+
+## IP and User-Agent are captured once, and both are attacker-supplied
+
+`RequestContext.from_request` reads the two attributes both features want at the same sites — a
+session row records the device that signed in, an audit event records the device an event happened
+from — so neither is captured twice at every token mint.
+
+**Both values are bounded there, and that is not hygiene.** The User-Agent is a request header with
+no length limit. `client_ip` is the less obvious one: it returns the socket peer ordinarily, but
+behind a configured `TRUSTED_PROXY_IPS` it returns the right-most `X-Forwarded-For` element that is
+not itself a trusted proxy — and nothing validates that element as an address (`_is_trusted` answers
+`False` for anything unparseable, and the loop returns it as-is). An over-length value reaching a
+column is a `StringDataRightTruncation`, which under the *failures propagate* rule above turns a
+sign-in into a 500. The two bounds are also the two column widths, imported from the same constants,
+so a truncation that still overflows is not expressible.
+
+**The string is stored raw, not parsed.** The web client already ships `passkeyNameForUserAgent`,
+whose own header records the decision that only the client names the device and the server "sees a
+User-Agent header it has no business parsing". A second server-side implementation would let a
+session row and a passkey row on one settings page disagree about what to call the same browser —
+and storing the raw string keeps every label re-derivable as those tables improve. *Rejected:*
+`uap-python` (a regexes.yaml engine for facts Chrome's UA reduction has largely frozen), the
+`user-agents` package (dormant since 2020), and `ua-parser-js` 2.x (AGPL-3.0 since 2.0.0, a license
+decision this change has no need to take).
+
+**`TRUSTED_PROXY_IPS` handling is unchanged.** A misconfigured instance records the proxy's address
+in `ip`, which is the failure mode the install bundle's `example.env` already warns about for rate
+limits; `docs/authentication.md` says so in one sentence and that is all.

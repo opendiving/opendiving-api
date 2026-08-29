@@ -1,4 +1,5 @@
 import logging
+import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, cast
 
@@ -7,7 +8,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...api.dependencies import get_current_user
+from ...api.dependencies import current_session_uuid, get_current_user
 from ...core.config import settings
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import (
@@ -20,12 +21,16 @@ from ...core.security import blacklist_token, blacklist_tokens, generate_secure_
 from ...core.utils.cache import cache, delete_keys_by_pattern
 from ...core.utils.client_ip import client_ip
 from ...core.utils.rate_limit import enforce_rate_limit
+from ...core.utils.request_context import RequestContext
 from ...core.utils.uploads import content_disposition_attachment
+from ...crud.crud_auth_audit_events import record_auth_event
 from ...crud.crud_authentication_requests import claim_authentication_request, crud_authentication_requests
 from ...crud.crud_user_dive_stats import crud_user_dive_stats
+from ...crud.crud_user_sessions import revoke_session
 from ...crud.crud_users import crud_users
 from ...models.user import User
 from ...schemas.auth import LinkCheckResponse
+from ...schemas.auth_audit_event import AuthEventType
 from ...schemas.authentication_request import AuthenticationRequestCreate, AuthenticationRequestUpdate
 from ...schemas.dive import DiveActivityPoint, DiveGasUsePoint
 from ...schemas.email_change import (
@@ -315,6 +320,17 @@ async def request_email_change(
         ),
     )
 
+    # The creation is the event; invalidating whatever was live before it (above) is
+    # housekeeping of this same request and gets none of its own. The row carries the
+    # account, so it sits on the 90-day tier - and no `email`, because `user_id` already
+    # names the subject and the *target* address is not what this event is about.
+    await record_auth_event(
+        db,
+        event_type=AuthEventType.EMAIL_CHANGE_REQUESTED,
+        context=RequestContext.from_request(request),
+        user_id=current_user["id"],
+    )
+
     confirm_url = f"{settings.FRONTEND_URL}/settings/confirm-email?token={raw_token}"
     await send_email_change_confirmation_email(new_email=new_email, confirm_url=confirm_url)
 
@@ -429,6 +445,21 @@ async def verify_email_change(
         claimed = await claim_authentication_request(db, request_id=auth_request["id"], commit=False)
         if claimed:
             await crud_users.update(db=db, object={"email": new_email}, id=user_id, commit=False)
+            # In the same transaction as the claim and the address change: an event saying
+            # the change was applied must not survive a rollback that undid it. Only on the
+            # winning branch - a tolerated replay below re-reports a change this request did
+            # not make, and recording it again would count one change twice.
+            #
+            # The account id comes off the claimed row rather than from a session: this
+            # endpoint is anonymous by design, because the link may be opened on a
+            # different device than the one that asked for the change.
+            await record_auth_event(
+                db,
+                event_type=AuthEventType.EMAIL_CHANGE_COMPLETED,
+                context=RequestContext.from_request(request),
+                user_id=user_id,
+                commit=False,
+            )
         await db.commit()
     except IntegrityError:
         await db.rollback()
@@ -553,6 +584,7 @@ async def erase_user(
     request: Request,
     response: Response,
     current_user: Annotated[dict, Depends(get_current_user)],
+    session_uuid: Annotated[uuid_pkg.UUID | None, Depends(current_session_uuid)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     access_token: str = Depends(oauth2_scheme),
     refresh_token: str | None = Cookie(None, alias="refresh_token"),
@@ -567,8 +599,17 @@ async def erase_user(
     devices' cookies stop rotating too. Someone deleting their account because they want
     to be *gone from it* gets that, not a fortnight's countdown banner.
 
-    Both presented tokens are blacklisted and the refresh cookie cleared, so the caller's
-    own session dies now rather than at its natural expiry.
+    Both presented tokens are blacklisted, the caller's **own** session row is stamped
+    `revoked_at`, and the refresh cookie is cleared - so the caller's own session dies now
+    rather than at its natural expiry.
+
+    **No other session row is touched, and that is load-bearing rather than an oversight.**
+    The other devices are already inert: `get_current_user` filters `is_deleted=False` and
+    `/auth/refresh` re-resolves the account, so every one of them 401s from this instant.
+    Leaving them *unrevoked* is what lets `POST /auth/restore` bring the account back with
+    those sessions intact - "a restore that silently signed every other device out would be
+    a worse answer", which is exactly the property the refresh check was written to
+    preserve. Somebody who wants them gone has `DELETE /user/sessions` for it.
 
     The response carries `purge_after` and is composed **before** the confirmation email is
     attempted, so a dead relay costs the copy rather than the date.
@@ -611,6 +652,19 @@ async def erase_user(
         response.delete_cookie(key="refresh_token")
     else:
         await blacklist_token(token=access_token, db=db)
+
+    if session_uuid is not None:
+        await revoke_session(db, session_uuid=session_uuid)
+
+    # Commits the revoke above with it. `newly_deleted` is not a condition on the event:
+    # the caller asked to delete their account either way, and a repeated request is a
+    # thing the trail should show rather than hide.
+    await record_auth_event(
+        db,
+        event_type=AuthEventType.ACCOUNT_DELETION_REQUESTED,
+        context=RequestContext.from_request(request),
+        user_id=current_user["id"],
+    )
 
     # Null only if the row is not there to read - it was purged between `get_current_user`
     # resolving it and this statement - or if something flagged it without setting the

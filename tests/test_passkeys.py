@@ -41,7 +41,7 @@ from src.app.schemas.webauthn_credential import (
     WebauthnCredentialUpdate,
 )
 from src.app.services.passkey_challenges import ChallengeStoreUnavailable
-from tests.helpers.mocks import stub_claim
+from tests.helpers.mocks import fake_request, stub_claim
 from tests.helpers.webauthn import SoftAuthenticator
 
 USER_UUID = uuid_pkg.uuid4()
@@ -81,10 +81,7 @@ class FakeRedis:
         return self.values.pop(key, None)
 
 
-def _request(ip: str = "1.2.3.4") -> Mock:
-    request = Mock()
-    request.client = Mock(host=ip)
-    return request
+_request = fake_request
 
 
 def _user(**overrides: Any) -> dict[str, Any]:
@@ -162,7 +159,7 @@ async def _register_credential(mock_db, redis_client, *, user: dict[str, Any] | 
 
         with patch("src.app.api.v1.passkeys.send_passkey_added_email", new_callable=AsyncMock):
             created = await passkey_registration_verify(
-                PasskeyRegistrationVerifyRequest(credential=attestation, name="iPhone"), account, mock_db
+                _request(), PasskeyRegistrationVerifyRequest(credential=attestation, name="iPhone"), account, mock_db
             )
 
     stored = _stored(
@@ -244,6 +241,7 @@ class TestRegistration:
 
             with patch("src.app.api.v1.passkeys.send_passkey_added_email", new_callable=AsyncMock) as send:
                 await passkey_registration_verify(
+                    _request(),
                     PasskeyRegistrationVerifyRequest(credential=device.register(options), name="Work laptop"),
                     _user(),
                     mock_db,
@@ -272,6 +270,7 @@ class TestRegistration:
                 caplog.at_level(logging.WARNING),
             ):
                 created = await passkey_registration_verify(
+                    _request(),
                     PasskeyRegistrationVerifyRequest(credential=device.register(options), name="iPhone"),
                     _user(),
                     mock_db,
@@ -309,6 +308,7 @@ class TestRegistration:
 
             with pytest.raises(HTTPException) as exc_info:
                 await passkey_registration_verify(
+                    _request(),
                     PasskeyRegistrationVerifyRequest(credential=device.register(options), name="iPhone"),
                     _user(),
                     mock_db,
@@ -330,12 +330,18 @@ class TestRegistration:
 
             with patch("src.app.api.v1.passkeys.send_passkey_added_email", new_callable=AsyncMock):
                 await passkey_registration_verify(
-                    PasskeyRegistrationVerifyRequest(credential=attestation, name="iPhone"), _user(), mock_db
+                    _request(),
+                    PasskeyRegistrationVerifyRequest(credential=attestation, name="iPhone"),
+                    _user(),
+                    mock_db,
                 )
 
             with pytest.raises(BadRequestException):
                 await passkey_registration_verify(
-                    PasskeyRegistrationVerifyRequest(credential=attestation, name="iPhone"), _user(), mock_db
+                    _request(),
+                    PasskeyRegistrationVerifyRequest(credential=attestation, name="iPhone"),
+                    _user(),
+                    mock_db,
                 )
 
     @pytest.mark.asyncio
@@ -348,6 +354,7 @@ class TestRegistration:
 
             with pytest.raises(BadRequestException):
                 await passkey_registration_verify(
+                    _request(),
                     PasskeyRegistrationVerifyRequest(
                         credential=device.register(options, origin="https://evil.example"), name="iPhone"
                     ),
@@ -372,7 +379,10 @@ class TestRegistration:
 
             with pytest.raises(HTTPException) as exc_info:
                 await passkey_registration_verify(
-                    PasskeyRegistrationVerifyRequest(credential=attestation, name="iPhone"), _user(), mock_db
+                    _request(),
+                    PasskeyRegistrationVerifyRequest(credential=attestation, name="iPhone"),
+                    _user(),
+                    mock_db,
                 )
 
         assert exc_info.value.status_code == 409
@@ -396,6 +406,7 @@ class TestRegistration:
 
             with pytest.raises(HTTPException) as exc_info:
                 await passkey_registration_verify(
+                    _request(),
                     PasskeyRegistrationVerifyRequest(credential=device.register(options), name="iPhone"),
                     _user(),
                     mock_db,
@@ -446,7 +457,10 @@ class TestRegistration:
 
                 with pytest.raises(HTTPException) as exc_info:
                     await passkey_registration_verify(
-                        PasskeyRegistrationVerifyRequest(credential=attestation, name="iPhone"), _user(), mock_db
+                        _request(),
+                        PasskeyRegistrationVerifyRequest(credential=attestation, name="iPhone"),
+                        _user(),
+                        mock_db,
                     )
 
             details.add((exc_info.value.status_code, exc_info.value.detail))
@@ -850,7 +864,7 @@ class TestManagement:
             owned.return_value = _stored(name="Old phone")
             crud.delete = AsyncMock()
 
-            result = await erase_passkey(CREDENTIAL_UUID, _user(), mock_db)
+            result = await erase_passkey(_request(), CREDENTIAL_UUID, _user(), mock_db)
 
         assert result == {"message": "Passkey removed"}
         crud.delete.assert_called_once()
@@ -873,7 +887,7 @@ class TestManagement:
             owned.return_value = _stored()
             crud.delete = AsyncMock()
 
-            result = await erase_passkey(CREDENTIAL_UUID, _user(), mock_db)
+            result = await erase_passkey(_request(), CREDENTIAL_UUID, _user(), mock_db)
 
         assert result == {"message": "Passkey removed"}
         assert "relay is down" in caplog.text
@@ -891,7 +905,7 @@ class TestManagement:
             crud.delete = AsyncMock()
 
             with pytest.raises(NotFoundException):
-                await erase_passkey(CREDENTIAL_UUID, _user(), mock_db)
+                await erase_passkey(_request(), CREDENTIAL_UUID, _user(), mock_db)
 
             crud.delete.assert_not_called()
 
@@ -1071,7 +1085,10 @@ class TestMalformedInput:
 
             with patch("src.app.api.v1.passkeys.send_passkey_added_email", new_callable=AsyncMock):
                 await passkey_registration_verify(
-                    PasskeyRegistrationVerifyRequest(credential=attestation, name="iPhone"), _user(), mock_db
+                    _request(),
+                    PasskeyRegistrationVerifyRequest(credential=attestation, name="iPhone"),
+                    _user(),
+                    mock_db,
                 )
 
         assert crud.create.call_args.kwargs["object"].transports is None
@@ -1129,7 +1146,10 @@ class TestMalformedInput:
 
             with patch("src.app.api.v1.passkeys.send_passkey_added_email", new_callable=AsyncMock):
                 await passkey_registration_verify(
-                    PasskeyRegistrationVerifyRequest(credential=attestation, name="iPhone"), _user(), mock_db
+                    _request(),
+                    PasskeyRegistrationVerifyRequest(credential=attestation, name="iPhone"),
+                    _user(),
+                    mock_db,
                 )
 
         assert crud.create.call_args.kwargs["object"].transports == expected
@@ -1147,6 +1167,7 @@ class TestMalformedInput:
 
             with patch("src.app.api.v1.passkeys.send_passkey_added_email", new_callable=AsyncMock):
                 await passkey_registration_verify(
+                    _request(),
                     PasskeyRegistrationVerifyRequest(credential=device.register(options), name="iPhone"),
                     _user(),
                     mock_db,

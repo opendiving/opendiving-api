@@ -89,6 +89,15 @@ NOT_A_DIVERS_OWN_RESOURCE: dict[str, str] = {
         "Everybody's row rather than one diver's, and nothing in the app deletes a species by design "
         "(see `models/species.py`)."
     ),
+    "UserSession": (
+        "There is a `DELETE /user/session/{uuid}`, and it **revokes rather than removes**: it stamps "
+        "`revoked_at`, and the hourly sweep is what deletes the row afterwards. So the three behaviour "
+        "classes have nothing to assert - the row is deliberately still there once the delete has "
+        "succeeded, which is the opposite of what `TestTheRowIsActuallyRemoved` requires, and a second "
+        "revoke is a success rather than the 404 `TestASecondDeleteIsA404` expects. Note this reason is "
+        "*not* `AuthenticationRequest`'s: that one turns on 'nothing offers a delete of it', and this "
+        "resource offers exactly such a delete."
+    ),
     "WebauthnCredential": (
         "A passkey, removed through the account's own credential routes together with the "
         "last-credential guard gating them."
