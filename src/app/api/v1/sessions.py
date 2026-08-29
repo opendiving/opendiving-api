@@ -98,6 +98,12 @@ async def erase_session(
     A second revoke of an already-revoked session succeeds and changes nothing, unlike the
     hard-deleting resources whose second `DELETE` is a 404: the row is not what is being
     removed, and the caller already owns it.
+
+    An access token minted before this feature names no session, so for its remaining
+    minutes the 409 cannot fire and such a caller *can* revoke the row they are on. That is
+    deliberate rather than a hole: with no `sid` there is nothing to compare against, the
+    list marks nothing "This device" either, and the only consequence is the 401 at their
+    next refresh - which a token that old is heading for regardless.
     """
     await fetch_owned_or_raise(
         db=db,
