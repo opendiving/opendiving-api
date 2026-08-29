@@ -48,12 +48,21 @@ async def evict_stalest_sessions(db: AsyncSession, *, user_id: int, keep: int) -
     insert, so an account can momentarily sit one or two rows above the cap. That is why
     the list endpoint reads well past it - a session nobody can see is a session nobody can
     revoke.
+
+    **The subquery orders `last_used_at` DESC and then skips `keep`**, which reads
+    backwards and is the only ordering that does the right thing: `OFFSET` keeps what it
+    skips, so the rows it must skip are the ones to *retain* - the freshest. Sorted the
+    other way the statement is still a valid eviction of exactly the right number of rows,
+    and it evicts precisely the wrong ones - every session in daily use, sparing the idle
+    ones. Written the wrong way round first, and caught by
+    `TestTheCapEvictsTheStalest::test_the_least_recently_used_row_goes_not_the_oldest`,
+    which is why that case asserts *which* row survived rather than only how many did.
     """
     now = datetime.now(UTC)
     stalest = (
         select(UserSession.id)
         .where(UserSession.user_id == user_id, _live(now))
-        .order_by(UserSession.last_used_at.asc(), UserSession.id.asc())
+        .order_by(UserSession.last_used_at.desc(), UserSession.id.desc())
         .offset(keep)
     )
     result = cast(
