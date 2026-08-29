@@ -2,9 +2,12 @@
 #
 #   docker compose -f docker-compose.yml -f docker-compose.test.yml up --build --abort-on-container-exit api
 #
-# One of two ways to exercise the eight DB-backed test modules, which skip themselves when nothing
-# is listening on Postgres. Here `db` resolves and nothing needs overriding; on the host it takes
-# `POSTGRES_SERVER=localhost`, since `src/.env` names the compose hostname. See CONTRIBUTING.md.
+# One of two ways to exercise the DB-backed test modules, which skip themselves when nothing is
+# listening on Postgres. Here `db` resolves and nothing needs overriding; on the host it takes
+# `POSTGRES_SERVER=localhost`, since `src/.env` names the compose hostname. Either way the suite
+# writes to its own database on that server - `POSTGRES_DB` with `_test` appended, created and
+# migrated by `tests/conftest.py` - and not to the one the `api` service serves from. See
+# CONTRIBUTING.md.
 services:
   api:
     build:

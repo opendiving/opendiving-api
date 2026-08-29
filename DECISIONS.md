@@ -84,13 +84,14 @@ reintroduced by someone re-adding the conventional line. `alembic.ini` therefore
 an awkward password to keep it that way.
 
 **What guards this in CI.** `.github/workflows/tests.yml` runs `alembic upgrade head` against the
-job's empty Postgres and then `alembic check`, before pytest. That ordering is load-bearing: the
-suite builds its schema with `create_all` (`tests/conftest.py`), so running it first would leave
-`upgrade head` dying on an existing table - and running the migrations first means the DB-backed
-tests execute against the schema that actually ships. `alembic check` autogenerates against the
-just-migrated database and fails on any difference, so a model changed without a revision fails the
-PR. `tests/test_migrations.py` covers the same ground without a database, by generating the offline
-`--sql` output and asserting every table in `Base.metadata` appears in it.
+job's empty Postgres and then `alembic check`, before pytest. `alembic check` autogenerates against
+the just-migrated database and fails on any difference, so a model changed without a revision fails
+the PR. That ordering used to be load-bearing for a second reason - the suite built its schema with
+`create_all` and would have left `upgrade head` dying on an existing table - which stopped applying
+when the suite got a database of its own and started migrating it; see *"The suite has its own
+database, and builds it with the migrations"*. `tests/test_migrations.py` covers the same ground
+without a database, by generating the offline `--sql` output and asserting every table in
+`Base.metadata` appears in it.
 
 **One model change came with this, and it changed no DDL.** Twenty-three models declared their
 primary key as `mapped_column(..., unique=True, primary_key=True)`, inherited from the upstream
@@ -3606,9 +3607,12 @@ handed to `crud_dives.update`.
 
 ## Test users get uuid-derived names, because nothing cleans them up
 
-`create_user` writes a real row to whatever database `POSTGRES_SERVER` points at - in practice the
-developer's own - and nothing deletes it afterwards. The `docker-compose.test.yml` overlay does the
-same. So the `user` table accumulates: one machine had 919 rows from previous runs.
+`create_user` writes a real row to whatever database `POSTGRES_SERVER` points at, and nothing
+deletes it afterwards. The `docker-compose.test.yml` overlay does the same. So the `user` table
+accumulates: one machine had 919 rows from previous runs. (At the time that meant the developer's
+own dev database, which is a separate problem and has since been fixed - see *"The suite has its own
+database, and builds it with the migrations"*. The accumulation is unchanged; it now happens
+somewhere disposable.)
 
 `fake.user_name()`/`fake.email()` draw from a small vocabulary, and both columns are `unique=True`.
 Past a few hundred rows the birthday problem catches up and runs start failing with an
@@ -3640,9 +3644,9 @@ neither reaches a real inbox, but `email-validator` - which backs Pydantic's `Em
 `.test` as a special-use name, so any test round-tripping such an address through a schema fails
 validation. That cost one test (`test_rejects_unchanged_email`) before it was spotted.
 
-This stops the bleeding; it does not tidy up. Rows already in the table stay until someone runs
-`docker compose down -v`. The real fix is fixtures that roll back what they write, which is a larger
-change than this was.
+This stops the bleeding; it does not tidy up. Rows already in the table stay until someone drops the
+suite's database (`CONTRIBUTING.md` has the statement) or runs `docker compose down -v`. The real
+fix is fixtures that roll back what they write, which is a larger change than this was.
 
 ## A session's subject is the user's `uuid`, because a username can change hands
 
@@ -7470,6 +7474,85 @@ catalog, filled one pick at a time"* rather than repeated here:
   its own rows, takes an early-return path, and passes while measuring nothing. The first run
   passing is what makes it invisible.
 
+## The suite has its own database, and builds it with the migrations
+
+The documented way of running the Postgres-backed tests on the host was
+`POSTGRES_SERVER=localhost uv run pytest`, and `src/.env` names the database `opendive` — which is
+the database `docker compose up` serves from. So the suite ran against the dev stack's own data, and
+the arrangement was not merely untidy: it broke the stack outright, on 2026-08-29, in a way that
+takes some reading to attribute.
+
+**The mechanism.** `conftest._ensure_tables` built the schema with `Base.metadata.create_all`, which
+creates missing tables and writes nothing to `alembic_version`. Run against the dev database from a
+branch carrying an unmerged revision, it therefore created that revision's tables — and left the
+version at the revision before them. The next `docker compose restart api` ran its startup
+`alembic upgrade head`, reached the first `CREATE TABLE` of a revision the database now already had,
+and died:
+
+```
+sqlalchemy.exc.ProgrammingError: <asyncpg.exceptions.DuplicateTableError>: relation "auth_audit_event" already exists
+ERROR:    Application startup failed. Exiting.
+```
+
+Two things make that expensive to diagnose. The API container stays `Up (unhealthy)` and keeps
+appearing in `docker ps`, so the stack looks alive while serving nothing on :8000. And the test run
+that caused it had finished, apparently fine, some time earlier — nothing connects the two events
+except knowing this paragraph. The remedy at the time was an `alembic stamp head` plus an
+`alembic check`, which is the same drill *"Schema changes have no migration tool"* prescribes for a
+database from before migrations existed, arrived at from the opposite direction.
+
+The accumulated cost was visible too: 70,999 rows in `"user"`, 981 in `user_session` and 91 in
+`auth_audit_event`, nearly all of it test residue — including fixture boundary values sitting in the
+dev database, an `ip` of `7` repeated to the column's 45 characters and a `user_agent` of `U`
+repeated to 400.
+
+**The fix is a database of the suite's own**, and the only place it can be chosen is the top of
+`tests/conftest.py`, before any `src.app` import: `settings.POSTGRES_URI` is assembled when
+`core.config` is imported and `core/db/database.py` builds the app's engine from it, so a
+redirection after that reaches neither. The name is `POSTGRES_DB` with `_test` appended, never a
+literal — `f"{name}_test"` differs from `name` by construction, whatever the operator called theirs,
+and a structural guarantee is the point of the exercise. `conftest` creates it on the same server if
+it isn't there, connecting to the configured database to do it, since that is the one database
+guaranteed to exist and to accept these credentials wherever the app runs; the connection reads
+`pg_database` and issues one `CREATE DATABASE` naming a different database, and writes nothing.
+
+**That creation happens at import, not in a fixture**, because `db_available()` is called during
+collection by every module's `skipif`. A database created any later would leave the first run on a
+fresh checkout skipping everything and the second run green — a trap of exactly the kind this
+section exists to remove.
+
+**And `create_all` gave way to `alembic upgrade head`.** The reason it was `create_all` is recorded
+in its own former docstring: the tests ran against the developer's dev database, and `upgrade head`
+against one that predates migrations dies on the first `CREATE TABLE`, so a suite that migrated
+could not start. That reason is precisely what a suite-owned database removes — it is created empty,
+so the migrations can always build it from base. What that buys, beyond ending the corruption
+mechanism above:
+
+- The local suite exercises the schema that ships, revision by revision, rather than the models'
+  account of it.
+- `alembic_version` tells the truth afterwards, so the app's own startup `upgrade head` — which the
+  `client` fixture runs for real, through `TestClient` — is a no-op rather than a `DuplicateTable`
+  waiting to happen inside the test database too.
+- An added *column* reaches the test database. `create_all` only ever created whole missing tables,
+  so a column added to an existing one never appeared and the failure was `UndefinedColumn` on a
+  database that looked current.
+
+Two costs, both worth naming. A model change with no matching revision now fails the DB-backed tests
+locally instead of passing and waiting for CI's `alembic check` — the better end of the trade, but a
+change in what a red local run means. And a test database left at a revision that is not in the
+branch's history — hop onto a branch, run the suite, hop off — cannot be upgraded from; Alembic's
+own message names a revision hash and nothing else, so `_ensure_tables` catches `CommandError` and
+re-raises it naming the database and the `DROP DATABASE` that fixes it. The database holds nothing
+worth keeping, which is what makes "drop it" the whole remedy.
+
+**CI needed no new variable.** It sets `POSTGRES_DB=postgres`, so the suite derives `postgres_test`
+and builds it; the `alembic upgrade head` + `alembic check` step keeps running against `postgres`,
+which is what that step wants — a database the migrations built from empty, for autogenerate to
+compare the models against. The step's ordering comment changed, though: it used to explain that it
+had to precede pytest because `create_all` would otherwise have made the tables already. The two
+databases are separate now, and it stays first only because a drift failure reads better than a
+suite failing on a column nobody generated a revision for.
+
 ## A deleted gear item's service history has no view, and archiving is the surface that does
 
 **The conclusion survived the hard-delete change and its premise did not**, which is worth stating
@@ -8676,14 +8759,17 @@ because cache hits ask no provider anything, and both are gone when the burst is
 
 ### Test fixtures in a global table are visible to real accounts
 
-The suite's Postgres-backed tests write real rows to the developer's own database and nothing cleans
-them up - `unique_username`'s docstring records that as a deliberate trade, and it is fine for every
-table that came before this one, because those rows hang off a fixture `user_id` and no real account
-can see them.
+The suite's Postgres-backed tests write real rows and nothing cleans them up - `unique_username`'s
+docstring records that as a deliberate trade, and it is fine for every table that came before this
+one, because those rows hang off a fixture `user_id` and no other account can see them.
 
 `species` broke that assumption the moment it existed: a fixture row is in *everyone's* picker. This
-was found the boring way — a developer cleared the catalog by hand, the next `pytest` run put thirty
-rows straight back, and `?q=clownfish` was topped by test data.
+was found the boring way — those rows landed in the developer's own database back then, so a
+developer cleared the catalog by hand, the next `pytest` run put thirty rows straight back, and
+`?q=clownfish` was topped by test data. The suite writes to a database of its own now (*"The suite
+has its own database, and builds it with the migrations"*), which shrinks the blast radius to one
+disposable database and changes nothing about the rule below: within that database a global-table
+fixture is still visible to every account the tests create.
 
 The fix is naming, not cleanup: `create_species` writes `zzfixture-species-<hex>` and the
 `species_name` fixtures write `zzfixture-name-<hex>`, so no query a diver would type can reach them.
@@ -11179,12 +11265,14 @@ The second-order half is not decoration: a cascade stopping one level short woul
 `certification_file`, `dive_dive_site`, `gear_set_item` and `trip_location` silently rather than
 raising, so counting only the ten would pass while they stayed.
 
-One trap in running it. `conftest._ensure_tables` builds the test schema with `create_all`, which
-creates missing tables and **never alters an existing one** — so on a dev database that has not run
-`alembic upgrade head` since this change, the Postgres half fails. That is the correct outcome, not
-a fixture bug: that database really would refuse the delete. And per CONTRIBUTING.md the whole class
-skips silently without `POSTGRES_SERVER=localhost`, so a green run on the host proves nothing until
-you have checked it did not skip.
+One trap in running it, and it used to be two. `conftest._ensure_tables` built the test schema with
+`create_all`, which creates missing tables and never alters an existing one, so the `ondelete` rules
+this revision adds never reached a database that already had the tables and the Postgres half failed
+— correctly, since that database really would have refused the delete. It migrates the suite's own
+database now (*"The suite has its own database, and builds it with the migrations"*), so the rules
+under test are the ones this revision declares. What remains is that per CONTRIBUTING.md the whole
+class skips silently without `POSTGRES_SERVER=localhost`, so a green run on the host proves nothing
+until you have checked it did not skip.
 
 ## Deleting an account is two changes with a fortnight between them
 
