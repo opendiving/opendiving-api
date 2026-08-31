@@ -13,6 +13,18 @@ reason `photo_fetched_at` is stamped on a failed attempt. A species whose fetch 
 out* is the exception and is deliberately left for the next run: nothing was established about
 it, so writing a no-photo verdict would be a claim nobody checked.
 
+**Upgrading from a build whose photo fence refused Commons' thumbnail host? Run `--force`
+once.** Every species attempted under that build carries a stamped `photo_fetched_at` and no
+photo, so an ordinary run skips all of them - the predicate below reads them as asked and
+answered. `--force` is the whole remedy and no narrower flag is offered on purpose: a row
+poisoned that way is **byte-for-byte identical** to a species the selection rule refused on
+its merits, both being a stamped timestamp over a null `photo_storage_key`, so a
+"retry only the failures" predicate could not tell them apart and would promise a precision it
+does not have. What that costs is honest instead: `--force` re-walks the whole catalog,
+including the large tail that legitimately has no photo, at the pace below - so budget the
+same "under an hour per thousand species" a first run takes, and let it finish in one go.
+`--limit` will not break that up; see `_candidates`.
+
 Three things differ from the nearest sibling, and copying that one blindly gets each wrong:
 
 - **It creates no Redis pool, and that is not an oversight.** `backfill_dive_profiles` needs
@@ -99,9 +111,16 @@ class _Candidate:
 async def _candidates(session: AsyncSession, *, limit: int | None, force: bool) -> list[_Candidate]:
     """The species to attempt, oldest catalog rows first.
 
-    Ordered by `id` so a `--limit`ed run walks the catalog in a stable order and successive
-    runs continue rather than re-drawing the same slice - which they do anyway once the
-    timestamp is stamped, but the ordering is what makes a `--force --limit` run advance too.
+    Ordered by `id` so a `--limit`ed run walks the catalog in a stable order rather than
+    whatever order the planner happens to return. Successive *ordinary* runs then continue
+    where the last stopped - though it is the stamped `photo_fetched_at` that excludes what was
+    already done, not the ordering.
+
+    **A `--force --limit` run does not advance between runs, and no ordering could make it.**
+    `--force` drops the predicate altogether, so there is nothing left to exclude the rows the
+    previous run just handled and the same first `limit` ids come back every time - verified,
+    not inferred. Chunking a forced re-walk is not something these two flags can express
+    together: run `--force` on its own and let it finish.
     """
     statement = select(Species.id, Species.aphia_id, Species.scientific_name).order_by(Species.id)
     if not force:
