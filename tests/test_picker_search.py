@@ -7,6 +7,7 @@ shape of the search `WHERE` clause, and the cache keys - rather than the endpoin
 top of a live Postgres/Redis, which are exercised by hand (see DECISIONS.md).
 """
 
+import ast
 from pathlib import Path
 from typing import Any
 
@@ -163,6 +164,69 @@ class TestListCacheKeys:
         assert ":search:" not in unsearchable.list_cache_key_prefix
 
 
+V1_ROUTES_DIR = Path(__file__).resolve().parents[1] / "src" / "app" / "api" / "v1"
+
+# Every paginated list route in `api/v1`, by the file it lives in. A tuple per file rather
+# than one name, because `gear_service.py` has two and a `filename -> function` mapping
+# structurally cannot say so - it named the schedules route, and the records route beside
+# it was covered by nothing at all.
+PAGINATED_LIST_ROUTES: dict[str, tuple[str, ...]] = {
+    "certifications.py": ("read_certifications",),
+    "courses.py": ("read_courses",),
+    "dive_sites.py": ("read_dive_sites",),
+    "dives.py": ("read_dives",),
+    "gear_items.py": ("read_gear_items",),
+    "gear_service.py": ("read_gear_service_records", "read_gear_service_schedules"),
+    "gear_sets.py": ("read_gear_sets",),
+    "trips.py": ("read_trips",),
+}
+
+CLAMP_CALL = "page, items_per_page = clamp_pagination(page, items_per_page)"
+
+
+def _declares_a_paginated_response(function: ast.AsyncFunctionDef | ast.FunctionDef) -> bool:
+    """Whether one of `function`'s decorators sets `response_model=PaginatedListResponse[...]`."""
+    for decorator in function.decorator_list:
+        if not isinstance(decorator, ast.Call):
+            continue
+        for keyword in decorator.keywords:
+            if keyword.arg != "response_model":
+                continue
+            # `PaginatedListResponse[DiveRead]` parses as a subscript of the bare name.
+            model = keyword.value.value if isinstance(keyword.value, ast.Subscript) else keyword.value
+            if isinstance(model, ast.Name) and model.id == "PaginatedListResponse":
+                return True
+    return False
+
+
+def _discover_paginated_list_routes() -> dict[str, dict[str, ast.AsyncFunctionDef | ast.FunctionDef]]:
+    """Every paginated list route under `api/v1`, as `{filename: {function name: its node}}`.
+
+    Off the source rather than the imported routers because what the tests below assert -
+    that the handler calls `clamp_pagination` - is a fact about the body, not about the
+    route object, so one parse answers both halves.
+    """
+    discovered: dict[str, dict[str, ast.AsyncFunctionDef | ast.FunctionDef]] = {}
+
+    for path in sorted(V1_ROUTES_DIR.glob("*.py")):
+        # Module level only: a route is always a top-level `def`, and descending would let
+        # a nested helper stand in for one.
+        routes = {
+            node.name: node
+            for node in ast.parse(path.read_text()).body
+            if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef) and _declares_a_paginated_response(node)
+        }
+        if routes:
+            discovered[path.name] = routes
+
+    return discovered
+
+
+def _clamps_pagination(function: ast.AsyncFunctionDef | ast.FunctionDef) -> bool:
+    """Whether `function` itself clamps, rather than merely sharing a file with one that does."""
+    return any(isinstance(node, ast.Assign) and ast.unparse(node) == CLAMP_CALL for node in ast.walk(function))
+
+
 class TestPageSizeCaps:
     def test_the_cap_is_low_enough_to_matter(self) -> None:
         # Low enough that no single request can pull a whole table, which is exactly what
@@ -183,30 +247,40 @@ class TestPageSizeCaps:
     def test_a_reasonable_request_is_left_alone(self) -> None:
         assert clamp_pagination(3, 25) == (3, 25)
 
+    def test_the_inventory_names_every_paginated_route(self) -> None:
+        """A list route `PAGINATED_LIST_ROUTES` doesn't name is a route nothing below
+        checks, and until this assertion existed that was silent rather than a failure.
+
+        It is how `read_gear_service_records` went uncovered from the day it was written:
+        the inventory mapped a filename to *one* function name, so `gear_service.py`
+        could only ever name one of its two list routes.
+        """
+        discovered = {filename: tuple(sorted(routes)) for filename, routes in _discover_paginated_list_routes().items()}
+        declared = {filename: tuple(sorted(names)) for filename, names in PAGINATED_LIST_ROUTES.items()}
+
+        assert discovered == declared
+
     def test_every_list_endpoint_clamps(self) -> None:
         """The bug this replaces: three of eight list endpoints clamped and five didn't.
-        (Eight then; the dict below has grown since, and the historical count stays as it
+        (Eight then; the inventory has grown since, and the historical count stays as it
         was.)
 
         Asserting on the source keeps that from silently regressing when a new list
-        endpoint is added by copying one of the five that used to be unbounded.
+        endpoint is added by copying one of the five that used to be unbounded. Per
+        *function*, not per file: a file-wide substring search passes every route sharing
+        a module with one that clamps.
         """
-        list_routes = {
-            "certifications.py": "read_certifications",
-            "courses.py": "read_courses",
-            "dive_sites.py": "read_dive_sites",
-            "dives.py": "read_dives",
-            "gear_items.py": "read_gear_items",
-            "gear_service.py": "read_gear_service_schedules",
-            "gear_sets.py": "read_gear_sets",
-            "trips.py": "read_trips",
-        }
-        routes_dir = Path(__file__).resolve().parents[1] / "src" / "app" / "api" / "v1"
+        discovered = _discover_paginated_list_routes()
+        unclamped = []
 
-        for filename, function_name in list_routes.items():
-            source = (routes_dir / filename).read_text()
-            assert f"def {function_name}(" in source, f"{filename} no longer defines {function_name}"
-            assert "clamp_pagination(page, items_per_page)" in source, f"{filename} does not clamp pagination"
+        for filename, function_names in PAGINATED_LIST_ROUTES.items():
+            for function_name in function_names:
+                function = discovered.get(filename, {}).get(function_name)
+                assert function is not None, f"{filename} no longer defines a list route {function_name}"
+                if not _clamps_pagination(function):
+                    unclamped.append(f"{filename}::{function_name}")
+
+        assert unclamped == [], f"list endpoint(s) not clamping pagination: {unclamped}"
 
 
 @pytest.mark.parametrize(

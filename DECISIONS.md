@@ -3178,6 +3178,26 @@ client asking for too much gets the ceiling instead of a new 422. The three per-
 `MAX_*_PER_PAGE = 100` constants collapsed into one `DEFAULT_MAX_ITEMS_PER_PAGE`, with the per-call
 override kept for a resource that ever needs a different bound.
 
+**The sweep guarding that was keyed by filename, so it could not see a second route in one file.**
+`TestPageSizeCaps` in `tests/test_picker_search.py` walked a hand-written `{filename: function}`
+dict and asserted the *file* contained `clamp_pagination(page, items_per_page)` somewhere.
+`gear_service.py` has two list routes; the dict could name only one of them, and
+`read_gear_service_records` passed on `read_gear_service_schedules`' clamp without ever being looked
+at. Nine routes across eight files were nominally covered by eight names. The endpoint itself
+clamped the whole time - what was missing was the coverage, and it stayed missing because a route
+absent from the dict was silently uncovered rather than a failure.
+
+Both halves are fixed. `PAGINATED_LIST_ROUTES` maps a filename to a *tuple* of function names, and
+the check is an `ast` parse asking whether that handler's own body assigns from `clamp_pagination`
+
+- a file-wide substring passes every route sharing a module with one that clamps. Alongside it,
+  `test_the_inventory_names_every_paginated_route` discovers every
+  `response_model=PaginatedListResponse` handler in `api/v1` and fails when the inventory and the
+  source disagree in *either* direction, so the next route added to an already-named file cannot
+  inherit its neighbour's pass. Discovery reads the source rather than the imported routers because
+  the clamp assertion is a fact about the function body either way, so one parse answers both
+  questions.
+
 ## Ownership checks go through one `fetch_owned_or_raise`
 
 The "fetch by public uuid, check the owner" block existed in seven route files: three as
