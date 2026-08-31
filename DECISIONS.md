@@ -8814,6 +8814,20 @@ dive reads for at most the single-dive TTL of 3600 s.
 The taxonomy-refresh story — WoRMS moves a species, we re-resolve — is explicitly not being built,
 and cross-user cache invalidation is its prerequisite.
 
+**Iteration 2 puts one exception on the row, and it is exempt rather than a contradiction.** Filling
+a `photo_*` column is the first thing that mutates a `species` row. The immutability argument above
+is specifically about *invalidation* — a global rename cannot be expressed in a pattern vocabulary
+that only speaks `user_{id}_*` — and a photo landing inherits exactly the same bounded staleness and
+nothing worse: the only long-lived cached surface carrying a photo field is the single-dive
+response, whose `SpeciesInfo` gained `photo_sha256`, and it self-heals within that same 3600 s TTL.
+Nothing else caches one. `SpeciesRead` is uncached, and the life list's entries carry the digest
+under a 60 s key.
+
+So the sentence to keep is "the *taxonomy* is written once", not "the row is". What has not changed
+is the prerequisite: a photo *correction* that had to be visible immediately would need the same
+cross-user sweep, and nothing in iteration 2 builds one. That is why `--force` on the backfill is an
+operator action rather than an endpoint, and why the refresh cadence is explicitly not built.
+
 ### Species embed on `DiveReadWithMixtures`, not `DiveRead`
 
 The same reasoning every other field on that schema carries: on the parent it would land on the
@@ -11811,6 +11825,289 @@ so `tests/test_create_first_superuser.py` can assert both directions of the drif
 copy names exists on the real table, and every `NOT NULL` column without a server default is named
 by the copy. A copy of a schema is a thing that goes stale; the guard is what makes the next drop
 fail in CI instead of on somebody's first install.
+
+## Species photos are the fourth kind on the files volume, and Commons is never hotlinked
+
+A species now carries one Wikimedia Commons photograph, fetched once at resolve time, stored on this
+instance's own files volume under the `species-photos/` kind, and served by
+`GET /api/v1/species/{uuid}/photo`. Eight nullable columns on `species` hold where it is, which
+version it is, and the parts of its credit. This is the "future kind (photos, species images)" that
+*"File payloads live on the files volume, not in Postgres"* anticipated when it chose the key
+layout, and nothing at the `blob_store` layer changed to accommodate it.
+
+### Fetched once and served from here, rather than hotlinked
+
+The competing shape was `<img src="https://upload.wikimedia.org/…">`, which is cheaper to build and
+was an earlier draft's recommendation. It loses on this project's own recorded grounds: web
+`DECISIONS.md`'s *"Avatars are this instance's own, and Gravatar left rather than becoming a
+fallback"* removed a third-party image host rather than keeping it behind a flag, and named the two
+costs it refused to keep — the third-party host in the CSP, and the privacy-page disclosure.
+Hotlinking reinstates both and adds a third: every viewer's browser would tell Wikimedia which
+species they are looking at.
+
+Serving from our own API needs **no CSP change at all** in either topology, because
+`DEFAULT_API_BASE_URL` is the relative `/api/v1` and `img-src` lists `'self'` unconditionally (a
+split-origin build already contributes `apiOrigin` to `img-src`).
+
+What it costs is a third server-side third party, and it is a *different* one from the two the
+species picker already contacts: `commons.wikimedia.org` for the credit metadata and
+`upload.wikimedia.org` for the bytes. Neither is ever sent anything a diver typed — Commons is asked
+for a file title derived from an AphiaID. `src/.env.example`'s species PRIVACY paragraph says so,
+and the front door's `docs/` and the web app's privacy page both need the same correction, since
+neither is in this repository.
+
+### The selection rule is a sequence, and it refuses rather than guesses
+
+**P18 is multi-valued and the extra value can be a different animal.** Across a 42-species
+diver-realistic sample, 10 items carry more than one P18 statement: `Q169468` (zebra shark) carries
+a photograph of a great hammerhead, `Q695344` (*Triaenodon obesus*) one of a silvertip shark, and
+`Q199458` (green turtle) a vector distribution diagram. "Take the first P18" is a coin flip that
+shows divers the wrong species.
+
+**Rank is very nearly useless for settling it, and that had to be measured rather than assumed.**
+Only 2 of those 10 items rank a statement `preferred`, and `deprecated` appears nowhere in the
+sample at all — the mechanism Wikidata provides for marking the bad value bad is simply not in use
+on these taxa. So the rule reads file titles, in this order (`services/species_photos.py`):
+
+1. Drop `deprecated` statements and anything that is not a raster image by extension.
+2. One candidate left — use it.
+3. Exactly one ranked `preferred` — use it.
+4. Keep only candidates whose title contains the taxon name or its specific epithet.
+5. If **any** survive, use one: those whose title begins with the taxon name first, then the first
+   in statement order.
+6. None survive — no photo.
+
+Two things about that sequence are worth keeping, because both were got wrong once:
+
+- **Step 5 is not optional.** Stopping at "if exactly one survives step 4" yields 33 of 42 rather
+  than 39, because in six of the eight remaining ties *both* candidates name the taxon and so
+  neither is uniquely selected. It is safe precisely because step 4 has already run — every
+  candidate reaching it names the taxon, so choosing between them cannot pick a different animal,
+  which is the only thing the no-substitutes decision forbids.
+- **Step 4 matches against the P225 of the item being examined**, not the accepted name this
+  instance stores. On the synonym-retry path those differ: `Q169468`'s taxon name is *Stegostoma
+  fasciatum* while the stored name is *Stegostoma tigrinum*, so matching the stored name keeps
+  neither candidate and the zebra shark silently loses its photo.
+
+**A species with no reliable photo shows no photo.** The rejected alternative was falling back to
+the genus image, which sampled species lacking their own generally did have. It was rejected because
+*Acropora* has hundreds of species a diver cannot separate in the water, so the genus photo is a
+photo of some other animal — and presenting it in a logbook whose entire claim is "this is what I
+saw" is a factual error dressed as a feature. That decision is what makes the conservative rule
+above correct rather than merely cautious, and it is why the no-photo case is a first-class state
+everywhere: population-wide, only 11.7% of Wikidata items carrying a WoRMS id have a P18 at all.
+
+### A synonym's item can hold the photo the accepted item lacks
+
+WoRMS's accepted AphiaID for the zebra shark is 313100, whose Wikidata item carries no image;
+Wikidata has split the taxon and the *unaccepted* 220032 reaches `Q169468`, which has one. Storing
+the accepted id is the obviously correct thing to do and is exactly what misses the photo, so a
+retry keyed on the synonym ids exists — **one search, not one per synonym**: `haswbstatement` ORs
+its values inside a single query, verified live, which matters because the flagship case has 22
+synonym ids and some taxa have 55. `_worms_synonyms` was widened to carry each row's AphiaID
+alongside its name for this; the id was already in the same response and was being discarded.
+
+**The retry fires only when the accepted item offered no candidate at all**, never when the rule
+looked at candidates and declined them. Getting that backwards would hand *Triaenodon obesus* a
+photo from a synonym's item immediately after the rule had refused its own for naming a different
+shark — undoing the one refusal the design exists to make.
+
+### None of it may share `resolve_species`' enrichment budget
+
+**The sharpest hazard in the feature.** `resolve_species` runs its three enrichment legs inside one
+`anyio.move_on_after(_ENRICHMENT_BUDGET_SECONDS)` task group and then raises 503 when the synonym
+list came back `None`. `move_on_after` cancels the whole group, so a slow Commons call sharing that
+scope would cancel the synonym walk beside it and turn a photo provider's bad day into
+`POST /species/resolve` failing — the only route by which a species enters the catalog at all, so
+divers could not add species to dives.
+
+The photo work therefore runs **after** that group, after the row is committed, in a timeout scope
+and budget of its own, and the whole step is guarded: the row is already shared with every account,
+so nothing about a picture may turn a resolve that succeeded into an error the client reads as
+failure. The invariant, pinned by `TestCommonsCannotFailAResolve`: **no failure or slowness of
+Commons can change the status code of `POST /species/resolve`.**
+
+Reading P18 off the entity the group already loaded is what makes the photo's *identity* free —
+`_WikidataEntity` carries the values and their ranks, out of a `props=claims` response that was
+already being made. The rejected alternative was moving the byte fetch onto the worker: better in
+the abstract and not available cheaply, since every function in `core/worker/functions.py` is
+cron-driven and `enqueue_job` appears nowhere in `src/app/`. The picker already shows a pending row
+with a disabled submit while a resolve is in flight, so the second or so this adds is absorbed by an
+interaction that was already asynchronous.
+
+### The credit is stored as parts, and `Artist` is HTML
+
+Iteration 1's precedent points the other way — *"The attribution string is a wire format"* has
+search results carry a ready-made `attribution` string — and it is rejected here for a concrete
+reason: a compliant credit needs **two different hyperlinks**, the licence and the source, and one
+string can carry at most one. The clients compose.
+
+`Artist` is HTML on 36 of 40 sampled files, and the ready-made `Attribution` key exists on only 7 —
+so parsing is the common path, not a fallback. Be precise about why a regex is wrong, because the
+obvious guess is not the reason: a tag-shaped strip does **not** leak the `title` tooltip into the
+name. What it leaves is `&amp;` and `&#39;` sitting in the name, and adjacent elements glued
+together, so a two-author value comes back as one run-on string. `_TextExtractor` resolves the
+entities and treats every tag as a soft boundary. None of it may ever be interpolated as HTML.
+
+`descriptionurl` was present on 40 of 40, so the "source" link every one of these licences asks for
+is always available. The attribution obligation is discharged one click away, which both licence
+generations allow: CC BY-SA 4.0 says so outright at §3(a)(2), and 3.0 and earlier rest on §4(c)'s
+"reasonable to the medium or means You are utilizing" — cite the right one per file rather than
+assuming 4.0, since Commons files carry a spread and 3.0 was the most common in the sample.
+
+### The stored bytes are a scaled copy and nothing else
+
+Never cropped, never overlaid, never composited — which is why `services/species_photos.py` does not
+reuse `user_avatars._normalize` however similar the decode fencing looks. It is a **licence**
+property rather than an aesthetic one: 24 of 40 sampled files are ShareAlike, and while displaying
+and scaling an image is not adaptation, cropping and compositing move toward it. Any square-card
+presentation is the browser's business at render time.
+
+One stored width, and it comes from Commons' own bucket list. **Thumbnail widths are bucketed, not
+arbitrary**: the served buckets are 120/250/330/500/960, an off-bucket URL answers HTTP 400, and
+`imageinfo`'s `thumbwidth` reports the width asked for rather than the one served — so layout
+arithmetic based on it is wrong by up to ten pixels. This asks the API to name the URL via
+`iiurlwidth=500` rather than building one, which sidesteps the trap entirely. Storing 330 for lists
+and 960 for the page halves list bandwidth and doubles storage and fetch count; there is no evidence
+yet that list bandwidth is a problem.
+
+The byte fetch also needs the identifying `User-Agent` the API calls already send: an empty one
+returns **403 on `upload.wikimedia.org` as well as on `api.php`**, verified both ways. End-user
+browsers always send one, which is why this bites servers and not `<img>` tags. Note also that
+Wikimedia's User-Agent policy has moved off `meta.wikimedia.org` — which now serves a redirect stub
+— to `foundation.wikimedia.org`.
+
+### The endpoint that serves them is the first unauthenticated bytes route
+
+Access tokens in this app are Bearer-only — the sole cookie is `refresh_token`, read on the refresh,
+logout and account-deletion paths alone — so an `<img src>` cannot authenticate. The alternative is
+the `useAuthedBlobUrl` path the certification cards use, and web `DECISIONS.md` says what that
+costs: "the blob is re-fetched on every mount… it would need real thought at gallery scale." A life
+list is a gallery.
+
+It discloses nothing. The catalog is already global and ownerless, a species uuid is not an
+existence oracle for anything private, and the bytes are freely licensed Commons files anybody can
+fetch from Commons directly. A missing photo and an unknown uuid are deliberately the same 404, so
+the route is not an oracle for catalog membership either.
+
+Two departures from the authenticated binary reads next door, both consequences of the bytes being
+public and immutable: `Cache-Control` is **public** rather than `private`, and the content is served
+for **inline** rendering rather than as an `attachment`. Those routes use `attachment` because the
+web app fetches them through its API client — which is exactly what this route exists not to do, so
+a `Content-Disposition` here would break the `<img>` it is built for. The rest of the convention is
+copied verbatim: a digest-only query before any bytes are read, an ETag of the sha256,
+`If-None-Match` → 304, `nosniff`, and the restrictive per-response CSP.
+
+The route is enrolled by hand in the two allowlists that fail closed — `ANONYMOUS_BY_DESIGN` in
+`tests/test_route_authentication.py` (as a fourth kind of anonymous caller: one that carries no
+credential and cannot be given one) and `UNOWNED_ROUTES` in `tests/test_ownership.py`.
+
+### The sweeper has to learn every new blob kind, and forgetting is destructive
+
+`blob_store.iter_keys()` walks the whole volume while `_referenced_keys()` builds its set from
+columns, so a kind missing there is on-disk and referenced by nothing — which classifies every file
+of it past the 24-hour grace window as an orphan for `--delete` to unlink. The suspicious-fraction
+refusal is the only brake, `--force` overrides it, and it does not engage at all below 20 files on
+the volume, so the smallest instances have no brake. Species photos are the worst case for that,
+being the only kind on a *global* table. `_referenced_keys`' docstring no longer counts the sources,
+because it said "the three places" right up until the fourth arrived.
+
+### Backfilling selects on the timestamp, not on the absence of bytes
+
+`src/scripts/backfill_species_photos.py` follows the house shape, with three deliberate departures
+from `backfill_dive_profiles.py` that copying blindly would get wrong:
+
+- **It creates no Redis pool.** That one needs it because `delete_keys_by_pattern` silently no-ops
+  when the pool is absent and it invalidates. This one invalidates nothing — see the exemption under
+  *Rows are immutable in v1* — so there is nothing to no-op.
+- **Its predicate is `photo_fetched_at IS NULL`.** "No photo" is the permanent outcome for most of
+  the catalog, so a predicate keyed on the absence of stored bytes would never shrink and every
+  re-run would re-query Wikidata and Commons for the entire photo-less tail forever. Stamping the
+  timestamp on a *failed* attempt is what makes the second run report zero. `--force` therefore
+  means "re-attempt regardless of when it was last tried".
+- **It paces itself and completes.** The provider throttle is built to *degrade*, because its
+  counter is instance-wide and one diver's search must not reject another's. A backfill wants the
+  opposite, so it sleeps between species rather than dropping them.
+
+### GBIF was cut on the evidence, not deferred
+
+Held open in an earlier draft pending a coverage measurement, and then run live against species that
+genuinely lack a P18: licences come back `null` or **CC BY-NC-ND** (NonCommercial *and*
+NoDerivatives — a resize is arguably a derivative, so even a thumbnail is unsafe), `/species/match`
+silently fuzzy-matched *Stegostoma tigrinum* to *Stegostoma tigrinus* at confidence 96, and the
+images are taxonomic monograph plates rather than photographs — one was downloaded and looked at: a
+coral photo with a world distribution map stitched underneath it, captioned "FIG. 82". There is no
+AphiaID→GBIF-key route either; it goes through a name, inheriting every synonym problem plus GBIF's
+own. iNaturalist was rejected in iteration 1 for NC licensing and remains so. P373 (Commons
+category) is more common than P18 across the register and is the recorded escalation if the no-photo
+rate ever becomes the complaint — not built, because a category's first member is not a curated lead
+image.
+
+## The life list is a hand-written aggregate, and it lives under `/user/`
+
+`GET /api/v1/user/species` returns every species the caller has ever logged, most recently seen
+first, with their dive count and first/last sighting — paginated, token-scoped, searchable.
+
+**Why not `/species/logged?user_uuid=`.** Both are defensible. Eleven collection-shaped routes take
+a `user_uuid` query param and 403 on a mismatch, and two of them (`/certifications-expiring`,
+`/gear-service-due`) are derived views just like this one. Against that: `/species/` is the one
+router in `api/v1` that belongs to nobody, stated as such in its own docstring and above, and
+putting a user-scoped route there would make it the first mixed-ownership namespace in the API. The
+`/user/` family is exactly "the caller's own log as a whole". Preserving a documented invariant beat
+matching the pagination family's path shape. The cost, recorded so it is not rediscovered: no other
+`/user/` route is paginated, so this is the first.
+
+**It is the first hand-written aggregate in the API.** A grep for `group_by` across `src/app/`
+returned a single hit before it, and that was a search-ranking collapse rather than a statistics
+query. The house rule is unambiguous even so: FastCRUD serves the plain-row path, and anything with
+a join, an aggregate or a non-trivial ordering is a hand-written `select()` returning
+`{"data": …, "total_count": …}` so `paginated_response` still works.
+
+Three properties it has to hold, and each fails quietly rather than loudly:
+
+- **It counts live dives only.** `dive_species` carries no liveness of its own and its `dive_id`
+  cascade is *dormant* — dives are soft-deleted, so no `DELETE FROM dive` ever fires and the join
+  rows of a deleted dive survive it. The aggregate reaches through to `Dive.is_deleted` exactly as
+  `recalculate_dive_stats` does. Forgetting shows a diver dives they deleted.
+- **Its `total_count` equals `species_seen`.** The dashboard stat is `COUNT(DISTINCT species_id)`
+  over the same join, computed on the write path, so the two agreeing for any diver is the cheapest
+  end-to-end check the feature has — and it only holds because both reach through the same way.
+  `species_seen` stays a stored scalar with zero read cost; the tile links to the new page rather
+  than starting to read from it.
+- **Its search is an `EXISTS` over `species_name`, not a join.** A join would multiply the
+  aggregates by the number of matching aliases, so a species with three of them would report
+  `dive_count` as dives × aliases — silently, and only for the species a diver searched for.
+
+### Its cache key carries the whole query, and that is the defect worth remembering
+
+`@cache` builds its key from the `key_prefix` placeholders and the resource id and **nothing else**,
+so a key missing `page` and `search` collapses every page *and* every search of one diver onto a
+single entry: page 2 serves page 1 and a search serves the unfiltered list, for 60 s at a time.
+Nothing downstream catches it — `TestListCacheKeys` asserts `page_{page}` only for
+`OwnedResourceCache` instances, and this is deliberately not one — and it is invisible to any check
+run outside the TTL, which is precisely how it would ship. `SPECIES_LIFE_LIST_CACHE_KEY_PREFIX` is a
+named constant so a test can assert on it, and `TestTheCacheKeyCarriesTheWholeQuery` drives the real
+decorator against a cache that really stores.
+
+It hangs under the `user_{id}_dives:` prefix rather than a namespace of its own, for the reason
+`_cached_gas_use_history` gives next door: `invalidate_dive_caches` deletes exactly
+`user_{id}_dives:*` and `user_{id}_dive:*` and deliberately not a wider pattern, so a key of its own
+would be a third pattern to remember to add there. The bug from forgetting is specific here —
+`species_seen` is uncached and drops instantly on a dive delete, so the tile and the list would
+disagree, breaking the very equality above. The 60 s TTL also bounds how long a backfilled photo
+stays invisible on this surface.
+
+### `GET /dives?species_uuid=` is the third custom filter, and needed no migration
+
+An `IN (subquery)` on `dive_id`, copying `at_dive_site` and `with_gear_item`.
+`dive_species.species_id` is already indexed and the model comment says it was indexed for this. Two
+things differ from its siblings: it takes no `user_id`, the catalog being global, and its resolver
+returns **`None`, not an empty map**, when the uuid is unknown — so it needs the
+`(species_map or {}).get(uuid, -1)` spelling, or a bare `.get` raises `AttributeError` and answers
+500 on exactly the unknown-uuid case the filter has to answer with an empty page. The dives cache
+key grew a `species_{id}` segment to match; every placeholder in that key is looked up as a keyword
+argument, so a filter passed positionally raises at key construction rather than collapsing two
+result sets onto one entry.
 
 ## Signing stopped being a demand on contributors, and the hook learned to check
 

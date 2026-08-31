@@ -602,11 +602,16 @@ async def read_dive_activity(
 #
 # Same authorization caveat as everywhere in this file: `@cache` serves a hit without re-running
 # the body, so this must only ever be called with the calling user's own id.
-@cache(
-    key_prefix="user_{user_id}_dives:species:page_{page}:items_per_page:{items_per_page}:search:{search}",
-    resource_id_name="user_id",
-    expiration=60,
+# Named rather than written inline so a test can assert on it directly. That is worth the one
+# extra line here and nowhere else in this file: this is the key whose omissions produce a
+# wrong answer rather than a slow one, and every other way of checking it either reads this
+# file's source text or passes whenever it happens to run outside the 60 s TTL.
+SPECIES_LIFE_LIST_CACHE_KEY_PREFIX = (
+    "user_{user_id}_dives:species:page_{page}:items_per_page:{items_per_page}:search:{search}"
 )
+
+
+@cache(key_prefix=SPECIES_LIFE_LIST_CACHE_KEY_PREFIX, resource_id_name="user_id", expiration=60)
 async def _cached_species_life_list(
     request: Request, user_id: int, db: AsyncSession, page: int, items_per_page: int, search: str | None
 ) -> dict:
