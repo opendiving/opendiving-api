@@ -11873,11 +11873,14 @@ Serving from our own API needs **no CSP change at all** in either topology, beca
 split-origin build already contributes `apiOrigin` to `img-src`).
 
 What it costs is a third server-side third party, and it is a *different* one from the two the
-species picker already contacts: `commons.wikimedia.org` for the credit metadata and
-`upload.wikimedia.org` for the bytes. Neither is ever sent anything a diver typed — Commons is asked
-for a file title derived from an AphiaID. `src/.env.example`'s species PRIVACY paragraph says so,
-and the front door's `docs/` and the web app's privacy page both need the same correction, since
-neither is in this repository.
+species picker already contacts. One party, **three** hosts: `commons.wikimedia.org` for the credit
+metadata, and then `thumb.wikimedia.org` or `upload.wikimedia.org` for the bytes — a single
+`imageinfo` reply names both of those, and which one is actually fetched depends on whether the file
+is wide enough to have a thumbnail (see *The byte fence admits two hosts, because one `imageinfo`
+reply names two*). None of the three is ever sent anything a diver typed — Commons is asked for a
+file title derived from an AphiaID. `src/.env.example`'s species PRIVACY paragraph says so, and the
+front door's `docs/` and the web app's privacy page both need the same correction, since neither is
+in this repository.
 
 ### The selection rule is a sequence, and it refuses rather than guesses
 
