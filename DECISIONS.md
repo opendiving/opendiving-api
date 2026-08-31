@@ -3178,6 +3178,25 @@ client asking for too much gets the ceiling instead of a new 422. The three per-
 `MAX_*_PER_PAGE = 100` constants collapsed into one `DEFAULT_MAX_ITEMS_PER_PAGE`, with the per-call
 override kept for a resource that ever needs a different bound.
 
+**The sweep guarding that was keyed by filename, so it could not see a second route in one file.**
+`TestPageSizeCaps` in `tests/test_picker_search.py` walked a hand-written `{filename: function}`
+dict and asserted the *file* contained `clamp_pagination(page, items_per_page)` somewhere.
+`gear_service.py` has two list routes; the dict could name only one of them, and
+`read_gear_service_records` passed on `read_gear_service_schedules`' clamp without ever being looked
+at. When this was found the sweep put eight names against nine routes in eight files. The endpoint
+itself clamped the whole time - what was missing was the coverage, and it stayed missing because a
+route absent from the dict was silently uncovered rather than a failure.
+
+Both halves are fixed. `PAGINATED_LIST_ROUTES` maps a filename to a *tuple* of function names, and
+the check is an `ast` parse asking whether that handler's own body assigns from `clamp_pagination`,
+since a file-wide substring passes every route sharing a module with one that clamps. Alongside it,
+`test_the_inventory_names_every_paginated_route` discovers every
+`response_model=PaginatedListResponse` handler in `api/v1` and fails when the inventory and the
+source disagree in *either* direction, so the next route added to an already-named file cannot
+inherit its neighbour's pass. Discovery reads the source rather than the imported routers because
+the clamp assertion is a fact about the function body either way, so one parse answers both
+questions.
+
 ## Ownership checks go through one `fetch_owned_or_raise`
 
 The "fetch by public uuid, check the owner" block existed in seven route files: three as
@@ -12782,7 +12801,7 @@ were checked.
 
 Two kinds of registration live in `tests/`, and they behave oppositely when a model is added.
 
-The first kind asks the models and fails by name on anything it does not recognise:
+The first kind asks the code itself and fails by name on anything it does not recognise:
 
 - `test_migrations.py::TestMigrationsCoverEveryModel` diffs `Base.metadata.tables` against the DDL
   an offline `alembic upgrade head` emits, so a table no revision creates is a failure.
@@ -12793,6 +12812,13 @@ The first kind asks the models and fails by name on anything it does not recogni
 - `test_ownership.py::TestEveryUuidRouteIsAccountedFor` enumerates the app's real route table and
   fails on a `{uuid}` route not listed there; `TestEveryOwnedRouteUsesIt` greps the route files for
   the hand-rolled ownership block that `fetch_owned_or_raise` replaced.
+
+- `test_picker_search.py::TestPageSizeCaps` parses `api/v1` with `ast` for every handler declaring
+  `response_model=PaginatedListResponse` and fails when that set and `PAGINATED_LIST_ROUTES`
+  disagree in either direction, then reads each named handler's *own* body for the
+  `clamp_pagination` call. It sat in the inventory below, correctly, until it grew that discovery -
+  see *"Pagination bounds live in `core/utils/pagination`, not in each route"* for what the
+  hand-written version missed.
 
 - `test_hard_delete.py::TestTheRegistryIsComplete` names any hard-deleting model with a public
   `uuid` that has neither a case in that file nor a recorded reason for having no delete of its own,
@@ -12835,11 +12861,6 @@ wrong would be worse than an honest list: it would look like coverage.
   trips search one column plus an `EXISTS` over `trip_location` and so go through
   `trips.py::_search_conditions` rather than `search_clause`. That distinction is exactly the
   judgement a sweep over the models could not make.
-- **`tests/test_picker_search.py`, `test_every_list_endpoint_clamps`** - a dict of route file to
-  handler name. Its own docstring records the bug it replaces, where most list endpoints did not
-  clamp at all; a new list endpoint copied from an old one is unbounded again and absent from the
-  dict, which is silence twice over. Deriving it would mean deciding from the source what counts as
-  a list endpoint, which is the part that needs a person.
 - **`tests/test_owned_read_scoping.py`, the per-helper classes** - `TestTripUuidLookupScoping`,
   `TestTheDiveReadsScopeThatLookup`, `TestOwnedGearItemIsScopedToTheCaller` and
   `TestArchivedItemsStillComeThrough`. These pin loaders that are *not* reachable through today's
