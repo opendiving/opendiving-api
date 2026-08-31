@@ -335,17 +335,30 @@ class TestTheAggregate:
     async def test_the_ordering_is_still_by_the_absolute_instant(self, db: Session, async_db: AsyncSession) -> None:
         """ "First seen" means the earliest dive chronologically, whatever local time it read as.
         Sorting on the offset-shifted value instead would reorder a diver's log by where they
-        happened to be standing."""
+        happened to be standing.
+
+        **The offsets have to be extreme enough to actually invert the order**, or this passes
+        against both implementations and pins nothing. The two dives are 24 h apart, so the
+        offset spread has to exceed 1440 minutes: +840 (Kiritimati) and -720 (Baker Island) give
+        1560, which puts the *later* dive at 21:00 local on the 1st and the *earlier* one at
+        23:00 local the same evening. Sorting on local time therefore swaps them and these
+        assertions fail. An earlier version of this fixture used -600 and +780 - a spread of
+        1380, just under the gap - and could not fail either way.
+        """
         diver = create_user(db)
         species = create_species(db)
-        self._log(db, diver, species, 1, offset_minutes=-600)
-        self._log(db, diver, species, 2, offset_minutes=780)
+        self._log(db, diver, species, 1, offset_minutes=840)
+        self._log(db, diver, species, 2, offset_minutes=-720)
 
-        page = await species_life_list(async_db, user_id=diver.id, offset=0, limit=10)
+        row = (await species_life_list(async_db, user_id=diver.id, offset=0, limit=10))["data"][0]
 
-        row = page["data"][0]
+        # The instants - the fixture's whole point is that the local clock disagrees with them.
         assert row["first_seen"] == datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
         assert row["last_seen"] == datetime(2026, 6, 2, 9, 0, tzinfo=UTC)
+        # And each still wears its own dive's offset, so a swap could not hide behind two
+        # aware datetimes comparing equal across timezones.
+        assert row["first_seen"].utcoffset() == timedelta(minutes=840)
+        assert row["last_seen"].utcoffset() == timedelta(minutes=-720)
 
     @pytest.mark.asyncio
     async def test_a_soft_deleted_dive_does_not_count(self, db: Session, async_db: AsyncSession) -> None:
