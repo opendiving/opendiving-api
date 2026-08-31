@@ -159,6 +159,7 @@ class TestTheDiveReadsScopeThatLookup:
                 course_id=None,
                 dive_site_id=None,
                 gear_item_id=None,
+                species_id=None,
             )
 
         assert lookup.await_args is not None

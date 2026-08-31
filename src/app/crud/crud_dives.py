@@ -7,13 +7,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models.dive import Dive
 from ..models.dive_dive_site import DiveDiveSite
 from ..models.dive_gear_item import DiveGearItem
+from ..models.dive_species import DiveSpecies
 from ..schemas.dive import DiveCreateInternal, DiveDelete, DiveReadInternal, DiveUpdate, DiveUpdateInternal
 
 CRUDDive = FastCRUD[Dive, DiveCreateInternal, DiveUpdate, DiveUpdateInternal, DiveDelete, DiveReadInternal]
 
-# Lets callers filter dives by dive site or gear item (e.g. `id__at_dive_site=some_id`,
-# `id__with_gear_item=some_id`) with a single `IN (subquery)` condition instead of
-# resolving matching dive ids in a separate round trip.
+# Lets callers filter dives by dive site, gear item or species (e.g. `id__at_dive_site=some_id`,
+# `id__with_gear_item=some_id`, `id__showing_species=some_id`) with a single `IN (subquery)`
+# condition instead of resolving matching dive ids in a separate round trip.
+#
+# None of the three subqueries scopes by owner, and that is safe rather than an omission: the
+# `user_id` filter on the outer query is what bounds the result, and each of these only narrows
+# it further. `showing_species` could not scope by owner in any case - the catalog is global
+# and `species` has no `user_id` - which is exactly why it needs no migration either: it reads
+# `dive_species.species_id`, already indexed, and the model comment says it was indexed for
+# this.
 crud_dives = CRUDDive(
     Dive,
     custom_filters={
@@ -26,6 +34,9 @@ crud_dives = CRUDDive(
             lambda gear_item_id: column.in_(
                 select(DiveGearItem.dive_id).where(DiveGearItem.gear_item_id == gear_item_id)
             )
+        ),
+        "showing_species": lambda column: (
+            lambda species_id: column.in_(select(DiveSpecies.dive_id).where(DiveSpecies.species_id == species_id))
         ),
     },
 )

@@ -61,15 +61,59 @@ class SpeciesBase(BaseModel):
     ]
 
 
-class SpeciesRead(SpeciesBase, PublicUUIDSchema):
+class SpeciesPhotoCredit(BaseModel):
+    """The stored photo's provenance, as the parts a compliant credit line is built from.
+
+    **Parts rather than one pre-composed string**, which is the opposite of what
+    `SpeciesSearchResult.attribution` does and is a deliberate departure: a credit here needs
+    two different hyperlinks - the licence and the source page - and a single string can
+    carry at most one of them. The client composes; nothing here is markup, and none of it
+    may ever be interpolated as HTML (`photo_author` is parsed out of Commons' HTML `Artist`
+    field, so it is plain text by the time it reaches this).
+
+    Every field is nullable independently. Measured across a 40-file sample, `descriptionurl`
+    was present on all forty and `Artist` was absent from one, so a photo whose author is
+    unknown is a real state rather than a defensive one.
+    """
+
+    photo_file: Annotated[
+        str | None,
+        Field(default=None, max_length=255, examples=["Clownfisch (Amphiprion ocellaris).jpg"]),
+    ]
+    photo_author: Annotated[str | None, Field(default=None, max_length=255, examples=["Raimond Spekking"])]
+    photo_license: Annotated[str | None, Field(default=None, max_length=128, examples=["CC BY-SA 4.0"])]
+    photo_license_url: Annotated[
+        str | None,
+        Field(default=None, max_length=512, examples=["https://creativecommons.org/licenses/by-sa/4.0"]),
+    ]
+    photo_source_url: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=512,
+            examples=["https://commons.wikimedia.org/wiki/File:Clownfisch%20(Amphiprion%20ocellaris).jpg"],
+            description="The Commons file description page - the 'source' the licence asks for",
+        ),
+    ]
+
+
+class SpeciesRead(SpeciesBase, SpeciesPhotoCredit, PublicUUIDSchema):
     """Public representation of a catalog row, keyed by its opaque `uuid`.
 
     No `user_uuid`, unlike every other read schema here: the catalog belongs to nobody. The
     `aphia_id` is exposed deliberately - it is the identifier that makes a row meaningful
     outside this database, which is also why the export carries it.
+
+    Carries the whole credit because the species page renders it. **`photo_storage_key` and
+    `photo_fetched_at` are deliberately absent**, exactly as `UserRead` carries
+    `avatar_sha256` and never `avatar_storage_key`: an internal blob key and an operational
+    timestamp are not part of any client contract.
     """
 
     created_at: datetime
+    # The same digest `SpeciesInfo` carries, and the same contract - see there. Non-null
+    # means there is a photo; the client builds `/species/{uuid}/photo?v=<prefix>` itself.
+    photo_sha256: Annotated[str | None, Field(default=None, max_length=64)]
 
 
 class SpeciesSearchResult(BaseModel):
@@ -124,6 +168,29 @@ class SpeciesSearchResponse(BaseModel):
     ]
 
 
+class SpeciesLifeListEntry(PublicUUIDSchema):
+    """One row of `GET /user/species` - a species this diver has logged, and their history
+    with it.
+
+    Not a `SpeciesRead` with extras: the three aggregate fields are facts about *this
+    caller's* logbook rather than about the taxon, which is the whole reason this route lives
+    under `/user/` rather than under the ownerless `/species/`. The taxon half is deliberately
+    the same subset `SpeciesInfo` carries, plus the digest, so a card renders without a second
+    request per row.
+
+    `first_seen`/`last_seen` are dive **start times**, so they carry the offset the diver
+    logged the dive in - the same values every other dive-derived surface reports.
+    """
+
+    scientific_name: Annotated[str, Field(max_length=255, examples=["Amphiprion ocellaris"])]
+    common_name: Annotated[str | None, Field(default=None, max_length=255, examples=["Ocellaris clownfish"])]
+    rank: Annotated[str, Field(max_length=64, examples=["Species"])]
+    photo_sha256: Annotated[str | None, Field(default=None, max_length=64)]
+    dive_count: Annotated[int, Field(ge=1, examples=[7], description="How many live dives recorded this species")]
+    first_seen: datetime
+    last_seen: datetime
+
+
 class SpeciesResolveRequest(BaseModel):
     """Body for `POST /species/resolve` - the one field that identifies a taxon globally.
 
@@ -147,13 +214,18 @@ class SpeciesCreate(SpeciesBase):
     model_config = ConfigDict(extra="forbid")
 
 
-class SpeciesReadInternal(SpeciesBase):
+class SpeciesReadInternal(SpeciesBase, SpeciesPhotoCredit):
     """Mirrors the actual `species` table columns. Never returned over the API - the public
-    shape is `SpeciesRead`, which carries the `uuid` instead of the internal `id`."""
+    shape is `SpeciesRead`, which carries the `uuid` instead of the internal `id`.
+
+    The two photo fields `SpeciesRead` withholds are here, since this shape is the row."""
 
     id: int
     uuid: uuid_pkg.UUID
     created_at: datetime
+    photo_sha256: Annotated[str | None, Field(default=None, max_length=64)]
+    photo_storage_key: Annotated[str | None, Field(default=None, max_length=255)]
+    photo_fetched_at: datetime | None = None
 
 
 class SpeciesUpdate(BaseModel):
@@ -161,6 +233,12 @@ class SpeciesUpdate(BaseModel):
     PATCH endpoint, by design (see `models/species.py`). An edit here goes stale in already
     cached dive reads for at most that cache's TTL, since global invalidation is not
     something this codebase can express.
+
+    **The `photo_*` columns are deliberately absent from this schema altogether**, the same
+    call `UserUpdate` makes about the avatar pair and for the same reason: they are written
+    by `services.species_photos`, which owns the blob beside them, and an edit that could
+    null the key while leaving the file on the volume is exactly the orphan this app has a
+    sweeper for. Re-fetching a photo is a backfill run, not a form field.
     """
 
     model_config = ConfigDict(extra="forbid")

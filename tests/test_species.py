@@ -924,6 +924,7 @@ class TestWikidataBreadthThenEnrichment:
             label="Amphiprion ocellaris",
             aliases=("ocellaris clownfish",),
             rank="Species",
+            images=(),
         )
 
         for term, expected in (

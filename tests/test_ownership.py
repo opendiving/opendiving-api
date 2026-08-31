@@ -438,6 +438,12 @@ RESOLVER_OWNED_ROUTES = [
 # `user_id` filter its siblings carry is an omission on purpose rather than an oversight.
 UNOWNED_ROUTES: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/species/{uuid}"): "The species catalog is global - there is no owner to compare against.",
+    ("GET", "/api/v1/species/{uuid}/photo"): (
+        "Same global catalog, and this one does not even authenticate - see its entry in "
+        "`test_route_authentication.ANONYMOUS_BY_DESIGN`. The bytes are a freely licensed "
+        "Commons file shared by every account, so there is no owner to compare against and "
+        "nothing an ownership check could protect."
+    ),
 }
 
 OWNER_ID = 7

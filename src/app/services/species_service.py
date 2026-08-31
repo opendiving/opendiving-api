@@ -24,7 +24,14 @@ is free with citation and asks callers not to harvest the register wholesale, wh
 exactly what an on-demand catalog does not do. The lawful bulk route (paging GBIF's own
 copy) is recorded in DECISIONS.md as the escalation, not taken here.
 
-Both providers are throttled instance-wide and every answer is cached, for the reason
+**A third provider, and it is not a third source of names.** Wikimedia Commons is asked for
+one thing only - the credit and the scaled bytes of the photograph a Wikidata item already
+named - and it is asked once per *new* species rather than per keystroke. It never sees
+anything a diver typed. The bytes it returns go on this instance's files volume and are served
+from this instance's own API, so no browser ever contacts Wikimedia; see
+`services/species_photos.py`, which owns everything done with the answer.
+
+Every provider here is throttled instance-wide and every answer is cached, for the reason
 Nominatim's policy makes load-bearing next door: a courtesy that is only observed when
 traffic is low is not one.
 """
@@ -54,6 +61,7 @@ from ..core.utils.search import LIKE_ESCAPE_CHAR, escape_like
 from ..models.species import Species
 from ..models.species_name import SpeciesName
 from ..schemas.species import SpeciesSearchResponse, SpeciesSearchResult
+from . import species_photos
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +182,13 @@ _TAXON_NAME_PROPERTY = "P225"
 # Wikidata's "taxon rank" property, whose value is an item rather than a string - so it is
 # read through `_claim_entity_id` and translated by the map below.
 _TAXON_RANK_PROPERTY = "P105"
+# Wikidata's "image" property: the Commons file title of the item's lead image. **The only
+# image property consulted**, deliberately. P181 is a distribution map and P2716 a collage,
+# and rendering either where a photograph belongs is the same failure that made GBIF's media
+# unusable. P373 (Commons category) is more common than P18 across the register and is the
+# recorded escalation if the no-photo rate ever becomes the complaint - it is not built,
+# because a category's first member is not a curated lead image.
+_IMAGE_PROPERTY = "P18"
 
 # P105's item to the rank string this app ships. **Spelled WoRMS's way wherever WoRMS has a
 # spelling**, so one rank never reaches a client under two names: a client displays this
@@ -258,6 +273,7 @@ _LANGUAGE_CODE_MAX_LENGTH = 3
 # holding the whole fan-out open.
 _PROVIDER_WORMS = "worms"
 _PROVIDER_WIKIDATA = "wikidata"
+_PROVIDER_COMMONS = "commons"
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,6 +322,12 @@ class _WikidataEntity:
     # one whose rank item is not in the map, both of which become the `"unknown"` sentinel on
     # the way out.
     rank: str | None
+    # Every non-deprecated P18 value **and its statement rank**, in serialization order. The
+    # rank rides along because `species_photos.choose_photo_file` needs it, and the order does
+    # because that rule's last tie-break is "the first in statement order". These bytes are
+    # already in the `props=claims` response every caller here makes, so carrying them costs
+    # no extra request - which is the whole reason the photo's *identity* is free.
+    images: tuple[species_photos.ImageCandidate, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -420,7 +442,14 @@ async def _claim_provider_slot(provider: str) -> bool:
             settings.SPECIES_WIKIDATA_RATE_LIMIT_REQUESTS,
             settings.SPECIES_WIKIDATA_RATE_LIMIT_WINDOW_SECONDS,
         ),
+        _PROVIDER_COMMONS: (
+            settings.SPECIES_COMMONS_RATE_LIMIT_REQUESTS,
+            settings.SPECIES_COMMONS_RATE_LIMIT_WINDOW_SECONDS,
+        ),
     }
+    # Indexed rather than `.get`-ed on purpose: a provider added above without a pair here is a
+    # `KeyError` at the first call, which is loud, where a default would be an unthrottled
+    # third party nobody notices. Every caller of this passes one of the three constants.
     max_requests, window = limits[provider]
     try:
         await enforce_rate_limit(f"species:provider:{provider}", max_requests, window)
@@ -520,6 +549,18 @@ async def _worms(endpoint: str, segment: str | int, params: dict[str, Any] | Non
 
 async def _wikidata(params: dict[str, Any]) -> Any | None:
     return await _request(_PROVIDER_WIKIDATA, settings.WIKIDATA_API_URL, {**params, "format": "json"})
+
+
+async def _commons(params: dict[str, Any]) -> Any | None:
+    """Ask Wikimedia Commons' Action API.
+
+    `formatversion=2` because this one is read for its *content* rather than for a list of
+    ids: version 2 gives `query.pages` as an array and drops the "*" wrappers, which is what
+    makes `extmetadata` readable without a layer of unwrapping. The Wikidata calls above stay
+    on version 1 because their readers are written against its shapes and have measured
+    comments about them.
+    """
+    return await _request(_PROVIDER_COMMONS, settings.COMMONS_API_URL, {**params, "format": "json", "formatversion": 2})
 
 
 # -------------- matching --------------
@@ -851,31 +892,41 @@ def _wikidata_entity(qid: str, entity: Any) -> _WikidataEntity | None:
         label=label,
         aliases=tuple(aliases),
         rank=_WIKIDATA_RANK_BY_QID.get(rank_qid) if rank_qid is not None else None,
+        images=_image_candidates(claims),
     )
 
 
-def _claim_values(claims: dict[str, Any], prop: str) -> list[Any]:
-    """Every usable value of a Wikidata property, best statement first.
+def _image_candidates(claims: dict[str, Any]) -> tuple[species_photos.ImageCandidate, ...]:
+    """Every P18 value on an entity, paired with its statement rank.
+
+    Untouched otherwise: no format filter and no choosing happens here, both of which are
+    `services.species_photos`' job. This reads the claim, that decides what to do with it.
+    """
+    return tuple(
+        species_photos.ImageCandidate(file=title, rank=rank)
+        for value, rank in _ranked_claim_values(claims, _IMAGE_PROPERTY)
+        if (title := _text(value)) is not None
+    )
+
+
+def _ranked_claim_values(claims: dict[str, Any], prop: str) -> list[tuple[Any, str]]:
+    """Every usable value of a Wikidata property with its statement rank, **in serialization
+    order**, with `deprecated` statements dropped.
 
     Wikidata nests every claim four levels deep and any level can be missing or be a type
     this cares nothing about, so each step is checked rather than assumed - a malformed
     entity should cost its own row, never the search.
 
-    **Statement rank is honoured, and that is not decoration.** A property here is
-    multi-valued more often than it looks - P105 carries both a parvorder and a suborder on
-    *Mysticeti* - and Wikidata's own answer to "which of these is current" is the statement's
-    `rank`: `deprecated` marks a value the community has ruled wrong, `preferred` the one to
-    use when several are true. Reading in serialization order and taking the first, as this
-    did, let a deprecated AphiaID or a superseded binomial win purely by sitting earlier in
-    the JSON. So deprecated statements are dropped, preferred ones come first, and the rest
-    keep serialization order - deterministic for a given entity revision, and one rule for
-    every property rather than one for the rank and another for the identifier.
+    `deprecated` is dropped here rather than by the callers because it is Wikidata's own
+    marker for a value the community has ruled wrong, and no reader in this app wants one.
+    The other two ranks are *carried* rather than resolved, because the two callers want
+    different things: `_claim_values` below wants preferred first, while the photo selection
+    rule wants the untouched statement order and asks about `preferred` itself.
     """
     statements = claims.get(prop)
     if not isinstance(statements, list):
         return []
-    preferred: list[Any] = []
-    normal: list[Any] = []
+    values: list[tuple[Any, str]] = []
     for statement in statements:
         if not isinstance(statement, dict):
             continue
@@ -890,8 +941,27 @@ def _claim_values(claims: dict[str, Any], prop: str) -> list[Any]:
             continue
         # An absent or unrecognized rank reads as "normal" - Wikidata's own default, and the
         # safe direction, since a value is then dropped only when explicitly disowned.
-        (preferred if rank == "preferred" else normal).append(datavalue.get("value"))
-    return preferred + normal
+        values.append((datavalue.get("value"), rank if isinstance(rank, str) else "normal"))
+    return values
+
+
+def _claim_values(claims: dict[str, Any], prop: str) -> list[Any]:
+    """Every usable value of a Wikidata property, best statement first.
+
+    **Statement rank is honoured, and that is not decoration.** A property here is
+    multi-valued more often than it looks - P105 carries both a parvorder and a suborder on
+    *Mysticeti* - and Wikidata's own answer to "which of these is current" is the statement's
+    `rank`: `deprecated` marks a value the community has ruled wrong, `preferred` the one to
+    use when several are true. Reading in serialization order and taking the first, as this
+    did, let a deprecated AphiaID or a superseded binomial win purely by sitting earlier in
+    the JSON. So deprecated statements are dropped, preferred ones come first, and the rest
+    keep serialization order - deterministic for a given entity revision, and one rule for
+    every property rather than one for the rank and another for the identifier.
+    """
+    ranked = _ranked_claim_values(claims, prop)
+    return [value for value, rank in ranked if rank == "preferred"] + [
+        value for value, rank in ranked if rank != "preferred"
+    ]
 
 
 def _claim_value(claims: dict[str, Any], prop: str) -> str | None:
@@ -1817,9 +1887,17 @@ async def _worms_vernaculars(aphia_id: int) -> list[tuple[str, str | None]]:
     return vernaculars
 
 
-async def _worms_synonyms(aphia_id: int) -> list[str] | None:
-    """Superseded names for a taxon, so a diver who learned *Manta birostris* still finds it -
-    or `None` when WoRMS could not be asked for **all** of them.
+async def _worms_synonyms(aphia_id: int) -> list[tuple[str, int | None]] | None:
+    """Superseded names for a taxon and the AphiaIDs they are filed under, so a diver who
+    learned *Manta birostris* still finds it - or `None` when WoRMS could not be asked for
+    **all** of them.
+
+    **The id is carried because the photo path needs it and it is free.** It sits right beside
+    the name in the same response, and it is the key the synonym retry searches Wikidata by:
+    the zebra shark's accepted id 313100 reaches an item with no image, while its unaccepted
+    220032 reaches the item that has one. Discarding it here, as this used to, would mean a
+    second WoRMS call to get back what was already in hand. `None` for a row WoRMS sent without
+    a usable id - the name still vets the display name, which is this list's first job.
 
     **The `None` is the point, and it is why this one enrichment call is load-bearing.**
     `resolve_species` hands the list to `_choose_common_name` as its reject list, which is the
@@ -1843,17 +1921,19 @@ async def _worms_synonyms(aphia_id: int) -> list[str] | None:
     exhaust it expires the budget into the ordinary transient 503. Any page that fails fails
     the whole list, for the same reason a truncation does.
     """
-    names: list[str] = []
+    synonyms: list[tuple[str, int | None]] = []
     offset = 1
     while True:
         rows = await _worms("AphiaSynonymsByAphiaID", aphia_id, {"offset": offset})
         if not isinstance(rows, list):
             return None
-        names += [
-            name for row in rows if isinstance(row, dict) and (name := _text(row.get("scientificname"))) is not None
-        ]
+        for row in rows:
+            if not isinstance(row, dict) or (name := _text(row.get("scientificname"))) is None:
+                continue
+            row_id = row.get("AphiaID")
+            synonyms.append((name, row_id if isinstance(row_id, int) and row_id > 0 else None))
         if len(rows) < _WORMS_PAGE_SIZE:
-            return names
+            return synonyms
         offset += _WORMS_PAGE_SIZE
 
 
@@ -1883,7 +1963,7 @@ async def _wikidata_by_aphia_id(aphia_id: int) -> _WikidataEntity | None:
 def _name_rows(
     *,
     scientific_name: str,
-    synonyms: list[str],
+    synonyms: list[tuple[str, int | None]],
     vernaculars: list[tuple[str, str | None]],
     entity: _WikidataEntity | None,
 ) -> list[tuple[str, str, str, str | None]]:
@@ -1898,7 +1978,9 @@ def _name_rows(
     keep than the same name untagged.
     """
     candidates: list[tuple[str, str, str, str | None]] = [(scientific_name, "scientific", "worms", None)]
-    candidates += [(name, "synonym", "worms", None) for name in synonyms]
+    # The synonyms' AphiaIDs are the photo path's business, not the search index's: a
+    # `species_name` row is a string to match a typed query against.
+    candidates += [(name, "synonym", "worms", None) for name, _ in synonyms]
     candidates += [(name, "common", "worms", language) for name, language in vernaculars]
     if entity is not None:
         english = [name for name in (entity.label, *entity.aliases) if name]
@@ -1913,6 +1995,276 @@ def _name_rows(
         seen.add(key)
         rows.append((name, kind, source, language))
     return rows
+
+
+# -------------- photos --------------
+
+
+# What the whole photo pipeline may spend, and it is a **scope of its own** rather than a
+# share of `_ENRICHMENT_BUDGET_SECONDS`. That is the sharpest hazard in this feature:
+# `move_on_after` cancels the entire task group it wraps, so a slow Commons call sharing the
+# enrichment scope would cancel the synonym walk beside it, `synonyms` would come back `None`,
+# and `resolve_species` would answer **503** - on the only route by which a species enters the
+# catalog at all, so divers could not add species to dives. Photos are decoration; that route
+# is not. The invariant, pinned by a test: no failure or slowness of Commons can change the
+# status code of `POST /species/resolve`.
+#
+# Twelve seconds covers up to four sequential calls - the synonym-item search, one entity
+# chunk, the `imageinfo` lookup and the byte fetch - against hosts that answer in well under a
+# second each. Expiry is not an error: the row is already committed and `photo_fetched_at` is
+# left unstamped, so the backfill picks the species up on its next run.
+_PHOTO_BUDGET_SECONDS = 12.0
+
+# How many Wikidata items the synonym retry will look at. The search ORs every synonym id into
+# one query whatever the count - some taxa have 55 - so this bounds the *entity* fetches that
+# follow rather than the search: two chunks of `_WIKIDATA_ENTITY_BATCH`. A taxon with more than
+# eight distinct items carrying one of its ids is a data problem rather than a case to serve.
+_SYNONYM_ITEM_SEARCH_LIMIT = 8
+
+
+async def _commons_imageinfo(file_title: str) -> tuple[str, species_photos.PhotoCredit] | None:
+    """The URL of one Commons file's 500 px rendition and its credit, or `None`.
+
+    **`iiurlwidth` rather than a hand-built thumbnail URL**, which is what keeps this clear of
+    the bucketing trap: Commons serves thumbnails only at 120/250/330/500/960 and refuses
+    anything else outright, so asking the API to name the URL means never constructing an
+    off-bucket one. 500 is a real bucket, so 500 is what comes back.
+
+    `thumburl` is absent when the source file is *narrower* than the width asked for - Commons
+    does not upscale - and the full-size `url` is the right answer there, because a file under
+    500 px wide is already thumbnail-sized. Both go through the same host fence downstream.
+    """
+    payload = await _commons(
+        {
+            "action": "query",
+            "prop": "imageinfo",
+            "titles": f"File:{file_title}",
+            "iiprop": "extmetadata|url",
+            "iiurlwidth": species_photos.COMMONS_THUMBNAIL_WIDTH,
+        }
+    )
+    if not isinstance(payload, dict) or not isinstance(query := payload.get("query"), dict):
+        return None
+    pages = query.get("pages")
+    if not isinstance(pages, list) or not pages:
+        return None
+    page = pages[0]
+    if not isinstance(page, dict) or page.get("missing"):
+        return None
+    infos = page.get("imageinfo")
+    if not isinstance(infos, list) or not infos or not isinstance(info := infos[0], dict):
+        return None
+
+    url = info.get("thumburl") or info.get("url")
+    if not isinstance(url, str) or not url:
+        return None
+    return url, species_photos.credit_from_imageinfo(info)
+
+
+async def _fetch_photo_bytes(url: str) -> bytes | None:
+    """Fetch the image bytes, or `None` for every way of not getting them.
+
+    Modelled on `user_avatars.import_google_avatar`: redirects are not followed, the read is
+    capped, and the host is checked against an allowlist before anything leaves. The allowlist
+    is the SSRF fence and it is hard-coded in `species_photos`, unlike the API endpoint beside
+    it, which is a setting.
+
+    **The `User-Agent` is not optional here.** Wikimedia's policy blocks generic and empty
+    ones, and an empty header returns 403 on `upload.wikimedia.org` just as it does on
+    `api.php` - which bites servers rather than `<img>` tags, because a browser always sends
+    one. The same string the register calls already send does the job.
+    """
+    if not species_photos.is_photo_byte_source(url):
+        logger.warning("Refusing to fetch species photo bytes from an unexpected host.")
+        return None
+    if not await _claim_provider_slot(_PROVIDER_COMMONS):
+        logger.warning("Skipping a species photo fetch: this instance is over its Commons rate limit.")
+        return None
+
+    try:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=_TIMEOUT) as client:
+            async with client.stream("GET", url, headers={"User-Agent": settings.SPECIES_USER_AGENT}) as response:
+                if response.status_code != 200:
+                    logger.info("A species photo fetch answered %s; the species keeps no photo.", response.status_code)
+                    return None
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > species_photos.MAX_PHOTO_DOWNLOAD_BYTES:
+                        logger.warning("A species photo exceeded %d bytes.", species_photos.MAX_PHOTO_DOWNLOAD_BYTES)
+                        return None
+    except (httpx.HTTPError, httpx.InvalidURL) as exc:
+        logger.warning("A species photo fetch failed (%s).", type(exc).__name__)
+        return None
+    return bytes(body)
+
+
+async def _wikidata_items_by_aphia_ids(aphia_ids: list[int]) -> list[_WikidataEntity]:
+    """Every Wikidata item carrying any of these AphiaIDs, in **one** search.
+
+    `haswbstatement` ORs its values inside a single query, verified against the live API, so
+    "try a synonym" needs no per-synonym request however long the list is - the flagship case
+    has 22 synonym ids and some taxa have 55. Whatever comes back feeds the existing
+    four-at-a-time `wbgetentities` chunking.
+    """
+    if not aphia_ids:
+        return []
+
+    clause = "|".join(f"{_APHIA_PROPERTY}={aphia_id}" for aphia_id in aphia_ids)
+    payload = await _wikidata(
+        {
+            "action": "query",
+            "list": "search",
+            "srsearch": f"haswbstatement:{clause}",
+            "srlimit": _SYNONYM_ITEM_SEARCH_LIMIT,
+        }
+    )
+    qids = _wikidata_qids(payload)
+    if not qids:
+        return []
+    entities, _ = await _wikidata_entities(qids[:_SYNONYM_ITEM_SEARCH_LIMIT])
+    return entities
+
+
+def _choose_from_synonym_items(
+    items: list[_WikidataEntity], *, scientific_name: str, accepted_aphia_id: int
+) -> str | None:
+    """The Commons file a synonym's item offers, or `None` to decline.
+
+    Each item is judged by the same conservative rule as the accepted one, against **its own**
+    P225 - which is the whole reason this path recovers the zebra shark: `Q169468`'s taxon name
+    is *Stegostoma fasciatum* while this instance stores *Stegostoma tigrinum*, so matching the
+    stored name would keep neither of its two candidates.
+
+    Where more than one item offers a photo, prefer the one whose P225 *is* the accepted name,
+    then the one holding the accepted id, and otherwise decline - the same refuse-when-ambiguous
+    rule as everywhere else here. The second tie-break is live rather than defensive: the search
+    that found the accepted item asked for one result, so a taxon whose accepted id is carried
+    by two items can reach here with the other one.
+    """
+    offered = [
+        (item, chosen)
+        for item in items
+        if (
+            chosen := species_photos.choose_photo_file(
+                species_photos.photograph_candidates(item.images), taxon_name=item.scientific_name
+            )
+        )
+        is not None
+    ]
+    if not offered:
+        return None
+    if len(offered) == 1:
+        return offered[0][1]
+
+    folded = scientific_name.casefold()
+    by_name = [chosen for item, chosen in offered if (item.scientific_name or "").casefold() == folded]
+    if len(by_name) == 1:
+        return by_name[0]
+    by_id = [chosen for item, chosen in offered if item.aphia_id == accepted_aphia_id]
+    if len(by_id) == 1:
+        return by_id[0]
+    return None
+
+
+async def fetch_species_photo(
+    *,
+    scientific_name: str,
+    aphia_id: int,
+    entity: _WikidataEntity | None,
+    synonym_aphia_ids: list[int],
+) -> species_photos.FetchedPhoto | None:
+    """Choose, fetch and normalize one species photo - or `None` for every way of not having
+    one, which is most of them.
+
+    **`None` is a first-class answer, not a failure**, and the caller stamps
+    `photo_fetched_at` either way. Across the whole register only 11.7% of Wikidata items
+    carrying a WoRMS id have a P18 at all, and this rule then refuses some of those on purpose,
+    so "no photo" is the ordinary outcome and every surface has to look deliberate without one.
+
+    The synonym retry fires **only when the accepted item offered no candidate at all**, never
+    when the rule looked at candidates and refused them. That distinction is load-bearing:
+    *Triaenodon obesus* carries a silvertip shark beside a correct photo at equal rank and
+    neither title names the taxon, so the rule declines - and a retry that fired there would
+    hand it a photo from a synonym's item, undoing the one refusal this design exists to make.
+
+    Guarded end to end, `import_google_avatar`-style: whatever goes wrong out here, the caller
+    is mid-way through an operation the diver asked for and a picture must not be able to fail
+    it.
+    """
+    try:
+        candidates = species_photos.photograph_candidates(entity.images) if entity is not None else []
+        file_title = (
+            species_photos.choose_photo_file(candidates, taxon_name=entity.scientific_name)
+            if entity is not None
+            else None
+        )
+
+        if file_title is None and not candidates and synonym_aphia_ids:
+            # Gated on there being a *synonym* to try, so the very common "this taxon has no
+            # Wikidata item at all" path costs no second search. The accepted id then rides
+            # along with the synonyms rather than being left out: it is what makes the "prefer
+            # the item holding the accepted id" tie-break reachable, and the accepted item
+            # having no candidates is this branch's own precondition, so it can never win on
+            # its own account.
+            items = await _wikidata_items_by_aphia_ids(list(dict.fromkeys([aphia_id, *synonym_aphia_ids])))
+            file_title = _choose_from_synonym_items(items, scientific_name=scientific_name, accepted_aphia_id=aphia_id)
+
+        if file_title is None:
+            return None
+
+        found = await _commons_imageinfo(file_title)
+        if found is None:
+            return None
+        url, credit = found
+
+        data = await _fetch_photo_bytes(url)
+        if data is None:
+            return None
+
+        return species_photos.fetched_photo(
+            data=await species_photos.process_photo(data), file=file_title, credit=credit
+        )
+    except Exception:
+        logger.warning("Could not fetch a species photo for %s; storing the row without one.", aphia_id, exc_info=True)
+        return None
+
+
+async def fetch_photo_for_species(*, scientific_name: str, aphia_id: int) -> species_photos.FetchedPhoto | None:
+    """`fetch_species_photo` for a species already in the catalog, loading its own inputs.
+
+    The entry point for `src/scripts/backfill_species_photos.py`, which has a stored row rather
+    than the enrichment `resolve_species` happens to be holding. It pays for the two lookups
+    that path gets free - the Wikidata entity and the synonym list - which is the right trade
+    for a script that runs once and paces itself between species.
+
+    A synonym list that failed to arrive degrades to no retry here rather than refusing, which
+    is the opposite of what `resolve_species` does with the same `None`. The reason is what the
+    list is *for* in each place: there it vets a display name about to be written forever, and
+    here it is a second chance at a photograph that the next run will take again anyway.
+    """
+    entity: _WikidataEntity | None = None
+    synonyms: list[tuple[str, int | None]] | None = None
+
+    async def load_entity() -> None:
+        nonlocal entity
+        entity = await _wikidata_by_aphia_id(aphia_id)
+
+    async def load_synonyms() -> None:
+        nonlocal synonyms
+        synonyms = await _worms_synonyms(aphia_id)
+
+    with anyio.move_on_after(_ENRICHMENT_BUDGET_SECONDS):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(load_entity)
+            tasks.start_soon(load_synonyms)
+
+    return await fetch_species_photo(
+        scientific_name=scientific_name,
+        aphia_id=aphia_id,
+        entity=entity,
+        synonym_aphia_ids=[synonym_id for _, synonym_id in (synonyms or []) if synonym_id is not None],
+    )
 
 
 async def resolve_species(db: AsyncSession, aphia_id: int) -> Species:
@@ -1938,6 +2290,12 @@ async def resolve_species(db: AsyncSession, aphia_id: int) -> Species:
     a fast endpoint - it means an endpoint that always 503s and a catalog that can never be
     filled. The client is showing a spinner against a deliberate click, which is the one
     place in this feature where waiting is the right answer.
+
+    **The photo runs last, after the row is committed, in a timeout scope of its own**, and
+    that placement is a correctness requirement rather than an ordering preference: sharing
+    the enrichment scope would let a slow Commons cancel the synonym walk beside it and turn a
+    photo provider's bad day into this endpoint answering 503. Nothing about a picture can
+    change what this returns.
     """
     if (existing := await _species_by_aphia_id(db, aphia_id)) is not None:
         return existing
@@ -1990,7 +2348,7 @@ async def resolve_species(db: AsyncSession, aphia_id: int) -> Species:
     # Budgeted well below the record fetch above, and separately from it: the diver is already
     # several seconds into a spinner by the time this runs, and enrichment is not worth another
     # twenty. That budget is also the only bound on the synonym walk - see `_worms_synonyms`.
-    synonyms: list[str] | None = None
+    synonyms: list[tuple[str, int | None]] | None = None
     vernaculars: list[tuple[str, str | None]] = []
     entity: _WikidataEntity | None = None
     accepted_id = taxon.aphia_id
@@ -2031,7 +2389,7 @@ async def resolve_species(db: AsyncSession, aphia_id: int) -> Species:
         vernaculars=tuple(name for name, language in vernaculars if language in (None, "eng")),
         # A superseded scientific name is not what this animal is called, however plausibly
         # it reads next to the accepted binomial.
-        rejected=tuple(synonyms),
+        rejected=tuple(name for name, _ in synonyms),
     )
 
     species = Species(
@@ -2070,7 +2428,42 @@ async def resolve_species(db: AsyncSession, aphia_id: int) -> Species:
         winner = await _species_by_aphia_id(db, taxon.aphia_id)
         if winner is None:
             raise
+        # No photo attempt on this branch: the winner's own resolve is making one, or has
+        # already made it, and `photo_fetched_at IS NULL` is what the backfill picks up if the
+        # winner died in between. Two callers racing to write the same photo would be two
+        # blobs, one of them orphaned.
         return winner
 
+    # **After the enrichment task group and in a scope of its own**, which is the point rather
+    # than the tidy shape - see `_PHOTO_BUDGET_SECONDS`. The row above is committed by now, so
+    # the species is already in the catalog and attachable to a dive whatever happens here.
+    #
+    # `taxon.scientific_name` rather than the entity's: this is the accepted binomial this
+    # instance stores, and it is what the synonym retry's tie-breaks compare against. The
+    # *selection rule* uses each examined item's own P225 instead, which is a different
+    # question and is answered inside `fetch_species_photo`.
+    photo: species_photos.FetchedPhoto | None = None
+    try:
+        with anyio.move_on_after(_PHOTO_BUDGET_SECONDS):
+            photo = await fetch_species_photo(
+                scientific_name=taxon.scientific_name,
+                aphia_id=taxon.aphia_id,
+                entity=entity,
+                synonym_aphia_ids=[synonym_id for _, synonym_id in synonyms if synonym_id is not None],
+            )
+        # Outside the scope on purpose: the budget bounds what leaves this server, and a
+        # cancellation landing part-way through the write would be a torn row rather than a
+        # missing photo.
+        await species_photos.save_photo_attempt(db, species_id=species.id, photo=photo)
+    except Exception:
+        # The row is committed and shared with every account on the instance, so nothing about
+        # a picture may turn a resolve that succeeded into an error the client reads as
+        # failure. `photo_fetched_at` stays null and the backfill collects it.
+        logger.warning("Could not store a species photo for %s.", taxon.aphia_id, exc_info=True)
+        await db.rollback()
+
+    # After the photo, not before: `expire_on_commit=False` means the in-memory row still
+    # carries the nulls it was constructed with, so a refresh placed above would return a
+    # `SpeciesRead` claiming no photo for a species that has one.
     await db.refresh(species)
     return species

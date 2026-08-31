@@ -200,6 +200,7 @@ class TestPageSizeCaps:
             "gear_service.py": "read_gear_service_schedules",
             "gear_sets.py": "read_gear_sets",
             "trips.py": "read_trips",
+            "users.py": "read_species_life_list",
         }
         routes_dir = Path(__file__).resolve().parents[1] / "src" / "app" / "api" / "v1"
 
