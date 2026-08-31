@@ -183,11 +183,24 @@ class SpeciesInfo(PublicUUIDSchema):
     back to `scientific_name`. `rank` rides along because a sighting is not always
     species-rank - "a moray eel" is a family, and a client that renders it as though it were
     a species is claiming an identification the diver did not make.
+
+    `photo_sha256` is **the whole photo contract**, following the avatar precedent verbatim:
+    one nullable digest answers existence, version and cache-busting at once, and no URL goes
+    on the wire. Non-null means "there is a photo, and this is which one"; the client builds
+    `/api/v1/species/{uuid}/photo?v=<digest prefix>` itself. It has a `default` for the same
+    load-bearing reason `DiveReadWithMixtures.species` does: `user_{id}_dive:{uuid}` entries
+    live an hour and replay through this schema, so every entry written before this field
+    existed lacks the key and would fail validation on read.
+
+    That replay is also the staleness this feature accepts: for up to the single-dive TTL
+    after a photo lands, a cached dive still says the species has none. Bounded, self-healing,
+    and the alternative is the cross-user cache sweep iteration 1 exists to defer.
     """
 
     scientific_name: str
     common_name: str | None = None
     rank: str
+    photo_sha256: str | None = None
 
 
 class DiveRead(DiveBase, DiveTechScalars, PublicUUIDSchema):

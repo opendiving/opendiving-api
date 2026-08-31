@@ -36,7 +36,13 @@ else; what is here is the source, and the notes for working on it.
   for the common names — so typing "clownfish" finds *Amphiprion ocellaris*, which WoRMS alone would
   not. Catalog rows are shared across the instance, and search falls back to what is already stored
   rather than failing when a register is unreachable. Distinct species seen is part of the dive
-  statistics.
+  statistics, and `GET /user/species` is the whole life list: every species you have logged, with
+  how many dives saw it and when.
+- **Species photos** — a freely licensed photograph per species, chosen from
+  [Wikimedia Commons](https://commons.wikimedia.org/), fetched **once** and stored on this
+  instance's own files volume, so no visitor's browser ever contacts Wikimedia. A species whose
+  candidates cannot be told apart gets no photo rather than a picture of a different animal, and the
+  author, licence and source travel with it so a credit line can be rendered.
 - **Dive-site suggestions** — `GET /dive-sites/suggest` answers from a catalog of real dive sites
   bundled in the image, so the site form can offer "SS Thistlegorm" rather than only the town it is
   near. A geocoder knows where Dahab is, not where the Blue Hole's north entry is. No account, no
@@ -161,15 +167,17 @@ for it — generated from the routes themselves, so they describe the API as it 
 than as a list here last remembered it.
 
 The families: **auth** (email link or six-digit code, Google, passkeys, refresh, sign-out, account
-restore) and **user** (profile, avatar, email change, dive statistics, gas-use history, account
-deletion); **dives**, the bulk of it, with their **files** — upload an export, read the per-sample
-profile back — alongside **trips**, **dive sites**, the shared **species** catalog a dive can
-reference, and a **geocoding** helper for naming a site pinned on a map; **gear** as items, sets,
-service schedules and service records; **certifications** with their card images and the **courses**
-that issued them; and **export** in UDDF, CSV or full-archive form. All of those want a bearer
-token. The ones that don't are **contact**, the auth routes themselves, and the two health checks —
-`/health` says the process is up, `/health/ready` says Postgres and Redis answered, and 503s when
-they didn't.
+restore) and **user** (profile, avatar, email change, dive statistics, gas-use history, the species
+life list, account deletion); **dives**, the bulk of it, with their **files** — upload an export,
+read the per-sample profile back — alongside **trips**, **dive sites**, the shared **species**
+catalog a dive can reference, and a **geocoding** helper for naming a site pinned on a map; **gear**
+as items, sets, service schedules and service records; **certifications** with their card images and
+the **courses** that issued them; and **export** in UDDF, CSV or full-archive form. All of those
+want a bearer token. The ones that don't are **contact**, the auth routes themselves, the two health
+checks — `/health` says the process is up, `/health/ready` says Postgres and Redis answered, and
+503s when they didn't — and `GET /species/{uuid}/photo`, which serves a public Commons image to an
+`<img>` tag that has no way to send a token. `tests/test_route_authentication.py` is the guard that
+keeps that list honest, and it holds the reason for each.
 
 A typical import flow:
 

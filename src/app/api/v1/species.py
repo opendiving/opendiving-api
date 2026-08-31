@@ -2,10 +2,15 @@
 
 Every other resource here is scoped to the caller: the route resolves their id, the query
 filters on it, and somebody else's row reads as a 404. A species is a fact about the ocean
-rather than about a diver, so none of that applies - these three endpoints authenticate but
-never check ownership, and two accounts asking about *Amphiprion ocellaris* get byte-identical
-answers. That is the point: it is what lets a dive reference a shared row, what makes
-`species_seen` countable, and what a life list would be built on.
+rather than about a diver, so none of that applies - **no endpoint here checks ownership**,
+and two accounts asking about *Amphiprion ocellaris* get byte-identical answers. That is the
+point: it is what lets a dive reference a shared row, what makes `species_seen` countable, and
+what the life list at `GET /user/species` is built on.
+
+Three of the four authenticate. `GET /species/{uuid}/photo` does not, and that is the
+load-bearing decision in this module rather than an oversight - see its own docstring. No
+count is written here on purpose: the sentence this replaces said "these three endpoints
+authenticate but never check ownership" and both halves went stale in the same commit.
 
 What it costs is spelled out where it bites. There is no `@cache` decorator on any of these:
 the reads are a PK lookup and a small `ILIKE`, the rows are immutable in v1, and adding a
@@ -20,7 +25,7 @@ must not invent a catalog row without the authoritative record behind it.
 import uuid as uuid_pkg
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,9 +36,17 @@ from ...core.exceptions.http_exceptions import NotFoundException
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...models.species import Species
 from ...schemas.species import SpeciesRead, SpeciesResolveRequest, SpeciesSearchResponse
+from ...services.species_photos import PHOTO_CONTENT_TYPE, get_stored_photo, read_photo_bytes
 from ...services.species_service import resolve_species, search_species
 
 router = APIRouter(tags=["species"])
+
+# Five minutes, matching the avatar route's window, but **public** rather than `private`: these
+# bytes are the same for every viewer and are not a fact about anyone, so a shared cache in
+# front of an instance keeping a copy is a benefit rather than a leak. The `ETag` makes
+# re-validation after the window cheap, and the client's `?v=` digest means a replaced photo
+# lands on a URL no cache has seen.
+_PHOTO_CACHE_CONTROL = "public, max-age=300"
 
 
 async def _enforce_species_limit(user_id: int) -> None:
@@ -134,3 +147,59 @@ async def read_species(
     if species is None:
         raise NotFoundException("Species not found")
     return SpeciesRead.model_validate(species, from_attributes=True)
+
+
+@router.get("/species/{uuid}/photo")
+async def read_species_photo(
+    request: Request,
+    uuid: uuid_pkg.UUID,
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    v: Annotated[str | None, Query(description="Opaque cache-busting version token; ignored by the server")] = None,
+) -> Response:
+    """Serve a species' photograph - one WebP, always, and **without authentication**.
+
+    The first route in this app that serves stored bytes to anyone who can reach the port, and
+    it is deliberate. Access tokens here are Bearer-only - the sole cookie is `refresh_token`,
+    read on the refresh, logout and account-deletion paths alone - so an `<img src>` cannot
+    authenticate, and the alternative is fetching every thumbnail through the API client and
+    rendering it from a blob URL. That path re-fetches on every mount, which is tolerable for
+    one certification card and is not a life list of fifty.
+
+    It discloses nothing. The catalog is global and ownerless, a species uuid is not an
+    existence oracle for anything private, and the bytes are public-domain or CC-licensed
+    Wikimedia Commons files that anybody can fetch from Commons directly. What this route buys
+    by serving them from here is that no diver's browser tells Wikimedia which species they are
+    looking at.
+
+    404 for a uuid that is not in the catalog **and** for a species that simply has no photo,
+    which is most of them - the two are one answer here, because distinguishing them is exactly
+    the oracle an unauthenticated route should not be.
+
+    `v` is read by nothing; the client passes the `photo_sha256` it already has so each version
+    gets its own browser cache entry. Two departures from the authenticated binary reads next
+    door, both consequences of these bytes being public and immutable: `Cache-Control` is
+    `public` rather than `private`, and the content is served for **inline** rendering rather
+    than as an `attachment` - the `attachment` on those exists because the web app fetches them
+    through its API client, which is precisely what this route exists not to do.
+    """
+    stored = await get_stored_photo(db=db, species_uuid=uuid)
+    if stored is None:
+        raise NotFoundException("No photo for this species")
+
+    etag = f'"{stored.sha256}"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": _PHOTO_CACHE_CONTROL})
+
+    return Response(
+        content=await read_photo_bytes(stored),
+        media_type=PHOTO_CONTENT_TYPE,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            # `frame-ancestors` is spelled out because it does not fall back to `default-src`:
+            # a response carrying its own policy opts out of `SecurityHeadersMiddleware`'s
+            # default and would otherwise be framable however strict the rest of this is.
+            "Content-Security-Policy": "default-src 'none'; sandbox; frame-ancestors 'none'",
+            "Cache-Control": _PHOTO_CACHE_CONTROL,
+            "ETag": etag,
+        },
+    )

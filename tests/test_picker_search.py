@@ -179,6 +179,7 @@ PAGINATED_LIST_ROUTES: dict[str, tuple[str, ...]] = {
     "gear_service.py": ("read_gear_service_records", "read_gear_service_schedules"),
     "gear_sets.py": ("read_gear_sets",),
     "trips.py": ("read_trips",),
+    "users.py": ("read_species_life_list",),
 }
 
 CLAMP_CALL = "page, items_per_page = clamp_pagination(page, items_per_page)"

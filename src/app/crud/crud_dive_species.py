@@ -11,7 +11,15 @@ from ..schemas.dive import SpeciesInfo
 # the order `species_info_from_row` unpacks them. Kept here rather than in `crud_species.py`
 # - unlike gear, whose columns are shared with the gear-set join - this join table is the
 # only reader.
-SPECIES_INFO_COLUMNS = (Species.uuid, Species.scientific_name, Species.common_name, Species.rank)
+SPECIES_INFO_COLUMNS = (
+    Species.uuid,
+    Species.scientific_name,
+    Species.common_name,
+    Species.rank,
+    # The digest, not the key and not a URL: it is both "there is a photo" and which version,
+    # and the client builds the URL. See `SpeciesInfo.photo_sha256`.
+    Species.photo_sha256,
+)
 
 
 def species_info_from_row(row: Any) -> SpeciesInfo:
@@ -21,6 +29,7 @@ def species_info_from_row(row: Any) -> SpeciesInfo:
         scientific_name=row.scientific_name,
         common_name=row.common_name,
         rank=row.rank,
+        photo_sha256=row.photo_sha256,
     )
 
 

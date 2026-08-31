@@ -20,7 +20,7 @@ from uuid6 import uuid7
 from src.app.services import blob_store
 from src.scripts import sweep_orphaned_files as sweeper
 from tests.conftest import db_available
-from tests.helpers.generators import create_user
+from tests.helpers.generators import create_species, create_user
 
 REFERENCED = "dive-files/aa/referenced"
 ORPHAN = "dive-files/bb/orphan"
@@ -207,9 +207,15 @@ class TestReferencedKeys:
 
     Every test above stubs `_referenced_keys` out, which is right for testing the refusal
     logic and wrong for the one thing that makes this script dangerous: a key source the
-    query forgets is a live file the sweep offers to delete. Avatars are the third source
-    and the only one on a nullable column, so they are also the only one that can quietly
-    contribute a `None` to the set instead of a key.
+    query forgets is a live file the sweep offers to delete. The two nullable-column sources
+    are covered here, avatars and species photos, because they are also the only ones that can
+    quietly contribute a `None` to the set instead of a key.
+
+    Species photos are the case worth having a test for rather than a note: they are the only
+    kind on a **global** table, so forgetting them would offer to delete a photo shared by
+    every account on the instance, and the suspicious-fraction brake does not engage at all
+    below `_SUSPICIOUS_MIN_FILES` files - which is exactly the instance least likely to
+    notice.
     """
 
     @pytest.mark.asyncio
@@ -230,3 +236,45 @@ class TestReferencedKeys:
         referenced = await sweeper._referenced_keys(async_db)
 
         assert None not in referenced
+
+    @pytest.mark.asyncio
+    async def test_a_species_photo_key_counts_as_referenced(self, db: Session, async_db: AsyncSession) -> None:
+        key = f"species-photos/bb/{uuid7()}_{'b' * 64}"
+        create_species(db, photo_storage_key=key, photo_sha256="b" * 64)
+
+        referenced = await sweeper._referenced_keys(async_db)
+
+        assert key in referenced
+
+    @pytest.mark.asyncio
+    async def test_a_species_without_a_photo_contributes_nothing(self, db: Session, async_db: AsyncSession) -> None:
+        create_species(db)
+
+        referenced = await sweeper._referenced_keys(async_db)
+
+        assert None not in referenced
+
+    @pytest.mark.asyncio
+    async def test_a_stored_species_photo_is_not_swept(self, db: Session, async_db: AsyncSession, volume: Path) -> None:
+        """The end-to-end shape of the destructive failure, rather than only the query.
+
+        `iter_keys()` walks the whole volume, so a kind missing from `_referenced_keys` is
+        on-disk and referenced by nothing - and `--delete` unlinks it once it is past the grace
+        window. This drives the real query rather than the stub every test above uses, which is
+        the only way the two halves can be checked against each other.
+        """
+        key = f"species-photos/cc/{uuid7()}_{'c' * 64}"
+        create_species(db, photo_storage_key=key, photo_sha256="c" * 64)
+        _write(volume, key, age_hours=48)
+        _write(volume, ORPHAN, age_hours=48)
+
+        # The set comes from the real query rather than from a literal - which is the half the
+        # tests above stub out - and is then fed to the real classification. Run through the
+        # test's own session, because the one `sweep` opens for itself would point at the same
+        # database but not see rows this test committed on another connection.
+        with _with_referenced(await sweeper._referenced_keys(async_db)):
+            report = await sweeper.sweep(delete=True)
+
+        assert (volume / key).is_file()
+        assert not (volume / ORPHAN).exists()
+        assert report.deleted == 1
