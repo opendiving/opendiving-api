@@ -13069,8 +13069,8 @@ a runner, plus a cron GitHub disables after 60 quiet days. *Also rejected:* tyin
 release cadence, which contradicts the standing position that a release is a heuristic rather than a
 calendar.
 
-**The tripwire is the count.** `tests/test_dive_site_catalog.py` asserts exactly 3,702 records, so a
-refresh that moves the number fails rather than landing quietly — and a *shrinking* catalog is
+**The tripwire is the count.** `tests/test_dive_site_catalog.py` asserts the exact record count, so
+a refresh that moves the number fails rather than landing quietly — and a *shrinking* catalog is
 usually a filter that started deleting real sites, not the world losing dive sites. The number is
 pinned in three places, following `marine_areas`' 293: that test, `services/dive_site_catalog.py`'s
 module docstring, and this section. Move all three together.

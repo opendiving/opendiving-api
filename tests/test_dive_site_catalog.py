@@ -413,7 +413,7 @@ class TestTheVendoredFile:
         assert codes.get("Norway") == "NO"
 
     def test_no_display_name_anywhere_in_the_file_is_really_a_code(self):
-        """Over all 3,702 records rather than the ten a query returns, which is the
+        """Over the whole file rather than the ten records a query returns, which is the
         difference between a guarantee and a coincidence: the route-level check can only see
         whatever matched, so on its own it would pass by luck. Two ways a code reaches a
         diver - the resolver writing `country_code` into `country`, or Natural Earth handing
