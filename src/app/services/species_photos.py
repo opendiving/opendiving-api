@@ -63,10 +63,24 @@ KEY_KIND = "species-photos"
 # evidence yet that list bandwidth is a problem.
 COMMONS_THUMBNAIL_WIDTH = 500
 
-# The one host this server will fetch image bytes from. Hard-coded on purpose while the API
+# The hosts this server will fetch image bytes from. Hard-coded on purpose while the API
 # endpoint beside it is a setting: this is an SSRF fence, and a fence with an environment
 # variable in front of it is not a fence.
-UPLOAD_HOST = "upload.wikimedia.org"
+#
+# **Two names, because one `imageinfo` reply carries two hosts.** Commons answers an
+# `iiurlwidth` request with a `thumburl` on `thumb.wikimedia.org` and the full-size `url` on
+# `upload.wikimedia.org`, and `_commons_imageinfo` prefers the thumbnail - so a fence holding
+# only the second refuses every thumbnail there is, which is a feature that fetches nothing at
+# all rather than one that fetches badly. `thumb.wikimedia.org` presents a certificate whose
+# SANs include `*.wikimedia.org`, the same wildcard family covering `upload.wikimedia.org`; it
+# is Wikimedia's own infrastructure and not a redirect target.
+#
+# **It stays a set of exact names and does not become a `*.wikimedia.org` suffix match**, which
+# would survive Wikimedia moving the host a third time and was refused anyway. A suffix test is
+# a pattern, and a subdomain-matching bug in a pattern is an SSRF hole; a name that stops
+# resolving is a feature that visibly stops working. Adding a third entry here is a deliberate
+# one-line change, which is the property being bought.
+PHOTO_BYTE_HOSTS = frozenset({"upload.wikimedia.org", "thumb.wikimedia.org"})
 
 # What the fetch will read before giving up. A 500 px-wide JPEG is tens of kilobytes; this is
 # an order of magnitude of headroom over anything Commons serves at that width, and it bounds
@@ -408,9 +422,14 @@ def is_photo_byte_source(url: str) -> bool:
     first one's failure mode is server-side request forgery: an `imageinfo` reply that could
     name `http://169.254.169.254/...` and be fetched from inside the network is the entire
     class of bug. Same shape and same reasoning as `user_avatars._is_google_avatar_url`.
+
+    **Membership in `PHOTO_BYTE_HOSTS`, comparing the whole hostname.** That it holds two names
+    rather than one makes it no less an exact-match allowlist: `upload.wikimedia.org.evil.example`
+    and `evil.example/thumb.wikimedia.org` are refused by the same comparison that admits the
+    real ones, and so is every other `*.wikimedia.org` host, none of which serves file bytes.
     """
     parts = urlsplit(url)
-    return parts.scheme == "https" and (parts.hostname or "").lower() == UPLOAD_HOST
+    return parts.scheme == "https" and (parts.hostname or "").lower() in PHOTO_BYTE_HOSTS
 
 
 # -------------- storing --------------

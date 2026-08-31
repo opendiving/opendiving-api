@@ -370,12 +370,13 @@ class SpeciesSettings(BaseSettings):
     # Wikidata entity has already named the file (P18). Unlike the two above it is asked
     # nothing a diver typed - it receives a file title derived from an AphiaID.
     #
-    # **A setting, while the host the bytes are fetched from is hard-coded.** That asymmetry
-    # is the point: `services.species_photos` will only ever fetch image bytes from
-    # `upload.wikimedia.org`, which is an SSRF fence, and a fence with an environment
-    # variable in front of it is not a fence. This setting exists so an instance can point
-    # the metadata call at a mirror - and so the "unroutable host degrades to no photo"
-    # behaviour is checkable without editing code.
+    # **A setting, while the hosts the bytes are fetched from are hard-coded.** That asymmetry
+    # is the point: `services.species_photos` will only ever fetch image bytes from the two
+    # hosts a Commons `imageinfo` reply names - `thumb.wikimedia.org` for a thumbnail and
+    # `upload.wikimedia.org` for a file already small enough to serve whole - which is an SSRF
+    # fence, and a fence with an environment variable in front of it is not a fence. This
+    # setting exists so an instance can point the metadata call at a mirror - and so the
+    # "unroutable host degrades to no photo" behaviour is checkable without editing code.
     COMMONS_API_URL: str = config("COMMONS_API_URL", default="https://commons.wikimedia.org/w/api.php")
 
     # Wikimedia's policy requires a descriptive `User-Agent` and blocks generic ones; WoRMS

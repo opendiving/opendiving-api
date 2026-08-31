@@ -353,23 +353,43 @@ class TestComposingTheCredit:
 
 
 class TestWhereBytesMayComeFrom:
-    def test_the_upload_host_is_allowed(self) -> None:
-        assert is_photo_byte_source("https://upload.wikimedia.org/wikipedia/commons/thumb/e/ef/x/500px-x.jpg")
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://thumb.wikimedia.org/wikipedia/commons/thumb/e/ef/x.jpg/500px-x.jpg",
+            "https://upload.wikimedia.org/wikipedia/commons/e/ef/x.jpg",
+        ],
+    )
+    def test_both_hosts_one_imageinfo_reply_names_are_allowed(self, url: str) -> None:
+        """`thumburl` and `url` come back from the same Commons response on **different**
+        hosts, and the code prefers the first. A fence admitting only the second refuses every
+        thumbnail there is, which is a pipeline that fetches nothing rather than one that
+        fetches badly - so the thumbnail host is the case that matters most here."""
+        assert is_photo_byte_source(url)
 
     @pytest.mark.parametrize(
         "url",
         [
+            "http://thumb.wikimedia.org/x.jpg",
             "http://upload.wikimedia.org/x.jpg",
             "https://169.254.169.254/latest/meta-data/",
             "https://localhost/x.jpg",
+            "https://thumb.wikimedia.org.evil.example/x.jpg",
             "https://upload.wikimedia.org.evil.example/x.jpg",
+            "https://evil.example/thumb.wikimedia.org/x.jpg",
             "https://evil.example/upload.wikimedia.org/x.jpg",
+            "https://commons.wikimedia.org/x.jpg",
+            "https://en.wikipedia.org/x.jpg",
         ],
     )
     def test_everything_else_is_refused(self, url: str) -> None:
-        """An exact host match rather than a suffix one, unlike the Google avatar fence next
-        door: Commons serves every file from one host, so there is no subdomain to allow and
-        a suffix test would admit `upload.wikimedia.org.evil.example`."""
+        """**Two exact names, not a `*.wikimedia.org` suffix match**, which is the whole reason
+        the last four cases are here rather than only the obvious ones. A suffix test would
+        admit `thumb.wikimedia.org.evil.example`; a "contains" test would admit
+        `evil.example/upload.wikimedia.org`; and either would admit `commons.wikimedia.org`,
+        which is Wikimedia's own but serves no file bytes and has no business here. Widening
+        this fence a third time means adding a name to `PHOTO_BYTE_HOSTS` and a case above,
+        which is the deliberate act the allowlist shape is bought for."""
         assert not is_photo_byte_source(url)
 
 
@@ -468,34 +488,48 @@ def _entity_payload(qid: str, *, aphia_id: int, taxon_name: str, images: list[tu
     }
 
 
-def _imageinfo_payload(*, thumb_url: str) -> dict[str, Any]:
-    return {
-        "batchcomplete": True,
-        "query": {
-            "pages": [
-                {
-                    "pageid": 1,
-                    "title": "File:Some fish.jpg",
-                    "imageinfo": [
-                        {
-                            "thumburl": thumb_url,
-                            "thumbwidth": 500,
-                            "url": "https://upload.wikimedia.org/wikipedia/commons/e/ef/Some_fish.jpg",
-                            "descriptionurl": "https://commons.wikimedia.org/wiki/File:Some_fish.jpg",
-                            "extmetadata": {
-                                "Artist": {"value": "<bdi>Raimond Spekking</bdi>"},
-                                "LicenseShortName": {"value": "CC BY-SA 4.0"},
-                                "LicenseUrl": {"value": "https://creativecommons.org/licenses/by-sa/4.0"},
-                            },
-                        }
-                    ],
-                }
-            ]
+# **The host Commons actually serves thumbnails from, which is the invariant this whole file
+# rests on.** This named `upload.wikimedia.org` until 2026-08-31, and the cost was not one bad
+# test: `iiurlwidth` is answered with a `thumburl` on `thumb.wikimedia.org`, the code prefers
+# it, and the fence admitted only the other host - so twenty tests passed green against a fake
+# Commons handing back a host the fence happened to like, over a feature that had never fetched
+# a single photo in production. A fixture that names something upstream does not send cannot
+# fail, whatever it asserts.
+_THUMB_URL = "https://thumb.wikimedia.org/wikipedia/commons/thumb/e/ef/Some_fish.jpg/500px-Some_fish.jpg"
+
+# The full-size original, on the other host. Commons returns both in one reply.
+_FULL_URL = "https://upload.wikimedia.org/wikipedia/commons/e/ef/Some_fish.jpg"
+
+# The hosts the fake serves bytes from, **spelled out rather than read from
+# `species_photos.PHOTO_BYTE_HOSTS`**. Sourcing them from the constant under test would make
+# the fake agree with the fence by construction and reinstate exactly the blindness above: the
+# fake stands in for Commons, so it has to be able to disagree.
+_COMMONS_BYTE_HOSTS = frozenset({"thumb.wikimedia.org", "upload.wikimedia.org"})
+
+
+def _imageinfo_payload(*, thumb_url: str | None = _THUMB_URL, url: str = _FULL_URL) -> dict[str, Any]:
+    """One Commons `imageinfo` entry, carrying both of the URLs a real reply carries.
+
+    `thumb_url=None` omits `thumburl` altogether, which is what Commons does when the source
+    file is narrower than the width asked for - it does not upscale - and is the one case where
+    the full-size `url` on the other host is what actually gets fetched.
+    """
+    info: dict[str, Any] = {
+        "url": url,
+        "descriptionurl": "https://commons.wikimedia.org/wiki/File:Some_fish.jpg",
+        "extmetadata": {
+            "Artist": {"value": "<bdi>Raimond Spekking</bdi>"},
+            "LicenseShortName": {"value": "CC BY-SA 4.0"},
+            "LicenseUrl": {"value": "https://creativecommons.org/licenses/by-sa/4.0"},
         },
     }
-
-
-_THUMB_URL = "https://upload.wikimedia.org/wikipedia/commons/thumb/e/ef/Some_fish.jpg/500px-Some_fish.jpg"
+    if thumb_url is not None:
+        info["thumburl"] = thumb_url
+        info["thumbwidth"] = 500
+    return {
+        "batchcomplete": True,
+        "query": {"pages": [{"pageid": 1, "title": "File:Some fish.jpg", "imageinfo": [info]}]},
+    }
 
 
 def _wikimedia(
@@ -507,13 +541,20 @@ def _wikimedia(
     commons_raises: bool = False,
     image_status: int = 200,
 ) -> _Wikimedia:
-    """Every upstream this feature touches, answering from canned payloads and routed by URL."""
+    """Every upstream this feature touches, answering from canned payloads and routed by host.
+
+    **By host, not by substring.** A `"upload.wikimedia.org" in url` test would answer bytes for
+    `https://evil.example/upload.wikimedia.org/x.jpg` too, so a fence that let one through would
+    be met by an obliging fake rather than by a failure - the routing has to be at least as
+    strict as the thing it is checking.
+    """
 
     def handle(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
-        if "upload.wikimedia.org" in url:
+        host = (request.url.host or "").lower()
+        if host in _COMMONS_BYTE_HOSTS:
             return httpx.Response(image_status, content=image_bytes or b"")
-        if "commons.wikimedia.org" in url:
+        if host == "commons.wikimedia.org":
             if commons_raises:
                 raise httpx.ConnectError("commons is unreachable")
             return httpx.Response(200, json=imageinfo or {"batchcomplete": True, "query": {"pages": []}})
@@ -561,6 +602,43 @@ class TestFetchingAPhoto:
         assert len(photo.sha256) == 64
 
     @pytest.mark.asyncio
+    async def test_the_bytes_are_fetched_from_the_thumbnail_host(self) -> None:
+        """**The pin on the defect that made this feature inert.** `thumburl` comes back on
+        `thumb.wikimedia.org` while the full-size `url` is on `upload.wikimedia.org`, the code
+        prefers the thumbnail, and a fence carrying only the second silently refused every one
+        of them. Asserting the host that was actually contacted is what makes that visible;
+        asserting only that a photo came back would pass on either host."""
+        with _wikimedia(imageinfo=_imageinfo_payload(), image_bytes=plain_png(size=(500, 333))) as wikimedia:
+            photo = await species_service.fetch_species_photo(
+                scientific_name="Amphiprion ocellaris",
+                aphia_id=278400,
+                entity=_local_entity(images=[("Amphiprion ocellaris.jpg", "normal")]),
+                synonym_aphia_ids=[],
+            )
+
+        assert photo is not None
+        byte_hosts = [r.url.host for r in wikimedia.requests if (r.url.host or "") in _COMMONS_BYTE_HOSTS]
+        assert byte_hosts == ["thumb.wikimedia.org"]
+
+    @pytest.mark.asyncio
+    async def test_a_file_too_narrow_to_thumbnail_is_fetched_whole_from_the_other_host(self) -> None:
+        """Commons omits `thumburl` when the source file is narrower than the width asked for,
+        because it does not upscale - and the full-size `url` is the right answer there, since
+        such a file is already thumbnail-sized. `thumburl or url` is therefore unchanged by the
+        fence fix; what changed is that **both** of the hosts those two fields name are now
+        admitted, so this path and the one above both reach bytes."""
+        with _wikimedia(imageinfo=_imageinfo_payload(thumb_url=None), image_bytes=plain_png(size=(320, 240))) as w:
+            photo = await species_service.fetch_species_photo(
+                scientific_name="Amphiprion ocellaris",
+                aphia_id=278400,
+                entity=_local_entity(images=[("Amphiprion ocellaris.jpg", "normal")]),
+                synonym_aphia_ids=[],
+            )
+
+        assert photo is not None
+        assert [r.url.host for r in w.requests if (r.url.host or "") in _COMMONS_BYTE_HOSTS] == ["upload.wikimedia.org"]
+
+    @pytest.mark.asyncio
     async def test_the_thumbnail_is_asked_for_at_a_real_bucket_width(self) -> None:
         """Commons serves thumbnails only at 120/250/330/500/960 and refuses anything else
         outright, so this asks the API to name the URL rather than building one. 500 is a
@@ -593,7 +671,7 @@ class TestFetchingAPhoto:
                 synonym_aphia_ids=[],
             )
 
-        byte_request = next(r for r in wikimedia.requests if "upload.wikimedia.org" in str(r.url))
+        byte_request = next(r for r in wikimedia.requests if (r.url.host or "") in _COMMONS_BYTE_HOSTS)
         assert byte_request.headers["User-Agent"] == settings.SPECIES_USER_AGENT
 
     @pytest.mark.asyncio
@@ -736,6 +814,29 @@ class TestFetchingAPhoto:
 
         assert photo is None
         assert not [url for url in wikimedia.urls() if "169.254" in url]
+
+    @pytest.mark.asyncio
+    async def test_a_wikimedia_host_that_is_not_on_the_allowlist_is_refused_too(self) -> None:
+        """**The fence is two exact names, not `*.wikimedia.org`.** This is the case the
+        link-local one above cannot cover: a host that looks entirely legitimate, is genuinely
+        Wikimedia's, and still is not one of the two that serve file bytes. Relaxing the fence
+        to a suffix match would make this test pass bytes through, which is the point of it -
+        a subdomain-matching bug in a pattern is an SSRF hole, while a name that stops resolving
+        is a feature that visibly stops working.
+        """
+        with _wikimedia(
+            imageinfo=_imageinfo_payload(thumb_url="https://static.wikimedia.org/wikipedia/commons/x.jpg"),
+            image_bytes=plain_png(size=(500, 333)),
+        ) as wikimedia:
+            photo = await species_service.fetch_species_photo(
+                scientific_name="Amphiprion ocellaris",
+                aphia_id=278400,
+                entity=_local_entity(images=[("Amphiprion ocellaris.jpg", "normal")]),
+                synonym_aphia_ids=[],
+            )
+
+        assert photo is None
+        assert not [url for url in wikimedia.urls() if "static.wikimedia.org" in url]
 
     @pytest.mark.asyncio
     async def test_bytes_that_do_not_decode_yield_no_photo_rather_than_raising(self) -> None:
@@ -1149,6 +1250,42 @@ class TestBackfill:
         candidates = await backfill._candidates(async_db, limit=None, force=True)
 
         assert attempted.id in {species.id for species in candidates}
+
+    @pytest.mark.asyncio
+    async def test_force_reattempts_a_species_stamped_with_no_photo(self, db: Session, async_db: AsyncSession) -> None:
+        """**The remedy for rows a broken fetch poisoned**, and the reason no narrower flag
+        exists. A species attempted while the photo fence refused Commons' thumbnail host looks
+        exactly like one the selection rule declined on its merits - a stamped
+        `photo_fetched_at` over a null `photo_storage_key` - so nothing can select the first
+        without the second, and `--force` taking both is the honest answer rather than a
+        limitation."""
+        from src.scripts import backfill_species_photos as backfill
+
+        poisoned = create_species(db, photo_fetched_at=datetime.now(UTC), photo_storage_key=None)
+
+        ordinary = await backfill._candidates(async_db, limit=None, force=False)
+        forced = await backfill._candidates(async_db, limit=None, force=True)
+
+        assert poisoned.id not in {species.id for species in ordinary}
+        assert poisoned.id in {species.id for species in forced}
+
+    @pytest.mark.asyncio
+    async def test_force_with_a_limit_redraws_the_same_slice_rather_than_advancing(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """`--force` drops the predicate entirely, so nothing excludes the rows the previous run
+        just handled and the same first `limit` ids come back every time. Pinned because the
+        docstring said the opposite until 2026-08-31 and an operator chunking a forced re-walk
+        would have re-attempted one slice forever while believing they were making progress."""
+        from src.scripts import backfill_species_photos as backfill
+
+        for _ in range(3):
+            create_species(db)
+
+        first = await backfill._candidates(async_db, limit=2, force=True)
+        second = await backfill._candidates(async_db, limit=2, force=True)
+
+        assert [species.id for species in first] == [species.id for species in second]
 
     @pytest.mark.asyncio
     async def test_a_dry_run_writes_nothing(self, db: Session, async_db: AsyncSession) -> None:

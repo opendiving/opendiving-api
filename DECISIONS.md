@@ -7999,9 +7999,13 @@ feature deliberately does not:
 - **No `OwnedResourceCache`, no `fetch_owned_or_raise`.** Both require `model.user_id`
   (`core/utils/owned_resource_cache.py`, `api/dependencies.py`). AGENTS.md's rule — "new per-user
   owned resource → `OwnedResourceCache`" — does not fire, because this is not one.
-- **The endpoints authenticate but never check ownership**, and `GET /species/{uuid}`'s 404 means
-  "not in this catalog" rather than the "not yours" the same status means everywhere else. A species
-  uuid is not an existence oracle for anything private, so there is nothing to protect.
+- **No endpoint here checks ownership**, and `GET /species/{uuid}`'s 404 means "not in this catalog"
+  rather than the "not yours" the same status means everywhere else. A species uuid is not an
+  existence oracle for anything private, so there is nothing to protect. Nor do they all
+  authenticate: `GET /species/{uuid}/photo` serves its bytes with no token at all, because an
+  `<img>` tag cannot send one — see *The endpoint that serves them is the first unauthenticated
+  bytes route*. No count is written here on purpose. The sentence this replaces read "the endpoints
+  authenticate but never check ownership", and both halves went stale in the same commit.
 - **`crud_species.resolve_species_ids` has no user filter**, unlike its gear and dive-site siblings.
   It checks existence only — which is still what lets `write_dive` answer 422 "Species not found."
   before writing any join rows.
@@ -11869,11 +11873,14 @@ Serving from our own API needs **no CSP change at all** in either topology, beca
 split-origin build already contributes `apiOrigin` to `img-src`).
 
 What it costs is a third server-side third party, and it is a *different* one from the two the
-species picker already contacts: `commons.wikimedia.org` for the credit metadata and
-`upload.wikimedia.org` for the bytes. Neither is ever sent anything a diver typed — Commons is asked
-for a file title derived from an AphiaID. `src/.env.example`'s species PRIVACY paragraph says so,
-and the front door's `docs/` and the web app's privacy page both need the same correction, since
-neither is in this repository.
+species picker already contacts. One party, **three** hosts: `commons.wikimedia.org` for the credit
+metadata, and then `thumb.wikimedia.org` or `upload.wikimedia.org` for the bytes — a single
+`imageinfo` reply names both of those, and which one is actually fetched depends on whether the file
+is wide enough to have a thumbnail (see *The byte fence admits two hosts, because one `imageinfo`
+reply names two*). None of the three is ever sent anything a diver typed — Commons is asked for a
+file title derived from an AphiaID. `src/.env.example`'s species PRIVACY paragraph says so, and the
+front door's `docs/` and the web app's privacy page both need the same correction, since neither is
+in this repository.
 
 ### The selection rule is a sequence, and it refuses rather than guesses
 
@@ -12007,6 +12014,47 @@ browsers always send one, which is why this bites servers and not `<img>` tags. 
 Wikimedia's User-Agent policy has moved off `meta.wikimedia.org` — which now serves a redirect stub
 — to `foundation.wikimedia.org`.
 
+### The byte fence admits two hosts, because one `imageinfo` reply names two
+
+`iiurlwidth=500` is answered with a `thumburl` on **`thumb.wikimedia.org`** and the full-size `url`
+on **`upload.wikimedia.org`**, and `_commons_imageinfo` prefers the thumbnail. The fence shipped in
+[api #138](https://github.com/opendiving/opendiving-api/pull/138) held only the second name and
+compared it exactly, so `_fetch_photo_bytes` refused every thumbnail there was and logged "Refusing
+to fetch species photo bytes from an unexpected host" each time. The feature was complete,
+correct-looking and had **never fetched a single photo**; a close-out walk found the catalog at 2613
+species, zero photos. `species_photos.PHOTO_BYTE_HOSTS` now carries both names.
+`thumb.wikimedia.org` presents a certificate whose SANs include `*.wikimedia.org`, the same wildcard
+family covering `upload.wikimedia.org` — it is Wikimedia's own infrastructure, not a redirect
+target.
+
+**It stays a set of exact hostnames and did not become a `*.wikimedia.org` suffix match**, which
+would have survived Wikimedia moving the host a third time. Refused for the reason the Commons
+endpoint beside it is a setting while this is not: a suffix test is a pattern, and a
+subdomain-matching bug in a pattern is an SSRF hole, whereas a name that stops resolving is a
+feature that visibly stops working. Adding a third name is a deliberate one-line change, and that
+deliberateness is the whole property being bought.
+
+**Also refused: preferring the full-size `url` and leaving the fence untouched.** That needs no
+allowlist change and looks like the conservative option, but measured over six sampled taxa **two
+originals exceed the 4 MB `MAX_PHOTO_DOWNLOAD_BYTES` cap** (9.99 MB and 6.88 MB) and would still
+silently get no photo, while the rest would be stored at full resolution — 6671x4448 behind a
+thumbnail — because the no-resize rule is a licence constraint rather than a display one. The
+`thumburl or url` preference order is therefore unchanged; what changed is that both hosts those two
+fields name now pass the fence.
+
+**The lesson is in the test fixture, not in the fence.** `tests/test_species_photos.py`'s
+`_THUMB_URL` hard-coded a `upload.wikimedia.org` URL, so the fake Commons handed back a host the
+fence already accepted and twenty tests passed green over a feature that had never worked once. **A
+fixture naming something upstream does not send cannot fail, whatever it asserts** — which is the
+transferable part, and the reason to check what a fake actually returns against a real response
+before trusting a suite that exercises a third party. Three things now hold it: that constant names
+the thumbnail host, the fake routes by **hostname rather than substring** (a
+`"upload.wikimedia.org" in url` test would answer bytes for
+`https://evil.example/upload.wikimedia.org/x.jpg` as well, so a fence that let one through would be
+met by an obliging fake instead of a failure), and the fake's byte hosts are spelled out in the test
+file rather than imported from `PHOTO_BYTE_HOSTS`, so it can disagree with the fence rather than
+agreeing with it by construction.
+
 ### The endpoint that serves them is the first unauthenticated bytes route
 
 Access tokens in this app are Bearer-only — the sole cookie is `refresh_token`, read on the refresh,
@@ -12044,8 +12092,9 @@ because it said "the three places" right up until the fourth arrived.
 
 ### Backfilling selects on the timestamp, not on the absence of bytes
 
-`src/scripts/backfill_species_photos.py` follows the house shape, with three deliberate departures
-from `backfill_dive_profiles.py` that copying blindly would get wrong:
+`src/scripts/backfill_species_photos.py` follows the house shape, with deliberate departures from
+`backfill_dive_profiles.py` that copying blindly would get wrong. No count is given here: it said
+"three" over four bullets for as long as the section has existed.
 
 - **It creates no Redis pool.** That one needs it because `delete_keys_by_pattern` silently no-ops
   when the pool is absent and it invalidates. This one invalidates nothing — see the exemption under
@@ -12066,6 +12115,22 @@ from `backfill_dive_profiles.py` that copying blindly would get wrong:
 - **It paces itself and completes.** The provider throttle is built to *degrade*, because its
   counter is instance-wide and one diver's search must not reject another's. A backfill wants the
   opposite, so it sleeps between species rather than dropping them.
+
+**Two things about `--force` that its one-line definition above does not cover:**
+
+- **`--force` is also the whole remedy for rows a broken fetch poisoned, and no narrower flag was
+  added.** Every species attempted while the byte fence refused Commons' thumbnail host carries a
+  stamped `photo_fetched_at` over a null `photo_storage_key` — which is **byte-for-byte the state of
+  a species the selection rule declined on its merits**, so no predicate can select the first
+  without also taking the second. A `--retry-failed` flag would promise a precision the data cannot
+  support; taking both is the honest answer rather than a limitation. The cost is a full re-walk at
+  the pacing above, under an hour per thousand species.
+- **`--force --limit` does not advance between runs**, and no ordering could make it: `--force`
+  drops the predicate, so nothing excludes the rows the previous run just handled and the same first
+  `limit` ids come back every time. `_candidates`' docstring claimed the opposite until 2026-08-31 —
+  an operator chunking a forced re-walk would have re-attempted one slice forever while believing
+  they were making progress. Pinned now by
+  `test_force_with_a_limit_redraws_the_same_slice_rather_than_advancing`.
 
 ### GBIF was cut on the evidence, not deferred
 

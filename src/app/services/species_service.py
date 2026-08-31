@@ -2054,7 +2054,12 @@ async def _commons_imageinfo(file_title: str) -> tuple[str, species_photos.Photo
 
     `thumburl` is absent when the source file is *narrower* than the width asked for - Commons
     does not upscale - and the full-size `url` is the right answer there, because a file under
-    500 px wide is already thumbnail-sized. Both go through the same host fence downstream.
+    500 px wide is already thumbnail-sized.
+
+    **The two are served from different hosts** - `thumburl` from `thumb.wikimedia.org` and
+    `url` from `upload.wikimedia.org` - and both go through the same fence downstream, which is
+    why `species_photos.PHOTO_BYTE_HOSTS` carries two names. Preferring `thumburl` while the
+    fence knew only the second host is exactly how this pipeline once fetched nothing at all.
     """
     payload = await _commons(
         {
@@ -2089,12 +2094,14 @@ async def _fetch_photo_bytes(url: str) -> bytes | None:
     Modelled on `user_avatars.import_google_avatar`: redirects are not followed, the read is
     capped, and the host is checked against an allowlist before anything leaves. The allowlist
     is the SSRF fence and it is hard-coded in `species_photos`, unlike the API endpoint beside
-    it, which is a setting.
+    it, which is a setting. It admits the two hosts one `imageinfo` reply can name and nothing
+    else, so both the thumbnail and the full-size fallback arrive through the same check.
 
-    **The `User-Agent` is not optional here.** Wikimedia's policy blocks generic and empty
-    ones, and an empty header returns 403 on `upload.wikimedia.org` just as it does on
-    `api.php` - which bites servers rather than `<img>` tags, because a browser always sends
-    one. The same string the register calls already send does the job.
+    **The `User-Agent` is not optional here.** Wikimedia's policy is the Foundation's and
+    applies across its hosts, blocking generic and empty ones; an empty header was measured
+    returning 403 on `upload.wikimedia.org` just as it does on `api.php` - which bites servers
+    rather than `<img>` tags, because a browser always sends one. The same string the register
+    calls already send does the job.
     """
     if not species_photos.is_photo_byte_source(url):
         logger.warning("Refusing to fetch species photo bytes from an unexpected host.")
