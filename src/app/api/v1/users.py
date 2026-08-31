@@ -1,9 +1,10 @@
 import logging
 import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Cookie, Depends, File, HTTPException, Query, Request, Response, UploadFile
+from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +21,7 @@ from ...core.exceptions.http_exceptions import (
 from ...core.security import blacklist_token, blacklist_tokens, generate_secure_token, hash_token, oauth2_scheme
 from ...core.utils.cache import cache, delete_keys_by_pattern
 from ...core.utils.client_ip import client_ip
+from ...core.utils.pagination import clamp_pagination
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...core.utils.request_context import RequestContext
 from ...core.utils.uploads import content_disposition_attachment
@@ -39,6 +41,7 @@ from ...schemas.email_change import (
     EmailChangeVerifyRequest,
     EmailChangeVerifyResponse,
 )
+from ...schemas.species import SpeciesLifeListEntry
 from ...schemas.user import AccountDeletionResponse, AvatarRead, UserRead, UserUpdate
 from ...schemas.user_dive_stats import UserDiveStatsRead, UserDiveStatsReadInternal
 from ...services.dive_activity import dive_activity
@@ -48,6 +51,7 @@ from ...services.email_service import (
     send_email_change_confirmation_email,
     send_email_changed_notification,
 )
+from ...services.species_life_list import species_life_list
 from ...services.user_avatars import (
     AVATAR_CONTENT_TYPE,
     AVATAR_FILENAME,
@@ -577,6 +581,89 @@ async def read_dive_activity(
     account - no uuid parameter.
     """
     return await _cached_dive_activity(request, user_id=current_user["id"], db=db)
+
+
+# Keyed under `user_{id}_dives:` for the same reason as the two series above, and with a
+# second obligation they do not have: **every query parameter has to be in the key**.
+# `@cache` builds its key from this template's placeholders and the resource id and nothing
+# else, so a prefix missing `page` and `search` would collapse every page *and* every search of
+# one diver onto a single entry - page 2 serving page 1, and a search serving the unfiltered
+# list, for sixty seconds at a time. Nothing downstream catches that: `TestListCacheKeys`
+# asserts `page_{page}` only for `OwnedResourceCache` instances, and this is deliberately a
+# hand-written aggregate. The shape is `_cached_read_dives`', not `_cached_gas_use_history`',
+# which is an unparameterised whole-series fetch with no page to vary by.
+#
+# The prefix is what makes this drop with the rest: `invalidate_dive_caches()` sweeps
+# `user_{id}_dives:*` after every dive create, update and delete, and deliberately not a wider
+# pattern. A namespace of its own would have been a third pattern to remember to add there, and
+# the bug from forgetting it is specific here - `species_seen` is uncached and drops instantly
+# on a dive delete, so the dashboard tile and this list would disagree, breaking the very
+# equality that makes the two checkable against each other.
+#
+# Same authorization caveat as everywhere in this file: `@cache` serves a hit without re-running
+# the body, so this must only ever be called with the calling user's own id.
+# Named rather than written inline so a test can assert on it directly. That is worth the one
+# extra line here and nowhere else in this file: this is the key whose omissions produce a
+# wrong answer rather than a slow one, and every other way of checking it either reads this
+# file's source text or passes whenever it happens to run outside the 60 s TTL.
+SPECIES_LIFE_LIST_CACHE_KEY_PREFIX = (
+    "user_{user_id}_dives:species:page_{page}:items_per_page:{items_per_page}:search:{search}"
+)
+
+
+@cache(key_prefix=SPECIES_LIFE_LIST_CACHE_KEY_PREFIX, resource_id_name="user_id", expiration=60)
+async def _cached_species_life_list(
+    request: Request, user_id: int, db: AsyncSession, page: int, items_per_page: int, search: str | None
+) -> dict:
+    """Fetches (and caches) a page of the caller's life list. Authorization happens in the
+    route before this is reached.
+    """
+    data = await species_life_list(
+        db=db, user_id=user_id, offset=compute_offset(page, items_per_page), limit=items_per_page, search=search
+    )
+    response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
+    return response
+
+
+@router.get("/user/species", response_model=PaginatedListResponse[SpeciesLifeListEntry])
+async def read_species_life_list(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    page: int = 1,
+    items_per_page: int = 10,
+    search: Annotated[
+        str | None,
+        Query(max_length=255, description="Match by any name the species goes by, as the catalog search does"),
+    ] = None,
+) -> dict:
+    """Every species the caller has ever logged, most recently seen first.
+
+    One row per taxon rather than per sighting: `dive_count`, `first_seen` and `last_seen` are
+    that diver's whole history with it, and `photo_sha256` is non-null when there is a photo to
+    render (build `/species/{uuid}/photo?v=<digest>` from it - that route needs no token).
+
+    Counts **live** dives only, so soft-deleting a dive drops its species from this list when it
+    was the only sighting - which is also why `total_count` equals the `species_seen` on
+    `GET /user/dive-stats` for the same account.
+
+    Always the caller's own account, like the rest of `/user/...` - no uuid parameter, so there
+    is no ownership check to get backwards. Out-of-range pagination is clamped, not rejected.
+    """
+    page, items_per_page = clamp_pagination(page, items_per_page)
+    # Normalized here rather than in the service, so the shape the cache key is built from is
+    # the shape this route accepted - the reasoning `read_species_search` spells out for its
+    # own search parameter. An all-whitespace term becomes `None` rather than a `%%` pattern
+    # that matches the unfiltered list under a different key.
+    normalized = " ".join(search.split()) if search is not None else None
+    return await _cached_species_life_list(
+        request,
+        user_id=current_user["id"],
+        db=db,
+        page=page,
+        items_per_page=items_per_page,
+        search=normalized or None,
+    )
 
 
 @router.delete("/user", response_model=AccountDeletionResponse)

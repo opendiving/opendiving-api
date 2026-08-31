@@ -22,8 +22,10 @@ A script, not an arq cron. Every source of an orphan is rare and bounded: a cras
 writing a file and committing its row; two replacements of the same card racing; files
 restored from a backup whose rows were deleted after the dump was taken; and a hard delete
 of a `Certification` from the admin panel, whose FK cascade removes the file rows with no
-service layer in the way to unlink anything. Scheduled deletion machinery is precisely what
-the Gitea tale warns against automating. Revisit when photo galleries land.
+service layer in the way to unlink anything; and a species photo re-fetched by
+`backfill_species_photos --force` while the run that wrote the old one was still committing.
+Scheduled deletion machinery is precisely what the Gitea tale warns against automating.
+Revisit when *user-uploaded* photo galleries land - species photos are already covered.
 """
 
 import argparse
@@ -38,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..app.core.db.database import local_session
 from ..app.models.certification_file import CertificationFile
 from ..app.models.dive_file import DiveFile
+from ..app.models.species import Species
 from ..app.models.user import User
 from ..app.services import blob_store
 
@@ -76,11 +79,20 @@ class SweepReport:
 
 
 async def _referenced_keys(session: AsyncSession) -> set[str]:
-    """Every key any row names, across the three places a blob key is stored.
+    """Every key any row names, across every column a blob key is stored in.
 
-    Avatars are the third and the only one on a nullable column, so that select filters
-    the NULLs out - an account with no picture must not contribute a `None` to a set the
-    tree is diffed against.
+    **Every new kind of blob has to be added here, and forgetting is destructive rather than
+    merely blind.** `blob_store.iter_keys()` walks the whole volume, so a kind missing from
+    this set counts as on-disk and referenced by nothing - which classifies every file of it
+    past the grace window as an orphan for `--delete` to unlink. The suspicious-fraction
+    refusal is the only brake, `--force` overrides it, and it does not engage at all below
+    `_SUSPICIOUS_MIN_FILES`, so the smallest instances have no brake at all.
+
+    No count is written in this sentence on purpose: it said "the three places" while there
+    were three, and the fourth arriving is exactly the moment nobody re-reads the docstring.
+
+    The two nullable columns filter their NULLs out - a species with no photo or an account
+    with no picture must not contribute a `None` to a set the tree is diffed against.
     """
     dive_keys = (await session.execute(select(DiveFile.storage_key))).scalars().all()
     card_keys = (await session.execute(select(CertificationFile.storage_key))).scalars().all()
@@ -89,7 +101,12 @@ async def _referenced_keys(session: AsyncSession) -> set[str]:
         .scalars()
         .all()
     )
-    return set(dive_keys) | set(card_keys) | set(avatar_keys)
+    species_photo_keys = (
+        (await session.execute(select(Species.photo_storage_key).where(Species.photo_storage_key.is_not(None))))
+        .scalars()
+        .all()
+    )
+    return set(dive_keys) | set(card_keys) | set(avatar_keys) | set(species_photo_keys)
 
 
 def _classify(referenced: set[str], *, now: float) -> tuple[list[str], int, int]:
@@ -155,7 +172,8 @@ def _refusal(referenced: set[str], orphans: list[str], on_disk: int) -> str | No
 
 
 async def sweep(*, delete: bool = False, force: bool = False) -> SweepReport:
-    """Diff the volume against every `storage_key` column: both file tables and `user`."""
+    """Diff the volume against every `storage_key` column - see `_referenced_keys`, which is
+    the list that has to grow with every new kind of blob."""
     async with local_session() as session:
         referenced = await _referenced_keys(session)
 

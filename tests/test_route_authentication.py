@@ -32,8 +32,8 @@ from tests.helpers.routes import RouteInfo, dependency_calls, iter_api_routes
 AUTH_MARKERS: set[Any] = {get_current_user, get_current_superuser, oauth2_scheme}
 
 # The reason is the payload here, not the path. It is what a reviewer reads when someone
-# proposes a twelfth entry, and "it needs to be anonymous" is not one of these reasons.
-# They fall into three groups.
+# proposes the next entry, and "it needs to be anonymous" is not one of these reasons.
+# They fall into four groups.
 ANONYMOUS_BY_DESIGN: dict[tuple[str, str], str] = {
     # 1. The caller has no token yet, by definition - these *are* the flow that issues one.
     ("POST", "/api/v1/auth/email/request"): "Asks for a magic link; nobody is signed in at the start of sign-in.",
@@ -75,6 +75,15 @@ ANONYMOUS_BY_DESIGN: dict[tuple[str, str], str] = {
     # test_client_cache_middleware.py).
     ("GET", "/api/v1/user/email-change/verify/check"): "The link's token is the credential, not a session.",
     ("POST", "/api/v1/user/email-change/verify"): "Same token-in-the-link authorization as its /check counterpart.",
+    # 4. The caller is an `<img>` tag, which carries no credential and cannot be given one.
+    ("GET", "/api/v1/species/{uuid}/photo"): (
+        "Serves a public Wikimedia Commons image from a global, ownerless catalog to an "
+        "`<img src>`, which cannot send a Bearer token - and the cookie this app sets is the "
+        "refresh token, read on three auth paths only. Discloses nothing: a species uuid is "
+        "not an existence oracle for anything private, and the bytes are freely licensed "
+        "files anybody can fetch from Commons directly. Serving them from here is what stops "
+        "a diver's browser telling Wikimedia which species they are looking at."
+    ),
 }
 
 

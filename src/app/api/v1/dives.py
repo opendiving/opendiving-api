@@ -483,10 +483,13 @@ async def write_dive(
     )
 
 
+# Every filter has to appear in this key, and every placeholder in it is looked up as a
+# **keyword** argument - so a new filter passed positionally raises at key construction rather
+# than quietly collapsing two different result sets onto one entry.
 @cache(
     key_prefix=(
         "user_{user_id}_dives:page_{page}:items_per_page:{items_per_page}"
-        ":trip_{trip_id}:course_{course_id}:site_{dive_site_id}:gear_{gear_item_id}"
+        ":trip_{trip_id}:course_{course_id}:site_{dive_site_id}:gear_{gear_item_id}:species_{species_id}"
     ),
     resource_id_name="user_id",
     expiration=60,
@@ -502,6 +505,7 @@ async def _cached_read_dives(
     course_id: int | None,
     dive_site_id: int | None,
     gear_item_id: int | None,
+    species_id: int | None,
 ) -> dict:
     """Fetches (and caches) a user's paginated dive list.
 
@@ -525,6 +529,9 @@ async def _cached_read_dives(
     if gear_item_id is not None:
         # Same shape as the dive site filter above: match dives that used this item.
         filters["id__with_gear_item"] = gear_item_id
+    if species_id is not None:
+        # Same shape again: match dives that recorded this species.
+        filters["id__showing_species"] = species_id
 
     dives_data = await crud_dives.get_multi(
         db=db,
@@ -572,15 +579,17 @@ async def read_dives(
     course_uuid: uuid_pkg.UUID | None = None,
     dive_site_uuid: uuid_pkg.UUID | None = None,
     gear_item_uuid: uuid_pkg.UUID | None = None,
+    species_uuid: uuid_pkg.UUID | None = None,
 ) -> dict:
     """List the caller's dives, newest first, each with its trip, course, sites and gear.
 
     `user_uuid` must be the caller's own (403 otherwise). The `trip_uuid`, `course_uuid`,
-    `dive_site_uuid` and `gear_item_uuid` filters are combinable, and one naming something
-    that doesn't exist or isn't the caller's returns an empty page rather than an error -
-    it reveals nothing about whether that resource exists. `dive_site_uuid` matches any
-    dive that *includes* the site, since a dive can span several. Out-of-range pagination
-    is clamped, not rejected.
+    `dive_site_uuid`, `gear_item_uuid` and `species_uuid` filters are combinable, and one
+    naming something that doesn't exist or isn't the caller's returns an empty page rather
+    than an error - it reveals nothing about whether that resource exists. `dive_site_uuid`
+    matches any dive that *includes* the site, since a dive can span several, and
+    `species_uuid` any dive that recorded that species. Out-of-range pagination is clamped,
+    not rejected.
     """
     if current_user["uuid"] != user_uuid:
         raise ForbiddenException()
@@ -612,6 +621,17 @@ async def read_dives(
         )
         gear_item_id = (gear_map or {}).get(gear_item_uuid, -1)
 
+    species_id: int | None = None
+    if species_uuid is not None:
+        # Unlike its two neighbours this resolver takes no `user_id` - the species catalog is
+        # global, so there is no owner to compare against (see `resolve_species_ids`). The -1
+        # sentinel still applies, and it has to arrive through `(map or {})`: that function
+        # returns **`None`, not an empty map**, when any uuid is unknown, so a bare `.get`
+        # would raise `AttributeError` and answer 500 on exactly the unknown-uuid case this
+        # filter has to answer with an empty page.
+        species_map = await resolve_species_ids(db=db, species_uuids=[species_uuid])
+        species_id = (species_map or {}).get(species_uuid, -1)
+
     return await _cached_read_dives(
         request,
         user_id=current_user["id"],
@@ -623,6 +643,7 @@ async def read_dives(
         course_id=course_id,
         dive_site_id=dive_site_id,
         gear_item_id=gear_item_id,
+        species_id=species_id,
     )
 
 

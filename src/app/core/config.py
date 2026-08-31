@@ -349,12 +349,13 @@ class GeocodingSettings(BaseSettings):
 
 
 class SpeciesSettings(BaseSettings):
-    # The species catalog's two upstream sources, proxied server-side exactly as geocoding is
-    # (see `services.species_service`). Neither takes a key and neither is optional in the
-    # sense `GEOCODER_URL` is: emptying these does not switch the feature off, it degrades
-    # search to whatever is already in the local catalog and makes resolving a *new* species
-    # fail. That asymmetry is deliberate - a diver can type a location by hand, but they
-    # cannot invent an AphiaID.
+    # The species catalog's upstream sources, proxied server-side exactly as geocoding is
+    # (see `services.species_service`). None takes a key. The two name registers below are
+    # not optional in the sense `GEOCODER_URL` is: emptying them does not switch the feature
+    # off, it degrades search to whatever is already in the local catalog and makes resolving
+    # a *new* species fail. That asymmetry is deliberate - a diver can type a location by
+    # hand, but they cannot invent an AphiaID. `COMMONS_API_URL` is the one that genuinely is
+    # optional: unset or unreachable, a species simply gets no photo.
     #
     # WoRMS is the taxonomic authority: scientific names, synonyms, and the accepted-taxon
     # mapping that gives every catalog row its identity. Its REST webservice is free to use
@@ -365,6 +366,17 @@ class SpeciesSettings(BaseSettings):
     # because WoRMS alone cannot answer "clownfish": *Amphiprion ocellaris* carries exactly
     # one vernacular in WoRMS, and it is in Japanese.
     WIKIDATA_API_URL: str = config("WIKIDATA_API_URL", default="https://www.wikidata.org/w/api.php")
+    # Wikimedia Commons, asked only for a photo's credit metadata and thumbnail URL once a
+    # Wikidata entity has already named the file (P18). Unlike the two above it is asked
+    # nothing a diver typed - it receives a file title derived from an AphiaID.
+    #
+    # **A setting, while the host the bytes are fetched from is hard-coded.** That asymmetry
+    # is the point: `services.species_photos` will only ever fetch image bytes from
+    # `upload.wikimedia.org`, which is an SSRF fence, and a fence with an environment
+    # variable in front of it is not a fence. This setting exists so an instance can point
+    # the metadata call at a mirror - and so the "unroutable host degrades to no photo"
+    # behaviour is checkable without editing code.
+    COMMONS_API_URL: str = config("COMMONS_API_URL", default="https://commons.wikimedia.org/w/api.php")
 
     # Wikimedia's policy requires a descriptive `User-Agent` and blocks generic ones; WoRMS
     # asks to be told who is calling. One string satisfies both. A public deployment that
@@ -394,6 +406,13 @@ class SpeciesSettings(BaseSettings):
     SPECIES_WORMS_RATE_LIMIT_REQUESTS: int = config("SPECIES_WORMS_RATE_LIMIT_REQUESTS", default=120)
     SPECIES_WIKIDATA_RATE_LIMIT_WINDOW_SECONDS: int = config("SPECIES_WIKIDATA_RATE_LIMIT_WINDOW_SECONDS", default=60)
     SPECIES_WIKIDATA_RATE_LIMIT_REQUESTS: int = config("SPECIES_WIKIDATA_RATE_LIMIT_REQUESTS", default=300)
+    # Commons gets a pair of its own because `_claim_provider_slot` indexes its `limits` dict
+    # unguarded - a provider with no entry there is a `KeyError`, not a missing throttle.
+    # Lower than Wikidata's: this one is charged at most twice per *new* species (the credit
+    # call and the byte fetch) rather than once per enriched search candidate, so a number
+    # that would bottleneck a picker cannot bottleneck this.
+    SPECIES_COMMONS_RATE_LIMIT_WINDOW_SECONDS: int = config("SPECIES_COMMONS_RATE_LIMIT_WINDOW_SECONDS", default=60)
+    SPECIES_COMMONS_RATE_LIMIT_REQUESTS: int = config("SPECIES_COMMONS_RATE_LIMIT_REQUESTS", default=120)
 
 
 class ExportSettings(BaseSettings):
