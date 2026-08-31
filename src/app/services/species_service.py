@@ -2011,8 +2011,15 @@ def _name_rows(
 #
 # Twelve seconds covers up to four sequential calls - the synonym-item search, one entity
 # chunk, the `imageinfo` lookup and the byte fetch - against hosts that answer in well under a
-# second each. Expiry is not an error: the row is already committed and `photo_fetched_at` is
-# left unstamped, so the backfill picks the species up on its next run.
+# second each.
+#
+# **Expiry is not an attempt**, which is what `PhotoAttempt.completed` below exists to say.
+# `photo_fetched_at` is stamped on a failed attempt on purpose - it is what stops the backfill
+# re-querying the photo-less majority forever - but a fetch the budget *cancelled* learned
+# nothing about the species, and stamping it would strand every taxon resolved during one bad
+# Wikimedia afternoon: permanently photo-less, invisible to the backfill's
+# `photo_fetched_at IS NULL` predicate, and recoverable only by an operator who happens to know
+# to run `--force`. Nothing found and nothing asked are different answers.
 _PHOTO_BUDGET_SECONDS = 12.0
 
 # How many Wikidata items the synonym retry will look at. The search ORs every synonym id into
@@ -2020,6 +2027,21 @@ _PHOTO_BUDGET_SECONDS = 12.0
 # follow rather than the search: two chunks of `_WIKIDATA_ENTITY_BATCH`. A taxon with more than
 # eight distinct items carrying one of its ids is a data problem rather than a case to serve.
 _SYNONYM_ITEM_SEARCH_LIMIT = 8
+
+
+@dataclass(frozen=True, slots=True)
+class PhotoAttempt:
+    """What one photo attempt produced, and whether it finished at all.
+
+    `completed` is the field that exists to be *false*, and it is the difference between "this
+    species has no usable photo" and "we never got to ask". Both look identical downstream - a
+    `photo` of `None` - and conflating them is what would let one slow Wikimedia afternoon write
+    a permanent no-photo verdict for every species resolved during it. Only a completed attempt
+    is worth stamping `photo_fetched_at` for; see `_PHOTO_BUDGET_SECONDS`.
+    """
+
+    photo: species_photos.FetchedPhoto | None
+    completed: bool
 
 
 async def _commons_imageinfo(file_title: str) -> tuple[str, species_photos.PhotoCredit] | None:
@@ -2230,8 +2252,36 @@ async def fetch_species_photo(
         return None
 
 
-async def fetch_photo_for_species(*, scientific_name: str, aphia_id: int) -> species_photos.FetchedPhoto | None:
-    """`fetch_species_photo` for a species already in the catalog, loading its own inputs.
+async def attempt_species_photo(
+    *,
+    scientific_name: str,
+    aphia_id: int,
+    entity: _WikidataEntity | None,
+    synonym_aphia_ids: list[int],
+) -> PhotoAttempt:
+    """`fetch_species_photo` under its own timeout scope, reporting whether it finished.
+
+    The scope is the whole point and is documented at `_PHOTO_BUDGET_SECONDS`: photo work must
+    never share `resolve_species`' enrichment budget, because a cancellation there takes the
+    synonym walk with it and turns a slow Commons into a 503 on the only route that fills the
+    catalog.
+
+    `cancelled_caught` is how the two `None`s are told apart. Without it a timeout is
+    indistinguishable from a completed search that found nothing, and only one of those is worth
+    writing down.
+    """
+    photo: species_photos.FetchedPhoto | None = None
+    # Initialized before the scope, not inside it: `move_on_after` cancels the body wherever it
+    # happens to be, so an assignment in there is not guaranteed to have run.
+    with anyio.move_on_after(_PHOTO_BUDGET_SECONDS) as scope:
+        photo = await fetch_species_photo(
+            scientific_name=scientific_name, aphia_id=aphia_id, entity=entity, synonym_aphia_ids=synonym_aphia_ids
+        )
+    return PhotoAttempt(photo=photo, completed=not scope.cancelled_caught)
+
+
+async def fetch_photo_for_species(*, scientific_name: str, aphia_id: int) -> PhotoAttempt:
+    """`attempt_species_photo` for a species already in the catalog, loading its own inputs.
 
     The entry point for `src/scripts/backfill_species_photos.py`, which has a stored row rather
     than the enrichment `resolve_species` happens to be holding. It pays for the two lookups
@@ -2242,6 +2292,10 @@ async def fetch_photo_for_species(*, scientific_name: str, aphia_id: int) -> spe
     is the opposite of what `resolve_species` does with the same `None`. The reason is what the
     list is *for* in each place: there it vets a display name about to be written forever, and
     here it is a second chance at a photograph that the next run will take again anyway.
+
+    **A budget that expired while loading those inputs is not an attempt either.** The photo
+    step would then run against no entity and no synonyms and return `None` immediately, which
+    reads downstream as "this species has no photo" - a verdict nothing actually established.
     """
     entity: _WikidataEntity | None = None
     synonyms: list[tuple[str, int | None]] | None = None
@@ -2254,12 +2308,14 @@ async def fetch_photo_for_species(*, scientific_name: str, aphia_id: int) -> spe
         nonlocal synonyms
         synonyms = await _worms_synonyms(aphia_id)
 
-    with anyio.move_on_after(_ENRICHMENT_BUDGET_SECONDS):
+    with anyio.move_on_after(_ENRICHMENT_BUDGET_SECONDS) as scope:
         async with anyio.create_task_group() as tasks:
             tasks.start_soon(load_entity)
             tasks.start_soon(load_synonyms)
+    if scope.cancelled_caught:
+        return PhotoAttempt(photo=None, completed=False)
 
-    return await fetch_species_photo(
+    return await attempt_species_photo(
         scientific_name=scientific_name,
         aphia_id=aphia_id,
         entity=entity,
@@ -2442,19 +2498,19 @@ async def resolve_species(db: AsyncSession, aphia_id: int) -> Species:
     # instance stores, and it is what the synonym retry's tie-breaks compare against. The
     # *selection rule* uses each examined item's own P225 instead, which is a different
     # question and is answered inside `fetch_species_photo`.
-    photo: species_photos.FetchedPhoto | None = None
     try:
-        with anyio.move_on_after(_PHOTO_BUDGET_SECONDS):
-            photo = await fetch_species_photo(
-                scientific_name=taxon.scientific_name,
-                aphia_id=taxon.aphia_id,
-                entity=entity,
-                synonym_aphia_ids=[synonym_id for _, synonym_id in synonyms if synonym_id is not None],
-            )
-        # Outside the scope on purpose: the budget bounds what leaves this server, and a
-        # cancellation landing part-way through the write would be a torn row rather than a
-        # missing photo.
-        await species_photos.save_photo_attempt(db, species_id=species.id, photo=photo)
+        attempt = await attempt_species_photo(
+            scientific_name=taxon.scientific_name,
+            aphia_id=taxon.aphia_id,
+            entity=entity,
+            synonym_aphia_ids=[synonym_id for _, synonym_id in synonyms if synonym_id is not None],
+        )
+        # The write is outside the budget scope on purpose - a cancellation landing part-way
+        # through it would be a torn row rather than a missing photo - and is skipped entirely
+        # when the budget expired, because a cancelled fetch established nothing about this
+        # species and `photo_fetched_at` is what the backfill selects on.
+        if attempt.completed:
+            await species_photos.save_photo_attempt(db, species_id=species.id, photo=attempt.photo)
     except Exception:
         # The row is committed and shared with every account on the instance, so nothing about
         # a picture may turn a resolve that succeeded into an error the client reads as

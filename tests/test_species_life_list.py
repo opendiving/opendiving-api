@@ -20,7 +20,7 @@ in the SQL: a `GROUP BY` leaning on functional-dependency inference, three aggre
 """
 
 from collections.abc import Generator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -266,10 +266,11 @@ class TestTheAggregate:
     """The SQL, executed. A mocked session tests the code around a query and never the query,
     and everything interesting here is in the query."""
 
-    def _log(self, db: Session, diver: Any, species: Any, *days: int) -> None:
+    def _log(self, db: Session, diver: Any, species: Any, *days: int, offset_minutes: int = 0) -> None:
         for day in days:
             dive = create_dive(db, diver)
             dive.start_time = datetime(2026, 6, day, 9, 0, tzinfo=UTC)
+            dive.utc_offset_minutes = offset_minutes
             db.add(DiveSpecies(dive_id=dive.id, species_id=species.id, position=0))
         db.commit()
 
@@ -286,6 +287,65 @@ class TestTheAggregate:
         assert row["dive_count"] == 3
         assert row["first_seen"] == datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
         assert row["last_seen"] == datetime(2026, 6, 9, 9, 0, tzinfo=UTC)
+
+    @pytest.mark.asyncio
+    async def test_the_dates_carry_the_offset_the_dives_were_logged_in(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """**A dive displays in the timezone it was logged in**, and this endpoint is bound by
+        that contract like every other dive-derived surface. A `timestamptz` stores only an
+        absolute instant, so a dive logged at 09:00 in Bangkok is 02:00 UTC — reporting the raw
+        instant would show the wrong local time here while `GET /dive/{uuid}` shows the right
+        one for the same dive.
+
+        The fixture logs at 09:00 UTC with a +07:00 offset, so a correct answer reads 16:00
+        +07:00 — the same instant, the diver's own clock. Zero-offset fixtures cannot tell the
+        two apart, which is why every other test in this class was blind to it."""
+        diver = create_user(db)
+        species = create_species(db)
+        self._log(db, diver, species, 1, 9, offset_minutes=420)
+
+        page = await species_life_list(async_db, user_id=diver.id, offset=0, limit=10)
+
+        row = page["data"][0]
+        assert row["first_seen"].utcoffset() == timedelta(minutes=420)
+        assert row["last_seen"].utcoffset() == timedelta(minutes=420)
+        assert row["first_seen"] == datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
+        assert row["first_seen"].hour == 16
+
+    @pytest.mark.asyncio
+    async def test_each_date_carries_its_own_dives_offset(self, db: Session, async_db: AsyncSession) -> None:
+        """The offset belongs to the *one* dive that produced the `min()` or the `max()`, which
+        no aggregate over the offset column can identify on its own — a diver who logged their
+        first sighting in the Red Sea and their most recent in Indonesia gets two different
+        offsets from one row. A single `min(utc_offset_minutes)` would pass the test above and
+        fail this one."""
+        diver = create_user(db)
+        species = create_species(db)
+        self._log(db, diver, species, 1, offset_minutes=180)
+        self._log(db, diver, species, 20, offset_minutes=480)
+
+        page = await species_life_list(async_db, user_id=diver.id, offset=0, limit=10)
+
+        row = page["data"][0]
+        assert row["first_seen"].utcoffset() == timedelta(minutes=180)
+        assert row["last_seen"].utcoffset() == timedelta(minutes=480)
+
+    @pytest.mark.asyncio
+    async def test_the_ordering_is_still_by_the_absolute_instant(self, db: Session, async_db: AsyncSession) -> None:
+        """ "First seen" means the earliest dive chronologically, whatever local time it read as.
+        Sorting on the offset-shifted value instead would reorder a diver's log by where they
+        happened to be standing."""
+        diver = create_user(db)
+        species = create_species(db)
+        self._log(db, diver, species, 1, offset_minutes=-600)
+        self._log(db, diver, species, 2, offset_minutes=780)
+
+        page = await species_life_list(async_db, user_id=diver.id, offset=0, limit=10)
+
+        row = page["data"][0]
+        assert row["first_seen"] == datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
+        assert row["last_seen"] == datetime(2026, 6, 2, 9, 0, tzinfo=UTC)
 
     @pytest.mark.asyncio
     async def test_a_soft_deleted_dive_does_not_count(self, db: Session, async_db: AsyncSession) -> None:

@@ -11927,6 +11927,17 @@ so nothing about a picture may turn a resolve that succeeded into an error the c
 failure. The invariant, pinned by `TestCommonsCannotFailAResolve`: **no failure or slowness of
 Commons can change the status code of `POST /species/resolve`.**
 
+**A budget that expired is not an attempt, and that distinction had to be made explicit.**
+`photo_fetched_at` is stamped on a *failed* attempt on purpose — it is the whole reason the
+backfill's second run reports zero — but a fetch the scope cancelled learned nothing about the
+species, and stamping it writes a permanent no-photo verdict nobody established. One slow Wikimedia
+afternoon would then strand every taxon resolved during it: invisible to the backfill's
+`photo_fetched_at IS NULL` predicate, recoverable only by an operator who happens to know to run
+`--force`. `PhotoAttempt.completed` carries `cancelled_caught` out of the scope so both callers can
+tell the two `None`s apart, and the write is skipped rather than the timestamp being written. The
+two states look identical downstream, which is exactly why they needed a field rather than a comment
+— an earlier version of this feature had the comment saying one thing and the code doing the other.
+
 Reading P18 off the entity the group already loaded is what makes the photo's *identity* free —
 `_WikidataEntity` carries the values and their ranks, out of a `props=claims` response that was
 already being made. The rejected alternative was moving the byte fetch onto the worker: better in
@@ -12025,6 +12036,14 @@ from `backfill_dive_profiles.py` that copying blindly would get wrong:
   re-run would re-query Wikidata and Commons for the entire photo-less tail forever. Stamping the
   timestamp on a *failed* attempt is what makes the second run report zero. `--force` therefore
   means "re-attempt regardless of when it was last tried".
+- **Its candidates are selected columns, not `Species` entities.** `save_photo_attempt` calls
+  `release_read_transaction` on the path where a photo was fetched, and that is a
+  `Session.rollback()`, which expires **every** instance in the identity map whatever
+  `expire_on_commit` says. A live entity held across it turns the next attribute read into a lazy
+  refresh on an `AsyncSession` outside a greenlet — so the loop would die on the first species that
+  actually got a photo, which is the only path the script exists for. That helper's docstring states
+  the precondition ("release only where the preceding lookup handed back something detached"); a
+  `_Candidate` of three plain values is what satisfies it.
 - **It paces itself and completes.** The provider throttle is built to *degrade*, because its
   counter is instance-wide and one diver's search must not reject another's. A backfill wants the
   opposite, so it sleeps between species rather than dropping them.
@@ -12077,6 +12096,17 @@ Three properties it has to hold, and each fails quietly rather than loudly:
 - **Its search is an `EXISTS` over `species_name`, not a join.** A join would multiply the
   aggregates by the number of matching aliases, so a species with three of them would report
   `dive_count` as dives × aliases — silently, and only for the species a diver searched for.
+- **`first_seen`/`last_seen` come back in the offset those dives were logged in.** The rule from
+  *"`start_time`'s UTC offset is stored separately"* reaches here too, and it is harder to obey here
+  than anywhere else in the app: these are *aggregates*, so the offset wanted belongs to the single
+  dive that produced the `min()` or the `max()`, and no aggregate over the offset column can say
+  which that was. `array_agg(utc_offset_minutes ORDER BY start_time)[1]` pairs them in the pass
+  Postgres is already making; `combine_start_time` then does the conversion in Python, because
+  `core/utils/datetime_offset.py` is documented as the single place that happens and a second copy
+  of it in SQL is how a list quietly disagrees with the dive pages behind it. Ordering stays on the
+  absolute instant — "first seen" means the earliest dive, whatever local time it read as. A fixture
+  logging everything at +00:00 cannot tell any of this apart, which is how it was missed the first
+  time.
 
 ### Its cache key carries the whole query, and that is the defect worth remembering
 

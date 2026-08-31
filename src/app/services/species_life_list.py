@@ -22,9 +22,11 @@ family's path shape.
 
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import ARRAY, Integer, func, or_, select
+from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..core.utils.datetime_offset import combine_start_time
 from ..core.utils.search import LIKE_ESCAPE_CHAR, escape_like
 from ..models.dive import Dive
 from ..models.dive_species import DiveSpecies
@@ -46,6 +48,32 @@ def _sighting_join(statement: Any, *, user_id: int) -> Any:
     return statement.join(DiveSpecies, DiveSpecies.species_id == Species.id).join(
         Dive, (Dive.id == DiveSpecies.dive_id) & (Dive.user_id == user_id) & (Dive.is_deleted.is_(False))
     )
+
+
+def _offset_of_the(order: Any) -> Any:
+    """The `utc_offset_minutes` of the first dive in the group under `order`.
+
+    **A dive displays in the timezone it was logged in**, which this endpoint has to honour like
+    every other dive-derived surface - `_to_public_start_time`, `dive_neighbors`,
+    `dive_activity` and `gas_use_history` all reconstruct it, and `DECISIONS.md` states it as the
+    API contract. A `timestamptz` stores only an absolute instant, so a dive logged at 09:00 in
+    Bangkok comes back as 02:00 UTC and would read as the wrong local time - and, for an evening
+    dive, the wrong day.
+
+    That is harder here than anywhere else in the app, because `first_seen` and `last_seen` are
+    *aggregates*: the offset wanted is the one belonging to the single dive that produced the
+    `min()` or the `max()`, and no aggregate over the offset column can say which that was.
+    Ordering `array_agg` and taking its first element is what pairs the two, in one pass over the
+    group that Postgres is already making. `Dive.id` breaks a tie between two dives at the same
+    instant, so a diver with two logs at one timestamp does not get a different offset run to
+    run.
+
+    The conversion itself still happens in Python, through `combine_start_time`. Deliberately, and
+    the same call `dive_activity` explains: `core/utils/datetime_offset.py` is documented as the
+    single place that conversion happens, and the failure mode of a second copy of it in SQL is a
+    list that quietly disagrees with the dive pages it was built from.
+    """
+    return func.array_agg(aggregate_order_by(Dive.utc_offset_minutes, order, Dive.id.asc()), type_=ARRAY(Integer))[1]
 
 
 def _search_clause(search: str) -> Any:
@@ -80,6 +108,10 @@ async def species_life_list(
     path by `recalculate_dive_stats`. The two agreeing for any diver is the cheapest
     end-to-end check this feature has, and it only holds because both reach through to
     `Dive.is_deleted`.
+
+    **The two dates come back in the offset the diver logged those dives in**, which takes more
+    than a `min()`/`max()` - see `_offset_of_the`. Ordering is by the UTC instant either way:
+    "first seen" means the earliest dive chronologically, whatever local time it read as.
     """
     conditions = [] if search is None else [_search_clause(search)]
 
@@ -103,6 +135,8 @@ async def species_life_list(
                     func.count(func.distinct(Dive.id)).label("dive_count"),
                     func.min(Dive.start_time).label("first_seen"),
                     last_seen,
+                    _offset_of_the(Dive.start_time.asc()).label("first_offset"),
+                    _offset_of_the(Dive.start_time.desc()).label("last_offset"),
                 ),
                 user_id=user_id,
             )
@@ -125,8 +159,8 @@ async def species_life_list(
                 rank=row.rank,
                 photo_sha256=row.photo_sha256,
                 dive_count=row.dive_count,
-                first_seen=row.first_seen,
-                last_seen=row.last_seen,
+                first_seen=combine_start_time(row.first_seen, row.first_offset),
+                last_seen=combine_start_time(row.last_seen, row.last_offset),
             ).model_dump()
             for row in rows
         ],

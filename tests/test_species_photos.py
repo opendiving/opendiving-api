@@ -800,6 +800,50 @@ class TestCommonsCannotFailAResolve:
         assert stored.scientific_name == "Amphiprion ocellaris"
 
     @pytest.mark.asyncio
+    async def test_a_budget_expiry_writes_no_verdict_about_the_species(self) -> None:
+        """**Nothing found and nothing asked are different answers**, and only one of them is
+        worth writing down. `photo_fetched_at` is stamped on a *failed* attempt on purpose - it
+        is what stops the backfill re-querying the photo-less majority forever - but a fetch the
+        budget cancelled established nothing, and stamping it would make one slow Wikimedia
+        afternoon permanently photo-less for every species resolved during it, invisible to the
+        backfill's own predicate."""
+        db = _resolve_db()
+        save = AsyncMock()
+
+        async def hangs(**_kwargs: Any) -> None:
+            await anyio.sleep(3600)
+
+        with (
+            patch.object(species_service, "fetch_species_photo", hangs),
+            patch.object(species_service, "_PHOTO_BUDGET_SECONDS", 0.05),
+            patch.object(species_service.species_photos, "save_photo_attempt", save),
+            patch.object(species_service, "_worms", AsyncMock(side_effect=_worms_answers)),
+            patch.object(species_service, "_wikidata", AsyncMock(return_value={"query": {"search": []}})),
+        ):
+            await species_service.resolve_species(db, 278400)
+
+        save.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_completed_attempt_that_found_nothing_is_still_written_down(self) -> None:
+        """The control for the test above, and the property the backfill's second run rests on:
+        a search that finished and found nothing *is* an attempt, and gets stamped."""
+        db = _resolve_db()
+        save = AsyncMock()
+
+        with (
+            patch.object(species_service, "fetch_species_photo", AsyncMock(return_value=None)),
+            patch.object(species_service.species_photos, "save_photo_attempt", save),
+            patch.object(species_service, "_worms", AsyncMock(side_effect=_worms_answers)),
+            patch.object(species_service, "_wikidata", AsyncMock(return_value={"query": {"search": []}})),
+        ):
+            await species_service.resolve_species(db, 278400)
+
+        save.assert_awaited_once()
+        assert save.await_args is not None
+        assert save.await_args.kwargs["photo"] is None
+
+    @pytest.mark.asyncio
     async def test_a_photo_step_that_raises_still_resolves(self) -> None:
         """Everything inside `fetch_species_photo` already degrades to `None`, so reaching here
         means the storage half failed - a full volume, a database error. The species row is
@@ -1134,15 +1178,81 @@ class TestBackfill:
         await async_db.commit()
         species = create_species(db)
 
-        with patch.object(backfill, "fetch_photo_for_species", AsyncMock(return_value=None)):
+        completed_with_nothing = species_service.PhotoAttempt(photo=None, completed=True)
+        with patch.object(backfill, "fetch_photo_for_species", AsyncMock(return_value=completed_with_nothing)):
             first = await backfill.backfill_species_photos(async_db, limit=None)
 
-        assert (first.examined, first.without_photo, first.stored) == (1, 1, 0)
+        assert (first.examined, first.without_photo, first.stored, first.timed_out) == (1, 1, 0, 0)
         db.refresh(species)
         assert species.photo_fetched_at is not None
 
         second = await backfill._candidates(async_db, limit=None, force=False)
         assert second == []
+
+    @pytest.mark.asyncio
+    async def test_a_timed_out_attempt_is_left_for_the_next_run(self, db: Session, async_db: AsyncSession) -> None:
+        """**Nothing found and nothing asked are different answers.** Stamping a fetch the budget
+        cancelled would write a permanent no-photo verdict for a species nothing actually asked
+        about - so one slow Wikimedia afternoon would strand every taxon resolved during it,
+        invisible to this script's own predicate and recoverable only by `--force`."""
+        from src.scripts import backfill_species_photos as backfill
+
+        await async_db.execute(update(Species).where(Species.photo_fetched_at.is_(None)).values(photo_fetched_at=_NOW))
+        await async_db.commit()
+        species = create_species(db)
+
+        cancelled = species_service.PhotoAttempt(photo=None, completed=False)
+        with patch.object(backfill, "fetch_photo_for_species", AsyncMock(return_value=cancelled)):
+            report = await backfill.backfill_species_photos(async_db, limit=None)
+
+        assert (report.examined, report.timed_out, report.without_photo) == (1, 1, 0)
+        db.refresh(species)
+        assert species.photo_fetched_at is None
+        assert [row.id for row in await backfill._candidates(async_db, limit=None, force=False)] == [species.id]
+
+    @pytest.mark.asyncio
+    async def test_candidates_are_detached_rows_rather_than_orm_entities(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """`save_photo_attempt` calls `release_read_transaction` on the stored-photo path, which
+        is a `Session.rollback()` - and that expires **every** instance in the identity map,
+        `expire_on_commit=False` notwithstanding. A live `Species` held across it would turn the
+        next attribute read into a lazy refresh on an `AsyncSession` outside a greenlet, so the
+        loop would die on the first species that actually got a photo. Selecting columns is what
+        satisfies that helper's stated precondition."""
+        from src.scripts import backfill_species_photos as backfill
+
+        create_species(db)
+
+        candidates = await backfill._candidates(async_db, limit=1, force=True)
+
+        assert candidates and not isinstance(candidates[0], Species)
+        assert isinstance(candidates[0], backfill._Candidate)
+
+    @pytest.mark.asyncio
+    async def test_a_stored_photo_does_not_break_the_next_log_line(
+        self, db: Session, async_db: AsyncSession, volume: Path
+    ) -> None:
+        """The end-to-end shape of the expiry hazard above: the branch that actually writes a
+        blob, followed by the loop reading the species' name again. Every other backfill test
+        stubs the photo away, which is precisely the branch that skips
+        `release_read_transaction`."""
+        from src.scripts import backfill_species_photos as backfill
+
+        await async_db.execute(update(Species).where(Species.photo_fetched_at.is_(None)).values(photo_fetched_at=_NOW))
+        await async_db.commit()
+        species = create_species(db)
+
+        photo = species_photos.fetched_photo(
+            data=b"webp", file="Some fish.jpg", credit=PhotoCredit(None, None, None, None)
+        )
+        attempt = species_service.PhotoAttempt(photo=photo, completed=True)
+        with patch.object(backfill, "fetch_photo_for_species", AsyncMock(return_value=attempt)):
+            report = await backfill.backfill_species_photos(async_db, limit=None)
+
+        assert (report.examined, report.stored) == (1, 1)
+        db.refresh(species)
+        assert species.photo_storage_key is not None
 
 
 # -------------- the digest on the wire --------------
