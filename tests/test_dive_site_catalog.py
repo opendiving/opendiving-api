@@ -13,6 +13,7 @@ licence requires is a licence breach, not a cosmetic defect.
 """
 
 import json
+import re
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,15 @@ _REAL_DATA = dive_site_catalog._DATA_PATH
 CATALOG_RECORDS = 3702
 
 OSM_ATTRIBUTION = "[Data © OpenStreetMap contributors, ODbL 1.0.](https://osm.org/copyright)"
+
+# An ISO 3166 code, alpha-2 or a subdivision of one: `EG`, `EG-JS`, `MY-08`. Matching the
+# *shape* rather than counting characters, because a length rule cannot separate the two
+# things that matter here. `EG-JS` is five characters, so "longer than three" would wave a
+# subdivision code straight through; and the catalog carries seven genuine three-character
+# region names - `Ain`, `Goa`, `Lot`, `Osh`, `Uri`, `Var`, `Zug` - so the same rule fails a
+# legitimate refresh the moment one of them lands in a result. Nothing in the shipped file
+# matches this pattern, and nothing should: these are display names.
+_ISO_CODE = re.compile(r"^[A-Z]{2}(-[A-Z0-9]{1,3})?$")
 
 
 def _site(
@@ -402,6 +412,20 @@ class TestTheVendoredFile:
         assert codes.get("France") == "FR"
         assert codes.get("Norway") == "NO"
 
+    def test_no_display_name_anywhere_in_the_file_is_really_a_code(self):
+        """Over all 3,702 records rather than the ten a query returns, which is the
+        difference between a guarantee and a coincidence: the route-level check can only see
+        whatever matched, so on its own it would pass by luck. Two ways a code reaches a
+        diver - the resolver writing `country_code` into `country`, or Natural Earth handing
+        back a subdivision code as a region name - and both look like a working feature until
+        somebody reads `EG` in a Location field."""
+        for site in dive_site_catalog._sites():
+            for value in (site.country, site.region):
+                assert value is None or not _ISO_CODE.match(value), value
+                # Guarded on the code rather than the value: the unresolved records carry
+                # `None` in all three fields, and an unguarded `!=` reads that as a match.
+                assert site.country_code is None or value != site.country_code, value
+
     def test_the_malaysian_shark_points_come_apart_on_region(self):
         """The whole argument for carrying `region` rather than country alone. Five `Shark
         Point` records resolve to four countries; the two Malaysian ones are ~300 km apart,
@@ -481,16 +505,15 @@ class TestTheEndpoint:
         assert first["attribution"] == OSM_ATTRIBUTION
         assert body["has_more"] is False
 
-    def test_no_iso_code_reaches_a_client_anywhere(self, client: TestClient):
-        """Asserted over the whole answer rather than one field, because the failure this
-        guards against is a code leaking through any of them - a `country` of `EG`, a `region`
-        of `EG-JS`. The catalog's own key never crosses the wire under any name."""
+    def test_the_stable_key_is_not_on_the_wire_under_any_name(self, client: TestClient):
+        """`country_code` is absent as a field, and no place field is carrying one instead."""
         body = client.get("/api/v1/dive-sites/suggest", params={"q": "reef"}).json()
 
-        assert all("country_code" not in result for result in body["results"])
+        assert body["results"]
         for result in body["results"]:
+            assert "country_code" not in result
             for field in ("country", "region"):
-                assert result[field] is None or len(result[field]) > 3
+                assert result[field] is None or not _ISO_CODE.match(result[field])
 
     def test_a_short_query_is_refused_rather_than_matching_everything(self, client: TestClient):
         assert client.get("/api/v1/dive-sites/suggest", params={"q": "b"}).status_code == 422
