@@ -23,9 +23,12 @@ from ...schemas.dive_site import (
     DiveSiteCreateInternal,
     DiveSiteRead,
     DiveSiteReadInternal,
+    DiveSiteSuggestion,
+    DiveSiteSuggestResponse,
     DiveSiteUpdate,
 )
 from ...services.cache_invalidation import invalidate_dive_caches
+from ...services.dive_site_catalog import search_sites
 
 router = APIRouter(tags=["dive-sites"])
 
@@ -281,3 +284,92 @@ async def erase_dive_site(
     await invalidate_dive_caches(owner_id)
 
     return {"message": "Dive site deleted"}
+
+
+# -------------- catalog suggestions --------------
+# The one route in this module that is about nobody's dive sites. Everything above is scoped
+# to the caller; this answers from a read-only catalog vendored in the image
+# (`services/dive_site_catalog.py`), so two accounts asking the same thing get byte-identical
+# answers. Picking a suggestion does not link to it - the client copies the values into an
+# ordinary `POST /dive-site`, and nothing downstream knows the catalog exists.
+#
+# **No `@cache` decorator**, for the reason `api/v1/species.py` gives for its own search: the
+# answer is local, non-user-scoped and immutable until the image is rebuilt, so a cache would
+# mean building an invalidation surface for a problem that does not exist. Scanning a few
+# thousand value objects already in memory is cheaper than the Redis round trip would be.
+#
+# **No per-user rate budget either**, unlike both comparable endpoints (`/species/search` and
+# `/geocode/search`, 600/hour each), and the absence is argued rather than overlooked. Those
+# budgets exist because each request spends a scarce *shared* resource - a third party's
+# goodwill, a remote catalogue's capacity - and bound what one account can make this instance
+# do to somebody else. This request spends a bounded scan over a file already resident in
+# memory: no third party, no network, no database. That is the profile of `GET /dives`, which
+# carries no budget either. If it ever stops being true, `enforce_rate_limit` is one awaited
+# call away and fails open when Redis is absent.
+#
+# No route-ordering hazard, unlike species: every parameterised dive-site route lives under
+# the singular `/dive-site/{uuid}`, so a literal subpath of the plural segment can be declared
+# anywhere. This follows `dives.py`'s numbering block - a labelled section of literal plural
+# subpaths at the end of the module.
+@router.get("/dive-sites/suggest", response_model=DiveSiteSuggestResponse)
+async def read_dive_site_suggestions(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    q: Annotated[str, Query(min_length=2, max_length=200, description="Part of a dive site's name.")],
+    latitude: Annotated[
+        float | None,
+        Query(ge=-90, le=90, description="Rank by distance from this position, when the form has one."),
+    ] = None,
+    longitude: Annotated[float | None, Query(ge=-180, le=180, description="Longitude of that position.")] = None,
+) -> DiveSiteSuggestResponse:
+    """Find named dive sites to prefill a new site from - "thistlegorm", "blue hole".
+
+    Answers from a catalog of real dive sites extracted from OpenStreetMap and Wikidata and
+    shipped inside this image, which is the gap the place search cannot fill: a geocoder
+    knows where Dahab is, not where the Blue Hole's north entry is. Nothing is stored and
+    nothing is owned - picking a suggestion means creating an ordinary dive site of your own
+    from its values, which you can then rename, move and annotate like any other.
+
+    Send `latitude` and `longitude` together when the form already has a position and results
+    come back nearest first, which is the only thing that separates a same-name cluster:
+    there are five `Shark Point`s in four countries. Send neither and they are ranked by how
+    well the name matches. Sending one alone is a 422.
+
+    Matching is case-insensitive and looks at both the site's local name and its English one,
+    so 砂辺 is reachable by typing "Sunabe". `has_more` means the answer was cut by the
+    result cap - keep typing rather than expecting the rest.
+
+    `country` and `region` are English display names and either may be null; a site far
+    enough offshore belongs to no administrative area at all. Every result carries the
+    `attribution` its source's licence requires, and a client showing these must render it.
+
+    Returns an empty list rather than an error when nothing matches, and also when the
+    catalog file itself cannot be read - a diver can always type the site in by hand, and a
+    500 here would make the form look broken over a convenience.
+    """
+    if (latitude is None) != (longitude is None):
+        # The same rule `WholeCoordinatePair` enforces on the write schemas, and for the same
+        # reason: half a pair is not a partial position but a meaningless one. Enforced here
+        # rather than silently ignored, because a client that sent one and not the other has
+        # a bug, and ranking by match quality while it believes it asked for proximity is the
+        # kind of wrongness nobody notices.
+        raise UnprocessableEntityException("latitude and longitude must be sent together")
+
+    sites, has_more = search_sites(q.strip(), latitude, longitude)
+    return DiveSiteSuggestResponse(
+        results=[
+            DiveSiteSuggestion(
+                name=site.name,
+                name_en=site.name_en,
+                latitude=site.latitude,
+                longitude=site.longitude,
+                # `country_code` stays behind deliberately - see `DiveSiteSuggestion`.
+                country=site.country,
+                region=site.region,
+                source=cast(Any, site.source),
+                source_id=site.source_id,
+                attribution=site.attribution,
+            )
+            for site in sites
+        ],
+        has_more=has_more,
+    )

@@ -5854,6 +5854,15 @@ Postgres image and an extension install for every self-hoster, which is a real c
 feature that is two numbers on a form. Revisit if "sites near me" ever ships; until then the
 rejection is the reusable part.
 
+**That revisit condition has since been read as met once, and it was not.**
+`GET /api/v1/dive-sites/suggest` takes a latitude and a longitude and ranks by distance, which looks
+exactly like the trigger — but it scans frozen value objects parsed from a file that ships in the
+image, with no table, no index, no extension and nothing persisted, so the install cost this section
+rejected is not being paid. The condition is about the *user's own* `dive_site` rows becoming
+searchable by distance in Postgres, and nothing there moves towards it. Written out in *"The
+dive-site catalog is a vendored ODbL database, and the licence is the hard part"* below, because an
+inference is not something a later reader can check.
+
 Both are `Mapped[float | None]` for the reason in *"`Mapped[X]` vs `Mapped[X | None]` on
 `MappedAsDataclass`"* above, and the schema change needed the usual manual DDL:
 
@@ -12992,3 +13001,268 @@ decision this change has no need to take).
 **`TRUSTED_PROXY_IPS` handling is unchanged.** A misconfigured instance records the proxy's address
 in `ip`, which is the failure mode the install bundle's `example.env` already warns about for rate
 limits; `docs/authentication.md` says so in one sentence and that is all.
+
+## The dive-site catalog is a vendored ODbL database, and the licence is the hard part
+
+`GET /api/v1/dive-sites/suggest` answers from `src/app/data/dive_site_catalog.json` — **3,702
+records** extracted from OpenStreetMap and Wikidata by `scripts/build_dive_site_catalog.py` and
+checked in. It exists because the geocoder cannot answer the question the dive-site form is actually
+asking: Nominatim knows where Dahab is, and not where the Blue Hole's north entry is.
+`PlaceSearch`'s own component docstring in the web repo has said so since it was written.
+
+This is `services/marine_areas.py` one size up, and it copies that file's reasoning rather than
+re-deciding it: a vendored, license-stamped extract beats a live dependency because a self-hoster
+should not acquire an outbound host, an account and a second failure mode so that a form can offer a
+suggestion. The same call that rejected PostGIS, and the same one the geocoding proxy makes.
+
+**No schema change, and that is the design rather than a saving.** A pick copies values into an
+ordinary per-user `dive_site` row through the existing `POST /dive-site`; nothing links to the
+catalog and nothing downstream knows it exists. That is deliberately the opposite of what the
+species catalog does, and the difference is the entity. A species is a universal immutable fact, so
+a shared row is right and `species_seen` is countable across accounts. A dive site is a personal,
+editable thing — divers rename them, drag the pin, keep notes — and the whole existing chain (join
+table → per-user rows → per-user uniqueness → user-scoped caches → export) is built on ownership.
+Making suggestions referenceable would mean rebuilding all of it for rows nobody edits.
+
+### The PostGIS revisit condition is *not* met by these query parameters
+
+*"Dive site coordinates are two `Float` columns"* rejects PostGIS and adds **"Revisit if 'sites near
+me' ever ships"**; the Postgres-18 section restates "no PostGIS … no extensions at all" as an
+invariant. `search_sites` takes a latitude and a longitude and ranks by distance, which is close
+enough to trip that condition that a reader will reasonably think it was met and ignored. It was
+not, and the difference is not a technicality:
+
+- There is **no table**. The catalog is a tuple of frozen value objects parsed from a file that
+  ships inside the image. Nothing is persisted, nothing is written, and the database never sees this
+  request at all.
+- There is **no spatial query**. A linear scan over a few thousand objects already in memory
+  computes a haversine per *match*, after the answer has been narrowed by name. No index would help
+  and none exists.
+- The rejected cost was an **install step** — a new Postgres image and an extension for every
+  self-hoster. Nothing here adds one. The whole point of vendoring the file is that this feature
+  costs an installer nothing.
+
+The revisit condition is about the *user's own* dive sites becoming searchable by distance in
+Postgres — a "what have I dived near here" over `dive_site` rows. That would still need PostGIS, or
+a deliberate decision not to use it, and nothing here moves towards it.
+
+### Refresh policy, and why `marine_areas`' excuse is not available
+
+`marine_areas.geojson` is exempted from any refresh policy on the grounds of "293 public-domain
+polygons **that do not change**". **That argument does not transfer and must not be borrowed.** OSM
+dive sites do change: divers add them, rename them and move them, and the upstream is alive in a way
+a set of cartographic sea outlines is not.
+
+The honest justification is weaker and sufficient. Dive sites change *slowly* — a site that existed
+last year still exists — so the cost of a stale file is failing to suggest a site somebody added
+recently, which is exactly the state the form was in before this shipped. Nothing regresses. So the
+policy is the one every generated artifact in both repos already follows: **regenerated by hand, in
+the PR that changes the file's meaning**, and by nothing else — no CI job, no Makefile target, no
+schedule. `CONTRIBUTING.md` now documents that for **both** generators, which closes a real gap:
+`build_marine_areas.py` was mentioned in neither `CONTRIBUTING.md` nor `README.md`, so its only
+documentation was its own docstring.
+
+*Rejected:* a scheduled Actions job opening a refresh PR. It needs `contents: write` on a schedule —
+where the one job here that already holds it was granted it, in its own words, "to that job alone
+rather than to everything", and fires on a tag push rather than a clock — plus an Overpass call from
+a runner, plus a cron GitHub disables after 60 quiet days. *Also rejected:* tying refreshes to
+release cadence, which contradicts the standing position that a release is a heuristic rather than a
+calendar.
+
+**The tripwire is the count.** `tests/test_dive_site_catalog.py` asserts the exact record count, so
+a refresh that moves the number fails rather than landing quietly — and a *shrinking* catalog is
+usually a filter that started deleting real sites, not the world losing dive sites. The number is
+pinned in three places, following `marine_areas`' 293: that test, `services/dive_site_catalog.py`'s
+module docstring, and this section. Move all three together.
+
+### Three ODbL obligations, and all three are discharged in the file
+
+The catalog is a **Derivative Database**, and this is settled rather than arguable: ODbL §4.4(b)
+says extraction of a substantial part of the Contents into a new database is a Derivative Database.
+Filtering OSM into a new JSON file is exactly that, and the §4.5(b) Produced Work carve-out does not
+rescue it — what ships is the database, not a rendering of it.
+
+- **§4.4 share-alike.** The file is ODbL whatever the repository around it says. `LICENSE` here is
+  the AGPL, a *software* copyleft that says nothing about a vendored database, so this is a
+  carve-out either way and is named as one in the file's own provenance block and in `README.md`
+  rather than left for a reader to assume.
+- **§4.2 notices.** The licence and its URI must travel "both in the Database or Derivative Database
+  and in any relevant documentation", and the OSMF attribution guidelines are explicit that for
+  *databases* the notice goes within the data or metadata. The in-file provenance block does this,
+  which is why it is a compliance artifact rather than a nicety — the same reason `marine_areas`
+  carries its provenance inside the file: there it cannot drift away from the data.
+- **§4.6 access to derivative databases.** Recipients must be able to obtain the derivative database
+  or the method of making it. Checking in both the JSON and its generator satisfies this outright,
+  and the block records the exact Overpass and SPARQL queries, which is the rest of the method.
+
+**Natural Earth adds no fourth obligation.** It is public domain, it is consumed by the generator
+and never shipped, and what reaches the catalog from it is a country name, an ISO code and a region
+name — facts, not creative content. It is named in the provenance block anyway, because that block's
+job is to say where every *field* came from, not only where the licensed obligations came from.
+
+**Wikidata is CC0 and imposes nothing**, and public-domain content can join an ODbL derivative
+database without conflict — but the merged file is then ODbL as a whole. **Never mix an NC or ND
+source into it.** A diver copying one suggestion into their own logbook is insubstantial extraction,
+so user exports stay clean.
+
+**The loader enforces the notice rather than trusting it.** `_attributions` builds the per-source
+credit from the file's own `sources` block, and a record naming a source that block does not credit
+is **dropped at load**. That is a licence rule wearing the clothes of a parsing rule: serving an
+ODbL record with no attribution is the §4.2 breach the block exists to prevent, so the safe failure
+is to lose the record, not the notice. Natural Earth deliberately carries no `source` key there,
+which is what makes "natural-earth" unable to become a shippable record source by accident.
+
+### What the wire carries, and the two things it deliberately does not
+
+Results follow `SpeciesSearchResponse`'s shape — `{results, has_more}`, capped at 10, no
+`clamp_pagination`, because a result cap is not pagination and search-shaped endpoints here skip it.
+Each result carries exactly `name`, `name_en`, `latitude`, `longitude`, `country`, `region`,
+`source`, `source_id` and `attribution`. The cap is 10 because neither neighbouring house number
+transfers: the geocoder's 5 is sized for a provider that charges per call, species' 25 for a menu
+showing nothing else, and this menu shows catalog hits *above* up to 5 geocoder rows.
+
+- **`country_code` does not cross the wire**, though the file carries one. It is the stable key that
+  normalises what Submersion's bundled catalog got wrong — raw local-language country strings like
+  `Schweiz/Suisse/Svizzera/Svizra` and `مصر`, with 377 nulls. But the field a client writes this
+  into is `dive_site.location`, an ordinary text input whose own schema example is
+  `Koh Tao, Thailand` and whose geocoder-filled values read `Dahab, Egypt`. Putting `EG` on the wire
+  invites it into that field or into a menu hint, and it is wrong in both. **Display name to the UI,
+  code to the data.**
+- **No distance field**, and this is a decision rather than an omission. The endpoint ranks by
+  distance when given a position and returns none, because the web tier already carries
+  `haversineMeters` and a `formatDistance` wired to the diver's unit preference. A distance on the
+  wire would either duplicate that or — pre-formatted, or metric-only — silently break the imperial
+  unit preference, in a way no reviewer reading one diff would catch.
+
+**Name is filled from `name`, not `name_en`.** `name` is what the site is called where it is; OSM's
+own semantics make it primary. `name_en` exists so a Latin keyboard reaches 砂辺 by typing "Sunabe" —
+dozens of the file's names carry no Latin letter at all and are otherwise unreachable from one — and
+so a hint can show it where the two differ. Both are searched.
+
+**No `@cache` decorator**, for the reason `api/v1/species.py` gives for its own search: the answer
+is local, non-user-scoped and immutable until the image is rebuilt, so a cache would mean building
+an invalidation surface for a problem that does not exist. A Redis round trip would be slower than
+the scan it replaced.
+
+**No per-user rate budget either, and the absence is argued rather than overlooked.** Both
+comparable endpoints carry one (600/hour), so silence would read as an oversight. Those budgets
+exist because each request spends a scarce *shared* resource — a third party's goodwill, a remote
+catalogue's capacity — and both modules frame the budget as bounding what one account can make this
+instance do to somebody else. This request spends a bounded scan over a file already resident in
+memory: no third party, no network, no database. That is the profile of `GET /dives`, which carries
+no budget either. If it stops being true, `enforce_rate_limit` is one awaited call away and fails
+open when Redis is absent.
+
+**When a position is given, distance decides the order** — it is the ranking, not a tie-break
+applied after match quality. A diver who dropped a pin before searching is asking about where they
+are, and 111 of the file's names are carried by more than one record, so distance is the only thing
+that separates a same-name cluster at all. With no position there is nothing to rank by but the
+match: exact name, then prefix, then substring, with the name breaking ties so the same query always
+returns the same order. Rows that tie on everything keep the file's order, because `CatalogSite` is
+not orderable and a sort falling through to compare them would raise — which the seven identical
+`Diving Spot` records make a live path rather than a hypothetical.
+
+**Half a position is a 422**, mirroring `WholeCoordinatePair` on the write schemas and for the same
+reason: half a pair is not a partial position but a meaningless one. Ignoring it would leave a
+client believing it asked for proximity ranking while getting match-quality ranking, which is the
+kind of wrongness nobody notices.
+
+### The selection rules are floors, and one of them cost the research a wrong first answer
+
+The generator takes every feature carrying `sport=scuba_diving` **or** `scuba_diving:divespot=yes`,
+then drops businesses and indoor facilities. Both exclusion sets are **floors, not enumerations** —
+OSM's tagging vocabulary moves, so re-derive them from the actual tag distributions before a refresh
+rather than trusting the constants.
+
+**`leisure=pitch` and `leisure=water_park` are NOT noise, and excluding them would have deleted real
+dive sites.** `pitch` is the Dutch convention in Zeeland — `Flauwers West`, `Goese Sas`,
+`Noordbout`, `Lokkersnol` — and 35 of its 43 named features carry scuba attributes; `water_park` is
+the same story at 6 of 7. A "drop sports-shaped `leisure` values" filter is the obvious
+implementation and it is wrong. The discriminator is whether the feature carries scuba attributes,
+not what `leisure` says, and `scuba_diving:divespot=yes` rescues an otherwise-excluded feature
+outright: a flooded quarry tagged `leisure=sports_centre` because a club runs it is still somewhere
+people dive, and a mapper saying so explicitly is better evidence than the `leisure` value. Only
+`=yes` rescues — the key carries 65 distinct values, some 55 of them site names misused as the
+value.
+
+`amenity=scuba_diving` is deliberately **not** in the business set: 23 uses globally and no wiki
+page, so there is no evidence it means "business" rather than "dive site", and a guess costs a real
+record. Tag values *are* split on OSM's `;` multi-value convention, which is the only reason
+`amenity=restaurant;dive_centre` is recognised as a dive centre at all.
+
+**Overpass is queried with `out center;`, never a bare `out;`.** A way or relation has no position
+of its own. Submersion's bundled catalog ships 356 of its 3,612 records with no coordinates — a
+number exactly equal to its 320 ways plus its 36 relations — because it used the bare form.
+
+**Wikidata is in as a regional patch, not a second global source.** OSM has exactly **three** named
+`sport=scuba_diving` features in the whole of South Africa; 302 of Wikidata's 345 recreational dive
+sites are South African. The join fills a hole no amount of OSM tag-filtering reaches, and the
+dedupe that looked expensive is nearly a no-op — 23 records — precisely *because* the two sets
+barely intersect. Three dedupe signals in decreasing confidence: the OSM feature naming the QID in
+its own `wikidata` tag, a position within 200 m, or a position within 1 km *and* matching normalised
+names. The last is deliberately not proximity alone at a kilometre, because two genuinely different
+sites on one reef are routinely that close and coverage is the whole point of this source.
+
+### Country and region are resolved from Natural Earth, and containment alone is not enough
+
+**Neither upstream carries them.** Of 3,560 named non-business OSM features, 36 (1.0%) have any
+country-ish tag and 9 (0.25%) any admin tag — `SS Thistlegorm` has neither, and nor does either
+Malaysian `Shark Point` node. So the generator downloads Natural Earth admin-0 and admin-1 and
+resolves each record itself, which is the move `build_marine_areas.py` already makes against the
+same upstream, at generation time, over the network. Nothing extra ships.
+
+**Rule 1 is point-in-polygon, rule 2 is nearest boundary within 50 km, and rule 2 is not optional.**
+Dive sites are in water and administrative polygons are land: **only 44.5% of records fall inside
+any admin-0 polygon; 55.5% are offshore.** Of an offshore sample the median distance to land is 3.0
+km and 98% are within 50 km, so containment-then-nearest covers 98.7% of the shipped catalog where
+strict containment covers 44.5%. **A generator written to rule 1 alone empties the country for more
+than half the catalog while every unit test passes**, because every site anyone would think to check
+by hand is inshore. That failure mode — invisible to the suite, visible only to someone who thinks
+to ask what fraction of dive sites are on land — is the single clearest reason this work needed the
+care it got. Rule 3 is "else null, and the record ships anyway": 47 records really do belong to no
+administrative area, and a site with no country is still a site.
+
+Distances there are measured **vertex-to-point**, which over-states the true distance to a polygon,
+so the 50 km cut-off is conservative in the direction that matters. It also means a test built on a
+four-corner rectangle fails at distances the real, densely-vertexed outlines resolve fine — which is
+why `tests/test_build_dive_site_catalog.py` subdivides its synthetic edges.
+
+**Three traps in the Natural Earth properties, and each one fails quietly:**
+
+- **`ISO_A2` is the string `-99`** for 22 of the 258 admin-0 features and `ISO_A2_EH` for 13 — and
+  those 13 are a **strict subset**, so falling back from `ISO_A2_EH` to `ISO_A2` can never recover a
+  code and "read EH first, fall back" is a no-op dressed as defensiveness. **Read `ISO_A2_EH` alone
+  and treat `-99` as null.** The nine it repairs are not obscure: they include **France** and
+  **Norway**, so reading `ISO_A2` strips the country from every French and Norwegian dive site while
+  looking like it worked.
+- **Admin-1: take `name_en`, never `name`.** They differ on 1,265 of 4,596 features. The unit
+  nearest `SS Thistlegorm` is `Janub Sina'` by `name` and `South Sinai` by `name_en` — so `name`
+  reproduces on the region half exactly the local-language-string defect this catalog exists to
+  avoid on the country half. The 7 features with no `name_en` have no `name` either, so no fallback
+  is needed.
+- **Resolve admin-0 first, then restrict admin-1 to that country by `iso_a2`.** The two layers are
+  separately generalised outlines and most records resolve by *nearest* rather than containment, so
+  run independently they disagree: in the Gulf of Aqaba, Egypt, Israel, Jordan and Saudi Arabia are
+  all within 20 km of one another, and a record can take its country from one and its region from
+  another's province — shipping `Tabuk, Egypt`. Where the restricted set is empty within 50 km the
+  region is **null rather than a neighbour's**. A consequence worth knowing: the 13 countries with
+  no `ISO_A2_EH` (Somaliland, Northern Cyprus, the Cyprus base areas and ten others) resolve to a
+  country name and no region, since there is no code to restrict by. Two shipped records are in that
+  state and the hint reads fine without it.
+
+The `region` is what makes the hint useful rather than merely present: the five `Shark Point`
+records resolve to four countries, and the two Malaysian ones — Langkawi in Kedah and Perhentian in
+Terengganu, ~300 km apart — come apart on region alone. It cannot always succeed, and the invariant
+does not pretend otherwise: the seven `Diving Spot` records sit within about four kilometres of each
+other in one Indonesian bay, sharing a name, a country and a region, so nothing in the record shape
+separates them. The recovery is that coordinates travel with the pick and the pin is editable.
+
+### The OpenStreetMap credit is byte-identical to the geocoder's, on purpose
+
+The catalog's OSM attribution is exactly `geocoding_service._DEFAULT_ATTRIBUTION`, character for
+character. That is load-bearing rather than tidy: the site form renders catalog hits and geocoder
+hits in one list under one credit line that collapses repeats **by exact string**, so a second
+wording for the same licence would show a diver the same credit twice. A test asserts the two are
+equal, and changing either without the other is what it exists to catch. The Wikidata credit is
+necessarily different — CC0 is not ODbL — which is the point of carrying attribution per record
+rather than per response.
