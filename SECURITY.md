@@ -1,7 +1,7 @@
 # Security Policy
 
-OpenDiving is self-hosted software: every instance is somebody's own server, holding their own dive
-log. A defect in what we ship reaches all of them at once, so we would much rather hear about one
+OpenDiving is software anyone can self-host: every instance is a server somewhere, holding real dive
+logs. A defect in what we ship reaches all of them at once, so we would much rather hear about one
 privately than read about it in a public issue.
 
 This project is [AGPL-3.0](LICENSE) and run by a single maintainer in their spare time. There is no
@@ -25,8 +25,9 @@ Whatever you can tell us helps, but the four things that speed a fix up most are
 3. Enough to reproduce it — a request, a payload, a dive-computer file, a sequence of calls.
 4. Whether anyone else knows, and any deadline you are working to.
 
-Please test against an instance you run yourself. `docker compose up` gives you the whole stack in a
-couple of minutes, and there is no shared deployment worth pointing a scanner at.
+Please test against an instance you run yourself, never against one somebody else runs — whoever
+that is, their dive logs are real and the traffic is theirs to explain. `docker compose up` gives
+you the whole stack in a couple of minutes.
 
 ## What not to do
 
