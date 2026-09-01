@@ -7,8 +7,8 @@ contact_links:
   - name: Security vulnerability
     url: https://github.com/opendiving/opendiving-api/security/advisories/new
     about: >-
-      Report it privately here, never as a public issue — every self-hosted instance is exposed for
-      as long as it takes to cut a release. No GitHub account? security@opendiving.app.
+      Report it privately here, never as a public issue — every instance is exposed for as long as
+      it takes to cut a release. No GitHub account? security@opendiving.app.
 
   - name: Installing, upgrading, backing up or configuring
     url: https://github.com/opendiving/opendiving/issues/new

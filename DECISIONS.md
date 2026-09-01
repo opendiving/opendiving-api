@@ -13679,3 +13679,47 @@ wording for the same licence would show a diver the same credit twice. A test as
 equal, and changing either without the other is what it exists to catch. The Wikidata credit is
 necessarily different — CC0 is not ODbL — which is the point of carrying attribution per record
 rather than per response.
+
+## Self-hosting is a capability we offer, not what the product *is*
+
+The README opened by calling OpenDiving "a self-hosted, open-source dive log" and promised that the
+API "keeps it in your own Postgres database"; `SECURITY.md` opened with "OpenDiving is self-hosted
+software: every instance is somebody's own server, holding their own dive log". Both sentences make
+self-hosting the product's identity and then make a universal claim off the back of it, and the
+second half is the part that does not hold: **the reader of this README is not necessarily the
+operator of the instance they use.** A diver whose club or buddy runs the instance has no shell on
+that box and no `psql` — the Postgres database is somebody's, just not theirs. The same division is
+already recorded under *"The operator docs carry the consent duty"* and under *"Deleting an account
+is two changes with a fortnight between them"*, where the operator is the controller and the diver
+is the data subject; the front-page copy was the one place still assuming those were the same
+person.
+
+What is true for every reader, and is what the pitch now leads with, is the guarantee rather than
+the topology: open formats, the original dive-computer export kept beside every imported dive, and a
+full export in one request. Those hold whoever runs the copy. Self-hosting stays in the copy as a
+*capability* rather than leaving it: the README's lead adjective is "self-hostable", its sentence
+about Postgres is conditioned on running your own instance, `SECURITY.md` opens "yours to self-host"
+and scopes what follows to an instance run from this repository, and the AGPL paragraph's "Run it,
+change it, self-host it freely" was already in that register and needed no change at all. The same
+rewrite is being made across the sibling repositories, so the register is worth matching rather than
+improving on locally.
+
+The rule for anything written here later: an adjective that defines the product may only name
+something true of every instance of it. Self-hosting is a right this licence and this packaging
+guarantee to anyone who wants it, which is a strictly stronger claim than a description of where the
+bytes happen to sit, and it does not go stale the moment one instance is run by someone other than
+its users. Prose *about* self-hosters — the release notes they read, the upgrade path they follow,
+the security decisions the operator docs put on them — stays as it is: those sentences describe a
+real audience rather than defining the product.
+
+**One qualifier came off that is worth separating from the rest**, because it looked like audience
+prose and was not. "Every *self-hosted* instance is exposed for as long as it takes to cut a
+release" — in `SECURITY.md`, in `.github/ISSUE_TEMPLATE/config.yml`'s security contact link, and in
+a shorter wording in the bug template's banner (`01-bug.yml`) — is an argument about disclosure
+timing, and the argument does not turn on who runs the instance: an undisclosed defect in shipped
+code is live on every instance running that code. The qualifier narrowed a true claim for no gain
+and quietly implied a class of instance the reasoning does not cover, so all three now read "every
+instance". The other two templates never carried the sentence. The test that separates it from the
+sentences left alone is whether removing "self-hosted" changes what the sentence asserts. In
+*"self-hosters pick a fix up the way they pick up everything else"* it does — that names who does
+the picking. Here it only subtracts.

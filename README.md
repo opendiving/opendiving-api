@@ -1,11 +1,12 @@
 # OpenDiving API
 
-**The backend component of [OpenDiving](https://github.com/opendiving/opendiving) — a self-hosted,
-open-source dive log.** FastAPI + PostgreSQL + Redis.
+**The backend component of [OpenDiving](https://github.com/opendiving/opendiving) — an open-source,
+self-hostable dive log.** FastAPI + PostgreSQL + Redis.
 
-Your dive history should outlive any app. This API keeps it in your own Postgres database, stores
-the original dive-computer export alongside every imported dive, and serves it all over a clean,
-documented REST API — so your data is never more than one `curl` away.
+Your dive history should outlive any app. This API keeps the original dive-computer export alongside
+every imported dive, serves the lot over a clean, documented REST API, and takes the whole log back
+out in open formats in a single request — so your data is never more than one `curl` away. Run your
+own copy and the Postgres database underneath it is yours too.
 
 ## Looking to run OpenDiving?
 
@@ -76,7 +77,8 @@ else; what is here is the source, and the notes for working on it.
 ## Running it from source
 
 For working on it, rather than for running it — this compose file builds from `./src`, mounts it for
-live reload, and publishes the API and Postgres on the host. To *use* OpenDiving, install it from
+live reload, and publishes the API and Postgres on the host. To *run* an instance rather than
+develop against one, install it from
 [opendiving/opendiving](https://github.com/opendiving/opendiving) instead.
 
 ```bash

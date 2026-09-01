@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Found a **security** problem instead? Don't file it here — [SECURITY.md](https://github.com/opendiving/opendiving-api/blob/main/SECURITY.md)
-        has the private channel. Every self-hosted instance is exposed for as long as a public issue is open.
+        has the private channel. Every instance is exposed for as long as a public issue is open.
 
         Stuck **installing, upgrading, backing up or configuring** an instance? That belongs in
         [opendiving/opendiving](https://github.com/opendiving/opendiving/issues/new), where the install
