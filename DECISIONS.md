@@ -13714,10 +13714,12 @@ real audience rather than defining the product.
 
 **One qualifier came off that is worth separating from the rest**, because it looked like audience
 prose and was not. "Every *self-hosted* instance is exposed for as long as it takes to cut a
-release" — in `SECURITY.md` and, in a second wording, in both issue templates — is an argument about
-disclosure timing, and the argument does not turn on who runs the instance: an undisclosed defect in
-shipped code is live on every instance running that code. The qualifier narrowed a true claim for no
-gain and quietly implied a class of instance the reasoning does not cover, so all three now read
-"every instance". The test that separates it from the sentences left alone is whether removing
-"self-hosted" changes what the sentence asserts. In *"self-hosters pick a fix up the way they pick
-up everything else"* it does — that names who does the picking. Here it only subtracts.
+release" — in `SECURITY.md`, in `.github/ISSUE_TEMPLATE/config.yml`'s security contact link, and in
+a shorter wording in the bug template's banner (`01-bug.yml`) — is an argument about disclosure
+timing, and the argument does not turn on who runs the instance: an undisclosed defect in shipped
+code is live on every instance running that code. The qualifier narrowed a true claim for no gain
+and quietly implied a class of instance the reasoning does not cover, so all three now read "every
+instance". The other two templates never carried the sentence. The test that separates it from the
+sentences left alone is whether removing "self-hosted" changes what the sentence asserts. In
+*"self-hosters pick a fix up the way they pick up everything else"* it does — that names who does
+the picking. Here it only subtracts.
