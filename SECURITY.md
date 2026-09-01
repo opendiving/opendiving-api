@@ -1,8 +1,9 @@
 # Security Policy
 
-OpenDiving is software anyone can self-host: every instance is a server somewhere, holding real dive
-logs. A defect in what we ship reaches all of them at once, so we would much rather hear about one
-privately than read about it in a public issue.
+OpenDiving is yours to self-host, and this repository is the API half of what you install: every
+instance run from it is somebody's own server, holding their own dive log. A defect in what we ship
+reaches all of them at once, so we would much rather hear about one privately than read about it in
+a public issue.
 
 This project is [AGPL-3.0](LICENSE) and run by a single maintainer in their spare time. There is no
 bug bounty and no money behind any of this — what we can offer is a prompt reply, a fix in the next
@@ -32,10 +33,10 @@ you the whole stack in a couple of minutes.
 ## What not to do
 
 - **Don't open a public issue, pull request, or discussion** for a suspected vulnerability. Every
-  self-hosted instance is exposed for as long as it takes to cut a release, and a public issue
-  starts that clock before the fix exists. (You may see an open issue labelled `image-cve` naming
-  CVEs in the published image. That is not an exception to this rule: those are advisories Debian
-  and NVD published first, filed by our own scanner so the base-image rebuild gets done, and running
+  instance is exposed for as long as it takes to cut a release, and a public issue starts that clock
+  before the fix exists. (You may see an open issue labelled `image-cve` naming CVEs in the
+  published image. That is not an exception to this rule: those are advisories Debian and NVD
+  published first, filed by our own scanner so the base-image rebuild gets done, and running
   `trivy image` against the same public tag tells you the same thing. This rule is about a defect in
   *our* code that nobody has disclosed yet — that still goes to the private channel above.)
 - **Don't use the in-app contact form.** It has a *Security* category, and it is still the wrong
