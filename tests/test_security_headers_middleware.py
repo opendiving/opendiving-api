@@ -1,11 +1,15 @@
 """Unit tests for `SecurityHeadersMiddleware`.
 
 The gap these pin down: the install bundle's `Caddyfile`
-(https://github.com/opendiving/opendiving/blob/main/Caddyfile) routes `/api/v1*`, `/admin*`
-and the docs paths straight to the API, so the web app's headers never reach them, and
-neither Caddy nor CRUDAdmin adds any of its own. `/admin` - a full create/update/delete
-interface over every model - was therefore served framable, and a bring-your-own-proxy
-install got nothing at all.
+(https://github.com/opendiving/opendiving/blob/main/Caddyfile) routes `/api/v1*` and the
+docs paths straight to the API, so the web app's headers never reach them, and neither Caddy
+nor CRUDAdmin adds any of its own. The CRUDAdmin panel - a full create/update/delete
+interface over every model, wherever an operator has mounted it - was therefore served
+framable, and a bring-your-own-proxy install got nothing at all.
+
+`/admin` is no longer the example it once was: that path is the web app's superuser section
+now, driving the JSON routes in `api.v1.admin`, and the bundle stopped routing it here. What
+this middleware covers is `/api/v1*`, the docs paths and the panel's own mount path.
 """
 
 import pytest
@@ -76,7 +80,7 @@ class TestEveryResponseIsProtected:
         assert client.get("/thing").headers["X-Content-Type-Options"] == "nosniff"
 
     def test_a_404_is_covered(self, client: TestClient):
-        """Not a formality: an unmatched path under `/admin*` is still HTML the panel's
+        """Not a formality: an unmatched path under the CRUDAdmin mount is still HTML that
         mount can render, and a 404 is a response like any other."""
         response = client.get("/no-such-path")
 
@@ -129,8 +133,8 @@ class TestCorsPreflight:
 class TestTheCspIsFrameAncestorsOnly:
     def test_it_constrains_no_resource(self, client: TestClient):
         """A `default-src` here would break CRUDAdmin's own templates, which style
-        themselves inline and pull `htmx.min.js` from `/admin/static` and a webfont from
-        `fonts.googleapis.com`. `frame-ancestors` is the whole policy on purpose."""
+        themselves inline and pull `htmx.min.js` from the panel's `/static` and a webfont
+        from `fonts.googleapis.com`. `frame-ancestors` is the whole policy on purpose."""
         csp = client.get("/thing").headers["Content-Security-Policy"]
 
         assert csp == "frame-ancestors 'none'"
@@ -138,9 +142,9 @@ class TestTheCspIsFrameAncestorsOnly:
         assert "script-src" not in csp
 
     def test_no_hsts(self, client: TestClient):
-        """HSTS is host-scoped, so the web app's header already pins `/admin` too.
-        Sending it from here as well would put two controls on one behaviour and ignore
-        `WEB_HSTS=off`, which is how a plain-HTTP LAN instance stays reachable."""
+        """HSTS is host-scoped, so the web app's header already pins everything this app
+        serves. Sending it from here as well would put two controls on one behaviour and
+        ignore `WEB_HSTS=off`, which is how a plain-HTTP LAN instance stays reachable."""
         assert "Strict-Transport-Security" not in client.get("/thing").headers
 
 

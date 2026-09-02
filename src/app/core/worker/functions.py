@@ -18,6 +18,8 @@ from ...models.certification_file import CertificationFile
 from ...models.dive_file import DiveFile
 from ...models.gear_item import GearItem
 from ...models.gear_service_schedule import GearServiceSchedule
+from ...models.invitation import Invitation
+from ...models.invite_request import InviteRequest
 from ...models.user import User
 from ...models.user_session import UserSession
 from ...schemas.gear_service import ServiceStatus
@@ -65,8 +67,9 @@ AUTHENTICATION_REQUEST_RETENTION = timedelta(days=7)
 # identifier indefinitely.
 #
 # **Seven days for a row with `user_id IS NULL`.** Those are the genuinely pre-account
-# events - an auth request created, a sign-in code failed, onboarding started - and each
-# carries an email address typed by somebody who may never have signed up. Recording "an
+# events - an auth request created, a sign-in code failed, onboarding started, an invite
+# requested - and each carries an email address typed by somebody who may never have signed
+# up. Recording "an
 # auth request for `<email>`" puts in the operator's database exactly what
 # `authentication_request.email` already puts there, which is a defensible equivalence only
 # if it holds for *duration* as well as for content: an address that survives thirteen times
@@ -80,6 +83,35 @@ AUTHENTICATION_REQUEST_RETENTION = timedelta(days=7)
 # which are in a different repository.
 AUTH_AUDIT_RETENTION = timedelta(days=90)
 AUTH_AUDIT_ANONYMOUS_RETENTION = AUTHENTICATION_REQUEST_RETENTION
+
+# How long an invitation nobody has accepted is kept, counted from `created_at`, revoked
+# ones included. Not a knob, following `AUTHENTICATION_REQUEST_RETENTION`'s own deliberate
+# non-configurability and with the same second benefit: no new setting means nothing to add
+# to the install bundle's `example.env` or its configuration reference, which are in another
+# repository.
+#
+# **Ninety rather than unbounded**, and the reasoning is the anonymous audit tier's one
+# paragraph up. An invitation row holds the same category of datum a request row does - a
+# non-user's address, plus who invited them - and the audit row that already names that
+# address expires at ninety days, so an invitation table that grew forever would be a new
+# retention decision made silently, one table over from the one that refused it. What the
+# sweep costs the invitee is that an invitation ignored for three months stops admitting
+# them until somebody invites them again.
+#
+# An **accepted** invitation is never swept: it belongs to two accounts, and goes when
+# either of them does - the inviter's by the FK cascade, the invitee's by the by-address
+# arm of `_purge_one_account`.
+INVITATION_RETENTION = timedelta(days=90)
+
+# How long a pending invite request is kept, counted from `created_at`. Ninety days is the
+# account-tied audit tier's figure and long enough for a slow rollout of a closed beta; the
+# alternative that was refused is unbounded retention "because it is the operator's queue",
+# which would have been the same silent retention decision.
+#
+# A request row has four exits and no others: it is invited (deleted in the transaction that
+# creates the invitation, from either route), the operator removes it, the account its
+# address belongs to is purged, or this sweep takes it.
+INVITE_REQUEST_RETENTION = timedelta(days=90)
 
 
 # -------- background tasks --------
@@ -153,6 +185,72 @@ async def purge_expired_authentication_requests(ctx: dict[Any, Any]) -> str:
 
     logging.info("Purged %d expired authentication request(s)", purged)
     return f"Purged {purged} expired authentication request(s)"
+
+
+async def purge_expired_invitations(ctx: dict[Any, Any]) -> str:
+    """Delete invitations nobody accepted, `INVITATION_RETENTION` after they were sent.
+
+    `created_at` is the clock rather than `revoked_at`, and both arms of that matter. A
+    revoked invitation is swept at the same age as a live one - it has been admitting
+    nobody since it was revoked, and re-clocking it on the revoke would keep the address
+    around *longer* for having been withdrawn. And a live one is swept too: no invitation
+    carries a per-invitation expiry the invitee races against, so this sweep is the only
+    thing that bounds the address at all.
+
+    `accepted_at IS NULL` is the whole guard on the other side. An accepted invitation is
+    two accounts' shared history, not a pending allow-list entry, and it goes with either of
+    them rather than on a clock.
+
+    One `DELETE` reporting its own `rowcount`, for the reason
+    `purge_expired_authentication_requests` gives: FastCRUD's `delete()` raises
+    `NoResultFound` when nothing matches, which on an hourly sweep is the ordinary case, and
+    Core has no such objection.
+    """
+    cutoff = datetime.now(UTC) - INVITATION_RETENTION
+    async with local_session() as db:
+        result = cast(
+            CursorResult,
+            await db.execute(
+                delete(Invitation).where(Invitation.accepted_at.is_(None), Invitation.created_at < cutoff)
+            ),
+        )
+        # Read before the commit: the count belongs to the statement, not the transaction.
+        purged = result.rowcount
+        await db.commit()
+
+    if purged == 0:
+        logging.info("No unaccepted invitations to purge")
+        return "No unaccepted invitations to purge"
+
+    logging.info("Purged %d unaccepted invitation(s)", purged)
+    return f"Purged {purged} unaccepted invitation(s)"
+
+
+async def purge_expired_invite_requests(ctx: dict[Any, Any]) -> str:
+    """Delete pending invite requests `INVITE_REQUEST_RETENTION` after they were made.
+
+    The table this app is least able to bound any other way: `POST /invite-requests` is
+    anonymous, so every row here was written by somebody with no account, and the only other
+    things that remove one are an operator acting on it and an invitation being sent.
+
+    The address is never told. There is no state to keep and nothing to notify - a person
+    whose request ages out may simply ask again, and the rate limits on the endpoint are
+    what bound that.
+    """
+    cutoff = datetime.now(UTC) - INVITE_REQUEST_RETENTION
+    async with local_session() as db:
+        result = cast(
+            CursorResult, await db.execute(delete(InviteRequest).where(InviteRequest.created_at < cutoff))
+        )
+        purged = result.rowcount
+        await db.commit()
+
+    if purged == 0:
+        logging.info("No expired invite requests to purge")
+        return "No expired invite requests to purge"
+
+    logging.info("Purged %d expired invite request(s)", purged)
+    return f"Purged {purged} expired invite request(s)"
 
 
 async def purge_expired_user_sessions(ctx: dict[Any, Any]) -> str:
@@ -300,8 +398,8 @@ async def _purge_one_account(db: AsyncSession, *, user_id: int, email: str, cuto
 
     **`auth_audit_event` needs the identical second arm, and for the identical reason.**
     Its account-tied rows go down the FK cascade with the `DELETE FROM "user"` below, but
-    the pre-account ones - auth request created, sign-in code failed, onboarding started -
-    are written with `user_id IS NULL` on purpose (`request_email_link` structurally cannot
+    the pre-account ones - auth request created, sign-in code failed, onboarding started,
+    invite requested - are written with `user_id IS NULL` on purpose (`request_email_link` structurally cannot
     know whether an account exists, and making it find out would be the enumeration
     guarantee reversed), so no cascade will ever reach them. Without this statement, "audit
     rows are erased with the account" would be false for exactly the rows that name an
@@ -311,6 +409,22 @@ async def _purge_one_account(db: AsyncSession, *, user_id: int, email: str, cuto
 
     await db.execute(delete(AuthenticationRequest).where(AuthenticationRequest.email == email))
     await db.execute(delete(AuthAuditEvent).where(AuthAuditEvent.email == email))
+    # **Lowercased, unlike the two deletes directly above, and the difference is not an
+    # inconsistency to tidy away.** `email` here is the stored `User.email`, which
+    # `POST /auth/complete` inserts verbatim from the onboarding token - so a Google-born
+    # account's may carry capitals. The two tables above store whatever the sign-in path
+    # wrote, which for those paths is already lowercased; both invitation tables store
+    # lowercase unconditionally. Comparing the raw address against them would leave a purged
+    # person's address sitting in the allow-list, which is the one outcome this arm exists
+    # to prevent.
+    #
+    # The invitation delete is by address rather than by cascade for the same reason the
+    # `authentication_request` one is: these rows name the *invitee*, whose `user_id` column
+    # holds the inviter. An invitee's purge cannot reach them down any foreign key. The
+    # inviter's own rows do go down the cascade with the `DELETE FROM "user"` below.
+    purged_email = email.lower()
+    await db.execute(delete(Invitation).where(Invitation.email == purged_email))
+    await db.execute(delete(InviteRequest).where(InviteRequest.email == purged_email))
     result = cast(
         CursorResult,
         await db.execute(
@@ -323,8 +437,8 @@ async def _purge_one_account(db: AsyncSession, *, user_id: int, email: str, cuto
         ),
     )
     if result.rowcount == 0:
-        # Rolls back both by-email deletes above with it - a restored account keeps its
-        # sign-in history and its audit trail like any other.
+        # Rolls back every by-address delete above with it - a restored account keeps its
+        # sign-in history, its audit trail and the invitation that let it in like any other.
         await db.rollback()
         logging.info("Account %d was restored before the purge reached it; nothing deleted", user_id)
         return False

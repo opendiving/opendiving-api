@@ -9709,9 +9709,14 @@ that reaches the log has leaked whether or not the caller also got a 500.
 reads. Sign-in is passwordless and keyed on the email, so the magic link for that superuser account
 is delivered to whoever controls `admin.com`.
 
-**The impact was limited, and worth stating rather than overstating.** `is_superuser` gates exactly
-one thing in this codebase — the `/docs`, `/redoc` and `/openapi.json` router on non-local
-non-production environments (`core/setup.py`) — and grants no access to anyone's dives. The script
+**The impact was limited, and worth stating rather than overstating.** `is_superuser` gated exactly
+one thing in this codebase when this was written — the `/docs`, `/redoc` and `/openapi.json` router
+on non-local non-production environments (`core/setup.py`) — and granted no access to anyone's
+dives. It now also gates the three `/api/v1/admin/*` routes (`api.v1.admin`): the invite queue, the
+batch invite and the batch removal, whose caller can read the addresses of everybody waiting to be
+let in and invite them. That widens the consequence of a wrongly-created superuser without changing
+this section's conclusion — the dives are still nobody's but their owner's, the script is still not
+in the image, and its compose service is still commented out. The script
 is not in the published image either (`.dockerignore` excludes `scripts/`, and the Dockerfile copies
 only `src/app` and `src/migrations`) and its compose service is commented out. So this is not a live
 hole; it is the third instance of a default that is wrong in somebody else's install, after
@@ -10139,13 +10144,14 @@ finding is a new patch release, and the issue body now says so per row rather th
 
 ## Security headers are the app's, not the proxy's
 
-[The bundled `Caddyfile`](https://github.com/opendiving/opendiving/blob/main/Caddyfile) routes five
+[The bundled `Caddyfile`](https://github.com/opendiving/opendiving/blob/main/Caddyfile) routed five
 paths — `/api/v1*`, `/admin*`, `/docs`, `/redoc`, `/openapi.json` — straight to `api:8000`, so
-nothing the web container sets reaches any of them. The comment on the `web` handler directly below
+nothing the web container sets reaches any of them. (`/admin*` has since come off that list: it is
+the web app's superuser section now, and the section below marks where that changes the argument.) The comment on the `web` handler directly below
 said the web app "sets its own security headers, HSTS included … so there is nothing to add here",
 which was true of that handler and read as if it covered the site. Nothing filled the gap on the API
 side either: CRUDAdmin ships no security headers at all (grep the installed package — there are
-none), the API set none globally, and Caddy adds none by default. So `/admin`, a full
+none), the API set none globally, and Caddy adds none by default. So the CRUDAdmin panel, a full
 create/update/delete interface over `User`, `Dive`, `GearItem` and everything else in
 `admin/views.py`, was served framable.
 
@@ -10154,11 +10160,11 @@ CRUDAdmin's session cookie is `SameSite=strict` outside debug mode (`crudadmin/s
 `PROD_SAMESITE`), so a cross-site frame carries no cookie and renders a logged-out panel —
 clickjacking is neutered today by a third-party default we do not control, which is the argument for
 having a header of our own rather than against it. Second, HSTS is recorded per *host*, not per
-path, so one page load anywhere on the domain pins `/admin` too; the only visitor who misses it is
-an operator whose first-ever request to the domain is `/admin` itself, from a bookmark. And `/docs`,
-`/redoc` and `/openapi.json` are absent on `ENVIRONMENT=production` (the `EnvironmentSettings` block
-in `core/setup.py` gates the whole docs router), so on a production install `/admin*` is the only
-HTML behind that matcher at all.
+path, so one page load anywhere on the domain pins the panel too; the only visitor who misses it is
+an operator whose first-ever request to the domain is the panel itself, from a bookmark. And
+`/docs`, `/redoc` and `/openapi.json` are absent on `ENVIRONMENT=production` (the
+`EnvironmentSettings` block in `core/setup.py` gates the whole docs router), so on a production
+install the panel was the only HTML behind that matcher at all.
 
 **The fix is `SecurityHeadersMiddleware`, not a `header` block in the Caddyfile**, and the choice is
 the substance of this section. The obvious move is the proxy: it is where headers conventionally
@@ -10170,7 +10176,7 @@ exists for exactly those — and a config file this repository never sees cannot
 a change made here. A doc paragraph is guidance, not a control, and most installs will not read it.
 
 The counter-argument is that the app is asserting policy about a surface it does not own, and it
-does not hold up: `/admin` is mounted on this FastAPI app in `main.py` and `/docs` is a route in
+does not hold up: the panel is mounted on this FastAPI app in `main.py` and `/docs` is a route in
 `core/setup.py`. These are the app's own responses. The precedent was already in the tree, too —
 `dives.py`, `certifications.py` and `export.py` have each sent `X-Content-Type-Options` and a
 per-response CSP on binary downloads since those endpoints were written. The middleware generalises
@@ -10185,10 +10191,10 @@ later and ends up with two definitions of one policy.
 
 - `Content-Security-Policy: frame-ancestors 'none'` — the whole policy, on purpose. A `default-src`
   here would break CRUDAdmin's own templates, which style themselves inline and pull `htmx.min.js`
-  and a favicon from `/admin/static` and a webfont from `fonts.googleapis.com`; `frame-ancestors`
-  restricts framing only and constrains none of that. Verified by loading the panel: it renders
-  fully styled, htmx and the webfont load, the console is clean, and a cross-origin page trying to
-  frame `http://127.0.0.1:8001/admin/login` gets
+  and a favicon from the panel's `/static` and a webfont from `fonts.googleapis.com`;
+  `frame-ancestors` restricts framing only and constrains none of that. Verified by loading the
+  panel: it renders fully styled, htmx and the webfont load, the console is clean, and a
+  cross-origin page trying to frame `http://127.0.0.1:8001/admin/login` gets
   `Framing … violates the following Content Security Policy directive: "frame-ancestors 'none'". The request has been blocked.`
 - `X-Frame-Options: DENY` — redundant in every browser that supports `frame-ancestors` (Chrome 40,
   Firefox 33, Safari 10), which is every browser that can run the panel. Sent anyway for parity with
@@ -10196,12 +10202,12 @@ later and ends up with two definitions of one policy.
   absent one is a finding in the scanners self-hosters point at their own boxes. Where both are
   present the browser uses the CSP, so it cannot conflict.
 - `X-Content-Type-Options: nosniff` — the one with real breakage potential, since a wrong
-  `Content-Type` stops being forgiven. The panel's entire asset surface is two files,
-  `/admin/static/htmx.min.js` (`text/javascript`) and `/admin/static/favicon.png`, plus inline
-  styles; both were checked.
+  `Content-Type` stops being forgiven. The panel's entire asset surface is two files, its
+  `/static/htmx.min.js` (`text/javascript`) and `/static/favicon.png`, plus inline styles; both were
+  checked.
 - **No `Strict-Transport-Security`.** It is host-scoped, so the web app's header already covers
-  `/admin` for anyone who has loaded a page of the site, and the residual case above closes on the
-  first one. Sending it from here as well would put two controls on one behaviour — and the
+  everything this app serves for anyone who has loaded a page of the site, and the residual case
+  above closes on the first one. Sending it from here as well would put two controls on one behaviour — and the
   off-switch, `WEB_HSTS`, lives in the other repository, so an API-side copy would ignore it. That
   matters concretely rather than tidily: `WEB_HSTS=off` is what a plain-HTTP LAN instance uses, and
   a pin it cannot honour makes the instance unreachable.
@@ -10234,6 +10240,24 @@ being discarded, so the danger there is getting a policy you did not type), a du
 a site-wide `default-src 'self'` at the proxy blocks the admin panel's webfont — and losing
 `X-Forwarded-Proto`, without which the web app never emits HSTS at all. An operator who would rather
 own HSTS at the proxy sets `WEB_HSTS=off` and sends it there; the point is that one thing sends it.
+
+### `/admin` stopped being this section's example
+
+Everything above was written when the bundle's `Caddyfile` sent `/admin*` to `api:8000`, and several
+of its sentences reasoned from that. They have been rewritten to name the CRUDAdmin panel rather
+than the path, because the path has changed hands: `/admin` is now a superuser-gated section of the
+**web** app, driving the JSON routes in `api.v1.admin`, and the bundle's `@api` matcher no longer
+claims it.
+
+Nothing about the middleware changes — it still covers `/api/v1*`, the docs paths and the panel's
+own mount, which is the set the argument was always really about. What changes is the worked example
+and one factual claim inside it: on a bundled install with the panel off, which is the default, the
+HTML behind the `@api` matcher is now only `/docs` and friends, and those are absent on
+`ENVIRONMENT=production` — so a production install has no HTML there at all.
+
+An operator who still enables the panel must mount it elsewhere (`CRUD_ADMIN_MOUNT_PATH`) and route
+it by hand, or the web app answers `/admin` with its own not-found. That is one sentence in the
+install docs, and it is true until the panel's retirement chore lands.
 
 ## `public` requires the absence of every credential, not just a bearer token
 
@@ -13305,8 +13329,8 @@ rotation.
 
 ### `user_id` is set only where the request already holds the account
 
-Three events are user-less **by design** rather than by omission: auth request created, sign-in code
-failed, and onboarding started. `request_email_link` "never even queries `crud_users`" — the
+Four events are user-less **by design** rather than by omission: auth request created, sign-in code
+failed, onboarding started, and an invitation requested. `request_email_link` "never even queries `crud_users`" — the
 enumeration protection there is structural, the code path genuinely cannot distinguish an existing
 account from a new one (*"Unified auth flow"*) — and an audit-time lookup to fill in a `user_id`
 would reverse that guarantee verbatim, in a `crud_users` call no diff reviewer would connect to the

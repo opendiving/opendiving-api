@@ -107,6 +107,13 @@ UNGUARDED_UPDATE_SCHEMAS = (
     # (`api/v1/auth.py`, `api/v1/users.py`) to stamp `used_at`/`invalidated_at`.
     "AuthenticationProviderUpdate",
     "AuthenticationRequestUpdate",
+    # Same shape as those two, and never reached by FastCRUD either: both stamps on an
+    # invitation are written by hand-written Core in `crud/crud_invitations.py` (the
+    # acceptance, inside the account-creating transaction) and in `api/v1/invitations.py`
+    # (the revoke). The schema exists to give the FastCRUD alias its update types, and no
+    # request body anywhere reaches it - `POST /user/invitations` takes an address and
+    # nothing else, and there is no PATCH.
+    "InvitationUpdate",
 )
 
 NULLABLE_CASES = [

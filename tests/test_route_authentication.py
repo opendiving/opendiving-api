@@ -65,6 +65,17 @@ ANONYMOUS_BY_DESIGN: dict[tuple[str, str], str] = {
     ),
     # 2. The caller may be locked out, and that is the point.
     ("POST", "/api/v1/contact"): "A diver who cannot sign in is precisely who needs to reach a human.",
+    ("POST", "/api/v1/invite-requests"): (
+        "Asks a closed instance for an invitation; the whole population it serves is people with no "
+        "account. It answers the same 202 for every address and never queries `user`, which is the "
+        "same structural guarantee `/auth/email/request` carries and for the same reason."
+    ),
+    # 5. The caller is a browser deciding what to render before anyone has signed in.
+    ("GET", "/api/v1/config"): (
+        "Tells the landing page whether registration is open or by invitation, which it has to know "
+        "before its first paint - and before any session exists. Discloses one bit the page discloses "
+        "anyway by which form it then shows."
+    ),
     # 3. The caller is a monitor or an orchestrator, holding no account at all.
     ("GET", "/api/v1/health"): "Liveness probe, read by whatever decides whether to restart the container.",
     ("GET", "/api/v1/health/ready"): "Readiness probe, same caller as /health.",

@@ -490,8 +490,8 @@ session revocations, and the two failures the app considers rare and meaningful 
 token and a regressed passkey signature counter.
 
 A row carries when, where (the request's IP and `User-Agent`) and who - an account id where the
-request had already established one, and an email address for the three genuinely pre-account events
-(an auth request created, a sign-in code failed, onboarding started). It **never** carries a token,
+request had already established one, and an email address for the genuinely pre-account events (an
+auth request created, a sign-in code failed, onboarding started, an invitation requested). It **never** carries a token,
 a token hash, a sign-in code or its digest.
 
 Nothing in the API returns these rows; they are visible to an operator through the admin panel at

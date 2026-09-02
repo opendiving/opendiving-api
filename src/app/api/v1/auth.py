@@ -42,6 +42,7 @@ from ...core.db.database import async_get_db, release_read_transaction
 from ...core.exceptions.http_exceptions import (
     BadRequestException,
     DuplicateValueException,
+    ForbiddenException,
     UnauthorizedException,
 )
 from ...core.schemas import OnboardingTokenData
@@ -75,6 +76,7 @@ from ...crud.crud_authentication_requests import (
     crud_authentication_requests,
     register_failed_code_attempt,
 )
+from ...crud.crud_invitations import accept_invitations
 from ...crud.crud_user_sessions import live_session_for, revoke_session
 from ...crud.crud_users import crud_users
 from ...models.user import User
@@ -96,7 +98,7 @@ from ...schemas.authentication_request import (
     AuthenticationRequestRead,
     AuthenticationRequestUpdate,
 )
-from ...schemas.user import UserCreateInternal, UserReadInternal
+from ...schemas.user import UserBootstrapCreateInternal, UserCreateInternal, UserReadInternal
 from ...schemas.webauthn_credential import PasskeySignInOptions, PasskeySignInVerifyRequest
 from ...services.auth_service import (
     AuthenticatedUser,
@@ -107,6 +109,7 @@ from ...services.auth_service import (
 )
 from ...services.email_service import send_magic_link_email
 from ...services.passkey_service import finish_sign_in, start_sign_in
+from ...services.registration_gate import admit_or_refuse, refuse_uninvited
 from ...services.user_avatars import import_google_avatar
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -205,6 +208,19 @@ async def _start_onboarding_or_sign_in(
             email=outcome.user["email"],
         )
 
+    # The gate, asked here for the person's benefit rather than for the guarantee: nobody
+    # should fill in a profile form and be refused at the end of it. Above the token mint
+    # and above the audit write, so a refusal costs neither - and it is not an enumeration
+    # oracle, because reaching this line took proof of the address (a link delivered to it,
+    # the code from that email, or Google's verified claim). The authoritative check is the
+    # one inside `complete_profile`'s creating transaction; this one can be overtaken by a
+    # revocation and deliberately is not the guarantee.
+    #
+    # No audit event on the refusal: the vocabulary's membership rule takes a site that
+    # commits a row, mints a token or revokes a credential, and a refusal that does none of
+    # those is neither rare nor a WARNING (`schemas/auth_audit_event.py`).
+    await refuse_uninvited(db, email=outcome.email)
+
     onboarding_token = await create_onboarding_token(
         OnboardingTokenData(
             email=outcome.email,
@@ -216,8 +232,8 @@ async def _start_onboarding_or_sign_in(
     )
     # "Registration-request creation": there is no registration table, so the onboarding
     # JWT *is* the registration request, and this is the one place it is minted. The row is
-    # written user-less because no account exists yet - one of the three genuinely
-    # pre-account events, carrying only the address, and swept on the 7-day tier.
+    # written user-less because no account exists yet - one of the genuinely pre-account
+    # events, carrying only the address, and swept on the 7-day tier.
     await record_auth_event(
         db,
         event_type=AuthEventType.ONBOARDING_STARTED,
@@ -658,8 +674,18 @@ async def complete_profile(
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> AuthOutcome:
     """Creates the `User` row (and its `AuthenticationProvider` link) for a verified
-    identity that had no account yet, then signs the new user in. This is the *only*
-    place a `User` row is ever created.
+    identity that had no account yet, then signs the new user in. This is the only place
+    *self-service* registration ever creates a `User` row - two operator paths also write
+    one and are not registration: `scripts/create_first_superuser.py`, which is excluded
+    from the shipped image, and the admin panel's `User` view, both of which bypass the
+    gate below by construction.
+
+    **On an `invite`-mode instance this refuses (403) an address with no live
+    invitation**, and creates nothing. The check is `services.registration_gate.
+    admit_or_refuse` and it runs *below* `release_read_transaction`, inside the transaction
+    that inserts the row, for the reason spelled out at that call - the helper rolls back,
+    so a check above it decides nothing. The first account on an empty instance is admitted
+    in either mode and is created with `is_superuser = true`.
 
     Rate limited per-IP because the username check below is an availability oracle:
     someone holding a single onboarding token could otherwise walk a wordlist through
@@ -699,17 +725,29 @@ async def complete_profile(
     await release_read_transaction(db)
     avatar = await import_google_avatar(token_data.avatar)
 
-    user_internal = UserCreateInternal(
-        name=body.name,
-        username=body.username,
-        email=token_data.email,
-        avatar_storage_key=avatar.storage_key if avatar else None,
-        avatar_sha256=avatar.sha256 if avatar else None,
-    )
-
     context = RequestContext.from_request(request)
 
     try:
+        # **The gate, and it has to be here rather than above.** `release_read_transaction`
+        # above *rolls back*, so a gate query, an emptiness check or an advisory lock taken
+        # before it is discarded before anything is written - a check whose answer is
+        # thrown away is not a check. Below it, everything down to `db.commit()` is one
+        # transaction, which is what makes a revocation or a mode flip committed between
+        # verification and completion honoured, and what makes "account created" and
+        # "invitation accepted" a single commit.
+        bootstrap = await admit_or_refuse(db, email=token_data.email)
+
+        user_fields = {
+            "name": body.name,
+            "username": body.username,
+            "email": token_data.email,
+            "avatar_storage_key": avatar.storage_key if avatar else None,
+            "avatar_sha256": avatar.sha256 if avatar else None,
+        }
+        user_internal = (
+            UserBootstrapCreateInternal(**user_fields) if bootstrap else UserCreateInternal(**user_fields)
+        )
+
         created_user = await crud_users.create(
             db=db, object=user_internal, commit=False, schema_to_select=UserReadInternal, return_as_model=True
         )
@@ -720,6 +758,13 @@ async def complete_profile(
             ),
             commit=False,
         )
+        # In the same transaction as the account, which is the whole invariant: an address
+        # whose account exists must have no live invitation left, or the gate would admit
+        # it a second time. Every live invitation for it, not one - two members may each
+        # have invited the same friend, and both of them should see that the friend
+        # arrived. Emits no event of its own: this is the same commit as
+        # `ACCOUNT_CREATED`, and the vocabulary is one event per site.
+        await accept_invitations(db, email=token_data.email.lower(), commit=False)
         # "Registration-request completion", in the same transaction as the account it
         # records - so an account that fails to be created leaves no event saying it was.
         # One event for the whole act: the provider row above gets none of its own, because
@@ -736,6 +781,13 @@ async def complete_profile(
     except IntegrityError:
         await db.rollback()
         raise DuplicateValueException("An account with this email or username already exists") from None
+    except ForbiddenException:
+        # The gate's refusal, and the rollback is not optional: `admit_or_refuse` takes a
+        # transaction-scoped advisory lock, `async_get_db` does not end the transaction on
+        # unwind, and a request that raised out of here holding that lock would block every
+        # other account creation until its connection was returned to the pool.
+        await db.rollback()
+        raise
 
     # Single-use: a second `/auth/complete` call with the same onboarding token must
     # never create (or attempt to create) a second account.
