@@ -349,7 +349,7 @@ wheels = [
 
 [[package]]
 name = "crudadmin"
-version = "0.5.0"
+version = "0.5.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiosqlite" },
@@ -364,9 +364,9 @@ dependencies = [
     { name = "sqlalchemy" },
     { name = "user-agents" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d3/0b/262d5c483a30db1b24ef4b285c7f10ddaa8adb758e5a7a63ac3c363a8a3f/crudadmin-0.5.0.tar.gz", hash = "sha256:7a081b286e7164f1aeb60c5ff9d7f817b07c7e83df6de77b77fa44d180dcd611", size = 199053, upload-time = "2026-06-08T00:23:28.977Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e3/59/cab2ca29ca81a31cf3645732698e28691498d838aaa31fd56389c5167617/crudadmin-0.5.1.tar.gz", hash = "sha256:9f1d0a2c8b5830e3539d410af491bbbd850f228fac7c8e7602f31b83f3f1b9a9", size = 199298, upload-time = "2026-08-24T12:18:09.679Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b2/e2/91f0d904abcb43e96cadc5f1d50c633111be55410ba2b3f7a536fcbef03d/crudadmin-0.5.0-py3-none-any.whl", hash = "sha256:5ad5003e067e7518d0b94e09b1b4844457ae03947b7086cde172e4f6f1299f12", size = 229503, upload-time = "2026-06-08T00:23:27.093Z" },
+    { url = "https://files.pythonhosted.org/packages/27/d9/ece77a9cb8c6f4ecabd924e8087edfeda826342a129cddb6fa8164f20859/crudadmin-0.5.1-py3-none-any.whl", hash = "sha256:814e07b4c64cf1955679cc7b08583100cc14608ad9f8640b2f177e4986cddd2c", size = 229868, upload-time = "2026-08-24T12:18:13.512Z" },
 ]
 
 [[package]]
