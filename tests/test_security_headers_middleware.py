@@ -6,6 +6,12 @@ and the docs paths straight to the API, so the web app's headers never reach the
 neither Caddy nor CRUDAdmin adds any of its own. `/admin` - a full create/update/delete
 interface over every model - was therefore served framable, and a bring-your-own-proxy
 install got nothing at all.
+
+`/admin` is about to change hands: the operator's surface is now the JSON routes in
+`api.v1.admin` under `/api/v1/admin/*`, driven by a superuser-gated section of the *web*
+app, and a companion change in the install bundle stops the `Caddyfile` routing `/admin*`
+here. Nothing below turns on which of the two `/admin` means - what this middleware covers
+is this app's own responses either way.
 """
 
 import pytest
@@ -76,7 +82,7 @@ class TestEveryResponseIsProtected:
         assert client.get("/thing").headers["X-Content-Type-Options"] == "nosniff"
 
     def test_a_404_is_covered(self, client: TestClient):
-        """Not a formality: an unmatched path under `/admin*` is still HTML the panel's
+        """Not a formality: an unmatched path under the CRUDAdmin mount is still HTML that
         mount can render, and a 404 is a response like any other."""
         response = client.get("/no-such-path")
 
@@ -129,8 +135,8 @@ class TestCorsPreflight:
 class TestTheCspIsFrameAncestorsOnly:
     def test_it_constrains_no_resource(self, client: TestClient):
         """A `default-src` here would break CRUDAdmin's own templates, which style
-        themselves inline and pull `htmx.min.js` from `/admin/static` and a webfont from
-        `fonts.googleapis.com`. `frame-ancestors` is the whole policy on purpose."""
+        themselves inline and pull `htmx.min.js` from the panel's `/static` and a webfont
+        from `fonts.googleapis.com`. `frame-ancestors` is the whole policy on purpose."""
         csp = client.get("/thing").headers["Content-Security-Policy"]
 
         assert csp == "frame-ancestors 'none'"
@@ -138,9 +144,9 @@ class TestTheCspIsFrameAncestorsOnly:
         assert "script-src" not in csp
 
     def test_no_hsts(self, client: TestClient):
-        """HSTS is host-scoped, so the web app's header already pins `/admin` too.
-        Sending it from here as well would put two controls on one behaviour and ignore
-        `WEB_HSTS=off`, which is how a plain-HTTP LAN instance stays reachable."""
+        """HSTS is host-scoped, so the web app's header already pins everything this app
+        serves. Sending it from here as well would put two controls on one behaviour and
+        ignore `WEB_HSTS=off`, which is how a plain-HTTP LAN instance stays reachable."""
         assert "Strict-Transport-Security" not in client.get("/thing").headers
 
 

@@ -61,9 +61,10 @@ class AuthAuditEvent(Base):
     # account.** `request_email_link` "never even queries `crud_users`" - the enumeration
     # protection there is structural rather than a response-shaping trick, and an
     # audit-time lookup would reverse that guarantee (`DECISIONS.md` §"Unified auth flow").
-    # So the auth-request-created event is always written user-less, as are the other two
-    # genuinely pre-account events (sign-in code failed, onboarding started). Everything
-    # downstream of a resolved identity carries the id it already had.
+    # So the auth-request-created event is always written user-less, as are the other
+    # genuinely pre-account events (sign-in code failed, onboarding started, invite
+    # requested). Everything downstream of a resolved identity carries the id it already
+    # had.
     #
     # `CASCADE`, so a purged account takes its own auth history with it. The cascade cannot
     # reach the user-less rows - `purge_deleted_accounts` deletes those by email, the same

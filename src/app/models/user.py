@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Index, String
+from sqlalchemy import Boolean, Index, String, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -78,4 +78,19 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
             # other's bytes. Nullable, and Postgres lets a unique index hold any number of
             # NULLs, so every account without a picture is unaffected.
             Index("ux_user_avatar_storage_key", "avatar_storage_key", unique=True),
+            # `ix_user_email` beside it is a plain b-tree on the raw column, which no
+            # `lower(email)` predicate can use - so every case-insensitive account lookup
+            # would be a sequential scan of this table without this one. The invitation path
+            # makes three of them (`crud.crud_invitations.account_exists_for` and the
+            # operator queue's `has_account` join), and the batch invite runs the first up to
+            # a hundred times in one request.
+            #
+            # **Not unique**, deliberately, and the distinction is the whole reason the
+            # column keeps its own unique index as well. Accounts differing only in case are
+            # possible today - `POST /auth/complete` inserts the onboarding token's address
+            # verbatim and the Google path never lowercased its claim - so a unique
+            # functional index would be a data-shape assertion this change did not make and
+            # could fail to build on an existing instance. Uniqueness stays where it was; this
+            # index only makes the lookup cheap.
+            Index("ix_user_email_lower", func.lower(cls.email)),
         )

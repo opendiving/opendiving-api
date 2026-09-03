@@ -400,6 +400,17 @@ FETCH_OWNED_ROUTES = [
         "src.app.api.v1.sessions:crud_user_sessions",
         "Session not found",
     ),
+    # DELETE alone, for the same reason as the session above: `GET /user/invitations`
+    # returns the caller's whole list and an invitation has nothing a diver may edit.
+    # Reachable at all only on an `invite`-mode instance, which is the default the suite
+    # runs under - in `open` mode the route answers 404 before the ownership check, with a
+    # different message, and that is the self-hiding the web's settings card depends on.
+    OwnedRoute(
+        "DELETE",
+        "/api/v1/user/invitation/{uuid}",
+        "src.app.api.v1.invitations:crud_invitations",
+        "Invitation not found",
+    ),
 ]
 
 # The other family. These six resolve ownership in SQL rather than through

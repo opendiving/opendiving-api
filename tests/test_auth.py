@@ -134,11 +134,22 @@ class TestRequestEmailLink:
     async def test_never_queries_whether_the_user_exists(self, mock_db):
         """Email enumeration protection: the response (and the code path leading to
         it) must be identical whether or not an account exists for this email - this
-        endpoint doesn't even look at `crud_users`."""
+        endpoint doesn't even look at `crud_users`.
+
+        **And it must not learn whether the address is invited either.** Once registration
+        can be closed, "is this address allowed in" is a second fact about a stranger that a
+        differing code path here would leak, and it is the more sensitive of the two on an
+        instance whose whole membership is an invitation list. The refusal happens later, at
+        the onboarding branch and at account creation, where the caller has already proven
+        the address and nothing is disclosed - so the assertions below are extended rather
+        than the guarantee weakened.
+        """
         with (
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.crud_authentication_requests") as mock_crud,
             patch("src.app.api.v1.auth.crud_users") as mock_users,
+            patch("src.app.api.v1.auth.refuse_uninvited", new_callable=AsyncMock) as gate,
+            patch("src.app.api.v1.auth.accept_invitations", new_callable=AsyncMock) as accepted,
             patch("src.app.api.v1.auth.send_magic_link_email", new_callable=AsyncMock),
         ):
             mock_crud.count = AsyncMock(return_value=0)
@@ -150,6 +161,25 @@ class TestRequestEmailLink:
             assert result.message == "Check your email for the next step."
             mock_users.exists.assert_not_called()
             mock_users.get.assert_not_called()
+            gate.assert_not_awaited()
+            accepted.assert_not_awaited()
+
+    def test_the_request_handler_names_no_invitation_table(self):
+        """The structural half of the guarantee above, which the mocks cannot give.
+
+        A patch proves the symbols this module imports were not called; it says nothing
+        about a query issued through `db.execute` inside the handler. Reading the source is
+        what covers that, and it is the same shape `test_picker_search.py` uses to assert a
+        handler's own body calls `clamp_pagination`.
+        """
+        import inspect
+
+        from src.app.api.v1 import auth as auth_module
+
+        body = inspect.getsource(auth_module.request_email_link)
+        assert "Invitation" not in body
+        assert "InviteRequest" not in body
+        assert "invitation" not in body.lower().split('"""')[-1]
 
     @pytest.mark.asyncio
     async def test_invalidates_previous_pending_tokens_for_the_same_email(self, mock_db):

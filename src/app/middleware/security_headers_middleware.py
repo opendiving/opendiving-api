@@ -25,6 +25,17 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         third-party default we don't control, which is the argument for having a header
         of our own rather than against it.
 
+        **`/admin` is about to stop meaning the panel, and nothing above depends on which
+        it means.** The operator's surface is now the JSON routes in `api.v1.admin` under
+        `/api/v1/admin/*`, driven by a superuser-gated section of the *web* app at
+        `/admin` - so the bundle's `Caddyfile` has to stop sending `/admin*` here, and a
+        companion change in the install bundle does that in the same release. Until that
+        ships, `/admin*` still reaches this app and the sentences above are literally true
+        of it; after it, `CRUD_ADMIN_MOUNT_PATH` (still `/admin` by default) has to be moved
+        by any operator who enables the panel. Either way what this middleware covers is
+        this app's own responses - `/api/v1*`, the docs paths, and wherever the panel is
+        mounted - which is the set the argument was always really about.
+
     What it deliberately does not do
     --------------------------------
         - **The CSP is `frame-ancestors` and nothing else.** A `default-src` here would
@@ -33,11 +44,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
           `fonts.googleapis.com`. `frame-ancestors` restricts framing only and
           constrains none of that.
         - **No `Strict-Transport-Security`.** HSTS is recorded per *host*, not per path,
-          so the web app's header already covers `/admin` on any domain whose visitor
-          has loaded one page of it. Sending it from here as well would put two controls
-          on one behaviour and, worse, ignore `WEB_HSTS=off` - the switch a plain-HTTP
-          LAN instance uses precisely because a pin it cannot honour makes the instance
-          unreachable.
+          so the web app's header already covers every path this app serves on any domain
+          whose visitor has loaded one page of it. Sending it from here as well would put
+          two controls on one behaviour and, worse, ignore `WEB_HSTS=off` - the switch a
+          plain-HTTP LAN instance uses precisely because a pin it cannot honour makes the
+          instance unreachable.
 
     Note
     ----

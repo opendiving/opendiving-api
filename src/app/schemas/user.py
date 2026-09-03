@@ -53,6 +53,12 @@ class UserRead(PublicUUIDSchema):
     # Feeds the settings page's units toggle, and every measurement the web app renders.
     # Same note as its neighbour above on what the default is and isn't for.
     units: UnitSystem = UnitSystem.METRIC
+    # The caller's own record of whether they are this instance's operator, so a client can
+    # decide whether to offer the operator's surface at all. Not a disclosure about anybody
+    # else: `GET /user` returns the caller's row and no route returns another account's.
+    # False for every account but the first one on an empty instance (see
+    # `UserBootstrapCreateInternal`) and any promoted by hand.
+    is_superuser: bool = False
 
 
 class UserReadInternal(UserRead):
@@ -64,11 +70,18 @@ class UserReadInternal(UserRead):
 
 
 class UserCreateInternal(UserBase):
-    """The only way a `User` row is ever created - from a completed profile (`POST
-    /auth/complete`), never directly from a signup form. There's no password field
-    anywhere: identity is proven up front by the email-magic-link or Google flow, and
+    """The only way *self-service registration* creates a `User` row - from a completed
+    profile (`POST /auth/complete`), never directly from a signup form. There's no password
+    field anywhere: identity is proven up front by the email-magic-link or Google flow, and
     the resulting authentication method is recorded separately (see
     `AuthenticationProviderCreate`), not on the user row itself.
+
+    "Self-service" is the qualifier, not decoration: `scripts/create_first_superuser.py`
+    and the admin panel's `User` view also write rows, and both bypass the registration
+    gate (`services.registration_gate`) by construction. On an `invite`-mode instance the
+    completion route creates a row only for an address that holds a live invitation, or for
+    the very first account on an empty instance - which is `UserBootstrapCreateInternal`
+    below rather than this schema.
     """
 
     # Set together or not at all, and only by the Google import in `POST /auth/complete`
@@ -77,6 +90,24 @@ class UserCreateInternal(UserBase):
     # sign-up has no picture to import and starts with initials.
     avatar_storage_key: str | None = None
     avatar_sha256: str | None = None
+
+
+class UserBootstrapCreateInternal(UserCreateInternal):
+    """The first account on an empty instance, which is the operator's.
+
+    A subclass rather than a defaulted field on `UserCreateInternal`, because that schema
+    is also the admin panel's `create_schema` (`admin/views.py`) and a checkbox that grants
+    superuser is not a control this change is adding to a panel it is otherwise leaving
+    alone. Only `POST /auth/complete` builds this, and only when
+    `services.registration_gate.admit_or_refuse` has said - under its advisory lock, in the
+    transaction that does the insert - that the `user` table was empty.
+
+    This is what makes the install docs' "the first account to sign in is yours" literally
+    true, in both registration modes, without SQL or a script that is not in the shipped
+    image.
+    """
+
+    is_superuser: bool = True
 
 
 class UserUpdate(RejectsExplicitNulls):

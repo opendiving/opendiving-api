@@ -198,6 +198,71 @@ class GoogleAuthSettings(BaseSettings):
     GOOGLE_CLIENT_SECRET: SecretStr | None = config("GOOGLE_CLIENT_SECRET", default=None, cast=SecretStr)
 
 
+class RegistrationMode(Enum):
+    """Who may create an account on this instance.
+
+    `open` is what this app did before the setting existed: any address that proves it owns
+    itself gets an account. `invite` admits only an address someone already invited - plus
+    the very first account on an empty instance, which is the operator's own and is admitted
+    in *both* modes (see `services.registration_gate`).
+
+    Declared as an `Enum` for the reason `EnvironmentOption` is: pydantic rejects a value
+    that is not one of these at `Settings()`, which is import time, so a typo names itself
+    at startup rather than silently selecting a mode nobody chose.
+    """
+
+    OPEN = "open"
+    INVITE = "invite"
+
+
+class RegistrationSettings(BaseSettings):
+    # **`invite` is the default, and that is a deliberate breaking change.** An instance
+    # reachable from the internet with no setting touched would otherwise take anyone who
+    # finds it, and the apps in this category that hold personal data all ship closed
+    # (Mealie's `ALLOW_SIGNUP=false`, Plausible's `DISABLE_REGISTRATION=invite_only`, a
+    # Bluesky PDS's `PDS_INVITE_REQUIRED`, Mastodon's `registrations_mode=none`); the
+    # developer tools that ship open (Gitea, Vikunja) hold nobody's dive log. The
+    # first-account exemption is what keeps closed-by-default from being a first-run trap:
+    # a fresh instance has no invitations and no superuser, and the first address to sign
+    # in becomes both.
+    #
+    # Flipping it is a restart, like every other setting here - they are read once at
+    # import.
+    REGISTRATION_MODE: RegistrationMode = config("REGISTRATION_MODE", default=RegistrationMode.INVITE)
+
+    # A *rate*, not a lifetime allotment: a member who invites five friends today can
+    # invite five more tomorrow. Counted from the `invitation` table rather than from the
+    # Redis limiter, because the limiter fails open on a Redis outage by design (see
+    # `DECISIONS.md` §"Rate limiting fails open on a Redis *outage*") and its counters are
+    # flushed locally - neither of which a growth bound on who gets into a closed beta
+    # should inherit. Superusers are exempt.
+    INVITATIONS_PER_USER: int = config("INVITATIONS_PER_USER", default=5)
+    INVITATIONS_WINDOW_DAYS: int = config("INVITATIONS_WINDOW_DAYS", default=1)
+
+    # **A throttle, and not the quota above** - they bound different things and only one of
+    # them bounds the oracle. `POST /user/invitations` answers a distinguishable 409 for an
+    # address that already has an account, and that refusal creates no invitation row, so
+    # the quota (counted from rows created) never charges for it: unthrottled, a signed-in
+    # caller can walk a wordlist through the endpoint and learn who is registered, without
+    # limit. This is the shape `PATCH /user`'s username check already guards - "unthrottled
+    # it is a wordlist oracle over who exists" - and it is keyed per-user for the same
+    # reason: the caller is authenticated, so there is a better key than their IP.
+    #
+    # Deliberately above `INVITATIONS_PER_USER` rather than equal to it. It is a backstop
+    # against automated probing, not a second opinion on how many friends somebody may
+    # invite, and a diver who mistypes an address twice must not be spending the same
+    # budget that decides whether their fifth invitation goes out.
+    INVITATION_ATTEMPT_RATE_LIMIT_PER_USER: int = config("INVITATION_ATTEMPT_RATE_LIMIT_PER_USER", default=20)
+
+    # Fixed-window rate limits on `POST /invite-requests`, keyed separately by the
+    # submitted email and by client IP - the `ContactSettings` shape, with the contact
+    # form's values, because it is the same kind of endpoint: anonymous, writing a row
+    # nobody authenticated, on behalf of somebody who may never come back.
+    INVITE_REQUEST_RATE_LIMIT_WINDOW_SECONDS: int = config("INVITE_REQUEST_RATE_LIMIT_WINDOW_SECONDS", default=3600)
+    INVITE_REQUEST_RATE_LIMIT_PER_EMAIL: int = config("INVITE_REQUEST_RATE_LIMIT_PER_EMAIL", default=3)
+    INVITE_REQUEST_RATE_LIMIT_PER_IP: int = config("INVITE_REQUEST_RATE_LIMIT_PER_IP", default=10)
+
+
 class MagicLinkSettings(BaseSettings):
     MAGIC_LINK_TOKEN_EXPIRE_MINUTES: int = config("MAGIC_LINK_TOKEN_EXPIRE_MINUTES", default=30)
 
@@ -724,6 +789,7 @@ class Settings(
     CryptSettings,
     FirstUserSettings,
     GoogleAuthSettings,
+    RegistrationSettings,
     MagicLinkSettings,
     EmailSettings,
     ContactSettings,

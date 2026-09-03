@@ -6,6 +6,8 @@ from .functions import (
     purge_deleted_accounts,
     purge_expired_auth_audit_events,
     purge_expired_authentication_requests,
+    purge_expired_invitations,
+    purge_expired_invite_requests,
     purge_expired_tokens,
     purge_expired_user_sessions,
     send_gear_service_digests,
@@ -34,6 +36,15 @@ class WorkerSettings:
         # is what keeps them on this side of the line `purge_deleted_accounts` sits on.
         cron(purge_expired_user_sessions, minute=0, run_at_startup=True),
         cron(purge_expired_auth_audit_events, minute=0, run_at_startup=True),
+        # The two invitation sweeps join the hour mark on the same criterion, with one
+        # difference worth naming: these delete rows that are *not* past an expiry of their
+        # own, because neither table has one - a live invitation admits its address until
+        # this takes it. What keeps them on this side of the line `purge_deleted_accounts`
+        # sits on is what they destroy: an allow-list entry nobody used in three months and
+        # a request nobody acted on, neither of which is a thing a diver could ask for back.
+        # A restart loop still costs a no-op `DELETE`, since the cutoff is absolute.
+        cron(purge_expired_invitations, minute=0, run_at_startup=True),
+        cron(purge_expired_invite_requests, minute=0, run_at_startup=True),
         # Hourly, so `ACCOUNT_DELETION_GRACE_DAYS=0` behaves the way an operator setting
         # it to zero expects, and at :30 so it doesn't contend with the two sweeps on the
         # hour mark. No `run_at_startup`, and that is the difference that matters: those

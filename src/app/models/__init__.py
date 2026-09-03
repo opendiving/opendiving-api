@@ -17,6 +17,8 @@ from .gear_service_record import GearServiceRecord
 from .gear_service_schedule import GearServiceSchedule
 from .gear_set import GearSet
 from .gear_set_item import GearSetItem
+from .invitation import Invitation
+from .invite_request import InviteRequest
 from .species import Species
 from .species_name import SpeciesName
 from .trip import Trip

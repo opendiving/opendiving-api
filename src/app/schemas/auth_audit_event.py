@@ -32,7 +32,11 @@ class AuthEventType(StrEnum):
     credential's power is unchanged); the invalidation of a previous live authentication
     request (housekeeping of the new request's creation, which is the event); the provider
     row created inside `POST /auth/complete`'s transaction (part of account creation, and a
-    second row would record one act twice); failed passkey registrations and assertions
+    second row would record one act twice); an invitation being accepted (same commit as
+    the account creation that accepts it) and an invitation being revoked (not a
+    credential, and the row records its own `revoked_at`); the registration gate refusing
+    an uninvited address (neither a write, nor rare, nor a WARNING - it is the ordinary
+    answer on a closed instance); failed passkey registrations and assertions
     (expected, and logged at `info` - the failure that means something on that path is the
     counter regression, which *is* here); the passkey-notice delivery failure; and the
     generic 401/400s across the auth surface, most of which carry no established identity
@@ -43,11 +47,23 @@ class AuthEventType(StrEnum):
     AUTH_REQUEST_CREATED = "auth_request_created"
     SIGN_IN_CODE_FAILED = "sign_in_code_failed"
     ONBOARDING_STARTED = "onboarding_started"
+    # Criterion (a), stretched, and the stretch is worth naming: this is emitted on
+    # **every** accepted request to `POST /invite-requests`, including one whose
+    # on-conflict insert was a no-op and committed nothing. The IP and User-Agent it
+    # carries are what bound abuse of an endpoint anybody can reach, which is the same
+    # reason `AUTH_REQUEST_CREATED` above is unconditional.
+    INVITE_REQUESTED = "invite_requested"
 
     # --- the identity is resolved by the time these are written ---
     SIGN_IN_SUCCEEDED = "sign_in_succeeded"
     RESTORE_OFFERED = "restore_offered"
     ACCOUNT_CREATED = "account_created"
+    # `user_id` is the inviter, `email` the invitee - so the row names both parties to the
+    # act, which is what makes it answerable later. Acceptance emits nothing of its own: it
+    # is the same commit as `ACCOUNT_CREATED`, and the rule above is one event per site.
+    # Nor does revocation - an invitation is not a credential, so criterion (c) does not
+    # reach it, and the row keeps its own `revoked_at`.
+    INVITATION_CREATED = "invitation_created"
     ACCOUNT_RESTORED = "account_restored"
     PROVIDER_LINKED = "provider_linked"
     PASSKEY_ADDED = "passkey_added"

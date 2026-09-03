@@ -4,9 +4,10 @@ Used for the magic-link sign-in email (see `api.v1.auth.request_email_link`), th
 email-change confirmation/notification pair (see `api.v1.users`), the passkey
 added/removed security notices (see `api.v1.passkeys`), the account-deletion
 confirmation that carries the purge date (see `api.v1.users.erase_user`), the gear-service
-digest (see `core.worker.functions.send_gear_service_digests`), and the contact form
-(see `api.v1.contact`), all funneling through `_send` so the "run a blocking client off
-the event loop" plumbing only lives in one place.
+digest (see `core.worker.functions.send_gear_service_digests`), the invitation into a
+closed instance (see `api.v1.invitations`), and the contact form (see `api.v1.contact`),
+all funneling through `_send` so the "run a blocking client off the event loop" plumbing
+only lives in one place.
 
 SMTP rather than any vendor's HTTP API because it is the one interface every provider
 and every self-hosted relay already speaks - Resend included, which is reachable as
@@ -114,16 +115,25 @@ def _header_safe(value: str) -> str:
 
 
 def _refuse_to_log_credential_outside_local(what: str) -> None:
-    """Guards the "no transport, so log the link instead" fallback used by the two senders
-    whose URL embeds a live single-use auth token.
+    """Guards the "no transport, so log the link instead" fallback used by the senders whose
+    failure to send is worse than a 500.
+
+    For two of the three that call it - `send_magic_link_email` and
+    `send_email_change_confirmation_email` - the reason is literal: the URL they would log
+    *is* a live single-use auth token. `send_invitation_email` carries no token at all (an
+    invitation is an allow-list entry, not a credential) and takes this shape for the other
+    half of the argument below: the consequence of a silent failure. Its own docstring says
+    so.
 
     That fallback is a local-development convenience, and a good one - it's how you sign
-    in without configuring a relay. But the URL it prints *is* the credential, and this
-    app's logs are read by `docker compose logs` and shipped to whatever collects them, so
-    the same code path on a deployed instance would quietly turn a forgotten `SMTP_HOST`
-    into sign-in tokens sitting in plaintext wherever those end up. Fail loudly there
-    instead: a 500 on a sign-in attempt is recoverable and obvious, leaked tokens are
-    neither.
+    in without configuring a relay. But for the two credential-carrying senders the URL it
+    prints *is* the credential, and this app's logs are read by `docker compose logs` and
+    shipped to whatever collects them, so the same code path on a deployed instance would
+    quietly turn a forgotten `SMTP_HOST` into sign-in tokens sitting in plaintext wherever
+    those end up. Fail loudly there instead: a 500 on a sign-in attempt is recoverable and
+    obvious, leaked tokens are neither. For the invitation the same raise buys something
+    else - an invitee who is never told they were invited, while their inviter's quota was
+    spent on it, is a failure nobody would otherwise notice.
 
     The line is `local`, not `production`: `local` is the one environment where reading
     the link out of the logs is the documented way to sign in, and anything else is a
@@ -184,6 +194,60 @@ async def send_magic_link_email(email: str, magic_link_url: str, code: str) -> N
 
     # `smtplib` blocks - run it off the event loop thread so a slow or hanging relay
     # doesn't stall other requests.
+    await anyio.to_thread.run_sync(_send, message)
+
+
+async def send_invitation_email(email: str, inviter_name: str) -> None:
+    """Tells `email` that `inviter_name` has invited them to this instance.
+
+    **Carries no token and no query parameter**, because an invitation is an allow-list
+    entry rather than a bearer credential: signing in already proves ownership of the
+    address, so the invitee simply signs in *with this address* and the gate lets them
+    through. What the mail therefore has to say is precisely that, which is why the address
+    is in the body rather than only in the `To:` header - a person who forwards this to
+    their other mailbox needs to know which one was invited.
+
+    The inviter's name is the one thing here that is another diver's content, and it is
+    what makes the invitation legible rather than a cold mail from a domain the recipient
+    may not know. The legal pages carry the corresponding grant.
+
+    **Says nothing about the registration mode**, deliberately. `POST /admin/invitations`
+    carries no mode check, so an operator on an `open` instance reaches this sender - and a
+    sentence asserting registration is by invitation would be false there. The copy does not
+    need one: the first paragraph says who invited them, the second says which address to
+    use, and both are true in either mode. A mode-conditional clause was considered and
+    rejected as disproportionate to what it would restore.
+
+    The credential-carrying shape (log on `local`, raise elsewhere) rather than the notice
+    shape, even though nothing here is a credential. The reasoning is the *consequence* of
+    a silent failure rather than the sensitivity of the payload: a notice that fails to send
+    costs somebody a heads-up they can live without, while an invitation that fails to send
+    is an invitee who never learns they were invited and an inviter whose quota was spent
+    on nothing. The row is already committed by the time this runs, so the address is
+    admitted either way and the operator's job on a 5xx is to tell them another way.
+    """
+    sign_in_url = f"{settings.FRONTEND_URL}/signin"
+
+    if not settings.SMTP_HOST:
+        _refuse_to_log_credential_outside_local("the invitation email")
+        logger.warning("SMTP_HOST not configured; invitation for %s from %s: %s", email, inviter_name, sign_in_url)
+        return
+
+    message = _build_message(
+        to=email,
+        subject=f"{inviter_name} invited you to OpenDiving",
+        html_body=(
+            f"<p>{html.escape(inviter_name)} has invited you to their OpenDiving log book at "
+            f'<a href="{settings.FRONTEND_URL}">{settings.FRONTEND_URL}</a>.</p>'
+            f"<p>Sign in with <strong>{html.escape(email)}</strong> - "
+            "the address this was sent to - and your account will be created:</p>"
+            f'<p><a href="{sign_in_url}">{sign_in_url}</a></p>'
+            "<p>There is no password to choose: you enter your address, and a sign-in link and code "
+            "arrive in this mailbox. If you weren't expecting this, you can safely ignore it - nothing "
+            "has been created in your name.</p>"
+        ),
+    )
+
     await anyio.to_thread.run_sync(_send, message)
 
 

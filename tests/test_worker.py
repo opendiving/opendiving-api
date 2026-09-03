@@ -8,18 +8,27 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
+from src.app.core.config import settings
 from src.app.core.db.database import async_engine
 from src.app.core.worker.functions import (
     AUTHENTICATION_REQUEST_RETENTION,
+    INVITATION_RETENTION,
+    INVITE_REQUEST_RETENTION,
     _due_text,
+    _purge_one_account,
     purge_expired_authentication_requests,
+    purge_expired_invitations,
+    purge_expired_invite_requests,
     purge_expired_tokens,
     send_gear_service_digests,
 )
 from src.app.models.authentication_request import AuthenticationRequest
+from src.app.models.invitation import Invitation
+from src.app.models.invite_request import InviteRequest
 from src.app.models.user import User
 from src.app.schemas.gear_service import ServiceKind, ServiceStatus
 from tests.conftest import db_available, unique_email
@@ -217,6 +226,157 @@ class TestPurgeExpiredAuthenticationRequestsAgainstPostgres:
         await purge_expired_authentication_requests({})
 
         assert self._still_there(db, live_id)
+
+
+class TestTheInvitationSweepsAgainstPostgres:
+    """The two 90-day sweeps, and the account-purge arm beside them.
+
+    Against a real database for the reason the sweep above it is: what has to be right is a
+    `WHERE` clause and a case-folded comparison, and a mocked session evaluates neither.
+
+    Unscoped, as the crons run them: they delete every eligible row in the database, so the
+    assertions only ever ask after rows the test seeded, and every seeded row is far outside
+    the developer's own data by construction (a fresh `unique_email` each time).
+    """
+
+    @pytest_asyncio.fixture(autouse=True)
+    async def _dispose_the_app_engine(self) -> AsyncGenerator[None]:
+        await async_engine.dispose()
+        yield
+        await async_engine.dispose()
+
+    @staticmethod
+    def _invitation(db: Session, inviter: User, *, age: timedelta, **stamps: Any) -> int:
+        row = Invitation(
+            email=unique_email(),
+            user_id=inviter.id,
+            uuid=uuid7(),
+            created_at=datetime.now(UTC) - age,
+            **stamps,
+        )
+        db.add(row)
+        db.commit()
+        row_id = row.id
+        db.expunge(row)
+        return row_id
+
+    @staticmethod
+    def _request_row(db: Session, *, age: timedelta) -> int:
+        row = InviteRequest(email=unique_email(), created_at=datetime.now(UTC) - age)
+        db.add(row)
+        db.commit()
+        row_id = row.id
+        db.expunge(row)
+        return row_id
+
+    @pytest.mark.asyncio
+    async def test_an_old_unaccepted_invitation_is_swept(self, db: Session, diver: User) -> None:
+        stale = self._invitation(db, diver, age=INVITATION_RETENTION + timedelta(days=1))
+
+        await purge_expired_invitations({})
+
+        assert db.get(Invitation, stale) is None
+
+    @pytest.mark.asyncio
+    async def test_a_revoked_invitation_is_swept_on_the_same_clock(self, db: Session, diver: User) -> None:
+        """`created_at` rather than `revoked_at`: re-clocking on the revoke would keep a
+        withdrawn address around *longer* than a live one, which is backwards."""
+        stale = self._invitation(db, diver, age=INVITATION_RETENTION + timedelta(days=1), revoked_at=datetime.now(UTC))
+
+        await purge_expired_invitations({})
+
+        assert db.get(Invitation, stale) is None
+
+    @pytest.mark.asyncio
+    async def test_an_accepted_invitation_is_never_swept(self, db: Session, diver: User) -> None:
+        """It is two accounts' shared history rather than a pending allow-list entry, and it
+        goes when either of them does - not on a clock."""
+        accepted = self._invitation(
+            db, diver, age=INVITATION_RETENTION * 3, accepted_at=datetime.now(UTC) - INVITATION_RETENTION
+        )
+
+        await purge_expired_invitations({})
+
+        assert db.get(Invitation, accepted) is not None
+
+    @pytest.mark.asyncio
+    async def test_a_recent_invitation_survives(self, db: Session, diver: User) -> None:
+        fresh = self._invitation(db, diver, age=INVITATION_RETENTION - timedelta(days=1))
+
+        await purge_expired_invitations({})
+
+        assert db.get(Invitation, fresh) is not None
+
+    @pytest.mark.asyncio
+    async def test_an_old_request_is_swept_and_a_recent_one_is_not(self, db: Session) -> None:
+        stale = self._request_row(db, age=INVITE_REQUEST_RETENTION + timedelta(days=1))
+        fresh = self._request_row(db, age=INVITE_REQUEST_RETENTION - timedelta(days=1))
+
+        await purge_expired_invite_requests({})
+
+        assert db.get(InviteRequest, stale) is None
+        assert db.get(InviteRequest, fresh) is not None
+
+    @pytest.mark.asyncio
+    async def test_the_purge_deletes_by_lowercased_address(self, db: Session) -> None:
+        """Invariant 13's sharp edge, and the one a mock would answer wrongly rather than
+        not at all.
+
+        `_purge_one_account` receives the stored `User.email`, which `POST /auth/complete`
+        inserts verbatim from the onboarding token - so a Google-born account's may carry
+        capitals, while both invitation tables store lowercase. The two by-address deletes
+        beside these compare raw, correctly, because the tables they name hold whatever the
+        sign-in path wrote. Comparing raw *here* would leave a purged person's address in
+        the allow-list, which is the one thing this arm exists to prevent.
+        """
+        from tests.helpers.generators import create_user
+
+        purged = create_user(db)
+        purged.email = f"Shouty.{purged.id}@Example.COM"
+        purged.is_deleted = True
+        purged.deleted_at = datetime.now(UTC) - timedelta(days=30)
+        db.commit()
+
+        lowered = purged.email.lower()
+        inviter = create_user(db)
+        invitation = Invitation(email=lowered, user_id=inviter.id, uuid=uuid7())
+        request_row = InviteRequest(email=lowered)
+        db.add_all([invitation, request_row])
+        db.commit()
+        invitation_id, request_id, user_id = invitation.id, request_row.id, purged.id
+        db.expunge_all()
+
+        engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
+        try:
+            async with async_sessionmaker(bind=engine, class_=AsyncSession)() as session:
+                gone = await _purge_one_account(
+                    session,
+                    user_id=user_id,
+                    email=f"Shouty.{user_id}@Example.COM",
+                    cutoff=datetime.now(UTC),
+                )
+        finally:
+            await engine.dispose()
+
+        assert gone is True
+        assert db.get(Invitation, invitation_id) is None
+        assert db.get(InviteRequest, request_id) is None
+
+    @pytest.mark.asyncio
+    async def test_deleting_an_inviter_cascades_their_invitations(self, db: Session) -> None:
+        """The other direction, which needs no statement of its own: `invitation.user_id` is
+        the inviter with `ondelete="CASCADE"`, so the hard delete carries their rows down."""
+        from sqlalchemy import text
+
+        from tests.helpers.generators import create_user
+
+        inviter = create_user(db)
+        row_id = self._invitation(db, inviter, age=timedelta(hours=1))
+
+        db.execute(text('DELETE FROM "user" WHERE id = :id'), {"id": inviter.id})
+        db.commit()
+
+        assert db.get(Invitation, row_id) is None
 
 
 def _row(**overrides):
