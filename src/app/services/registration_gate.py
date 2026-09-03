@@ -53,9 +53,12 @@ NOT_INVITED = "This address hasn't been invited to this instance yet. You can re
 # takes a namespace of the caller's choosing, so the value is arbitrary - but it is not
 # arbitrary in the sense of "pick anything", because this is the app's **second** advisory
 # lock: `core.setup.apply_migrations` takes `_SCHEMA_BOOTSTRAP_LOCK_KEY` to serialise the
-# startup `alembic upgrade head`. Postgres keys advisory locks on the value alone, in one
-# cluster-wide namespace, so a third one has to be checked against both of these rather than
-# assumed unique - `git grep advisory_xact_lock -- src/app` is the check.
+# startup `alembic upgrade head`. Postgres scopes an advisory lock to the connected
+# *database* and otherwise keys it on the value alone - the lock tag carries the database
+# OID and nothing else identifying the caller - so within one instance a third key has to be
+# checked against both of these rather than assumed unique. `git grep advisory_xact_lock --
+# src/app` is the check. (The per-database scoping is also why the suite, which runs against
+# `<db>_test`, cannot contend with the dev database on this key even though it uses it.)
 _REGISTRATION_LOCK_KEY = 0x0D1E_0001
 
 
