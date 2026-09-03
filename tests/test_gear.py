@@ -152,6 +152,15 @@ class TestGearType:
         assert values[-1] == "other"
         assert values != sorted(values)
 
+    def test_the_vocabulary_matches_divejson_1_0s_order(self) -> None:
+        """The members and their order are DiveJSON 1.0's `gear_item.type` enum, so a
+        category cannot simply be appended - it goes where the format puts it. These are
+        the four the app gained last, each pinned against the neighbours that fix its
+        position; the format is the source of truth for the rest (see DECISIONS.md)."""
+        values = [t.value for t in GearType]
+        assert values[values.index("smb") : values.index("reel")] == ["smb", "mirror", "whistle"]
+        assert values[values.index("knife") : values.index("compass")] == ["knife", "line_cutter", "shears"]
+
 
 class TestGearSchemas:
     def test_gear_item_update_distinguishes_unset_from_explicit_null_brand(self) -> None:

@@ -29,7 +29,7 @@ class GearItem(Base, PublicUUIDMixin, TimestampMixin):
     # the numeric ranges on `dive`/`dive_mixture`, whose only other validation lives in
     # the frontend's Zod schemas - see DECISIONS.md), so a DB-level copy of the list
     # would buy nothing and would need a DDL change every time a category is added.
-    # 32 chars is generous headroom over the longest current member ("regulator"),
+    # 32 chars is generous headroom over the longest current member ("line_cutter"),
     # so a new category never needs the column widened.
     type: Mapped[str | None] = mapped_column(String(32), default=None)
     notes: Mapped[str] = mapped_column(Text, default="")
