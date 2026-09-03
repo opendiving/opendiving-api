@@ -69,6 +69,42 @@ no cookie is set, and the account stays deleted until the user acts on it - sign
 silently cancel a deletion somebody deliberately asked for. A client that does not know the third
 status must not fall through to its onboarding branch: there is no `onboarding_token` in it either.
 
+### Registration can be closed, and the onboarding branch is where it shows
+
+`REGISTRATION_MODE` is `invite` by default. On such an instance the "no account yet" branch above is
+not automatic: the address has to hold a live `invitation` row, or the account is refused with a
+`403` whose `detail` says so.
+
+The refusal happens **twice**, at two points and for two different reasons, and both are in
+`services.registration_gate`:
+
+- At the onboarding branch, *for the person's benefit* - so nobody fills in a profile form only to
+  be refused at the end. No onboarding token is minted and no `ONBOARDING_STARTED` row is written.
+- Inside `POST /auth/complete`'s creating transaction, *authoritatively*. This is the one that
+  carries the guarantee: it runs below `release_read_transaction` (which rolls back), so a
+  revocation committed between the two is honoured, and "account created" and "invitation accepted"
+  are a single commit.
+
+Neither is an enumeration oracle. Both run only after the caller has proven the address, so the
+`403` tells them nothing about an address that is not theirs - and `POST /auth/email/request` stays
+ignorant of invitations entirely, exactly as it stays ignorant of accounts.
+
+**The first account on an empty instance is exempt in both modes**, and is created with
+`is_superuser = true`. That is what makes "the first account to sign in is yours" literally true,
+and it is what stops a closed-by-default instance being a first-run deadlock. It is a property of
+the `user` table being empty rather than a one-shot flag, so an instance whose last account is
+purged hands the next signer-in the same deal.
+
+**The passkey paths need nothing**: a credential exists only because a signed-in user registered it,
+so they cannot reach the onboarding branch at all. The Google path needs nothing beyond
+normalisation - its verified address reaches the same funnel, lowercased at the gate.
+
+An address asks to be let in through `POST /invite-requests`, which is anonymous, answers the same
+`202` for every address and never queries the `user` table. The operator works that queue through
+`GET /admin/invite-requests` and `POST /admin/invitations`; a member invites from their own
+settings, bounded by `INVITATIONS_PER_USER` per `INVITATIONS_WINDOW_DAYS`. In `open` mode the
+user-facing invitation routes answer `404` and the feature is absent rather than idle.
+
 #### 1. Sign up with email (new user)
 
 No separate "register" endpoint - a brand-new email just falls out of the same `/auth/email/request`
@@ -491,8 +527,8 @@ token and a regressed passkey signature counter.
 
 A row carries when, where (the request's IP and `User-Agent`) and who - an account id where the
 request had already established one, and an email address for the genuinely pre-account events (an
-auth request created, a sign-in code failed, onboarding started, an invitation requested). It **never** carries a token,
-a token hash, a sign-in code or its digest.
+auth request created, a sign-in code failed, onboarding started, an invitation requested). It
+**never** carries a token, a token hash, a sign-in code or its digest.
 
 Nothing in the API returns these rows; they are visible to an operator through the admin panel at
 `/admin`, registered read-only. Retention is fixed rather than configurable: 90 days for events tied

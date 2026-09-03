@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, String
+from sqlalchemy import DateTime, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.db.database import Base
@@ -42,6 +42,14 @@ class InviteRequest(Base):
     # (`core.worker.functions.purge_expired_invite_requests`) - the argument
     # `b24933e17c19_index_authentication_request_expires_at` makes for its own column, and
     # this table is written by unauthenticated callers, so it is the one most able to grow.
+    #
+    # **`server_default` as well as `default_factory`, unlike every other `created_at` in
+    # this app**, and the pair is load-bearing rather than belt-and-braces. `default_factory`
+    # is applied by SQLAlchemy when it *constructs the model*, and the only writer here is a
+    # Core `INSERT ... ON CONFLICT DO NOTHING` (`crud.crud_invite_requests`) that never
+    # constructs one - so without the server default that statement sends no value for a
+    # `NOT NULL` column and every anonymous request is a 500. The Python default stays for
+    # the ORM inserts the tests and any future caller use, and the two agree: both are UTC.
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default_factory=lambda: datetime.now(UTC), index=True
+        DateTime(timezone=True), default_factory=lambda: datetime.now(UTC), server_default=func.now(), index=True
     )

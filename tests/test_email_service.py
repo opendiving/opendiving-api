@@ -16,6 +16,7 @@ from src.app.services.email_service import (
     send_contact_form_email,
     send_email_change_confirmation_email,
     send_gear_service_digest_email,
+    send_invitation_email,
     send_magic_link_email,
 )
 
@@ -246,6 +247,70 @@ class TestSendMagicLinkEmail:
             assert mock_run_sync.call_args.args[0] is _send
 
 
+class TestSendInvitationEmail:
+    """The ninth sender, and the one that carries somebody else's name into a stranger's
+    inbox."""
+
+    @pytest.mark.asyncio
+    async def test_it_carries_no_token_and_links_to_signin(self):
+        """An invitation is an allow-list entry, not a bearer credential: signing in already
+        proves ownership of the address, so a token here would prove nothing the sign-in
+        does not - and would be a redemption surface to carry through `/auth/verify` into
+        onboarding. The address is in the *body* as well as the header, because a person who
+        forwards this needs to know which mailbox was invited."""
+        with (
+            patch("src.app.services.email_service.settings") as mock_settings,
+            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+        ):
+            _configured(mock_settings)
+            mock_settings.FRONTEND_URL = "https://dive.example.com"
+
+            await send_invitation_email("Invitee@example.com", "Ada Reef")
+
+        _send_fn, message = mock_run_sync.call_args.args
+        body = message.get_content()
+        assert message["To"] == "Invitee@example.com"
+        assert "Ada Reef" in message["Subject"]
+        assert 'href="https://dive.example.com/signin"' in body
+        assert "Invitee@example.com" in body
+        # No token and no query parameter of any kind - the link is the bare sign-in page.
+        assert "token=" not in body
+        assert "/signin?" not in body
+
+    @pytest.mark.asyncio
+    async def test_the_inviter_s_name_is_escaped(self):
+        """It is another diver's free-text profile field going into HTML somebody else
+        reads, which is exactly the shape `send_passkey_added_email` escapes for."""
+        with (
+            patch("src.app.services.email_service.settings") as mock_settings,
+            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+        ):
+            _configured(mock_settings)
+            mock_settings.FRONTEND_URL = "https://dive.example.com"
+
+            await send_invitation_email("invitee@example.com", "<script>alert(1)</script>")
+
+        body = mock_run_sync.call_args.args[1].get_content()
+        assert "<script>" not in body
+        assert "&lt;script&gt;" in body
+
+    @pytest.mark.asyncio
+    async def test_it_logs_rather_than_sending_on_local(self):
+        """The local-development path every sender has: no relay, so the invitation is
+        readable in `docker compose logs api` like the magic link is."""
+        with (
+            patch("src.app.services.email_service.settings") as mock_settings,
+            patch("src.app.services.email_service.smtplib") as mock_smtplib,
+        ):
+            mock_settings.SMTP_HOST = None
+            mock_settings.ENVIRONMENT = EnvironmentOption.LOCAL
+            mock_settings.FRONTEND_URL = "http://localhost:3000"
+
+            await send_invitation_email("invitee@example.com", "Ada Reef")
+
+        mock_smtplib.SMTP.assert_not_called()
+
+
 class TestSendGearServiceDigestEmail:
     LINES = [
         ("Scubapro MK25 EVO", "Service overdue since 1 Jul 2026", "0199-aaaa"),
@@ -374,6 +439,12 @@ class TestCredentialBearingEmailsOutsideLocal:
                 send_email_change_confirmation_email,
                 ("new@example.com", "https://app.example.com/settings/email?token=secret"),
             ),
+            # Nothing here is a credential, and it takes the credential-carrying shape
+            # anyway. The reasoning is the *consequence* of a silent failure rather than the
+            # sensitivity of the payload: a notice nobody gets costs a heads-up, an
+            # invitation nobody gets is an invitee who never learns they were invited while
+            # their inviter's quota was spent on it.
+            (send_invitation_email, ("invitee@example.com", "Ada Reef")),
         ],
     )
     async def test_raises_instead_of_logging_the_token(self, sender, args, environment):

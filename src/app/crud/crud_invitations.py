@@ -1,9 +1,9 @@
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 from fastcrud import FastCRUD
 from sqlalchemy import CursorResult, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import cast
 
 from ..models.invitation import Invitation
 from ..models.user import User
@@ -34,7 +34,9 @@ async def live_invitation_exists(db: AsyncSession, *, email: str) -> bool:
     row can only belong to a purged account whose invitation outlived it, which is exactly
     the case where re-admitting the address is right.
     """
-    exists = await db.scalar(select(func.count()).select_from(Invitation).where(Invitation.email == email, Invitation.revoked_at.is_(None)))
+    exists = await db.scalar(
+        select(func.count()).select_from(Invitation).where(Invitation.email == email, Invitation.revoked_at.is_(None))
+    )
     return bool(exists)
 
 
@@ -72,7 +74,9 @@ async def invitations_created_since(db: AsyncSession, *, user_id: int, window_da
     """
     since = datetime.now(UTC) - timedelta(days=window_days)
     count = await db.scalar(
-        select(func.count()).select_from(Invitation).where(Invitation.user_id == user_id, Invitation.created_at >= since)
+        select(func.count())
+        .select_from(Invitation)
+        .where(Invitation.user_id == user_id, Invitation.created_at >= since)
     )
     return int(count or 0)
 

@@ -47,9 +47,7 @@ logger = logging.getLogger(__name__)
 # person who followed their link and the person who submitted the profile form read the
 # same thing. It names the way forward rather than only the refusal - on an invite-mode
 # instance the landing page is where an invitation is asked for.
-NOT_INVITED = (
-    "This address hasn't been invited to this instance yet. You can request an invitation from the home page."
-)
+NOT_INVITED = "This address hasn't been invited to this instance yet. You can request an invitation from the home page."
 
 # The advisory-lock key the bootstrap decision is serialised on. An arbitrary constant, and
 # arbitrary is fine: `pg_advisory_xact_lock` takes a namespace of the caller's choosing and

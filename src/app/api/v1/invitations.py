@@ -13,7 +13,7 @@ The gate that reads these rows is `services.registration_gate`.
 import logging
 import uuid as uuid_pkg
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
@@ -146,15 +146,33 @@ async def read_invitations(
 
     page, items_per_page = clamp_pagination(page, items_per_page)
 
-    rows: dict[str, Any] = await crud_invitations.get_multi(
-        db=db,
-        offset=compute_offset(page, items_per_page),
-        limit=items_per_page,
-        schema_to_select=InvitationRead,
-        sort_columns=["created_at"],
-        sort_orders=["desc"],
-        user_id=current_user["id"],
+    # `schema_to_select` is the crud alias's own select schema, so the rows come back
+    # carrying the internal ids; the public shape is built from them below rather than left
+    # to `response_model` to strip. Explicit, because "the response model will drop it" is
+    # exactly the reasoning that puts an internal id on the wire the day somebody adds a
+    # route that reuses this helper without one.
+    rows = cast(
+        dict[str, Any],
+        await crud_invitations.get_multi(
+            db=db,
+            offset=compute_offset(page, items_per_page),
+            limit=items_per_page,
+            schema_to_select=InvitationReadInternal,
+            sort_columns=["created_at"],
+            sort_orders=["desc"],
+            user_id=current_user["id"],
+        ),
     )
+    rows["data"] = [
+        InvitationRead(
+            uuid=row["uuid"],
+            email=row["email"],
+            created_at=row["created_at"],
+            accepted_at=row["accepted_at"],
+            revoked_at=row["revoked_at"],
+        ).model_dump()
+        for row in rows["data"]
+    ]
     return paginated_response(crud_data=rows, page=page, items_per_page=items_per_page)
 
 
@@ -291,5 +309,5 @@ async def revoke_invitation(
 
 
 def _window_phrase(days: int) -> str:
-    """"per day" reads better than "per 1 days" on the one refusal a diver actually sees."""
+    """ "per day" reads better than "per 1 days" on the one refusal a diver actually sees."""
     return "per day" if days == 1 else f"every {days} days"

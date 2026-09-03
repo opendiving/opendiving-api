@@ -239,9 +239,7 @@ async def purge_expired_invite_requests(ctx: dict[Any, Any]) -> str:
     """
     cutoff = datetime.now(UTC) - INVITE_REQUEST_RETENTION
     async with local_session() as db:
-        result = cast(
-            CursorResult, await db.execute(delete(InviteRequest).where(InviteRequest.created_at < cutoff))
-        )
+        result = cast(CursorResult, await db.execute(delete(InviteRequest).where(InviteRequest.created_at < cutoff)))
         purged = result.rowcount
         await db.commit()
 

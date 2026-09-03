@@ -259,6 +259,91 @@ class TestTheFirstSuperuserAddressHasNoDefault:
         assert _config_loaded_without_an_env_file(tmp_path, monkeypatch).settings.ADMIN_NAME == "admin"
 
 
+class TestRegistrationSettings:
+    """`REGISTRATION_MODE` and the four numbers beside it.
+
+    The default is the load-bearing one and it is a **breaking change**: an instance that
+    sets nothing is now invite-only, where before it took anybody. Read off a `config.py`
+    loaded with no `.env` in reach, because `config()` resolves its default at import
+    against the developer's own `src/.env` - so reading `settings.REGISTRATION_MODE`
+    directly would report what that file happens to say rather than what the code declares,
+    which is exactly the assertion that would stop meaning anything.
+    """
+
+    def test_an_instance_that_configures_nothing_is_invite_only(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("REGISTRATION_MODE", raising=False)
+        module = _config_loaded_without_an_env_file(tmp_path, monkeypatch)
+
+        assert module.settings.REGISTRATION_MODE is module.RegistrationMode.INVITE
+
+    def test_open_is_the_other_value_and_it_is_accepted(self):
+        from src.app.core.config import RegistrationMode
+
+        assert _settings(REGISTRATION_MODE=RegistrationMode.OPEN).REGISTRATION_MODE is RegistrationMode.OPEN
+
+    @pytest.mark.parametrize("value", ["closed", "invite_only", "OPEN ", "", "true"])
+    def test_an_unknown_value_fails_at_import(self, value: str):
+        """The loud failure the boot guard section wants: `Settings()` runs at import, so a
+        typo kills the container at startup and `pytest` at collection, rather than
+        selecting a mode nobody chose. `EnvironmentOption` is the shape being copied."""
+        with pytest.raises(ValueError):
+            _settings(REGISTRATION_MODE=value)
+
+    def test_the_quota_defaults_to_five_a_day(self, tmp_path, monkeypatch):
+        """A rate rather than a lifetime allotment. Both halves are read together because
+        neither means anything alone."""
+        for name in ("INVITATIONS_PER_USER", "INVITATIONS_WINDOW_DAYS"):
+            monkeypatch.delenv(name, raising=False)
+        module = _config_loaded_without_an_env_file(tmp_path, monkeypatch)
+
+        assert module.settings.INVITATIONS_PER_USER == 5
+        assert module.settings.INVITATIONS_WINDOW_DAYS == 1
+
+    def test_the_request_limits_mirror_the_contact_form(self, tmp_path, monkeypatch):
+        """Same shape and same values: both endpoints are anonymous and both act on a
+        stranger's say-so, so a divergence here would be a number with no argument behind
+        it. Asserted against the contact form's own defaults rather than against literals,
+        so the two move together or the test says so."""
+        for name in (
+            "INVITE_REQUEST_RATE_LIMIT_WINDOW_SECONDS",
+            "INVITE_REQUEST_RATE_LIMIT_PER_EMAIL",
+            "INVITE_REQUEST_RATE_LIMIT_PER_IP",
+            "CONTACT_FORM_RATE_LIMIT_WINDOW_SECONDS",
+            "CONTACT_FORM_RATE_LIMIT_PER_EMAIL",
+            "CONTACT_FORM_RATE_LIMIT_PER_IP",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        loaded = _config_loaded_without_an_env_file(tmp_path, monkeypatch).settings
+
+        assert loaded.INVITE_REQUEST_RATE_LIMIT_WINDOW_SECONDS == loaded.CONTACT_FORM_RATE_LIMIT_WINDOW_SECONDS
+        assert loaded.INVITE_REQUEST_RATE_LIMIT_PER_EMAIL == loaded.CONTACT_FORM_RATE_LIMIT_PER_EMAIL
+        assert loaded.INVITE_REQUEST_RATE_LIMIT_PER_IP == loaded.CONTACT_FORM_RATE_LIMIT_PER_IP
+
+    def test_every_new_setting_is_in_the_template(self):
+        """`src/.env.example`'s own rule: a setting that can be silently wrong belongs there
+        as a commented block showing its default. The template is the canonical setup, so a
+        setting missing from it is one a self-hoster only discovers by reading the source.
+        """
+        from pathlib import Path
+
+        template = (Path(__file__).resolve().parents[1] / "src" / ".env.example").read_text()
+
+        for name in (
+            "REGISTRATION_MODE",
+            "INVITATIONS_PER_USER",
+            "INVITATIONS_WINDOW_DAYS",
+            "INVITE_REQUEST_RATE_LIMIT_WINDOW_SECONDS",
+            "INVITE_REQUEST_RATE_LIMIT_PER_EMAIL",
+            "INVITE_REQUEST_RATE_LIMIT_PER_IP",
+        ):
+            assert name in template, name
+
+        # The line to uncomment is the *non-default* value, the way `# WEB_NOINDEX=true`
+        # flips away from its default in the bundle's own template: uncommenting a block is
+        # a decision, and a template that restated the default would make it a no-op.
+        assert '# REGISTRATION_MODE="open"' in template
+
+
 class TestLogLevel:
     def test_a_level_name_is_normalized(self):
         assert _settings(LOG_LEVEL=" debug ").LOG_LEVEL == "DEBUG"

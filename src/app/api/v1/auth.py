@@ -744,9 +744,7 @@ async def complete_profile(
             "avatar_storage_key": avatar.storage_key if avatar else None,
             "avatar_sha256": avatar.sha256 if avatar else None,
         }
-        user_internal = (
-            UserBootstrapCreateInternal(**user_fields) if bootstrap else UserCreateInternal(**user_fields)
-        )
+        user_internal = UserBootstrapCreateInternal(**user_fields) if bootstrap else UserCreateInternal(**user_fields)
 
         created_user = await crud_users.create(
             db=db, object=user_internal, commit=False, schema_to_select=UserReadInternal, return_as_model=True

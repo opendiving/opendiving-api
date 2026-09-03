@@ -62,6 +62,46 @@ class TestPatchUser:
                 await patch_user(Mock(), user_update, current_user_dict, mock_db)
 
 
+class TestIsSuperuserOnTheCallersOwnRecord:
+    """`UserRead` carries `is_superuser` so a client can decide whether to offer the
+    operator's surface at all.
+
+    Not a disclosure about anybody else: `GET /user` returns the caller's own row, and no
+    route in this app returns another account's. It is also not the gate - the three
+    `/api/v1/admin/*` routes take `get_current_superuser`, and a client that lied about this
+    field to itself would still be refused there.
+    """
+
+    def test_it_defaults_to_false(self):
+        """The same reasoning as `units` beside it: a row read back without the key must
+        still answer, and the safe answer is "not an operator"."""
+        values = UserRead.model_validate(
+            {"uuid": uuid7(), "name": "Ada Lovelace", "username": "ada", "email": "ada@example.com"}
+        )
+
+        assert values.is_superuser is False
+
+    def test_it_is_published_when_the_row_carries_it(self):
+        values = UserRead.model_validate(
+            {
+                "uuid": uuid7(),
+                "name": "Ada Lovelace",
+                "username": "ada",
+                "email": "ada@example.com",
+                "is_superuser": True,
+            }
+        )
+
+        assert values.is_superuser is True
+
+    def test_patch_user_cannot_set_it(self):
+        """`UserUpdate` is `extra="forbid"`, so an attempt to grant yourself the operator's
+        surface is a 422 naming the field rather than a silently ignored no-op. The panel's
+        `UserAdminUpdate` cannot set it either - promotion is SQL or the bootstrap."""
+        with pytest.raises(ValidationError):
+            UserUpdate(is_superuser=True)
+
+
 class TestUnitsPreference:
     """`units` - the account-level metric-or-imperial toggle.
 

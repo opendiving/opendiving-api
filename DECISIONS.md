@@ -9716,11 +9716,11 @@ dives. It now also gates the three `/api/v1/admin/*` routes (`api.v1.admin`): th
 batch invite and the batch removal, whose caller can read the addresses of everybody waiting to be
 let in and invite them. That widens the consequence of a wrongly-created superuser without changing
 this section's conclusion — the dives are still nobody's but their owner's, the script is still not
-in the image, and its compose service is still commented out. The script
-is not in the published image either (`.dockerignore` excludes `scripts/`, and the Dockerfile copies
-only `src/app` and `src/migrations`) and its compose service is commented out. So this is not a live
-hole; it is the third instance of a default that is wrong in somebody else's install, after
-`EMAIL_FROM_ADDRESS` and `CONTACT_FORM_EMAIL`, and it is fixed the same way both of those were.
+in the image, and its compose service is still commented out. The script is not in the published
+image either (`.dockerignore` excludes `scripts/`, and the Dockerfile copies only `src/app` and
+`src/migrations`) and its compose service is commented out. So this is not a live hole; it is the
+third instance of a default that is wrong in somebody else's install, after `EMAIL_FROM_ADDRESS` and
+`CONTACT_FORM_EMAIL`, and it is fixed the same way both of those were.
 
 `ADMIN_EMAIL` is now `str | None` with no default, `src/.env.example` ships it **commented out** —
 the same half-of-the-fix argument as the from-address, since a template value that is active
@@ -10147,13 +10147,13 @@ finding is a new patch release, and the issue body now says so per row rather th
 [The bundled `Caddyfile`](https://github.com/opendiving/opendiving/blob/main/Caddyfile) routed five
 paths — `/api/v1*`, `/admin*`, `/docs`, `/redoc`, `/openapi.json` — straight to `api:8000`, so
 nothing the web container sets reaches any of them. (`/admin*` has since come off that list: it is
-the web app's superuser section now, and the section below marks where that changes the argument.) The comment on the `web` handler directly below
-said the web app "sets its own security headers, HSTS included … so there is nothing to add here",
-which was true of that handler and read as if it covered the site. Nothing filled the gap on the API
-side either: CRUDAdmin ships no security headers at all (grep the installed package — there are
-none), the API set none globally, and Caddy adds none by default. So the CRUDAdmin panel, a full
-create/update/delete interface over `User`, `Dive`, `GearItem` and everything else in
-`admin/views.py`, was served framable.
+the web app's superuser section now, and the section below marks where that changes the argument.)
+The comment on the `web` handler directly below said the web app "sets its own security headers,
+HSTS included … so there is nothing to add here", which was true of that handler and read as if it
+covered the site. Nothing filled the gap on the API side either: CRUDAdmin ships no security headers
+at all (grep the installed package — there are none), the API set none globally, and Caddy adds none
+by default. So the CRUDAdmin panel, a full create/update/delete interface over `User`, `Dive`,
+`GearItem` and everything else in `admin/views.py`, was served framable.
 
 **Not urgent, and the PR should not be read as though it were.** Two things already blunt it. First,
 CRUDAdmin's session cookie is `SameSite=strict` outside debug mode (`crudadmin/session/manager.py`'s
@@ -10207,10 +10207,10 @@ later and ends up with two definitions of one policy.
   checked.
 - **No `Strict-Transport-Security`.** It is host-scoped, so the web app's header already covers
   everything this app serves for anyone who has loaded a page of the site, and the residual case
-  above closes on the first one. Sending it from here as well would put two controls on one behaviour — and the
-  off-switch, `WEB_HSTS`, lives in the other repository, so an API-side copy would ignore it. That
-  matters concretely rather than tidily: `WEB_HSTS=off` is what a plain-HTTP LAN instance uses, and
-  a pin it cannot honour makes the instance unreachable.
+  above closes on the first one. Sending it from here as well would put two controls on one
+  behaviour — and the off-switch, `WEB_HSTS`, lives in the other repository, so an API-side copy
+  would ignore it. That matters concretely rather than tidily: `WEB_HSTS=off` is what a plain-HTTP
+  LAN instance uses, and a pin it cannot honour makes the instance unreachable.
 
 **Handlers keep their own headers**, the same contract `ClientCacheMiddleware` keeps with
 `Cache-Control`. That protects the three binary-download responses, whose
@@ -13330,11 +13330,11 @@ rotation.
 ### `user_id` is set only where the request already holds the account
 
 Four events are user-less **by design** rather than by omission: auth request created, sign-in code
-failed, onboarding started, and an invitation requested. `request_email_link` "never even queries `crud_users`" — the
-enumeration protection there is structural, the code path genuinely cannot distinguish an existing
-account from a new one (*"Unified auth flow"*) — and an audit-time lookup to fill in a `user_id`
-would reverse that guarantee verbatim, in a `crud_users` call no diff reviewer would connect to the
-paragraph eleven thousand lines away that it contradicts.
+failed, onboarding started, and an invitation requested. `request_email_link` "never even queries
+`crud_users`" — the enumeration protection there is structural, the code path genuinely cannot
+distinguish an existing account from a new one (*"Unified auth flow"*) — and an audit-time lookup to
+fill in a `user_id` would reverse that guarantee verbatim, in a `crud_users` call no diff reviewer
+would connect to the paragraph eleven thousand lines away that it contradicts.
 
 Everything downstream of a resolved identity carries the id it already had. Two sites work slightly
 harder for it and both are bounded: `POST /auth/logout` authenticates on `oauth2_scheme` alone and
@@ -13747,3 +13747,276 @@ instance". The other two templates never carried the sentence. The test that sep
 sentences left alone is whether removing "self-hosted" changes what the sentence asserts. In
 *"self-hosters pick a fix up the way they pick up everything else"* it does — that names who does
 the picking. Here it only subtracts.
+
+## An invitation is an allow-list entry, not a bearer token
+
+`invitation` carries no secret, and there is nothing on it to hash. The invitee is admitted because
+they signed in with the address that was invited, full stop.
+
+The obvious alternative is what most comparable apps ship — a shareable code the invitee redeems
+(Mastodon, Lemmy, Mealie, a Bluesky PDS) — and the reason it was rejected is that sign-in *already*
+proves ownership of the address. A magic link is delivered to that mailbox, the six-digit code is
+printed in the same email, and Google's `email_verified` claim says the same thing; a token carried
+in the invitation email would prove nothing on top of that, while adding a whole redemption surface:
+generation, hashing, single use, and carriage through `/auth/verify` into `/onboarding`, where the
+onboarding token is already the thing being carried. Plausible binds the same way ("They will need
+to register for a Plausible account with the email address that was invited") and Ghost derives its
+token from the email, which is the same binding wearing a token's clothes.
+
+What the allow-list costs is forwardability, and that is the feature rather than the price: a
+shareable code decouples "who was invited" from "who signed up", which for a closed beta whose queue
+is keyed on addresses is precisely the thing worth keeping coupled.
+
+Two consequences worth stating because they read as omissions otherwise. **There is no
+per-invitation expiry** the invitee races against — a beta invitee slow to act should not have to be
+re-invited within the week, and what bounds the address instead is the 90-day retention sweep. And
+**revocation stamps `revoked_at` rather than deleting the row**, which is what keeps the quota an
+honest bound on emails sent: the count is over rows created in the window, so an invitation cannot
+be un-sent by withdrawing it afterwards.
+
+## The registration gate sits below `release_read_transaction`, and that is the whole design
+
+`POST /auth/complete` contains a transaction boundary that is easy not to see. Between the duplicate
+username/email checks and the insert it calls `release_read_transaction(db)`, which **rolls back** —
+it exists to stop the handler holding a connection idle-in-transaction across the Google avatar
+fetch. Anything read, locked or written above that line is discarded before the row is created.
+
+So a gate check placed with the other pre-flight checks, where it visually belongs, decides nothing:
+by the time the account is inserted its answer has been thrown away, and a revocation committed in
+between is silently ignored. The check therefore lives **below** the release, inside the `try` that
+creates the row, in the one transaction `db.commit()` ends. Three things follow from that placement
+and none of them are free anywhere else:
+
+- A revocation or a mode flip committed between the verification and the completion is honoured,
+  because the gate's `SELECT` runs after the rollback and sees the committed row version.
+- "Account created" and "invitation accepted" are one commit, so an address whose account exists can
+  never still hold a live invitation.
+- The emptiness check that decides the bootstrap exemption is in the same transaction as the insert
+  it authorises.
+
+`tests/test_registration_gate.py` stages the first of those against a real Postgres on two
+connections, hooking the revocation onto the avatar import — which is exactly what the handler is
+doing while the transaction is released. A structural assertion that the check "is called" would
+pass on a build that called it above the rollback, which is the bug.
+
+**The refusal path rolls back explicitly**, and the `except ForbiddenException` that does it is not
+tidiness. The gate takes a transaction-scoped advisory lock (below), `async_get_db` does not end the
+transaction on unwind, and a request that raised out of the handler still holding that lock would
+block every other account creation until its connection went back to the pool.
+
+## The bootstrap exemption is a property of the table being empty, not a flag
+
+While `user` is empty, the next address to complete onboarding is admitted whatever
+`REGISTRATION_MODE` says, and its row carries `is_superuser = true`.
+
+It resolves a deadlock that closed-by-default would otherwise create: a fresh `invite` instance has
+no invitations and no superuser to make one. The alternative was promoting by hand —
+`scripts/create_first_superuser.py` or SQL — and that is not available to the audience that needs
+it: the script is excluded from the published image, so a self-hoster would have to deploy open,
+sign in, flip the row, and then close the instance, with the docs growing a bootstrap step for it.
+It also makes the front door's "the first account to sign in is yours" literally true rather than
+approximately, and it applies in `open` mode too, so a fresh open instance gets an operator without
+SQL either.
+
+**Emptiness rather than a one-shot flag** is deliberate and has a consequence worth knowing:
+`_purge_one_account` hard-deletes the `User` row, so an instance whose last account is deleted and
+purged is a fresh instance again, and the next address to sign in becomes its operator. That is the
+same sentence the install docs already carry, and a flag would have made it quietly false.
+
+**The lock, and why it is unconditional.** Two concurrent first sign-ups would both count zero
+accounts and both be created as superusers, and the emptiness check cannot be made atomic on its own
+— there is no row to lock, which is the problem rather than an oversight. `admit_or_refuse`
+therefore takes `pg_advisory_xact_lock` on a fixed key *before* the count. Transaction-scoped, so it
+is released by the transaction ending whichever way it ends and there is no unlock to forget on the
+refusal path; and taken on every account creation rather than only the bootstrap one, because
+branching would mean a race between the branch and the check. The cost is that account creations
+serialise, which for a human-paced act on an instance with an invitation list is not a cost.
+
+`SERIALIZABLE` would also work and was not chosen: it would make the guarantee a property of the
+isolation level rather than of a line of code a reader can see, and it moves the failure from
+"blocks briefly" to "raises a serialization error the handler has to retry".
+
+The suite pins this by staging the race on two connections and asserting exactly one superuser
+exists afterwards. It genuinely fails without the lock — both racers are admitted — which was
+verified by removing the call and watching both parametrizations go red.
+
+## The invite-request endpoint stays ignorant, exactly as the sign-in request does
+
+`POST /invite-requests` never queries the `user` table. It answers the same `202` with the same
+frozen message for a first request, a repeat, an address that already has an account and an address
+somebody invited last week.
+
+This is `request_email_link`'s guarantee, extended one endpoint over and for a sharper reason. That
+endpoint is structurally incurious about accounts and pinned to stay so
+(`tests/test_auth.py::test_never_queries_whether_the_user_exists`); on a closed instance there is
+now a *second* fact about a stranger worth protecting — whether they are allowed in — and it is the
+more sensitive of the two, because on an invite-only instance the membership list is the whole
+population. So the same test was extended rather than a new one written beside it: the handler must
+not learn whether an address has an account **or** whether it is invited.
+
+Two consequences the design accepts rather than works around:
+
+- **A request row may be stored for an address that already has an account.** The handler cannot
+  know, by construction. The operator's queue resolves it: `GET /admin/invite-requests` carries a
+  `has_account` flag — *that* route may look, because its caller is the operator rather than an
+  anonymous stranger — and the operator removes the row.
+- **A repeat submission stores nothing**, because the insert is `ON CONFLICT DO NOTHING`. The audit
+  row is written anyway: what it carries beyond the address is the IP and User-Agent, and those are
+  the whole reason an anonymous write site emits an event at all — the same argument that makes
+  `AUTH_REQUEST_CREATED` unconditional.
+
+The refusal an uninvited person eventually meets happens at the onboarding branch and at account
+creation, where they have already proven the address and nothing is disclosed by telling them.
+
+**`ON CONFLICT DO NOTHING` rather than a `SELECT` then an `INSERT`**, and the difference is the
+guarantee rather than a micro-optimisation. Check-then-insert has a window in which two submissions
+of one address both find nothing and both insert; the second then raises an `IntegrityError` the
+handler has to translate back into the same neutral `202` — a branch that can be got wrong, on the
+one endpoint in this app where being got wrong means telling a stranger whether an address is
+already in the queue. One statement has no window and one answer. It is also the app's first
+Postgres-specific `insert`, which costs no portability it had: `postgresql://` is the only DSN
+`core.config` builds.
+
+## The invitation quota is counted from the table, not from the rate limiter
+
+`INVITATIONS_PER_USER` per `INVITATIONS_WINDOW_DAYS` (5 per 1 day) is enforced by counting
+`invitation` rows this inviter created in the trailing window — revoked and accepted ones included.
+Redis is not consulted.
+
+The limiter beside it would have been the obvious tool and is the wrong one twice over. It **fails
+open on a Redis outage by design** (*"Rate limiting fails open on a Redis *outage*"*), which is
+right for pacing a sign-in form and wrong for a bound on who gets into a closed instance; and its
+counters are flushed locally, so the bound would evaporate on a restart. A growth limit and a pacing
+limit look alike and want opposite failure modes.
+
+**Revoked rows count**, which is what makes this a bound on *emails sent* rather than on live
+invitations: the mail is gone by the time anybody revokes, and letting a revoke free a slot would
+turn the quota into a bucket an inviter can refill at will. Accepted ones count for the same reason.
+
+**A rate rather than a lifetime allotment.** Lemmy's `max_invites_per_user_allowed` (default 10) is
+the allotment shape and Mastodon's is unlimited-with-a-rate-limit; a beta member who invites five
+friends today should be able to invite five more tomorrow without an operator topping them up.
+Superusers are exempt, and the exemption is structural — the count is never taken for them, so a
+stale number cannot refuse an operator.
+
+## Inviting an address that already has an account is a 409, and that is a disclosure
+
+`POST /user/invitations` answers `409 That address already has an account on this instance.` It
+tells a signed-in caller, bounded by a quota, that a particular address is registered here.
+
+Accepted deliberately. The alternative is a `201` that creates nothing, and it is worse in both
+directions: the inviter then looks for an invitation that is nowhere in their list, and an
+"accepted" status against a row that was never sent would reveal the same fact a moment later
+anyway. Plausible and Ghost both surface this case openly. The exposure is bounded by three things
+already in place — the caller is authenticated, the quota caps how many addresses they can probe,
+and the endpoint exists only on an instance whose operator chose to close it.
+
+The comparison is **case-insensitive**, and that is not incidental to it: see below.
+
+## Every account comparison in the invitation path is on `lower(User.email)`
+
+`POST /auth/complete` inserts `token_data.email` verbatim, and the Google path hands
+`resolve_identity` its `email` claim un-lowercased — so a Google-born account's stored `User.email`
+may carry capitals. Both invitation tables store lowercase unconditionally.
+
+That mismatch is a live bug generator, and the narrow fix was chosen over the wide one. The wide fix
+is to normalise `User.email` on write, which is correct and touches the account path, the
+email-change path and every existing row; the narrow fix is to compare on `lower(User.email)`
+wherever an invitation address meets an account. Three sites do:
+
+- the `409` on `POST /user/invitations`,
+- `has_account` on `GET /admin/invite-requests`,
+- the "skip if it already has an account" arm of `POST /admin/invitations`.
+
+All three go through `crud.crud_invitations.account_exists_for`, which exists so there is one place
+for the rule rather than three equalities that each look right.
+
+**The account purge needs the mirror image of this**, and it is the one place where comparing raw
+would be wrong in the other direction. `_purge_one_account` receives the stored `User.email`; the
+two by-address deletes already there (`authentication_request`, `auth_audit_event`) compare it raw
+and are correct, because those tables hold whatever the sign-in path wrote. The two invitation
+deletes lowercase it first, because those tables hold lowercase. A single rule applied to all four
+would be wrong for two of them, so the difference is commented at the call site rather than tidied
+away.
+
+## `invite_request.created_at` needs a `server_default`, unlike every other one in this app
+
+The column carries both `default_factory` and `server_default=func.now()`, and the pair is
+load-bearing rather than belt-and-braces.
+
+`default_factory` is applied by SQLAlchemy when it **constructs the model instance**. The only
+writer of this table is a Core `INSERT ... ON CONFLICT DO NOTHING` (`crud.crud_invite_requests`),
+which never constructs one — so without the server default the statement sends no value for a
+`NOT NULL` column and *every anonymous invite request is a 500*. Nothing about the model looks
+wrong; the failure is in the interaction between a Core statement and an ORM-side default, and it
+surfaces only against a real database.
+
+It was caught by the Postgres-backed test for the repeat-request case rather than by review, which
+is the argument for having written that test at all: every mocked test of the endpoint passed
+throughout, because a mocked session evaluates no constraint.
+
+The Python default stays for the ORM inserts the tests and any future caller use, and the two agree
+— both are UTC-aware. The general rule this is an instance of: **a column written by hand-written
+Core needs its default in the database, not in the mapper.**
+
+## The invitation tables carry their own retention, and it is 90 days for both
+
+`INVITATION_RETENTION` and `INVITE_REQUEST_RETENTION` are module constants beside
+`AUTH_AUDIT_RETENTION`, deliberately not settings — following `AUTHENTICATION_REQUEST_RETENTION`'s
+own non-configurability, and with the same second benefit: no new setting is one less row in the
+install bundle's `example.env` and its configuration reference, which live in another repository.
+
+**Ninety days rather than unbounded, for both, and the argument is the anonymous audit tier's.**
+Both tables hold the same category of datum: a non-user's email address, plus (for an invitation)
+who invited them. The audit row that already names that address expires at 90 days, and this repo's
+recorded doctrine says an address that survives far longer in one table than in another "is a new
+retention decision wearing an old one's clothes". Leaving either table to grow forever would have
+been exactly that, made silently.
+
+Two asymmetries inside it:
+
+- **A revoked invitation is swept on `created_at`, not on `revoked_at`.** Re-clocking on the revoke
+  would keep a withdrawn address around *longer* than a live one, which is backwards.
+- **An accepted invitation is never swept.** It is two accounts' shared history rather than a
+  pending allow-list entry, and it goes when either of them does — the inviter's down the FK
+  cascade, the invitee's through the by-address arm of `_purge_one_account`.
+
+What the sweep costs is stated rather than hidden: an invitation ignored for three months stops
+admitting its address, and the person has to be invited again.
+
+## The operator's routes are the first superuser-gated `/api/v1` routes, and the gate is router-level
+
+`api.v1.admin` declares `dependencies=[Depends(get_current_superuser)]` on its `APIRouter` rather
+than naming it in each handler. The route-walking auth guard reads include-level dependencies
+through the merged dependant (`tests/helpers/routes.py` says so in as many words), so it sees the
+marker on every route in the module — and a fourth route added there cannot arrive unprotected by
+forgetting a line.
+
+**Why the routes are here and the pages are not.** The operator's UI is a superuser-gated section of
+the web app; this module is the JSON it drives. The deciding argument is auth rather than features:
+this app has no passwords, the access token is a bearer header held in browser memory, and the
+refresh cookie is single-use and `SameSite=lax` — so a browser *navigating* to a server-rendered
+admin page on this origin carries no credential this app recognises. The staging `/docs` route,
+gated on the same dependency, is the existing proof: it is reachable only by a client that adds the
+header by hand. Every API-side alternative therefore either keeps a second identity with its own
+password (which is what CRUDAdmin is) or builds a cookie-to-page auth bridge nobody else ships.
+
+Three more reasons, each grounded rather than aesthetic: library admins write straight to the tables
+and skip the service layer, which this repo has already paid for once (`admin/views.py`, the comment
+on why six models lost their delete — "no cache invalidation: that lives on the API routes"); the
+map picker a dive-site admin will want is a web-image artifact whose basemap settings reach only the
+web container and whose CSP is the web's, so an API-side admin would build it twice; and a list with
+checkboxes and a confirm dialog is the web's most practised shape.
+
+**The argument against, recorded so it is not relitigated blind:** every admin screen for an
+audience of one now costs what a diver-facing screen costs in review and tests, where a library
+would have given tables, filters and export for free. The hedge is that this router is the
+load-bearing half — bolting a table-browser on later is a day's work — which is why the operator's
+contract ships as ordinary routes whichever UI drives them.
+
+**The batch route reports per-address outcomes rather than failing on the first problem.**
+`invited`, `already_registered`, `already_invited`, `mail_failed`. A partial SMTP failure is then
+visible as *which* addresses got through, instead of a 5xx that hides them; and `mail_failed` names
+real invitations whose invitees have simply not been told, which is a thing the operator can act on.
+Sends are sequential and inline — the worker runs crons only (*"The Arq worker now does one real
+thing"*), and a bounded one-off operator action does not justify this app's first queued job.

@@ -90,9 +90,7 @@ async def read_invite_requests(
 
     data: dict[str, Any] = {
         "data": [
-            AdminInviteRequestRead(
-                email=row.email, created_at=row.created_at, has_account=row.has_account
-            ).model_dump()
+            AdminInviteRequestRead(email=row.email, created_at=row.created_at, has_account=row.has_account).model_dump()
             for row in rows
         ],
         "total_count": int(total or 0),

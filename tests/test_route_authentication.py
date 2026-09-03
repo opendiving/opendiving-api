@@ -33,7 +33,8 @@ AUTH_MARKERS: set[Any] = {get_current_user, get_current_superuser, oauth2_scheme
 
 # The reason is the payload here, not the path. It is what a reviewer reads when someone
 # proposes the next entry, and "it needs to be anonymous" is not one of these reasons.
-# They fall into four groups.
+# They fall into the numbered groups below; the numbers are labels rather than a count, so
+# adding a group is adding a group.
 ANONYMOUS_BY_DESIGN: dict[tuple[str, str], str] = {
     # 1. The caller has no token yet, by definition - these *are* the flow that issues one.
     ("POST", "/api/v1/auth/email/request"): "Asks for a magic link; nobody is signed in at the start of sign-in.",
@@ -70,12 +71,6 @@ ANONYMOUS_BY_DESIGN: dict[tuple[str, str], str] = {
         "account. It answers the same 202 for every address and never queries `user`, which is the "
         "same structural guarantee `/auth/email/request` carries and for the same reason."
     ),
-    # 5. The caller is a browser deciding what to render before anyone has signed in.
-    ("GET", "/api/v1/config"): (
-        "Tells the landing page whether registration is open or by invitation, which it has to know "
-        "before its first paint - and before any session exists. Discloses one bit the page discloses "
-        "anyway by which form it then shows."
-    ),
     # 3. The caller is a monitor or an orchestrator, holding no account at all.
     ("GET", "/api/v1/health"): "Liveness probe, read by whatever decides whether to restart the container.",
     ("GET", "/api/v1/health/ready"): "Readiness probe, same caller as /health.",
@@ -94,6 +89,12 @@ ANONYMOUS_BY_DESIGN: dict[tuple[str, str], str] = {
         "not an existence oracle for anything private, and the bytes are freely licensed "
         "files anybody can fetch from Commons directly. Serving them from here is what stops "
         "a diver's browser telling Wikimedia which species they are looking at."
+    ),
+    # 5. The caller is a browser deciding what to render before anyone has signed in.
+    ("GET", "/api/v1/config"): (
+        "Tells the landing page whether registration is open or by invitation, which it has to know "
+        "before its first paint - and before any session exists. Discloses one bit the page discloses "
+        "anyway by which form it then shows."
     ),
 }
 
