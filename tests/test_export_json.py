@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.app.schemas.export import EXPORT_FORMAT, EXPORT_VERSION, ExportEnvelope
+from src.app.schemas.export import EXPORT_FORMAT, EXPORT_VERSION, ExportCourse, ExportEnvelope
 from src.app.services.dive_profiles import LoadedProfile
 from src.app.services.export.envelope import write_export_json
 from src.app.services.export.paths import plan_archive_paths
@@ -79,15 +79,23 @@ class TestWhatUddfCannotHold:
     @pytest.mark.asyncio
     async def test_training_courses_are_here_with_every_attribute(self, monkeypatch):
         """UDDF's nearest element is `<divetrip>`, which a training course is not - so this
-        file is the only place a course survives the export at all."""
+        file is the only place a course survives the export at all.
+
+        The key-set assertion is what makes the name a promise rather than a hope: the
+        spot checks below only ever grew when someone remembered to add one, so a field
+        added to `ExportCourse` and never written - or one removed from the schema and
+        still written here - passed unnoticed. It is the same shape
+        `test_every_declared_collection_is_present` uses one level up.
+        """
         document = await _render(full_bundle(), monkeypatch)
         (course,) = document["courses"]
 
+        assert set(course) == set(ExportCourse.model_fields)
         assert course["name"] == "Advanced Nitrox + Decompression Procedures"
         assert (course["agency"], course["status"]) == ("tdi", "completed")
         assert (course["start_date"], course["end_date"]) == ("2026-03-02", "2026-03-06")
         assert (course["instructor_name"], course["instructor_number"]) == ("Jae Kim", "TDI-88121")
-        assert (course["training_center"], course["cost"]) == ("Blue Ocean", "EUR 1450")
+        assert course["training_center"] == "Blue Ocean"
 
     @pytest.mark.asyncio
     async def test_both_account_preferences_travel_with_the_logbook(self, monkeypatch):

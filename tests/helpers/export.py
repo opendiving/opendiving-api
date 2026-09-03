@@ -268,7 +268,6 @@ def full_bundle() -> ExportBundle:
             instructor_name="Jae Kim",
             instructor_number="TDI-88121",
             training_center="Blue Ocean",
-            cost="EUR 1450",
             notes="Two deco dives to 45 m",
             uuid=UUIDS["course"],
             created_at=CREATED_AT,

@@ -222,7 +222,6 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     instructor_name=course.instructor_name,
                     instructor_number=course.instructor_number,
                     training_center=course.training_center,
-                    cost=course.cost,
                     notes=course.notes,
                     created_at=course.created_at,
                 )

@@ -57,10 +57,6 @@ class CourseBase(BaseModel):
         str | None,
         Field(default=None, max_length=255, description="Dive shop, resort or club that ran the course"),
     ]
-    cost: Annotated[
-        str | None,
-        Field(default=None, max_length=64, examples=["EUR 1450"], description="What it cost, as the diver notes it"),
-    ]
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
 
     @model_validator(mode="after")
@@ -119,9 +115,9 @@ class CourseUpdate(RejectsExplicitNulls):
     model_config = ConfigDict(extra="forbid")
 
     # Everything nullable stays off this list, so an explicit null clears it: an
-    # instructor misremembered, a cost that turned out not to be worth recording, and the
-    # dates of a course that turned out to be `planned` after all are all real edits.
-    # `agency_other` in particular is half of moving a course off `agency="other"`.
+    # instructor misremembered, and the dates of a course that turned out to be `planned`
+    # after all, are both real edits. `agency_other` in particular is half of moving a
+    # course off `agency="other"`.
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "agency", "status", "notes")
 
     name: Annotated[str | None, Field(default=None, min_length=1, max_length=255)]
@@ -133,7 +129,6 @@ class CourseUpdate(RejectsExplicitNulls):
     instructor_name: Annotated[str | None, Field(default=None, max_length=255)]
     instructor_number: Annotated[str | None, Field(default=None, max_length=64)]
     training_center: Annotated[str | None, Field(default=None, max_length=255)]
-    cost: Annotated[str | None, Field(default=None, max_length=64)]
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
 
 

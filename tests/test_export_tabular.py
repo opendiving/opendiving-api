@@ -20,6 +20,8 @@ import pytest
 
 from src.app.services.export.tabular import (
     BOM,
+    CERTIFICATIONS_HEADER,
+    COURSES_HEADER,
     CSV_WRITERS,
     DIVE_SITES_HEADER,
     DIVES_HEADER,
@@ -43,19 +45,23 @@ from tests.helpers.export import UUIDS, build_bundle, full_bundle, make_dive, mi
 
 GOLDEN = Path(__file__).parent / "fixtures" / "export" / "dives.csv"
 
-# Every file in `CSV_WRITERS` except `dives.csv`, which is the flat one. Hand-written and
-# therefore able to go short - `test_every_normalized_file_is_headed_even_when_empty` is
-# the only thing it feeds, and a writer left out of it is simply not covered there.
-# `write_species_csv` was missing until courses were added; both are here now.
-_NORMALIZED_WRITERS = (
-    write_mixtures_csv,
-    write_trips_csv,
-    write_courses_csv,
-    write_dive_sites_csv,
-    write_species_csv,
-    write_gear_items_csv,
-    write_gear_service_csv,
-    write_certifications_csv,
+# Every file in `CSV_WRITERS` except `dives.csv`, which is the flat one and has the golden
+# file instead. Hand-written and therefore able to go short - a writer left out of it is
+# simply not covered by the two tests it feeds. `write_species_csv` was missing until
+# courses were added; both are here now.
+#
+# Each writer is paired with the header it claims, because the pairing is itself the thing
+# under test: `_rows_to_csv` takes the header and the rows as two independent tuples and
+# never compares them.
+_NORMALIZED_FILES = (
+    (write_mixtures_csv, MIXTURES_HEADER),
+    (write_trips_csv, TRIPS_HEADER),
+    (write_courses_csv, COURSES_HEADER),
+    (write_dive_sites_csv, DIVE_SITES_HEADER),
+    (write_species_csv, SPECIES_HEADER),
+    (write_gear_items_csv, GEAR_ITEMS_HEADER),
+    (write_gear_service_csv, GEAR_SERVICE_HEADER),
+    (write_certifications_csv, CERTIFICATIONS_HEADER),
 )
 
 
@@ -291,8 +297,29 @@ class TestTheNormalizedFiles:
 
     def test_every_normalized_file_is_headed_even_when_empty(self):
         empty = build_bundle()
-        for writer in _NORMALIZED_WRITERS:
+        for writer, _ in _NORMALIZED_FILES:
             assert len(_parse(_render(writer(empty)))) == 1, writer.__name__
+
+    def test_every_normalized_file_lines_its_rows_up_with_its_header(self):
+        """Each writer declares its header as one tuple and yields its rows as another,
+        matched by position and by nothing else. Drop a column from one and not the other
+        and every cell after it shifts silently into the neighbouring column - the file
+        still parses, still has a header, and is wrong from that column to the end.
+
+        `test_no_file_carries_a_deleted_column_any_more` pins this for the four files that
+        change touched; `courses.csv` was covered by neither, which is what let a column
+        removal there go unnoticed. This asserts it for every normalized file, so the next
+        one is covered without anyone remembering to add it.
+
+        The row count is asserted first because the alignment check is vacuous on a file
+        with no data rows: a fixture that stopped producing a course would turn this test
+        green rather than red.
+        """
+        for writer, header in _NORMALIZED_FILES:
+            rows = _parse(_render(writer(full_bundle())))
+            assert len(rows) > 1, writer.__name__
+            assert tuple(rows[0]) == header, writer.__name__
+            assert all(len(row) == len(header) for row in rows[1:]), writer.__name__
 
     def test_every_file_carries_the_byte_order_mark_not_just_dives(self):
         """`dive-sites.csv`, `trips.csv`, `courses.csv` and `certifications.csv` hold the

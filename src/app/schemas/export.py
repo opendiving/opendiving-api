@@ -209,7 +209,6 @@ class ExportCourse(PublicUUIDSchema):
     instructor_name: str | None = None
     instructor_number: str | None = None
     training_center: str | None = None
-    cost: str | None = None
     notes: str
     created_at: datetime
 

@@ -53,9 +53,8 @@ else; what is here is the source, and the notes for working on it.
   service history, a due-soon endpoint, and a scheduled email reminder digest.
 - **Certifications** — c-card records with front/back card images.
 - **Training courses** — the course a card came out of and the dives logged on it, with the agency,
-  status, instructor, training centre and what it cost. No mainstream logbook models this: the
-  agency apps tie dives to a course *or* cards to a course, and none of them let the record outlive
-  the agency.
+  status, instructor and training centre. No mainstream logbook models this: the agency apps tie
+  dives to a course *or* cards to a course, and none of them let the record outlive the agency.
 - **Full export** — everything out in open formats (UDDF, CSV, and a complete JSON + original-files
   archive) in one request. Owner-only, never cached; the UDDF validates against the 3.2.2 schema.
 - **Passwordless auth** — email sign-in (over SMTP, so any relay or provider works), Google Sign-In,
