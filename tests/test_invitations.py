@@ -36,7 +36,7 @@ from src.app.api.v1.invitations import (
     revoke_invitation,
 )
 from src.app.core.config import RegistrationMode, settings
-from src.app.core.exceptions.http_exceptions import NotFoundException
+from src.app.core.exceptions.http_exceptions import NotFoundException, RateLimitException
 from src.app.models.invitation import Invitation
 from src.app.models.invite_request import InviteRequest
 from src.app.models.user import User
@@ -61,6 +61,18 @@ def _request() -> Mock:
     request.client = Mock(host="203.0.113.7")
     request.headers = {}
     return request
+
+
+def awaited_args(recorder: Any) -> tuple:
+    """The positional arguments of a mock's last await, narrowed for mypy.
+
+    `AsyncMock.await_args` is typed `_Call | None`, so reading `.args` off it does not
+    type-check - the sibling of `tests.helpers.mocks.awaited_kwargs`, which does the same
+    for the keyword half.
+    """
+    calls = recorder.await_args_list
+    assert calls, "the mock was never awaited"
+    return tuple(calls[-1].args)
 
 
 CALLER = {"id": 7, "uuid": uuid_pkg.uuid4(), "name": "Ada Reef", "is_superuser": False}
@@ -278,6 +290,103 @@ class TestReadInvitations:
         assert crud.get_multi.await_args.kwargs["limit"] == 100
         assert page["page"] == 1
         assert page["items_per_page"] == 100
+
+
+class TestTheProbeThrottle:
+    """`POST /user/invitations` answers a distinguishable 409 for a registered address, and
+    that refusal creates nothing - so the quota, counted from rows created, never charges
+    for it.
+
+    Without a throttle above the check, a signed-in caller can walk a wordlist through this
+    endpoint and learn who is registered, without bound, and can keep telling the two
+    answers apart even after their quota is spent (409 for a member, 429 for everyone else).
+    `PATCH /user` guards the identical shape for its username-availability check.
+    """
+
+    @staticmethod
+    def _quiet_dependencies() -> tuple:
+        return (
+            patch("src.app.api.v1.invitations.account_exists_for", new_callable=AsyncMock, return_value=True),
+            patch("src.app.api.v1.invitations.live_invitation_from", new_callable=AsyncMock, return_value=False),
+            patch("src.app.api.v1.invitations.invitations_created_since", new_callable=AsyncMock, return_value=0),
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_throttle_runs_before_the_existence_check(self, mock_db) -> None:
+        """Above it, not beside it. A limiter consulted after the lookup would still let the
+        oracle answer on the request that trips it, and - more to the point - would leave the
+        ordering free to drift back."""
+        account, already, quota = self._quiet_dependencies()
+        with (
+            _mode(RegistrationMode.INVITE),
+            patch(
+                "src.app.api.v1.invitations.enforce_rate_limit",
+                new_callable=AsyncMock,
+                side_effect=RateLimitException("slow down"),
+            ),
+            account as looked,
+            already,
+            quota,
+            pytest.raises(RateLimitException),
+        ):
+            await create_invitation(_request(), InvitationCreateRequest(email="member@example.com"), CALLER, mock_db)
+
+        looked.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_refused_probe_is_still_charged(self, mock_db) -> None:
+        """The whole point: the 409 path creates no invitation row, so the quota cannot see
+        it - the throttle is what a probe spends."""
+        account, already, quota = self._quiet_dependencies()
+        with (
+            _mode(RegistrationMode.INVITE),
+            patch("src.app.api.v1.invitations.enforce_rate_limit", new_callable=AsyncMock) as limiter,
+            account,
+            already,
+            quota,
+            pytest.raises(HTTPException) as refusal,
+        ):
+            await create_invitation(_request(), InvitationCreateRequest(email="member@example.com"), CALLER, mock_db)
+
+        assert refusal.value.status_code == 409
+        limiter.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_it_is_keyed_per_user_and_not_per_ip(self, mock_db) -> None:
+        """The caller is authenticated, so there is a better key than their address - and a
+        per-IP bucket would let one office share one probing budget."""
+        account, already, quota = self._quiet_dependencies()
+        with (
+            _mode(RegistrationMode.INVITE),
+            patch("src.app.api.v1.invitations.enforce_rate_limit", new_callable=AsyncMock) as limiter,
+            account,
+            already,
+            quota,
+            pytest.raises(HTTPException),
+        ):
+            await create_invitation(_request(), InvitationCreateRequest(email="member@example.com"), CALLER, mock_db)
+
+        key, limit, _window = awaited_args(limiter)
+        assert key == f"invitation-create:user:{CALLER['id']}"
+        assert limit == settings.INVITATION_ATTEMPT_RATE_LIMIT_PER_USER
+
+    @pytest.mark.asyncio
+    async def test_a_superuser_is_throttled_too(self, mock_db) -> None:
+        """Exempt from the quota, which bounds how many people they may invite; not from the
+        backstop against automated probing, which is a different question."""
+        account, already, quota = self._quiet_dependencies()
+        with (
+            _mode(RegistrationMode.INVITE),
+            patch("src.app.api.v1.invitations.enforce_rate_limit", new_callable=AsyncMock) as limiter,
+            account,
+            already,
+            quota,
+            pytest.raises(HTTPException),
+        ):
+            await create_invitation(_request(), InvitationCreateRequest(email="member@example.com"), OPERATOR, mock_db)
+
+        limiter.assert_awaited_once()
+        assert awaited_args(limiter)[0] == f"invitation-create:user:{OPERATOR['id']}"
 
 
 class TestCreateInvitation:

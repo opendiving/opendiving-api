@@ -189,16 +189,17 @@ async def create_invitation(
     guess at what happened:
 
     - **404** - `open` mode; the feature is not here.
-    - **409** - the address already has an account. This does disclose, to a signed-in
-      caller bounded by a quota, that an address is registered. Accepted deliberately: the
+    - **409** - the address already has an account. This does disclose, to a signed-in and
+      throttled caller, that an address is registered. Accepted deliberately: the
       alternative is a `201` that creates nothing, and the inviter then looks for an
       invitation that is nowhere in their list. Inviting yourself lands here.
     - **409** - you already have a live, unaccepted invitation out to this address.
       Per-inviter, because the table is not unique on the address: somebody else may have
       invited them too, and each of you sees your own row.
-    - **429** - your quota. `INVITATIONS_PER_USER` per `INVITATIONS_WINDOW_DAYS`, counted
-      over rows you created in the trailing window with revoked ones included, so the bound
-      is on invitation emails you have caused to be sent. Superusers are exempt.
+    - **429** - either the throttle below or your quota. `INVITATIONS_PER_USER` per
+      `INVITATIONS_WINDOW_DAYS`, counted over rows you created in the trailing window with
+      revoked ones included, so the bound is on invitation emails you have caused to be
+      sent. Superusers are exempt from the quota, not from the throttle.
     - **422** - a malformed address, from `EmailStr`.
 
     Creating an invitation **deletes any pending request row for the address**, in the same
@@ -214,6 +215,20 @@ async def create_invitation(
     _require_invite_mode()
 
     email = body.email.lower()
+
+    # **Above the existence check, and it is the quota that cannot do this job.** The 409
+    # below is a distinguishable answer about whether an address is registered, and it
+    # creates no invitation row - so the quota, which counts rows created, never charges for
+    # it and a caller could walk a wordlist through this endpoint unbounded. `PATCH /user`
+    # throttles its username-availability check for exactly this reason. Keyed per-user
+    # rather than per-IP because the caller is authenticated, and applied to superusers too:
+    # they are exempt from the quota, which bounds how many people they may invite, not from
+    # the backstop against automated probing.
+    await enforce_rate_limit(
+        f"invitation-create:user:{current_user['id']}",
+        settings.INVITATION_ATTEMPT_RATE_LIMIT_PER_USER,
+        settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
+    )
 
     if await account_exists_for(db, email=email):
         # A raw `HTTPException`: `core/exceptions/http_exceptions.py` has no class for 409

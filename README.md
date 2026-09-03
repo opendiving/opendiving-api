@@ -174,12 +174,20 @@ life list, account deletion); **dives**, the bulk of it, with their **files** �
 read the per-sample profile back — alongside **trips**, **dive sites**, the shared **species**
 catalog a dive can reference, and a **geocoding** helper for naming a site pinned on a map; **gear**
 as items, sets, service schedules and service records; **certifications** with their card images and
-the **courses** that issued them; and **export** in UDDF, CSV or full-archive form. All of those
-want a bearer token. The ones that don't are **contact**, the auth routes themselves, the two health
-checks — `/health` says the process is up, `/health/ready` says Postgres and Redis answered, and
-503s when they didn't — and `GET /species/{uuid}/photo`, which serves a public Commons image to an
-`<img>` tag that has no way to send a token. `tests/test_route_authentication.py` is the guard that
-keeps that list honest, and it holds the reason for each.
+the **courses** that issued them; **export** in UDDF, CSV or full-archive form; **invitations**,
+which exist only where the operator has closed registration (see `REGISTRATION_MODE` below) — a
+member sends and revokes their own, and the routes answer 404 on an open instance; and **admin**,
+the operator's own — the queue of people who have asked to be let in, and inviting or removing them
+in a batch — which is the one family gated on `is_superuser` rather than merely on having a token.
+All of those want a bearer token. The ones that don't are **contact**, the auth routes themselves,
+the two health checks — `/health` says the process is up, `/health/ready` says Postgres and Redis
+answered, and 503s when they didn't — `POST /invite-requests`, which is how somebody with no account
+asks a closed instance for an invitation, `GET /config`, which tells the web app whether
+registration is open before anyone has signed in, and `GET /species/{uuid}/photo`, which serves a
+public Commons image to an `<img>` tag that has no way to send a token.
+`tests/test_route_authentication.py` is the guard that keeps the *anonymous* half of that list
+honest — it compares the app's real route table against its own allowlist and holds the reason for
+each — but nothing checks this paragraph, so a new route family belongs here by hand.
 
 A typical import flow:
 

@@ -239,6 +239,21 @@ class RegistrationSettings(BaseSettings):
     INVITATIONS_PER_USER: int = config("INVITATIONS_PER_USER", default=5)
     INVITATIONS_WINDOW_DAYS: int = config("INVITATIONS_WINDOW_DAYS", default=1)
 
+    # **A throttle, and not the quota above** - they bound different things and only one of
+    # them bounds the oracle. `POST /user/invitations` answers a distinguishable 409 for an
+    # address that already has an account, and that refusal creates no invitation row, so
+    # the quota (counted from rows created) never charges for it: unthrottled, a signed-in
+    # caller can walk a wordlist through the endpoint and learn who is registered, without
+    # limit. This is the shape `PATCH /user`'s username check already guards - "unthrottled
+    # it is a wordlist oracle over who exists" - and it is keyed per-user for the same
+    # reason: the caller is authenticated, so there is a better key than their IP.
+    #
+    # Deliberately above `INVITATIONS_PER_USER` rather than equal to it. It is a backstop
+    # against automated probing, not a second opinion on how many friends somebody may
+    # invite, and a diver who mistypes an address twice must not be spending the same
+    # budget that decides whether their fifth invitation goes out.
+    INVITATION_ATTEMPT_RATE_LIMIT_PER_USER: int = config("INVITATION_ATTEMPT_RATE_LIMIT_PER_USER", default=20)
+
     # Fixed-window rate limits on `POST /invite-requests`, keyed separately by the
     # submitted email and by client IP - the `ContactSettings` shape, with the contact
     # form's values, because it is the same kind of endpoint: anonymous, writing a row

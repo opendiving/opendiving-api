@@ -299,6 +299,20 @@ class TestRegistrationSettings:
         assert module.settings.INVITATIONS_PER_USER == 5
         assert module.settings.INVITATIONS_WINDOW_DAYS == 1
 
+    def test_the_probe_throttle_is_looser_than_the_quota(self, tmp_path, monkeypatch):
+        """They bound different things, and only the throttle bounds the 409 oracle.
+
+        The relationship is what is asserted rather than either number: the throttle is a
+        backstop against automated probing, the quota is how many people one member may
+        invite, and a diver who mistypes an address twice must not be spending the budget
+        that decides whether their fifth real invitation goes out.
+        """
+        for name in ("INVITATIONS_PER_USER", "INVITATION_ATTEMPT_RATE_LIMIT_PER_USER"):
+            monkeypatch.delenv(name, raising=False)
+        loaded = _config_loaded_without_an_env_file(tmp_path, monkeypatch).settings
+
+        assert loaded.INVITATION_ATTEMPT_RATE_LIMIT_PER_USER > loaded.INVITATIONS_PER_USER
+
     def test_the_request_limits_mirror_the_contact_form(self, tmp_path, monkeypatch):
         """Same shape and same values: both endpoints are anonymous and both act on a
         stranger's say-so, so a divergence here would be a number with no argument behind
@@ -332,6 +346,7 @@ class TestRegistrationSettings:
             "REGISTRATION_MODE",
             "INVITATIONS_PER_USER",
             "INVITATIONS_WINDOW_DAYS",
+            "INVITATION_ATTEMPT_RATE_LIMIT_PER_USER",
             "INVITE_REQUEST_RATE_LIMIT_WINDOW_SECONDS",
             "INVITE_REQUEST_RATE_LIMIT_PER_EMAIL",
             "INVITE_REQUEST_RATE_LIMIT_PER_IP",

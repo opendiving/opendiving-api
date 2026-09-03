@@ -13916,9 +13916,28 @@ tells a signed-in caller, bounded by a quota, that a particular address is regis
 Accepted deliberately. The alternative is a `201` that creates nothing, and it is worse in both
 directions: the inviter then looks for an invitation that is nowhere in their list, and an
 "accepted" status against a row that was never sent would reveal the same fact a moment later
-anyway. Plausible and Ghost both surface this case openly. The exposure is bounded by three things
-already in place — the caller is authenticated, the quota caps how many addresses they can probe,
-and the endpoint exists only on an instance whose operator chose to close it.
+anyway. Plausible and Ghost both surface this case openly.
+
+**What bounds it is a throttle, and the first draft of this section got that wrong in a way worth
+recording.** It claimed the exposure was capped by three things: the caller being authenticated, the
+endpoint existing only on a closed instance, and *the quota*. The first two hold; the third does
+not, and the reason is a detail one table over. The quota is counted from `invitation` rows the
+caller created (`invitations_created_since`), and the 409 path returns before anything is created —
+so a probe is free, and a caller with an exhausted quota can still tell the two answers apart, since
+a registered address answers 409 where everything else answers 429. A limit that charges only for
+success cannot bound a question whose interesting answer is a failure.
+
+So `POST /user/invitations` carries `INVITATION_ATTEMPT_RATE_LIMIT_PER_USER` (20 per the magic-link
+window), applied **above** the existence check and to superusers as well. It is deliberately a
+different number from the quota and deliberately larger: the quota bounds how many people one member
+may invite, the throttle bounds automated probing, and a diver who mistypes an address twice must
+not be spending the budget that decides whether their fifth real invitation goes out. This is the
+shape `PATCH /user` already uses for its username-availability check — *"unthrottled it is a
+wordlist oracle over who exists"* — keyed per-user for the same reason: the caller is authenticated,
+so there is a better key than their IP.
+
+The general rule, since this is the second endpoint to meet it: **an availability check that answers
+distinguishably needs its own throttle, and a quota counted from successful writes is not one.**
 
 The comparison is **case-insensitive**, and that is not incidental to it: see below.
 

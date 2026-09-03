@@ -115,16 +115,25 @@ def _header_safe(value: str) -> str:
 
 
 def _refuse_to_log_credential_outside_local(what: str) -> None:
-    """Guards the "no transport, so log the link instead" fallback used by the two senders
-    whose URL embeds a live single-use auth token.
+    """Guards the "no transport, so log the link instead" fallback used by the senders whose
+    failure to send is worse than a 500.
+
+    For two of the three that call it - `send_magic_link_email` and
+    `send_email_change_confirmation_email` - the reason is literal: the URL they would log
+    *is* a live single-use auth token. `send_invitation_email` carries no token at all (an
+    invitation is an allow-list entry, not a credential) and takes this shape for the other
+    half of the argument below: the consequence of a silent failure. Its own docstring says
+    so.
 
     That fallback is a local-development convenience, and a good one - it's how you sign
-    in without configuring a relay. But the URL it prints *is* the credential, and this
-    app's logs are read by `docker compose logs` and shipped to whatever collects them, so
-    the same code path on a deployed instance would quietly turn a forgotten `SMTP_HOST`
-    into sign-in tokens sitting in plaintext wherever those end up. Fail loudly there
-    instead: a 500 on a sign-in attempt is recoverable and obvious, leaked tokens are
-    neither.
+    in without configuring a relay. But for the two credential-carrying senders the URL it
+    prints *is* the credential, and this app's logs are read by `docker compose logs` and
+    shipped to whatever collects them, so the same code path on a deployed instance would
+    quietly turn a forgotten `SMTP_HOST` into sign-in tokens sitting in plaintext wherever
+    those end up. Fail loudly there instead: a 500 on a sign-in attempt is recoverable and
+    obvious, leaked tokens are neither. For the invitation the same raise buys something
+    else - an invitee who is never told they were invited, while their inviter's quota was
+    spent on it, is a failure nobody would otherwise notice.
 
     The line is `local`, not `production`: `local` is the one environment where reading
     the link out of the logs is the documented way to sign in, and anything else is a
