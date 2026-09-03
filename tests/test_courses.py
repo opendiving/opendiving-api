@@ -165,7 +165,7 @@ class TestCourseSchema:
         course = CourseCreate.model_validate({"user_uuid": str(USER_UUID), "name": "Open Water", "agency": "padi"})
 
         assert course.status is CourseStatus.COMPLETED
-        assert (course.start_date, course.end_date, course.cost) == (None, None, None)
+        assert (course.start_date, course.end_date) == (None, None)
 
     def test_a_course_needs_no_dates_at_all(self) -> None:
         """The divergence from `TripCreate`, whose `start_date` is required: a `planned`
@@ -229,7 +229,7 @@ class TestCourseSchema:
         with pytest.raises(ValidationError, match="cannot be null"):
             CourseUpdate.model_validate({"status": None})
 
-    @pytest.mark.parametrize("field", ["start_date", "end_date", "cost", "instructor_name", "training_center"])
+    @pytest.mark.parametrize("field", ["start_date", "end_date", "instructor_name", "training_center"])
     def test_the_update_schema_still_clears_a_nullable_field(self, field: str) -> None:
         """Clearing these is a real edit - an instructor misremembered, a course that
         turned out to be `planned` after all."""

@@ -14159,3 +14159,60 @@ person.
 `<name>` element and could carry only a nameless body/lens breakdown we do not record — a camera
 keeps its name as a `<variouspieces>` instead. Preferring a correct element to a legible one would
 lose the only thing about the item we actually store.
+
+## `Course.cost` is gone, and money is a cross-cutting concern this app has not designed yet
+
+The column, `CourseBase`'s field, `CourseUpdate`'s independent copy of it, `ExportCourse`'s field
+and both export writers' handling of it are all removed, along with the `cost` column from
+`courses.csv`. Revision `84bee1255635` drops it.
+
+It was free text ("EUR 650", "1 200 AUD including gear") rather than a number plus a currency, and
+the argument the model comment made for that shape is the argument against keeping the field at all:
+a cost appears in no agency record, nothing else in the app models money, and there was no
+aggregation use case that would pay for real currency handling. What a single free-text string
+cannot do is be *the* answer to "what has diving cost me", which is the only question that would
+justify the field — and answering that means gear and dives carrying one too, an amount and a
+currency rather than a label, and something that can add them up. That is a feature with its own
+design, not a column; a string on one entity is a down payment on it that has to be thrown away when
+the real thing arrives.
+
+**DiveJSON agrees, which is what makes this cheap.** The interchange format's `course` object
+carries no cost member and its `additionalProperties: false` forbids adding one, so `export.json`
+loses nothing a reader could have used and the app and the format now describe a course the same
+way.
+
+**No data preservation, and no backfill into `notes`.** Folding stored values in first was
+considered and rejected: nothing is deployed anywhere (`AGENTS.md`), so the only rows this meets are
+local development data. `ALTER TABLE ... DROP COLUMN` is content-independent, so there is no
+"courses with a cost" case that behaves differently from any other.
+
+**The web client had to stop sending the key first**, and that ordering is not optional.
+`CourseCreate` and `CourseUpdate` are both `extra="forbid"`, so a body still carrying `cost` is a
+422 naming the field rather than a value silently dropped — which is the right behaviour and exactly
+why the api half cannot go first. Removed here after `opendiving-web` stopped putting the key in
+every create and PATCH body; in the other order every course save fails, create and edit alike.
+Going web-first costs nothing in between: the API is left with a nullable column nothing writes to.
+
+**A cached course read can still hold the key for an hour, and it never reaches a client.** The
+single-course read takes `cache(...)`'s default 3600-second expiration (the list endpoint passes
+`expiration=60`), a hit returns the stored dict without running the helper, and Redis has a
+persistent volume — so an entry written before this revision keeps its `cost` key until it expires.
+Both course reads answer through a response model (`CourseRead`, which declares no `model_config`
+and so takes Pydantic's default `extra="ignore"`), so FastAPI drops the stale key on the way out.
+Nothing 500s and nothing renders it; there is no flush step to run.
+
+### The CSV writers match header to row by position, and courses had no test saying so
+
+Worth recording separately, because it is the trap this removal would have sprung.
+`services/export/tabular.py` declares each file's header as one tuple and yields its rows as
+another; `_rows_to_csv` never compares them. Removing a column from one and not the other shifts
+every cell after it one column left — the file still parses, still has the right header, and is
+wrong from that column to the end.
+
+`test_no_file_carries_a_deleted_column_any_more` pinned this for the four files that change touched,
+which did not include `courses.csv`; `tests/test_export_tabular.py` contained no `cost` reference at
+all, so both halves of this removal could have been made independently with a green suite.
+`test_every_normalized_file_lines_its_rows_up_with_its_header` now asserts it for every normalized
+file against the header it claims, so the next writer is covered without anyone remembering to add
+it. It asserts a row count first on purpose: with no data rows the alignment check passes vacuously,
+so a fixture that stopped producing a course would turn the test green rather than red.

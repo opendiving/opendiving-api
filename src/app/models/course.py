@@ -58,11 +58,6 @@ class Course(Base, PublicUUIDMixin, TimestampMixin):
     instructor_name: Mapped[str | None] = mapped_column(String(255), default=None)
     instructor_number: Mapped[str | None] = mapped_column(String(64), default=None)
     training_center: Mapped[str | None] = mapped_column(String(255), default=None)
-    # Free text ("EUR 650", "1 200 AUD including gear"), not a number plus a currency:
-    # what a course cost appears in no agency record, nothing else in the app models
-    # money, and there is no aggregation use case that would pay for real currency
-    # handling.
-    cost: Mapped[str | None] = mapped_column(String(64), default=None)
     notes: Mapped[str] = mapped_column(Text, default="")
 
     @declared_attr.directive
