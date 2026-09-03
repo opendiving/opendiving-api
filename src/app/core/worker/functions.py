@@ -69,8 +69,7 @@ AUTHENTICATION_REQUEST_RETENTION = timedelta(days=7)
 # **Seven days for a row with `user_id IS NULL`.** Those are the genuinely pre-account
 # events - an auth request created, a sign-in code failed, onboarding started, an invite
 # requested - and each carries an email address typed by somebody who may never have signed
-# up. Recording "an
-# auth request for `<email>`" puts in the operator's database exactly what
+# up. Recording "an auth request for `<email>`" puts in the operator's database exactly what
 # `authentication_request.email` already puts there, which is a defensible equivalence only
 # if it holds for *duration* as well as for content: an address that survives thirteen times
 # longer here than it does there is a new retention decision wearing an old one's clothes.

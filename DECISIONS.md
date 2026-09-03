@@ -9715,12 +9715,11 @@ on non-local non-production environments (`core/setup.py`) — and granted no ac
 dives. It now also gates the three `/api/v1/admin/*` routes (`api.v1.admin`): the invite queue, the
 batch invite and the batch removal, whose caller can read the addresses of everybody waiting to be
 let in and invite them. That widens the consequence of a wrongly-created superuser without changing
-this section's conclusion — the dives are still nobody's but their owner's, the script is still not
-in the image, and its compose service is still commented out. The script is not in the published
-image either (`.dockerignore` excludes `scripts/`, and the Dockerfile copies only `src/app` and
-`src/migrations`) and its compose service is commented out. So this is not a live hole; it is the
-third instance of a default that is wrong in somebody else's install, after `EMAIL_FROM_ADDRESS` and
-`CONTACT_FORM_EMAIL`, and it is fixed the same way both of those were.
+this section's conclusion — the dives are still nobody's but their owner's. The script is not in the
+published image either (`.dockerignore` excludes `scripts/`, and the Dockerfile copies only
+`src/app` and `src/migrations`) and its compose service is commented out. So this is not a live
+hole; it is the third instance of a default that is wrong in somebody else's install, after
+`EMAIL_FROM_ADDRESS` and `CONTACT_FORM_EMAIL`, and it is fixed the same way both of those were.
 
 `ADMIN_EMAIL` is now `str | None` with no default, `src/.env.example` ships it **commented out** —
 the same half-of-the-fix argument as the from-address, since a template value that is active
@@ -10144,27 +10143,26 @@ finding is a new patch release, and the issue body now says so per row rather th
 
 ## Security headers are the app's, not the proxy's
 
-[The bundled `Caddyfile`](https://github.com/opendiving/opendiving/blob/main/Caddyfile) routed five
+[The bundled `Caddyfile`](https://github.com/opendiving/opendiving/blob/main/Caddyfile) routes five
 paths — `/api/v1*`, `/admin*`, `/docs`, `/redoc`, `/openapi.json` — straight to `api:8000`, so
-nothing the web container sets reaches any of them. (`/admin*` has since come off that list: it is
-the web app's superuser section now, and the section below marks where that changes the argument.)
-The comment on the `web` handler directly below said the web app "sets its own security headers,
-HSTS included … so there is nothing to add here", which was true of that handler and read as if it
-covered the site. Nothing filled the gap on the API side either: CRUDAdmin ships no security headers
-at all (grep the installed package — there are none), the API set none globally, and Caddy adds none
-by default. So the CRUDAdmin panel, a full create/update/delete interface over `User`, `Dive`,
-`GearItem` and everything else in `admin/views.py`, was served framable.
+nothing the web container sets reaches any of them. The comment on the `web` handler directly below
+said the web app "sets its own security headers, HSTS included … so there is nothing to add here",
+which was true of that handler and read as if it covered the site. Nothing filled the gap on the API
+side either: CRUDAdmin ships no security headers at all (grep the installed package — there are
+none), the API set none globally, and Caddy adds none by default. So `/admin`, a full
+create/update/delete interface over `User`, `Dive`, `GearItem` and everything else in
+`admin/views.py`, was served framable.
 
 **Not urgent, and the PR should not be read as though it were.** Two things already blunt it. First,
 CRUDAdmin's session cookie is `SameSite=strict` outside debug mode (`crudadmin/session/manager.py`'s
 `PROD_SAMESITE`), so a cross-site frame carries no cookie and renders a logged-out panel —
 clickjacking is neutered today by a third-party default we do not control, which is the argument for
 having a header of our own rather than against it. Second, HSTS is recorded per *host*, not per
-path, so one page load anywhere on the domain pins the panel too; the only visitor who misses it is
-an operator whose first-ever request to the domain is the panel itself, from a bookmark. And
-`/docs`, `/redoc` and `/openapi.json` are absent on `ENVIRONMENT=production` (the
-`EnvironmentSettings` block in `core/setup.py` gates the whole docs router), so on a production
-install the panel was the only HTML behind that matcher at all.
+path, so one page load anywhere on the domain pins `/admin` too; the only visitor who misses it is
+an operator whose first-ever request to the domain is `/admin` itself, from a bookmark. And `/docs`,
+`/redoc` and `/openapi.json` are absent on `ENVIRONMENT=production` (the `EnvironmentSettings` block
+in `core/setup.py` gates the whole docs router), so on a production install `/admin*` is the only
+HTML behind that matcher at all.
 
 **The fix is `SecurityHeadersMiddleware`, not a `header` block in the Caddyfile**, and the choice is
 the substance of this section. The obvious move is the proxy: it is where headers conventionally
@@ -10176,7 +10174,7 @@ exists for exactly those — and a config file this repository never sees cannot
 a change made here. A doc paragraph is guidance, not a control, and most installs will not read it.
 
 The counter-argument is that the app is asserting policy about a surface it does not own, and it
-does not hold up: the panel is mounted on this FastAPI app in `main.py` and `/docs` is a route in
+does not hold up: `/admin` is mounted on this FastAPI app in `main.py` and `/docs` is a route in
 `core/setup.py`. These are the app's own responses. The precedent was already in the tree, too —
 `dives.py`, `certifications.py` and `export.py` have each sent `X-Content-Type-Options` and a
 per-response CSP on binary downloads since those endpoints were written. The middleware generalises
@@ -10191,10 +10189,10 @@ later and ends up with two definitions of one policy.
 
 - `Content-Security-Policy: frame-ancestors 'none'` — the whole policy, on purpose. A `default-src`
   here would break CRUDAdmin's own templates, which style themselves inline and pull `htmx.min.js`
-  and a favicon from the panel's `/static` and a webfont from `fonts.googleapis.com`;
-  `frame-ancestors` restricts framing only and constrains none of that. Verified by loading the
-  panel: it renders fully styled, htmx and the webfont load, the console is clean, and a
-  cross-origin page trying to frame `http://127.0.0.1:8001/admin/login` gets
+  and a favicon from `/admin/static` and a webfont from `fonts.googleapis.com`; `frame-ancestors`
+  restricts framing only and constrains none of that. Verified by loading the panel: it renders
+  fully styled, htmx and the webfont load, the console is clean, and a cross-origin page trying to
+  frame `http://127.0.0.1:8001/admin/login` gets
   `Framing … violates the following Content Security Policy directive: "frame-ancestors 'none'". The request has been blocked.`
 - `X-Frame-Options: DENY` — redundant in every browser that supports `frame-ancestors` (Chrome 40,
   Firefox 33, Safari 10), which is every browser that can run the panel. Sent anyway for parity with
@@ -10202,15 +10200,15 @@ later and ends up with two definitions of one policy.
   absent one is a finding in the scanners self-hosters point at their own boxes. Where both are
   present the browser uses the CSP, so it cannot conflict.
 - `X-Content-Type-Options: nosniff` — the one with real breakage potential, since a wrong
-  `Content-Type` stops being forgiven. The panel's entire asset surface is two files, its
-  `/static/htmx.min.js` (`text/javascript`) and `/static/favicon.png`, plus inline styles; both were
-  checked.
+  `Content-Type` stops being forgiven. The panel's entire asset surface is two files,
+  `/admin/static/htmx.min.js` (`text/javascript`) and `/admin/static/favicon.png`, plus inline
+  styles; both were checked.
 - **No `Strict-Transport-Security`.** It is host-scoped, so the web app's header already covers
-  everything this app serves for anyone who has loaded a page of the site, and the residual case
-  above closes on the first one. Sending it from here as well would put two controls on one
-  behaviour — and the off-switch, `WEB_HSTS`, lives in the other repository, so an API-side copy
-  would ignore it. That matters concretely rather than tidily: `WEB_HSTS=off` is what a plain-HTTP
-  LAN instance uses, and a pin it cannot honour makes the instance unreachable.
+  `/admin` for anyone who has loaded a page of the site, and the residual case above closes on the
+  first one. Sending it from here as well would put two controls on one behaviour — and the
+  off-switch, `WEB_HSTS`, lives in the other repository, so an API-side copy would ignore it. That
+  matters concretely rather than tidily: `WEB_HSTS=off` is what a plain-HTTP LAN instance uses, and
+  a pin it cannot honour makes the instance unreachable.
 
 **Handlers keep their own headers**, the same contract `ClientCacheMiddleware` keeps with
 `Cache-Control`. That protects the three binary-download responses, whose
@@ -10241,23 +10239,34 @@ a site-wide `default-src 'self'` at the proxy blocks the admin panel's webfont �
 `X-Forwarded-Proto`, without which the web app never emits HSTS at all. An operator who would rather
 own HSTS at the proxy sets `WEB_HSTS=off` and sends it there; the point is that one thing sends it.
 
-### `/admin` stopped being this section's example
+### `/admin` is about to stop being this section's example, and has not yet
 
-Everything above was written when the bundle's `Caddyfile` sent `/admin*` to `api:8000`, and several
-of its sentences reasoned from that. They have been rewritten to name the CRUDAdmin panel rather
-than the path, because the path has changed hands: `/admin` is now a superuser-gated section of the
-**web** app, driving the JSON routes in `api.v1.admin`, and the bundle's `@api` matcher no longer
-claims it.
+Everything above reasons from the bundle's `Caddyfile` sending `/admin*` to `api:8000`, and **all of
+it is still literally true**: that matcher still names `/admin*`, `CRUD_ADMIN_MOUNT_PATH` still
+defaults to `/admin`, and `main.py` still mounts the panel there. This subsection exists so none of
+it is read as permanent, because the path is changing hands in the same release as the invite-only
+registration work.
 
-Nothing about the middleware changes — it still covers `/api/v1*`, the docs paths and the panel's
-own mount, which is the set the argument was always really about. What changes is the worked example
-and one factual claim inside it: on a bundled install with the panel off, which is the default, the
-HTML behind the `@api` matcher is now only `/docs` and friends, and those are absent on
-`ENVIRONMENT=production` — so a production install has no HTML there at all.
+What is changing, and where. The operator's surface is now the JSON routes in `api.v1.admin`, under
+`/api/v1/admin/*` — inside the `@api` matcher's first pattern, so nothing about *their* routing is
+in question. What drives them is a superuser-gated section of the **web** app at `/admin`, and for a
+bundled install to reach it the `Caddyfile`'s `@api` matcher has to stop claiming `/admin*`. That
+file lives in the install bundle's own repository and is changed there, not here — so until it
+ships, a bundled install cannot reach the web admin at all, and every sentence above describes the
+live configuration.
 
-An operator who still enables the panel must mount it elsewhere (`CRUD_ADMIN_MOUNT_PATH`) and route
-it by hand, or the web app answers `/admin` with its own not-found. That is one sentence in the
-install docs, and it is true until the panel's retirement chore lands.
+**Nothing about the middleware changes either way**, which is the part worth keeping straight: it
+covers this app's own responses, and whether `/admin` reaches this app or the web container, the set
+it protects is `/api/v1*`, the docs paths, and wherever the panel is mounted.
+
+Two consequences to expect when the bundle change lands. On a default install — the panel is off —
+the only HTML left behind the `@api` matcher is `/docs` and friends, which are absent on
+`ENVIRONMENT=production`, so a production install has no HTML there at all and the worked example
+above becomes historical. And an operator who *does* enable the panel has to move it off `/admin`
+with `CRUD_ADMIN_MOUNT_PATH` and route the new path by hand, or the web app answers `/admin` with
+its own not-found — a sentence the install docs gain, true until the panel's retirement chore lands.
+**The default stays `/admin` deliberately** rather than being moved pre-emptively: changing it would
+break every existing install that has the panel switched on, for the sake of one that has not.
 
 ## `public` requires the absence of every credential, not just a bearer token
 

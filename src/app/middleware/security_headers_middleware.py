@@ -8,16 +8,16 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     Why the app and not the proxy
     -----------------------------
         The bundled `Caddyfile` (https://github.com/opendiving/opendiving/blob/main/Caddyfile)
-        routes `/api/v1*` and the three docs paths straight to this app, so nothing the web
-        container sets reaches them - and a bring-your-own-proxy install
+        routes `/api/v1*`, `/admin*` and the three docs paths straight to this app, so
+        nothing the web container sets reaches them - and a bring-your-own-proxy install
         (https://github.com/opendiving/opendiving/blob/main/docs/reverse-proxy.md) is a
         config file this repository never sees. Setting them here is the only version of this
         that holds for *every* deployment shape, including a developer's `docker compose
         up`, and it is a policy about this app's own responses rather than about a
-        surface someone else owns: `/docs` is a route in `core/setup.py`, and the CRUDAdmin
-        panel, where an operator has enabled one, is mounted on this FastAPI app.
+        surface someone else owns: `/admin` is mounted on this FastAPI app and `/docs`
+        is a route in `core/setup.py`.
 
-        The surface that actually needs it is that panel - CRUDAdmin ships no security
+        The surface that actually needs it is `/admin` - CRUDAdmin ships no security
         headers of its own, and it is a full create/update/delete interface over `User`,
         `Dive`, `GearItem` and everything else in `admin/views.py`. It is not urgent:
         CRUDAdmin's session cookie is `SameSite=strict` outside debug mode, so a
@@ -25,23 +25,26 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         third-party default we don't control, which is the argument for having a header
         of our own rather than against it.
 
-        **`/admin` is the web app's now, and none of the above turns on it.** The operator's
-        surface is a superuser-gated section of the web app driving the JSON routes in
-        `api.v1.admin`; the bundle's Caddyfile no longer sends `/admin*` here, and an
-        operator who still enables the CRUDAdmin panel mounts it elsewhere with
-        `CRUD_ADMIN_MOUNT_PATH` and routes it by hand. What reaches this middleware is
-        therefore `/api/v1*`, the docs paths, and whatever mount path the panel has - which
-        is exactly the set the argument above was always really about.
+        **`/admin` is about to stop meaning the panel, and nothing above depends on which
+        it means.** The operator's surface is now the JSON routes in `api.v1.admin` under
+        `/api/v1/admin/*`, driven by a superuser-gated section of the *web* app at
+        `/admin` - so the bundle's `Caddyfile` has to stop sending `/admin*` here, and a
+        companion change in the install bundle does that in the same release. Until that
+        ships, `/admin*` still reaches this app and the sentences above are literally true
+        of it; after it, `CRUD_ADMIN_MOUNT_PATH` (still `/admin` by default) has to be moved
+        by any operator who enables the panel. Either way what this middleware covers is
+        this app's own responses - `/api/v1*`, the docs paths, and wherever the panel is
+        mounted - which is the set the argument was always really about.
 
     What it deliberately does not do
     --------------------------------
         - **The CSP is `frame-ancestors` and nothing else.** A `default-src` here would
           break CRUDAdmin's own templates, which style themselves inline and pull
-          `htmx.min.js` and a favicon from the panel's `/static` and a webfont from
+          `htmx.min.js` and a favicon from `/admin/static` and a webfont from
           `fonts.googleapis.com`. `frame-ancestors` restricts framing only and
           constrains none of that.
         - **No `Strict-Transport-Security`.** HSTS is recorded per *host*, not per path,
-          so the web app's header already covers everything this app serves on any domain
+          so the web app's header already covers every path this app serves on any domain
           whose visitor has loaded one page of it. Sending it from here as well would put
           two controls on one behaviour and, worse, ignore `WEB_HSTS=off` - the switch a
           plain-HTTP LAN instance uses precisely because a pin it cannot honour makes the

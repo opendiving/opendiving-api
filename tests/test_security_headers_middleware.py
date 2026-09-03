@@ -1,15 +1,17 @@
 """Unit tests for `SecurityHeadersMiddleware`.
 
 The gap these pin down: the install bundle's `Caddyfile`
-(https://github.com/opendiving/opendiving/blob/main/Caddyfile) routes `/api/v1*` and the
-docs paths straight to the API, so the web app's headers never reach them, and neither Caddy
-nor CRUDAdmin adds any of its own. The CRUDAdmin panel - a full create/update/delete
-interface over every model, wherever an operator has mounted it - was therefore served
-framable, and a bring-your-own-proxy install got nothing at all.
+(https://github.com/opendiving/opendiving/blob/main/Caddyfile) routes `/api/v1*`, `/admin*`
+and the docs paths straight to the API, so the web app's headers never reach them, and
+neither Caddy nor CRUDAdmin adds any of its own. `/admin` - a full create/update/delete
+interface over every model - was therefore served framable, and a bring-your-own-proxy
+install got nothing at all.
 
-`/admin` is no longer the example it once was: that path is the web app's superuser section
-now, driving the JSON routes in `api.v1.admin`, and the bundle stopped routing it here. What
-this middleware covers is `/api/v1*`, the docs paths and the panel's own mount path.
+`/admin` is about to change hands: the operator's surface is now the JSON routes in
+`api.v1.admin` under `/api/v1/admin/*`, driven by a superuser-gated section of the *web*
+app, and a companion change in the install bundle stops the `Caddyfile` routing `/admin*`
+here. Nothing below turns on which of the two `/admin` means - what this middleware covers
+is this app's own responses either way.
 """
 
 import pytest
