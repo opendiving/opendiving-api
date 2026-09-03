@@ -49,9 +49,13 @@ logger = logging.getLogger(__name__)
 # instance the landing page is where an invitation is asked for.
 NOT_INVITED = "This address hasn't been invited to this instance yet. You can request an invitation from the home page."
 
-# The advisory-lock key the bootstrap decision is serialised on. An arbitrary constant, and
-# arbitrary is fine: `pg_advisory_xact_lock` takes a namespace of the caller's choosing and
-# nothing else in this app takes one, so the only contention is with itself.
+# The advisory-lock key the bootstrap decision is serialised on. `pg_advisory_xact_lock`
+# takes a namespace of the caller's choosing, so the value is arbitrary - but it is not
+# arbitrary in the sense of "pick anything", because this is the app's **second** advisory
+# lock: `core.setup.apply_migrations` takes `_SCHEMA_BOOTSTRAP_LOCK_KEY` to serialise the
+# startup `alembic upgrade head`. Postgres keys advisory locks on the value alone, in one
+# cluster-wide namespace, so a third one has to be checked against both of these rather than
+# assumed unique - `git grep advisory_xact_lock -- src/app` is the check.
 _REGISTRATION_LOCK_KEY = 0x0D1E_0001
 
 
