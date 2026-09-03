@@ -19,8 +19,14 @@ class GearType(StrEnum):
 
     Declaring the members in the order kit is normally listed rather than
     alphabetically keeps that order available to any caller that wants to sort
-    by it. This is the single source of truth for the vocabulary - it is
-    deliberately *not* mirrored by a DB `CHECK` constraint (see DECISIONS.md).
+    by it. This is the single source of truth for the vocabulary *within this
+    codebase* - it is deliberately *not* mirrored by a DB `CHECK` constraint
+    (see DECISIONS.md).
+
+    The members and their order are DiveJSON 1.0's `gear_item.type` enum,
+    value for value. Adding a member here without the format having it, or
+    reordering these, breaks that parity - see DECISIONS.md for how it is
+    checked.
     """
 
     MASK = "mask"
@@ -38,8 +44,12 @@ class GearType(StrEnum):
     CYLINDER = "cylinder"
     LIGHT = "light"
     SMB = "smb"
+    MIRROR = "mirror"
+    WHISTLE = "whistle"
     REEL = "reel"
     KNIFE = "knife"
+    LINE_CUTTER = "line_cutter"
+    SHEARS = "shears"
     COMPASS = "compass"
     CAMERA = "camera"
     OTHER = "other"

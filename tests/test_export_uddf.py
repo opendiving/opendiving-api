@@ -31,7 +31,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 import xmlschema
+from uuid6 import uuid7
 
+from src.app.models.gear_item import GearItem
 from src.app.schemas.gear_item import GearType
 from src.app.services.dive_profiles import LoadedProfile
 from src.app.services.export.uddf import (
@@ -44,6 +46,7 @@ from src.app.services.export.uddf import (
     write_uddf,
 )
 from tests.helpers.export import (
+    CREATED_AT,
     EXPORTED_AT,
     OFF_GRID_PROFILE,
     TRIMIX_PROFILE,
@@ -90,6 +93,16 @@ def _dive(tree: ET.Element, index: int) -> ET.Element:
 def _text(element: ET.Element, path: str) -> str | None:
     found = element.find(path)
     return None if found is None else found.text
+
+
+def _gear(name: str, gear_type: GearType) -> GearItem:
+    """A bare gear item for bundles built here rather than by `full_bundle`.
+
+    Local to this module on purpose: `full_bundle`'s gear list is asserted *exactly* by
+    `test_an_untyped_gear_item_is_not_dropped`, so a category added there to exercise a
+    mapping would break an unrelated test.
+    """
+    return GearItem(user_id=1, name=name, type=gear_type, uuid=uuid7(), created_at=CREATED_AT)
 
 
 class TestSchemaValidity:
@@ -798,7 +811,7 @@ class TestDeterminism:
 class TestEquipmentMapping:
     def test_every_gear_type_has_a_uddf_element(self):
         """`_EQUIPMENT_ELEMENT` is looked up unguarded, and `full_bundle` only exercises
-        three of the twenty categories - so an enum member added without a home here
+        three of the twenty-four categories - so an enum member added without a home here
         would first surface as a 500 on a diver's download."""
         assert set(_EQUIPMENT_ELEMENT) == set(GearType)
 
@@ -806,6 +819,36 @@ class TestEquipmentMapping:
         """`equipmentType` is an `xs:sequence`, so an element `_EQUIPMENT_ORDER` does not
         list would simply never be emitted."""
         assert set(_EQUIPMENT_ELEMENT.values()) <= set(_EQUIPMENT_ORDER)
+
+    @pytest.mark.asyncio
+    async def test_the_cutting_tools_all_render_as_knife(self, schema, monkeypatch):
+        """`equipmentType` has exactly one cutting-tool element, so `line_cutter` and
+        `shears` join `knife` in it rather than falling into `<variouspieces>` beside the
+        SMB and the camera. Three of our categories collapse onto one element and the
+        distinction is not recoverable from the file - which costs nothing, because no
+        reader imports a UDDF kit list back (see DECISIONS.md)."""
+        bundle = build_bundle(
+            gear_items=[
+                _gear("Z-Knife", GearType.KNIFE),
+                _gear("Trilobite", GearType.SHEARS),
+                _gear("Piranha", GearType.LINE_CUTTER),
+            ]
+        )
+        document = await _render(bundle, monkeypatch=monkeypatch)
+        schema.validate(document)
+        knives = _tree(document).findall(f".//{UDDF}knife/{UDDF}name")
+        assert [e.text for e in knives] == ["Z-Knife", "Trilobite", "Piranha"]
+        assert _tree(document).find(f".//{UDDF}variouspieces") is None
+
+    @pytest.mark.asyncio
+    async def test_a_mirror_and_a_whistle_land_in_variouspieces(self, schema, monkeypatch):
+        """Neither has any other home in `equipmentType` - the catch-all is the whole
+        answer here rather than a choice between slots."""
+        bundle = build_bundle(gear_items=[_gear("Signal mirror", GearType.MIRROR), _gear("Fox 40", GearType.WHISTLE)])
+        document = await _render(bundle, monkeypatch=monkeypatch)
+        schema.validate(document)
+        various = _tree(document).findall(f".//{UDDF}variouspieces/{UDDF}name")
+        assert [e.text for e in various] == ["Signal mirror", "Fox 40"]
 
 
 class TestPersonNames:

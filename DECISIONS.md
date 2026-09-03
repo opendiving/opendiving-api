@@ -1362,6 +1362,28 @@ Members are declared in the order kit is normally listed rather than alphabetica
 want that order (the frontend's type picker) can take it straight from the enum instead of
 maintaining a second sorted list.
 
+**The vocabulary is DiveJSON 1.0's, and parity with it is the rule going forward.** `GearType`'s
+members and their order are the `gear_item.type` enum of the
+[DiveJSON](https://github.com/divejson/divejson) dive-log interchange format, value for value, from
+`mask` to `other`. That is newer than the enum: the app's list came first and was four short, and
+`mirror`, `whistle`, `line_cutter` and `shears` were added to close the gap. They went in at the
+format's own positions — the first two after `smb`, the last two after `knife` — rather than being
+appended, because declaration order is the contract described above and appending would have put a
+signalling mirror after the camera.
+
+Two consequences. A new category is no longer ours to invent alone: it goes into the format first
+and arrives here where the format puts it, which is what will let a DiveJSON export write the value
+through unchanged rather than translating it. And the check is a diff rather than a reading — the
+enum against `schema/1.0/divejson.schema.json`'s `#/$defs/gear_item/properties/type/enum` in that
+repository, which is public. Re-derive it; a list of the members written into prose is the copy that
+goes stale, and this paragraph names four of them only because *which four were added* is the part a
+diff cannot tell you afterwards.
+
+`opendiving-web` maintains its own hand-kept copy of this list as `GEAR_TYPES`, and is held to the
+same parity — see its own `DECISIONS.md`. Nothing generates one from the other, so the two move in
+separate commits and a window where they disagree is possible; the API is the one that must widen
+first, since it is what rejects a value the other side has started offering.
+
 Unlike `dive`/`dive_mixture`'s numeric ranges, this is deliberately **not** mirrored by a
 `CheckConstraint`. Those constraints exist because their only other validation lives in the
 frontend's Zod schemas, so a direct API call could otherwise write nonsense. A gear type has no such
@@ -14092,3 +14114,48 @@ docker rm -f od-redis-test
 
 A throwaway container rather than publishing the dev stack's port, so nothing about the running
 stack changes and the suite cannot touch the cache the dev API is serving from.
+
+## Gear categories land in UDDF's fixed equipment list, and three of them share `<knife>`
+
+UDDF 3.2.2's `equipmentType` is an `xs:sequence` of named elements — `boots`, `compass`, `knife`,
+`suit`, `tank`, `variouspieces` and the rest — and that list is closed: a category we hold that it
+has no element for cannot be added, only placed. Our vocabulary is the larger of the two (see
+*"`GearItem.type` is a closed vocabulary, but has no DB `CHECK` constraint"*), so the mapping is
+many-to-one by construction and the only question is *which* many. It runs the other way too:
+several of the schema's elements are never emitted — `compressor`, `scooter`, `rebreather`, `watch`
+— because we hold no category that belongs in them.
+
+`services/export/uddf.py` holds it as `_EQUIPMENT_ELEMENT`, with `_EQUIPMENT_ORDER` giving the
+sequence's own declaration order — the elements have to be emitted in *its* order, not ours, so the
+writer iterates the tuple rather than the mapping. Both are asserted at module import: every
+`GearType` needs an entry, and every entry's tag needs a slot. Import time is the deliberate part:
+the lookup is unguarded, so a category added without a home would raise a `KeyError` mid-export, and
+the one place that would surface is a diver's download. As an import-time assertion it is a startup
+failure in CI instead.
+
+**`line_cutter` and `shears` join `knife` in the `<knife>` element.** `equipmentType` has no
+cutting-tool slot but that one, and keeping a diver's cutting tools together under it beats
+scattering them into `variouspieces` beside the SMB and the camera. Rejected: mapping both to
+`variouspieces`, which is semantically tidier — neither is a knife — but throws away the one
+grouping a reader could act on; and splitting them on physical form, `shears` to `knife` and
+`line_cutter` to `variouspieces`, which draws a distinction no consumer makes.
+
+**`mirror` and `whistle` map to `variouspieces`**, which is not a judgment call: UDDF has nowhere
+else to put a signalling mirror or a whistle, and `variouspieces` is the catch-all the untyped items
+already use.
+
+**The cost is that three categories collapse onto one element, and it is invisible in practice.**
+Round-trip fidelity is DiveJSON's job, not UDDF's — a `<knife>` in our output carries the item's
+name and brand, so a human reading the file loses only the sub-category. And no consumer reads it at
+all: *"Trips and gear cannot survive a UDDF round-trip, and it is not our encoding"* establishes
+that the single path either tested reader touches under `<diver><owner><equipment>` is Subsurface's
+`divecomputer`, for the device that recorded the dive. Neither imports the kit list, and nothing
+looks at `<knife>` or `<variouspieces>`. So the collapse costs nothing today and would cost the
+sub-category if that ever changed — cheap enough to prefer the grouping that reads correctly to a
+person.
+
+`camera` is the mapping's other non-obvious entry and goes the other way: it has a dedicated
+`cameraType`, and we decline it. That type extends `ID_TYPE` rather than `namedType`, so it has no
+`<name>` element and could carry only a nameless body/lens breakdown we do not record — a camera
+keeps its name as a `<variouspieces>` instead. Preferring a correct element to a legible one would
+lose the only thing about the item we actually store.

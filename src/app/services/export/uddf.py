@@ -90,6 +90,12 @@ _INDENT = "  "
 # `camera` is the one deliberate demotion: UDDF's `cameraType` extends `ID_TYPE`, not
 # `namedType`, so it has no `<name>` element and could only carry a nameless body/lens
 # breakdown we don't record. A camera keeps its name as a `<variouspieces>` instead.
+#
+# `knife` is the one deliberate collapse: `equipmentType` has no cutting-tool slot other
+# than that one, so `line_cutter` and `shears` join `knife` there rather than scattering
+# a diver's cutting tools into `<variouspieces>` beside the SMB and the camera. Three of
+# our categories therefore render as one element - see DECISIONS.md for why that is
+# cheap here.
 _EQUIPMENT_ELEMENT: dict[GearType, str] = {
     GearType.MASK: "mask",
     GearType.SNORKEL: "variouspieces",
@@ -106,8 +112,12 @@ _EQUIPMENT_ELEMENT: dict[GearType, str] = {
     GearType.CYLINDER: "tank",
     GearType.LIGHT: "light",
     GearType.SMB: "variouspieces",
+    GearType.MIRROR: "variouspieces",
+    GearType.WHISTLE: "variouspieces",
     GearType.REEL: "variouspieces",
     GearType.KNIFE: "knife",
+    GearType.LINE_CUTTER: "knife",
+    GearType.SHEARS: "knife",
     GearType.COMPASS: "compass",
     GearType.CAMERA: "variouspieces",
     GearType.OTHER: "variouspieces",
