@@ -14182,9 +14182,9 @@ loses nothing a reader could have used and the app and the format now describe a
 way.
 
 **No data preservation, and no backfill into `notes`.** Folding stored values in first was
-considered and rejected: nothing is deployed anywhere (`AGENTS.md`), so the only rows this meets are
-local development data. `ALTER TABLE ... DROP COLUMN` is content-independent, so there is no
-"courses with a cost" case that behaves differently from any other.
+considered and rejected: *There is no production* (umbrella `CLAUDE.md`), so the only rows this
+meets are local development data. `ALTER TABLE ... DROP COLUMN` is content-independent, so there is
+no "courses with a cost" case that behaves differently from any other.
 
 **The web client had to stop sending the key first**, and that ordering is not optional.
 `CourseCreate` and `CourseUpdate` are both `extra="forbid"`, so a body still carrying `cost` is a
