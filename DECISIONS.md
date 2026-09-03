@@ -14048,3 +14048,47 @@ visible as *which* addresses got through, instead of a 5xx that hides them; and 
 real invitations whose invitees have simply not been told, which is a thing the operator can act on.
 Sends are sequential and inline — the worker runs crons only (*"The Arq worker now does one real
 thing"*), and a bounded one-off operator action does not justify this app's first queued job.
+
+## The local suite has no Redis, so a test that reaches the rate limiter is green here and red in CI
+
+`CONTRIBUTING.md` and `CLAUDE.md` both warn at length about the Postgres-backed tests skipping
+themselves when `POSTGRES_SERVER` names a host the test process cannot reach. There is a second
+datastore with the same shape of trap and it fails in the **opposite direction**, which is why it
+went unnoticed until a PR was already open.
+
+`docker-compose.yml` publishes Postgres to the host and **does not publish Redis** — the `redis`
+service exposes `6379/tcp` on the compose network only. So a host run of the suite cannot reach it,
+`enforce_rate_limit` takes its documented fail-open path (*"Rate limiting fails open on a Redis
+*outage*"*), and a test that never patched the limiter passes anyway. CI runs Redis as a service
+container on `localhost`, where the limiter really runs — against a module-level client bound to
+whichever event loop touched it first, while pytest-asyncio hands every test a fresh one. The result
+is `got Future attached to a different loop` / `Event loop is closed`, raised through redis-py's
+parser, in tests that look like they are about invitations.
+
+**The asymmetry is what makes it expensive.** A skipped Postgres test at least prints a skip line,
+and `CONTRIBUTING.md` teaches you to read it. This one prints nothing at all: the local run is
+genuinely green, the failure appears only after a push, and the traceback points at redis-py rather
+than at the missing `patch`. It also does not reproduce by running the offending module alone —
+another module has to poison the loop first — so the natural debugging move confirms the wrong
+conclusion.
+
+Two things follow.
+
+**Patch `enforce_rate_limit` in any test that drives a handler which calls it.** `test_auth.py` has
+done this in every case since it was written, and `test_invitations.py` now does it once as an
+autouse fixture with the tests that are genuinely about the limiter re-patching over the top. A
+handler acquiring a *new* rate limit is the moment to sweep its existing tests, and nothing local
+will tell you that you skipped one.
+
+**To reproduce CI's conditions on the host, give the suite a Redis it can reach** — the dev stack's
+is not it:
+
+```bash
+docker run -d --rm --name od-redis-test -p 16379:6379 redis:7-alpine
+POSTGRES_SERVER=localhost REDIS_CACHE_HOST=localhost REDIS_CACHE_PORT=16379 \
+  ENVIRONMENT=local SECRET_KEY=testsecret uv run pytest -q
+docker rm -f od-redis-test
+```
+
+A throwaway container rather than publishing the dev stack's port, so nothing about the running
+stack changes and the suite cannot touch the cache the dev API is serving from.

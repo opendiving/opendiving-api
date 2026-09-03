@@ -63,6 +63,25 @@ def _request() -> Mock:
     return request
 
 
+@pytest.fixture(autouse=True)
+def _no_live_rate_limiter():
+    """Every handler in this module consults `enforce_rate_limit`, and none of these tests
+    is about Redis.
+
+    Autouse rather than repeated per test because the failure mode is asymmetric and
+    misleading: the compose stack does **not** publish Redis to the host, so on a developer's
+    machine the limiter fails open (`DECISIONS.md` §"Rate limiting fails open on a Redis
+    *outage*") and an unpatched test passes. CI runs Redis as a service container on
+    localhost, where the real limiter runs instead - so the same test can be green locally
+    and red in CI, which is the one direction the Postgres skip trap does not cover.
+
+    The tests that are genuinely *about* the limiter re-patch it themselves; an inner
+    `patch` wins over this one.
+    """
+    with patch("src.app.api.v1.invitations.enforce_rate_limit", new_callable=AsyncMock):
+        yield
+
+
 def awaited_args(recorder: Any) -> tuple:
     """The positional arguments of a mock's last await, narrowed for mypy.
 
