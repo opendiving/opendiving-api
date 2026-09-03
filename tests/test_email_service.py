@@ -276,6 +276,12 @@ class TestSendInvitationEmail:
         # No token and no query parameter of any kind - the link is the bare sign-in page.
         assert "token=" not in body
         assert "/signin?" not in body
+        # And no claim about the registration mode. `POST /admin/invitations` has no mode
+        # check, so a superuser on an `open` instance can send this - a sentence asserting
+        # registration is by invitation would be false there, and the copy does not need it:
+        # the first paragraph already says who invited them and the second says which
+        # address to use.
+        assert "by invitation" not in body
 
     @pytest.mark.asyncio
     async def test_the_inviter_s_name_is_escaped(self):

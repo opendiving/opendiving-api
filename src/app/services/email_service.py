@@ -211,6 +211,13 @@ async def send_invitation_email(email: str, inviter_name: str) -> None:
     what makes the invitation legible rather than a cold mail from a domain the recipient
     may not know. The legal pages carry the corresponding grant.
 
+    **Says nothing about the registration mode**, deliberately. `POST /admin/invitations`
+    carries no mode check, so an operator on an `open` instance reaches this sender - and a
+    sentence asserting registration is by invitation would be false there. The copy does not
+    need one: the first paragraph says who invited them, the second says which address to
+    use, and both are true in either mode. A mode-conditional clause was considered and
+    rejected as disproportionate to what it would restore.
+
     The credential-carrying shape (log on `local`, raise elsewhere) rather than the notice
     shape, even though nothing here is a credential. The reasoning is the *consequence* of
     a silent failure rather than the sensitivity of the payload: a notice that fails to send
@@ -232,7 +239,7 @@ async def send_invitation_email(email: str, inviter_name: str) -> None:
         html_body=(
             f"<p>{html.escape(inviter_name)} has invited you to their OpenDiving log book at "
             f'<a href="{settings.FRONTEND_URL}">{settings.FRONTEND_URL}</a>.</p>'
-            f"<p>Registration on this instance is by invitation. Sign in with <strong>{html.escape(email)}</strong> - "
+            f"<p>Sign in with <strong>{html.escape(email)}</strong> - "
             "the address this was sent to - and your account will be created:</p>"
             f'<p><a href="{sign_in_url}">{sign_in_url}</a></p>'
             "<p>There is no password to choose: you enter your address, and a sign-in link and code "
