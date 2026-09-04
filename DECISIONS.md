@@ -14511,6 +14511,25 @@ once and retaken later is legitimately the same name twice — the model says so
 The same rule applies *within* one document: two sites under different uuids with the same name are
 one row, the second linking to the first, and both spellings of the reference reach it.
 
+**The within-document half needs its own key, and getting it wrong is two different bugs.** A
+collision is decided on whatever the index is keyed on, and for four of the five collections that is
+the record's own text, so one key serves both halves. `gear_service_schedule` is keyed on
+`gear_item_id`, and the schedule's dedupe therefore has to happen *per gear row* - which has two
+spellings depending on where that row came from, and each spelling on its own loses a real case:
+
+- A gear item **this import is creating** has no row id yet, so the existing-row half has nothing to
+  look in. Its identity is the document's own canonical gear uuid.
+- A gear item the caller **already owns** has a row id, and two document gear records can both link
+  to it: each takes the existing-row branch, so neither carries a `canonical_source_uuid` and
+  references to them come back as two different uuids for one row.
+
+Both misses end identically - two inserts against `ux_gear_service_schedule_item_kind_label`, an
+`IntegrityError` out of the apply transaction, and the whole logbook refused. So the alias key is
+the row id where one is known and the canonical uuid where it is not, `_claim_unique` takes the two
+keys separately, and `tests/test_logbook_import.py::TestTwoSchedulesOnOneNewGearItem` covers all
+three shapes. Review found this twice running, once per spelling; the second was a regression
+introduced by the fix for the first.
+
 **`ux_dive_file_user_id_sha256` is the one collision with no link available**, and it is skip-and-
 report. Link-to-existing is impossible there: `dive_id` is `NOT NULL` under the full-unique
 `ux_dive_file_dive_id`, and `ux_dive_file_storage_key` forbids sharing a key, so one row cannot
