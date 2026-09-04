@@ -232,12 +232,17 @@ class TestTheRoundTrip:
     async def test_uuids_are_remapped_because_they_belong_to_the_source(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
+        """The cross-account cause, isolated: nothing in this document is a duplicate, so
+        the *other* remap code must not appear. Which code comes out is the contract - the
+        two differ in where a reference to the old identifier lands."""
         source_user, document = seeded
         destination = create_user(db)
 
         plan = await _apply(async_db, destination.id, document)
 
-        assert ImportNoteCode.RECORD_REMAPPED in _codes(plan)
+        codes = _codes(plan)
+        assert ImportNoteCode.RECORD_REMAPPED_REFERENCES_FOLLOW in codes
+        assert ImportNoteCode.RECORD_REMAPPED_REFERENCES_STAY not in codes
         original = parse_document(document)
         source_uuids = {uuid_pkg.UUID(dive["uuid"]) for dive in original["dives"]}
         destination_uuids = set(
@@ -1114,7 +1119,7 @@ class TestTwoRecordsClaimingOneIdentifier:
         created, linked, restored, skipped = _counts(plan)["dives"]
         assert created + linked + restored + skipped == len(parsed["dives"])
         assert created == 2
-        assert ImportNoteCode.RECORD_REMAPPED in _codes(plan)
+        assert ImportNoteCode.RECORD_REMAPPED_REFERENCES_STAY in _codes(plan)
         numbers = sorted(
             (await async_db.execute(select(Dive.dive_number).where(Dive.user_id == destination.id))).scalars()
         )
@@ -1137,6 +1142,65 @@ class TestTwoRecordsClaimingOneIdentifier:
 
         assert _counts(plan)["dives"] == (1, 0, 0, 1)
         assert len((await async_db.execute(select(Dive.id).where(Dive.user_id == destination.id))).scalars().all()) == 1
+
+    @pytest.mark.asyncio
+    async def test_the_duplicate_is_the_only_remap_when_the_account_owns_the_identifiers(
+        self, seeded: Any, async_db: AsyncSession
+    ) -> None:
+        """The duplicate-identifier cause, isolated.
+
+        The test above imports into a *second* account, where every uuid is somebody
+        else's, so both remap codes fire and neither is pinned by the other's absence.
+        Importing into the owning account takes the link branch for every record the
+        document already has here, leaving the twin's remap the only one in the report.
+        """
+        user, document = seeded
+        parsed = json.loads(document)
+        twin = dict(parsed["dives"][0])
+        twin["dive_number"] = 99
+        twin["started_at"] = "2027-06-01T09:00:00+00:00"
+        parsed["dives"].append(twin)
+
+        plan = await _apply(async_db, user.id, json.dumps(parsed).encode())
+
+        codes = _codes(plan)
+        assert ImportNoteCode.RECORD_REMAPPED_REFERENCES_STAY in codes
+        assert ImportNoteCode.RECORD_REMAPPED_REFERENCES_FOLLOW not in codes
+        assert _counts(plan)["dives"] == (1, 1, 0, 0)
+        stayed = [note for note in plan.notes if note.code is ImportNoteCode.RECORD_REMAPPED_REFERENCES_STAY]
+        assert len(stayed) == 1
+        assert stayed[0].collection == "dives"
+        assert stayed[0].uuid == uuid_pkg.UUID(twin["uuid"])
+
+    @pytest.mark.asyncio
+    async def test_a_reference_to_the_duplicated_identifier_reaches_the_first_record(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """What the code's name promises, on a collection something actually points at.
+
+        The dive's `trip_uuid` is the duplicated identifier and nothing rewrites it, so it
+        has to land on the trip the document defined first while the twin arrives beside it
+        under an identifier no reference reaches. Distinct names on purpose: two trips
+        sharing one would be the name-dedupe branch instead, which links rather than remaps.
+        """
+        _, document = seeded
+        parsed = json.loads(document)
+        twin = dict(parsed["trips"][0])
+        twin["name"] = "The twin under a claimed identifier"
+        parsed["trips"].append(twin)
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert ImportNoteCode.RECORD_REMAPPED_REFERENCES_STAY in _codes(plan)
+        assert _counts(plan)["trips"] == (2, 0, 0, 0)
+        trips = {
+            trip.name: trip.id
+            for trip in (await async_db.execute(select(Trip).where(Trip.user_id == destination.id))).scalars()
+        }
+        dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        assert dive.trip_id == trips[parsed["trips"][0]["name"]]
+        assert dive.trip_id != trips[twin["name"]]
 
 
 class TestAServiceRecordOnAScheduleTheImportDidNotWrite:
