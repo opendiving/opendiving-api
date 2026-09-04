@@ -31,15 +31,17 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # **NULL is a third state, not a missing value**: the wall clock was recorded and the
     # instant is unknown (DiveJSON spec §5.2). `start_time` then holds that wall clock
     # labelled UTC, because a `timestamptz` has nowhere else to put it, and
-    # `combine_start_time` hands it back naive. Only the logbook importer writes it -
-    # manual entry and the dive-computer parse path both know an offset - and it exists
-    # because a converter meeting an offset-less source has no honest third option.
+    # `combine_start_time` hands it back naive. It exists because a converter meeting an
+    # offset-less source has no honest third option. Only the logbook importer can *begin*
+    # it - manual entry and the dive-computer parse path both know an offset - though a
+    # `PATCH /dive/{uuid}` of such a dive's wall clock writes the NULL onward rather than
+    # forcing an offset onto it. Preserve, never remove: see `core/utils/datetime_offset.py`.
     #
     # The `0` defaults survive the column becoming nullable, and deliberately: they are
     # what stops a `Dive(...)` constructed without an offset (tests, the admin panel) from
     # silently claiming the unknown state, which is a claim about the data rather than a
-    # missing keyword argument. Every real write passes an explicit value - the importer's
-    # is an explicit `None`.
+    # missing keyword argument. Every real write passes an explicit value; the two that
+    # ever pass an explicit `None` are the importer and `patch_dive`'s preserve branch.
     utc_offset_minutes: Mapped[int | None] = mapped_column(Integer, default=0, server_default="0")
 
     max_depth: Mapped[float | None] = mapped_column(Float, default=None)

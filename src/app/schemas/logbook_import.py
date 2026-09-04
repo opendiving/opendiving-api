@@ -185,9 +185,11 @@ class ImportCylinder(_ReadModel):
 class ImportDive(_ReadModel):
     uuid: uuid_pkg.UUID
     dive_number: int | None = None
-    # No offset validator, unlike every write shape in `schemas/dive.py`: an offset-less
+    # No offset validator, unlike `DiveCreate` in `schemas/dive.py`: an offset-less
     # `started_at` is spec §5.2's local date-time, and admitting it is the reason
-    # `dive.utc_offset_minutes` became nullable.
+    # `dive.utc_offset_minutes` became nullable. `DiveUpdate` has since dropped its
+    # validator too, but for the narrower reason that it may only *preserve* what this
+    # endpoint created - see `core/utils/datetime_offset.py`.
     started_at: datetime | None = None
     duration: int | None = None
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]

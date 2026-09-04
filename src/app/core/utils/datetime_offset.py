@@ -17,12 +17,28 @@ DiveJSON's local date-time (spec §5.2), which exists because real migration sou
 destroy offsets and the only alternatives are fabricating one or dropping the dive. For
 such a row the `start_time` column holds the wall clock *labelled* UTC, because a
 `timestamptz` has nowhere else to put it, and `combine_start_time` hands it back naive -
-the same wall clock, with no zone claim attached to it. Every write path a human touches
-still requires an offset: manual entry and the parse path both know one, so the state
-enters through import alone.
+the same wall clock, with no zone claim attached to it.
+
+**Creating the state is import's alone; carrying it forward is not.** Manual entry and the
+parse path both know an offset, so `DiveCreate` demands one and the state never comes into
+existence through a human write. But `PATCH /dive/{uuid}` accepts an offsetless
+`start_time` on a dive whose offset is *already* unknown, so an imported dive's wall clock
+stays editable without a client having to invent an offset to fix a typo - the value this
+app exports for such a dive is then a value its own write API accepts. The same body
+against a dive that has an offset is refused. That asymmetry - preserve, never remove - is
+`split_updated_start_time` below.
 """
 
 from datetime import UTC, datetime, timedelta, timezone
+
+# What a client is told when it tries to *remove* an offset. Named rather than inlined
+# because two suites and the web app's edit form all depend on the exact sentence, and
+# because it has to explain the one case that is allowed - a message reading only "include
+# a UTC offset" would send a client looking for a bug in a dive it can legitimately save.
+START_TIME_OFFSET_REQUIRED_MESSAGE = (
+    "start_time must include a UTC offset, e.g. '2021-04-04T10:04:47.910+02:00'. Only a dive whose own UTC "
+    "offset is already unknown may be updated without one."
+)
 
 
 def require_utc_offset(value: datetime) -> datetime:
@@ -33,10 +49,13 @@ def require_utc_offset(value: datetime) -> datetime:
     parser either finds an explicit offset in the file or the caller falls back to the
     browser's offset - so the API requires it up front rather than guessing.
 
-    **A write-side rule, not a read-side one.** It stays on `DiveCreate`, `DiveUpdate`,
-    `DiveRenumberRequest.from_start_time` and `GET /dives/next-number`'s query parameter,
-    because every one of those callers knows an offset. The read shapes serve whatever is
-    stored, offset-less rows included - see the module docstring.
+    **A write-side rule, and no longer the whole of the write side.** It guards
+    `DiveCreate`, `DiveRenumberRequest.from_start_time` and `GET /dives/next-number`'s
+    query parameter, because every one of those callers knows an offset. It is
+    deliberately *not* on `DiveUpdate`: whether an offsetless update is legal depends on
+    the dive being updated, which a schema cannot see, so that half of the write side is
+    `split_updated_start_time` instead. The read shapes serve whatever is stored,
+    offset-less rows included - see the module docstring.
     """
     if value.utcoffset() is None:
         raise ValueError(
@@ -72,6 +91,29 @@ def split_local_start_time(start_time: datetime) -> tuple[datetime, int | None]:
     if start_time.utcoffset() is None:
         return start_time.replace(tzinfo=UTC), None
     return split_start_time(start_time)
+
+
+def split_updated_start_time(start_time: datetime, stored_offset_minutes: int | None) -> tuple[datetime, int | None]:
+    """`split_local_start_time`, narrowed to what an *update* of an existing dive may do.
+
+    **Preserving is allowed; removing is not**, and that asymmetry is the whole of it. An
+    offsetless `start_time` against a dive whose `utc_offset_minutes` is already NULL
+    leaves it NULL: the wall clock of an imported dive stays editable, and the round trip
+    closes, since the offsetless `started_at` this app exports for such a dive is then a
+    value its own dive-write API accepts. The same body against a dive that *has* an offset
+    is refused - otherwise editing would be a second way to bring the unknown state into
+    existence, and import would stop being its only origin.
+
+    An offset-aware value is accepted either way: adopting a real offset is the diver
+    deciding they know one, which is a fact gained rather than lost.
+
+    A `ValueError` rather than an HTTP exception, so the rule stays testable without a
+    request and the route decides the status code - the division of labour
+    `validate_depth_pair` has.
+    """
+    if start_time.utcoffset() is None and stored_offset_minutes is not None:
+        raise ValueError(START_TIME_OFFSET_REQUIRED_MESSAGE)
+    return split_local_start_time(start_time)
 
 
 def combine_start_time(utc_instant: datetime, offset_minutes: int | None) -> datetime:

@@ -21,7 +21,7 @@ from ...core.exceptions.http_exceptions import (
 )
 from ...core.security import create_dive_file_token
 from ...core.utils.cache import cache
-from ...core.utils.datetime_offset import combine_start_time, split_start_time
+from ...core.utils.datetime_offset import combine_start_time, split_start_time, split_updated_start_time
 from ...core.utils.pagination import clamp_pagination
 from ...core.utils.uploads import content_disposition_attachment, read_upload_within_limit
 from ...crud.crud_courses import get_course_uuids_by_ids, resolve_course_id_for_user
@@ -259,8 +259,8 @@ def _to_public_start_time(data: dict[str, Any]) -> dict[str, Any]:
     **Offset-aware for every dive but one kind.** A dive whose source recorded no offset
     stores a NULL there, and `combine_start_time` hands back the recorded wall clock with no
     zone attached (`2021-04-04T10:04:47.910`). Only logbook import can create such a dive;
-    the read shapes carry `DiveLocalStartTime` so they can serve it, while every write shape
-    still requires an offset.
+    the read shapes carry `DiveLocalStartTime` so they can serve it, `DiveCreate` still
+    requires an offset, and `patch_dive` requires one of any dive that already has one.
     """
     data = dict(data)
     offset_minutes = data.pop("utc_offset_minutes")
@@ -915,6 +915,12 @@ async def patch_dive(
     Passing `null` for `course_uuid` detaches it from its training course the same way.
     Referencing anything the caller doesn't own is a 422, as are the DB's domain
     constraints.
+
+    `start_time` normally has to carry a UTC offset. The exception is a dive whose offset
+    is already unknown - an imported dive whose source recorded none - where an offsetless
+    value like `2026-04-17T11:49:23` is accepted and leaves the offset unknown, so the wall
+    clock stays editable without inventing one. Sending an offsetless value for a dive that
+    *has* an offset is a 422: an update may preserve that state but never create it.
     """
     db_dive = await _get_owned_dive(db, uuid, current_user)
     owner_id = db_dive.user_id
@@ -929,8 +935,15 @@ async def patch_dive(
     # explicit null for `start_time` (the column is `NOT NULL`), so a field that is set
     # is always a real datetime here - which is what stops a null slipping past this
     # branch into the update and leaving `utc_offset_minutes` describing the *old* time.
+    #
+    # The offset rule is the stored dive's to answer, which is why it is here and not on
+    # `DiveUpdate`: an offsetless value preserves an already-unknown offset and is refused
+    # on a dive that has one. See `core/utils/datetime_offset.py`.
     if "start_time" in values.model_fields_set and values.start_time is not None:
-        utc_start_time, utc_offset_minutes = split_start_time(values.start_time)
+        try:
+            utc_start_time, utc_offset_minutes = split_updated_start_time(values.start_time, db_dive.utc_offset_minutes)
+        except ValueError as e:
+            raise UnprocessableEntityException(str(e)) from e
         update_data["start_time"] = utc_start_time
         update_data["utc_offset_minutes"] = utc_offset_minutes
 

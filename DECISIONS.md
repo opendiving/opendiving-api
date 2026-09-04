@@ -540,13 +540,18 @@ instant) and `utc_offset_minutes` (e.g. `120` for `+02:00`), the latter defaulti
 existing call sites that construct a `Dive(...)` without it (tests, the admin panel) don't break.
 
 Critically, **the API itself never exposes `utc_offset_minutes` as its own field**. Every
-input/output `start_time` is a single offset-aware ISO 8601 string, e.g.
-`"2021-04-04T10:04:47.910+02:00"` - a naive datetime (no offset) is rejected by
-`DiveBase`/`DiveUpdate`'s `start_time` validation (`require_utc_offset` in
-`core/utils/datetime_offset.py`). The two DB columns are purely an internal storage detail:
+input/output `start_time` is a single ISO 8601 string, e.g. `"2021-04-04T10:04:47.910+02:00"`, and a
+naive datetime (no offset) is rejected by `DiveCreate`'s `start_time` validation
+(`require_utc_offset` in `core/utils/datetime_offset.py`). Two later changes narrowed that to
+*create*: the read shapes serve the offset-less string a dive imported from an offset-destroying
+source reads back as, and an update may carry that state forward on a dive that already has it. See
+*A dive's UTC offset may be unknown, and only import can make it so* and *An offset-unknown dive
+keeps its wall clock editable* below. The two DB columns are purely an internal storage detail:
 
-- On write (`write_dive`/`patch_dive` in `api/v1/dives.py`), `split_start_time()` splits the
-  incoming offset-aware `start_time` into the UTC instant + offset minutes to store.
+- On write (`write_dive` in `api/v1/dives.py`), `split_start_time()` splits the incoming
+  offset-aware `start_time` into the UTC instant + offset minutes to store. `patch_dive` goes
+  through `split_updated_start_time()` instead, which is the same split plus the one rule an update
+  has that a create does not.
 - On read (`_to_public_start_time()` in `api/v1/dives.py`), `combine_start_time()` re-attaches the
   stored offset to the stored UTC instant before building the public `DiveRead`/
   `DiveReadWithMixtures` response.
@@ -14592,14 +14597,30 @@ and it exists because real migration sources — UDDF pipelines above all — de
 converter two dishonest options: fabricate one, which poisons the record undetectably, or drop the
 dive, which is the loss the format exists to end.
 
-**The requirement became a write-side rule rather than disappearing.** `require_utc_offset` still
-guards `DiveCreate`, `DiveUpdate`, `DiveRenumberRequest.from_start_time` and
-`GET /dives/next-number`'s query parameter — every caller that writes through them knows its own
-offset, the browser off `Date.getTimezoneOffset()` and the parse path off the file. The *read*
-shapes serve what is stored, which is why `schemas/dive.py` now declares two annotations:
-`DiveStartTime` (strict) and `DiveLocalStartTime` (whatever is there). Derive the set with
-`git grep -n "DiveStartTime" -- src/` rather than from a list; it reaches `schemas/export.py` and a
-route-level annotation in `api/v1/dives.py` that no sweep of `schemas/` would find.
+**The requirement became a write-side rule rather than disappearing.** `require_utc_offset` guards
+`DiveCreate`, `DiveRenumberRequest.from_start_time` and `GET /dives/next-number`'s query parameter —
+every caller that writes through them knows its own offset, the browser off
+`Date.getTimezoneOffset()` and the parse path off the file. The *read* shapes serve what is stored,
+which is why `schemas/dive.py` declares two annotations: `DiveStartTime` (strict) and
+`DiveLocalStartTime` (whatever is there). Derive the set with
+`git grep -nE "DiveStartTime|DiveLocalStartTime|require_utc_offset" -- src/ tests/ DECISIONS.md`
+rather than from a list — two things make a narrower sweep miss. `DiveStartTime` is carried
+route-level in `api/v1/dives.py` as well as in `schemas/`, so `-- src/app/schemas/` is not the
+boundary; and neither identifier reaches any *statement* of the rule, so a type-only grep hits no
+prose at all — not this section, and not the two docstrings in `core/utils/datetime_offset.py` that
+are its primary description. That second gap is the expensive one: when `DiveUpdate` left the strict
+list below, the type-only sweep reached none of the docstrings and comments stating the rule it was
+leaving, and every one of them would have shipped contradicting the code. Sweep the prose, not just
+the type. (The permissive name is worth sweeping for alongside: `schemas/export.py` carries
+`DiveLocalStartTime` and no strict annotation at all, which an earlier revision of this paragraph
+got backwards.)
+
+**Narrowed later: `DiveUpdate` left that list, and this section's title is the reason it could.**
+The heading says *make it so*, and creating the state is still import's alone — but an update may
+now **carry it forward**, so `DiveUpdate.start_time` is `DiveLocalStartTime` and `patch_dive`
+refuses what a schema cannot judge. Preserve, never remove. The reasoning is in *An offset-unknown
+dive keeps its wall clock editable* at the end of this file; what matters here is that these two
+sections agree rather than one of them being the stale half.
 
 **The storage shape is what makes every reader work unchanged.** For an offset-less dive the
 `start_time` column holds the recorded wall clock *labelled* UTC, because a `timestamptz` has
@@ -14923,3 +14944,58 @@ out rather than merely that a note did. A cross-account import of a clean docume
 already owns the identifiers takes the link branch everywhere else, leaving `..._stay` the only
 remap in the report. The cross-account import of a document that *also* duplicates an identifier
 emits both — correct, and pinning neither.
+
+## An offset-unknown dive keeps its wall clock editable
+
+`PATCH /dive/{uuid}` accepts a `start_time` with no UTC offset — but only against a dive whose
+`utc_offset_minutes` is *already* NULL, and only leaving it NULL. **Preserving is allowed; removing
+is not**, and everything below is that one asymmetry.
+
+**The reason is round-trip closure, not the edit form.** The DiveJSON writer emits an offsetless
+`started_at` for an offset-unknown dive and the logbook importer accepts one, while
+`DiveUpdate.start_time` was offset-*required* — so a value this app wrote into its own export was a
+value its own dive-write API refused. That is not a rough edge in the UI; it is the app failing to
+digest what it produces, on the one format it claims to be the reference implementation of, and any
+third-party client PATCHing a dive from a document it just read met the same wall.
+
+The UX consequence is what surfaced it. The web client copies `start_time` out of a dive and sends
+it back on save, so once its own client-side refusal relaxes, every save of an imported
+offset-unknown dive would have 422'd — with fabricating `+00:00` as the nearest way out, which is
+precisely the invention the third state exists to prevent. A "not recorded" offset the diver can see
+and keep is honest; a silent `+00:00` is a claim about an instant nobody recorded.
+
+**This narrows *A dive's UTC offset may be unknown, and only import can make it so*; it does not
+reverse it.** That section is about the state coming into *existence*, and it still holds: no create
+path can produce it, and refusing to let an update remove an offset is what keeps import the only
+origin. Were removal allowed, editing would be a second origin and the earlier section would quietly
+become false — the worst outcome available here, since a later reader finding a recorded rule the
+code no longer obeys cannot tell which of the two is stale. Both sections were rewritten together
+for that reason.
+
+**The rule lives in `split_updated_start_time`, not in an annotation, because a schema cannot see
+the dive.** Whether a given body is a preserve or a remove depends entirely on the row being
+updated, so `DiveUpdate.start_time` carries the permissive `DiveLocalStartTime` and the route
+decides — the same division of labour `validate_depth_pair` has with `patch_dive`'s merged pair, and
+for the same reason. It raises `ValueError`, `patch_dive` turns that into a 422 whose body is
+`{"detail": "<sentence>"}` rather than Pydantic's per-field array, and
+`START_TIME_OFFSET_REQUIRED_MESSAGE` is a named constant because the sentence has to explain the
+case that *is* allowed. A message reading only "include a UTC offset" would send a client hunting
+for a bug in a dive it can legitimately save.
+
+**`0` is an offset.** A dive logged in London has `utc_offset_minutes = 0`, and the column's own
+`server_default` is `0` — so the guard tests `stored_offset_minutes is not None`, never falsiness. A
+truthiness check here would let an update strip the offset off every UTC dive in a log, silently,
+and the corpus is full of them.
+
+**An offset-aware update is always accepted, including on a dive that had none.** Adopting a real
+offset is the diver deciding they know one: a fact gained rather than lost, and the deliberate way
+out of the unknown state. There is no way back into it, which is the point.
+
+**What breaks, since the acceptance itself only widens.** No body that worked before stops working —
+this admits a shape that used to be refused. Two things do move for a client, and both are about the
+refusal: an offsetless `start_time` is no longer rejected by the *schema*, so it no longer produces
+Pydantic's per-field `detail` array, and the case that is still refused answers with the flat
+`{"detail": "<sentence>"}` shape from the route instead. A client that read the 422 body
+structurally rather than through `getApiErrorMessage` sees the difference; one that told a diver
+"start time needs a timezone" before ever calling the API now refuses a save the API would have
+accepted.
