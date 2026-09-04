@@ -741,6 +741,49 @@ class TestTwoSchedulesOnOneNewGearItem:
         created, linked, _, _ = _counts(plan)["gear_service_schedules"]
         assert (created, linked) == (1, 1)
 
+    @pytest.mark.asyncio
+    async def test_two_gear_records_linking_to_one_existing_item_share_its_schedule_slot(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The third shape, and the one an alias key on the *document's* uuid misses.
+
+        When the destination already owns a matching gear item, two document gear records
+        both take `_claim_unique`'s existing-row branch - which returns a link with a row id
+        and **no** `canonical_source_uuid`, so `_reference` hands back two different uuids
+        for one row. Their schedules have to collapse on the row, not on the document.
+        """
+        _, document = seeded
+        parsed = json.loads(document)
+        original = parsed["gear"][0]
+        destination = create_user(db)
+        db.add(GearItem(user_id=destination.id, name=original["name"], brand=original.get("brand"), notes=""))
+        db.commit()
+        gear_twin = dict(original)
+        gear_twin["uuid"] = str(uuid7())
+        parsed["gear"].append(gear_twin)
+        schedule_twin = dict(parsed["gear_service_schedules"][0])
+        schedule_twin["uuid"] = str(uuid7())
+        schedule_twin["gear_uuid"] = gear_twin["uuid"]
+        parsed["gear_service_schedules"].append(schedule_twin)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["gear"] == (0, 2, 0, 0)
+        created, linked, _, _ = _counts(plan)["gear_service_schedules"]
+        assert (created, linked) == (1, 1)
+        assert (
+            len(
+                (
+                    await async_db.execute(
+                        select(GearServiceSchedule.id).where(GearServiceSchedule.user_id == destination.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            == 1
+        )
+
 
 class TestTheOffsetUnknownState:
     """The one state only this endpoint can create, and the one no other suite covers.

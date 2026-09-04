@@ -1111,17 +1111,26 @@ class _Planner:
         record = self._resolve(collection, schedule.uuid, existing)
         gear_record = self._records["gear"][gear_uuid]
         if record.action is Action.CREATE:
-            # The alias half is keyed on the *document's* gear identity, which every gear
-            # record has; the index half on the gear row's id, which one being created does
-            # not have yet - and cannot collide with anything anyway, because there are no
-            # existing schedules under a gear item that does not exist.
+            # **Both halves key on the gear *row* this schedule will hang on**, which is
+            # what the unique index is on - and that row has two spellings depending on
+            # where it came from. An existing row has an id, and two document gear records
+            # can both link to it (each takes `_claim_unique`'s index branch, so neither
+            # carries a `canonical_source_uuid` and `_reference` hands back two different
+            # uuids for one row). A row this import is *creating* has no id yet, and there
+            # the document's own canonical uuid is the identity - one per row, because the
+            # alias branch already collapsed any duplicates.
+            #
+            # Keying the alias half on either one alone misses the other case, and both
+            # misses end the same way: two inserts against
+            # `ux_gear_service_schedule_item_kind_label` and the whole import refused.
             rule = _key(schedule.type.value, schedule.label)
+            gear_identity = str(gear_uuid) if gear_record.row_id is None else str(gear_record.row_id)
             record = self._claim_unique(
                 collection,
                 record,
                 index,
                 aliases,
-                (str(gear_uuid), *rule),
+                (gear_identity, *rule),
                 "service schedule",
                 index_key=None if gear_record.row_id is None else (str(gear_record.row_id), *rule),
             )
