@@ -1,6 +1,6 @@
 """Unit tests for cache key helper utilities, and for the one key *shape* two modules share.
 
-Everything below `TestTheListCacheNamesAgree` is about `core/utils/cache.py`'s string
+Everything up to `TestTheListCacheNamesAgree` is about `core/utils/cache.py`'s string
 handling. That last class is about something else and is here rather than beside the
 feature that needed it, because it is the guard three comments in
 `core/utils/owned_resource_cache.py` and `services/cache_invalidation.py` point at - and a

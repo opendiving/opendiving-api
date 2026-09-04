@@ -36,6 +36,7 @@ from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
 from src.app.models.certification import Certification
+from src.app.models.course import Course
 from src.app.models.dive import Dive
 from src.app.models.dive_dive_site import DiveDiveSite
 from src.app.models.dive_file import DiveFile
@@ -46,7 +47,9 @@ from src.app.models.dive_site import DiveSite
 from src.app.models.gear_item import GearItem
 from src.app.models.gear_service_record import GearServiceRecord
 from src.app.models.gear_service_schedule import GearServiceSchedule
+from src.app.models.gear_set import GearSet
 from src.app.models.gear_set_item import GearSetItem
+from src.app.models.trip import Trip
 from src.app.schemas.certification import CertificationAgency
 from src.app.schemas.logbook_import import ImportNoteCode
 from src.app.services.export import load_export_bundle, write_divejson
@@ -1157,6 +1160,83 @@ class TestNumbersWiderThanTheColumn:
         assert record.dive_count_at_service == 0
 
 
+class TestNumbersThatOnlyOverflowOnceAddedUp:
+    """The half a per-column bound cannot reach: a *derived* column that sums the values.
+
+    Both of these write inside the apply transaction, from code that knows nothing about
+    import - so the failure is not "a value was refused" but "the whole logbook was", over
+    arithmetic in a tile nobody was looking at. Each is closed at its inputs.
+    """
+
+    MAX_DURATION = 366 * 24 * 60 * 60
+    MAX_COUNT = 1_000_000
+
+    @pytest.mark.asyncio
+    async def test_two_year_long_dives_sum_without_refusing_the_import(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """`user_dive_stats.total_time` is `SUM(dive.duration)` over the whole account, so
+        two dives each inside `dive.duration`'s own bound overflowed a 32-bit column."""
+        from src.app.models.user_dive_stats import UserDiveStats
+
+        _, document = seeded
+        parsed = json.loads(document)
+        first = parsed["dives"][0]
+        first["duration"] = self.MAX_DURATION
+        second = dict(first)
+        second["uuid"] = str(uuid7())
+        second["started_at"] = "2027-06-01T09:00:00+00:00"
+        parsed["dives"].append(second)
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["dives"] == (2, 0, 0, 0)
+        stats = (
+            (await async_db.execute(select(UserDiveStats).where(UserDiveStats.user_id == destination.id)))
+            .scalars()
+            .one()
+        )
+        assert stats.total_time == 2 * self.MAX_DURATION
+
+    @pytest.mark.asyncio
+    async def test_a_dive_longer_than_a_year_is_skipped(self, seeded: Any, db: Session, async_db: AsyncSession) -> None:
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["duration"] = self.MAX_DURATION + 1
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["dives"] == (0, 0, 0, 1)
+
+    @pytest.mark.asyncio
+    async def test_a_schedule_at_the_count_ceiling_still_computes_its_next_due(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """`recalculate_service_schedule` writes `dive_count_at_start + interval_dives` into
+        a column no wider than either of them."""
+        _, document = seeded
+        parsed = json.loads(document)
+        schedule = parsed["gear_service_schedules"][0]
+        schedule["dive_count_at_start"] = self.MAX_COUNT
+        schedule["interval_dives"] = self.MAX_COUNT
+        schedule.pop("interval_months", None)
+        # The service record's own snapshot would otherwise become the baseline instead.
+        parsed["gear_service_records"] = []
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["gear_service_schedules"] == (1, 0, 0, 0)
+        stored = (
+            (await async_db.execute(select(GearServiceSchedule).where(GearServiceSchedule.user_id == destination.id)))
+            .scalars()
+            .one()
+        )
+        assert stored.next_due_at_dive_count == 2 * self.MAX_COUNT
+
+
 class TestTheIntegerColumnCensus:
     """The second guard, and the one a `CheckConstraint` sweep cannot be:  an `Integer`
     column's real bound is its *width*, which no rule is written on.
@@ -1211,6 +1291,21 @@ class TestTheIntegerColumnCensus:
         ("gear_item", "id"): "the sequence's",
         ("gear_item", "user_id"): "the caller's",
         ("gear_item", "dive_count"): "written as 0 and recomputed by `recalculate_gear_dive_counts`",
+        ("trip", "id"): "the sequence's",
+        ("trip", "user_id"): "the caller's",
+        ("course", "id"): "the sequence's",
+        ("course", "user_id"): "the caller's",
+        ("dive_site", "id"): "the sequence's",
+        ("dive_site", "user_id"): "the caller's",
+        ("gear_set", "id"): "the sequence's",
+        ("gear_set", "user_id"): "the caller's",
+        ("certification", "id"): "the sequence's",
+        ("certification", "user_id"): "the caller's",
+        ("certification", "course_id"): "resolved from a row this import wrote",
+        ("user_dive_stats", "id"): "the sequence's",
+        ("user_dive_stats", "user_id"): "the caller's",
+        ("user_dive_stats", "total_dives"): "a count of rows, derived by `recalculate_dive_stats`",
+        ("user_dive_stats", "species_seen"): "a count of distinct rows, derived by `recalculate_dive_stats`",
         ("trip_location", "id"): "the sequence's",
         ("trip_location", "trip_id"): "resolved from a row this import wrote",
         ("trip_location", "position"): "the list index, not the document's",
@@ -1224,27 +1319,44 @@ class TestTheIntegerColumnCensus:
     }
 
     def test_every_integer_column_an_import_writes_is_accounted_for(self) -> None:
-        from sqlalchemy import Integer
+        """The `written` tuple is every table `writer.py` issues a statement against.
+
+        Derive it from that module rather than from memory: `_Writer.write()` names the
+        collections it walks, and `_recalculate` names the three maintainers it runs, one of
+        which writes `user_dive_stats`. An omission here is silent - the census passes over
+        a table it never looks at.
+        """
+        from sqlalchemy import BigInteger, Integer
 
         from src.app.models.certification_file import CertificationFile
         from src.app.models.trip_location import TripLocation
+        from src.app.models.user_dive_stats import UserDiveStats
 
         written: tuple[Any, ...] = (
             Dive,
             DiveMixture,
             DiveProfile,
+            Trip,
+            TripLocation,
+            Course,
+            DiveSite,
+            GearItem,
+            GearSet,
             GearServiceSchedule,
             GearServiceRecord,
-            GearItem,
-            TripLocation,
+            Certification,
             DiveFile,
             CertificationFile,
+            UserDiveStats,
         )
         found = {
             (model.__table__.name, column.name)
             for model in written
             for column in model.__table__.columns
-            if isinstance(column.type, Integer)
+            # `BigInteger` is excluded rather than overlooked: `user_dive_stats.total_time`
+            # widened precisely because it sums a bounded column, and a 64-bit column is not
+            # reachable by any number a document can carry.
+            if isinstance(column.type, Integer) and not isinstance(column.type, BigInteger)
         }
 
         assert found == set(self.ACCOUNTED), (

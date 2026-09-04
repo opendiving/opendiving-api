@@ -157,6 +157,27 @@ _LONGITUDE_LIMIT = 180.0
 _INT32_MAX = 2**31 - 1
 _INT32_MIN = -(2**31)
 
+# **A column's width is not the bound where a derived column adds the values up.** Two
+# imported numbers each inside `Integer` can sum past it, and the write that fails is then
+# the *derived* one, in the middle of the apply transaction - a whole logbook refused over
+# an arithmetic overflow in a tile. Two derivations do that here, and each gets a ceiling
+# on its inputs rather than a check on its output, because the output is computed by code
+# that knows nothing about import.
+#
+# A dive count: `next_due_at_dive_count` is `dive_count_at_start + interval_dives` (see
+# `services/gear_service.py`). A million is past any logbook that has ever existed - the
+# most prolific working divers log a few tens of thousands in a career - so a number
+# beyond it is a unit error rather than a diver, and two of them still sum comfortably
+# inside the column.
+_MAX_DIVE_COUNT = 1_000_000
+
+# A single dive's length: `user_dive_stats.total_time` is `SUM(dive.duration)` over every
+# dive the account holds, including ones this import never touched. A year is far past
+# saturation diving, which is where the longest logged excursions come from and which runs
+# in weeks. The sum is `BigInteger` as well now - the ceiling here is what makes the
+# overflow implausible, the width is what makes it impossible.
+_MAX_DIVE_DURATION_SECONDS = 366 * 24 * 60 * 60
+
 
 class Action(StrEnum):
     """What the import will do with one record of the document."""
@@ -301,11 +322,15 @@ class _Bound:
 # has no guard for them either. `_plan_dive` handles the depth pair on its own terms, and a
 # position is all-or-nothing by shape.
 _DIVE_BOUNDS: tuple[_Bound, ...] = (
-    _Bound("dive_number", lambda value: _INT32_MIN <= value <= _INT32_MAX, "a dive number that large is not a number"),
+    _Bound(
+        "dive_number",
+        lambda value: 0 <= value <= _MAX_DIVE_COUNT,
+        f"a dive number must be between 0 and {_MAX_DIVE_COUNT}",
+    ),
     _Bound(
         "duration",
-        lambda value: 0 < value <= _INT32_MAX,
-        "a dive's duration must be greater than zero and small enough to store",
+        lambda value: 0 < value <= _MAX_DIVE_DURATION_SECONDS,
+        "a dive's duration must be greater than zero and shorter than a year",
     ),
     _Bound("max_depth", lambda value: value > 0, "a maximum depth must be greater than zero"),
     _Bound("avg_depth", lambda value: value > 0, "an average depth must be greater than zero"),
@@ -326,7 +351,11 @@ _MIXTURE_BOUNDS: tuple[_Bound, ...] = (
     _Bound("start_pressure", lambda value: 0 < value <= 350, "a start pressure must be between 0 and 350 bar"),
     _Bound("end_pressure", lambda value: 0 <= value <= 350, "an end pressure must be between 0 and 350 bar"),
     _Bound("po2_limit", lambda value: 0.4 <= value <= 2.0, "a ppO2 limit must be between 0.4 and 2.0 bar"),
-    _Bound("gas_number", lambda value: 0 <= value <= _INT32_MAX, "a gas number cannot be negative"),
+    _Bound(
+        "gas_number",
+        lambda value: 0 <= value <= _INT32_MAX,
+        f"a gas number must be between 0 and {_INT32_MAX}",
+    ),
 )
 
 
@@ -645,12 +674,16 @@ class _Planner:
         """A lifetime dive-count snapshot, as an `Integer` column can hold it.
 
         Absent reads as 0, which is the column's own default and means "count from the
-        beginning". A negative or unstorably large one is not a count at all, so it is
+        beginning". A negative or implausibly large one is not a count at all, so it is
         dropped to 0 and reported rather than taking the record with it.
+
+        The ceiling is `_MAX_DIVE_COUNT` rather than the column's width, because
+        `recalculate_service_schedule` adds this to a schedule's `interval_dives` and writes
+        the sum into a column no wider than either of them.
         """
         if value is None:
             return 0
-        if not 0 <= value <= _INT32_MAX:
+        if not 0 <= value <= _MAX_DIVE_COUNT:
             self._dropped(collection, record_uuid, "A dive count this app cannot store was dropped")
             return 0
         return value
@@ -1049,7 +1082,10 @@ class _Planner:
         if months is not None and not 0 < months <= _INT32_MAX:
             self._dropped(collection, schedule.uuid, "A month interval this app cannot store was dropped")
             months = None
-        if dives is not None and not 0 < dives <= _INT32_MAX:
+        # Capped at `_MAX_DIVE_COUNT` rather than at the column's width, because
+        # `recalculate_service_schedule` adds it to `dive_count_at_start` and writes the sum
+        # into a column of the same width.
+        if dives is not None and not 0 < dives <= _MAX_DIVE_COUNT:
             self._dropped(collection, schedule.uuid, "A dive interval this app cannot store was dropped")
             dives = None
         if months is None and dives is None:

@@ -14816,6 +14816,11 @@ failing means one file is unavailable, and `read_member` collapses all three int
 writer's existing skip-and-report path handles it — aborting a half-written import over one corrupt
 c-card scan is the opposite trade from every other file decision in this feature.
 
+Both endpoints are rate-limited per user on their own budget rather than sharing the export one: an
+import is a different kind of expensive, and a diver restoring a backup should not find their next
+export refused because of it. The default is twenty rather than ten because **one import is two
+calls**.
+
 ## An `Integer` column's real bound is its width, and no `CheckConstraint` census can see one
 
 The importer mirrors every `CheckConstraint` a document can reach, and a test counts them so a new
@@ -14839,7 +14844,19 @@ payload itself is JSONB. The guard against the next one is a second census that 
 excluded with the reason it needs no guard (a sequence's id, an id resolved from a row this import
 just wrote, a length, a value this build supplies). It caught one on its first run.
 
-Both endpoints are rate-limited per user on their own budget rather than sharing the export one: an
-import is a different kind of expensive, and a diver restoring a backup should not find their next
-export refused because of it. The default is twenty rather than ten because **one import is two
-calls**.
+**And a column's width is not the bound where a derived column adds the values up.** Two imported
+numbers each inside `Integer` can sum past it, and the write that fails is then the *derived* one,
+in the middle of the apply transaction — a whole logbook refused over an arithmetic overflow in a
+tile nobody was looking at. Two derivations do that here, and each is closed at its **inputs**
+rather than at its output, because the output is computed by code (`recalculate_dive_stats`,
+`recalculate_service_schedule`) that knows nothing about import and should not have to.
+
+`next_due_at_dive_count` is `dive_count_at_start + interval_dives`, so both are capped at
+`_MAX_DIVE_COUNT` — a million, past any logbook that has ever existed, so a number beyond it is a
+unit error rather than a diver, and two of them still sum comfortably inside the column.
+`user_dive_stats.total_time` is `SUM(dive.duration)` over *every* dive the account holds, including
+ones this import never touched, so a per-dive cap could never bound it on its own: a single dive is
+capped at a year, which is far past saturation diving, **and** the column widened to `BigInteger`.
+The ceiling makes the overflow implausible; the width makes it impossible. That column is the only
+counter on its table that is a sum of caller-supplied values rather than a count of rows, which is
+why it is the only one that widened.

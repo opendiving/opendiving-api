@@ -1,4 +1,4 @@
-from sqlalchemy import Float, ForeignKey, Integer
+from sqlalchemy import BigInteger, Float, ForeignKey, Integer
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.db.database import Base
@@ -19,5 +19,13 @@ class UserDiveStats(Base, TimestampMixin):
 
     total_dives: Mapped[int] = mapped_column(Integer, default=0)
     max_depth: Mapped[float] = mapped_column(Float, default=0)
-    total_time: Mapped[int] = mapped_column(Integer, default=0, doc="Total dive time in seconds")
+    # `BigInteger`, unlike every other counter here, because it is the only one that is a
+    # **sum of a column the caller supplies** rather than a count of rows. `dive.duration`
+    # is a 32-bit `Integer`, so a few dives near its ceiling sum past it - and the write
+    # that fails is this one, in the middle of whatever transaction recomputed the stats.
+    # For a logbook import that means an entire restore refused over an arithmetic overflow
+    # in a derived tile. The importer bounds a single dive's duration at a year for its own
+    # reasons, which makes this unreachable in practice; the width is what makes it
+    # unreachable in principle, and it costs four bytes a diver.
+    total_time: Mapped[int] = mapped_column(BigInteger, default=0, doc="Total dive time in seconds")
     species_seen: Mapped[int] = mapped_column(Integer, default=0)
