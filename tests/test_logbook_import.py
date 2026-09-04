@@ -977,6 +977,282 @@ class TestTheBoundsCensus:
         )
 
 
+class TestAnArchiveThatWillNotInflate:
+    """`zipfile` raises three different exceptions for a member it cannot decompress, and
+    none of them is a subclass of anything the route translates.
+
+    The commonest by far is the first: a diver zips their export with a password and hands
+    it over. Unhandled, that is a 500 from an endpoint whose whole contract is a 415/422/413
+    taxonomy - and on the apply path it aborts a half-written import over one bad member.
+    """
+
+    @staticmethod
+    def _encrypt_flags(archive: bytes) -> bytes:
+        """Set the general-purpose "encrypted" bit in both headers of the first member.
+
+        `writestr` overwrites `ZipInfo.flag_bits`, and `zipfile` cannot *write* an encrypted
+        member at all, so the flag is patched into the bytes: offset 6 of the local file
+        header and offset 8 of the central directory entry. What comes back is a real
+        archive that `zipfile` refuses to extract, which is the shape under test.
+        """
+        raw = bytearray(archive)
+        raw[raw.index(b"PK\x03\x04") + 6] |= 0x01
+        raw[raw.index(b"PK\x01\x02") + 8] |= 0x01
+        return bytes(raw)
+
+    @staticmethod
+    def _break_crc(archive: bytes, marker: bytes) -> bytes:
+        raw = bytearray(archive)
+        raw[raw.index(marker)] ^= 0xFF
+        return bytes(raw)
+
+    @pytest.mark.asyncio
+    async def test_a_password_protected_archive_is_malformed_not_a_500(self, seeded: Any) -> None:
+        _, document = seeded
+        archive = self._encrypt_flags(_zip_of(document, {}))
+
+        with pytest.raises(MalformedImportError) as caught:
+            await load_import(_upload(archive, "logbook.zip"))
+
+        assert "password-protected" in str(caught.value)
+
+    @pytest.mark.asyncio
+    async def test_a_corrupt_logbook_member_is_malformed_not_a_500(self, seeded: Any) -> None:
+        _, document = seeded
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
+            archive.writestr(DIVEJSON_NAME, document)
+
+        with pytest.raises(MalformedImportError):
+            await load_import(_upload(self._break_crc(buffer.getvalue(), b'{"format"'), "logbook.zip"))
+
+    @pytest.mark.asyncio
+    async def test_a_corrupt_blob_member_skips_the_file_and_keeps_the_dive(
+        self, db: Session, async_db: AsyncSession, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        from src.app.services import blob_store
+
+        monkeypatch.setattr(blob_store, "storage_root", lambda: tmp_path)
+        user = _seed_logbook(db)
+        dive = db.query(Dive).filter(Dive.user_id == user.id).one()
+        payload = b"AAAABBBBCCCCDDDD"
+        digest = hashlib.sha256(payload).hexdigest()
+        key = blob_store.new_key("dive-files", sha256=digest)
+        await blob_store.put(key, payload)
+        db.add(
+            DiveFile(
+                user_id=user.id,
+                dive_id=dive.id,
+                sha256=digest,
+                content_type="application/json",
+                byte_size=len(payload),
+                original_filename="dive.json",
+                parser_key="suunto_json",
+                storage_key=key,
+            )
+        )
+        db.commit()
+        document = await _export(async_db, user.id, archive_paths=True)
+        member = parse_document(document)["dives"][0]["source_file"]["archive_path"]
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
+            archive.writestr(DIVEJSON_NAME, document)
+            archive.writestr(member, payload)
+        destination = create_user(db)
+
+        plan = await _apply(
+            async_db, destination.id, self._break_crc(buffer.getvalue(), payload), filename="logbook.zip"
+        )
+
+        assert _counts(plan)["dives"] == (1, 0, 0, 0)
+        assert plan.files_restored == 0
+        assert plan.files_skipped == 1
+        assert (
+            not (await async_db.execute(select(DiveFile.id).where(DiveFile.user_id == destination.id))).scalars().all()
+        )
+
+
+class TestNumbersWiderThanTheColumn:
+    """The format puts no ceiling on any of its integer members - `dive_number` is a bare
+    `{"type": "integer"}` in the published schema - and `Integer` here is 32 bits.
+
+    So a **conforming** document can carry a number this app's columns cannot, and a
+    converter with a unit bug is exactly how one arrives. Unbounded, that is SQLSTATE 22003
+    raised from inside the apply transaction: the whole logbook refused over one number,
+    which is the failure every other bound in the planner exists to prevent.
+    """
+
+    HUGE = 2**31
+
+    @pytest.mark.asyncio
+    async def test_an_unstorable_dive_number_falls_back_to_the_placeholder(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["dive_number"] = self.HUGE
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["dives"] == (1, 0, 0, 0)
+        assert ImportNoteCode.VALUE_DROPPED in _codes(plan)
+        stored = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        assert stored.dive_number == 0
+
+    @pytest.mark.asyncio
+    async def test_an_unstorable_duration_skips_the_dive_rather_than_the_logbook(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["duration"] = self.HUGE
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["dives"] == (0, 0, 0, 1)
+        # And everything else in the document still arrived.
+        assert _counts(plan)["sites"] == (2, 0, 0, 0)
+
+    @pytest.mark.asyncio
+    async def test_an_unstorable_profile_reading_drops_the_channel(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["profile"] = {
+            "duration": 30,
+            "depth": {"times": [0, 10, 20], "values": [100, self.HUGE, 300]},
+        }
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["dives"] == (1, 0, 0, 0)
+        imported = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        assert (
+            not (await async_db.execute(select(DiveProfile.id).where(DiveProfile.dive_id == imported.id)))
+            .scalars()
+            .all()
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_unstorable_snapshot_count_drops_to_zero(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["gear_service_records"][0]["dive_count_at_service"] = self.HUGE
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["gear_service_records"] == (1, 0, 0, 0)
+        record = (
+            (await async_db.execute(select(GearServiceRecord).where(GearServiceRecord.user_id == destination.id)))
+            .scalars()
+            .one()
+        )
+        assert record.dive_count_at_service == 0
+
+
+class TestTheIntegerColumnCensus:
+    """The second guard, and the one a `CheckConstraint` sweep cannot be:  an `Integer`
+    column's real bound is its *width*, which no rule is written on.
+
+    So every `Integer` column an import writes is accounted for here by name - guarded in
+    the planner, or excluded with the reason it needs no guard. A new one lands in neither
+    bucket and this fails, which is the only thing that would notice.
+    """
+
+    # (table, column) -> why it cannot carry an unstorable number.
+    ACCOUNTED: dict[tuple[str, str], str] = {
+        ("dive", "dive_number"): "bounded in `_DIVE_BOUNDS`",
+        ("dive", "duration"): "bounded in `_DIVE_BOUNDS`",
+        ("dive", "visibility"): "bounded in `_DIVE_BOUNDS`",
+        ("dive", "altitude"): "bounded in `_DIVE_BOUNDS`, to the model's own -450..6500",
+        ("dive", "id"): "the sequence's, never the document's",
+        ("dive", "user_id"): "the caller's",
+        ("dive", "trip_id"): "resolved from a row this import wrote",
+        ("dive", "course_id"): "resolved from a row this import wrote",
+        ("dive", "utc_offset_minutes"): "derived from a parsed UTC offset, which Python bounds at a day",
+        ("dive_mixture", "id"): "the sequence's",
+        ("dive_mixture", "dive_id"): "resolved from a row this import wrote",
+        ("dive_mixture", "gas_number"): "bounded in `_MIXTURE_BOUNDS`",
+        ("dive_profile", "id"): "the sequence's",
+        ("dive_profile", "dive_id"): "resolved from a row this import wrote",
+        ("dive_profile", "extractor_version"): "this build's own constant",
+        ("dive_profile", "duration"): "bounded in `_plan_profile`, against the samples and the declared span",
+        ("dive_profile", "depth_sample_count"): "a length, capped by `MAX_POINTS_PER_CHANNEL`",
+        ("dive_profile", "event_count"): "a count, capped by `MAX_EVENTS`",
+        ("dive_profile", "max_depth_cm"): "an extreme of a channel `_series` bounds",
+        ("dive_profile", "max_ceiling_cm"): "an extreme of a channel `_series` bounds",
+        ("dive_profile", "min_temperature_c10"): "an extreme of a channel `_series` bounds",
+        ("dive_profile", "max_temperature_c10"): "an extreme of a channel `_series` bounds",
+        ("dive_profile", "min_pressure_bar10"): "an extreme of a channel `_series` bounds",
+        ("dive_profile", "max_pressure_bar10"): "an extreme of a channel `_series` bounds",
+        ("gear_service_schedule", "id"): "the sequence's",
+        ("gear_service_schedule", "user_id"): "the caller's",
+        ("gear_service_schedule", "gear_item_id"): "resolved from a row this import wrote",
+        ("gear_service_schedule", "interval_months"): "bounded in `_plan_schedule`",
+        ("gear_service_schedule", "interval_dives"): "bounded in `_plan_schedule`",
+        ("gear_service_schedule", "dive_count_at_start"): "bounded by `_Planner._count`",
+        ("gear_service_schedule", "next_due_at_dive_count"): "derived by `recalculate_service_schedule`",
+        (
+            "gear_service_schedule",
+            "notified_for_due_at_dive_count",
+        ): "digest-job notify state, never imported and cleared by `recalculate_service_schedule`",
+        ("gear_service_record", "id"): "the sequence's",
+        ("gear_service_record", "user_id"): "the caller's",
+        ("gear_service_record", "gear_item_id"): "resolved from a row this import wrote",
+        ("gear_service_record", "gear_service_schedule_id"): "resolved from a row this import wrote",
+        ("gear_service_record", "dive_count_at_service"): "bounded by `_Planner._count`",
+        ("gear_item", "id"): "the sequence's",
+        ("gear_item", "user_id"): "the caller's",
+        ("gear_item", "dive_count"): "written as 0 and recomputed by `recalculate_gear_dive_counts`",
+        ("trip_location", "id"): "the sequence's",
+        ("trip_location", "trip_id"): "resolved from a row this import wrote",
+        ("trip_location", "position"): "the list index, not the document's",
+        ("dive_file", "id"): "the sequence's",
+        ("dive_file", "user_id"): "the caller's",
+        ("dive_file", "dive_id"): "resolved from a row this import wrote",
+        ("dive_file", "byte_size"): "the restored bytes' own length, capped by `MAX_DIVE_FILE_SIZE`",
+        ("certification_file", "id"): "the sequence's",
+        ("certification_file", "certification_id"): "resolved from a row this import wrote",
+        ("certification_file", "byte_size"): "the restored bytes' own length, capped by `MAX_CARD_FILE_SIZE`",
+    }
+
+    def test_every_integer_column_an_import_writes_is_accounted_for(self) -> None:
+        from sqlalchemy import Integer
+
+        from src.app.models.certification_file import CertificationFile
+        from src.app.models.trip_location import TripLocation
+
+        written: tuple[Any, ...] = (
+            Dive,
+            DiveMixture,
+            DiveProfile,
+            GearServiceSchedule,
+            GearServiceRecord,
+            GearItem,
+            TripLocation,
+            DiveFile,
+            CertificationFile,
+        )
+        found = {
+            (model.__table__.name, column.name)
+            for model in written
+            for column in model.__table__.columns
+            if isinstance(column.type, Integer)
+        }
+
+        assert found == set(self.ACCOUNTED), (
+            "an `Integer` column an import writes is unaccounted for, so a conforming document carrying a number "
+            f"wider than 32 bits would abort the whole import: {sorted(found ^ set(self.ACCOUNTED))}"
+        )
+
+
 class TestTheAgencyVocabulary:
     def test_the_app_enum_is_the_formats_own(self) -> None:
         """A REQUIRED member of a vocabulary the format freezes at 1.0 (spec §§6.16, 7), so

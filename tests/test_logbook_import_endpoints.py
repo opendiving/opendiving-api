@@ -228,22 +228,3 @@ class TestApply:
         assert "invalidate_dive_site_caches" in called
         assert "invalidate_trip_caches" in called
         assert len(called) == 6
-
-
-class TestTheListCacheNamesAgree:
-    """`cache_invalidation` sweeps two list caches it cannot import.
-
-    `_dive_site_cache` and `_trip_cache` are module-private `OwnedResourceCache` instances
-    inside their routers, and a service importing a route module would invert the layering.
-    So the *shape* is shared through `OwnedResourceCache.list_cache_pattern` and the
-    resource names are spelled out - and this is what stops those spellings drifting from
-    the caches they are meant to sweep, which nothing else would notice.
-    """
-
-    def test_the_patterns_match_the_real_caches(self) -> None:
-        from src.app.api.v1.dive_sites import _dive_site_cache
-        from src.app.api.v1.trips import _trip_cache
-        from src.app.core.utils.owned_resource_cache import OwnedResourceCache
-
-        assert OwnedResourceCache.list_cache_pattern(_dive_site_cache.resource_name, 7) == "user_7_dive_sites:*"
-        assert OwnedResourceCache.list_cache_pattern(_trip_cache.resource_name, 7) == "user_7_trips:*"

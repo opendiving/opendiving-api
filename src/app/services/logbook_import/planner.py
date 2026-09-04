@@ -145,6 +145,18 @@ _FALLBACK_FILE_CONTENT_TYPE = "application/octet-stream"
 _LATITUDE_LIMIT = 90.0
 _LONGITUDE_LIMIT = 180.0
 
+# Postgres `Integer` is 32-bit, and **the format puts no ceiling on any of its integer
+# members** - `dive_number` is a bare `{"type": "integer"}` in the published schema, and
+# `duration`, `visibility`, the profile's own `duration` and every `values` entry carry
+# only a minimum. So a *conforming* document can hold a number this app's columns cannot,
+# and a converter with a unit bug (a duration in microseconds, a depth in micrometres) is
+# exactly how one arrives. Unbounded, that is SQLSTATE 22003 raised from the middle of the
+# apply transaction: the whole logbook refused over one number, which is the failure every
+# other bound here exists to prevent. A `CheckConstraint` census cannot see this, because
+# the limit is the column's *width* rather than a rule written on it.
+_INT32_MAX = 2**31 - 1
+_INT32_MIN = -(2**31)
+
 
 class Action(StrEnum):
     """What the import will do with one record of the document."""
@@ -289,10 +301,15 @@ class _Bound:
 # has no guard for them either. `_plan_dive` handles the depth pair on its own terms, and a
 # position is all-or-nothing by shape.
 _DIVE_BOUNDS: tuple[_Bound, ...] = (
-    _Bound("duration", lambda value: value > 0, "a dive's duration must be greater than zero"),
+    _Bound("dive_number", lambda value: _INT32_MIN <= value <= _INT32_MAX, "a dive number that large is not a number"),
+    _Bound(
+        "duration",
+        lambda value: 0 < value <= _INT32_MAX,
+        "a dive's duration must be greater than zero and small enough to store",
+    ),
     _Bound("max_depth", lambda value: value > 0, "a maximum depth must be greater than zero"),
     _Bound("avg_depth", lambda value: value > 0, "an average depth must be greater than zero"),
-    _Bound("visibility", lambda value: value >= 0, "visibility cannot be negative"),
+    _Bound("visibility", lambda value: 0 <= value <= _INT32_MAX, "visibility must be a non-negative number of metres"),
     _Bound("weight", lambda value: value >= 0, "ballast cannot be negative"),
     _Bound("altitude", lambda value: -450 <= value <= 6500, "altitude must be between -450 and 6500 metres"),
     _Bound("cns_start", lambda value: value >= 0, "a CNS reading cannot be negative"),
@@ -309,7 +326,7 @@ _MIXTURE_BOUNDS: tuple[_Bound, ...] = (
     _Bound("start_pressure", lambda value: 0 < value <= 350, "a start pressure must be between 0 and 350 bar"),
     _Bound("end_pressure", lambda value: 0 <= value <= 350, "an end pressure must be between 0 and 350 bar"),
     _Bound("po2_limit", lambda value: 0.4 <= value <= 2.0, "a ppO2 limit must be between 0.4 and 2.0 bar"),
-    _Bound("gas_number", lambda value: value >= 0, "a gas number cannot be negative"),
+    _Bound("gas_number", lambda value: 0 <= value <= _INT32_MAX, "a gas number cannot be negative"),
 )
 
 
@@ -322,6 +339,11 @@ def _finite(value: float | None) -> bool:
     accepts a bare `NaN` token, so a document really can carry one.
     """
     return value is None or math.isfinite(value)
+
+
+def _within_int32(values: Sequence[int]) -> bool:
+    """Every element storable in a Postgres `Integer` column."""
+    return all(_INT32_MIN <= value <= _INT32_MAX for value in values)
 
 
 def _key(*parts: str | None) -> tuple[str, ...]:
@@ -618,6 +640,20 @@ class _Planner:
         if agency_other is not None:
             self._dropped(collection, record_uuid, f"`agency_other` was dropped: {AGENCY_OTHER_NOT_ALLOWED_MESSAGE}")
         return source.agency.value, None
+
+    def _count(self, collection: str, record_uuid: uuid_pkg.UUID, value: int | None) -> int:
+        """A lifetime dive-count snapshot, as an `Integer` column can hold it.
+
+        Absent reads as 0, which is the column's own default and means "count from the
+        beginning". A negative or unstorably large one is not a count at all, so it is
+        dropped to 0 and reported rather than taking the record with it.
+        """
+        if value is None:
+            return 0
+        if not 0 <= value <= _INT32_MAX:
+            self._dropped(collection, record_uuid, "A dive count this app cannot store was dropped")
+            return 0
+        return value
 
     @staticmethod
     def _created_at(value: datetime | None) -> datetime:
@@ -1010,11 +1046,11 @@ class _Planner:
         if schedule.starts_on is None:
             return self._skip(collection, schedule.uuid, "A service schedule needs the date its clock starts from.")
         months, dives = schedule.interval_months, schedule.interval_dives
-        if months is not None and months <= 0:
-            self._dropped(collection, schedule.uuid, "A non-positive month interval was dropped")
+        if months is not None and not 0 < months <= _INT32_MAX:
+            self._dropped(collection, schedule.uuid, "A month interval this app cannot store was dropped")
             months = None
-        if dives is not None and dives <= 0:
-            self._dropped(collection, schedule.uuid, "A non-positive dive interval was dropped")
+        if dives is not None and not 0 < dives <= _INT32_MAX:
+            self._dropped(collection, schedule.uuid, "A dive interval this app cannot store was dropped")
             dives = None
         if months is None and dives is None:
             # `ck_gear_service_schedule_has_an_interval`: a rule with no interval can never
@@ -1047,7 +1083,7 @@ class _Planner:
             # against the destination's live counter is the reset-every-baseline failure the
             # distinction exists to prevent. Zero when absent, which is the column's own
             # default and means "count from the beginning".
-            "dive_count_at_start": max(schedule.dive_count_at_start or 0, 0),
+            "dive_count_at_start": self._count(collection, schedule.uuid, schedule.dive_count_at_start),
             "is_active": True if schedule.active is None else bool(schedule.active),
             "created_at": self._created_at(schedule.created_at),
         }
@@ -1095,7 +1131,7 @@ class _Planner:
             "user_id": self._user_id,
             "kind": service.type.value,
             "serviced_on": service.serviced_on,
-            "dive_count_at_service": max(service.dive_count_at_service, 0),
+            "dive_count_at_service": self._count(collection, service.uuid, service.dive_count_at_service),
             "label": service.label,
             "performed_by": service.performed_by,
             "notes": self._text(service.notes),
@@ -1228,12 +1264,14 @@ class _Planner:
         start_time, offset_minutes = split_local_start_time(dive.started_at)
         record.values = {
             "user_id": self._user_id,
-            # A dive number is the diver's own numbering and `NOT NULL` here. Absent, it is
-            # taken from the dive's position in the document rather than the record being
-            # dropped: `dive_number` duplicates are legal by design (see
-            # `DiveNumberingSummary`), so a placeholder costs nothing a diver cannot fix,
-            # while dropping the dive would lose everything else it carries.
-            "dive_number": dive.dive_number if dive.dive_number is not None else 0,
+            # A dive number is the diver's own numbering and `NOT NULL` here. Absent - or
+            # dropped by the bound above - it falls back to the placeholder `0` rather than
+            # the record being dropped: duplicate dive numbers are legal by design (see
+            # `DiveNumberingSummary`, which counts them rather than refusing them), so a
+            # placeholder costs nothing a diver cannot fix, while dropping the dive would
+            # lose everything else it carries. Every unnumbered dive in one document
+            # therefore lands on 0, not on 1, 2, 3.
+            "dive_number": bounded.get("dive_number", 0),
             "start_time": start_time,
             "utc_offset_minutes": offset_minutes,
             "duration": int(duration),
@@ -1406,6 +1444,11 @@ class _Planner:
         # and that span is what the app's gas-coverage fraction is a fraction *of*. A
         # `duration` that fails to cover its own samples is incoherent, so the samples win.
         declared = source.duration if source.duration is not None else 0
+        if not 0 <= declared <= _INT32_MAX:
+            self._dropped(
+                "dives", dive.uuid, "The profile declared a span this app cannot store, so its samples' own was used"
+            )
+            declared = 0
         return PlannedProfile(profile=capped, duration=max(declared, capped.duration))
 
     def _series(self, collection: str, record_uuid: uuid_pkg.UUID, series: Any, label: str) -> ProfileSeries | None:
@@ -1425,6 +1468,15 @@ class _Planner:
         if times[0] < 0 or any(later <= earlier for earlier, later in zip(times, times[1:], strict=False)):
             self._dropped(
                 collection, record_uuid, f"The {label} channel's times were not increasing from zero, and was dropped"
+            )
+            return None
+        # The stored `data` payload is JSONB and holds any integer, but the summary columns
+        # `store_profile` derives from these - `max_depth_cm` and the five extremes beside
+        # it, and the span - are `Integer`. A channel carrying a value outside that width
+        # goes whole, because there is no half of a series to keep.
+        if not (_within_int32(times) and _within_int32(values)):
+            self._dropped(
+                collection, record_uuid, f"The {label} channel carried readings this app cannot store, and was dropped"
             )
             return None
         return ProfileSeries(t=list(times), v=list(values))

@@ -21,6 +21,7 @@ two orders of magnitude past it.
 
 import hashlib
 import json
+import logging
 import tempfile
 import zipfile
 from dataclasses import dataclass
@@ -32,6 +33,18 @@ from pydantic import ValidationError
 from ...schemas.export import DIVEJSON_FORMAT, DIVEJSON_VERSION
 from ...schemas.logbook_import import ImportDocument
 from ..export.archive import DIVEJSON_NAME, SPOOL_THRESHOLD
+
+logger = logging.getLogger(__name__)
+
+# What `zipfile` raises when a member cannot be inflated, as opposed to when the container
+# cannot be opened. All three are ordinary states of a file somebody actually has:
+# `RuntimeError` for a password-protected archive (the commonest by far - a diver zips
+# their export with a password and hands it over), `BadZipFile` for a CRC mismatch from a
+# truncated or bit-rotted member, and `NotImplementedError` for a compression method this
+# build has no decoder for. `OSError` covers a spool that cannot be read back. None is a
+# subclass of anything the route translates, so uncaught they are a 500 - which is the
+# wrong answer to every one of them.
+_MEMBER_READ_FAILURES = (RuntimeError, zipfile.BadZipFile, NotImplementedError, OSError)
 
 # A bare document. Generous against the reference implementation's own output - the demo
 # logbook is kilobytes and a thousand sampled dives is tens of megabytes - and the number
@@ -159,13 +172,19 @@ class LoadedImport:
             return None
 
     def read_member(self, path: str) -> bytes | None:
-        """One binary out of the container, or `None` when it is not there.
+        """One binary out of the container, or `None` when it cannot be had.
 
         Unbounded on purpose: every caller has already been through `member_size` and
         refused anything over its own cap, and `_open_archive` refused the whole container
         if its declared sizes summed past `MAX_ARCHIVE_EXTRACTED_SIZE`. `zipfile` verifies
         the CRC on the way out, which is what makes those declared sizes worth trusting;
         the digest the caller then checks against the manifest is the end-to-end guarantee.
+
+        **A member that will not inflate is `None` rather than an exception**, because the
+        caller is the writer and it already has the right answer for a file it cannot have:
+        skip it, report it, and leave the dive. Letting the failure out would abort a
+        half-written import over one corrupt c-card scan, which is the opposite trade from
+        every other file decision here.
         """
         if self._archive is None:
             return None
@@ -173,7 +192,11 @@ class LoadedImport:
             info = self._archive.getinfo(path)
         except KeyError:
             return None
-        return self._archive.read(info)
+        try:
+            return self._archive.read(info)
+        except _MEMBER_READ_FAILURES:
+            logger.warning("An archive member could not be read during an import", exc_info=True)
+            return None
 
 
 async def _spool_upload(upload: UploadFile, max_size: int) -> IO[bytes]:
@@ -225,13 +248,22 @@ def _document_bytes(buffer: IO[bytes], archive: zipfile.ZipFile | None) -> bytes
         raise ImportTooLargeError(
             f"The {DIVEJSON_NAME} inside this archive is larger than the {MAX_DOCUMENT_SIZE // (1024 * 1024)} MB limit."
         )
-    return archive.read(info)
+    try:
+        return archive.read(info)
+    except _MEMBER_READ_FAILURES as exc:
+        # A 422 rather than a 415: this *is* an archive of the shape this app produces, and
+        # the logbook inside it cannot be read. The message names the two causes a diver can
+        # do something about, because "could not be read" on its own sends nobody anywhere.
+        raise MalformedImportError(
+            f"The {DIVEJSON_NAME} inside this archive could not be read. If the archive is password-protected, "
+            "extract it first and import the document on its own; otherwise the file is damaged."
+        ) from exc
 
 
 def _open_archive(buffer: IO[bytes]) -> zipfile.ZipFile:
     try:
         archive = zipfile.ZipFile(buffer)
-    except zipfile.BadZipFile as exc:
+    except (zipfile.BadZipFile, OSError, EOFError) as exc:
         raise MalformedImportError("This looks like a zip archive but could not be opened.") from exc
 
     declared = sum(info.file_size for info in archive.infolist())

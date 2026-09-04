@@ -1,4 +1,11 @@
-"""Unit tests for cache key helper utilities."""
+"""Unit tests for cache key helper utilities, and for the one key *shape* two modules share.
+
+Everything below `TestTheListCacheNamesAgree` is about `core/utils/cache.py`'s string
+handling. That last class is about something else and is here rather than beside the
+feature that needed it, because it is the guard three comments in
+`core/utils/owned_resource_cache.py` and `services/cache_invalidation.py` point at - and a
+guard filed away from its pointers is one nobody finds.
+"""
 
 import pytest
 
@@ -71,3 +78,22 @@ class TestInferResourceId:
     def test_raises_when_no_matching_id_found(self):
         with pytest.raises(CacheIdentificationInferenceError):
             _infer_resource_id({"name": "bob"}, int)
+
+
+class TestTheListCacheNamesAgree:
+    """`cache_invalidation` sweeps two list caches it cannot import.
+
+    `_dive_site_cache` and `_trip_cache` are module-private `OwnedResourceCache` instances
+    inside their routers, and a service importing a route module would invert the layering.
+    So the *shape* is shared through `OwnedResourceCache.list_cache_pattern` and the
+    resource names are spelled out - and this is what stops those spellings drifting from
+    the caches they are meant to sweep, which nothing else would notice.
+    """
+
+    def test_the_patterns_match_the_real_caches(self) -> None:
+        from src.app.api.v1.dive_sites import _dive_site_cache
+        from src.app.api.v1.trips import _trip_cache
+        from src.app.core.utils.owned_resource_cache import OwnedResourceCache
+
+        assert OwnedResourceCache.list_cache_pattern(_dive_site_cache.resource_name, 7) == "user_7_dive_sites:*"
+        assert OwnedResourceCache.list_cache_pattern(_trip_cache.resource_name, 7) == "user_7_trips:*"

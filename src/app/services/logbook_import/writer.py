@@ -154,7 +154,11 @@ class _Writer:
         """
         data = self._loaded.read_member(planned.archive_path)
         if data is None:
-            self._file_skipped(collection, record_uuid, "its bytes were not in the archive")
+            # Either the member vanished from the container's index or it would not inflate
+            # - a password-protected archive, a CRC failure, a compression method this build
+            # has no decoder for. `read_member` collapses them because the answer here is
+            # the same for all of them, and it is not "abort a half-written import".
+            self._file_skipped(collection, record_uuid, "its bytes could not be read out of the archive")
             return None
         digest = hashlib.sha256(data).hexdigest()
         if digest != planned.sha256:

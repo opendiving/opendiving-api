@@ -14801,6 +14801,44 @@ kind's cap by declared size, and `zipfile` verifies the CRC on the way out. `arc
 member name and never a filesystem path, so a `../../` in one addresses a member that does not
 exist.
 
+**Opening a container and inflating a member fail differently, and both have to be caught.**
+`zipfile.ZipFile(...)` raising is the case everyone thinks of; `archive.read(...)` raising is the
+one that ships. It has three forms, and the commonest is not exotic at all: `RuntimeError` for a
+password-protected archive — a diver zipping their export before sending it — plus `BadZipFile` for
+a CRC mismatch from a truncated or bit-rotted member, and `NotImplementedError` for a compression
+method this build has no decoder for. None is a subclass of anything the route translates, so each
+was a 500 from an endpoint whose whole contract is a 415/422/413 taxonomy.
+
+They are caught in **two different places on purpose**, because the right answer differs. The
+`logbook.divejson` member failing means there is no logbook: a 422 whose message names the
+password-protected case, since "could not be read" on its own sends nobody anywhere. A *blob* member
+failing means one file is unavailable, and `read_member` collapses all three into `None` so the
+writer's existing skip-and-report path handles it — aborting a half-written import over one corrupt
+c-card scan is the opposite trade from every other file decision in this feature.
+
+## An `Integer` column's real bound is its width, and no `CheckConstraint` census can see one
+
+The importer mirrors every `CheckConstraint` a document can reach, and a test counts them so a new
+one cannot land without a guard. That census has a blind spot with a whole class of failure behind
+it: Postgres `Integer` is 32 bits, and **DiveJSON puts no ceiling on any of its integer members** —
+`dive_number` is a bare `{"type": "integer"}` in the published schema, and `duration`, `visibility`,
+the profile's own `duration` and every `values` entry carry only a minimum.
+
+So a **conforming** document can hold a number this app's columns cannot, and a converter with a
+unit bug — a duration in microseconds, a depth in micrometres — is exactly how one arrives.
+Unbounded, that is SQLSTATE 22003 raised from the middle of the apply transaction: a whole logbook
+refused over one number, which is precisely the failure every other bound in the planner exists to
+prevent, and it is invisible to a sweep of the rules written *on* the columns because the limit is
+not one of them.
+
+Every reachable integer is bounded now — in `_DIVE_BOUNDS` and `_MIXTURE_BOUNDS`, in
+`_plan_schedule`, in `_Planner._count` for the two lifetime-count snapshots, and in `_series` and
+`_plan_profile` for the samples, whose extremes become `Integer` summary columns even though the
+payload itself is JSONB. The guard against the next one is a second census that enumerates `Integer`
+*columns* on every table an import writes and requires each to be named — bounded in the planner, or
+excluded with the reason it needs no guard (a sequence's id, an id resolved from a row this import
+just wrote, a length, a value this build supplies). It caught one on its first run.
+
 Both endpoints are rate-limited per user on their own budget rather than sharing the export one: an
 import is a different kind of expensive, and a diver restoring a backup should not find their next
 export refused because of it. The default is twenty rather than ten because **one import is two
