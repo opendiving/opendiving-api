@@ -1,6 +1,6 @@
-"""Full export of the caller's own logbook, in three shapes.
+"""Full export of the caller's own logbook, in four shapes.
 
-Four things are true of all three endpoints, and each is here rather than in the service
+Four things are true of all four endpoints, and each is here rather than in the service
 layer because each is an HTTP concern:
 
 - **The caller's own data, and nothing else.** No `username` or `user_uuid` parameter: the
@@ -36,7 +36,16 @@ from ...api.dependencies import get_current_user
 from ...core.config import settings
 from ...core.db.database import async_get_db
 from ...core.utils.rate_limit import enforce_rate_limit
-from ...services.export import load_export_bundle, spool, spool_text, write_archive, write_dives_csv, write_uddf
+from ...schemas.export import DIVEJSON_EXTENSION, DIVEJSON_MEDIA_TYPE
+from ...services.export import (
+    load_export_bundle,
+    spool,
+    spool_text,
+    write_archive,
+    write_divejson,
+    write_dives_csv,
+    write_uddf,
+)
 from ...services.export.naming import export_filename
 
 router = APIRouter(tags=["export"])
@@ -95,6 +104,33 @@ def _download(buffer: IO[bytes], *, filename: str, media_type: str) -> Streaming
     )
 
 
+@router.get("/export/divejson")
+async def export_divejson(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> StreamingResponse:
+    """Download the caller's whole logbook as a single DiveJSON 1.0 document.
+
+    DiveJSON is the open dive-log interchange format this project maintains
+    (<https://divejson.org>) and this app is its reference implementation, so this file is
+    lossless where UDDF is not: it carries the dives with their full sample profiles,
+    cylinders, sites, trips, training courses, marine-life sightings, gear and its service
+    history, and c-card records - everything the account holds except the binaries
+    themselves, which the file references by digest.
+
+    For a copy that carries those binaries too, use `/export/archive`, whose
+    `logbook.divejson` member is this same document.
+    """
+    await _enforce_export_limit(current_user["id"])
+    bundle = await load_export_bundle(db, user_id=current_user["id"])
+    exported_at = datetime.now(UTC)
+    # Named before the spool exists, so nothing can raise between creating the temp file
+    # and handing it to the response that owns closing it.
+    filename = export_filename(current_user["username"], exported_at.date(), DIVEJSON_EXTENSION)
+    buffer = await spool(write_divejson(db, bundle, exported_at=exported_at))
+    return _download(buffer, filename=filename, media_type=DIVEJSON_MEDIA_TYPE)
+
+
 @router.get("/export/uddf")
 async def export_uddf(
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -102,12 +138,13 @@ async def export_uddf(
 ) -> StreamingResponse:
     """Download the caller's whole logbook as a single UDDF 3.2.2 document.
 
-    UDDF is the open interchange format Subsurface, divelogs.de and MacDive import, so
-    this is the file to hand another program. It carries the dives, their sites, trips,
+    UDDF is the older interchange format Subsurface, divelogs.de and MacDive import, so
+    this is the file to hand one of those. It carries the dives, their sites, trips,
     gases, cylinders, gear and full sample profiles - but not the things the format has no
     slot for (gear sets, service history, c-cards, training courses, per-cylinder role and
     usage, the deco ceiling).
-    For a copy that holds everything, use `/export/archive`.
+    For a lossless structured copy, use `/export/divejson`; for one that carries the
+    stored files as well, `/export/archive`.
     """
     await _enforce_export_limit(current_user["id"])
     bundle = await load_export_bundle(db, user_id=current_user["id"])
@@ -129,6 +166,7 @@ async def export_csv(
     One row per dive with the related records flattened into readable cells - the file to
     open in Excel, Numbers or a notebook. The normalized set (cylinders, trips, courses,
     sites, gear, service history, certifications) ships inside `/export/archive`.
+    Deliberately lossy: `/export/divejson` is the one that holds everything.
     """
     await _enforce_export_limit(current_user["id"])
     bundle = await load_export_bundle(db, user_id=current_user["id"])
@@ -157,7 +195,7 @@ async def export_archive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> StreamingResponse:
-    """Download everything: a zip holding the structured export, the UDDF document, the
+    """Download everything: a zip holding the DiveJSON document, the UDDF one, the
     full CSV set, every stored dive-computer file and both sides of every c-card.
 
     This is the complete copy - nothing in the account is reachable only through the app

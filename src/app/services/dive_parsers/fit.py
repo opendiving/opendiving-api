@@ -456,7 +456,7 @@ class FitParser(DiveParser):
         the next dive. Collecting the lot described the dive from session 1 while giving
         it a profile spanning the whole file: a two-dive file came back as 1 800 seconds
         deep 30 m, with a profile running to 7 260 s across a surface interval, so
-        `DiveProfileInfo.duration_seconds` and the dive's own `duration` disagreed. The
+        `DiveProfileInfo.duration` and the dive's own `duration` disagreed. The
         cut is positional rather than by the session's time window because `dive_gas`
         carries no timestamp to filter on, and it costs nothing on a real file: across
         the corpus the only message following the first `session` is the `activity`.

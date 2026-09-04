@@ -1,4 +1,4 @@
-"""Tests for the three `/export/*` routes (`api/v1/export.py`).
+"""Tests for the four `/export/*` routes (`api/v1/export.py`).
 
 What is actually route behaviour, as opposed to writer behaviour, is a short list, and
 it is all here: authentication, the headers that make the response a download rather than
@@ -13,6 +13,9 @@ rather than by an ownership check that could be got wrong.
 """
 
 import inspect
+import io
+import json
+import zipfile
 from collections.abc import Generator
 from typing import Any
 from unittest.mock import AsyncMock
@@ -28,7 +31,12 @@ from src.app.core.exceptions.http_exceptions import RateLimitException
 from src.app.core.setup import create_application
 from tests.helpers.export import full_bundle
 
-PATHS = ("/api/v1/export/uddf", "/api/v1/export/csv", "/api/v1/export/archive")
+PATHS = (
+    "/api/v1/export/divejson",
+    "/api/v1/export/uddf",
+    "/api/v1/export/csv",
+    "/api/v1/export/archive",
+)
 
 CURRENT_USER = {"id": 1, "uuid": full_bundle().user.uuid, "username": "ada", "is_superuser": False}
 
@@ -53,7 +61,7 @@ def client(export_app: Any) -> Generator[TestClient]:
 
 @pytest.fixture
 def signed_in(export_app: Any, monkeypatch: Any) -> Any:
-    """The three routes with their database and rate limiter stubbed out.
+    """The four routes with their database and rate limiter stubbed out.
 
     Everything below the route is exercised elsewhere; what is under test here is the
     response the route builds around it.
@@ -100,7 +108,13 @@ class TestAuthentication:
         assert operation.get("parameters", []) == []
 
     @pytest.mark.parametrize(
-        "endpoint", (export_route.export_uddf, export_route.export_csv, export_route.export_archive)
+        "endpoint",
+        (
+            export_route.export_divejson,
+            export_route.export_uddf,
+            export_route.export_csv,
+            export_route.export_archive,
+        ),
     )
     def test_no_handler_names_a_user(self, endpoint: Any):
         """The same claim at the source, so it also holds for anything FastAPI would not
@@ -112,9 +126,13 @@ class TestResponseHeaders:
     @pytest.mark.parametrize(
         ("path", "extension", "media_type"),
         [
-            (PATHS[0], "uddf", "application/xml"),
-            (PATHS[1], "csv", "text/csv; charset=utf-8"),
-            (PATHS[2], "zip", "application/zip"),
+            # The DiveJSON row is the wire-identity assertion the format needs: the media
+            # type spec §8 registers and the extension it recommends, both served by the
+            # rules every other download here already goes through.
+            (PATHS[0], "divejson", "application/vnd.dive+json"),
+            (PATHS[1], "uddf", "application/xml"),
+            (PATHS[2], "csv", "text/csv; charset=utf-8"),
+            (PATHS[3], "zip", "application/zip"),
         ],
     )
     def test_each_route_offers_a_dated_download_of_its_own_type(
@@ -144,18 +162,41 @@ class TestResponseHeaders:
 
 
 class TestBodies:
-    def test_the_uddf_route_serves_a_uddf_document(self, client: TestClient, signed_in):
+    def test_the_divejson_route_serves_a_divejson_document(self, client: TestClient, signed_in):
         body = client.get(PATHS[0]).content
+        assert body.startswith(b'{"format":"divejson","version":"1.0",')
+
+    def test_the_archive_member_is_the_same_writer_as_the_standalone_route(self, client: TestClient, signed_in):
+        """One writer, two surfaces - the way `dives.uddf` and `GET /export/uddf` already
+        work. Not byte-identical, and deliberately so: inside the zip every stored file
+        gains an `archive_path` pointing at the member holding its bytes, which is the one
+        thing a bare document has nothing to say about. Everything else must match.
+        """
+        standalone = json.loads(client.get(PATHS[0]).content)
+        with zipfile.ZipFile(io.BytesIO(client.get(PATHS[3]).content)) as archive:
+            member = json.loads(archive.read("logbook.divejson"))
+
+        for document in (standalone, member):
+            document.pop("exported_at")
+            for dive in document["dives"]:
+                dive.get("source_file", {}).pop("archive_path", None)
+            for certification in document["certifications"]:
+                for side in ("front_file", "back_file"):
+                    certification.get(side, {}).pop("archive_path", None)
+        assert standalone == member
+
+    def test_the_uddf_route_serves_a_uddf_document(self, client: TestClient, signed_in):
+        body = client.get(PATHS[1]).content
         assert body.startswith(b'<?xml version="1.0" encoding="utf-8"?>')
         assert b'<uddf xmlns="http://www.streit.cc/uddf/3.2/"' in body
 
     def test_the_csv_route_serves_the_flat_dive_sheet(self, client: TestClient, signed_in):
-        body = client.get(PATHS[1]).content
+        body = client.get(PATHS[2]).content
         assert body.startswith("﻿".encode())
         assert b"dive_number,date,time,utc_offset" in body
 
     def test_the_archive_route_serves_a_zip(self, client: TestClient, signed_in):
-        assert client.get(PATHS[2]).content.startswith(b"PK\x03\x04")
+        assert client.get(PATHS[3]).content.startswith(b"PK\x03\x04")
 
 
 class TestRateLimit:

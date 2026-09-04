@@ -79,7 +79,7 @@ class TestGasAttributionRoundTrip:
         assert attribution[dive.id].entries == entries
         # The span the fraction is taken against comes off the same row, so it has to
         # survive the same trip: the profile's own duration, not the dive's 1800.
-        assert attribution[dive.id].duration_seconds == 100
+        assert attribution[dive.id].duration == 100
 
     @pytest.mark.asyncio
     async def test_a_profile_with_nothing_to_attribute_stores_an_empty_list_not_null(

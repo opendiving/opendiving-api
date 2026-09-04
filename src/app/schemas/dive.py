@@ -1,9 +1,9 @@
 import uuid as uuid_pkg
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, ClassVar
+from typing import Annotated, ClassVar, Self
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls
 from ..core.utils.datetime_offset import require_utc_offset
@@ -21,6 +21,34 @@ _START_TIME_EXAMPLE = "2021-04-04T10:04:47.910+02:00"
 # the timezone it was actually logged in, not the viewer's. A naive datetime (no offset)
 # is rejected rather than silently assumed to be UTC or local.
 DiveStartTime = Annotated[datetime, AfterValidator(require_utc_offset)]
+
+DEPTH_PAIR_MESSAGE = "avg_depth cannot be greater than max_depth"
+
+
+def validate_depth_pair(avg_depth: float | None, max_depth: float | None) -> None:
+    """The one place the depth pair's ordering is decided.
+
+    Shared by `DiveBase`/`DiveUpdate` and by `patch_dive`, which has to re-run it on a
+    merged stored+incoming pair - the case an update schema cannot see, since a PATCH may
+    carry either depth alone. `ck_dive_avg_depth_within_max` is underneath all three, so
+    this is about answering with a sentence naming the fields rather than with an
+    `IntegrityError`; the same division of labour `validate_date_range` has on trips and
+    courses.
+
+    A mean cannot exceed a maximum, so a dive that says otherwise records at least one
+    wrong number - and until this landed the app accepted it and exported it, which the
+    DiveJSON reference validator rejects (spec §6.2, and §3's cross-member arithmetic
+    list). Equality is fine: a perfectly square profile is unusual, not impossible.
+
+    `DiveBase` is a *read* schema as well as a write one (`DiveRead` inherits it, and
+    `crud_dives` validates every stored row through `DiveReadInternal`), so this rule can
+    in principle refuse a row on the way out - the liability `DiveMixtureBase`'s docstring
+    is about. It is safe here for the reason it is safe on `CourseBase`: the matching
+    `CheckConstraint` lands in the same change, and its migration repairs any row that
+    already violated, so no such row can exist to be read.
+    """
+    if avg_depth is not None and max_depth is not None and avg_depth > max_depth:
+        raise ValueError(DEPTH_PAIR_MESSAGE)
 
 
 class WaterType(StrEnum):
@@ -76,6 +104,11 @@ class DiveBase(BaseModel):
     ]
 
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
+
+    @model_validator(mode="after")
+    def _check_depth_pair(self) -> Self:
+        validate_depth_pair(self.avg_depth, self.max_depth)
+        return self
 
 
 class DiveTechScalars(BaseModel):
@@ -312,7 +345,7 @@ class DiveGasUse(BaseModel):
 
     The figures describe **the cylinders accounted for**, which on a single-cylinder dive
     is the dive. On a multi-cylinder dive whose import recorded which gas was breathed when,
-    they are the totals over `tanks`, and `attributed_seconds`/`duration_seconds` are what
+    they are the totals over `tanks`, and `attributed_seconds`/`duration` are what
     say how much of the dive that covers - a staged deco bottle with no pressures logged
     contributes neither its gas nor its time.
 
@@ -365,7 +398,7 @@ class DiveGasUse(BaseModel):
             "and a flagged parallel set summed over the dive's own duration.",
         ),
     ]
-    duration_seconds: Annotated[
+    duration: Annotated[
         int | None,
         Field(
             default=None,
@@ -686,6 +719,13 @@ class DiveUpdate(RejectsExplicitNulls):
             default=None,
         ),
     ]
+
+    @model_validator(mode="after")
+    def _check_depth_pair(self) -> Self:
+        """Only sees a PATCH that carries *both* depths; `patch_dive` re-runs the rule
+        against the merged stored pair for the one that carries either alone."""
+        validate_depth_pair(self.avg_depth, self.max_depth)
+        return self
 
 
 class DiveUpdateRequest(DiveUpdate):

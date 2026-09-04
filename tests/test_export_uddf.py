@@ -75,7 +75,7 @@ async def _render(bundle: Any, profiles: dict[int, dict[str, Any]] | None = None
 
     async def fake_load_profile(db: Any, *, dive_id: int) -> LoadedProfile | None:
         data = payloads.get(dive_id)
-        return None if data is None else LoadedProfile(duration_seconds=data.get("duration", 0), data=data)
+        return None if data is None else LoadedProfile(duration=data.get("duration", 0), data=data)
 
     monkeypatch.setattr("src.app.services.export.uddf.load_profile", fake_load_profile)
     chunks = [chunk async for chunk in write_uddf(AsyncMock(), bundle, exported_at=EXPORTED_AT)]
@@ -411,7 +411,7 @@ class TestDiveContent:
         elements it does have belong to `sitedata` and to `baseCalculationType`, a
         deco-planner input. Asserted rather than left implicit, because a reader who greps
         the XSD for `density` finds hits and would otherwise "fix" this into
-        `applicationdata`. It is in `export.json` and `dives.csv` instead."""
+        `applicationdata`. It is in `logbook.divejson` and `dives.csv` instead."""
         document = await _render(full_bundle(), monkeypatch=monkeypatch)
         assert list(_tree(document).iter(f"{UDDF}density")) == []
         assert b"salt" not in document
@@ -736,7 +736,7 @@ class TestWaypoints:
 
         Emitting a `<samples>` block of temperatures with no depths would hand divelogs.de
         a dive that plunges to the surface and back on every sample; the readings are in
-        `export.json` either way.
+        `logbook.divejson` either way.
         """
         profile = {"temperature": {"t": [0, 60], "v": [249, 181]}, "events": [{"t": 30, "type": "safety_stop"}]}
         document = await _render(full_bundle(), {2: profile}, monkeypatch)

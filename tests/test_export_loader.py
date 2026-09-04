@@ -186,9 +186,9 @@ class TestTheCascadeLeavesNothingDangling:
     back, because `erase_dive_site` left the site on the dives logged at it,
     `erase_gear_item` left the item on its dives and sets, `erase_trip` left the trip on
     its dives, and a service record went on naming a deleted schedule. Without that,
-    `sites_for`/`gear_for` came back a `KeyError` - a 500 on all three export endpoints for
-    any diver who had ever deleted a site - and `export.json` carried uuids nothing in the
-    file defined, with UDDF's `xs:IDREF` version of the same reference refusing to validate.
+    `sites_for`/`gear_for` came back a `KeyError` - a 500 on all four export endpoints for
+    any diver who had ever deleted a site - and `logbook.divejson` carried uuids nothing in
+    the file defined, with UDDF's `xs:IDREF` version of the same reference refusing to validate.
 
     All five of those tables are hard-deleted now, so the join row goes with the row it
     points at and a dangling reference cannot be created to be repaired. These pin that,

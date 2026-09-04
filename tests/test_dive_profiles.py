@@ -914,7 +914,7 @@ class TestNormalize:
         profile = normalize(parsed)
 
         assert [event.t for event in profile.events] == [90]
-        assert profile.duration_seconds == 10
+        assert profile.duration == 10
 
     def test_the_ceiling_shares_the_depth_channels_origin(self):
         parsed = SuuntoXmlParser.parse_profile(
@@ -937,7 +937,7 @@ class TestNormalize:
 
         profile = normalize(parsed)
 
-        assert profile.duration_seconds == 100
+        assert profile.duration == 100
         assert profile.depth_sample_count == 2
         assert profile.channels == ["depth", "temperature", "pressure"]
 
@@ -1273,7 +1273,7 @@ class TestFinalizeProfile:
         assert profile.gas_attribution[0].mean_depth_cm != round(sum(profile.depth.v) / len(profile.depth.v))
 
     def test_attributed_time_never_exceeds_the_span_it_is_a_fraction_of(self):
-        """The invariant `attributed_seconds`/`duration_seconds` exists to state, and the
+        """The invariant `attributed_seconds`/`duration` exists to state, and the
         one place the two halves can disagree: attribution is derived from the
         full-resolution channel while the stored span comes off the thinned one. A 77-minute
         1 Hz dive - the cadence every FIT export uses, and past `MAX_POINTS_PER_CHANNEL`
@@ -1288,9 +1288,9 @@ class TestFinalizeProfile:
 
         profile = finalize_profile(parsed)
 
-        assert sum(entry.seconds for entry in profile.gas_attribution) <= profile.duration_seconds
+        assert sum(entry.seconds for entry in profile.gas_attribution) <= profile.duration
         # And exactly equal here, since the dive begins on a gas and never stops being on one.
-        assert sum(entry.seconds for entry in profile.gas_attribution) == profile.duration_seconds
+        assert sum(entry.seconds for entry in profile.gas_attribution) == profile.duration
 
 
 class TestShouldExtract:
@@ -1430,10 +1430,10 @@ class TestToReadSchema:
             ],
         )
 
-        read = to_read_schema(LoadedProfile(duration_seconds=10, data=profile.to_data()))
+        read = to_read_schema(LoadedProfile(duration=10, data=profile.to_data()))
 
-        assert read.ceiling.v == [300]
-        assert [(event.t, event.type, event.gas_number, event.label) for event in read.events] == [
+        assert read.ceiling.values == [300]
+        assert [(event.time, event.type, event.gas_number, event.label) for event in read.events] == [
             (0, ProfileEventType.GAS_SWITCH, 1, None),
             (60, ProfileEventType.OTHER, None, "Ceiling Broken"),
         ]
@@ -1442,9 +1442,9 @@ class TestToReadSchema:
         """Extractor version 1's rows, which a backfill has not reached yet. The optional
         keys are read with `.get` for exactly this: a `KeyError` here would 500 the profile
         endpoint for every dive imported before the bump."""
-        read = to_read_schema(LoadedProfile(duration_seconds=10, data={"depth": {"t": [0], "v": [3000]}}))
+        read = to_read_schema(LoadedProfile(duration=10, data={"depth": {"t": [0], "v": [3000]}}))
 
-        assert read.depth.v == [3000]
+        assert read.depth.values == [3000]
         assert read.ceiling is None
         assert read.events == []
 
@@ -1504,7 +1504,7 @@ class TestGetGasAttributionForDives:
         return db
 
     def _row(self, gas_attribution: object) -> SimpleNamespace:
-        return SimpleNamespace(dive_id=7, duration_seconds=4300, gas_attribution=gas_attribution)
+        return SimpleNamespace(dive_id=7, duration=4300, gas_attribution=gas_attribution)
 
     @pytest.mark.asyncio
     async def test_reads_a_stored_attribution_back_with_the_span_it_was_derived_over(self):
@@ -1512,7 +1512,7 @@ class TestGetGasAttributionForDives:
 
         attribution = await get_gas_attribution_for_dives(self._db(rows), dive_ids=[7])
 
-        assert attribution[7].duration_seconds == 4300
+        assert attribution[7].duration == 4300
         assert attribution[7].entries == [GasAttribution(gas_number=0, seconds=2075, mean_depth_cm=3399)]
 
     @pytest.mark.asyncio

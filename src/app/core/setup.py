@@ -276,7 +276,7 @@ def create_application(
             allow_headers=["*"],
             # `Content-Disposition` is not one of the CORS-safelisted response
             # headers, so without this the browser strips it from every download
-            # response before JS ever sees it - the file endpoints and the three
+            # response before JS ever sees it - the file endpoints and the four
             # `/export/*` ones all send a filename the web app then can't read.
             # Exposing it makes the server's name authoritative instead of
             # something each client has to re-derive from `export/naming.py`.

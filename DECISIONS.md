@@ -2185,11 +2185,11 @@ cylinder slots per sample with one populated, and gas numbering differs between 
 (1 on the 2025 D5, 0 on the Ocean). It is a label to display, not an index to trust. Only cylinders
 with at least one non-null reading are stored.
 
-The summary columns (`duration_seconds`, `depth_sample_count`, and the five extremes) are
-deliberately *outside* `data`, because they are what answers "does this dive have a profile, and
-which curves would a chart draw" for the dive detail response without decoding tens of KB.
-`channels` on the read schema is derived from which extremes are non-NULL rather than stored - a
-column saying which curves a row carries is a column that can disagree with the row.
+The summary columns (`duration`, `depth_sample_count`, and the five extremes) are deliberately
+*outside* `data`, because they are what answers "does this dive have a profile, and which curves
+would a chart draw" for the dive detail response without decoding tens of KB. `channels` on the read
+schema is derived from which extremes are non-NULL rather than stored - a column saying which curves
+a row carries is a column that can disagree with the row.
 
 ## Profiles are capped at 1 200 points per channel by min/max bucketing, never LTTB
 
@@ -2220,7 +2220,7 @@ Hz recording usually ends — picks the beginning of that run as its bucket's mi
 true final sample. The channel then stops seconds before the dive did.
 
 That was invisible while nothing compared the stored span against anything. It stopped being
-invisible when `duration_seconds` became the denominator of Phase 4's coverage fraction whose
+invisible when the profile's `duration` became the denominator of Phase 4's coverage fraction whose
 numerator is derived from the **full-resolution** channel: on a 77-minute 1 Hz dive the fraction
 came out at 100.2%. Pinning the endpoints is the fix rather than clamping the fraction, because the
 shorter span was the thing that was wrong — a series that says when a dive started and stopped
@@ -2327,8 +2327,8 @@ very corpus entry needed to fix it.
 `dive.max_depth` - and does: `Dive_2021-03-28-1049.xml` reports `<MaxDepth>14.9</MaxDepth>` in its
 header while its deepest *sample* is 14.89 m. `dive.max_depth` is the diver's record and may have
 been hand-edited. The parse token proves "this dive was imported from this file", not "these values
-are derived from it". For the same reason `duration_seconds` on the profile is the span of the
-recorded samples, not `dive.duration`; a computer keeps logging for ~20 s after the dive ends.
+are derived from it". For the same reason `duration` on the profile is the span of the recorded
+samples, not `dive.duration`; a computer keeps logging for ~20 s after the dive ends.
 
 ## The profile's `ON DELETE CASCADE` never fires, so two explicit deletes do the work
 
@@ -3905,8 +3905,8 @@ the dict-comprehension bug the prototype had but would pass against `get_value` 
 only the first `session` - a file holding several dives is still one `ParsedDiveSchema` - but
 collected `record`, `tank_update` and `dive_gas` from all of them, so the dive came from session 1
 while its profile spanned the whole file. A two-dive fixture parsed as 1 800 seconds to 30 m with a
-profile running to 7 260 s across a surface interval, which put `DiveProfileInfo.duration_seconds`
-and the dive's own `duration` in open disagreement. Samples now stop at the first `session`.
+profile running to 7 260 s across a surface interval, which put `DiveProfileInfo.duration` and the
+dive's own `duration` in open disagreement. Samples now stop at the first `session`.
 
 The cut is **positional**, not by the session's `start_time … timestamp` window, for one reason:
 `dive_gas` carries no timestamp to filter on, and a second dive's gas list was being imported too.
@@ -5116,8 +5116,8 @@ figures where a bare `seconds` would not say what it counted.
 
 ## A multi-cylinder figure covers the cylinders it can account for, and says so
 
-`DiveGasUse` gained `tanks`, `attributed_seconds` and `duration_seconds`. `gas_used` and `rmv` now
-mean "the cylinders accounted for", which on a one-cylinder dive is still the dive.
+`DiveGasUse` gained `tanks`, `attributed_seconds` and `duration`. `gas_used` and `rmv` now mean "the
+cylinders accounted for", which on a one-cylinder dive is still the dive.
 
 The alternative was all-or-nothing per dive, matching `merge_mixture_fields` and the general refusal
 in this module — and it was rejected because it would ship nothing at all. The commonest tech shape
@@ -5129,9 +5129,9 @@ not suppression but a statement of scope, and the coverage fraction is it. On th
 reads 2 355 of 4 682: the client can say the figures cover half the dive, which is true, and is more
 than "no data" ever said.
 
-**Both halves of that fraction come off the same profile row**, which is why `duration_seconds` is
-sent rather than left to the client to take from the dive's own `duration`. `duration` is the
-diver's record and can be hand-edited, and a fraction whose denominator can be edited is
+**Both halves of that fraction come off the same profile row**, which is why the *profile's*
+`duration` is sent rather than left to the client to take from the dive's own. The dive's `duration`
+is the diver's record and can be hand-edited, and a fraction whose denominator can be edited is
 unfalsifiable — 2 355 of "whatever the diver typed" says nothing about how much of the dive was
 attributed. The number sent is the profile's span, which is what the attribution ran over. (Strictly
 it walked the *depth* channel, which can end a few seconds before the longest channel does; the two
@@ -5364,7 +5364,7 @@ The mapping from our columns to UDDF elements was settled against the vendored X
 (`tests/fixtures/uddf/uddf_3.2.2.xsd`), not from memory, and the schema contradicted what had been
 proposed in both directions.
 
-**Three things genuinely have nowhere to go, and are exported in `export.json`/CSV instead:**
+**Three things genuinely have nowhere to go, and are exported in `logbook.divejson`/CSV instead:**
 
 - **The deco ceiling.** The only per-waypoint slot is `<decostop>`, whose `duration` attribute is
   `use="required"`. A ceiling sample says how deep the obligation was; it says nothing about how
@@ -5388,7 +5388,7 @@ proposed in both directions.
 - **A dive links *every* site, in visit order, not just the primary one.**
   `informationbeforedive/link` is `maxOccurs="unbounded"`, so a drift dive's whole itinerary fits.
   An importer that reads only the first link still gets the primary site, because it is first. The
-  ordered list is in `export.json` regardless.
+  ordered list is in `logbook.divejson` regardless.
 - **Marine life has a slot — two of them — and species still do not reach the UDDF file.** The
   species plan assumed UDDF 3.2.2 had none. It has `siteType`'s `<ecology>` (`ecologyType`) and,
   closer to what we hold, `informationafterdive`'s `<observations>` (`observationsType`, which
@@ -5403,7 +5403,8 @@ proposed in both directions.
   and get quietly wrong. The census fields `speciesType` offers (`abundance` with
   `quality`/`occurence`, `dominance`, `lifestage`) are all optional, so the blocker is that
   classification, not the per-sighting detail `DiveSpecies` deliberately omits. Species go out in
-  `export.json` and `species.csv`; the species feature leaves `services/export/uddf.py` untouched.
+  `logbook.divejson` and `species.csv`; the species feature leaves `services/export/uddf.py`
+  untouched.
 
 **And two the format forces a choice on:**
 
@@ -5413,11 +5414,11 @@ proposed in both directions.
   make the document invalid.
 - **`<tankpressurebegin>` is mandatory inside `tankdataType`.** A cylinder with no recorded starting
   pressure therefore cannot be a `<tankdata>` at all and is skipped. Its gas still reaches
-  `<gasdefinitions>` and the cylinder itself still reaches `export.json`.
+  `<gasdefinitions>` and the cylinder itself still reaches `logbook.divejson`.
 
 Separately, the owner's **email is left out** although `contactType` has the slot. A UDDF file is
 what a diver hands to a dive shop or uploads to divelogs.de; their address riding along in it would
-be a surprise. It is in `export.json`, which is the diver's own copy.
+be a surprise. It is in `logbook.divejson`, which is the diver's own copy.
 
 ## Gas mixes dedupe on a rounded key, because the corpus carries float noise
 
@@ -5438,8 +5439,8 @@ importer show a diver two cylinders of the same gas. Worth catching, and it is e
 ## Archive member paths are planned for the whole zip at once
 
 `plan_archive_paths` assigns every stored file its path in one pass over the bundle, before anything
-is written, and `envelope.py` records the result in `export.json`. Two writers agreeing on a name is
-the obvious reason; uniqueness is the real one.
+is written, and `envelope.py` records the result in `logbook.divejson`. Two writers agreeing on a
+name is the obvious reason; uniqueness is the real one.
 
 Nothing upstream guarantees a unique member name. Dive numbers legitimately repeat — that is what
 `DiveNumberingSummary.duplicate_count` counts — two certifications can share a name, and
@@ -5541,9 +5542,9 @@ expired; the load-bearing one never moved.
 
 **Two failure modes, and neither is subtle once it happens.** The join tables carry no `is_deleted`
 of their own, so `site_ids_by_dive` names ids that a `is_deleted = false` read never returned — an
-unguarded lookup is a `KeyError`, i.e. a **500 on all three export endpoints for any diver who has
-ever deleted a dive site**. And where the lookup was guarded, the result was worse in a quieter way:
-a uuid in `export.json` that nothing in the file defines, and in UDDF the same reference is an
+unguarded lookup is a `KeyError`, i.e. a **500 on every export endpoint for any diver who has ever
+deleted a dive site**. And where the lookup was guarded, the result was worse in a quieter way: a
+uuid in `logbook.divejson` that nothing in the file defines, and in UDDF the same reference is an
 `xs:IDREF`, so the document would not validate at all.
 
 **The referrer graph is deeper than it first looks**, which is how the second round missed it. A
@@ -5560,7 +5561,7 @@ reads schedules *before* gear items: the order of the calls in `load_export_bund
   another account's site resurrects nothing.
 - It is not a resurrection of orphans. A deleted row nothing references stays out, because nothing
   can see it either.
-- It is not silent. The rows come back flagged `is_deleted: true` in `export.json`, so a reader
+- It is not silent. The rows come back flagged `is_deleted: true` in `logbook.divejson`, so a reader
   importing the file can tell them from the live ones rather than being handed back a site the diver
   thought they had removed. UDDF has no such flag, and they are simply present there — which is the
   right trade for a format whose job is "here are the dives I did".
@@ -5596,7 +5597,7 @@ both before they reach the wire (`allow_methods=["*"]` becomes the explicit meth
 wildcard there either. `expose_headers` gets neither treatment - it is emitted verbatim - which is
 exactly why this one had to be spelled out.
 
-The three `/export/*` endpoints are the reason it came up, but the fix is not export-specific:
+The `/export/*` endpoints are the reason it came up, but the fix is not export-specific:
 `GET /dive/{uuid}/file` and `GET /certification/{uuid}/file/{side}` build a `Content-Disposition`
 through `content_disposition_attachment` and were equally unreadable.
 
@@ -5766,8 +5767,8 @@ holds what was recorded. Snapping moves a reading in time; interpolating fabrica
 What it costs is real and small: two temperature readings that fall between the same pair of depth
 samples become one, so the demo corpus goes from 706 temperature samples to 430. What it buys is
 that those 430 all arrive — against 29 before — and that the depth profile survives divelogs.de at
-all. The unsnapped channels, at full resolution on their own axes, remain in `export.json` and in
-the original dive-computer file the archive carries, both lossless.
+all. The unsnapped channels, at full resolution on their own axes, remain in `logbook.divejson` and
+in the original dive-computer file the archive carries, both lossless.
 
 A profile with **no depth channel at all** now emits no `<samples>` element rather than a block of
 depth-less waypoints. That is the one case the old rule produced them for on its own, and a
@@ -6708,9 +6709,9 @@ no slot for"* was: `geographyType` is referenced from exactly two places, `siteT
 `trippartType`, and neither is per-dive. `informationbeforediveType` and `informationafterdiveType`
 have no coordinate element, and neither does `waypointType` — which carries `heading` but no
 position. So the entry and exit positions join the deco ceiling and the CNS/OTU scalars on the list
-of things that survive in `export.json` and `dives.csv` only. `dives.csv` gets four columns beside
-the other import-owned readings, empty where there was no fix rather than `0` — the Null Island trap
-again, from the writing side.
+of things that survive in `logbook.divejson` and `dives.csv` only. `dives.csv` gets four columns
+beside the other import-owned readings, empty where there was no fix rather than `0` — the Null
+Island trap again, from the writing side.
 
 ## The dive page is the map view, so `DiveSiteInfo` carries coordinates after all
 
@@ -7048,13 +7049,13 @@ need no filter because no orphan exists — on three grounds. None of them survi
 already conceded before this change.
 
 **The IDREF leg.** `_owned` deliberately read deleted-but-referenced rows back so that a uuid in
-`export.json` always named something the file defined, and so that UDDF's `xs:IDREF` version of the
-same reference validated; clearing the links would have destroyed exactly the rows that machinery
-existed to preserve. The gear-set section **already retracted this**, and correctly: clearing
-removes the reference, so nothing dangles either way. Its real weight was that the join rows *are*
-the historical record of "this dive was logged with this kit". That is still true, and it is why
-deleting is destructive and archiving exists — but it is an argument about what a delete should
-mean, not about whether a dangling reference is created. A cascade creates none, and
+`logbook.divejson` always named something the file defined, and so that UDDF's `xs:IDREF` version of
+the same reference validated; clearing the links would have destroyed exactly the rows that
+machinery existed to preserve. The gear-set section **already retracted this**, and correctly:
+clearing removes the reference, so nothing dangles either way. Its real weight was that the join
+rows *are* the historical record of "this dive was logged with this kit". That is still true, and it
+is why deleting is destructive and archiving exists — but it is an argument about what a delete
+should mean, not about whether a dangling reference is created. A cascade creates none, and
 `still_referenced` is gone with the problem it solved.
 
 **The orphan-backfill leg.** "A read filter fixes past and future in one line; a delete-time clear
@@ -7801,10 +7802,11 @@ either. If this is ever revisited, the null rows are the whole problem to solve 
 `test_export_uddf.py` runs. There is **no per-dive salinity or density child anywhere in 3.2.2** -
 and the precision matters, because the XSD does contain `density` elements: they belong to
 `sitedata` (a property of a site) and to `baseCalculationType` (deco-planner input), neither of
-which is a fact about one dive. So `water_type` lives in `export.json` and `dives.csv` only, and
-`test_the_water_type_has_nowhere_to_go_in_this_format` asserts its absence so nobody "fixes" it into
-`applicationdata`. `dives.csv` gains `water_type` and `altitude_m` after `weight_kg` - a **breaking
-CSV header change**, and one that moves the byte-for-byte golden in `tests/fixtures/export/`.
+which is a fact about one dive. So `water_type` lives in `logbook.divejson` and `dives.csv` only,
+and `test_the_water_type_has_nowhere_to_go_in_this_format` asserts its absence so nobody "fixes" it
+into `applicationdata`. `dives.csv` gains `water_type` and `altitude_m` after `weight_kg` - a
+**breaking CSV header change**, and one that moves the byte-for-byte golden in
+`tests/fixtures/export/`.
 
 **No `GET /dives` filter and no stats breakdown in this iteration.** The dive list page renders no
 filter UI at all today - the existing `trip`/`site`/`gear` filters are entered from those resources'
@@ -7850,7 +7852,7 @@ serve feet to someone who just switched back to metres. A `?units=` query parame
 trade with an extra cache dimension and a forked contract. There is no conversion code anywhere in
 `src/`, and that is the design, not an omission.
 
-**The exports do not bend to it either.** `export.json`'s docstring promises values are "not
+**The exports do not bend to it either.** `logbook.divejson`'s docstring promises values are "not
 re-scaled or re-unitised … exactly as the API serves them", and it still holds - the preference
 rides *in* the file as account data, on `ExportUser` beside `gear_service_emails`, because
 `/export/archive` promises nothing in the account is reachable only through the app. `dives.csv`
@@ -12718,7 +12720,7 @@ mixture backfill's join discriminator in any case: a sidemount pair's two rows s
 to live with.
 
 **Every write path gains it and one cannot clear it.** `DiveMixtureBase` carries it, so it flows
-into `DiveMixtureCreate`, `DiveMixtureRead` and `export.json` (the envelope re-wraps reads as
+into `DiveMixtureCreate`, `DiveMixtureRead` and `logbook.divejson` (the envelope re-wraps reads as
 `DiveMixtureBase`). `DiveMixtureUpdate` gains it too and stays off `RejectsExplicitNulls` like every
 other field on it - not because null means clear, but because CRUDAdmin's form handler drops blank
 fields before the schema is built, so an explicit `None` never reaches it on any path. The practical
@@ -13151,11 +13153,15 @@ the resolved value from its callers — `course_id` joins its exclusion set the 
 
 ### DiveJSON is not part of this
 
-The API's export is its own `export.json`; DiveJSON is not wired into the app. Once it is, a
-`courses` collection is a clean candidate — the spec already defines certifications with the same
-instructor/training-center fields, its cross-reference grammar is `*_uuid` members, and its
-service-record→schedule link is precedent for exactly this optional child-side reference. Until then
-nothing here mentions it.
+The API's export is its own `opendiving-export` JSON format; DiveJSON is not wired into the app.
+Once it is, a `courses` collection is a clean candidate — the spec already defines certifications
+with the same instructor/training-center fields, its cross-reference grammar is `*_uuid` members,
+and its service-record→schedule link is precedent for exactly this optional child-side reference.
+Until then nothing here mentions it.
+
+**Superseded.** DiveJSON is the app's JSON export now, and courses did become a core collection
+rather than a candidate — see *"The JSON export is DiveJSON, and the app maintains one JSON format"*
+below. The paragraph above is kept as the state courses were designed against.
 
 UDDF gets nothing, and `<divetrip>` is the near miss rather than the answer: it has a name and a
 date range, but a training course is not a trip, and writing one there would have an importer read
@@ -14177,9 +14183,9 @@ design, not a column; a string on one entity is a down payment on it that has to
 the real thing arrives.
 
 **DiveJSON agrees, which is what makes this cheap.** The interchange format's `course` object
-carries no cost member and its `additionalProperties: false` forbids adding one, so `export.json`
-loses nothing a reader could have used and the app and the format now describe a course the same
-way.
+carries no cost member and its `additionalProperties: false` forbids adding one, so
+`logbook.divejson` loses nothing a reader could have used and the app and the format now describe a
+course the same way.
 
 **No data preservation, and no backfill into `notes`.** Folding stored values in first was
 considered and rejected: *There is no production* (umbrella `CLAUDE.md`), so the only rows this
@@ -14216,3 +14222,145 @@ all, so both halves of this removal could have been made independently with a gr
 file against the header it claims, so the next writer is covered without anyone remembering to add
 it. It asserts a row count first on purpose: with no data rows the alignment check passes vacuously,
 so a fixture that stopped producing a course would turn the test green rather than red.
+
+## The JSON export is DiveJSON, and the app maintains one JSON format
+
+`src/app/schemas/export.py` used to declare `EXPORT_FORMAT = "opendiving-export"` with an integer
+`EXPORT_VERSION`, and a comment saying the free-change window "expires at launch" without saying
+what happens then. It is now a **DiveJSON 1.0 document**: `"format": "divejson"`, `"version": "1.0"`
+as a string, the member names of the published specification, and the archive member renamed
+`export.json` → `logbook.divejson` so the file someone extracts carries the format's own extension.
+A fourth endpoint, `GET /export/divejson`, serves the same bytes standalone with
+`Content-Type: application/vnd.dive+json`.
+
+DiveJSON is the open dive-log interchange format this project maintains
+([divejson.org](https://divejson.org), repository of record
+[divejson/divejson](https://github.com/divejson/divejson)). The window's answer is therefore the
+specification's §7: minor versions are additive, a reader accepts any document whose major version
+it implements, and a breaking change would be a major that the extension mechanism exists to avoid.
+
+**The alternative was keeping both**, an internal `opendiving-export` beside a public DiveJSON, and
+it was rejected for one reason: the public format would not have been the one the app itself used.
+"Reference implementation" then means a second writer nobody exercises, two shapes to keep in step
+on every schema change, and — the part that actually bites — a spec bug that the app's own export
+would never find, because the app's own export runs on the other format. Whatever the cost of the
+rename, it is paid once; the cost of two formats is paid on every change forever.
+
+**Conformance here is the reference validator's whole rule set, not the vendored schema.** Spec §3
+lists five classes of normative requirement JSON Schema cannot express — identifier uniqueness and
+referential closure, cross-member arithmetic, profile-series integrity, the `exported_at` offset,
+and the `format`/`version` member order — so a document the schema accepts can still be
+non-conforming. `tests/fixtures/divejson/divejson.schema.json` is vendored the way the UDDF XSD is
+(source, upstream commit and licence recorded in the README beside it), and
+`tests/helpers/divejson.py` is a port of the upstream validator's beyond-schema half. Both are
+checked on every generated document. This is not a theoretical gap: the writer's `profile.duration`
+was schema-valid and rule-invalid while the spec required `duration` to cover the *events* too, and
+nothing but a reading of §3 would have caught it — the spec was amended (upstream `d39c700`) rather
+than the writer, since `services/dive_profiles.py` deliberately does not clamp a marker pressed
+after the last sample.
+
+**What changed on the wire**, since every member below is a breaking change to the old format and
+there is nowhere it is deployed to break: `user` → `diver` (with `units` and `gear_service_emails`
+moved to `extensions.opendiving` on it, because application preferences are not logbook data and the
+format gives them no core member); `mixtures` → `cylinders`; `dive_sites` → `sites` and `gear_items`
+→ `gear`, with `dive_site_uuids`/`gear_item_uuids` following to `site_uuids`/`gear_uuids`;
+`start_time` → `started_at` and trip/course `start_date`/`end_date` → `starts_on`/`ends_on`, per the
+format's `_at` = instant / `_on` = calendar date convention; `surface_pressure_bar` →
+`surface_pressure`, since the format fixes units and member names carry no unit suffix; loose
+coordinate pairs grouped into Position objects (`entry_position`, `exit_position`, a site's and a
+trip location's `position`, and a location's four `bbox_*` into one `bbox`); a certification's
+`files` list split into `front_file`/`back_file`; service `kind` → `type`; `is_archived`/`is_active`
+→ `archived`/`active`; and a dive file's `parser_key` moved to `extensions.opendiving` on the
+stored-file object, parser registries being application-specific.
+
+**And the writer emits no nulls at all.** The old one serialized an explicit `null` for every unset
+member; absence is now the only spelling of "not recorded" (spec §5.4), enforced by
+`exclude_none=True` in `envelope._encode` and by the schema, which rejects a null everywhere. An
+empty `notes` is written as *absent* too, which is the one judgement call in the set: the column is
+`NOT NULL` with `""` meaning "the diver wrote nothing", so the app cannot tell a blank note from no
+note, and emitting `""` would claim the stronger of the two readings about a distinction the data
+never carried. It round-trips identically either way, since an importer that omits it gets `""` back
+from the column default.
+
+## The profile speaks one vocabulary, storage included
+
+`ExportDive.profile` is typed `DiveProfileRead` — the same class `GET /dive/{uuid}/profile` serves —
+so making the exported profile speak DiveJSON changed that endpoint's shape too. The rename was
+taken *through* rather than around: `duration_seconds` → `duration`, `t`/`v` → `times`/`values`,
+`pressure` → `pressures`, and an event's `t` → `time`, on `DiveProfileRead`, `DiveProfileSeries`,
+`DiveProfilePressureSeries` and `DiveProfileEvent`.
+
+The alternative was export-local profile models, which would have left `GET /dive/{uuid}/profile`
+untouched and cost nothing today. It was rejected because the cost is permanent: the project would
+speak two profile vocabularies on two surfaces, forever, and every future profile change would have
+to be made twice. A rename is paid once, and there is nowhere this is deployed.
+
+**It reaches storage.** `dive_profile.duration_seconds` is now `dive_profile.duration` (revision
+`b1c7f0e4a2d9`, an `ALTER TABLE ... RENAME COLUMN` — autogenerate renders a rename as a drop plus an
+add, which would have emptied a column nobody can re-derive without the original dive-computer
+file). Leaving the column alone would have left storage and the member it feeds under different
+names for no reader's benefit.
+
+**It does not reach the JSONB payload.** `dive_profile.data` keeps its compact `t`/`v`/`pressure`
+keys, and `to_read_schema` maps them onto the format's names on the way out. Renaming those keys
+would be a data migration across every profile row to save one mapping function, on an encoding
+nothing outside `services/dive_profiles.py` reads.
+
+**Two members renamed for internal consistency rather than because the format asked.**
+`DiveProfileInfo.duration` (the dive-detail summary) and `DiveGasUse.duration` (the gas-attribution
+denominator) both mean the profile's span, and neither is on the DiveJSON wire at all — there is no
+`gas_use` member in the format and the dive-detail summary is an app response shape. They renamed
+anyway, because the alternative is one quantity under two names in one codebase depending on which
+response you are looking at. Worth stating plainly: the format did not demand this; consistency did.
+
+**Two sites keep the old identifier, and they are one fact twice.** `services/export/tabular.py`'s
+`DIVES_HEADER` has a `duration_seconds` column and `tests/fixtures/export/dives.csv`'s header row
+mirrors it. That column writes `dive.duration` — the dive's own logged length, a different quantity
+that merely shares the word — and renaming it would break the `dives.csv` contract for no reason.
+The baseline migration keeps the old name too, because a past revision is history and is not
+rewritten to match.
+
+## A dive's average depth cannot exceed its maximum, and now nothing can store one that does
+
+A mean cannot be deeper than a maximum, so a dive that says otherwise records at least one wrong
+number. Until this landed the app had no comparison anywhere — only the independent
+`ck_dive_max_depth_positive` and `ck_dive_avg_depth_positive`, and no `model_validator` on
+`schemas/dive.py` at all — so `POST /dive` with `avg_depth` 30 and `max_depth` 20 was accepted, and
+any such row exported a document the DiveJSON reference validator rejects (spec §6.2, and §3's
+cross-member arithmetic list).
+
+It landed with the writer rather than with the importer that will need it, on the principle that the
+node claiming conformance must not be able to emit a non-conforming document. The failure it
+prevents is the shape the `profile.duration` conflict had: schema-valid, rule-invalid, and invisible
+until a live round-trip after every related change had merged.
+
+**Both layers, because either alone leaves a hole.** `ck_dive_avg_depth_within_max` is what makes it
+true of the database — the admin panel writes this table too — and `validate_depth_pair` in
+`schemas/dive.py` is what makes the API answer with a sentence naming the fields instead of an
+`IntegrityError`. `DiveBase` covers create, `DiveUpdate` covers a PATCH carrying both depths, and
+`patch_dive` re-runs the rule against the **merged** stored-plus-incoming pair, which is the case
+neither schema can see: a PATCH may carry either depth alone. That is the shape `patch_course` and
+`patch_trip` already use for their date ranges. `_DIVE_CONSTRAINT_MESSAGES` carries the constraint's
+message as the backstop for the one route left — a concurrent edit between the merged check and the
+UPDATE.
+
+`<=`, not `<`: a perfectly square profile is unusual, not impossible.
+
+**No parse-side guard, deliberately.** The repo's rule is that a parsed value the database refuses
+must not take the upload with it, and it is honoured column by column — but this is a *pair* rule,
+so there is no "the bad value" to null, and honouring it in the parser means choosing which of two
+recorded readings to discard. That is a different decision from "this number is not a reading", and
+it is the same reason `ck_dive_mixture_oxygen_helium_sum` and `ck_dive_mixture_pressure_order` have
+no parse-side guard either.
+`test_every_single_column_bound_a_parser_can_reach_has_a_parse_side_guard` counts single-column
+bounds only and its docstring now names this constraint among the exclusions.
+
+**The migration repairs rather than fails.** Revision `c4d81e6b3f57` clears `avg_depth` to NULL on
+any row that already violated, then adds the constraint. A migration that simply added it would
+abort on the first offending row and take the container's startup `alembic upgrade head` down with
+it, on a database nobody can log into to fix. `avg_depth` is the half that goes because `max_depth`
+is what the rest of the app depends on — the dive list, the user's stats, UDDF's mandatory
+`<greatestdepth>` — while `avg_depth` feeds only gas arithmetic, which declines to compute rather
+than compute wrongly when it is absent. Rejected: swapping the pair, which invents the reading that
+the diver typed them the wrong way round; and clearing both, which discards a number nothing
+suggests is wrong.

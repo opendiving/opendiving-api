@@ -58,6 +58,7 @@ dev = [
     # (tests/fixtures/uddf/) in tests only - the runtime writer builds its XML with the
     # stdlib and never validates.
     "xmlschema>=3.0.0",
+    "jsonschema>=4.25.0",
 ]
 
 [build-system]

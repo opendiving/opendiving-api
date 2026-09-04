@@ -27,7 +27,7 @@ def gas_name(oxygen: float, helium: float) -> str:
 
     Rounds to whole percent because the shorthand *is* integer shorthand - a 32.4 % fill
     is an EAN32 on every cylinder sticker - and because this is only ever a label: the
-    exact fractions travel unrounded in `export.json` and in the CSV alongside it, and
+    exact fractions travel unrounded in `logbook.divejson` and in the CSV alongside it, and
     UDDF carries them in `<o2>`/`<he>` next to this name.
 
     A mixture the constraints should have rejected (oxygen and helium summing past 100,
@@ -48,7 +48,7 @@ def gas_name(oxygen: float, helium: float) -> str:
 def trip_location_names(locations: Iterable[TripLocationRead]) -> str:
     """A trip's places on one line: `Moalboal, Bohol`.
 
-    Only the flat formats need this. `export.json` carries the locations structured, but
+    Only the flat formats need this. `logbook.divejson` carries the locations structured, but
     UDDF's `<geography><location>` is a single string and `trips.csv` has a single
     `location` cell, so both have to render the list the way the app does - and rendering
     it twice is how the two would end up disagreeing.

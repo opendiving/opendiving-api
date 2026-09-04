@@ -211,10 +211,10 @@ def _attributed(gas_number: int, *, seconds: int, mean_depth_cm: int) -> GasAttr
     return GasAttribution(gas_number=gas_number, seconds=seconds, mean_depth_cm=mean_depth_cm)
 
 
-def _attribution(*entries: GasAttribution, duration_seconds: int = 6000) -> ProfileGasAttribution:
+def _attribution(*entries: GasAttribution, duration: int = 6000) -> ProfileGasAttribution:
     """The attribution as it comes off a profile row, span included - the denominator
     `attributed_seconds` is a fraction of."""
-    return ProfileGasAttribution(duration_seconds=duration_seconds, entries=list(entries))
+    return ProfileGasAttribution(duration=duration, entries=list(entries))
 
 
 class TestComputeMultiTankGasUse:
@@ -295,7 +295,7 @@ class TestComputeMultiTankGasUse:
         attribution = _attribution(
             _attributed(1, seconds=2355, mean_depth_cm=2837),
             _attributed(2, seconds=2327, mean_depth_cm=655),
-            duration_seconds=4682,
+            duration=4682,
         )
 
         result = compute_multi_tank_gas_use(mixtures=mixtures, attribution=attribution)
@@ -305,7 +305,7 @@ class TestComputeMultiTankGasUse:
         assert result.gas_used == result.tanks[0].gas_used
         # Half the dive, and both halves of the fraction come off the same profile row -
         # the client renders "these figures cover 39 of the 78 minutes recorded" from it.
-        assert (result.attributed_seconds, result.duration_seconds) == (2355, 4682)
+        assert (result.attributed_seconds, result.duration) == (2355, 4682)
 
     def test_an_unmentioned_cylinder_that_was_never_breathed_is_left_out(self):
         """A hand-added cylinder has no `gas_number` to join on, and one the device never
@@ -356,7 +356,7 @@ class TestComputeMultiTankGasUseReturnsNone:
 
         result = compute_multi_tank_gas_use(
             mixtures=mixtures,
-            attribution=_attribution(_attributed(1, seconds=4300, mean_depth_cm=1779), duration_seconds=4300),
+            attribution=_attribution(_attributed(1, seconds=4300, mean_depth_cm=1779), duration=4300),
         )
 
         assert result is None
@@ -378,7 +378,7 @@ class TestComputeMultiTankGasUseReturnsNone:
             attribution=_attribution(
                 _attributed(1, seconds=2690, mean_depth_cm=2750),
                 _attributed(2, seconds=10, mean_depth_cm=600),
-                duration_seconds=2700,
+                duration=2700,
             ),
         )
 
@@ -399,7 +399,7 @@ class TestComputeMultiTankGasUseReturnsNone:
             attribution=_attribution(
                 _attributed(1, seconds=2100, mean_depth_cm=2750),
                 _attributed(2, seconds=600, mean_depth_cm=600),
-                duration_seconds=2700,
+                duration=2700,
             ),
         )
 
@@ -508,7 +508,7 @@ class TestComputeParallelGasUse:
         assert result is not None
         assert result.tanks == []
         assert result.attributed_seconds is None
-        assert result.duration_seconds is None
+        assert result.duration is None
 
     def test_the_manifolded_encoding_of_the_same_dive_agrees(self) -> None:
         """The identity the pooled-SAC definition exists for. One 22.2 L row at the pair's

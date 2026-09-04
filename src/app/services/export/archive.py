@@ -3,7 +3,8 @@
 Layout, and what each member is for:
 
 ```
-export.json          the complete structured export - see schemas/export.py
+logbook.divejson     the complete structured export, a DiveJSON 1.0 document -
+                     the same bytes GET /export/divejson serves; see schemas/export.py
 dives.uddf           the same bytes GET /export/uddf serves
 csv/dives.csv        the flat spreadsheet view, plus eight normalized files beside it
 avatar.webp          the diver's profile picture, if they have one
@@ -27,7 +28,7 @@ sits inside the open `ZipFile` and cannot simply be moved off; the two document 
 above do interleave, because each awaits `load_profile` per dive. Small enough to leave,
 large enough to name.
 
-**The profiles are read twice.** `export.json` and `dives.uddf` both embed every dive's
+**The profiles are read twice.** `logbook.divejson` and `dives.uddf` both embed every dive's
 samples, and each writer does its own per-dive `load_profile` with `undefer(data)` - so a
 thousand-dive log issues two thousand of the export's most expensive query. Loading them
 once and holding them would defeat the whole memory argument above, and interleaving the
@@ -61,7 +62,7 @@ from ..blob_store import BlobMissingError
 from ..certification_files import load_certification_file
 from ..dive_files import load_dive_file
 from ..user_avatars import AVATAR_FILENAME, StoredAvatar, read_avatar_bytes
-from .envelope import write_export_json
+from .envelope import write_divejson
 from .loader import ExportBundle
 from .paths import ArchivePaths, plan_archive_paths
 from .tabular import CSV_WRITERS
@@ -74,7 +75,10 @@ logger = logging.getLogger(__name__)
 # real logbooks, without letting a large one become a resident-memory problem.
 SPOOL_THRESHOLD = 32 * 1024 * 1024
 
-EXPORT_JSON_NAME = "export.json"
+# The archive's DiveJSON member. Named for the format's own file extension, because a
+# file someone extracts from the zip should say what it is; the convention that a
+# container's root member is called this is the format's (spec Appendix A).
+DIVEJSON_NAME = "logbook.divejson"
 UDDF_NAME = "dives.uddf"
 CSV_DIRECTORY = "csv"
 
@@ -143,7 +147,7 @@ async def _write_stream(archive: zipfile.ZipFile, info: zipfile.ZipInfo, chunks:
     """
     # `force_zip64` because the size is not known when the header is written: `zipfile`
     # would emit a non-ZIP64 local header and then raise at member close if the generator
-    # produced more than 2 GiB - after writing all of it. `export.json` embeds every
+    # produced more than 2 GiB - after writing all of it. `logbook.divejson` embeds every
     # dive's samples, so that ceiling is reachable by a large enough logbook. The blob
     # members go through `writestr`, which knows its length and sizes the header itself.
     with archive.open(info, "w", force_zip64=True) as member:
@@ -168,8 +172,8 @@ async def write_archive(db: AsyncSession, bundle: ExportBundle, *, exported_at: 
         with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             await _write_stream(
                 archive,
-                _member(EXPORT_JSON_NAME, exported_at, compress_type=zipfile.ZIP_DEFLATED),
-                write_export_json(db, bundle, exported_at=exported_at, paths=paths),
+                _member(DIVEJSON_NAME, exported_at, compress_type=zipfile.ZIP_DEFLATED),
+                write_divejson(db, bundle, exported_at=exported_at, paths=paths),
             )
             await _write_stream(
                 archive,
@@ -201,7 +205,8 @@ async def _write_blobs(
     """Every stored binary, one row at a time.
 
     A file that has vanished between the metadata read and this loop is skipped rather
-    than failing the export: losing a member beats losing the archive. `export.json` still
+    than failing the export: losing a member beats losing the archive. `logbook.divejson`
+    still
     names it, which is the honest record of what was there when the export began.
 
     Two ways to vanish now, and both are skipped on the same terms. A missing *row* is a
