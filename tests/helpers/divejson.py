@@ -28,6 +28,22 @@ from typing import Any
 from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.exceptions import best_match
 
+# The parse half comes from the app rather than being restated here, and it is the one
+# piece of this port that does: the logbook importer has to reject a duplicate member on
+# the request path (spec §9), and two spellings of that rule is the two-shapes-for-one-fact
+# problem the format's own supersession decision rejects. Re-exported so this module's
+# public surface is unchanged - `parse_document` and `DuplicateMemberError` are still
+# imported from here by `test_export_json.py`.
+from src.app.services.logbook_import.reader import DuplicateMemberError, parse_document
+
+__all__ = [
+    "SCHEMA_PATH",
+    "DuplicateMemberError",
+    "assert_conforms",
+    "conformance_issues",
+    "parse_document",
+]
+
 SCHEMA_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "divejson" / "divejson.schema.json"
 
 # The collections whose records carry a `uuid` and can be referenced (spec §4).
@@ -47,29 +63,6 @@ _COLLECTIONS = (
 # `\Z`, not `$`: Python's `$` also matches just before a trailing newline, which would let
 # `"…T08:00:00Z\n"` through the grammar check with the newline silently dropped.
 _DATE_TIME = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?([Zz]|[+-]\d{2}:\d{2})?\Z")
-
-
-class DuplicateMemberError(ValueError):
-    """A JSON object in the input carries the same member name twice (spec §9)."""
-
-
-def _reject_duplicate_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    obj: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in obj:
-            raise DuplicateMemberError(f"duplicate member name {key!r}")
-        obj[key] = value
-    return obj
-
-
-def parse_document(text: str | bytes) -> Any:
-    """Parse document text as JSON, rejecting duplicate member names.
-
-    Member order survives into the parsed dict, which is what lets the `format`/`version`
-    rule be checked without re-reading the text - and what stops the words "format" and
-    "version" inside some diver's note from being mistaken for it.
-    """
-    return json.loads(text, object_pairs_hook=_reject_duplicate_members)
 
 
 def conformance_issues(doc: Any) -> list[str]:

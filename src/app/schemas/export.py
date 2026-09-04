@@ -50,7 +50,7 @@ from pydantic import BaseModel, Field
 from ..core.schemas import PublicUUIDSchema
 from .certification import CertificationAgency
 from .course import CourseStatus
-from .dive import DiveStartTime, WaterType
+from .dive import DiveLocalStartTime, WaterType
 from .dive_mixture import DiveMixtureBase
 from .dive_profile import DiveProfileRead
 from .gear_item import GearType
@@ -168,7 +168,11 @@ class ExportDive(PublicUUIDSchema):
     """
 
     dive_number: int
-    started_at: DiveStartTime
+    # Offset-aware wherever the source recorded an offset, and offset-less where it did
+    # not - spec §5.2's local date-time, which the writer emits verbatim from the column
+    # pair rather than fabricating a zone for. `exported_at` on the envelope is the one
+    # member that must always carry one, and it is generated rather than recorded.
+    started_at: DiveLocalStartTime
     duration: Annotated[int, Field(description="Dive duration in seconds, as logged")]
     notes: str | None = None
     max_depth: float | None = None

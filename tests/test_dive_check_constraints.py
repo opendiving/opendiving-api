@@ -217,9 +217,16 @@ class TestDiveCheckConstraints:
         _assert_violates(db, _make_dive(dive_owner.id, surface_pressure_bar=0.1), "ck_dive_surface_pressure_range")
 
     def test_real_surface_pressures_are_allowed(self, db: Session, dive_owner: User) -> None:
-        """1.057 bar is a real reading off a 2025 export; 0.55 is roughly a 5 000 m lake."""
+        """1.057 bar is a real reading off a 2025 export; 0.55 is roughly a 5 000 m lake.
+
+        0.44 is the floor's own reason to be 0.4 rather than 0.5: it is ambient pressure at
+        `ck_dive_altitude_range`'s 6500 m ceiling, so the old floor refused a reading the
+        altitude bound blesses - and it is DiveJSON's floor too (spec §6.2), which is where
+        the contradiction was noticed.
+        """
         db.add(_make_dive(dive_owner.id, surface_pressure_bar=1.057))
         db.add(_make_dive(dive_owner.id, surface_pressure_bar=0.55))
+        db.add(_make_dive(dive_owner.id, surface_pressure_bar=0.44))
         db.commit()
 
     def test_coordinates_past_the_poles_or_the_antimeridian_are_rejected(self, db: Session, dive_owner: User) -> None:

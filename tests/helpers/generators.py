@@ -139,7 +139,13 @@ def create_gear_service_schedule(db: Session, user: models.User, item: models.Ge
         models.GearServiceSchedule(
             user_id=user.id,
             gear_item_id=item.id,
-            kind="inspection",
+            # A real `ServiceKind` member, which "inspection" was not. Nothing asserted on
+            # the old string, and every write path validates this column through that enum -
+            # so a fixture row carrying a value outside it was one no API call could have
+            # produced, and one the DiveJSON writer refuses outright (`ExportGearServiceSchedule.type`
+            # is the enum). It only ever surfaced once a test exported a generator-seeded
+            # schedule, which is what `test_logbook_import.py` does.
+            kind="visual_inspection",
             starts_on=date(2026, 1, 1),
             interval_months=12,
         ),
@@ -165,7 +171,7 @@ def create_gear_service_record(
             user_id=user.id,
             gear_item_id=item.id,
             gear_service_schedule_id=schedule.id if schedule is not None else None,
-            kind="inspection",
+            kind="visual_inspection",
             serviced_on=date(2026, 6, 1),
             dive_count_at_service=0,
             notes="",

@@ -72,6 +72,12 @@ def _offset_of_the(order: Any) -> Any:
     the same call `dive_activity` explains: `core/utils/datetime_offset.py` is documented as the
     single place that conversion happens, and the failure mode of a second copy of it in SQL is a
     list that quietly disagrees with the dive pages it was built from.
+
+    A NULL offset - the logbook importer's offset-unknown state - travels this path intact and
+    needs no special case at either end: a Postgres array may hold NULL elements, so the
+    subscript yields `None`, and `combine_start_time` reads that as "the column holds the wall
+    clock" and hands it back naive. `SpeciesLifeListEntry`'s two timestamps are plain `datetime`s
+    for exactly that reason, and would have to stay so even if this aggregate were rewritten.
     """
     return func.array_agg(aggregate_order_by(Dive.utc_offset_minutes, order, Dive.id.asc()), type_=ARRAY(Integer))[1]
 

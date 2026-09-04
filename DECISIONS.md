@@ -2235,9 +2235,15 @@ than growing `ParsedDiveSchema` a samples field.
 It is never called from `POST /dive/parse`. A profile is thousands of readings the browser has no
 use for while filling in a form, and it would have to be posted back to be stored - which would make
 the stored samples client-supplied and reopen the exact trust problem the parse token exists to
-close. The "`ParsedDiveSchema`/`DiveMixtureSchema` trimmed..." decision already deleted
-`DiveSampleSchema` for this reason; this is its complement. It is called server-side from
-`PUT /dive/{uuid}/file`, the only place with both the bytes and proof of where they came from.
+close.
+
+**Widened, not overturned, by logbook import.** `POST /import/divejson` does store client-supplied
+samples, and it is the one path that does; the sentence above is about `/dive/parse`, which still
+neither returns nor accepts a profile. See *"Importing a logbook is the one client-supplied
+profile"* below for why the two are different questions. The "`ParsedDiveSchema`/`DiveMixtureSchema`
+trimmed..." decision already deleted `DiveSampleSchema` for this reason; this is its complement. It
+is called server-side from `PUT /dive/{uuid}/file`, the only place with both the bytes and proof of
+where they came from.
 
 Non-abstract so a new format can ship header-only and grow a profile extraction later without a flag
 day. `None` means "this file carries no samples"; malformed samples raise `DiveParseError`. Dispatch
@@ -2563,7 +2569,7 @@ this one field is not: read as millibar, 105700 would be 105.7 bar, a hundred me
 the surface. Both corpora settle it - all 384 XML exports land in 103100-106700, plausible
 barometrically only on the Pascal reading, and the JSON export of the same dives writes the
 identical integer into a field the other parser already treated as Pascal.
-`ck_dive_surface_pressure_range` (0.5-1.2 bar) is the backstop.
+`ck_dive_surface_pressure_range` (0.4-1.2 bar) is the backstop.
 
 **FIT is the odd one out again, and gets the same treatment it always does.** `session`/
 `dive_summary` carry `start_cns`/`end_cns` (already whole percent) and `o2_toxicity` (OTUs), but
@@ -4682,6 +4688,10 @@ because the answers differ.
 
 ## A parsed value the database refuses must not take the upload — or the backfill run — with it
 
+**The floor moved to 0.4 bar** with logbook import — see *"The surface-pressure floor is 0.4 bar,
+because the altitude ceiling says so"* below. Everything this section says about *where* the failure
+lands is unchanged; only the number is.
+
 `ck_dive_surface_pressure_range` bounds `surface_pressure_bar` to 0.5–1.2 bar, and nothing between
 the parser and the write applied those bounds: `ParsedDiveSchema.surface_pressure_bar` was a bare
 `float | None` and both `_pascals_to_bar` calls passed the file's value through raw. The column is
@@ -4829,7 +4839,7 @@ serialization anywhere in between. An export attached before this phase, when CN
 parsed and so never serialized, gets `NaN` written on the first `backfill_dive_tech_fields` run: the
 exact operation this phase exists to ship.
 
-The two-sided validators were safe already, since `not (0.5 <= nan <= 1.2)` is `True` — but
+The two-sided validators were safe already, since `not (0.4 <= nan <= 1.2)` is `True` — but
 incidentally, as a property of how the comparison falls out rather than anything they say. **The
 first fix was per-field `isfinite`, and it was the wrong shape.** Adding
 `math.isfinite(value) and value >= 0` to each of the five one-sided guards makes those five fields
@@ -14378,3 +14388,494 @@ is what the rest of the app depends on — the dive list, the user's stats, UDDF
 than compute wrongly when it is absent. Rejected: swapping the pair, which invents the reading that
 the diver typed them the wrong way round; and clearing both, which discards a number nothing
 suggests is wrong.
+
+## The importer is a reader, not a validator, and that is why `jsonschema` stayed a test dependency
+
+DiveJSON's conformance rules are addressed to *writers*. §3 lists five classes the JSON Schema
+cannot express — identifier closure, cross-member arithmetic, profile-series integrity, the
+`exported_at` offset, the `format`/`version` member order — and `divejson validate` checks the lot;
+`tests/helpers/divejson.py` is that rule set ported, and it is what holds this app's *export*
+honest. The importer deliberately does not run it, and the difference is not laziness.
+
+**A reader's job is to salvage a logbook, not to grade one.** Every §3 rule has a strictly better
+answer available on the way in than "refuse the file". A dangling `trip_uuid` is imported without
+the link and reported. Two records claiming one uuid are two records, the second remapped. A profile
+whose `times` go backwards is dropped with a note and its dive imports anyway. Even the member-order
+rule, which is four lines to check and which the parse already has the information for, is left
+alone: refusing an otherwise readable logbook over the order two members were written in is
+precisely the data loss this format exists to end.
+
+That decision also settles a hazard `api-1` left behind and the suite could not have caught.
+`jsonschema` sits in the **`dev` extra**, beside `xmlschema`, and the `Dockerfile` states that the
+runtime image "deliberately carries only the main dependency set" and copies just `src/app`,
+`src/migrations` and `src/alembic.ini`. An import endpoint importing `jsonschema` — or
+`tests.helpers.divejson` — would therefore fail at *container start*, with every test green. Not
+running the rule set at request time means the dependency stays where it is.
+
+Rejected: moving the checker under `src/` and promoting `jsonschema` to a runtime dependency. It
+would have made §3 available on the request path, but the importer would still not have been able to
+*use* it as a gate without contradicting every invariant above — so what it bought was a runtime
+dependency and a second place for the format's rules to live.
+
+Rejected too: a second, importer-local statement of §3's rules. That is the two-shapes-for-one-fact
+disease decision 3 of the format's own supersession rejects, and it would drift.
+
+**One rule is shared rather than duplicated, and it is the exception that proves the shape.** Spec
+§9's duplicate-member rule is a *parsing* rule, not a conformance one: `json` silently keeps the
+last value, so a document with two `max_depth` members has no reading a parser can pick honestly.
+The importer has to reject it. So `parse_document` and `DuplicateMemberError` live in
+`services/logbook_import/reader.py` and `tests/helpers/divejson.py` re-exports them — one
+implementation, two callers, and the test helper's public surface unchanged.
+
+## A uuid is preserved, matched, restored or remapped, and which one is a property of the instance
+
+Four branches, and every caller-owned collection takes the same four. Given the document's uuid:
+
+- **Nothing on this instance carries it** → create the row under that uuid. This is what makes a
+  cross-instance migration preserve identity, and it is the ordinary case for a restore into a fresh
+  account.
+- **The caller already owns it, live** → that *is* this record. Nothing is written and it is counted
+  as `linked`. This is the whole of the idempotence invariant: importing a document twice creates
+  nothing the second time.
+- **The caller owns it, soft-deleted** → restore, below.
+- **Another account owns it** → mint a fresh uuid, create under that, and remap every reference in
+  the document consistently. A cross-account copy on one instance gets its own identity, and the
+  other diver's row is untouched and unreadable throughout.
+
+The consequence worth stating: **idempotence is impossible on the remap branch**, by construction.
+`dive` has no unique constraint, so the remapped rows carry the only key that could have matched,
+and a second import creates a second copy. The preview is the honest guard — it reports the full
+creation set again, and nothing is written until the caller applies. Rejected: a persistent
+source-uuid provenance column to make the remap branch idempotent too, which is a schema-wide change
+serving one corner case (copying another diver's logbook on a shared instance). Revisit if that
+becomes a real workflow.
+
+The `species` catalog is exempt from all four: it belongs to nobody, and import never creates or
+claims a catalog row under any uuid. See the species section below.
+
+## A soft-deleted match restores the row — wholesale, under its original uuid
+
+Import is the application's only un-delete path, and it is deliberate rather than incidental. A
+soft-deleted row of the caller's whose uuid the document carries has `is_deleted` and `deleted_at`
+cleared **together**, every imported column overwritten, and its children rebuilt exactly as a
+created record would have them — mixtures wholesale, links re-resolved, blobs re-attached on the
+archive path. Nothing of the husk survives but identity: `id`, `uuid`, `user_id`. It is reported
+under its own **restored** count, never inside created or skipped: a diver restoring a backup is
+entitled to see that number, and Verification reads it off the settings card.
+
+Rejected: create-fresh under a new uuid. The `uuid` unique index is **full, not partial**, and no
+purge job ever reclaims a deleted dive — so the husk owns its uuid forever, create-fresh must mint a
+new one, and every re-import of the same backup then duplicates the restored dives again. That
+breaks idempotence on the feature's motivating path.
+
+**Two implementation traps, both of which the branch is written against.** The dedupe lookup
+*branches* on `is_deleted` rather than filtering it: a lookup shaped like this repo's habitual
+`is_deleted=False` queries would call the husk's uuid unclaimed, create against it, and hit that
+full unique index — a failure on exactly the path this branch exists to serve. And the match is
+re-evaluated inside the apply transaction rather than replayed from the preview, because a row can
+be deleted (or a service-record husk cascade away entirely) between the two calls. That is why apply
+re-plans the whole document rather than carrying a plan in its token.
+
+The accepted cost: this opens the importer's single `UPDATE` path. It is confined to state the
+caller owns and had already deleted, which no other endpoint could have recovered. It also
+**pre-decides half of the still-open trash-bin question** in the restore direction — whatever a
+trash bin ends up looking like, "a deleted record can come back under its own identity" is now a
+thing this app does.
+
+Three tables take this branch, and the list is derived rather than remembered:
+`git grep -n "SoftDeleteMixin" -- src/app/models/` finds `Dive`, `Certification`,
+`GearServiceRecord` and `User` — and five more files that match on their own *"no
+`SoftDeleteMixin`"* comments, each the model saying it does **not** soft-delete. Read the hits; a
+pickup verification once miscounted those comments as tables. `User` never imports.
+
+## No uniqueness rule anywhere fails an import
+
+Every user-scoped unique index in this app is a "you already have one of these" rule rather than a
+data-integrity one, so the answer to a collision is to point at the row that is already there and
+say so. An import that 500s on a name a diver happens to have used twice would be useless.
+
+Where a created row would collide, the import **links** to the caller's existing row and remaps
+every reference to it. That covers `ux_dive_site_user_id_name_location_lower`,
+`ux_trip_user_id_name_lower`, `ux_gear_item_user_id_brand_name_lower`,
+`ux_gear_set_user_id_name_lower` and `ux_gear_service_schedule_item_kind_label` — derive the set
+rather than trusting that list, with
+`git grep -n "unique=True\|UniqueConstraint\|ux_" -- src/app/models/ src/app/core/db/models.py` (the
+second path is where `PublicUUIDMixin`'s full uuid unique lives, and the join tables declare
+`UniqueConstraint(...)` rather than `Index(..., unique=True)`, so a grep for the latter alone misses
+five of them).
+
+Two collections deliberately have **no** name rule and are never name-deduped. A `course` failed
+once and retaken later is legitimately the same name twice — the model says so — and a
+`certification` carries no uniqueness beyond its uuid either.
+
+The same rule applies *within* one document: two sites under different uuids with the same name are
+one row, the second linking to the first, and both spellings of the reference reach it.
+
+**The within-document half needs its own key, and getting it wrong is two different bugs.** A
+collision is decided on whatever the index is keyed on, and for four of the five collections that is
+the record's own text, so one key serves both halves. `gear_service_schedule` is keyed on
+`gear_item_id`, and the schedule's dedupe therefore has to happen *per gear row* - which has two
+spellings depending on where that row came from, and each spelling on its own loses a real case:
+
+- A gear item **this import is creating** has no row id yet, so the existing-row half has nothing to
+  look in. Its identity is the document's own canonical gear uuid.
+- A gear item the caller **already owns** has a row id, and two document gear records can both link
+  to it: each takes the existing-row branch, so neither carries a `canonical_source_uuid` and
+  references to them come back as two different uuids for one row.
+
+Both misses end identically - two inserts against `ux_gear_service_schedule_item_kind_label`, an
+`IntegrityError` out of the apply transaction, and the whole logbook refused. So the alias key is
+the row id where one is known and the canonical uuid where it is not, `_claim_unique` takes the two
+keys separately, and `tests/test_logbook_import.py::TestTwoSchedulesOnOneNewGearItem` covers all
+three shapes. Review found this twice running, once per spelling; the second was a regression
+introduced by the fix for the first.
+
+**`ux_dive_file_user_id_sha256` is the one collision with no link available**, and it is skip-and-
+report. Link-to-existing is impossible there: `dive_id` is `NOT NULL` under the full-unique
+`ux_dive_file_dive_id`, and `ux_dive_file_storage_key` forbids sharing a key, so one row cannot
+serve two dives. The collision means this diver already stores identical bytes against another dive;
+the restored dive simply has no source file and the preview says so. Still not an error.
+
+## Where the format is optional and this app is not, the record goes rather than a value being invented
+
+DiveJSON's REQUIRED members are "the minimal set without which the record cannot be interpreted"
+(spec §5.4), deliberately fewer than what this app always writes — a converter from a poorer format
+must be able to omit what its source never had. That leaves a real class of documents whose records
+this app's columns cannot hold, and the import needs one answer for all of them rather than a
+judgement per column.
+
+**Where the column's own default *is* this app's spelling of "not recorded", absence takes it.** A
+`notes` column is `NOT NULL` with `""` meaning "the diver wrote nothing" — which is the same
+distinction the writer collapses in the other direction, so the round trip is exact. `rented`,
+`archived` and `active` are booleans this app models as always-present. `dive_count_at_start` on a
+schedule defaults to 0, which reads as "count from the beginning". Nothing is claimed in any of
+these that the app does not already claim about every row in the table.
+
+**Otherwise the record is skipped and reported.** A course with no `status`: §6.17 says in as many
+words that a reader MUST NOT assume `completed`, and the column is `NOT NULL`. A service record with
+no `dive_count_at_service`: a snapshot with no recomputation procedure and no honest default. A dive
+with no `duration`, where the profile cannot supply one. A species with no `aphia_id`. A record
+whose REQUIRED closed-vocabulary member (`agency`, a service `type`) carries a value outside the
+vocabulary, which §5.6 makes read as *absent* — that rule followed to its conclusion, not a second
+one.
+
+**Two derivations are allowed, and both are reported as derivations**, which §5.4 permits where
+presenting one as recorded data would not. A dive with no `duration` but with a profile takes the
+profile's span: the profile is the recording of that very dive. A dive with no `dive_number` gets a
+placeholder, because duplicate dive numbers are legal by design (`DiveNumberingSummary` counts them
+rather than refusing them) and dropping the dive would lose everything else it carries.
+
+**A cylinder needs `volume`, `oxygen` and `helium`, and is skipped when it lacks any of them.** All
+three are `NOT NULL` here and all three are OPTIONAL in the format; §6.3 blesses a cylinder
+converted from a mix-only source with its vessel members absent, and says of `oxygen` in as many
+words that absent means not recorded, **not 21**. Divers plan gas off these numbers, so a supply
+whose size or mix this app would have to guess at is reported rather than guessed. The cost falls on
+the UDDF converter, whose sources routinely carry a mix with no cylinder size: those entries will
+not import until `dive_mixture.volume` becomes nullable, which is its own change with
+`services/dive_gas.py`, the dive form and the read schema all downstream of it.
+
+**The one place the format is *finer* than this app is `visibility`**, a number in the spec (§6.2 —
+half-metre visibility is a real low-vis fact) and whole metres here. A fractional value is dropped
+and reported rather than rounded, which would be an invented precision in the other direction.
+
+## A dive's UTC offset may be unknown, and only import can make it so
+
+`dive.utc_offset_minutes` is nullable, and NULL is a third state rather than a missing value: the
+wall clock was recorded and the instant is unknown. That is DiveJSON's local date-time (spec §5.2),
+and it exists because real migration sources — UDDF pipelines above all — destroy offsets, leaving a
+converter two dishonest options: fabricate one, which poisons the record undetectably, or drop the
+dive, which is the loss the format exists to end.
+
+**The requirement became a write-side rule rather than disappearing.** `require_utc_offset` still
+guards `DiveCreate`, `DiveUpdate`, `DiveRenumberRequest.from_start_time` and
+`GET /dives/next-number`'s query parameter — every caller that writes through them knows its own
+offset, the browser off `Date.getTimezoneOffset()` and the parse path off the file. The *read*
+shapes serve what is stored, which is why `schemas/dive.py` now declares two annotations:
+`DiveStartTime` (strict) and `DiveLocalStartTime` (whatever is there). Derive the set with
+`git grep -n "DiveStartTime" -- src/` rather than from a list; it reaches `schemas/export.py` and a
+route-level annotation in `api/v1/dives.py` that no sweep of `schemas/` would find.
+
+**The storage shape is what makes every reader work unchanged.** For an offset-less dive the
+`start_time` column holds the recorded wall clock *labelled* UTC, because a `timestamptz` has
+nowhere else to put it, and `combine_start_time(instant, None)` hands it back **naive** — the same
+wall clock, with no zone claim. Everything that already goes through that one converter is then
+correct for free: the dive read shapes, `dive_neighbors`, `gas_use_history`, `dive_numbering`, the
+CSV writer (whose `utc_offset` column goes empty), the UDDF writer (which emits the wall clock with
+no offset), and the DiveJSON writer, which emits exactly the characters that arrived.
+
+The two readers that do **not** go through it were the reason to check rather than assume, and both
+turn out to be safe for reasons worth recording. `services/dive_activity.py` does its calendar
+arithmetic in Python on the converter's output, so a NULL offset buckets the dive under the day the
+diver wrote down. `services/species_life_list.py` aggregates the column through
+`array_agg(..., type_=ARRAY(Integer))[1]`; a Postgres array may hold NULL elements, so the subscript
+yields `None` and `combine_start_time` reads it as the wall-clock case. Neither needed a change, and
+a suite test pins both against a real offset-less dive - the plan this work came from predicted an
+`ARRAY(Integer)` aggregate fault here, and there is none.
+
+The column keeps its `0` default and `server_default`, deliberately. That default is what stops a
+`Dive(...)` constructed without an offset (tests, the admin panel) from silently claiming the
+unknown state, which would be a claim about the data rather than a missing keyword argument. The
+importer is the only writer that passes an explicit `None`.
+
+## The surface-pressure floor is 0.4 bar, because the altitude ceiling says so
+
+`ck_dive_surface_pressure_range` ran `[0.5, 1.2]` and contradicted the table it sits on: ambient
+pressure at `ck_dive_altitude_range`'s own 6500 m ceiling is about **0.44 bar**, so a dive the
+altitude bound blesses could record a surface pressure the pressure bound refuses. Nothing had ever
+hit it — the corpus spans 0.997–1.067 bar — which is why it survived.
+
+DiveJSON is where it surfaced: spec §6.2 bands the member at 0.4–1.2 for the same altitude reason,
+and an importer must not drop a value the format blesses. The floor moves in the constraint, in
+`_drop_implausible_surface_pressure` (whose docstring pins itself to the CHECK's own numbers), in
+the constraint message `api/v1/dives.py` serves, in `suunto_xml.py`'s backstop comment, and in the
+two tests that assert the parser's band *is* the column's.
+
+## Importing a logbook is the one client-supplied profile
+
+`/dive/parse` deliberately neither returns nor accepts samples: a profile posted back would make the
+stored samples client-supplied and reopen the trust problem the parse token closes. That rule is
+unchanged. **Logbook import is a different question**, and the answer is different: it restores the
+caller's own DiveJSON backup, which is the whole point of the feature, through a two-phase
+preview/apply flow, with every channel re-validated against §6.5's rules and re-normalized through
+the same `derive_gas_attribution` → `downsample` sequence a dive-computer file goes through.
+
+There is no trust problem to reopen because there is no trust being claimed. The provenance columns
+say where the row came from: `parser_key` is `divejson_import` on a bare import, and the restored
+file's own key on the archive path, where a real file exists for a backfill to re-read.
+
+**`source_sha256` splits by path, and the reason is that column's documented job**: it matches the
+dive's *file* digest, which `should_extract` and the backfill's candidate query both select on. On
+the archive path it records the restored file's digest — truthful, since the source instance
+extracted precisely this profile from precisely those bytes — so file and profile agree, an
+archive-restored dive is never a backfill candidate, and the profile ETag still names a real file
+digest. On the bare path there is no `dive_file` row at all, the dive cannot be a candidate
+regardless, and the column records the imported payload's own digest as provenance.
+
+**The profile's `duration` is the document's, not the samples'.** `NormalizedProfile.duration` is
+the largest sample time, and §6.4 blesses a document whose `duration` exceeds it — a computer that
+stops sampling at the surface can keep timing the dive. That number is the denominator of this app's
+own gas-coverage fraction, so taking the samples' span instead would make a restored dive read as
+less covered than the one it came from. `store_profile` grew a `duration` override for it, used by
+nothing else. A `duration` *smaller* than its own samples is incoherent and is clamped up.
+
+The samples are **not** put through `normalize()`, and that is the one piece of the extraction
+pipeline import deliberately skips. `normalize` rebases a parser's raw axis onto the earliest
+reading, which is right for a file whose timestamps are the device's own and wrong for a document,
+whose `times` are already elapsed seconds from the start of the dive (spec §6.5): a profile whose
+first sample sits at five seconds would have every marker on it slid.
+
+## A bare document creates no file rows, and only the archive restores bytes
+
+The standalone export carries `source_file` and certification-file *metadata* with no bytes —
+`archive_path` is absent outside a container (spec §6.7) — and in this repo a file row's existence
+is the claim that the bytes exist: `BlobMissingError` treats a row without its blob as data loss,
+the download routes 500 on it, and `storage_key` is `NOT NULL` and minted per write, so a byteless
+row would need an invented key as well as an invented promise.
+
+So the bare path imports the dives and reports the files as *not contained* — never a 422, because a
+bare document is a legitimate logbook. It is also why a round-trip comparison legitimately finds the
+re-export missing those members.
+
+The archive path writes blob and row together, in that order: **the file lands on the volume before
+the transaction that references it**, the same ordering `store_dive_file` and
+`store_certification_file` use. Every database-visible state therefore names bytes that exist, and
+the only thing a failure can leave is an unreferenced file — the recorded and accepted orphan case,
+reclaimed by `sweep_orphaned_files.py`. There is no compensating unlink, which is the
+concurrent-write trap *"Orphans are the only failure product, and there is a script for them"*
+records as having gone wrong once already.
+
+Each restored member is **verified against the document's own manifest digest** before it is
+written, which is what makes a restore checked end to end rather than merely present: the entry was
+written from the source instance's stored digest, so a match says the bytes survived the export, the
+zip and the transfer. A mismatch skips the file and reports it.
+
+Two things the document does **not** get to decide. A card image's content type is sniffed from its
+leading bytes, exactly as `store_certification_file` sniffs an upload's — that value ends up in a
+response header, and a document is no more trustworthy about a media type than an uploader. A dive
+file's comes from this build's parser registry, resolved from the `parser_key` under this producer's
+extension key, for the reason `create_dive_file_token` gives for not carrying one.
+
+A stored file's uuid is **not** preserved. It is an identifier for the file within its own logbook,
+nothing in this app resolves a file by it, and claiming identifiers in a table where no dedupe rule
+reads them buys nothing. The bytes are what identity means there, and `ux_dive_file_user_id_sha256`
+is where it is enforced.
+
+## Species import by AphiaID, resolved before the transaction opens, and never created from the document
+
+`Species` is a global, ownerless catalog filled one WoRMS pick at a time, so an importer creating
+rows in it from a document would make every authenticated caller a writer to a table every account
+shares. It could not be done honestly either: `status` is `NOT NULL` and the format has no member
+for it, so creation would have to invent one, in direct contradiction of §5.4. The embedded record
+stays in the document for human readers; it is never a source this app writes from.
+
+What import does instead is match on `aphia_id` — the interchange identity (spec §6.11) — and, for
+an AphiaID this instance does not hold, call the same `resolve_species` that `POST /species/resolve`
+calls. A species that cannot be matched is skipped, and every sighting link naming it is dropped and
+reported. **Never the dive**: a species link is the one thing an import may lose without losing a
+dive.
+
+**It runs as a batch before the apply transaction opens**, and each of the three reasons rules out
+one alternative. It cannot run during preview, which stores nothing. It cannot run inside the apply
+transaction, because `resolve_species` rolls its own transaction back before going outbound and
+commits when it succeeds. And its worst case is long — two `_RESOLVE_BUDGET_SECONDS` passes (the
+synonym branch) plus `_ENRICHMENT_BUDGET_SECONDS`, on the order of a minute per unknown AphiaID —
+which is why `IMPORT_SPECIES_BUDGET_SECONDS` is sized against that ceiling rather than the
+single-pass figure, and why unknowns still outstanding when it expires are skipped and reported.
+
+`resolve_species` signals both budget expiry and a WoRMS outage as a **raised 503**, which is the
+right answer to `POST /species/resolve` and the wrong one to an import of two hundred dives that
+happens to mention one animal nobody can look up. The pre-pass catches and converts each to
+skip-and-report; nothing raised in there becomes the import request's response.
+
+Its rows are the second deliberate exception to the import's all-or-nothing guarantee, and a
+harmless one: they are global, idempotent, and identical to what a diver picking the same animal by
+hand would have created. A failed apply leaves them behind and the next attempt reuses them.
+
+## An import recomputes what is derived, imports what is a snapshot, and drops the caches afterwards
+
+Spec §5.7 draws a line this app's own derived-state rule already drew, and import is where the two
+have to agree.
+
+**Recomputable aggregates of current rows are recomputed, never imported**: `UserDiveStats` through
+`recalculate_dive_stats`, `GearItem.dive_count` through `recalculate_gear_dive_counts`, a schedule's
+`last_service_on` / `next_due_on` / `next_due_at_dive_count` through `recalculate_service_schedule`
+— which runs *after* the service records, because each due date is a function of them — and the
+profile summary family, which `store_profile` derives from the payload. The destination's view of
+the underlying records is the only thing that can make these true, and skipping them ships a
+restored account whose dashboard reads zero dives.
+
+**Server-set historical snapshots import verbatim**, because no recomputation procedure exists for
+them and recomputing against the destination's live counters is the reset-every-baseline failure the
+distinction exists to prevent: `GearServiceSchedule.dive_count_at_start` and
+`GearServiceRecord.dive_count_at_service`. Their models' per-column comments exist to stop live-API
+spoofing of a lifetime counter; a restore of the caller's own backup is the one context where
+accepting them is the point, and the preview reports them like everything else. Classify a new
+column by whether a recomputation procedure exists for it, not by the phrase in its comment — the
+wording varies and does not reliably name the same bin.
+
+**`created_at` imports from the document.** It is logbook history and restore means restore; a dive
+logged in 2019 that comes back out of a backup is still a 2019 record. `updated_at` is minted by the
+write, which is the honest reading of "when this instance last touched the row".
+
+**Six cache invalidators run after the commit, and two of them are the ones that would have been
+missed.** `invalidate_dive_caches`, `invalidate_certification_caches`, `invalidate_course_caches`
+and `invalidate_gear_caches` are the existing four. An import also fills the dive-site and trip
+collections, whose list caches are module-private `OwnedResourceCache` instances inside
+`api/v1/dive_sites.py` and `api/v1/trips.py`, swept only through their own `invalidate_list` — so a
+service has no way to reach them without importing a route module, which inverts the layering. The
+*shape* is shared instead: `OwnedResourceCache.list_cache_pattern` is one function used by both
+`invalidate_list` and the two new helpers in `services/cache_invalidation.py`, and a test asserts
+the resource names still match the real caches'. Without them a restored diver gets empty
+`/dive-sites` and `/trips` pages for up to the 60-second list expiry, at exactly the moment they go
+looking at what they just restored.
+
+## The `diver` member is read, reported, and never applied
+
+A DiveJSON document carries its owner — name, username, email, `created_at`, and this producer's two
+account preferences (`units`, `gear_service_emails`) under its extension key. None of it is applied,
+and the preview says so in as many words. Import's contract is the logbook; flipping a live
+account's notification or unit preference as a side effect of a restore is a worse surprise than
+asking a migrant to set two toggles once. The `created_at`-imports-from-the-document rule governs
+logbook records and does not reach a member that never imports at all.
+
+The archive's `avatar.webp` is the same decision's blob-shaped half and is likewise not restored:
+the importing account has its own identity.
+
+Rejected: restore-means-restore extended to preferences. Defensible for a fresh-instance migration,
+but the same code path serves restores into accounts that were never empty — and the member rides in
+the export so that nothing in the account is reachable only through the app, not so that import
+applies it.
+
+## The certification agency vocabulary is the format's, value for value, and cannot grow again
+
+`CertificationAgency` gained `andi`, `snsi`, `acuc`, `pss` and `ida` with logbook import, and now
+equals DiveJSON's §6.16 enum value for value and in order. It needed no migration: the column is a
+plain `VARCHAR(32)` with no DB `CHECK`, for the reason `gear_item.type` has none.
+
+The alternative was laundering five real agencies through `other`/`agency_other` on the way in,
+which would have made a round trip lossy on a member the format guarantees. It is also the *last*
+time this list can grow: `agency` is a REQUIRED member of a closed set, and §7 freezes those at 1.0
+precisely because a reader must treat an unrecognized value as absent — which for a REQUIRED member
+means the record becomes uninterpretable. That is why the spec seeded the list wide, and why a
+national CMAS federation is `cmas`.
+
+## Logbook import spools its upload and still parses the document whole
+
+The upload is read in bounded chunks into a `SpooledTemporaryFile` — the export path's own pattern
+in the other direction — because half a gigabyte resident per in-flight request is what
+`SPOOL_THRESHOLD` exists to avoid. `read_upload_within_limit` is the wrong tool at these sizes: it
+returns `bytes`, and every existing cap in this app (5 MB dive file, 10 MB card scan, 10 MB avatar)
+is two orders of magnitude below a logbook with a thousand sampled dives.
+
+**The honest limit of that**: parsing the JSON materializes the whole document anyway, so the
+*document* cap rather than the archive one is the real memory ceiling, and the parsed object is
+several times the bytes. The escape hatches are recorded rather than built — a streaming JSON
+parser, or an arq job — and so is the second one, that the two-phase flow uploads the file twice: a
+server-side spool keyed by the preview token would fix both, and the parse-then-attach flow already
+made the same trade.
+
+The archive is guarded against a zip bomb before a byte is inflated: the central directory's
+declared sizes must sum under `MAX_ARCHIVE_EXTRACTED_SIZE`, each member is checked against its own
+kind's cap by declared size, and `zipfile` verifies the CRC on the way out. `archive_path` is a
+member name and never a filesystem path, so a `../../` in one addresses a member that does not
+exist.
+
+**Opening a container and inflating a member fail differently, and both have to be caught.**
+`zipfile.ZipFile(...)` raising is the case everyone thinks of; `archive.read(...)` raising is the
+one that ships. It has three forms, and the commonest is not exotic at all: `RuntimeError` for a
+password-protected archive — a diver zipping their export before sending it — plus `BadZipFile` for
+a CRC mismatch from a truncated or bit-rotted member, and `NotImplementedError` for a compression
+method this build has no decoder for. None is a subclass of anything the route translates, so each
+was a 500 from an endpoint whose whole contract is a 415/422/413 taxonomy.
+
+They are caught in **two different places on purpose**, because the right answer differs. The
+`logbook.divejson` member failing means there is no logbook: a 422 whose message names the
+password-protected case, since "could not be read" on its own sends nobody anywhere. A *blob* member
+failing means one file is unavailable, and `read_member` collapses all three into `None` so the
+writer's existing skip-and-report path handles it — aborting a half-written import over one corrupt
+c-card scan is the opposite trade from every other file decision in this feature.
+
+Both endpoints are rate-limited per user on their own budget rather than sharing the export one: an
+import is a different kind of expensive, and a diver restoring a backup should not find their next
+export refused because of it. The default is twenty rather than ten because **one import is two
+calls**.
+
+## An `Integer` column's real bound is its width, and no `CheckConstraint` census can see one
+
+The importer mirrors every `CheckConstraint` a document can reach, and a test counts them so a new
+one cannot land without a guard. That census has a blind spot with a whole class of failure behind
+it: Postgres `Integer` is 32 bits, and **DiveJSON puts no ceiling on any of its integer members** —
+`dive_number` is a bare `{"type": "integer"}` in the published schema, and `duration`, `visibility`,
+the profile's own `duration` and every `values` entry carry only a minimum.
+
+So a **conforming** document can hold a number this app's columns cannot, and a converter with a
+unit bug — a duration in microseconds, a depth in micrometres — is exactly how one arrives.
+Unbounded, that is SQLSTATE 22003 raised from the middle of the apply transaction: a whole logbook
+refused over one number, which is precisely the failure every other bound in the planner exists to
+prevent, and it is invisible to a sweep of the rules written *on* the columns because the limit is
+not one of them.
+
+Every reachable integer is bounded now — in `_DIVE_BOUNDS` and `_MIXTURE_BOUNDS`, in
+`_plan_schedule`, in `_Planner._count` for the two lifetime-count snapshots, and in `_series` and
+`_plan_profile` for the samples, whose extremes become `Integer` summary columns even though the
+payload itself is JSONB. The guard against the next one is a second census that enumerates `Integer`
+*columns* on every table an import writes and requires each to be named — bounded in the planner, or
+excluded with the reason it needs no guard (a sequence's id, an id resolved from a row this import
+just wrote, a length, a value this build supplies). It caught one on its first run.
+
+**And a column's width is not the bound where a derived column adds the values up.** Two imported
+numbers each inside `Integer` can sum past it, and the write that fails is then the *derived* one,
+in the middle of the apply transaction — a whole logbook refused over an arithmetic overflow in a
+tile nobody was looking at. Two derivations do that here, and each is closed at its **inputs**
+rather than at its output, because the output is computed by code (`recalculate_dive_stats`,
+`recalculate_service_schedule`) that knows nothing about import and should not have to.
+
+`next_due_at_dive_count` is `dive_count_at_start + interval_dives`, so both are capped at
+`_MAX_DIVE_COUNT` — a million, past any logbook that has ever existed, so a number beyond it is a
+unit error rather than a diver, and two of them still sum comfortably inside the column.
+`user_dive_stats.total_time` is `SUM(dive.duration)` over *every* dive the account holds, including
+ones this import never touched, so a per-dive cap could never bound it on its own: a single dive is
+capped at a year, which is far past saturation diving, **and** the column widened to `BigInteger`.
+The ceiling makes the overflow implausible; the width makes it impossible. That column is the only
+counter on its table that is a sum of caller-supplied values rather than a count of rows, which is
+why it is the only one that widened.

@@ -15,6 +15,7 @@ from .gear_sets import router as gear_sets_router
 from .geocoding import router as geocoding_router
 from .health import router as health_router
 from .invitations import router as invitations_router
+from .logbook_import import router as logbook_import_router
 from .passkeys import router as passkeys_router
 from .sessions import router as sessions_router
 from .species import router as species_router
@@ -42,3 +43,4 @@ router.include_router(species_router)
 router.include_router(dives_router)
 router.include_router(contact_router)
 router.include_router(export_router)
+router.include_router(logbook_import_router)

@@ -115,7 +115,7 @@ _DIVE_CONSTRAINT_MESSAGES = {
     "ck_dive_cns_end_non_negative": "Imported CNS values must be zero or positive.",
     "ck_dive_otu_start_non_negative": "Imported OTU values must be zero or positive.",
     "ck_dive_otu_end_non_negative": "Imported OTU values must be zero or positive.",
-    "ck_dive_surface_pressure_range": "Imported surface pressure must be between 0.5 and 1.2 bar.",
+    "ck_dive_surface_pressure_range": "Imported surface pressure must be between 0.4 and 1.2 bar.",
     "ck_dive_entry_latitude_range": "Imported latitudes must be between -90 and 90.",
     "ck_dive_exit_latitude_range": "Imported latitudes must be between -90 and 90.",
     "ck_dive_entry_longitude_range": "Imported longitudes must be between -180 and 180.",
@@ -252,9 +252,15 @@ async def _get_owned_dive(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: d
 
 def _to_public_start_time(data: dict[str, Any]) -> dict[str, Any]:
     """Re-attaches a stored `utc_offset_minutes` to `start_time` and drops the now-redundant
-    offset key, so the public `DiveRead`/`DiveReadWithMixtures` shape always exposes a single
-    offset-aware `start_time` (e.g. `2021-04-04T10:04:47.910+02:00`) - see
+    offset key, so the public `DiveRead`/`DiveReadWithMixtures` shape exposes a single
+    `start_time` (e.g. `2021-04-04T10:04:47.910+02:00`) rather than a column pair - see
     `core/utils/datetime_offset.py`.
+
+    **Offset-aware for every dive but one kind.** A dive whose source recorded no offset
+    stores a NULL there, and `combine_start_time` hands back the recorded wall clock with no
+    zone attached (`2021-04-04T10:04:47.910`). Only logbook import can create such a dive;
+    the read shapes carry `DiveLocalStartTime` so they can serve it, while every write shape
+    still requires an offset.
     """
     data = dict(data)
     offset_minutes = data.pop("utc_offset_minutes")

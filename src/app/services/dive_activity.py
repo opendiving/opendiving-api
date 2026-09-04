@@ -21,7 +21,7 @@ from ..models.dive import Dive
 from ..schemas.dive import DiveActivityPoint
 
 
-def bucket_by_day(dives: Sequence[tuple[datetime, int]]) -> list[DiveActivityPoint]:
+def bucket_by_day(dives: Sequence[tuple[datetime, int | None]]) -> list[DiveActivityPoint]:
     """Count `(start_time, utc_offset_minutes)` pairs into calendar days, oldest first.
 
     **The day is the dive's own local one**, reconstructed with `combine_start_time`
@@ -30,6 +30,13 @@ def bucket_by_day(dives: Sequence[tuple[datetime, int]]) -> list[DiveActivityPoi
     instant would file it under April - and, worse, under a *different* day for a diver
     whose next trip was in a different timezone. That is the same rule as "a dive displays
     in the timezone it was logged in", extended from formatting to bucketing.
+
+    A NULL offset is the importer's offset-unknown state, and it needs no special case
+    here for a reason worth stating: the column then holds the recorded wall clock
+    labelled UTC, so `combine_start_time` hands back that wall clock and its calendar day
+    is the day the diver wrote down. Going through this module's one converter is what
+    makes that true - reading `start_time` directly would have been correct for these rows
+    and wrong for every other one, which is the more dangerous half of the bug.
 
     Doing it here rather than as a `date_trunc` over `start_time + utc_offset_minutes` in
     SQL is deliberate. `core/utils/datetime_offset.py` is documented as the single place

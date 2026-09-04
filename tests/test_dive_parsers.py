@@ -1827,11 +1827,11 @@ class TestTechScalars:
                 surface_pressure_bar=pressure,
             ).surface_pressure_bar
 
-        assert "0.5" in sqltext and "1.2" in sqltext
+        assert "0.4" in sqltext and "1.2" in sqltext
         # The bounds themselves are inclusive on both sides, as the CHECK's `>=`/`<=` are.
-        assert parsed_with(0.5) == 0.5
+        assert parsed_with(0.4) == 0.4
         assert parsed_with(1.2) == 1.2
-        assert parsed_with(0.49) is None
+        assert parsed_with(0.39) is None
         assert parsed_with(1.21) is None
 
     def test_a_negative_exposure_reading_reads_as_no_reading(self):
