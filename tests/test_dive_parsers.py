@@ -1481,7 +1481,7 @@ class TestFitParserMultiSession:
 
     `_collect` already took that position for `session`, but collected `record`,
     `tank_update` and `dive_gas` from every dive in the file - so the dive came from
-    session 1 while its profile spanned the lot, and `DiveProfileInfo.duration_seconds`
+    session 1 while its profile spanned the lot, and `DiveProfileInfo.duration`
     disagreed with the dive's own `duration`.
     """
 
@@ -2032,7 +2032,9 @@ class TestTechScalars:
         `ck_dive_mixture_oxygen_helium_sum` and `ck_dive_mixture_pressure_order` constrain
         a *pair*, so there is no "the bad value" to null - honouring them on the parse side
         means choosing which of two recorded readings to discard, which is a different
-        decision from "this number is not a reading" and is not made here. The two
+        decision from "this number is not a reading" and is not made here.
+        `ck_dive_avg_depth_within_max` is the same shape and excluded on the same terms.
+        The two
         `ck_dive_*_position_pair` constraints are pairs in the same sense and are excluded
         for the same reason - they are honoured by `_drop_half_positions`, a *model*
         validator, which is exactly what this counter cannot see. The four coordinate

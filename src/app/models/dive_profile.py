@@ -71,7 +71,12 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     # without decoding tens of KB of JSONB. Stored in the same integer scales as the
     # series (`_c10` is 0.1 C, `_bar10` is 0.1 bar) and converted to display units on the
     # way out.
-    duration_seconds: Mapped[int] = mapped_column(Integer)
+    # Seconds, and named for the wire member it feeds - `profile.duration` (DiveJSON spec
+    # §6.4) - rather than carrying a unit suffix of its own, so storage and the published
+    # format speak one word. Not the dive's own `duration`, which is a column on another
+    # table and a different quantity: the diver's logged length, which may have been
+    # hand-edited.
+    duration: Mapped[int] = mapped_column(Integer)
     depth_sample_count: Mapped[int] = mapped_column(Integer)
 
     # `deferred` so any query against this table returns the summary only unless the

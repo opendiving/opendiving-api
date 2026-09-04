@@ -55,8 +55,12 @@ else; what is here is the source, and the notes for working on it.
 - **Training courses** — the course a card came out of and the dives logged on it, with the agency,
   status, instructor and training centre. No mainstream logbook models this: the agency apps tie
   dives to a course *or* cards to a course, and none of them let the record outlive the agency.
-- **Full export** — everything out in open formats (UDDF, CSV, and a complete JSON + original-files
-  archive) in one request. Owner-only, never cached; the UDDF validates against the 3.2.2 schema.
+- **Full export** — everything out in open formats (DiveJSON, UDDF, CSV, and an archive of all three
+  plus your original files) in one request. Owner-only, never cached; the DiveJSON validates against
+  the published 1.0 schema and the UDDF against the 3.2.2 one.
+- **[DiveJSON](https://divejson.org)** — the open dive-log interchange format this project
+  maintains, and this is its reference implementation: a lossless structured copy of the whole
+  logbook, where UDDF measurably loses trips, gear, weights and UTC offsets.
 - **Passwordless auth** — email sign-in (over SMTP, so any relay or provider works), Google Sign-In,
   and passkeys, with automatic account linking, short-lived access tokens, and httpOnly refresh
   cookies. The sign-in email carries a magic link *and* a six-digit code, so reading your mail on a
@@ -173,19 +177,19 @@ life list, account deletion); **dives**, the bulk of it, with their **files** �
 read the per-sample profile back — alongside **trips**, **dive sites**, the shared **species**
 catalog a dive can reference, and a **geocoding** helper for naming a site pinned on a map; **gear**
 as items, sets, service schedules and service records; **certifications** with their card images and
-the **courses** that issued them; **export** in UDDF, CSV or full-archive form; **invitations**,
-which exist only where the operator has closed registration (`REGISTRATION_MODE`, documented with
-the rest of the settings in `src/.env.example`) — a member sends and revokes their own, and the
-routes answer 404 on an open instance; and **admin**, the operator's own — the queue of people who
-have asked to be let in, and inviting or removing them in a batch — which is the one family gated on
-`is_superuser` rather than merely on having a token. All of those want a bearer token. The ones that
-don't are **contact**, the auth routes themselves, the two health checks — `/health` says the
-process is up, `/health/ready` says Postgres and Redis answered, and 503s when they didn't —
-`POST /invite-requests`, which is how somebody with no account asks a closed instance for an
-invitation, `GET /config`, which tells the web app whether registration is open before anyone has
-signed in, and `GET /species/{uuid}/photo`, which serves a public Commons image to an `<img>` tag
-that has no way to send a token. `tests/test_route_authentication.py` is the guard that keeps the
-*anonymous* half of that list honest — it compares the app's real route table against its own
+the **courses** that issued them; **export** in DiveJSON, UDDF, CSV or full-archive form;
+**invitations**, which exist only where the operator has closed registration (`REGISTRATION_MODE`,
+documented with the rest of the settings in `src/.env.example`) — a member sends and revokes their
+own, and the routes answer 404 on an open instance; and **admin**, the operator's own — the queue of
+people who have asked to be let in, and inviting or removing them in a batch — which is the one
+family gated on `is_superuser` rather than merely on having a token. All of those want a bearer
+token. The ones that don't are **contact**, the auth routes themselves, the two health checks —
+`/health` says the process is up, `/health/ready` says Postgres and Redis answered, and 503s when
+they didn't — `POST /invite-requests`, which is how somebody with no account asks a closed instance
+for an invitation, `GET /config`, which tells the web app whether registration is open before anyone
+has signed in, and `GET /species/{uuid}/photo`, which serves a public Commons image to an `<img>`
+tag that has no way to send a token. `tests/test_route_authentication.py` is the guard that keeps
+the *anonymous* half of that list honest — it compares the app's real route table against its own
 allowlist and holds the reason for each — but nothing checks this paragraph, so a new route family
 belongs here by hand.
 

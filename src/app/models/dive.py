@@ -115,6 +115,18 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
             CheckConstraint("visibility IS NULL OR visibility >= 0", name="ck_dive_visibility_non_negative"),
             CheckConstraint("max_depth IS NULL OR max_depth > 0", name="ck_dive_max_depth_positive"),
             CheckConstraint("avg_depth IS NULL OR avg_depth > 0", name="ck_dive_avg_depth_positive"),
+            # A *pair*, unlike the two above it, and the only arithmetic relation on this
+            # table: a mean cannot exceed a maximum, so a dive claiming otherwise records
+            # at least one wrong number. `<=`, not `<` - a perfectly square profile is
+            # unusual, not impossible. Mirrored by `validate_depth_pair` in
+            # `schemas/dive.py` so the caller gets a sentence rather than an
+            # `IntegrityError`; it is a *pair* rule, so the parse-side single-column
+            # guards deliberately do not cover it (see
+            # `test_every_single_column_bound_a_parser_can_reach_has_a_parse_side_guard`).
+            CheckConstraint(
+                "avg_depth IS NULL OR max_depth IS NULL OR avg_depth <= max_depth",
+                name="ck_dive_avg_depth_within_max",
+            ),
             # `>= 0`, unlike the depths above: diving with no lead at all is a real,
             # deliberate entry (a drysuit with a heavy undergarment, a freedive), and it's
             # worth being able to tell apart from "didn't record it" (NULL).

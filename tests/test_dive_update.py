@@ -65,6 +65,11 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     db_dive = MagicMock()
     db_dive.id = 11
     db_dive.user_id = 1
+    # Real values, not the `MagicMock` attribute access every other field here gets:
+    # `patch_dive` compares the stored depths against the incoming ones, and a mock would
+    # raise on the comparison rather than exercising it.
+    db_dive.avg_depth = None
+    db_dive.max_depth = None
 
     async def fake_update(*, db: Any, object: dict, uuid: uuid_pkg.UUID) -> None:
         seen["update_data"] = object

@@ -2,7 +2,7 @@
 
 `load_export_bundle` is the only thing in `services/export` that touches Postgres; every
 writer takes the bundle it returns and is otherwise pure. Constructing one here means the
-UDDF, CSV and JSON tests run in the same sub-second, no-database mode as the rest of the
+UDDF, CSV and DiveJSON tests run in the same sub-second, no-database mode as the rest of
 suite - and, more usefully, it means the awkward shapes can be *made* rather than hoped
 for. The dev corpus is all single-tank air with one profile between five hundred dives;
 trimix, gas switches, multi-cylinder pressure channels and a dive with no depth at all
@@ -465,7 +465,7 @@ def full_bundle() -> ExportBundle:
         },
         profile_by_dive={
             2: DiveProfileInfo(
-                uuid=UUIDS["dive-file"], duration_seconds=2700, depth_sample_count=4, channels=["depth"], max_depth=52.0
+                uuid=UUIDS["dive-file"], duration=2700, depth_sample_count=4, channels=["depth"], max_depth=52.0
             )
         },
         trips=[trip],

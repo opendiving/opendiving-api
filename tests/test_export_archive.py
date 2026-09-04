@@ -1,7 +1,7 @@
 """Tests for the archive writer and its member layout (`services/export/{archive,paths}.py`).
 
 The load-bearing one is the inventory: every stored blob appears exactly once, under a
-path `export.json` names, with bytes that hash to the digest the database recorded. That
+path `logbook.divejson` names, with bytes that hash to the digest the database recorded. That
 is the whole promise of "download everything" - a member that silently went missing, or
 one whose bytes were mangled on the way through the zip, is the failure that makes the
 feature worthless and the one a diver would only find years later.
@@ -96,7 +96,7 @@ class TestInventory:
     async def test_it_holds_the_documents_and_the_full_csv_set(self, monkeypatch):
         archive = await _build(full_bundle(), monkeypatch)
         assert set(archive.namelist()) == {
-            "export.json",
+            "logbook.divejson",
             "dives.uddf",
             "csv/dives.csv",
             "csv/mixtures.csv",
@@ -115,13 +115,15 @@ class TestInventory:
     @pytest.mark.asyncio
     async def test_every_stored_blob_appears_once_and_hashes_to_its_recorded_digest(self, monkeypatch):
         """Checked against the `sha256` the database stored - carried through
-        `export.json` - rather than one computed here, so the assertion covers the whole
-        round trip: column, metadata, member."""
+        `logbook.divejson` - rather than one computed here, so the assertion covers the
+        whole round trip: column, metadata, member."""
         archive = await _build(_bundle_matching_the_stub_blobs(), monkeypatch)
-        envelope = json.loads(archive.read("export.json"))
+        envelope = json.loads(archive.read("logbook.divejson"))
 
-        stored = [dive["source_file"] for dive in envelope["dives"] if dive["source_file"]]
-        stored += [file for cert in envelope["certifications"] for file in cert["files"]]
+        stored = [dive["source_file"] for dive in envelope["dives"] if "source_file" in dive]
+        stored += [
+            cert[side] for cert in envelope["certifications"] for side in ("front_file", "back_file") if side in cert
+        ]
         assert len(stored) == 3
 
         members = archive.namelist()
@@ -130,11 +132,16 @@ class TestInventory:
             assert _digest(archive.read(entry["archive_path"])) == entry["sha256"], entry["archive_path"]
 
     @pytest.mark.asyncio
-    async def test_no_blob_is_in_the_archive_that_export_json_does_not_name(self, monkeypatch):
+    async def test_no_blob_is_in_the_archive_the_document_does_not_name(self, monkeypatch):
         archive = await _build(_bundle_matching_the_stub_blobs(), monkeypatch)
-        envelope = json.loads(archive.read("export.json"))
-        named = {dive["source_file"]["archive_path"] for dive in envelope["dives"] if dive["source_file"]}
-        named |= {file["archive_path"] for cert in envelope["certifications"] for file in cert["files"]}
+        envelope = json.loads(archive.read("logbook.divejson"))
+        named = {dive["source_file"]["archive_path"] for dive in envelope["dives"] if "source_file" in dive}
+        named |= {
+            cert[side]["archive_path"]
+            for cert in envelope["certifications"]
+            for side in ("front_file", "back_file")
+            if side in cert
+        }
         blobs = {name for name in archive.namelist() if name.startswith(("files/", "certifications/"))}
         assert blobs == named
 
@@ -180,7 +187,7 @@ class TestInventory:
     async def test_an_empty_logbook_still_produces_a_readable_archive(self, monkeypatch):
         archive = await _build(build_bundle(), monkeypatch)
         assert archive.testzip() is None
-        assert "export.json" in archive.namelist()
+        assert "logbook.divejson" in archive.namelist()
         assert not [name for name in archive.namelist() if name.startswith(("files/", "certifications/"))]
 
     @pytest.mark.asyncio

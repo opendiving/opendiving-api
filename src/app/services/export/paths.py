@@ -2,7 +2,7 @@
 
 Its own module because two writers have to agree on the answer and neither may import
 the other: `archive.py` writes the members, and `envelope.py` records the same paths in
-`export.json` so the metadata beside a `sha256` says which file it describes.
+`logbook.divejson` so the metadata beside a `sha256` says which file it describes.
 
 The paths are planned **up front, for the whole archive at once**, because uniqueness is
 not a property of any single file. Dive numbers can legitimately repeat (that is what
@@ -67,7 +67,7 @@ class ArchivePaths:
 
     A dive has at most one export and a certification at most one image per side, so
     these two maps between them name every member the archive carries beyond the
-    generated documents (`export.json`, `dives.uddf` and the nine files in
+    generated documents (`logbook.divejson`, `dives.uddf` and the nine files in
     `tabular.CSV_WRITERS`).
     """
 
@@ -117,7 +117,7 @@ def plan_archive_paths(bundle: ExportBundle) -> ArchivePaths:
         info = bundle.file_by_dive[dive.id]
         # The digest gate is the same one `envelope._dive` applies, and it is here so the
         # two cannot disagree: a file whose row vanished between the metadata read and the
-        # digest read is left out of `export.json`, and without this the zip would still
+        # digest read is left out of `logbook.divejson`, and without this the zip would still
         # carry a member nothing in the manifest named.
         if info is None or dive.id not in bundle.dive_file_sha256:
             continue

@@ -18,7 +18,8 @@ from typing import Annotated, Self
 
 from pydantic import BaseModel, Field, model_validator
 
-# The integer scales every `v` array is expressed in. They live here (and, mirrored, in
+# The integer scales every readings array is expressed in - `v` on the parser and stored
+# shapes, `values` on the wire. They live here (and, mirrored, in
 # the frontend's `PROFILE_CHANNELS`) rather than travelling per-response: they are part
 # of the format, not of a particular dive. Integers rather than floats because a float
 # round-trip reintroduces `20.600000000000023`-class noise several thousand times per
@@ -194,10 +195,20 @@ class GasAttribution(BaseModel):
 
 
 class DiveProfileSeries(BaseModel):
-    """One channel as `GET /dive/{uuid}/profile` returns it: integer seconds, integer values."""
+    """One channel as `GET /dive/{uuid}/profile` returns it: integer seconds, integer values.
 
-    t: Annotated[list[int], Field(description="Elapsed seconds from the start of the dive, strictly increasing")]
-    v: Annotated[list[int], Field(description="Readings in this channel's integer scale - see the channel's field")]
+    `times`/`values` rather than the `t`/`v` this served until DiveJSON 1.0: these are the
+    format's member names (spec §6.5), and the export embeds this very schema, so the two
+    surfaces speak one profile vocabulary. The *stored* JSONB payload still uses `t`/`v` -
+    it is not on the wire, and renaming its keys would be a data migration over every
+    profile row for no reader's benefit (`to_data`/`to_read_schema` in
+    `services/dive_profiles.py` are the translation).
+    """
+
+    times: Annotated[list[int], Field(description="Elapsed seconds from the start of the dive, strictly increasing")]
+    values: Annotated[
+        list[int], Field(description="Readings in this channel's integer scale - see the channel's field")
+    ]
 
 
 class DiveProfilePressureSeries(DiveProfileSeries):
@@ -205,9 +216,9 @@ class DiveProfilePressureSeries(DiveProfileSeries):
 
 
 class DiveProfileEvent(BaseModel):
-    """One marker on the profile chart, at an integer second like every series' `t`."""
+    """One marker on the profile chart, at an integer second like every series' `times`."""
 
-    t: Annotated[int, Field(description="Elapsed seconds from the start of the dive")]
+    time: Annotated[int, Field(description="Elapsed seconds from the start of the dive")]
     type: Annotated[ProfileEventType, Field(description="What happened", examples=[ProfileEventType.GAS_SWITCH])]
     gas_number: Annotated[
         int | None,
@@ -238,7 +249,14 @@ class DiveProfileRead(BaseModel):
     module constants) and mirrored by the frontend's `PROFILE_CHANNELS`.
     """
 
-    duration_seconds: Annotated[int, Field(description="Elapsed seconds covered by the longest channel")]
+    duration: Annotated[
+        int,
+        Field(
+            description="Elapsed seconds covered by the longest sample channel. An event may sit past it - a marker "
+            "pressed at the surface after the recorder's last sample is real, and neither it nor this number is "
+            "moved to make them agree (DiveJSON spec §6.4)."
+        ),
+    ]
     depth: Annotated[
         DiveProfileSeries | None, Field(default=None, description=f"Depth in centimeters (scale {DEPTH_SCALE})")
     ]
@@ -247,7 +265,7 @@ class DiveProfileRead(BaseModel):
         Field(
             default=None,
             description=f"Deco ceiling in centimeters (scale {CEILING_SCALE}, the same as depth - it is drawn against "
-            "the depth axis). Present only while the dive had a ceiling: a gap in `t` is a stretch with no "
+            "the depth axis). Present only while the dive had a ceiling: a gap in `times` is a stretch with no "
             "decompression obligation, not a dropout.",
         ),
     ]
@@ -255,7 +273,7 @@ class DiveProfileRead(BaseModel):
         DiveProfileSeries | None,
         Field(default=None, description=f"Water temperature in tenths of a degree Celsius (scale {TEMPERATURE_SCALE})"),
     ]
-    pressure: Annotated[
+    pressures: Annotated[
         list[DiveProfilePressureSeries],
         Field(
             default_factory=list,
@@ -277,7 +295,7 @@ class DiveProfileInfo(BaseModel):
     """
 
     uuid: uuid_pkg.UUID
-    duration_seconds: int
+    duration: int
     depth_sample_count: int
     channels: Annotated[
         list[str],

@@ -127,7 +127,7 @@ def compute_gas_use(
         # so there is no fraction to report either.
         tanks=[],
         attributed_seconds=None,
-        duration_seconds=None,
+        duration=None,
     )
 
 
@@ -268,7 +268,7 @@ def compute_multi_tank_gas_use(
       recorded late rather than not at all. See `MAX_PLAUSIBLE_RMV`.
 
     The dive-level figures are then the totals over the tanks that survived, and
-    `attributed_seconds` against `duration_seconds` is what makes that honest: the time
+    `attributed_seconds` against `duration` is what makes that honest: the time
     those tanks cover, over the span the profile recorded, so a caller can see how much of
     the dive is missing rather than reading the totals as the whole story.
 
@@ -339,7 +339,7 @@ def compute_multi_tank_gas_use(
             for tank in tanks
         ],
         attributed_seconds=sum(tank.seconds for tank in tanks),
-        duration_seconds=attribution.duration_seconds,
+        duration=attribution.duration,
     )
 
 
@@ -429,7 +429,7 @@ def compute_parallel_gas_use(
         sac_bar_per_min=None if pooled_sac is None else round(pooled_sac, 2),
         tanks=[],
         attributed_seconds=None,
-        duration_seconds=None,
+        duration=None,
     )
 
 

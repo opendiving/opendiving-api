@@ -1,6 +1,6 @@
 """One batched read of everything a diver's export contains.
 
-Every writer in this package (UDDF, CSV, `export.json`) needs the same graph, so it is
+Every writer in this package (UDDF, CSV, `logbook.divejson`) needs the same graph, so it is
 read once into an `ExportBundle` and handed to all three rather than each of them
 issuing its own queries. The read is deliberately flat: a fixed twenty-three `SELECT`s over
 whole tables scoped to one `user_id`, with no per-dive query anywhere. A logbook is a few
@@ -26,7 +26,7 @@ projection of the catalog rather than a copy of it.
 and the only other filter is soft-delete liveness on the three tables that still have the
 column - `Dive`, `GearServiceRecord` and `Certification`. Nothing is resurrected: this
 module used to read deleted-but-still-referenced trips, dive sites, gear items and
-schedules back so that a uuid in `export.json` (an `xs:IDREF` in UDDF) always resolved,
+schedules back so that a uuid in `logbook.divejson` (an `xs:IDREF` in UDDF) always resolved,
 and those five tables are hard-deleted now, so a dangling reference cannot be created in
 the first place. See `_owned`.
 """
@@ -252,7 +252,7 @@ async def _owned(db: AsyncSession, model: Any, *, user_id: int, order_by: Any) -
     This used to take a `still_referenced` set as well, and resurrect any dead row
     something else in the export still pointed at - a dive site on its dives, a gear item
     on its dives and sets, a trip on its dives, a schedule on its records. Without it a
-    uuid in `export.json` named nothing the file defined, and the UDDF `xs:IDREF` of the
+    uuid in `logbook.divejson` named nothing the file defined, and the UDDF `xs:IDREF` of the
     same reference produced a document that would not validate. The five tables that
     needed it are hard-deleted now, so the join row goes with the row it points at and a
     dangling reference cannot exist to be repaired. See "The row goes, and so does

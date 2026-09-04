@@ -15,7 +15,7 @@ a silently wrong factor of 100 000 produces a file that validates perfectly and 
 nonsense.
 
 **What the format cannot hold, this module does not fake.** Three cases came out of
-reading the XSD, and all three are exported in `export.json`/CSV instead:
+reading the XSD, and all three are exported in `logbook.divejson`/CSV instead:
 
 - **The deco ceiling.** The only per-waypoint slot is `<decostop>`, whose `duration`
   attribute is `use="required"` - and a ceiling sample says how deep the obligation was,
@@ -324,7 +324,7 @@ def _diver_element(bundle: ExportBundle) -> ET.Element:
 
     # No `<contact><email>`, although the schema has the slot: a UDDF file is the thing a
     # diver hands to a dive shop or uploads to divelogs.de, and their address riding along
-    # in it would be a surprise. It is in `export.json`, which is the diver's own copy.
+    # in it would be a surprise. It is in `logbook.divejson`, which is the diver's own copy.
     equipment = _equipment_element(bundle)
     if equipment is not None:
         owner.append(equipment)
@@ -373,7 +373,7 @@ def _divetrip_element(bundle: ExportBundle) -> ET.Element | None:
         _sub(part, "dateoftrip", startdate=f"{trip.start_date}T00:00:00", enddate=f"{end_date}T00:00:00")
         # UDDF has one string here where a trip now has a list, so the places are joined
         # into the line a diver would write themselves. The coordinates stay behind in
-        # `export.json`: `geographyType` allows a single lat/lon pair, and a trip that went
+        # `logbook.divejson`: `geographyType` allows a single lat/lon pair, and a trip that went
         # to three of them has no one position to put there.
         location = trip_location_names(bundle.locations_by_trip[trip.id])
         if location:
@@ -443,7 +443,7 @@ def _snap_tolerance(seconds: list[int]) -> int:
 
     So the tolerance is a property of the channel rather than of the neighbourhood, and
     readings that cannot reach a waypoint within it - across a dropout, or beyond either
-    end of the dive - are dropped. They are in `export.json`, on their own unsnapped axis,
+    end of the dive - are dropped. They are in `logbook.divejson`, on their own unsnapped axis,
     like everything else this format cannot carry honestly.
 
     A 1 Hz depth channel yields a tolerance of zero, which is exact rather than strict:
@@ -519,7 +519,7 @@ def _waypoints(
 
     A profile with no depth channel therefore emits **no `<samples>` at all** rather than
     the depth-less waypoints that started this. Everything at full resolution, on its own
-    unsnapped time axis, is in `export.json`.
+    unsnapped time axis, is in `logbook.divejson`.
     """
     depth = _series_by_second(data.get("depth"))
     if not depth:
@@ -533,7 +533,7 @@ def _waypoints(
         mix_id = mix_id_by_gas_number.get(cylinder["gas_number"])
         if mix_id is None:
             # `<tankpressure ref>` is an `xs:IDREF`: without a mix to point at, the
-            # reading has nowhere valid to go. It survives in `export.json`, which keeps
+            # reading has nowhere valid to go. It survives in `logbook.divejson`, which keeps
             # the gas number itself.
             continue
         readings = dict(zip(cylinder["t"], cylinder["v"], strict=True))
@@ -576,7 +576,7 @@ def _waypoints(
         gas_number = event.get("gas_number")
         # A switch the file recorded without saying what to, or to a cylinder this dive
         # has no mixture for, has no `xs:IDREF` to point at, so the waypoint gets no
-        # `<switchmix>` at all. It stays in `export.json`, which carries the raw events.
+        # `<switchmix>` at all. It stays in `logbook.divejson`, which carries the raw events.
         if gas_number is not None and gas_number in mix_id_by_gas_number:
             switch_at[second] = mix_id_by_gas_number[gas_number]
 
@@ -622,7 +622,7 @@ def _dive_element(
     # Between `<datetime>` and `<equipmentused>`, because `informationbeforediveType` is an
     # `xs:sequence` and that is where `altitude` sits in it. Water type has no counterpart
     # here at all - 3.2.2's `density` elements are site-level and deco-planner input, never
-    # a per-dive fact - so it stays in `export.json` and `dives.csv`. See DECISIONS.md.
+    # a per-dive fact - so it stays in `logbook.divejson` and `dives.csv`. See DECISIONS.md.
     _optional(before, "altitude", dive.altitude)
 
     gear = bundle.gear_for(dive)
@@ -648,7 +648,7 @@ def _dive_element(
         if mixture.start_pressure is None:
             # `tankdataType` makes `<tankpressurebegin>` mandatory, so a cylinder with no
             # recorded starting pressure cannot be a `<tankdata>` at all. Its gas is still
-            # in `<gasdefinitions>`, and the cylinder itself is in `export.json`.
+            # in `<gasdefinitions>`, and the cylinder itself is in `logbook.divejson`.
             continue
         tank = _sub(element, "tankdata")
         _sub(tank, "link", ref=mix_ids[_mix_key(mixture)])

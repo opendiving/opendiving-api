@@ -122,6 +122,27 @@ class TestDiveCheckConstraints:
         db.add(_make_dive(dive_owner.id, avg_depth=None))
         db.commit()
 
+    def test_an_avg_depth_deeper_than_the_max_is_rejected(self, db: Session, dive_owner: User) -> None:
+        """A mean cannot exceed a maximum, so the row records at least one wrong number.
+
+        The only *pair* rule on this table, and the reason it is here rather than only in
+        `schemas/dive.py`: the DiveJSON writer must not be able to emit a document the
+        format's own validator rejects (spec §6.2), and a Pydantic validator would leave
+        the admin panel and any direct write free to store one.
+        """
+        _assert_violates(db, _make_dive(dive_owner.id, avg_depth=30.0, max_depth=20.0), "ck_dive_avg_depth_within_max")
+
+    def test_an_equal_pair_is_allowed(self, db: Session, dive_owner: User) -> None:
+        """A perfectly square profile is unusual, not impossible - so `<=`, not `<`."""
+        db.add(_make_dive(dive_owner.id, avg_depth=20.0, max_depth=20.0))
+        db.commit()
+
+    def test_either_depth_alone_is_allowed(self, db: Session, dive_owner: User) -> None:
+        """The rule compares a pair, and a dive that recorded one of the two has no pair."""
+        db.add(_make_dive(dive_owner.id, avg_depth=30.0, max_depth=None))
+        db.add(_make_dive(dive_owner.id, dive_number=2, avg_depth=None, max_depth=20.0))
+        db.commit()
+
     def test_negative_weight_is_rejected(self, db: Session, dive_owner: User) -> None:
         _assert_violates(db, _make_dive(dive_owner.id, weight=-1), "ck_dive_weight_non_negative")
 

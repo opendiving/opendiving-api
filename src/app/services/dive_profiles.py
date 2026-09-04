@@ -161,7 +161,7 @@ class NormalizedProfile:
         return present
 
     @property
-    def duration_seconds(self) -> int:
+    def duration(self) -> int:
         """Elapsed seconds covered by the longest channel.
 
         Not the dive's `duration`: this is the span of what the file actually recorded,
@@ -212,7 +212,7 @@ class NormalizedProfile:
 class LoadedProfile:
     """A stored profile's series plus the span the chart's x axis has to cover."""
 
-    duration_seconds: int
+    duration: int
     data: dict[str, Any]
 
 
@@ -225,14 +225,14 @@ class ProfileGasAttribution:
     off the same profile row. The dive's own `duration` is the diver's record and may have
     been edited, which would make the fraction say whatever the edit said.
 
-    `duration_seconds` is the profile's full span rather than the depth channel's, which
+    `duration` is the profile's full span rather than the depth channel's, which
     is what the attribution actually walked. The two differ by seconds where they differ
     at all - a device goes on logging temperature a moment past the last depth reading -
     and the profile's span is the one already stored, already meant by "the recorded
     dive", and the one a client can line up against `DiveProfileInfo`.
     """
 
-    duration_seconds: int = 0
+    duration: int = 0
     entries: list[GasAttribution] = field(default_factory=list)
 
 
@@ -289,7 +289,7 @@ def _rebase_events(parsed: ParsedProfileSchema, origin: float) -> list[ProfileEv
     **The high end is deliberately not clamped**, and the asymmetry is the point rather than
     an oversight. Zero is where the dive begins for every format, so pinning to it moves a
     marker by a second or two onto a boundary that is real. There is no equivalent at the
-    other end: `duration_seconds` is the span of the *samples*, and a device goes on
+    other end: `duration` is the span of the *samples*, and a device goes on
     recording after the last one - a Suunto Ocean writes 8 292 samples of which 395 carry
     depth, and a FIT `user_marker` can be pressed after the final `record`. A marker there
     happened when the file says it happened, and dragging it back onto the last sample would
@@ -531,7 +531,7 @@ def _downsample_series(t: list[int], v: list[int], max_points: int) -> tuple[lis
     identical readings - a diver floating at the surface, which is how a 1 Hz recording
     usually ends - picks the beginning of that run and drops the true final sample. The
     channel then stops seconds before the dive did. Invisible on a chart, and not invisible
-    at all once `duration_seconds` became the denominator of a coverage fraction whose
+    at all once `duration` became the denominator of a coverage fraction whose
     numerator is derived from the *full-resolution* channel: the fraction came out over
     100%. Endpoints are also just the right thing for a series that says when a dive
     started and stopped.
@@ -718,7 +718,7 @@ async def store_profile(
             source_sha256=source_sha256,
             parser_key=parser_key,
             extractor_version=PROFILE_EXTRACTOR_VERSION,
-            duration_seconds=profile.duration_seconds,
+            duration=profile.duration,
             depth_sample_count=profile.depth_sample_count,
             # A count rather than `None` when there are none: this extractor version looked
             # and found nothing, which is a different fact from an older one never having
@@ -770,7 +770,7 @@ async def load_profile(db: AsyncSession, *, dive_id: int) -> LoadedProfile | Non
     Detached before returning, because an attached instance keeps its undeferred payload
     materialized for the life of the session. That cost nothing while the only caller was a
     single-dive route, and stopped being free when the full export began calling this once
-    per dive - twice, in fact, since `export.json` and `dives.uddf` each embed every
+    per dive - twice, in fact, since `logbook.divejson` and `dives.uddf` each embed every
     profile. Without this an archive of a few hundred dives would hold every one of them,
     which is what `services/export/loader.py` promises it does not.
 
@@ -789,22 +789,29 @@ async def load_profile(db: AsyncSession, *, dive_id: int) -> LoadedProfile | Non
         return None
 
     db.expunge(profile)
-    return LoadedProfile(duration_seconds=profile.duration_seconds, data=profile.data)
+    return LoadedProfile(duration=profile.duration, data=profile.data)
 
 
 def to_read_schema(loaded: LoadedProfile) -> DiveProfileRead:
-    """The stored payload as the wire shape, integers untouched."""
+    """The stored payload as the wire shape, integers untouched.
+
+    This is where the stored vocabulary meets the published one: `data` keeps the compact
+    `t`/`v`/`pressure` keys it has always had, and the wire speaks DiveJSON's
+    `times`/`values`/`pressures` (spec §§6.4-6.6). Renaming the JSONB keys instead would
+    be a data migration across every profile row to save this mapping, which is the wrong
+    trade - nothing outside this module reads the payload.
+    """
     data = loaded.data or {}
     depth = data.get("depth")
     ceiling = data.get("ceiling")
     temperature = data.get("temperature")
     return DiveProfileRead(
-        duration_seconds=loaded.duration_seconds,
-        depth=DiveProfileSeries(t=depth["t"], v=depth["v"]) if depth else None,
-        ceiling=DiveProfileSeries(t=ceiling["t"], v=ceiling["v"]) if ceiling else None,
-        temperature=DiveProfileSeries(t=temperature["t"], v=temperature["v"]) if temperature else None,
-        pressure=[
-            DiveProfilePressureSeries(gas_number=cylinder["gas_number"], t=cylinder["t"], v=cylinder["v"])
+        duration=loaded.duration,
+        depth=DiveProfileSeries(times=depth["t"], values=depth["v"]) if depth else None,
+        ceiling=DiveProfileSeries(times=ceiling["t"], values=ceiling["v"]) if ceiling else None,
+        temperature=DiveProfileSeries(times=temperature["t"], values=temperature["v"]) if temperature else None,
+        pressures=[
+            DiveProfilePressureSeries(gas_number=cylinder["gas_number"], times=cylinder["t"], values=cylinder["v"])
             for cylinder in data.get("pressure") or []
         ],
         events=[
@@ -812,7 +819,7 @@ def to_read_schema(loaded: LoadedProfile) -> DiveProfileRead:
             # them rather than writing nulls - so a row written by any version of this
             # module reads back without a `KeyError`.
             DiveProfileEvent(
-                t=event["t"],
+                time=event["t"],
                 type=ProfileEventType(event["type"]),
                 gas_number=event.get("gas_number"),
                 label=event.get("label"),
@@ -854,7 +861,7 @@ async def get_profile_infos_for_dives(db: AsyncSession, *, dive_ids: list[int]) 
     stmt = select(
         DiveProfile.dive_id,
         DiveProfile.uuid,
-        DiveProfile.duration_seconds,
+        DiveProfile.duration,
         DiveProfile.depth_sample_count,
         DiveProfile.event_count,
         DiveProfile.max_depth_cm,
@@ -883,7 +890,7 @@ async def get_profile_infos_for_dives(db: AsyncSession, *, dive_ids: list[int]) 
 
         infos[row.dive_id] = DiveProfileInfo(
             uuid=row.uuid,
-            duration_seconds=row.duration_seconds,
+            duration=row.duration,
             depth_sample_count=row.depth_sample_count,
             # Deliberately not folded into `channels`: events aren't a curve, and a client
             # deciding whether to offer a "markers" toggle wants the count, not membership
@@ -924,7 +931,7 @@ async def get_gas_attribution_for_dives(db: AsyncSession, *, dive_ids: list[int]
     if not dive_ids:
         return {}
 
-    stmt = select(DiveProfile.dive_id, DiveProfile.duration_seconds, DiveProfile.gas_attribution).where(
+    stmt = select(DiveProfile.dive_id, DiveProfile.duration, DiveProfile.gas_attribution).where(
         DiveProfile.dive_id.in_(set(dive_ids))
     )
 
@@ -935,7 +942,7 @@ async def get_gas_attribution_for_dives(db: AsyncSession, *, dive_ids: list[int]
         except ValidationError:
             logger.warning("Ignoring unreadable gas attribution stored for dive %s", row.dive_id, exc_info=True)
             continue
-        attribution[row.dive_id] = ProfileGasAttribution(duration_seconds=row.duration_seconds, entries=entries)
+        attribution[row.dive_id] = ProfileGasAttribution(duration=row.duration, entries=entries)
     return attribution
 
 

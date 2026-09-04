@@ -482,7 +482,7 @@ class SpeciesSettings(BaseSettings):
 
 
 class ExportSettings(BaseSettings):
-    # Fixed-window rate limit (see `core.utils.rate_limit`) on the three `/export/*`
+    # Fixed-window rate limit (see `core.utils.rate_limit`) on the four `/export/*`
     # endpoints, keyed per user and shared between them - the budget bounds total export
     # work, so the cheap CSV download draws on the same allowance as the archive.
     #

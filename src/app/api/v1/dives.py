@@ -61,6 +61,7 @@ from ...schemas.dive import (
     DiveStartTime,
     DiveUpdateRequest,
     SpeciesInfo,
+    validate_depth_pair,
 )
 from ...schemas.dive_mixture import DiveMixtureRead
 from ...schemas.dive_profile import DiveProfileInfo, DiveProfileRead
@@ -121,7 +122,27 @@ _DIVE_CONSTRAINT_MESSAGES = {
     "ck_dive_exit_longitude_range": "Imported longitudes must be between -180 and 180.",
     "ck_dive_entry_position_pair": "An imported position needs both a latitude and a longitude.",
     "ck_dive_exit_position_pair": "An imported position needs both a latitude and a longitude.",
+    # Reachable through the form, unlike the block above: a diver can type an average
+    # deeper than their maximum. `validate_depth_pair` catches every route into it that
+    # can see both numbers, so this is the backstop for the one that cannot - a PATCH
+    # carrying one depth against a stored other half is checked before the write, and a
+    # concurrent edit between that check and the UPDATE lands here.
+    "ck_dive_avg_depth_within_max": "Average depth cannot be greater than max depth.",
 }
+
+
+def _validate_merged_depth_pair(avg_depth: float | None, max_depth: float | None) -> None:
+    """Enforce `avg_depth <= max_depth` on a PATCH's merged result.
+
+    The same shape `patch_course` uses for its date range, and for the same reason:
+    `DiveUpdate` cannot see a pair whose other half is already stored, and
+    `ck_dive_avg_depth_within_max` would refuse the write with an `IntegrityError` rather
+    than a sentence naming the fields.
+    """
+    try:
+        validate_depth_pair(avg_depth, max_depth)
+    except ValueError as e:
+        raise UnprocessableEntityException(str(e)) from e
 
 
 def _fk_error_detail(exc: IntegrityError) -> str:
@@ -906,6 +927,13 @@ async def patch_dive(
         utc_start_time, utc_offset_minutes = split_start_time(values.start_time)
         update_data["start_time"] = utc_start_time
         update_data["utc_offset_minutes"] = utc_offset_minutes
+
+    # Against the *merged* pair, since a PATCH may carry either depth alone - the case
+    # neither `DiveUpdate`'s validator nor `DiveCreate`'s can see.
+    _validate_merged_depth_pair(
+        values.avg_depth if "avg_depth" in values.model_fields_set else db_dive.avg_depth,
+        values.max_depth if "max_depth" in values.model_fields_set else db_dive.max_depth,
+    )
 
     update_data.update(await _link_updates(db, values, owner_id))
 

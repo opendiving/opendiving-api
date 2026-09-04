@@ -58,6 +58,15 @@ class TestFkErrorDetail:
             == "Altitude must be between -450 and 6500 meters."
         )
 
+    def test_avg_depth_within_max(self):
+        """The backstop for the one route into this constraint `validate_depth_pair`
+        cannot cover: a concurrent edit between `patch_dive`'s merged check and its
+        UPDATE."""
+        assert (
+            _fk_error_detail(_integrity_error("ck_dive_avg_depth_within_max"))
+            == "Average depth cannot be greater than max depth."
+        )
+
     def test_coordinate_ranges(self):
         """Unreachable through the form - nothing sets these but the import - but a
         constraint with no message here is *worse* than a raw 500: both dive write paths

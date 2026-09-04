@@ -1,92 +1,149 @@
-"""The shape of `export.json` - the complete, structured copy of a diver's logbook.
+"""The shape of `logbook.divejson` - a complete, structured copy of a diver's logbook.
 
-This is the half of the export that answers *"rebuild my logbook"*, where the UDDF
-document answers *"take my dives anywhere"*. UDDF is a dive-interchange format and has no
-slot for gear sets, service history, c-card records, training courses, a cylinder's
-`role` or `usage`, or the order a drift dive visited its sites; all of that lives here,
-alongside everything UDDF does carry, so nothing a diver entered is reachable only through
-the lossy file.
+This is a **DiveJSON 1.0 document**. DiveJSON is the open dive-log interchange format
+this project maintains (<https://divejson.org>, repository of record
+<https://github.com/divejson/divejson>), and its specification - not this module - is the
+normative statement of the shape. What lives here is the writer's half of the
+reference implementation: every member below is defined in `spec/divejson.md` §§4-6, and
+the JSON Schema vendored at `tests/fixtures/divejson/` plus the beyond-schema rules in
+that spec's §3 are what `tests/test_export_json.py` holds this to.
 
-**Versioned from day one.** `format` and `version` are the first two keys so that a
-reader can dispatch on them before parsing anything else, and `version` is an integer
-that increments when the shape changes incompatibly. Adding a field is not a version
-bump; removing or re-meaning one is.
+It replaced the app's own `opendiving-export` format rather than sitting beside it: two
+JSON shapes for one logbook is two things to keep in step forever, and the public one
+would not have been the one the app itself used. So this file is both "the export" and
+"the format", and the questions its old `EXPORT_VERSION` comment left open - when the
+free-change window closes, what a version bump means - are answered by the specification's
+§7 instead.
 
-Resources reference each other by public `uuid`, never by the internal integer ids -
-those are an implementation detail of this database and would be actively misleading in
-a file that outlives it.
+Where it differs from the API's own read shapes, and why:
 
-Values are **not** re-scaled or re-unitised: depths are meters, pressures bar,
-temperatures Celsius, durations seconds, exactly as the API serves them, and the embedded
-profile keeps the integer scales `GET /dive/{uuid}/profile` uses (see `dive_profile.py`
-for why they are integers). The user's `units` preference is carried as account data and
-changes none of that - it says which system the diver reads in, not what this file
-records (see DECISIONS.md's *"Measurements are metric in the database and on the wire;
-`units` is who's looking"*). The one derived value anywhere in here is `archive_path`,
-which is a fact about the zip rather than about the logbook.
+- **No nulls, anywhere.** Absence is the only spelling of "not recorded" (spec §5.4), so
+  the writer serializes with `exclude_none=True` and the schema rejects an explicit null.
+  An empty `notes` is written as *absent* for the same reason: the column is `NOT NULL`
+  with `""` standing for "the diver wrote nothing", so this app cannot tell a blank note
+  from no note, and emitting `""` would claim the stronger of the two.
+- **Nothing is re-scaled or re-unitised.** Depths meters, pressures bar, temperatures
+  Celsius, durations seconds - which is the format's own canonical system (spec §5.1), so
+  the app's wire values travel unchanged. The embedded profile keeps the integer scales
+  `GET /dive/{uuid}/profile` uses, which the spec fixes too. The diver's `units`
+  preference is account data, says which system they read in, and changes none of it
+  (DECISIONS.md, *"Measurements are metric in the database and on the wire; `units` is
+  who's looking"*).
+- **Records reference each other by public `uuid`**, never by internal integer id - an
+  implementation detail of this database that would be actively misleading in a file
+  meant to outlive it. Spec §5.3 makes that the format's rule and adds referential
+  closure: every uuid a record names is defined in the same document.
+- **Whatever the format has no core member for rides `extensions.opendiving`** (spec
+  §5.5): the diver's two account preferences, and which parser read a stored dive-computer
+  file. A writer may not invent core members, so this is the sanctioned slot.
+
+The one derived value in here is `archive_path`, which is a fact about the zip rather than
+about the logbook.
 """
 
 import uuid as uuid_pkg
 from datetime import date, datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import BaseModel, Field
 
 from ..core.schemas import PublicUUIDSchema
-from .certification import CertificationAgency, CertificationSide
+from .certification import CertificationAgency
 from .course import CourseStatus
 from .dive import DiveStartTime, WaterType
 from .dive_mixture import DiveMixtureBase
 from .dive_profile import DiveProfileRead
 from .gear_item import GearType
 from .gear_service import ServiceKind
-from .user import UnitSystem
 
-EXPORT_FORMAT = "opendiving-export"
-# Still 1 after two changes the rule above would otherwise increment for: a trip's free-text
-# `location` became the structured `locations` list below, and `is_deleted` was removed from
-# the trip, dive-site, gear-item and schedule shapes when those five tables went
-# hard-delete (there is no deleted-but-exported row left for the flag to describe - see
-# "The row goes, and so does everything pointing at it" in DECISIONS.md). The same reason
-# covers both: the app is pre-launch and nothing has ever read a version-1 file, so there is
-# no reader for the bump to tell anything.
-#
-# That reason expires at launch. The first export a stranger reads is the last one that can
-# change shape for free, and by then this needs to be either a real bump or a stated policy.
-EXPORT_VERSION = 1
+# The format marker and the version the writer declares, both spec-defined literals and
+# both required to be the document's first two members so a reader can dispatch before
+# parsing further (spec §4). `version` is `"major.minor"` as a *string*: minor versions
+# are additive, which the old bare integer could not signal without either lying or
+# breaking every reader.
+DIVEJSON_FORMAT = "divejson"
+DIVEJSON_VERSION = "1.0"
+
+# Spec §8. The `.divejson` extension is what `export_filename` is asked for, and the media
+# type is what `GET /export/divejson` serves; IANA vendor-tree registration follows the
+# specification's own 1.0 freeze rather than preceding it.
+DIVEJSON_MEDIA_TYPE = "application/vnd.dive+json"
+DIVEJSON_EXTENSION = "divejson"
+
+# This producer's key inside every `extensions` object (spec §5.5). Stable by contract -
+# a reader that learned to understand our entries keeps understanding them.
+DIVEJSON_PRODUCER_KEY = "opendiving"
+
+# Every `extensions` member: producer key to that producer's payload. Typed loosely on
+# purpose - the spec allows any JSON value under a key, and a reader must not fail on
+# content it does not recognize.
+# The `= None` default is written at each use site rather than folded in here, because
+# Pydantic's mypy plugin does not read a default out of `Annotated[T, Field(default=...)]`
+# and would report every construction that omits it as a missing argument.
+ExportExtensions = Annotated[
+    dict[str, Any] | None,
+    Field(description="Producer-keyed extension data (DiveJSON spec §5.5)"),
+]
 
 
 class ExportGenerator(BaseModel):
-    """What wrote the file. Mirrors UDDF's `<generator>`, for the same reason: a reader
-    that hits something odd wants to know which version produced it."""
+    """What wrote the document. A reader that hits something odd wants to know which
+    version produced it - the same reason UDDF has `<generator>`."""
 
     name: str
     version: str | None = None
 
 
-class ExportUser(PublicUUIDSchema):
+class ExportPosition(BaseModel):
+    """A WGS 84 point, both halves required.
+
+    An object rather than a `latitude`/`longitude` pair of members, because half a
+    coordinate is unrepresentable: the grouping is "nothing invented" enforced by shape
+    rather than by rule (spec §6).
+    """
+
+    latitude: float
+    longitude: float
+
+
+class ExportBoundingBox(BaseModel):
+    """The rectangle a geocoder returned for a named place, so a reader can frame a map
+    around the whole area without re-geocoding. `west` may exceed `east`, which means the
+    box crosses the antimeridian."""
+
+    south: float
+    north: float
+    west: float
+    east: float
+
+
+class ExportDiver(PublicUUIDSchema):
+    """Whose logbook this is.
+
+    `units` and `gear_service_emails` are application preferences rather than logbook
+    data, so the format gives them no core member and they travel under this producer's
+    key (spec §6.1). They are here at all because `/export/archive` promises nothing in
+    the account is reachable only through the app.
+    """
+
     name: str
     username: str
     email: str
-    # The two account-level preferences there are. Here because `/export/archive` says
-    # nothing in the account is reachable only through the app - and `units` in
-    # particular is the diver's own setting travelling with a file whose measurements
-    # deliberately do not bend to it (see the module docstring).
-    gear_service_emails: bool
-    units: UnitSystem
     created_at: datetime
+    extensions: ExportExtensions = None
 
 
 class ExportStoredFile(PublicUUIDSchema):
-    """A binary the archive carries: a dive-computer export, or one side of a c-card.
+    """A binary the source logbook stores: a dive-computer export, or one side of a c-card.
 
     `sha256` is the stored digest of the bytes, not one computed at export time, so
-    checking a extracted file against it verifies the whole round trip - database column
+    checking an extracted file against it verifies the whole round trip - database column
     to zip member - rather than just that the zip is internally consistent.
 
-    `archive_path` is null when `export.json` is produced outside an archive - the writer
-    supports it, but only the archive endpoint uses it today, and there is no zip for the
-    path to point into otherwise.
+    `archive_path` is **absent** outside an archive: there is no container for the path to
+    point into, and the format has one spelling of "not applicable" (spec §6.7). Which
+    parser read a dive-computer file rides `extensions.opendiving.parser_key` - parser
+    registries are application-specific and have no core member.
     """
 
     original_filename: str
@@ -94,36 +151,34 @@ class ExportStoredFile(PublicUUIDSchema):
     byte_size: int
     sha256: str
     archive_path: str | None = None
-
-
-class ExportDiveFile(ExportStoredFile):
-    parser_key: Annotated[str, Field(description="Identifier of the parser that read this file, e.g. `suunto_xml`")]
-
-
-class ExportCertificationFile(ExportStoredFile):
-    side: CertificationSide
+    extensions: ExportExtensions = None
 
 
 class ExportDive(PublicUUIDSchema):
     """One dive, with everything that hangs off it embedded rather than referenced.
 
-    `dive_site_uuids` is in visit order - index 0 is the primary site - which is the
-    ordering UDDF cannot express and the reason this list is here at all.
+    `site_uuids` is in visit order - index 0 is the primary site - which is the ordering
+    UDDF cannot express and the reason this list exists at all. `gear_uuids` and
+    `species_uuids` are the diver's own order in the same way.
 
-    `profile` is the full per-sample payload, in the same integer scales the API serves,
-    so the JSON alone can redraw every curve without re-parsing `source_file`.
+    `profile` is the full per-sample payload in the same integer scales the API serves, so
+    the document alone can redraw every curve without re-parsing `source_file`. It is
+    `DiveProfileRead`, the very schema `GET /dive/{uuid}/profile` returns: one profile
+    vocabulary on both surfaces, rather than a second set of models that could drift.
     """
 
     dive_number: int
-    start_time: DiveStartTime
-    duration: Annotated[int, Field(description="Dive duration in seconds")]
-    notes: str
+    started_at: DiveStartTime
+    duration: Annotated[int, Field(description="Dive duration in seconds, as logged")]
+    notes: str | None = None
     max_depth: float | None = None
-    avg_depth: float | None = None
+    avg_depth: Annotated[
+        float | None, Field(default=None, description="Never greater than `max_depth` - a checked rule, spec §6.2")
+    ]
     bottom_temperature: Annotated[float | None, Field(default=None, description="In degrees Celsius")]
     visibility: Annotated[int | None, Field(default=None, description="Underwater visibility in meters")]
     weight: Annotated[float | None, Field(default=None, description="Total ballast carried, in kilograms")]
-    # Water type is in this file and in `dives.csv`, and in neither UDDF: 3.2.2 has no
+    # Water type is in this document and in `dives.csv`, and in neither UDDF: 3.2.2 has no
     # *per-dive* salinity or density slot at all - the `density` elements it does have are
     # site-level (`sitedata`) and deco-planner input (`baseCalculationType`), neither of
     # which is a fact about one dive. Altitude does have one, and UDDF gets it. See
@@ -136,25 +191,24 @@ class ExportDive(PublicUUIDSchema):
     cns_end: float | None = None
     otu_start: float | None = None
     otu_end: float | None = None
-    surface_pressure_bar: float | None = None
-    # Decimal degrees, as stored. UDDF 3.2.2 has nowhere to put a per-dive position - its
-    # only `<geography>` hangs off a `<site>`, and neither `informationbeforedive` nor
-    # `waypoint` has a coordinate element - so this file and `dives.csv` are the only two
-    # export formats that carry them. See DECISIONS.md.
-    entry_latitude: float | None = None
-    entry_longitude: float | None = None
-    exit_latitude: float | None = None
-    exit_longitude: float | None = None
+    surface_pressure: Annotated[float | None, Field(default=None, description="Ambient surface pressure, in bar")]
+    # UDDF 3.2.2 has nowhere to put a per-dive position - its only `<geography>` hangs off
+    # a `<site>`, and neither `informationbeforedive` nor `waypoint` has a coordinate
+    # element - so this document and `dives.csv` are the only two exports that carry them.
+    # See DECISIONS.md.
+    entry_position: ExportPosition | None = None
+    exit_position: ExportPosition | None = None
     trip_uuid: uuid_pkg.UUID | None = None
     course_uuid: uuid_pkg.UUID | None = None
-    dive_site_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In visit order")]
-    gear_item_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In the diver's own order")]
-    species_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In spotting order")]
+    site_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In visit order")]
+    gear_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In the diver's own order")]
+    species_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In the diver's own order")]
     # `DiveMixtureBase` rather than the API's `DiveMixtureRead`, which carries the
-    # internal row `id`. Nothing here references a cylinder, so that id would be the
-    # one integer key in the file - see this module's docstring.
-    mixtures: Annotated[list[DiveMixtureBase], Field(default_factory=list)]
-    source_file: ExportDiveFile | None = None
+    # internal row `id`. Nothing here references a cylinder, so that id would be the one
+    # integer key in the document. Its member names are the spec's Cylinder members
+    # already, `gas_number` included.
+    cylinders: Annotated[list[DiveMixtureBase], Field(default_factory=list)]
+    source_file: ExportStoredFile | None = None
     profile: DiveProfileRead | None = None
     created_at: datetime
 
@@ -162,21 +216,17 @@ class ExportDive(PublicUUIDSchema):
 class ExportTripLocation(BaseModel):
     """One place a trip went, as the geocoder described it when the diver picked it.
 
-    A value object with no `uuid`, because it has none to export: trip locations are per-trip
-    rows replaced wholesale with the trip, so nothing in this file - or in the database -
-    references one. The bounding box travels with the point because it is what the geocoder
-    said the place *covers*, and a reader redrawing the trip's map wants the region rather
-    than a pin in the middle of a country.
+    A value object with no `uuid`, because it has none to export: trip locations are
+    per-trip rows replaced wholesale with the trip, so nothing in this document - or in
+    the database - references one. The bounding box travels with the point because it is
+    what the geocoder said the place *covers*, and a reader redrawing the trip's map wants
+    the region rather than a pin in the middle of a country.
     """
 
     name: str
     display_name: str | None = None
-    latitude: float | None = None
-    longitude: float | None = None
-    bbox_south: float | None = None
-    bbox_north: float | None = None
-    bbox_west: float | None = None
-    bbox_east: float | None = None
+    position: ExportPosition | None = None
+    bbox: ExportBoundingBox | None = None
 
 
 class ExportTrip(PublicUUIDSchema):
@@ -185,9 +235,9 @@ class ExportTrip(PublicUUIDSchema):
         list[ExportTripLocation],
         Field(default_factory=list, description="Places this trip went to, in the order the diver listed them"),
     ]
-    start_date: date
-    end_date: date | None = None
-    notes: str
+    starts_on: date
+    ends_on: date | None = None
+    notes: str | None = None
     created_at: datetime
 
 
@@ -204,37 +254,38 @@ class ExportCourse(PublicUUIDSchema):
     agency: CertificationAgency
     agency_other: str | None = None
     status: CourseStatus
-    start_date: date | None = None
-    end_date: date | None = None
+    starts_on: date | None = None
+    ends_on: date | None = None
     instructor_name: str | None = None
     instructor_number: str | None = None
     training_center: str | None = None
-    notes: str
+    notes: str | None = None
     created_at: datetime
 
 
 class ExportDiveSite(PublicUUIDSchema):
     name: str
     location: str | None = None
-    latitude: float | None = None
-    longitude: float | None = None
-    notes: str
+    position: ExportPosition | None = None
+    notes: str | None = None
     created_at: datetime
 
 
 class ExportSpecies(PublicUUIDSchema):
     """One species from the catalog, as far as this diver's dives reference it.
 
-    The odd one out in this file: every other collection here is the diver's own rows, while
-    the species catalog belongs to nobody (see `models/species.py`). What is exported is the
-    slice the logbook points at, which is what makes the file self-contained - a reader
-    resolving `ExportDive.species_uuids` finds every one of them defined here.
+    The odd one out in this document: every other collection here is the diver's own rows,
+    while the species catalog belongs to nobody (see `models/species.py`). What is
+    exported is the slice the logbook points at, which is what makes the document
+    self-contained - a reader resolving `ExportDive.species_uuids` finds every one of them
+    defined here.
 
-    `aphia_id` is the field that matters outside this database. The uuids are this instance's;
-    the AphiaID is the World Register of Marine Species' own identifier, so a reader importing
-    this file elsewhere can re-link every sighting to a real taxon rather than to a name it
-    has to guess at. `wikidata_qid` does the same job for anything that would rather start
-    from Wikidata.
+    `aphia_id` is the field that matters outside this database, and the format says so:
+    the uuids are this instance's, the AphiaID is the World Register of Marine Species'
+    own identifier and the interchange identity a reader matches its own catalog on (spec
+    §6.11). `wikidata_qid` does the same job for anything that would rather start from
+    Wikidata. The record is a snapshot for human readers, never a source a reader creates
+    catalog rows from.
     """
 
     aphia_id: int
@@ -249,9 +300,9 @@ class ExportGearItem(PublicUUIDSchema):
     name: str
     brand: str | None = None
     type: GearType | None = None
-    notes: str
+    notes: str | None = None
     rented: bool
-    is_archived: bool
+    archived: bool
     archived_at: datetime | None = None
     dive_count: int
     created_at: datetime
@@ -260,19 +311,19 @@ class ExportGearItem(PublicUUIDSchema):
 class ExportGearSet(PublicUUIDSchema):
     name: str
     weight: float | None = None
-    gear_item_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In the set's own order")]
+    gear_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In the set's own order")]
     created_at: datetime
 
 
 class ExportGearServiceSchedule(PublicUUIDSchema):
-    gear_item_uuid: uuid_pkg.UUID
-    kind: ServiceKind
+    gear_uuid: uuid_pkg.UUID
+    type: ServiceKind
     label: str | None = None
     starts_on: date
     interval_months: int | None = None
     interval_dives: int | None = None
     dive_count_at_start: int
-    is_active: bool
+    active: bool
     last_service_on: date | None = None
     next_due_on: date | None = None
     next_due_at_dive_count: int | None = None
@@ -280,18 +331,25 @@ class ExportGearServiceSchedule(PublicUUIDSchema):
 
 
 class ExportGearServiceRecord(PublicUUIDSchema):
-    gear_item_uuid: uuid_pkg.UUID
+    gear_uuid: uuid_pkg.UUID
     gear_service_schedule_uuid: uuid_pkg.UUID | None = None
-    kind: ServiceKind
+    type: ServiceKind
     serviced_on: date
     dive_count_at_service: int
     label: str | None = None
     performed_by: str | None = None
-    notes: str
+    notes: str | None = None
     created_at: datetime
 
 
 class ExportCertification(PublicUUIDSchema):
+    """One c-card.
+
+    The two scans are `front_file`/`back_file` rather than a list with a side
+    discriminator, because a card has one front and one back and a list could claim two
+    fronts (spec §6.16).
+    """
+
     agency: CertificationAgency
     agency_other: str | None = None
     name: str
@@ -302,33 +360,35 @@ class ExportCertification(PublicUUIDSchema):
     instructor_number: str | None = None
     training_center: str | None = None
     course_uuid: uuid_pkg.UUID | None = None
-    notes: str
-    files: Annotated[list[ExportCertificationFile], Field(default_factory=list)]
+    notes: str | None = None
+    front_file: ExportStoredFile | None = None
+    back_file: ExportStoredFile | None = None
     created_at: datetime
 
 
 class ExportEnvelope(BaseModel):
-    """The whole document.
+    """The whole document, in the member order spec §4 declares.
 
     **Never used to serialize.** `services/export/envelope.py` streams the file a record
     at a time so a thousand-dive log with its profiles never sits in memory whole, which
     means this model would drift out of step with the real output if nothing checked it.
     `tests/test_export_json.py` closes that gap by validating the streamed bytes against
-    this model - so it is the format's specification, kept honest by a test rather than
-    by being on the write path.
+    this model *and* against the vendored JSON Schema and the spec's beyond-schema rules -
+    so it is the app's statement of the format, kept honest by a test rather than by being
+    on the write path.
     """
 
-    format: str = EXPORT_FORMAT
-    version: int = EXPORT_VERSION
+    format: str = DIVEJSON_FORMAT
+    version: str = DIVEJSON_VERSION
     exported_at: datetime
     generator: ExportGenerator
-    user: ExportUser
+    diver: ExportDiver
     dives: Annotated[list[ExportDive], Field(default_factory=list)]
     trips: Annotated[list[ExportTrip], Field(default_factory=list)]
     courses: Annotated[list[ExportCourse], Field(default_factory=list)]
-    dive_sites: Annotated[list[ExportDiveSite], Field(default_factory=list)]
+    sites: Annotated[list[ExportDiveSite], Field(default_factory=list)]
     species: Annotated[list[ExportSpecies], Field(default_factory=list)]
-    gear_items: Annotated[list[ExportGearItem], Field(default_factory=list)]
+    gear: Annotated[list[ExportGearItem], Field(default_factory=list)]
     gear_sets: Annotated[list[ExportGearSet], Field(default_factory=list)]
     gear_service_schedules: Annotated[list[ExportGearServiceSchedule], Field(default_factory=list)]
     gear_service_records: Annotated[list[ExportGearServiceRecord], Field(default_factory=list)]

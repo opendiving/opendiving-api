@@ -222,7 +222,7 @@ class TestTheNormalizedFiles:
 
     def test_a_trips_places_are_joined_into_one_location_cell(self):
         """A spreadsheet column is no place for a nested shape, so the list is rendered the
-        way the app shows it and the structured version stays in `export.json`."""
+        way the app shows it and the structured version stays in `logbook.divejson`."""
         rows = _parse(_render(write_trips_csv(full_bundle())))
         assert rows[1][TRIPS_HEADER.index("location")] == "Sharm el-Sheikh, Ras Mohammed"
 
@@ -268,7 +268,7 @@ class TestTheNormalizedFiles:
 
     def test_no_file_carries_a_deleted_column_any_more(self):
         """These four had one because `loader._owned` could resurrect their rows, and a
-        CSV listing as live what `export.json` flagged as deleted would have contradicted
+        CSV listing as live what `logbook.divejson` flagged as deleted would have contradicted
         itself inside one archive. Nothing is resurrected now, so a column that could only
         ever read `False` is a column that misleads. A breaking format change, deliberately
         - see the PR body."""

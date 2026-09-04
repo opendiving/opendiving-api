@@ -246,7 +246,7 @@ def write_trips_csv(bundle: ExportBundle) -> Iterator[str]:
                 trip.name,
                 # One cell where the trip has a list of places, joined the way the app
                 # shows them. A spreadsheet column is not a place to put a nested shape,
-                # and `export.json` is where the structured locations are.
+                # and `logbook.divejson` is where the structured locations are.
                 trip_location_names(bundle.locations_by_trip[trip.id]),
                 trip.start_date.isoformat(),
                 None if trip.end_date is None else trip.end_date.isoformat(),
