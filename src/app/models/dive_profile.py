@@ -9,11 +9,19 @@ from ..core.db.models import PublicUUIDMixin, TimestampMixin
 class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     """A dive's per-sample depth / temperature / tank-pressure curves.
 
-    Derived from the dive's stored export (`DiveFile`), never uploaded: the samples are
-    extracted server-side by `DiveParser.parse_profile` during `PUT /dive/{uuid}/file`,
-    which is the only place that has both the bytes and the parse token proving where
-    they came from. Nothing here is client-supplied, which is the whole reason
-    `/dive/parse` doesn't return a profile - see `services/dive_profiles.py`.
+    Derived from the dive's stored export (`DiveFile`) on every path but one: the samples
+    are extracted server-side by `DiveParser.parse_profile` during
+    `PUT /dive/{uuid}/file`, which is the only place that has both the bytes and the parse
+    token proving where they came from. That is still the whole reason `/dive/parse`
+    doesn't return a profile - see `services/dive_profiles.py`.
+
+    **The exception is logbook import**, which restores the caller's own DiveJSON backup
+    and so does write samples the client supplied. It is the one sanctioned path, on the
+    terms `DECISIONS.md` records under *"Importing a logbook is the one client-supplied
+    profile"*: the caller's own logbook, a two-phase preview/apply, and every channel
+    re-validated and re-normalized before it is stored. The provenance columns below say
+    which path a row came from - `parser_key` is `divejson_import` on a row that arrived
+    that way.
 
     One row per dive, with each channel's series in a JSONB `data` payload rather than a
     row per sample: several hundred (Suunto) to several thousand (Ocean, 1 Hz) readings

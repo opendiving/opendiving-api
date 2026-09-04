@@ -149,6 +149,22 @@ class DiveFileTokenData(BaseModel):
     parser_key: str
 
 
+class LogbookImportTokenData(BaseModel):
+    """Decoded payload of a logbook-import token (see `create_logbook_import_token`/
+    `verify_logbook_import_token` in `core.security`), minted by
+    `POST /import/divejson/preview` and presented again by `POST /import/divejson`.
+
+    The same shape and the same modest claim as `DiveFileTokenData` above, minus the
+    parser: this server read *these exact bytes* for *this user* and showed them a report
+    of what importing them would do. It carries no authority - apply re-plans the whole
+    document from scratch inside its own transaction - so what it actually buys is that
+    the report a diver approved describes the file they then applied.
+    """
+
+    user_uuid: str
+    sha256: str
+
+
 class TokenBlacklistBase(BaseModel):
     token: str
     expires_at: datetime

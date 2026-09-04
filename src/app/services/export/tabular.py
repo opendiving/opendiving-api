@@ -128,9 +128,16 @@ def _cylinder_summary(mixture: DiveMixtureRead) -> str:
     return " ".join(parts)
 
 
-def _utc_offset(minutes: int) -> str:
+def _utc_offset(minutes: int | None) -> str:
     """`+02:00` - the same spelling the combined `start_time` carries, in its own column
-    so a spreadsheet can sort on local time without parsing an offset out of a string."""
+    so a spreadsheet can sort on local time without parsing an offset out of a string.
+
+    Empty for a dive whose source recorded no offset: the two columns beside it are still
+    the wall clock the diver logged, and any string here would be a claim about the instant
+    that nothing in the row supports.
+    """
+    if minutes is None:
+        return ""
     sign = "-" if minutes < 0 else "+"
     hours, remainder = divmod(abs(minutes), 60)
     return f"{sign}{hours:02d}:{remainder:02d}"

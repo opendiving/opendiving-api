@@ -25,11 +25,22 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # separately because a `timestamptz` column only stores an absolute instant and
     # can't reconstruct the original offset on its own. Combined with `start_time` to
     # reconstruct an offset-aware datetime for the API (see `split_start_time()`/
-    # `combine_start_time()` in `schemas/dive.py`) so dives always display in the
-    # timezone they were actually logged in. Defaults to 0 (UTC) purely so existing
-    # call sites that construct a `Dive(...)` without it (tests, the admin panel) don't
-    # break - real writes always pass an explicit value derived from `start_time`.
-    utc_offset_minutes: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # `combine_start_time()` in `core/utils/datetime_offset.py`) so dives always display
+    # in the timezone they were actually logged in.
+    #
+    # **NULL is a third state, not a missing value**: the wall clock was recorded and the
+    # instant is unknown (DiveJSON spec §5.2). `start_time` then holds that wall clock
+    # labelled UTC, because a `timestamptz` has nowhere else to put it, and
+    # `combine_start_time` hands it back naive. Only the logbook importer writes it -
+    # manual entry and the dive-computer parse path both know an offset - and it exists
+    # because a converter meeting an offset-less source has no honest third option.
+    #
+    # The `0` defaults survive the column becoming nullable, and deliberately: they are
+    # what stops a `Dive(...)` constructed without an offset (tests, the admin panel) from
+    # silently claiming the unknown state, which is a claim about the data rather than a
+    # missing keyword argument. Every real write passes an explicit value - the importer's
+    # is an explicit `None`.
+    utc_offset_minutes: Mapped[int | None] = mapped_column(Integer, default=0, server_default="0")
 
     max_depth: Mapped[float | None] = mapped_column(Float, default=None)
     avg_depth: Mapped[float | None] = mapped_column(Float, default=None)
@@ -150,12 +161,18 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
             CheckConstraint("otu_end IS NULL OR otu_end >= 0", name="ck_dive_otu_end_non_negative"),
             # Bounded on both sides, unlike everything above, because this one has real
             # physical limits and the corpus sits well inside them (1.031-1.067 bar across
-            # 384 exports). The band spans roughly sea level in a deep low down to a 5 000 m
-            # altitude lake; anything outside it is a unit error - both Suunto exports write
-            # this field in Pascal, where an unconverted 105 700 is off by five orders of
-            # magnitude - rather than a dive somewhere unusual.
+            # 384 exports). Anything outside the band is a unit error - both Suunto exports
+            # write this field in Pascal, where an unconverted 105 700 is off by five orders
+            # of magnitude - rather than a dive somewhere unusual.
+            #
+            # The floor is 0.4, not 0.5, and it is `ck_dive_altitude_range` that fixes it:
+            # ambient pressure at this table's own 6500 m altitude ceiling is about 0.44
+            # bar, so a 0.5 floor refused readings the altitude bound blesses. It is the
+            # DiveJSON floor too (spec §6.2), which is where the contradiction was noticed -
+            # an importer must not drop a value the format admits. Mirrored by
+            # `_drop_implausible_surface_pressure` in `schemas/parsed_dive.py`.
             CheckConstraint(
-                "surface_pressure_bar IS NULL OR (surface_pressure_bar >= 0.5 AND surface_pressure_bar <= 1.2)",
+                "surface_pressure_bar IS NULL OR (surface_pressure_bar >= 0.4 AND surface_pressure_bar <= 1.2)",
                 name="ck_dive_surface_pressure_range",
             ),
             # Bounded on both sides like the surface pressure, and for a plainer reason:

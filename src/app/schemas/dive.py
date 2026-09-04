@@ -13,14 +13,23 @@ from .dive_site import Latitude, Longitude
 from .gear_item import GearItemInfo
 
 _START_TIME_EXAMPLE = "2021-04-04T10:04:47.910+02:00"
+_LOCAL_START_TIME_EXAMPLE = "2021-04-04T10:04:47.910"
 
-# `start_time` always carries an explicit UTC offset over the API, both ways: on input,
-# it's the offset the caller (e.g. the web app, defaulting to the browser's own offset)
-# knows the dive happened in; on output, it's reconstructed from the dive's stored
-# `utc_offset_minutes` (see `core/utils/datetime_offset.py`) so a dive always displays in
-# the timezone it was actually logged in, not the viewer's. A naive datetime (no offset)
-# is rejected rather than silently assumed to be UTC or local.
+# `start_time` carries an explicit UTC offset on every **write**: it's the offset the
+# caller (e.g. the web app, defaulting to the browser's own offset) knows the dive
+# happened in, and a naive datetime is rejected rather than silently assumed to be UTC or
+# local. Manual entry and the dive-computer parse path both know one, so nothing that
+# writes through these schemas ever has to guess.
 DiveStartTime = Annotated[datetime, AfterValidator(require_utc_offset)]
+
+# The **read** counterpart, which has to serve what is stored rather than what the write
+# rule demands. A dive whose `utc_offset_minutes` is NULL records a wall clock with an
+# unknown instant (DiveJSON spec §5.2), and `combine_start_time` reconstructs it naive -
+# so a read schema carrying `DiveStartTime` would 500 on the very row the logbook importer
+# exists to be able to accept. No validator at all rather than a looser one: there is
+# nothing left to check once both spellings are legal, and the two names are what say
+# which side of the API a given field is on.
+DiveLocalStartTime = datetime
 
 DEPTH_PAIR_MESSAGE = "avg_depth cannot be greater than max_depth"
 
@@ -78,8 +87,18 @@ class WaterType(StrEnum):
 
 
 class DiveBase(BaseModel):
+    """Shared by the read shapes and the write ones, which is why `start_time` is the
+    permissive spelling here and `DiveCreate` re-declares it as the strict one."""
+
     dive_number: Annotated[int, Field(examples=[5])]
-    start_time: Annotated[DiveStartTime, Field(examples=[_START_TIME_EXAMPLE])]
+    start_time: Annotated[
+        DiveLocalStartTime,
+        Field(
+            examples=[_START_TIME_EXAMPLE, _LOCAL_START_TIME_EXAMPLE],
+            description="The dive's own start time, in the timezone it was logged in. Carries no offset on a dive "
+            "whose source never recorded one - the wall clock is the record and the instant is unknown.",
+        ),
+    ]
     duration: Annotated[int, Field(examples=[2048], description="Dive duration in seconds")]
 
     max_depth: Annotated[float | None, Field(default=None)]
@@ -277,7 +296,11 @@ class DiveReadInternal(DiveBase, DiveTechScalars, PublicUUIDSchema):
     trip_id: int | None = None
     course_id: int | None = None
     utc_offset_minutes: Annotated[
-        int, Field(description="UTC offset (minutes) start_time was originally expressed in, e.g. 120 for +02:00")
+        int | None,
+        Field(
+            description="UTC offset (minutes) start_time was originally expressed in, e.g. 120 for +02:00. Null on a "
+            "dive whose source recorded no offset, where `start_time` above is the wall clock labelled UTC"
+        ),
     ]
     created_at: datetime
 
@@ -422,10 +445,11 @@ class DiveGasUsePoint(BaseModel):
     dive_uuid: Annotated[uuid_pkg.UUID, Field(description="Public id of the dive this point came from")]
     dive_number: int
     start_time: Annotated[
-        DiveStartTime,
+        DiveLocalStartTime,
         Field(
             examples=[_START_TIME_EXAMPLE],
-            description="The dive's own offset-aware start time, exactly as `DiveRead` reports it - the x axis",
+            description="The dive's own start time, exactly as `DiveRead` reports it - the x axis. Offset-aware, "
+            "unless the dive's source recorded no offset",
         ),
     ]
     avg_depth: Annotated[
@@ -519,7 +543,7 @@ class DiveNeighbor(PublicUUIDSchema):
     """
 
     dive_number: Annotated[int, Field(examples=[5])]
-    start_time: Annotated[DiveStartTime, Field(examples=[_START_TIME_EXAMPLE])]
+    start_time: Annotated[DiveLocalStartTime, Field(examples=[_START_TIME_EXAMPLE])]
 
 
 class DiveNeighbors(BaseModel):
@@ -617,10 +641,17 @@ class DiveRenumberRequest(BaseModel):
 
 
 class DiveRenumberChange(BaseModel):
-    """One dive whose number a renumber would change (or did change)."""
+    """One dive whose number a renumber would change (or did change).
+
+    A *response* shape, so `start_time` is the permissive spelling: the request's
+    `from_start_time` above still requires an offset (the caller is naming an instant),
+    while a dive being renumbered may be one whose own source recorded none - and the
+    strict annotation here would have surfaced that as a 500 rather than as anything a
+    caller could act on.
+    """
 
     dive_uuid: uuid_pkg.UUID
-    start_time: Annotated[DiveStartTime, Field(examples=[_START_TIME_EXAMPLE])]
+    start_time: Annotated[DiveLocalStartTime, Field(examples=[_START_TIME_EXAMPLE])]
     dive_number: Annotated[int, Field(description="The number before the renumber", examples=[212])]
     new_dive_number: Annotated[int, Field(description="The number after it", examples=[198])]
 
@@ -641,6 +672,11 @@ class DiveRenumberResult(BaseModel):
 class DiveCreate(DiveBase):
     model_config = ConfigDict(extra="forbid")
 
+    # Narrowed back from `DiveBase`'s permissive spelling: this is the write side, and a
+    # caller creating a dive knows the offset it happened in (the browser reads its own
+    # off `Date.getTimezoneOffset()`). Only the logbook importer, which does not come
+    # through here, may write a dive with no offset at all.
+    start_time: Annotated[DiveStartTime, Field(examples=[_START_TIME_EXAMPLE])]
     trip_uuid: Annotated[
         uuid_pkg.UUID | None, Field(default=None, description="Public id of the trip this dive belongs to")
     ]
@@ -656,9 +692,10 @@ class DiveCreateInternal(DiveBase):
     trip_id: int | None = None
     course_id: int | None = None
     # `start_time` on this schema is the UTC instant to store (already split from the
-    # public, offset-aware `start_time` via `split_start_time()`), paired with the offset
-    # it was split from.
-    utc_offset_minutes: int
+    # public `start_time` via `split_start_time()`), paired with the offset it was split
+    # from. `None` is the importer's offset-unknown state, where the instant is really the
+    # wall clock labelled UTC - see `core/utils/datetime_offset.py`.
+    utc_offset_minutes: int | None
 
 
 class DiveCreateRequest(DiveCreate):

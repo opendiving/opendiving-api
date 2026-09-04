@@ -23,6 +23,7 @@ from .exceptions.http_exceptions import UnauthorizedException
 from .schemas import (
     DiveFileTokenData,
     GoogleUserInfo,
+    LogbookImportTokenData,
     OnboardingTokenData,
     TokenBlacklistCreate,
     TokenBlacklistRead,
@@ -61,6 +62,12 @@ class TokenType(StrEnum):
     # `verify_dive_file_token` below, and `PUT /dive/{uuid}/file`. Carries no authority;
     # the upload route still checks that the caller owns the dive.
     DIVE_FILE = "dive_file"
+    # The same kind of receipt for a whole logbook: `POST /import/divejson/preview` read
+    # these bytes for this user and reported what importing them would do - see
+    # `create_logbook_import_token`/`verify_logbook_import_token`, and
+    # `POST /import/divejson`. Its own member rather than a reused `DIVE_FILE` so a parse
+    # receipt cannot be spent at the import endpoint or the other way round.
+    LOGBOOK_IMPORT = "logbook_import"
 
 
 # -------------- magic-link tokens --------------
@@ -656,6 +663,62 @@ def verify_dive_file_token(token: str) -> DiveFileTokenData | None:
         return None
 
     return DiveFileTokenData(user_uuid=user_uuid, sha256=sha256, parser_key=parser_key)
+
+
+# -------------- logbook import tokens --------------
+def create_logbook_import_token(*, user_uuid: uuid_pkg.UUID, sha256: str) -> str:
+    """Mints the receipt `POST /import/divejson/preview` hands back with its report.
+
+    Binds two things: who was shown the report, and exactly which bytes it was a report
+    *about*. `POST /import/divejson` re-hashes the body it receives and refuses a mismatch,
+    so the file a diver approves is the file that gets imported - the shape
+    `create_dive_file_token` already uses for the parse-then-attach pair, minus its
+    `parser_key`, which has no counterpart here.
+
+    Deliberately not blacklisted after use, for the same reason that one is not: an import
+    of a document whose uuids are already the caller's own creates nothing the second time
+    (that is the whole idempotence invariant), and the token confers no authority to
+    replay - it can only ever import bytes its holder was already shown a preview of.
+    Hence no `jti` either.
+
+    What it deliberately does **not** carry is the plan. Apply re-reads and re-plans the
+    document inside its own transaction, because rows can be created or deleted between
+    the two calls - a soft-deleted dive restored by hand, a site added under a name the
+    document also uses - and a plan pinned at preview time would write against a database
+    that had moved. The token is about the bytes; the decisions are made fresh.
+    """
+    expire = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=settings.IMPORT_TOKEN_EXPIRE_MINUTES)
+    to_encode: dict[str, Any] = {
+        "user_uuid": str(user_uuid),
+        "sha256": sha256,
+        "exp": expire,
+        "token_type": TokenType.LOGBOOK_IMPORT,
+    }
+    encoded_jwt: str = jwt.encode(to_encode, SECRET_KEY.get_secret_value(), algorithm=ALGORITHM)
+    return encoded_jwt
+
+
+def verify_logbook_import_token(token: str) -> LogbookImportTokenData | None:
+    """Validates a logbook-import token: well-formed, unexpired, correctly typed and
+    complete. Returns what it attests, or `None` if any of that fails.
+
+    Checking `token_type` is what stops an access token - which the frontend also holds,
+    and which is signed with the same key - from being presented here as a preview receipt.
+    """
+    try:
+        payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+
+    if payload.get("token_type") != TokenType.LOGBOOK_IMPORT:
+        return None
+
+    user_uuid = payload.get("user_uuid")
+    sha256 = payload.get("sha256")
+    if not user_uuid or not sha256:
+        return None
+
+    return LogbookImportTokenData(user_uuid=user_uuid, sha256=sha256)
 
 
 # -------------- blacklisting --------------

@@ -495,6 +495,35 @@ class ExportSettings(BaseSettings):
     EXPORT_RATE_LIMIT_PER_USER: int = config("EXPORT_RATE_LIMIT_PER_USER", default=10)
 
 
+class LogbookImportSettings(BaseSettings):
+    # Its own budget rather than a share of the export one: an import is a different kind
+    # of expensive - it spools up to half a gigabyte, parses a whole logbook and may make
+    # outbound WoRMS calls - and a diver restoring a backup should not find their next
+    # export refused because of it.
+    #
+    # Twenty rather than ten because **one import is two calls**: a preview and an apply,
+    # each uploading the file. Ten imports an hour is the same generosity the export limit
+    # means by ten downloads.
+    IMPORT_RATE_LIMIT_WINDOW_SECONDS: int = config("IMPORT_RATE_LIMIT_WINDOW_SECONDS", default=3600)
+    IMPORT_RATE_LIMIT_PER_USER: int = config("IMPORT_RATE_LIMIT_PER_USER", default=20)
+
+    # How long the preview receipt stays spendable. A staleness bound rather than a
+    # credential lifetime, exactly like `DIVE_FILE_TOKEN_EXPIRE_MINUTES`: it attests which
+    # bytes were previewed, and grants nothing beyond importing bytes this server has
+    # already shown the same caller a report for. An hour is long enough to read a report
+    # over a logbook's worth of records and short enough that the instance it was planned
+    # against has probably not moved.
+    IMPORT_TOKEN_EXPIRE_MINUTES: int = config("IMPORT_TOKEN_EXPIRE_MINUTES", default=60)
+
+    # Total wall-clock budget for the WoRMS pre-pass that resolves species the catalog does
+    # not hold yet. Sized against `resolve_species`'s own ceiling rather than its typical
+    # cost: one unknown AphiaID can spend two `_RESOLVE_BUDGET_SECONDS` passes (the synonym
+    # branch) plus `_ENRICHMENT_BUDGET_SECONDS`, about a minute, so this is two of those.
+    # Unknowns still unresolved when it runs out are skipped and reported, never guessed -
+    # a species link is the one thing an import may drop without losing a dive.
+    IMPORT_SPECIES_BUDGET_SECONDS: float = config("IMPORT_SPECIES_BUDGET_SECONDS", default=120.0)
+
+
 class FileStorageSettings(BaseSettings):
     # Where uploaded dive-computer exports and c-card images are stored. Everything under
     # it is written and read by `services/blob_store.py` and by nothing else.
@@ -796,6 +825,7 @@ class Settings(
     GeocodingSettings,
     SpeciesSettings,
     ExportSettings,
+    LogbookImportSettings,
     FileStorageSettings,
     ProxySettings,
     FrontendSettings,

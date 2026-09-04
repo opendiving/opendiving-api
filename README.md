@@ -5,8 +5,9 @@ self-hostable dive log.** FastAPI + PostgreSQL + Redis.
 
 Your dive history should outlive any app. This API keeps the original dive-computer export alongside
 every imported dive, serves the lot over a clean, documented REST API, and takes the whole log back
-out in open formats in a single request — so your data is never more than one `curl` away. Run your
-own copy and the Postgres database underneath it is yours too.
+out in open formats in a single request — and back **in** again, so your data is never more than one
+`curl` away in either direction. Run your own copy and the Postgres database underneath it is yours
+too.
 
 ## Looking to run OpenDiving?
 
@@ -61,6 +62,11 @@ else; what is here is the source, and the notes for working on it.
 - **[DiveJSON](https://divejson.org)** — the open dive-log interchange format this project
   maintains, and this is its reference implementation: a lossless structured copy of the whole
   logbook, where UDDF measurably loses trips, gear, weights and UTC offsets.
+- **Logbook import** — put a DiveJSON document or a full-export archive back into an account, in two
+  phases: a preview that reports exactly what would be created, linked to something you already
+  have, restored from your deleted records or skipped, and then an apply that writes the lot in one
+  transaction. Restore a backup, migrate between instances, or bring a whole logbook across from
+  anything that can produce DiveJSON.
 - **Passwordless auth** — email sign-in (over SMTP, so any relay or provider works), Google Sign-In,
   and passkeys, with automatic account linking, short-lived access tokens, and httpOnly refresh
   cookies. The sign-in email carries a magic link *and* a six-digit code, so reading your mail on a
@@ -177,21 +183,21 @@ life list, account deletion); **dives**, the bulk of it, with their **files** �
 read the per-sample profile back — alongside **trips**, **dive sites**, the shared **species**
 catalog a dive can reference, and a **geocoding** helper for naming a site pinned on a map; **gear**
 as items, sets, service schedules and service records; **certifications** with their card images and
-the **courses** that issued them; **export** in DiveJSON, UDDF, CSV or full-archive form;
-**invitations**, which exist only where the operator has closed registration (`REGISTRATION_MODE`,
-documented with the rest of the settings in `src/.env.example`) — a member sends and revokes their
-own, and the routes answer 404 on an open instance; and **admin**, the operator's own — the queue of
-people who have asked to be let in, and inviting or removing them in a batch — which is the one
-family gated on `is_superuser` rather than merely on having a token. All of those want a bearer
-token. The ones that don't are **contact**, the auth routes themselves, the two health checks —
-`/health` says the process is up, `/health/ready` says Postgres and Redis answered, and 503s when
-they didn't — `POST /invite-requests`, which is how somebody with no account asks a closed instance
-for an invitation, `GET /config`, which tells the web app whether registration is open before anyone
-has signed in, and `GET /species/{uuid}/photo`, which serves a public Commons image to an `<img>`
-tag that has no way to send a token. `tests/test_route_authentication.py` is the guard that keeps
-the *anonymous* half of that list honest — it compares the app's real route table against its own
-allowlist and holds the reason for each — but nothing checks this paragraph, so a new route family
-belongs here by hand.
+the **courses** that issued them; **export** in DiveJSON, UDDF, CSV or full-archive form and
+**import** back from either of the first and the last; **invitations**, which exist only where the
+operator has closed registration (`REGISTRATION_MODE`, documented with the rest of the settings in
+`src/.env.example`) — a member sends and revokes their own, and the routes answer 404 on an open
+instance; and **admin**, the operator's own — the queue of people who have asked to be let in, and
+inviting or removing them in a batch — which is the one family gated on `is_superuser` rather than
+merely on having a token. All of those want a bearer token. The ones that don't are **contact**, the
+auth routes themselves, the two health checks — `/health` says the process is up, `/health/ready`
+says Postgres and Redis answered, and 503s when they didn't — `POST /invite-requests`, which is how
+somebody with no account asks a closed instance for an invitation, `GET /config`, which tells the
+web app whether registration is open before anyone has signed in, and `GET /species/{uuid}/photo`,
+which serves a public Commons image to an `<img>` tag that has no way to send a token.
+`tests/test_route_authentication.py` is the guard that keeps the *anonymous* half of that list
+honest — it compares the app's real route table against its own allowlist and holds the reason for
+each — but nothing checks this paragraph, so a new route family belongs here by hand.
 
 A typical import flow:
 
@@ -208,6 +214,21 @@ curl -X PUT http://localhost:8000/api/v1/dive/{uuid}/file \
 
 # 3. The per-sample profile, served with an ETag
 curl http://localhost:8000/api/v1/dive/{uuid}/profile -H "Authorization: Bearer $TOKEN"
+```
+
+And a whole logbook, in and out:
+
+```bash
+# Out: one DiveJSON document, or a zip with the stored files beside it
+curl -OJ http://localhost:8000/api/v1/export/divejson -H "Authorization: Bearer $TOKEN"
+
+# Back in, in two phases. The preview writes nothing and reports what it would do;
+# the token it returns says which bytes that report was about.
+curl -X POST http://localhost:8000/api/v1/import/divejson/preview \
+  -H "Authorization: Bearer $TOKEN" -F "file=@logbook.divejson"
+
+curl -X POST http://localhost:8000/api/v1/import/divejson \
+  -H "Authorization: Bearer $TOKEN" -F "file=@logbook.divejson" -F "token=$PREVIEW_TOKEN"
 ```
 
 ## Development notes

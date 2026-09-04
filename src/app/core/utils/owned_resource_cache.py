@@ -110,7 +110,10 @@ class OwnedResourceCache[InternalT, PublicT]:
             TTL (seconds) for the list cache. The single-item cache has no expiration, matching
             the existing `trip_cache`/`dive_site_cache`/`dive_cache` behavior.
         """
-        self._resource_name = resource_name
+        # Public, unlike its siblings: `tests/test_cache_utils.py` reads it off the real
+        # dive-site and trip caches to check that `cache_invalidation`'s hard-coded names
+        # still name the resources it means to sweep.
+        self.resource_name = resource_name
         self._resource_label = resource_label
         self._crud = crud
         self._schema_to_select = schema_to_select
@@ -211,6 +214,20 @@ class OwnedResourceCache[InternalT, PublicT]:
 
         return self._to_public(db_item, owner_uuid)
 
+    @staticmethod
+    def list_cache_pattern(resource_name: str, user_id: int) -> str:
+        """The wildcard that sweeps one user's cached list pages for `resource_name`.
+
+        A `staticmethod` because there is a second caller that has no instance to ask:
+        `services/cache_invalidation.py` sweeps the dive-site and trip lists after a
+        logbook import, and those two caches are module-private to their routers - a
+        service importing a route module would invert the layering, and importing it
+        lazily to dodge that would be the same inversion with a delay in it. Sharing the
+        *shape* rather than the object is what keeps the two spellings from drifting;
+        `tests/test_cache_utils.py` pins that they agree.
+        """
+        return f"user_{user_id}_{resource_name}:*"
+
     async def invalidate_list(self, user_id: int) -> None:
         """Invalidates every cached list page for the given user, e.g. after a create/patch/delete."""
-        await delete_keys_by_pattern(f"user_{user_id}_{self._resource_name}:*")
+        await delete_keys_by_pattern(self.list_cache_pattern(self.resource_name, user_id))

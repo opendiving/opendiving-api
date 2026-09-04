@@ -267,7 +267,7 @@ class ParsedDiveSchema(_ParserOutput):
     @field_validator("surface_pressure_bar")
     @classmethod
     def _drop_implausible_surface_pressure(cls, value: float | None) -> float | None:
-        """Outside 0.5-1.2 bar this is a unit error or an absent-marker, not a reading.
+        """Outside 0.4-1.2 bar this is a unit error or an absent-marker, not a reading.
 
         The same band `ck_dive_surface_pressure_range` enforces, and deliberately the same
         numbers rather than a looser sanity check: the point is that no value can reach
@@ -275,6 +275,10 @@ class ParsedDiveSchema(_ParserOutput):
         rejected, on the `_drop_unpressurized` principle above - a file whose barometer
         reading is unusable is still a file worth storing, and the alternative is failing
         the attach of an otherwise perfectly importable export.
+
+        The floor moved from 0.5 to 0.4 with the constraint, for the reason recorded there:
+        ambient pressure at `ck_dive_altitude_range`'s own 6500 m ceiling is about 0.44 bar,
+        so the old floor refused a reading the altitude bound admits.
 
         Unattested in the corpus, unlike `_drop_unpressurized`: the 384 XML exports span
         1.031-1.067 bar and the 531 JSON readings 0.997-1.067, so not one of the 915 comes
@@ -285,7 +289,7 @@ class ParsedDiveSchema(_ParserOutput):
         in flight", advice that would be both wrong and unactionable: the retry it asks for
         fails identically every time.
         """
-        return None if value is not None and not (0.5 <= value <= 1.2) else value
+        return None if value is not None and not (0.4 <= value <= 1.2) else value
 
     @field_validator("entry_latitude", "exit_latitude")
     @classmethod

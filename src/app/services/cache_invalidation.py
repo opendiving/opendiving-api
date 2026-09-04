@@ -21,6 +21,7 @@ shapes themselves.
 """
 
 from ..core.utils.cache import delete_keys_by_pattern
+from ..core.utils.owned_resource_cache import OwnedResourceCache
 
 
 async def invalidate_dive_caches(user_id: int) -> None:
@@ -83,3 +84,25 @@ async def invalidate_gear_caches(user_id: int) -> None:
     `dive_count` (see `dives.py`).
     """
     await delete_keys_by_pattern(f"user_{user_id}_gear_*")
+
+
+# The two list caches that live *inside* their routers as `OwnedResourceCache` instances
+# (`api/v1/dive_sites.py::_dive_site_cache`, `api/v1/trips.py::_trip_cache`) rather than
+# behind a helper here, because until logbook import there was no writer outside those two
+# routers - each mutation route calls its own `invalidate_list` and that was the whole
+# story. An import fills both collections from a service, which has no business importing
+# a route module, so the key shape is shared instead of the object: these two go through
+# `OwnedResourceCache.list_cache_pattern`, the same function `invalidate_list` uses, and
+# `tests/test_cache_utils.py` checks the resource names still match the real caches'.
+#
+# Without them a restored logbook serves empty `/dive-sites` and `/trips` pages for up to
+# the 60-second list expiry - at exactly the moment the diver goes looking at what they
+# just restored.
+async def invalidate_dive_site_caches(user_id: int) -> None:
+    """Drop every cached dive-site list page for a user."""
+    await delete_keys_by_pattern(OwnedResourceCache.list_cache_pattern("dive_sites", user_id))
+
+
+async def invalidate_trip_caches(user_id: int) -> None:
+    """Drop every cached trip list page for a user."""
+    await delete_keys_by_pattern(OwnedResourceCache.list_cache_pattern("trips", user_id))

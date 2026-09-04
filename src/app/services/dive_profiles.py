@@ -695,6 +695,7 @@ async def store_profile(
     source_sha256: str,
     parser_key: str,
     commit: bool = False,
+    duration: int | None = None,
 ) -> None:
     """Replace this dive's profile with `profile`.
 
@@ -705,6 +706,15 @@ async def store_profile(
     The delete runs before the insert because `ux_dive_profile_dive_id` is checked per
     statement, so two rows for one dive must not coexist even momentarily - the same
     ordering, for the same reason, as `store_dive_file`.
+
+    `duration` overrides `NormalizedProfile.duration`, which is the largest sample time.
+    Only the logbook importer passes it, and only because a *document* can carry a span
+    larger than its own samples: DiveJSON §6.4 blesses a computer that stops sampling at
+    the surface while going on timing the dive, and that number is the denominator of this
+    app's own gas-coverage fraction. Extraction has no such case - the span is defined as
+    the samples' - so leaving it `None` is what every other caller wants. Never *smaller*
+    than the samples: the importer clamps before it gets here, because a duration that
+    fails to cover its own readings is incoherent.
     """
     depth_values = profile.depth.v if profile.depth else []
     ceiling_values = profile.ceiling.v if profile.ceiling else []
@@ -718,7 +728,7 @@ async def store_profile(
             source_sha256=source_sha256,
             parser_key=parser_key,
             extractor_version=PROFILE_EXTRACTOR_VERSION,
-            duration=profile.duration,
+            duration=profile.duration if duration is None else duration,
             depth_sample_count=profile.depth_sample_count,
             # A count rather than `None` when there are none: this extractor version looked
             # and found nothing, which is a different fact from an older one never having

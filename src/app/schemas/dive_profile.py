@@ -6,6 +6,11 @@ of readings the browser has no use for while filling in a form, and it would hav
 posted back to be stored - which would make the stored samples client-supplied and
 reopen the exact trust problem the parse token exists to close.
 
+That rule is about `/dive/parse` and is unchanged. **Logbook import is the one path that
+does store client-supplied samples**, because restoring a diver's own DiveJSON backup is
+exactly what it is for; `DECISIONS.md`, *"Importing a logbook is the one client-supplied
+profile"*, records why that is a different question from posting a parse back.
+
 One shape here is neither wire nor parser: `GasAttribution` is what a summary *column*
 holds. It lives here rather than in the service because it is read back out of JSONB and
 wants validating on the way in, which is what the models in this package are for.
