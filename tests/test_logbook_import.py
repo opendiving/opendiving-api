@@ -1086,6 +1086,110 @@ class TestDerivedState:
         assert imported.dive_count_at_service == source_record.dive_count_at_service
 
 
+class TestTwoRecordsClaimingOneIdentifier:
+    """A uuid used twice in one collection is two records, and the second is remapped.
+
+    Not conforming - §5.3 makes every uuid in a document unique and the reference corpus
+    carries an invalid fixture for it - which is exactly why it gets a reader's answer. The
+    failure it replaces is the one shape of loss this module has no other route to: the
+    records are accumulated into a dict keyed on the document's uuid, so without the remap
+    the second silently overwrote the first, and the first was never written, never counted
+    and never mentioned.
+    """
+
+    @pytest.mark.asyncio
+    async def test_both_records_arrive_and_the_counts_still_add_up(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        _, document = seeded
+        parsed = json.loads(document)
+        twin = dict(parsed["dives"][0])
+        twin["dive_number"] = 99
+        twin["started_at"] = "2027-06-01T09:00:00+00:00"
+        parsed["dives"].append(twin)
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        created, linked, restored, skipped = _counts(plan)["dives"]
+        assert created + linked + restored + skipped == len(parsed["dives"])
+        assert created == 2
+        assert ImportNoteCode.RECORD_REMAPPED in _codes(plan)
+        numbers = sorted(
+            (await async_db.execute(select(Dive.dive_number).where(Dive.user_id == destination.id))).scalars()
+        )
+        assert numbers == sorted([parsed["dives"][0]["dive_number"], 99])
+
+    @pytest.mark.asyncio
+    async def test_a_skippable_twin_does_not_take_the_good_record_with_it(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The worse variant: overwriting discarded a complete dive and reported one skip,
+        under the *bad* copy's reason."""
+        _, document = seeded
+        parsed = json.loads(document)
+        twin = dict(parsed["dives"][0])
+        del twin["started_at"]
+        parsed["dives"].append(twin)
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["dives"] == (1, 0, 0, 1)
+        assert len((await async_db.execute(select(Dive.id).where(Dive.user_id == destination.id))).scalars().all()) == 1
+
+
+class TestAServiceRecordOnAScheduleTheImportDidNotWrite:
+    """`recalculate_service_schedule` has to run for every schedule the import *touched*.
+
+    A record landing on a rule the caller already had moves that rule's dates exactly as one
+    landing on a rule this import created does - `api/v1/gear_service.py` recalculates on
+    every record create, update and delete for that reason. Collecting only the schedules
+    the import wrote left a linked one carrying a stale `last_service_on`, stale `next_due_*`
+    and stale notify state that would go on suppressing a reminder it had already earned.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_linked_schedules_due_dates_follow_the_imported_record(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        user, document = seeded
+        source_item = db.query(GearItem).filter(GearItem.user_id == user.id).one()
+        source_schedule = db.query(GearServiceSchedule).filter(GearServiceSchedule.user_id == user.id).one()
+        source_record = db.query(GearServiceRecord).filter(GearServiceRecord.user_id == user.id).one()
+        # The destination already owns the same gear item and the same rule - under its own
+        # identifiers, so both link through their user-scoped unique indexes rather than
+        # through the document's uuids - and has never had it serviced.
+        destination = create_user(db)
+        item = GearItem(user_id=destination.id, name=source_item.name, brand=source_item.brand, notes="")
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+        existing = GearServiceSchedule(
+            user_id=destination.id,
+            gear_item_id=item.id,
+            kind=source_schedule.kind,
+            starts_on=source_schedule.starts_on,
+            interval_months=source_schedule.interval_months,
+        )
+        db.add(existing)
+        db.commit()
+        db.refresh(existing)
+        assert existing.last_service_on is None
+
+        plan = await _apply(async_db, destination.id, document)
+
+        assert _counts(plan)["gear_service_schedules"] == (0, 1, 0, 0)
+        assert _counts(plan)["gear_service_records"] == (1, 0, 0, 0)
+        refreshed = (
+            (await async_db.execute(select(GearServiceSchedule).where(GearServiceSchedule.id == existing.id)))
+            .scalars()
+            .one()
+        )
+        assert refreshed.last_service_on == source_record.serviced_on
+        assert refreshed.next_due_on is not None
+
+
 class TestTheDiverIsNeverApplied:
     @pytest.mark.asyncio
     async def test_the_destination_keeps_its_own_identity_and_settings(

@@ -81,7 +81,6 @@ def signed_in(import_app: Any, monkeypatch: Any) -> Any:
             files_restored=0,
             files_not_contained=0,
             files_skipped=0,
-            unresolved_aphia_ids=[],
         )
 
     async def fake_write(db: Any, **kwargs: Any) -> None:

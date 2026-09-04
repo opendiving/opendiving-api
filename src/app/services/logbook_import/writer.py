@@ -92,6 +92,9 @@ class _Writer:
             for record in records.values()
             if record.row_id is not None
         }
+        # Every schedule whose due dates this import invalidated - the ones it wrote, and
+        # the ones it merely hung a new service record on. The second kind is what a
+        # "recalculate what I created" reading misses; see `_recalculate`.
         self._schedule_ids: list[int] = []
 
     # ------------------------------------------------------------------ helpers
@@ -245,7 +248,7 @@ class _Writer:
             if gear_item_id is None:
                 continue
             record.values["gear_item_id"] = gear_item_id
-            self._schedule_ids.append(await self._write_row("gear_service_schedules", GearServiceSchedule, record))
+            self._stale_schedule(await self._write_row("gear_service_schedules", GearServiceSchedule, record))
 
     async def _write_service_records(self) -> None:
         for record in self._plan.writable("gear_service_records"):
@@ -253,10 +256,17 @@ class _Writer:
             if gear_item_id is None:
                 continue
             record.values["gear_item_id"] = gear_item_id
-            record.values["gear_service_schedule_id"] = self._id(
-                "gear_service_schedules", record.children.get("schedule_uuid")
-            )
+            schedule_id = self._id("gear_service_schedules", record.children.get("schedule_uuid"))
+            record.values["gear_service_schedule_id"] = schedule_id
             await self._write_row("gear_service_records", GearServiceRecord, record)
+            # **Whether or not this import wrote that schedule.** A record attached to a rule
+            # the caller already had moves its due dates exactly as one attached to a rule
+            # this import created does, and `api/v1/gear_service.py` recalculates on every
+            # record create, update and delete for precisely that reason. Collecting only
+            # the schedules this import wrote left a linked one carrying a stale
+            # `last_service_on`, stale `next_due_*`, and stale notify state that would go on
+            # suppressing the reminder for a threshold it had already crossed.
+            self._stale_schedule(schedule_id)
 
     async def _write_certifications(self) -> None:
         for record in self._plan.writable("certifications"):
@@ -386,6 +396,11 @@ class _Writer:
             duration=planned_profile.duration,
         )
 
+    def _stale_schedule(self, schedule_id: int | None) -> None:
+        """Mark one schedule as needing its due dates recomputed. Deduped, order kept."""
+        if schedule_id is not None and schedule_id not in self._schedule_ids:
+            self._schedule_ids.append(schedule_id)
+
     async def _recalculate(self) -> None:
         """Every derived member, from what this import actually wrote.
 
@@ -393,7 +408,9 @@ class _Writer:
         the destination's view of the underlying records is the only thing that can make
         these true, and a restored account whose dashboard reads zero dives is what skipping
         them ships. The service schedules come last because each one's next due date is a
-        function of the service *records* this import just created.
+        function of the service *records* this import just created - and the set is every
+        schedule this import *touched*, which is not the same as every schedule it wrote: a
+        record landing on a rule the caller already had moves that rule's dates too.
         """
         await recalculate_dive_stats(self._db, user_id=self._user_id, commit=False)
         await recalculate_gear_dive_counts(self._db, user_id=self._user_id, commit=False)

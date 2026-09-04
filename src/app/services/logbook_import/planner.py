@@ -257,9 +257,6 @@ class ImportPlan:
     files_restored: int
     files_not_contained: int
     files_skipped: int
-    # AphiaIDs the document references that this instance's catalog does not hold. What the
-    # species pre-pass is handed; empty afterwards unless WoRMS could not be reached.
-    unresolved_aphia_ids: list[int]
 
     def collection_reports(self) -> list[ImportCollectionReport]:
         reports = []
@@ -421,7 +418,6 @@ class _Planner:
         self._files_restored = 0
         self._files_not_contained = 0
         self._files_skipped = 0
-        self._unresolved_aphia_ids: list[int] = []
         self._species_row_by_uuid: dict[uuid_pkg.UUID, int] = {}
         # Digests this account already stores, plus the ones this import is about to add.
         # `ux_dive_file_user_id_sha256` is per user, so a second dive carrying identical
@@ -437,6 +433,37 @@ class _Planner:
             self._notes_dropped += 1
             return
         self._notes.append(ImportNote(code=code, collection=collection, uuid=uuid, message=message))
+
+    def _claim_document_uuid(self, collection: str, record: Any) -> None:
+        """Make a record whose uuid another record of this collection already claimed its own.
+
+        Every collection is accumulated into a dict keyed on the document's uuid, so without
+        this the second of two records sharing one would **overwrite** the first: the first
+        never written, never counted, never noted. That is the one shape of loss this module
+        has no other route to - "nothing is fatal, everything is reported" is its invariant,
+        and a silent drop is neither of those - and the counts would stop summing to what the
+        document carries, which `ImportCollectionReport` promises they do.
+
+        A document like that is not conforming (§5.3 makes every uuid in a document unique,
+        and the reference corpus carries an invalid fixture for it), which is exactly why it
+        gets a reader's answer rather than a refusal: **two records claiming one uuid are two
+        records**, and the second is remapped. The first keeps the identity, so every
+        reference to it resolves where the document's own order says it should.
+
+        Mutating the parsed record is what keeps the ten planning functions from each having
+        to know about this; it is the reader's copy of the document and nothing else reads
+        it afterwards.
+        """
+        if record.uuid not in self._records[collection]:
+            return
+        self._note(
+            ImportNoteCode.RECORD_REMAPPED,
+            "Two records in this document claim the same identifier, so this one was imported under a new one. A "
+            "reference to that identifier reaches the first of them.",
+            collection=collection,
+            uuid=record.uuid,
+        )
+        record.uuid = uuid7()
 
     def _skip(self, collection: str, record_uuid: uuid_pkg.UUID, reason: str) -> PlannedRecord:
         self._note(ImportNoteCode.RECORD_SKIPPED, reason, collection=collection, uuid=record_uuid)
@@ -750,7 +777,6 @@ class _Planner:
             files_restored=self._files_restored,
             files_not_contained=self._files_not_contained,
             files_skipped=self._files_skipped,
-            unresolved_aphia_ids=self._unresolved_aphia_ids,
         )
 
     async def _plan_trips(self) -> None:
@@ -758,6 +784,7 @@ class _Planner:
         index = await self._existing_by_key(Trip, (Trip.name,), lambda row: _key(row[0]))
         aliases: dict[tuple[str, ...], uuid_pkg.UUID] = {}
         for trip in self._document.trips:
+            self._claim_document_uuid("trips", trip)
             self._records["trips"][trip.uuid] = self._plan_trip(trip, existing, index, aliases)
 
     def _plan_trip(
@@ -836,6 +863,7 @@ class _Planner:
     async def _plan_courses(self) -> None:
         existing = await self._rows_by_uuid(Course, [course.uuid for course in self._document.courses])
         for course in self._document.courses:
+            self._claim_document_uuid("courses", course)
             self._records["courses"][course.uuid] = self._plan_course(course, existing)
 
     def _plan_course(self, course: ImportCourse, existing: dict[uuid_pkg.UUID, _ExistingRow]) -> PlannedRecord:
@@ -892,6 +920,7 @@ class _Planner:
         )
         aliases: dict[tuple[str, ...], uuid_pkg.UUID] = {}
         for site in self._document.sites:
+            self._claim_document_uuid("sites", site)
             self._records["sites"][site.uuid] = self._plan_site(site, existing, index, aliases)
 
     def _plan_site(
@@ -939,6 +968,7 @@ class _Planner:
             catalog = {row[0]: row[1] for row in rows}
 
         for species in self._document.species:
+            self._claim_document_uuid("species", species)
             self._records["species"][species.uuid] = self._plan_one_species(species, catalog)
 
     def _plan_one_species(self, species: ImportSpecies, catalog: dict[int, int]) -> PlannedRecord:
@@ -955,7 +985,6 @@ class _Planner:
             action = Action.CREATE if species.aphia_id in self._newly_resolved else Action.LINK
             return PlannedRecord(action=action, source_uuid=species.uuid, uuid=species.uuid, row_id=row_id)
 
-        self._unresolved_aphia_ids.append(species.aphia_id)
         if self._resolution_ran:
             return self._skip(
                 "species",
@@ -980,6 +1009,7 @@ class _Planner:
         index = await self._existing_by_key(GearItem, (GearItem.brand, GearItem.name), lambda row: _key(row[0], row[1]))
         aliases: dict[tuple[str, ...], uuid_pkg.UUID] = {}
         for item in self._document.gear:
+            self._claim_document_uuid("gear", item)
             self._records["gear"][item.uuid] = self._plan_gear_item(item, existing, index, aliases)
 
     def _plan_gear_item(
@@ -1027,6 +1057,7 @@ class _Planner:
         index = await self._existing_by_key(GearSet, (GearSet.name,), lambda row: _key(row[0]))
         aliases: dict[tuple[str, ...], uuid_pkg.UUID] = {}
         for gear_set in self._document.gear_sets:
+            self._claim_document_uuid("gear_sets", gear_set)
             self._records["gear_sets"][gear_set.uuid] = self._plan_gear_set(gear_set, existing, index, aliases)
 
     def _plan_gear_set(
@@ -1074,6 +1105,7 @@ class _Planner:
         )
         aliases: dict[tuple[str, ...], uuid_pkg.UUID] = {}
         for schedule in self._document.gear_service_schedules:
+            self._claim_document_uuid("gear_service_schedules", schedule)
             self._records["gear_service_schedules"][schedule.uuid] = self._plan_schedule(
                 schedule, existing, index, aliases
             )
@@ -1165,6 +1197,7 @@ class _Planner:
             GearServiceRecord, [record.uuid for record in self._document.gear_service_records]
         )
         for service_record in self._document.gear_service_records:
+            self._claim_document_uuid("gear_service_records", service_record)
             self._records["gear_service_records"][service_record.uuid] = self._plan_service_record(
                 service_record, existing
             )
@@ -1218,6 +1251,7 @@ class _Planner:
             Certification, [certification.uuid for certification in self._document.certifications]
         )
         for certification in self._document.certifications:
+            self._claim_document_uuid("certifications", certification)
             self._records["certifications"][certification.uuid] = self._plan_certification(certification, existing)
 
     def _plan_certification(
@@ -1267,6 +1301,7 @@ class _Planner:
             (await self._db.execute(select(DiveFile.sha256).where(DiveFile.user_id == self._user_id))).scalars()
         )
         for dive in self._document.dives:
+            self._claim_document_uuid("dives", dive)
             self._records["dives"][dive.uuid] = self._plan_dive(dive, existing)
 
     def _plan_dive(self, dive: ImportDive, existing: dict[uuid_pkg.UUID, _ExistingRow]) -> PlannedRecord:
