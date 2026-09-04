@@ -397,8 +397,19 @@ class ImportNoteCode(StrEnum):
     # An existing row of the caller's already says this, so the import pointed at it
     # rather than creating a duplicate.
     RECORD_LINKED = "record_linked"
-    # The document's uuid belongs to another account on this instance, so the record was
-    # created under a fresh one and every reference to it remapped.
+    # The record was imported under an identifier other than the one the document gave it.
+    # **Two causes, and they differ in where a reference to the old identifier lands**, so
+    # a client that wants to say which must read `message` rather than infer it from the
+    # code:
+    #
+    # - The document's uuid belongs to another account on this instance. The record is
+    #   created under a fresh one and every reference to it follows.
+    # - Two records of one collection claim the same uuid (not conforming - spec §5.3).
+    #   The *second* is created under a fresh one, and references keep reaching the first.
+    #
+    # One code rather than two because a client renders both the same way - "this arrived
+    # under a different identifier" - and neither is an error. Splitting them is a live
+    # option if a client ever needs to branch on the reference behaviour.
     RECORD_REMAPPED = "record_remapped"
     # A soft-deleted row of the caller's came back, under its original uuid.
     RECORD_RESTORED = "record_restored"
