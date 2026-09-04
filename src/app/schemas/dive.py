@@ -677,10 +677,12 @@ class DiveRenumberResult(BaseModel):
 class DiveCreate(DiveBase):
     model_config = ConfigDict(extra="forbid")
 
-    # Narrowed back from `DiveBase`'s permissive spelling: this is the write side, and a
+    # Narrowed back from `DiveBase`'s permissive spelling: this is the create side, and a
     # caller creating a dive knows the offset it happened in (the browser reads its own
     # off `Date.getTimezoneOffset()`). Only the logbook importer, which does not come
-    # through here, may write a dive with no offset at all.
+    # through here, may write a dive with no offset at all. `DiveUpdate` is the write
+    # shape this narrowing deliberately does *not* reach - it may carry that state
+    # forward on a dive that already has it, never begin one.
     start_time: Annotated[DiveStartTime, Field(examples=[_START_TIME_EXAMPLE])]
     trip_uuid: Annotated[
         uuid_pkg.UUID | None, Field(default=None, description="Public id of the trip this dive belongs to")
