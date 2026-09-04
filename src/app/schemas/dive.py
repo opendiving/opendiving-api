@@ -15,20 +15,25 @@ from .gear_item import GearItemInfo
 _START_TIME_EXAMPLE = "2021-04-04T10:04:47.910+02:00"
 _LOCAL_START_TIME_EXAMPLE = "2021-04-04T10:04:47.910"
 
-# `start_time` carries an explicit UTC offset on every **write**: it's the offset the
-# caller (e.g. the web app, defaulting to the browser's own offset) knows the dive
-# happened in, and a naive datetime is rejected rather than silently assumed to be UTC or
-# local. Manual entry and the dive-computer parse path both know one, so nothing that
-# writes through these schemas ever has to guess.
+# `start_time` carries an explicit UTC offset wherever a dive is **created**: it's the
+# offset the caller (e.g. the web app, defaulting to the browser's own offset) knows the
+# dive happened in, and a naive datetime is rejected rather than silently assumed to be UTC
+# or local. Manual entry and the dive-computer parse path both know one, so nothing that
+# creates a dive through these schemas ever has to guess.
 DiveStartTime = Annotated[datetime, AfterValidator(require_utc_offset)]
 
-# The **read** counterpart, which has to serve what is stored rather than what the write
-# rule demands. A dive whose `utc_offset_minutes` is NULL records a wall clock with an
-# unknown instant (DiveJSON spec §5.2), and `combine_start_time` reconstructs it naive -
-# so a read schema carrying `DiveStartTime` would 500 on the very row the logbook importer
-# exists to be able to accept. No validator at all rather than a looser one: there is
-# nothing left to check once both spellings are legal, and the two names are what say
-# which side of the API a given field is on.
+# The permissive counterpart, which has to serve what is *stored* rather than what a create
+# demands. A dive whose `utc_offset_minutes` is NULL records a wall clock with an unknown
+# instant (DiveJSON spec §5.2), and `combine_start_time` reconstructs it naive - so a read
+# schema carrying `DiveStartTime` would 500 on the very row the logbook importer exists to
+# be able to accept. No validator at all rather than a looser one: there is nothing left to
+# check once both spellings are legal.
+#
+# It is on one **write** shape too, `DiveUpdate`, and that is not a read spelling leaking
+# across: an update may preserve an unknown offset but not remove one, and which case a
+# given body is depends on the dive being updated - something no schema can see.
+# `split_updated_start_time` holds that half of the rule, so the two names no longer say on
+# their own which side of the API a field is on.
 DiveLocalStartTime = datetime
 
 DEPTH_PAIR_MESSAGE = "avg_depth cannot be greater than max_depth"
@@ -723,13 +728,22 @@ class DiveUpdate(RejectsExplicitNulls):
     # `dive_number`, `start_time`, `duration` and `notes` map to `NOT NULL` columns (see
     # `models/dive.py`), so an explicit null is refused by `RejectsExplicitNulls` rather
     # than reaching the driver. `start_time` was the worst of them: `patch_dive`'s guard
-    # was `if values.start_time is not None`, so an explicit null skipped the
-    # `split_start_time` branch, still reached the database from `model_dump`, and left
-    # `utc_offset_minutes` describing the *previous* start time.
+    # was `if values.start_time is not None`, so an explicit null skipped the split-and-store
+    # branch, still reached the database from `model_dump`, and left `utc_offset_minutes`
+    # describing the *previous* start time.
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("dive_number", "start_time", "duration", "notes")
 
     dive_number: Annotated[int | None, Field(examples=[5], default=None)]
-    start_time: Annotated[DiveStartTime | None, Field(examples=[_START_TIME_EXAMPLE], default=None)]
+    # The permissive spelling, unlike `DiveCreate`'s. An update may **preserve** an unknown
+    # offset - an imported dive's wall clock stays editable, and the offsetless `started_at`
+    # this app exports for such a dive is a value it will take back - but it may not
+    # **remove** one, which `patch_dive` refuses through `split_updated_start_time`. Only
+    # the stored dive says which of the two a given body is, so the refusal cannot live
+    # here.
+    start_time: Annotated[
+        DiveLocalStartTime | None,
+        Field(examples=[_START_TIME_EXAMPLE, _LOCAL_START_TIME_EXAMPLE], default=None),
+    ]
     duration: Annotated[int | None, Field(examples=[2048], description="Dive duration in seconds", default=None)]
     max_depth: Annotated[float | None, Field(default=None)]
     avg_depth: Annotated[float | None, Field(default=None)]

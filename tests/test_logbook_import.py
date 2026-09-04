@@ -26,6 +26,7 @@ import uuid as uuid_pkg
 import zipfile
 from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -35,6 +36,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
+from src.app.api.v1 import dives as dives_module
+from src.app.core.exceptions.http_exceptions import UnprocessableEntityException
 from src.app.models.certification import Certification
 from src.app.models.course import Course
 from src.app.models.dive import Dive
@@ -53,6 +56,7 @@ from src.app.models.gear_set_item import GearSetItem
 from src.app.models.species import Species
 from src.app.models.trip import Trip
 from src.app.schemas.certification import CertificationAgency
+from src.app.schemas.dive import DiveUpdateRequest
 from src.app.schemas.logbook_import import ImportNoteCode
 from src.app.services.export import load_export_bundle, write_divejson
 from src.app.services.export.archive import DIVEJSON_NAME
@@ -98,6 +102,26 @@ async def _export(db: AsyncSession, user_id: int, *, archive_paths: bool = False
     exported_at = datetime.now(UTC)
     chunks = [chunk async for chunk in write_divejson(db, bundle, exported_at=exported_at, paths=paths)]
     return b"".join(chunks)
+
+
+async def _patch_start_time(
+    db: AsyncSession, monkeypatch: pytest.MonkeyPatch, owner: Any, dive_uuid: uuid_pkg.UUID, start_time: str
+) -> None:
+    """Drive the real `PATCH /dive/{uuid}` against a dive this module imported.
+
+    Only the two Redis invalidators are stubbed; the ownership fetch, the offset rule and
+    the UPDATE all run for real, because what these two tests claim is about the endpoint.
+    `test_dive_start_time.py` pins `split_updated_start_time` on its own.
+    """
+    for name in ("invalidate_dive_caches", "invalidate_gear_caches"):
+        monkeypatch.setattr(dives_module, name, AsyncMock())
+    await dives_module.patch_dive(
+        request=MagicMock(),
+        uuid=dive_uuid,
+        values=DiveUpdateRequest.model_validate({"start_time": start_time}),
+        current_user={"id": owner.id, "uuid": owner.uuid},
+        db=db,
+    )
 
 
 async def _preview(db: AsyncSession, user_id: int, data: bytes, filename: str = "logbook.divejson") -> Any:
@@ -797,6 +821,11 @@ class TestTheOffsetUnknownState:
     `utc_offset_minutes` and reads back offset-less - not converted, not stamped with
     anything. Round-tripped through the real writer, because the failure this pins is
     silent: a fabricated offset looks exactly like a real one.
+
+    Creating the state is still this endpoint's alone, and the last three tests are the
+    boundary of that: a dive that already has none keeps it through an edit of its own wall
+    clock, one that has an offset cannot be stripped of it, and a create still refuses an
+    offsetless value outright.
     """
 
     @pytest.mark.asyncio
@@ -847,8 +876,10 @@ class TestTheOffsetUnknownState:
         assert entry["first_seen"].hour == 23
 
     @pytest.mark.asyncio
-    async def test_the_write_api_still_demands_an_offset(self) -> None:
-        """The requirement became a write-side rule, not a deleted one."""
+    async def test_the_write_api_still_demands_an_offset_to_create_a_dive(self) -> None:
+        """The requirement became a write-side rule, not a deleted one - and creating is
+        still the half where it is absolute, which is what keeps import the only origin of
+        the state."""
         from pydantic import ValidationError
 
         from src.app.schemas.dive import DiveCreate, DiveRead
@@ -857,6 +888,50 @@ class TestTheOffsetUnknownState:
             DiveCreate(dive_number=1, start_time=datetime(2026, 4, 17, 11, 49), duration=60)
         # And the read shape serves what is stored.
         assert DiveRead.model_fields["start_time"].annotation is datetime
+
+    @pytest.mark.asyncio
+    async def test_the_write_api_takes_back_the_offsetless_value_it_exported(
+        self, seeded: Any, db: Session, async_db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The round trip does not close at the export: a value this app writes into its
+        own document has to be one its own dive-write API accepts, or the
+        reference-implementation claim is only true one way. So `PATCH /dive/{uuid}` takes
+        the offsetless `started_at` back, leaves the offset NULL, and the re-export still
+        carries the corrected wall clock with no offset on it.
+        """
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["started_at"] = "2026-04-17T11:49:23"
+        destination = create_user(db)
+        await _apply(async_db, destination.id, json.dumps(parsed).encode())
+        stored = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+
+        await _patch_start_time(async_db, monkeypatch, destination, stored.uuid, "2026-04-17T12:15:00")
+
+        await async_db.refresh(stored)
+        assert stored.utc_offset_minutes is None
+        assert stored.start_time.replace(tzinfo=None) == datetime(2026, 4, 17, 12, 15, 0)
+        re_exported = parse_document(await _export(async_db, destination.id))
+        assert re_exported["dives"][0]["started_at"] == "2026-04-17T12:15:00"
+
+    @pytest.mark.asyncio
+    async def test_an_update_may_not_take_the_offset_off_a_dive_that_has_one(
+        self, seeded: Any, db: Session, async_db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The other half of the asymmetry, and the reason it is one: were an edit allowed
+        to drop an offset, editing would be a second way to bring the unknown state into
+        existence and this endpoint would stop being its only origin."""
+        _, document = seeded
+        destination = create_user(db)
+        await _apply(async_db, destination.id, document)
+        stored = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        assert stored.utc_offset_minutes is not None
+
+        with pytest.raises(UnprocessableEntityException, match="already unknown"):
+            await _patch_start_time(async_db, monkeypatch, destination, stored.uuid, "2026-04-17T12:15:00")
+
+        await async_db.refresh(stored)
+        assert stored.utc_offset_minutes is not None
 
 
 class TestTheReaderRefusesOnlyWhatItMust:
