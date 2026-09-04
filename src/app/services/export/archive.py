@@ -205,9 +205,9 @@ async def _write_blobs(
     """Every stored binary, one row at a time.
 
     A file that has vanished between the metadata read and this loop is skipped rather
-    than failing the export: losing a member beats losing the archive. `logbook.divejson`
-    still
-    names it, which is the honest record of what was there when the export began.
+    than failing the export: losing a member beats losing the archive.
+    `logbook.divejson` still names it, which is the honest record of what was there when
+    the export began.
 
     Two ways to vanish now, and both are skipped on the same terms. A missing *row* is a
     concurrent delete from another session. A missing *file* - `BlobMissingError` - is data

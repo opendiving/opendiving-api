@@ -14295,6 +14295,17 @@ untouched and cost nothing today. It was rejected because the cost is permanent:
 speak two profile vocabularies on two surfaces, forever, and every future profile change would have
 to be made twice. A rename is paid once, and there is nowhere this is deployed.
 
+**The web half is a separate, sequenced change, and nothing automated will tell you it is missing.**
+`GET /dive/{uuid}/profile` and the `profile`/`gas_use` members of `GET /dive/{uuid}` change shape
+here, and `opendiving-web` reads all six renamed members — its `DiveProfile`, `DiveProfileSeries`,
+`DiveProfileEvent`, `DiveProfileInfo` and `DiveGasUse` types, the profile chart's x domain and every
+`.t` it plots, and `gasAttributionNote`'s coverage fraction. No CI job runs the two repos together
+(`CONTRIBUTING.md`, *Changes that span both repos*), so between this merging and the web change
+merging the chart and the gas-use card render nothing, with both suites green. That is the accepted
+shape of every breaking API change here — api first, web second, the two PRs linked — and it is
+written down because the failure is silent in both directions: a reviewer looking only at this repo
+cannot see it, and a reviewer looking only at web sees a client that matches nothing.
+
 **It reaches storage.** `dive_profile.duration_seconds` is now `dive_profile.duration` (revision
 `b1c7f0e4a2d9`, an `ALTER TABLE ... RENAME COLUMN` — autogenerate renders a rename as a drop plus an
 add, which would have emptied a column nobody can re-derive without the original dive-computer
