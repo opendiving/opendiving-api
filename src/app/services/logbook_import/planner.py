@@ -531,6 +531,8 @@ class _Planner:
         aliases: dict[tuple[str, ...], uuid_pkg.UUID],
         key: tuple[str, ...],
         label: str,
+        *,
+        index_key: tuple[str, ...] | None,
     ) -> PlannedRecord:
         """Turn a would-be duplicate into a link rather than an `IntegrityError`.
 
@@ -540,8 +542,17 @@ class _Planner:
         halves matter: `index` is what the caller already had, `aliases` is what earlier
         records of this same document already claimed - two sites named "Blue Hole" under
         different uuids are one site, and the second reference has to reach the first's row.
+
+        **The two halves take separate keys, and one collection needs them to differ.** A
+        service schedule's index is keyed on `gear_item_id`, which does not exist yet for a
+        gear item this import is creating - so `index_key` is `None` there and the
+        existing-row half is skipped, while `key` stays the document's own identity and the
+        alias half runs regardless. Skipping *both* together is what let two schedules of one
+        document collide on `ux_gear_service_schedule_item_kind_label` and take the whole
+        import down with an `IntegrityError`. It is keyword-only and has no default for that
+        reason: every caller has to say which key its index is on.
         """
-        row_id = index.get(key)
+        row_id = None if index_key is None else index.get(index_key)
         if row_id is not None:
             self._note(
                 ImportNoteCode.RECORD_LINKED,
@@ -760,7 +771,8 @@ class _Planner:
             return self._skip("trips", trip.uuid, "A trip needs both a name and a start date, and this one does not.")
         record = self._resolve("trips", trip.uuid, existing)
         if record.action is Action.CREATE:
-            record = self._claim_unique("trips", record, index, aliases, _key(trip.name), "trip")
+            trip_key = _key(trip.name)
+            record = self._claim_unique("trips", record, index, aliases, trip_key, "trip", index_key=trip_key)
         if record.action not in (Action.CREATE, Action.RESTORE):
             return record
 
@@ -893,7 +905,8 @@ class _Planner:
             return self._skip("sites", site.uuid, "A dive site needs a name, and this one has none.")
         record = self._resolve("sites", site.uuid, existing)
         if record.action is Action.CREATE:
-            record = self._claim_unique("sites", record, index, aliases, _key(site.name, site.location), "dive site")
+            site_key = _key(site.name, site.location)
+            record = self._claim_unique("sites", record, index, aliases, site_key, "dive site", index_key=site_key)
         if record.action not in (Action.CREATE, Action.RESTORE):
             return record
 
@@ -980,7 +993,8 @@ class _Planner:
             return self._skip("gear", item.uuid, "A gear item needs a name, and this one has none.")
         record = self._resolve("gear", item.uuid, existing)
         if record.action is Action.CREATE:
-            record = self._claim_unique("gear", record, index, aliases, _key(item.brand, item.name), "gear item")
+            item_key = _key(item.brand, item.name)
+            record = self._claim_unique("gear", record, index, aliases, item_key, "gear item", index_key=item_key)
         if record.action not in (Action.CREATE, Action.RESTORE):
             return record
 
@@ -1026,7 +1040,8 @@ class _Planner:
             return self._skip("gear_sets", gear_set.uuid, "A gear set needs a name, and this one has none.")
         record = self._resolve("gear_sets", gear_set.uuid, existing)
         if record.action is Action.CREATE:
-            record = self._claim_unique("gear_sets", record, index, aliases, _key(gear_set.name), "gear set")
+            set_key = _key(gear_set.name)
+            record = self._claim_unique("gear_sets", record, index, aliases, set_key, "gear set", index_key=set_key)
         if record.action not in (Action.CREATE, Action.RESTORE):
             return record
 
@@ -1095,14 +1110,20 @@ class _Planner:
 
         record = self._resolve(collection, schedule.uuid, existing)
         gear_record = self._records["gear"][gear_uuid]
-        if record.action is Action.CREATE and gear_record.row_id is not None:
+        if record.action is Action.CREATE:
+            # The alias half is keyed on the *document's* gear identity, which every gear
+            # record has; the index half on the gear row's id, which one being created does
+            # not have yet - and cannot collide with anything anyway, because there are no
+            # existing schedules under a gear item that does not exist.
+            rule = _key(schedule.type.value, schedule.label)
             record = self._claim_unique(
                 collection,
                 record,
                 index,
                 aliases,
-                (str(gear_record.row_id), *_key(schedule.type.value, schedule.label)),
+                (str(gear_uuid), *rule),
                 "service schedule",
+                index_key=None if gear_record.row_id is None else (str(gear_record.row_id), *rule),
             )
         if record.action not in (Action.CREATE, Action.RESTORE):
             return record
@@ -1353,6 +1374,12 @@ class _Planner:
         for species_uuid in dive.species_uuids:
             record = self._records["species"].get(species_uuid)
             row_id = self._species_row_by_uuid.get(species_uuid)
+            if record is not None and record.action is not Action.SKIP and row_id is None:
+                # Preview, and this species is one the pre-pass has not looked up yet. The
+                # species collection's own note already says it will be, and saying "the
+                # sighting was not imported" here would contradict that in the same report -
+                # while every dive naming a new species spent a note against the cap.
+                continue
             if record is None or record.action is Action.SKIP or row_id is None:
                 self._note(
                     ImportNoteCode.SPECIES_UNRESOLVED,

@@ -44,11 +44,13 @@ from src.app.models.dive_gear_item import DiveGearItem
 from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_site import DiveSite
+from src.app.models.dive_species import DiveSpecies
 from src.app.models.gear_item import GearItem
 from src.app.models.gear_service_record import GearServiceRecord
 from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.gear_set import GearSet
 from src.app.models.gear_set_item import GearSetItem
+from src.app.models.species import Species
 from src.app.models.trip import Trip
 from src.app.schemas.certification import CertificationAgency
 from src.app.schemas.logbook_import import ImportNoteCode
@@ -75,6 +77,7 @@ from tests.helpers.generators import (
     create_gear_service_record,
     create_gear_service_schedule,
     create_gear_set,
+    create_species,
     create_trip,
     create_user,
 )
@@ -145,6 +148,7 @@ def _seed_logbook(db: Session) -> Any:
     schedule = create_gear_service_schedule(db, user, item)
     create_gear_service_record(db, user, item, schedule=schedule)
     create_certification(db, user, course=course)
+    species = create_species(db)
     dive = create_dive(db, user, trip=trip, course=course)
     db.add(DiveMixture(dive_id=dive.id, volume=12.0, oxygen=32.0, helium=0.0, start_pressure=200.0, end_pressure=60.0))
     db.commit()
@@ -154,6 +158,7 @@ def _seed_logbook(db: Session) -> Any:
             DiveDiveSite(dive_id=dive.id, dive_site_id=site_a.id, position=0),
             DiveDiveSite(dive_id=dive.id, dive_site_id=site_b.id, position=1),
             DiveGearItem(dive_id=dive.id, gear_item_id=item.id, position=0),
+            DiveSpecies(dive_id=dive.id, species_id=species.id, position=0),
             GearSetItem(gear_set_id=gear_set.id, gear_item_id=item.id, position=0),
         ]
     )
@@ -603,6 +608,140 @@ class TestProfiles:
         )
 
 
+class TestSpeciesLinks:
+    """The catalog is global and ownerless, so a sighting is the one reference an import can
+    lose without losing the dive - and the one whose *preview* has to say something the
+    apply will agree with."""
+
+    @pytest.mark.asyncio
+    async def test_a_species_already_in_the_catalog_links_by_aphia_id(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """Never by uuid: a uuid means nothing across instances, an AphiaID names the same
+        animal everywhere (spec §6.11). The destination gets the *catalog's* row, whatever
+        uuid the document called it."""
+        _, document = seeded
+        parsed = json.loads(document)
+        aphia_id = parsed["species"][0]["aphia_id"]
+        parsed["species"][0]["uuid"] = str(uuid7())
+        parsed["dives"][0]["species_uuids"] = [parsed["species"][0]["uuid"]]
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["species"] == (0, 1, 0, 0)
+        catalog_id = (await async_db.execute(select(Species.id).where(Species.aphia_id == aphia_id))).scalars().one()
+        dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        linked = set(
+            (await async_db.execute(select(DiveSpecies.species_id).where(DiveSpecies.dive_id == dive.id))).scalars()
+        )
+        assert linked == {catalog_id}
+
+    @pytest.mark.asyncio
+    async def test_a_preview_does_not_claim_a_pending_lookup_was_dropped(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The preview counts an unknown AphiaID as one it *will* look up. A per-dive note
+        saying the sighting "was not imported" would contradict that in the same report -
+        and would spend one note per dive against the cap for a logbook full of new
+        species."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["species"][0]["aphia_id"] = 900_000_000 + int(uuid7().hex[-6:], 16)
+        destination = create_user(db)
+
+        plan = await _preview(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["species"] == (1, 0, 0, 0)
+        assert not [
+            note for note in plan.notes if note.collection == "dives" and note.code is ImportNoteCode.SPECIES_UNRESOLVED
+        ]
+
+    @pytest.mark.asyncio
+    async def test_an_unresolvable_species_drops_the_sighting_and_keeps_the_dive(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The apply's answer, where the lookup really has run and come back empty."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["species"][0]["aphia_id"] = 900_000_000 + int(uuid7().hex[-6:], 16)
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["dives"] == (1, 0, 0, 0)
+        assert _counts(plan)["species"] == (0, 0, 0, 1)
+        assert ImportNoteCode.SPECIES_UNRESOLVED in _codes(plan)
+        dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        assert (
+            not (await async_db.execute(select(DiveSpecies.species_id).where(DiveSpecies.dive_id == dive.id)))
+            .scalars()
+            .all()
+        )
+
+
+class TestTwoSchedulesOnOneNewGearItem:
+    """The uniqueness case the existing-row lookup cannot see.
+
+    `ux_gear_service_schedule_item_kind_label` is keyed on `gear_item_id`, which a gear item
+    this import is *creating* does not have yet - so the existing-row half of the dedupe has
+    nothing to look in. Skipping the within-document half along with it let two schedules of
+    one document reach the same index and take the whole import down with an
+    `IntegrityError`.
+    """
+
+    @pytest.mark.asyncio
+    async def test_two_identical_schedules_become_one_row(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        _, document = seeded
+        parsed = json.loads(document)
+        twin = dict(parsed["gear_service_schedules"][0])
+        twin["uuid"] = str(uuid7())
+        parsed["gear_service_schedules"].append(twin)
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        created, linked, _, _ = _counts(plan)["gear_service_schedules"]
+        assert (created, linked) == (1, 1)
+        assert (
+            len(
+                (
+                    await async_db.execute(
+                        select(GearServiceSchedule.id).where(GearServiceSchedule.user_id == destination.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            == 1
+        )
+
+    @pytest.mark.asyncio
+    async def test_two_duplicate_gear_items_collapsing_take_their_schedules_with_them(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The second shape: the gear items collapse through the alias branch, so two
+        schedules that named different gear uuids end up under one row."""
+        _, document = seeded
+        parsed = json.loads(document)
+        gear_twin = dict(parsed["gear"][0])
+        gear_twin["uuid"] = str(uuid7())
+        parsed["gear"].append(gear_twin)
+        schedule_twin = dict(parsed["gear_service_schedules"][0])
+        schedule_twin["uuid"] = str(uuid7())
+        schedule_twin["gear_uuid"] = gear_twin["uuid"]
+        parsed["gear_service_schedules"].append(schedule_twin)
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["gear"] == (1, 1, 0, 0)
+        created, linked, _, _ = _counts(plan)["gear_service_schedules"]
+        assert (created, linked) == (1, 1)
+
+
 class TestTheOffsetUnknownState:
     """The one state only this endpoint can create, and the one no other suite covers.
 
@@ -650,8 +789,14 @@ class TestTheOffsetUnknownState:
         activity = await dive_activity(async_db, destination.id)
 
         assert [(point.year, point.month, point.day) for point in activity] == [(2026, 4, 17)]
+        # The life list is the sharper of the two: it aggregates the offset column through
+        # `array_agg(..., type_=ARRAY(Integer))[1]`, so it needs a real sighting on a real
+        # offset-less dive to exercise the NULL at all - and `_seed_logbook` gives it one.
         life_list = await species_life_list(async_db, user_id=destination.id, offset=0, limit=10)
-        assert life_list["total_count"] == 0
+        assert life_list["total_count"] == 1
+        entry = life_list["data"][0]
+        assert entry["first_seen"].utcoffset() is None
+        assert entry["first_seen"].hour == 23
 
     @pytest.mark.asyncio
     async def test_the_write_api_still_demands_an_offset(self) -> None:
