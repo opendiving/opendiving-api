@@ -14442,6 +14442,12 @@ Four branches, and every caller-owned collection takes the same four. Given the 
   the document consistently. A cross-account copy on one instance gets its own identity, and the
   other diver's row is untouched and unreadable throughout.
 
+A fifth remap exists and is not one of these four: two records of one collection claiming a single
+uuid, decided in `_claim_document_uuid` before any of this runs. It is a property of the *document*
+rather than of the instance, and it moves references the opposite way — which is why it has a note
+code of its own. See *The two remaps are two codes, because they differ in what happened to other
+records* below.
+
 The consequence worth stating: **idempotence is impossible on the remap branch**, by construction.
 `dive` has no unique constraint, so the remapped rows carry the only key that could have matched,
 and a second import creates a second copy. The preview is the honest guard — it reports the full
@@ -14879,3 +14885,41 @@ capped at a year, which is far past saturation diving, **and** the column widene
 The ceiling makes the overflow implausible; the width makes it impossible. That column is the only
 counter on its table that is a sum of caller-supplied values rather than a count of rows, which is
 why it is the only one that widened.
+
+## The two remaps are two codes, because they differ in what happened to other records
+
+`ImportNoteCode` carried one `record_remapped`, emitted from both places a record can arrive under
+an identifier the document did not give it. The two are opposite in the half a client cares about:
+
+- **The identifier already belongs to another account here** (`_resolve`). The record is created
+  under a fresh uuid and *every* reference to the document's uuid is rewritten to follow it, which
+  is what keeps the copy internally consistent.
+- **Two records of one collection claim it** (`_claim_document_uuid`; §5.3 makes every uuid in a
+  document unique, so this one is not conforming). The second is created under a fresh uuid and
+  nothing is rewritten, so references to that identifier stay on the **first** of the two.
+
+One code could name what happened to the record and not what happened to everything pointing at it,
+and the second is the part a diver needs: "imported under a new identifier" is not an answer to "did
+my dive keep its trip". The note's `message` said which; the code did not, so a client wanting to
+*behave* differently by cause had to parse a sentence — exactly what the code exists to save it
+from, being "what a UI sorts on" per the enum's own docstring.
+
+So the two names carry the reference behaviour rather than the cause:
+`record_remapped_references_follow` and `record_remapped_references_stay`. A cause-named pair would
+have read as well inside the enum and worse outside it, where a client meets one value on its own
+and has to already know which branch that cause implies.
+
+Rejected: keeping one code and having clients branch on `message`, which puts a machine-readable
+distinction where only a human can read it and freezes the sentences into the API. Rejected too:
+keeping `record_remapped` for the cross-account cause and adding a member for the duplicate one,
+which avoids the breaking change and is worse — the surviving name is the one that already failed to
+say which remap it meant, and the asymmetry reads as a main case with an exception where there are
+two peers. Breaking `ImportNoteCode` is free while the import endpoints are on `main` with nothing
+consuming them.
+
+**Each cause is pinned by the other's absence**, which is what makes a test about *which* code came
+out rather than merely that a note did. A cross-account import of a clean document emits
+`..._follow` and must not emit `..._stay`. A duplicate identifier imported into the account that
+already owns the identifiers takes the link branch everywhere else, leaving `..._stay` the only
+remap in the report. The cross-account import of a document that *also* duplicates an identifier
+emits both — correct, and pinning neither.

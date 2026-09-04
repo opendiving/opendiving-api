@@ -457,7 +457,7 @@ class _Planner:
         if record.uuid not in self._records[collection]:
             return
         self._note(
-            ImportNoteCode.RECORD_REMAPPED,
+            ImportNoteCode.RECORD_REMAPPED_REFERENCES_STAY,
             "Two records in this document claim the same identifier, so this one was imported under a new one. A "
             "reference to that identifier reaches the first of them.",
             collection=collection,
@@ -527,7 +527,7 @@ class _Planner:
             # consistent. Idempotence is impossible on this branch by construction - see
             # `DECISIONS.md` - and the preview saying so is the honest guard.
             self._note(
-                ImportNoteCode.RECORD_REMAPPED,
+                ImportNoteCode.RECORD_REMAPPED_REFERENCES_FOLLOW,
                 "That identifier already belongs to another account here, so this record was imported under a new "
                 "one. Every reference to it was updated to match.",
                 collection=collection,

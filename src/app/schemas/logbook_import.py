@@ -397,20 +397,18 @@ class ImportNoteCode(StrEnum):
     # An existing row of the caller's already says this, so the import pointed at it
     # rather than creating a duplicate.
     RECORD_LINKED = "record_linked"
-    # The record was imported under an identifier other than the one the document gave it.
-    # **Two causes, and they differ in where a reference to the old identifier lands**, so
-    # a client that wants to say which must read `message` rather than infer it from the
-    # code:
+    # The two remap codes say the same thing about *this* record - it was imported under an
+    # identifier other than the one the document gave it, and neither is an error. They
+    # differ in what happened to every **other** record's reference to that identifier, and
+    # the name carries that rather than the sentence alone, so a client can branch on it.
     #
-    # - The document's uuid belongs to another account on this instance. The record is
-    #   created under a fresh one and every reference to it follows.
-    # - Two records of one collection claim the same uuid (not conforming - spec §5.3).
-    #   The *second* is created under a fresh one, and references keep reaching the first.
-    #
-    # One code rather than two because a client renders both the same way - "this arrived
-    # under a different identifier" - and neither is an error. Splitting them is a live
-    # option if a client ever needs to branch on the reference behaviour.
-    RECORD_REMAPPED = "record_remapped"
+    # The document's uuid belongs to another account on this instance. The record is created
+    # under a fresh one and every reference to it is rewritten to follow it.
+    RECORD_REMAPPED_REFERENCES_FOLLOW = "record_remapped_references_follow"
+    # Two records of one collection claim the same uuid (not conforming - spec §5.3). The
+    # *second* is created under a fresh one and nothing is rewritten, so references to that
+    # identifier stay where the document put them: on the first of the two.
+    RECORD_REMAPPED_REFERENCES_STAY = "record_remapped_references_stay"
     # A soft-deleted row of the caller's came back, under its original uuid.
     RECORD_RESTORED = "record_restored"
     # The record imported, but one of its values could not be stored as written.
