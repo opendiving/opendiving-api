@@ -14806,12 +14806,14 @@ looking at what they just restored.
 
 ## The `diver` member is read, reported, and never applied
 
-A DiveJSON document carries its owner — name, username, email, `created_at`, and this producer's two
-account preferences (`units`, `gear_service_emails`) under its extension key. None of it is applied,
-and the preview says so in as many words. Import's contract is the logbook; flipping a live
-account's notification or unit preference as a side effect of a restore is a worse surprise than
-asking a migrant to set two toggles once. The `created_at`-imports-from-the-document rule governs
-logbook records and does not reach a member that never imports at all.
+A DiveJSON document carries its owner — name, username, email, `created_at`, and this producer's
+account preferences (`units`, `gear_service_emails`, `dive_form_hidden_fields` and
+`dive_form_presets`) under its extension key. None of it is applied, and the preview says so in as
+many words. Import's contract is the logbook; flipping a live account's notification or unit
+preference as a side effect of a restore is a worse surprise than asking a migrant to set a couple
+of toggles once, and rearranging the dive form they have been using is a stranger one still. The
+`created_at`-imports-from-the-document rule governs logbook records and does not reach a member that
+never imports at all.
 
 The archive's `avatar.webp` is the same decision's blob-shaped half and is likewise not restored:
 the importing account has its own identity.
@@ -15122,3 +15124,190 @@ The same sentence appears in several places across the format's own repositories
 reworded in all of them; this file is the copy that lives here, and it is reworded here because a
 provenance note that summarises a stale promise is a stale note. Anyone re-fetching the schema
 should carry the wording forward from upstream rather than from this paragraph.
+
+## The dive form's field vocabulary lives in the API, and is mirrored with a two-sided guard
+
+A diver may hide dive-form fields they never fill in. What is hidden is stored server-side, and the
+names of the fields are a `DiveFormField` `StrEnum` in `schemas/dive_form_preset.py` —
+`hidden_fields` on a preset and `user.dive_form_hidden_fields` are both `list[DiveFormField]`, so an
+unknown name is a 422 rather than a string stored unchecked.
+
+The rejected alternative was opaque strings the API stores without looking. It costs nothing to add
+a field, which is its appeal — no lockstep change across two repos — and it fails in the one way
+that never surfaces: a typo or a renamed key un-hides a field in every stored preset silently, and
+nobody finds out from an error, only from a form that stopped looking the way it did. It also leaves
+the seed untypeable, since the three default sets are written by hand.
+
+The vocabulary being the API's does not make this UI knowledge in the wrong repo. The values are the
+dive resource's *own* optional fields, which is a fact about the API and not about any client — and
+that is exactly what the guard asserts. **Two tests, one per repo, no cross-repo test.** The api
+half (`tests/test_dive_form_presets.py::TestTheVocabularyNamesRealFields`) checks a **subset**:
+every enum value names a field of `DiveCreateRequest`, or with the `mixture.` prefix of
+`DiveMixtureCreate`, that is not required there. The web half checks an **equality**: its registry
+equals its form schema's optional keys exactly. The asymmetry is deliberate and is the interesting
+part — API-optional is wider than form-optional (`oxygen` and `helium` default on the wire and are
+required in the form, `gas_number` has no input at all), so an equality check on this side would
+fail against fields that have no business being hideable, while a subset check on the web side would
+let a new optional input go unregistered. Between them the mirror is pinned from both ends.
+
+**The `mixture.` prefix, not react-hook-form's `mixtures.${index}.po2_limit`.** A key names a field
+of *every* cylinder, not of one; hiding `mixture.role` hides that input on every tank card. Note the
+singular/plural pair is load-bearing: `mixtures` is a top-level key that hides the whole section.
+
+**These values are stored data.** A preset row and a user's current state name them, so renaming a
+member is a data migration over two columns rather than a rename.
+
+**What is stored is the hidden set, never the visible set.** A field the form gains later is visible
+under every existing preset until somebody hides it, which is the right default for a new optional
+input — and it is what lets "Technical" be the empty list rather than a list that goes stale on the
+next field added.
+
+## `hidden_fields` is canonical on write, so two equal sets are two equal lists
+
+Every write — a preset's `hidden_fields`, and `user.dive_form_hidden_fields` on `PATCH /user` — is
+rewritten into `DiveFormField` declaration order with duplicates collapsed. A caller may send any
+order.
+
+This is for the client, and it is worth stating because it looks like tidiness. The panel marks the
+preset whose hidden set equals the account's current state; with a canonical form that is one loop
+over two lists, and without it every client has to build sets on both sides before comparing — in
+every client, forever, and wrongly in the one that forgets. The single definition is
+`canonical_hidden_fields`, used by both schemas, so the two write paths cannot drift.
+
+The list cap is `max_length=len(DiveFormField)` and sits on the *input* list, deliberately before
+duplicates collapse: a body padded with repeats is a 422 rather than a large list that canonicalizes
+down to something small. Nothing legitimate sends more entries than the vocabulary has members.
+
+## Dive form presets are seeded at registration, not lazily
+
+Every account gets three presets — Basic, Recreational, Technical — as **ordinary rows**, created in
+`complete_profile`'s own transaction (`api/v1/auth.py`). Nothing downstream special-cases them: a
+diver edits, renames or deletes any of the three exactly as they would one they saved. The invariant
+is that a registration either creates the account with its three presets or creates nothing.
+
+`complete_profile` is the one place *self-service registration* makes a `User` row (see *"Unified
+auth flow"*), which is what makes eager seeding tractable. The two other writers are not
+registration — the admin panel's generic insert, off by default and slated for retirement, and
+`scripts/create_first_superuser.py`, which is excluded from the shipped image — and an account made
+either way reaches the same three through `POST /dive-form-presets/defaults`.
+
+Rejected: lazy seeding on the first `GET /dive-form-presets` behind a `seeded` flag on the user. It
+covers every writer, which is its whole appeal, and it costs a GET that writes and a column on the
+hottest row in the app — to serve two paths that make no real accounts. Also rejected: the web
+seeding from its own constant on first visit, which would give the vocabulary two owners and put the
+default sets in the repo that does not validate them.
+
+**Restore adds what is missing, by name, and never overwrites.** For each default whose name
+(case-insensitively) no current preset carries, create it. A default the diver edited keeps the
+edit; a default they renamed stays under its new name and the original comes back beside it. That
+makes the endpoint idempotent, so a client may offer it whenever the diver asks and a double-click
+is not a unique-index violation. Matching on name rather than on the hidden set is what makes "keeps
+the edit" possible at all — a set-based match would stop recognising a default the moment it was
+edited, and restore would then create a duplicate.
+
+One helper serves both callers (`services/dive_form_presets.py::seed_default_presets`), so the
+account a diver registers today and the account they press "Restore default presets" on tomorrow get
+the same three things.
+
+## The revision that backfills presets carries its own frozen copy of them
+
+Accounts that existed before this feature never went through the registration seed, so the revision
+does for them what `POST /auth/complete` does for everyone after it. Without it, a self-hoster's own
+account is the one account on the instance whose Fields panel has nothing to apply.
+
+The three default sets are **copied into the revision, not imported** from
+`services/dive_form_presets.py`, and this is the one place that decision is worth writing down
+because the plan that produced this change asked for the import. `c3c2c4dd4c27` states the general
+rule — a revision is frozen history — and here the concrete hazard is sharper than drift: if a later
+change renamed a `DiveFormField` member or dropped a default, an import would raise `ImportError` at
+revision-load time and take **every** `alembic upgrade head` with it, on a fresh install as much as
+an existing one, because Alembic loads every revision module to build the history. What the live
+definition owes this copy is nothing; what the copy owes the accounts it seeded is that they got the
+defaults as they stood on the day they ran.
+
+Two smaller things the data step needs, neither of which autogenerate can see:
+
+- **A uuid per row from `uuid7`, generated in Python.** `PublicUUIDMixin`'s `uuid` comes from a
+  dataclass `default_factory` the ORM applies on construction, and a migration constructs no models
+  — so a bare `INSERT` hands Postgres a NULL for a `NOT NULL` column. `gen_random_uuid()` would have
+  avoided the row loop and is deliberately not used: it is uuid4, and these would be the only rows
+  in the database that are not time-ordered.
+- **Typed binds on the `sa.text()` insert.** A text statement carries no column types, so without
+  `bindparam(..., type_=sa.JSON())` the driver is handed a bare Python list for a JSON column and
+  what happens next is the driver's business rather than SQLAlchemy's.
+
+The step skips a name the account already holds, compared case-insensitively — the same rule the
+restore endpoint keeps. At upgrade time nothing can match, since the table is created three
+statements above; the guard is there so `_backfill_default_presets` is a callable a test can drive
+twice, and so a hand re-run cannot trip the unique index. That callable is also *how* it is tested:
+`tests/conftest.py`'s session-scoped autouse `upgrade_to_head()` runs before any test body, so no
+test can create an account "before the revision", and
+`tests/test_dive_form_presets.py::TestTheBackfill` reaches the module through Alembic's
+`ScriptDirectory` by revision id rather than by filename.
+
+Soft-deleted accounts are backfilled too. They are pending purge and the cascade takes these rows
+with them, so the cost is nothing — and `POST /auth/restore` can bring one back, at which point
+being the one account on the instance with no presets would be a puzzle with no visible cause.
+
+## `user.dive_form_hidden_fields` follows the `gear_service_emails` template
+
+The account's *current* hidden set, as opposed to a preset, which is a snapshot of one. Applying a
+preset copies its list into this column — one `PATCH /user` — and toggling a single field afterwards
+moves this column and not the preset.
+
+The column is the `gear_service_emails` template followed to the letter (see that section): on
+`UserRead` **and** `UserUpdate`, because `UserUpdate` is `extra="forbid"` and missing the second
+422s the panel instead of saving it; in `UserUpdate.NON_NULLABLE_FIELDS`, which
+`test_update_explicit_nulls.py::test_the_declared_fields_match_the_table` reads back off the
+SQLAlchemy metadata so forgetting it fails the build; inherited by `UserAdminUpdate` with no
+separate edit. `JSON` with a `server_default` of `[]`, the `webauthn_credential.transports`
+precedent for a `list[str]` column — `ARRAY` has none here, and nothing queries into the list, so
+the indexable-element argument buys nothing.
+
+**Server-side rather than per device**, which is the opposite of what the per-field entry-unit
+switch chose. That switch was a single entry convenience with no named presets and no seeding; this
+follows the diver across devices, and because the list rides along on `get_current_user` — which
+selects every mapped column — the form's first paint already omits the hidden fields instead of
+flashing them and then removing them. Storing it per device would additionally owe a `/privacy` row
+and a place under the device-memory switch, for a preference whose presets already live on the
+server.
+
+**A fresh account hides nothing.** The default is `[]`, so a new diver sees the form exactly as it
+was before this existed and the three presets are one click away. Starting everyone on Basic was the
+alternative; it changes the first form a new diver meets for the sake of divers who can pick a
+preset themselves.
+
+## Presets are snapshots, and the list read is not cached
+
+Applying a preset **copies** its hidden set into the account's current state. Editing a field
+afterwards changes the current state and not the preset, until the diver writes it back. This is
+Lightroom's model rather than VS Code's live profiles, and the reason is the one-off: "show me
+altitude just this once" should not permanently edit a preset, and a diver who has deleted every
+preset still needs somewhere to toggle. It is also what makes `PATCH /dive-form-preset/{uuid}` touch
+no user row — editing the preset you are currently arranged like does not rearrange your form.
+
+`GET /dive-form-presets` is **not** Redis-cached, and the resource is named in
+`OwnedResourceCache`'s opt-out list with the others. The read would fit that factory exactly; there
+is simply nothing to cache for. Nothing embeds a preset — no dive, no user payload, no list anywhere
+carries one — so there is no second cache to invalidate and no staleness to trade against, and the
+panel that reads the list reads it once, when it opens. What caching buys is one Redis round trip
+per form; what it costs is an invalidation obligation on five mutating routes. `PATCH /user` carries
+the current state through the path `units` already takes, so there is nothing new to invalidate
+there either.
+
+## Presets and the hidden-fields preference travel in the archive
+
+Both ride the `diver` member's `extensions.opendiving` payload, beside `units` and
+`gear_service_emails`, and the logbook import reports them and never applies them — the standing
+rule for account settings (see *"The `diver` member is read, reported, and never applied"*).
+
+They are UI configuration, which is the argument for leaving them out, and that argument loses to
+one sentence: `/export/archive`'s docstring promises nothing in the account is reachable only
+through the app. Leaving them out would make that sentence false for the first time. Nothing here
+touches the DiveJSON spec — the producer key is the format's own extension mechanism (spec §5.5),
+and a reader that does not recognise the entries must not fail on them.
+
+A preset travels as `{name, hidden_fields}` and nothing else. Its `uuid`, `user_uuid` and
+`created_at` identify a row in *this* instance and mean nothing in a document that is going to be
+read somewhere else. The empty set is written as `[]` rather than omitted: "Technical hides nothing"
+is a preset, and a reader that saw no key could not tell it from one that failed to export.

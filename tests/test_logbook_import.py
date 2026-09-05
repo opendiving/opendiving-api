@@ -1404,13 +1404,49 @@ class TestTheDiverIsNeverApplied:
 
         _, document = seeded
         destination = create_user(db)
-        before = (destination.name, destination.username, destination.email, destination.units)
+        before = (
+            destination.name,
+            destination.username,
+            destination.email,
+            destination.units,
+            list(destination.dive_form_hidden_fields),
+        )
 
         plan = await _apply(async_db, destination.id, document)
 
         assert ImportNoteCode.DIVER_NOT_APPLIED in _codes(plan)
         after = (await async_db.execute(select(User).where(User.id == destination.id))).scalars().one()
-        assert (after.name, after.username, after.email, after.units) == before
+        assert (
+            after.name,
+            after.username,
+            after.email,
+            after.units,
+            list(after.dive_form_hidden_fields),
+        ) == before
+
+    @pytest.mark.asyncio
+    async def test_the_destination_gains_none_of_the_documents_dive_form_presets(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The presets ride in the `diver` member's extension, and that member is read,
+        reported and never applied - so a restore does not hand this account somebody else's
+        idea of which fields to hide. The note says so in as many words; this is the half
+        that checks the rows.
+        """
+        from src.app.models.dive_form_preset import DiveFormPreset
+
+        _, document = seeded
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, document)
+
+        assert ImportNoteCode.DIVER_NOT_APPLIED in _codes(plan)
+        presets = (
+            (await async_db.execute(select(DiveFormPreset).where(DiveFormPreset.user_id == destination.id)))
+            .scalars()
+            .all()
+        )
+        assert list(presets) == []
 
 
 class TestTheBoundsCensus:

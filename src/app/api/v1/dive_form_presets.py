@@ -42,9 +42,7 @@ async def _get_owned_dive_form_preset(
     )
 
 
-def _to_public(
-    preset: DiveFormPresetReadInternal | dict[str, Any], *, user_uuid: uuid_pkg.UUID
-) -> DiveFormPresetRead:
+def _to_public(preset: DiveFormPresetReadInternal | dict[str, Any], *, user_uuid: uuid_pkg.UUID) -> DiveFormPresetRead:
     """Convert an internal preset representation (integer FKs) into its public shape, with
     the owning user referenced by `uuid`."""
     data = preset if isinstance(preset, dict) else preset.model_dump()
