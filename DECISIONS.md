@@ -15148,11 +15148,22 @@ that is exactly what the guard asserts. **Two tests, one per repo, no cross-repo
 half (`tests/test_dive_form_presets.py::TestTheVocabularyNamesRealFields`) checks a **subset**:
 every enum value names a field of `DiveCreateRequest`, or with the `mixture.` prefix of
 `DiveMixtureCreate`, that is not required there. The web half checks an **equality**: its registry
-equals its form schema's optional keys exactly. The asymmetry is deliberate and is the interesting
-part — API-optional is wider than form-optional (`oxygen` and `helium` default on the wire and are
-required in the form, `gas_number` has no input at all), so an equality check on this side would
-fail against fields that have no business being hideable, while a subset check on the web side would
-let a new optional input go unregistered. Between them the mirror is pinned from both ends.
+equals its form schema's optional keys exactly, minus the keys that side exempts by name
+(`NON_HIDEABLE_MIXTURE_SCHEMA_KEYS`, which carries a reason per name). The asymmetry is deliberate
+and is the interesting part — API-optional is wider than what is hideable (`gas_number` has no input
+at all; a cylinder's `volume`, `oxygen` and `helium` are optional on both sides and exempt by name),
+so an equality check on this side would fail against fields that have no business being hideable,
+while a subset check on the web side would let a new optional input go unregistered. Between them
+the mirror is pinned from both ends.
+
+**Absent from the vocabulary does not mean required.** It did once: `dive_number`, `start_time`,
+`duration` and the cylinder trio `volume`/`oxygen`/`helium` were all absent because the form refused
+to submit without them, and the docs on both sides said so. The trio then became blank-able when a
+cylinder was allowed to record a mix with no vessel, and stayed un-hideable anyway — on the
+substance, that they are what a cylinder *is*, and a tank card that can lose all three records a row
+with nothing in it. So the exemption is now written down as an exemption, with its reason, rather
+than falling out of a `required` the schema no longer has. Anything reasoning from "it is absent, so
+the form must require it" is reasoning from a rule that stopped holding.
 
 **The `mixture.` prefix, not react-hook-form's `mixtures.${index}.po2_limit`.** A key names a field
 of *every* cylinder, not of one; hiding `mixture.role` hides that input on every tank card. Note the

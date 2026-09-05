@@ -20,10 +20,11 @@ class DiveFormField(StrEnum):
     (`tests/test_dive_form_presets.py::TestTheVocabularyNamesRealFields`) asserts every
     value here names a field of `DiveCreateRequest` - or, with the `mixture.` prefix, of
     `DiveMixtureCreate` - that is *not required* there, and the web half asserts its own
-    registry equals its form schema's optional keys exactly. API-optional is deliberately
-    wider than form-optional (`oxygen` and `helium` default on the wire and are required in
-    the form; `gas_number` has no input at all), which is why this side is a subset check
-    and the other is an equality check.
+    registry equals its form schema's optional keys exactly, minus a short list of keys
+    that side exempts by name. API-optional is deliberately wider than what is hideable
+    (`gas_number` has no input at all; a cylinder's `volume`, `oxygen` and `helium` are
+    optional on both sides and exempt by name on the web side), which is why this side is
+    a subset check and the other is an equality check.
 
     **These values are stored data, not labels.** A preset row and a user's current state
     name them, so renaming a member is a data migration over `dive_form_preset.hidden_fields`
@@ -38,9 +39,12 @@ class DiveFormField(StrEnum):
     are two equal lists and a client can compare them with one loop, and it is the order the
     clients take their panel rows from.
 
-    Required fields are deliberately absent - `dive_number`, `start_time` and `duration`,
-    and per cylinder `volume`, `oxygen` and `helium`, which the form requires. They are not
-    hideable, so they have no member to be hidden by.
+    Fields that cannot be hidden are deliberately absent, and for two different reasons.
+    `dive_number`, `start_time` and `duration` the form requires. A cylinder's `volume`,
+    `oxygen` and `helium` it does not - they became blank-able when a cylinder was allowed
+    to record a mix with no vessel - but the web side shows all three always and exempts
+    each by name from the registry its equality check reads, on the ground that they are
+    what a cylinder *is*. Either way there is no member here to hide them by.
     """
 
     TRIP_UUID = "trip_uuid"
