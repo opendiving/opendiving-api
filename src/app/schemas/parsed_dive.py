@@ -59,9 +59,14 @@ class DiveMixtureSchema(_ParserOutput):
 
     **Every field is nullable, and `None` means "the file did not record this"** - a
     parser reports what it read and never substitutes a plausible value for a missing
-    one. That is not the same shape as `DiveMixtureCreate` (`schemas/dive_mixture.py`),
-    where `oxygen`/`helium`/`volume` are required and the DB additionally enforces
-    `volume > 0`: this schema describes a *file*, that one describes a dive being saved.
+    one. This schema describes a *file*; `DiveMixtureCreate` (`schemas/dive_mixture.py`)
+    describes a dive being saved, and that is still the difference between them even
+    though the two shapes have converged: `oxygen`, `helium` and `volume` used to be
+    required over there, so a parsed absence had nowhere to go and the form filled it in.
+    Their columns are nullable now and mean the same thing on both sides, which is what
+    lets an absence travel all the way to the row instead of being defaulted at the door
+    (see *A cylinder may record a mix without a vessel* in `DECISIONS.md`). What has not
+    changed is who may guess: a parser still never does, and a *form* still may.
 
     The distinction is load-bearing rather than pedantic. These formats routinely omit
     gas data - a FIT file has nowhere to record cylinder size at all, and the 2026 Suunto

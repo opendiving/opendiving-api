@@ -15095,3 +15095,30 @@ else, and the oxygen-plus-helium rule follows the shape the pressure pair beside
 neither of two recorded numbers says which is wrong, so both go and the row stays. What is no longer
 skipped is the cylinder itself, because absence is now storable and the alternative was losing the
 members the document *did* carry.
+
+## The vendored schema's freeze note names no condition but the tag
+
+`tests/fixtures/divejson/README.md` records where `divejson.schema.json` came from, and part of that
+is what the version string means: 1.0 is a working draft, and the note says when it stops being one.
+It used to say the specification "freezes at 1.0 once the reference implementation's export/import
+round-trip passes against it". It now says the draft freezes as version 1.0 **when its maintainers
+tag it**, and nothing more.
+
+The old sentence was not merely vague — it named a condition that has since been **met**. This app
+is that reference implementation, and its export/import round-trip passes; the format's maintainers
+held the tag anyway, on the stronger ground that a format tested only against the implementation
+that wrote it has not really been tested. So the published promise was looser than the actual bar,
+and a reader who checked it would have expected a tag that was not coming. Every replacement
+*condition* has the same defect one step later: whatever event is named, the sentence reads as a
+broken promise for however long the tag waits behind it, and the tag is deliberately a human step
+with no schedule.
+
+Naming the tag is circular, and that is the cost the format's maintainers accepted rather than an
+oversight. What it buys is a sentence that cannot come untrue. The bar itself is a decision recorded
+where such decisions are made, not in normative text that would have to be edited every time the
+corpus grew.
+
+The same sentence appears in several places across the format's own repositories and is being
+reworded in all of them; this file is the copy that lives here, and it is reworded here because a
+provenance note that summarises a stale promise is a stale note. Anyone re-fetching the schema
+should carry the wording forward from upstream rather than from this paragraph.
