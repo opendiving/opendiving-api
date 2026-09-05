@@ -44,6 +44,7 @@ from src.app.api.v1.gear_service import _owned_gear_item
 from src.app.core.db.database import Base
 from src.app.core.exceptions.http_exceptions import NotFoundException
 from src.app.crud.crud_courses import crud_courses
+from src.app.crud.crud_dive_form_presets import crud_dive_form_presets, dive_form_preset_name_exists
 from src.app.crud.crud_dive_sites import crud_dive_sites, dive_site_name_exists
 from src.app.crud.crud_gear_items import crud_gear_items, gear_item_name_exists
 from src.app.crud.crud_gear_service_records import crud_gear_service_records
@@ -55,6 +56,7 @@ from src.app.crud.crud_gear_service_schedules import (
 from src.app.crud.crud_gear_sets import crud_gear_sets, gear_set_name_exists
 from src.app.crud.crud_trips import crud_trips, trip_name_exists
 from src.app.models.course import Course
+from src.app.models.dive_form_preset import DiveFormPreset
 from src.app.models.dive_site import DiveSite
 from src.app.models.gear_item import GearItem
 from src.app.models.gear_service_schedule import GearServiceSchedule
@@ -62,6 +64,7 @@ from src.app.models.gear_set import GearSet
 from src.app.models.trip import Trip
 from src.app.models.user import User
 from src.app.schemas.course import CourseReadInternal
+from src.app.schemas.dive_form_preset import DiveFormPresetReadInternal
 from src.app.schemas.dive_site import DiveSiteReadInternal
 from src.app.schemas.gear_item import GearItemReadInternal
 from src.app.schemas.gear_set import GearSetReadInternal
@@ -69,6 +72,7 @@ from src.app.schemas.trip import TripReadInternal
 from tests.conftest import db_available
 from tests.helpers.generators import (
     create_course,
+    create_dive_form_preset,
     create_dive_site,
     create_gear_item,
     create_gear_service_record,
@@ -163,6 +167,12 @@ HARD_DELETED_RESOURCES: dict[type[Base], Resource] = {
         name_exists=lambda session, diver, row: gear_item_name_exists(
             session, user_id=diver.id, name=row.name, brand=row.brand
         ),
+    ),
+    DiveFormPreset: Resource(
+        crud=crud_dive_form_presets,
+        create=create_dive_form_preset,
+        resolve=_resolves_through_fetch_owned(crud_dive_form_presets, DiveFormPresetReadInternal),
+        name_exists=lambda session, diver, row: dive_form_preset_name_exists(session, user_id=diver.id, name=row.name),
     ),
     GearSet: Resource(
         crud=crud_gear_sets,

@@ -19,6 +19,7 @@ from typing import Any
 from src.app.models.certification import Certification
 from src.app.models.course import Course
 from src.app.models.dive import Dive
+from src.app.models.dive_form_preset import DiveFormPreset
 from src.app.models.dive_site import DiveSite
 from src.app.models.gear_item import GearItem
 from src.app.models.gear_service_record import GearServiceRecord
@@ -63,6 +64,8 @@ UUIDS = {
             "card-back",
             "species-clownfish",
             "species-manta",
+            "dive-form-preset-1",
+            "dive-form-preset-2",
         )
     )
 }
@@ -76,7 +79,7 @@ def _with_id[T](row: T, row_id: int) -> T:
     return row
 
 
-def make_user() -> User:
+def make_user(dive_form_hidden_fields: list[str] | None = None) -> User:
     return _with_id(
         User(
             name="Ada Lovelace",
@@ -84,8 +87,22 @@ def make_user() -> User:
             email="ada@example.com",
             uuid=UUIDS["user"],
             created_at=CREATED_AT,
+            dive_form_hidden_fields=dive_form_hidden_fields or [],
         ),
         1,
+    )
+
+
+def make_dive_form_preset(row_id: int, name: str, hidden_fields: list[str]) -> DiveFormPreset:
+    return _with_id(
+        DiveFormPreset(
+            user_id=1,
+            name=name,
+            hidden_fields=hidden_fields,
+            uuid=UUIDS[f"dive-form-preset-{row_id}"],
+            created_at=CREATED_AT,
+        ),
+        row_id,
     )
 
 
@@ -147,6 +164,8 @@ def build_bundle(
     species: list[Species] | None = None,
     gear_sets: list[GearSet] | None = None,
     item_ids_by_set: dict[int, list[int]] | None = None,
+    dive_form_presets: list[DiveFormPreset] | None = None,
+    dive_form_hidden_fields: list[str] | None = None,
     schedules: list[GearServiceSchedule] | None = None,
     service_records: list[GearServiceRecord] | None = None,
     certifications: list[Certification] | None = None,
@@ -173,7 +192,7 @@ def build_bundle(
             (cert_id, info.side.value): "0" * 64 for cert_id, infos in certificate_files.items() for info in infos
         }
     return ExportBundle(
-        user=make_user(),
+        user=make_user(dive_form_hidden_fields),
         dives=dives,
         mixtures_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(mixtures_by_dive or {})},
         site_ids_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(site_ids_by_dive or {})},
@@ -190,6 +209,7 @@ def build_bundle(
         species=species or [],
         gear_sets=gear_sets or [],
         item_ids_by_set={**{gear_set.id: [] for gear_set in (gear_sets or [])}, **(item_ids_by_set or {})},
+        dive_form_presets=dive_form_presets or [],
         schedules=schedules or [],
         service_records=service_records or [],
         certifications=certifications or [],
@@ -500,6 +520,14 @@ def full_bundle() -> ExportBundle:
         },
         dive_file_sha256={2: "a" * 64},
         cert_file_sha256={(1, "front"): "b" * 64, (1, "back"): "c" * 64},
+        # A non-empty current state and two presets, one of them the empty set: the
+        # `diver` member's extension is the only place these appear, and an all-empty
+        # fixture could not tell "written as `[]`" from "not written at all".
+        dive_form_hidden_fields=["altitude", "mixture.po2_limit"],
+        dive_form_presets=[
+            make_dive_form_preset(1, "Recreational", ["altitude", "mixture.po2_limit"]),
+            make_dive_form_preset(2, "Technical", []),
+        ],
     )
 
 

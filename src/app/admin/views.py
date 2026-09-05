@@ -5,6 +5,7 @@ from ..models.certification import Certification
 from ..models.course import Course
 from ..models.dive import Dive
 from ..models.dive_dive_site import DiveDiveSite
+from ..models.dive_form_preset import DiveFormPreset
 from ..models.dive_gear_item import DiveGearItem
 from ..models.dive_mixture import DiveMixture
 from ..models.dive_site import DiveSite
@@ -26,6 +27,7 @@ from ..schemas.certification import CertificationCreateInternal, CertificationUp
 from ..schemas.course import CourseCreateInternal, CourseUpdate
 from ..schemas.dive import DiveCreateInternal, DiveUpdateInternal
 from ..schemas.dive_dive_site import DiveDiveSiteCreate, DiveDiveSiteUpdate
+from ..schemas.dive_form_preset import DiveFormPresetCreateInternal, DiveFormPresetUpdate
 from ..schemas.dive_gear_item import DiveGearItemCreate, DiveGearItemUpdate
 from ..schemas.dive_mixture import DiveMixtureCreateInternal, DiveMixtureUpdate
 from ..schemas.dive_site import DiveSiteCreateInternal, DiveSiteUpdate
@@ -88,7 +90,7 @@ def register_admin_views(admin: CRUDAdmin) -> None:
 
     # Both auth tables are registered **view-only**, and for a reason of their own rather
     # than either of the two already written down below - not the hard-delete-cascade
-    # argument the six diver-owned resources take, and not the everybody's-row argument
+    # argument the diver-owned resources take, and not the everybody's-row argument
     # `Species` takes.
     #
     # A `user_session` row is a live credential's backing state. A panel that could create
@@ -117,10 +119,10 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         allowed_actions={"view"},
     )
 
-    # `DiveSite`, `Trip`, `Course`, `GearItem`, `GearSet` and `GearServiceSchedule` are
-    # registered without `"delete"`, and that is not squeamishness about a superuser having
-    # the power. FastCRUD's `delete` branches on whether the model carries `is_deleted`, and
-    # since those six hard-delete it takes the `DELETE FROM` branch - so the button that
+    # `DiveSite`, `Trip`, `Course`, `GearItem`, `GearSet`, `GearServiceSchedule` and
+    # `DiveFormPreset` are registered without `"delete"`, and that is not squeamishness about
+    # a superuser having the power. FastCRUD's `delete` branches on whether the model carries
+    # `is_deleted`, and since they hard-delete it takes the `DELETE FROM` branch - so the button that
     # used to flag one row now destroys the row, its schedules, its service records and
     # every join row pointing at it, through the FK cascades. It would do that with **no
     # cache invalidation**: that lives on the API routes (`services/cache_invalidation.py`)
@@ -152,6 +154,16 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         allowed_actions={"view", "create", "update"},
     )
 
+    # `DiveFormPresetUpdate`, not a `*UpdateRequest`: like a course, a preset carries no
+    # non-column reference for a request schema to add, so the API's PATCH body and the
+    # admin form are the same shape.
+    admin.add_view(
+        model=DiveFormPreset,
+        create_schema=DiveFormPresetCreateInternal,
+        update_schema=DiveFormPresetUpdate,
+        allowed_actions={"view", "create", "update"},
+    )
+
     admin.add_view(
         model=DiveMixture,
         create_schema=DiveMixtureCreateInternal,
@@ -176,7 +188,7 @@ def register_admin_views(admin: CRUDAdmin) -> None:
     )
 
     # The species catalog and its search index are registered **without** `"delete"`, and for
-    # a different reason than the six above: these tables hard-delete too, but the row is
+    # a different reason than the diver-owned ones above: these tables hard-delete too, but the row is
     # not one user's. Deleting a species would take every `dive_species` row pointing at it
     # through the FK cascade - silently removing a sighting from other people's dives, with
     # no cache invalidation, since that lives on the API routes and there is no route here

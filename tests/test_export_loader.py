@@ -9,7 +9,7 @@ writer faithfully renders whatever bundle it is handed.
 So the two assertions that matter are the boring ones - only the caller's rows, and
 nothing soft-deleted - and they are asserted per table rather than once for dives, since
 each table applies them itself. The second only has three tables left to be wrong about:
-`Dive`, `GearServiceRecord` and `Certification` still soft-delete, and the other six are
+`Dive`, `GearServiceRecord` and `Certification` still soft-delete, and the rest are
 hard-deleted, so `_owned` skips a filter it cannot express rather than one it forgot.
 
 Like `test_dive_check_constraints.py`, these are skipped when no database is reachable.

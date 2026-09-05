@@ -34,7 +34,7 @@ Where it differs from the API's own read shapes, and why:
   meant to outlive it. Spec §5.3 makes that the format's rule and adds referential
   closure: every uuid a record names is defined in the same document.
 - **Whatever the format has no core member for rides `extensions.opendiving`** (spec
-  §5.5): the diver's two account preferences, and which parser read a stored dive-computer
+  §5.5): the diver's account preferences, and which parser read a stored dive-computer
   file. A writer may not invent core members, so this is the sanctioned slot.
 
 The one derived value in here is `archive_path`, which is a fact about the zip rather than
@@ -120,10 +120,11 @@ class ExportBoundingBox(BaseModel):
 class ExportDiver(PublicUUIDSchema):
     """Whose logbook this is.
 
-    `units` and `gear_service_emails` are application preferences rather than logbook
-    data, so the format gives them no core member and they travel under this producer's
-    key (spec §6.1). They are here at all because `/export/archive` promises nothing in
-    the account is reachable only through the app.
+    `units`, `gear_service_emails` and the dive form's hidden fields and presets are
+    application preferences rather than logbook data, so the format gives them no core
+    member and they travel under this producer's key (spec §6.1). They are here at all
+    because `/export/archive` promises nothing in the account is reachable only through the
+    app - which is the whole reason the presets ride along too, UI configuration or not.
     """
 
     name: str

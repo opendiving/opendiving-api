@@ -6,6 +6,7 @@ from .certifications import router as certifications_router
 from .config import router as config_router
 from .contact import router as contact_router
 from .courses import router as courses_router
+from .dive_form_presets import router as dive_form_presets_router
 from .dive_sites import router as dive_sites_router
 from .dives import router as dives_router
 from .export import router as export_router
@@ -41,6 +42,7 @@ router.include_router(gear_service_router)
 router.include_router(certifications_router)
 router.include_router(species_router)
 router.include_router(dives_router)
+router.include_router(dive_form_presets_router)
 router.include_router(contact_router)
 router.include_router(export_router)
 router.include_router(logbook_import_router)

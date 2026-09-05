@@ -45,6 +45,7 @@ from ...models.course import Course
 from ...models.dive import Dive
 from ...models.dive_dive_site import DiveDiveSite
 from ...models.dive_file import DiveFile
+from ...models.dive_form_preset import DiveFormPreset
 from ...models.dive_gear_item import DiveGearItem
 from ...models.dive_site import DiveSite
 from ...models.dive_species import DiveSpecies
@@ -101,6 +102,10 @@ class ExportBundle:
     species: list[Species]
     gear_sets: list[GearSet]
     item_ids_by_set: dict[int, list[int]]
+    # The account's saved dive-form presets, alphabetically, as `GET /dive-form-presets`
+    # serves them. Not logbook data - they ride in the `diver` member's extension, for
+    # the reason that member carries `units` at all.
+    dive_form_presets: list[DiveFormPreset]
     schedules: list[GearServiceSchedule]
     service_records: list[GearServiceRecord]
     certifications: list[Certification]
@@ -241,8 +246,8 @@ async def _owned(db: AsyncSession, model: Any, *, user_id: int, order_by: Any) -
     """One user's rows from a table, in a stable order - the live ones, where the table
     still has a notion of liveness.
 
-    Three of the nine tables read through here soft-delete (`Dive`, `GearServiceRecord`,
-    `Certification`); the other six hard-delete, and asking a `Trip` for `is_deleted`
+    Three of the tables read through here soft-delete (`Dive`, `GearServiceRecord`,
+    `Certification`); the rest hard-delete, and asking a `Trip` for `is_deleted`
     would be an `AttributeError` rather than a filter that quietly matches everything. The
     check is on the model rather than a per-call flag so that a soft-deleting table added
     to this bundle later is filtered by default: the failure mode of forgetting is a
@@ -343,6 +348,9 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
         species=await _referenced_species(db, species_ids_by_dive),
         gear_sets=gear_sets,
         item_ids_by_set=item_ids_by_set,
+        dive_form_presets=await _owned(
+            db, DiveFormPreset, user_id=user_id, order_by=(DiveFormPreset.name, DiveFormPreset.id)
+        ),
         schedules=schedules,
         service_records=service_records,
         certifications=certifications,
