@@ -23,7 +23,7 @@ from src.app.services.dive_profiles import ProfileGasAttribution
 
 def _mixture(
     *,
-    volume: float = 12.0,
+    volume: float | None = 12.0,
     start_pressure: float | None = 200.0,
     end_pressure: float | None = 50.0,
     gas_number: int | None = None,
@@ -204,6 +204,22 @@ class TestComputeGasUseReturnsNone:
         assert compute_gas_use(duration=-60, avg_depth=18.0, mixtures=[_mixture()]) is None
         assert compute_gas_use(duration=45 * 60, avg_depth=18.0, mixtures=[_mixture(volume=0.0)]) is None
 
+    def test_when_the_cylinder_size_was_never_recorded(self) -> None:
+        """The new refusal, and the one the browser has to phrase: an average depth, both
+        pressures and a real drop between them are all present, so every other condition
+        this function applies is satisfied and the only missing input is the size.
+
+        Unlike the zero above this is reachable from a stored row - `volume` is nullable,
+        and a UDDF `<tankdata>` with a gas link and no `<tankvolume>` is exactly it. A
+        pressure drop is bar; without the litres to multiply by there is no amount of gas.
+        """
+        mix_only = _mixture(volume=None, start_pressure=200.0, end_pressure=50.0)
+
+        assert compute_gas_use(duration=45 * 60, avg_depth=18.0, mixtures=[mix_only]) is None
+        # And the same cylinder with a size does produce the worked figure, so nothing but
+        # the volume is doing the refusing.
+        assert compute_gas_use(duration=45 * 60, avg_depth=18.0, mixtures=[_mixture()]) is not None
+
 
 def _attributed(gas_number: int, *, seconds: int, mean_depth_cm: int) -> GasAttribution:
     """One cylinder's stretch of the dive, as the profile extractor derived it from the
@@ -305,6 +321,29 @@ class TestComputeMultiTankGasUse:
         assert result.gas_used == result.tanks[0].gas_used
         # Half the dive, and both halves of the fraction come off the same profile row -
         # the client renders "these figures cover 39 of the 78 minutes recorded" from it.
+        assert (result.attributed_seconds, result.duration) == (2355, 4682)
+
+    def test_a_cylinder_that_recorded_no_size_is_left_out_and_the_shortfall_shows(self):
+        """The mix-only cylinder in a multi-tank dive: the attribution knows about it, so
+        its seconds are excluded from every other tank's and the shortfall is real and
+        reported - the same treatment a cylinder with no pressures gets. It is *not* the
+        unattributed-but-breathed refusal beside it: nothing has been misplaced into
+        another tank's stretch, this cylinder simply has no litres to report.
+        """
+        mixtures = [
+            _mixture(gas_number=1),
+            _mixture(gas_number=2, volume=None, start_pressure=200.0, end_pressure=100.0),
+        ]
+        attribution = _attribution(
+            _attributed(1, seconds=2355, mean_depth_cm=2837),
+            _attributed(2, seconds=2327, mean_depth_cm=655),
+            duration=4682,
+        )
+
+        result = compute_multi_tank_gas_use(mixtures=mixtures, attribution=attribution)
+
+        assert result is not None
+        assert [tank.gas_number for tank in result.tanks] == [1]
         assert (result.attributed_seconds, result.duration) == (2355, 4682)
 
     def test_an_unmentioned_cylinder_that_was_never_breathed_is_left_out(self):
@@ -677,6 +716,35 @@ class TestComputeParallelGasUseReturnsNone:
         assert compute_parallel_gas_use(duration=0, avg_depth=22.6, mixtures=[_parallel(), _parallel()]) is None
         assert (
             compute_parallel_gas_use(duration=59 * 60, avg_depth=22.6, mixtures=[_parallel(), _parallel(volume=0.0)])
+            is None
+        )
+
+    def test_when_one_cylinder_size_was_never_recorded(self) -> None:
+        """One unrecorded size refuses the whole set, on the same terms as one missing
+        pressure: its litres would be absent from a numerator whose denominator still
+        covers the whole dive, reporting an RMV that is too *low* rather than none."""
+        assert (
+            compute_parallel_gas_use(
+                duration=59 * 60,
+                avg_depth=22.6,
+                mixtures=[_parallel(volume=11.1), _parallel(volume=None)],
+            )
+            is None
+        )
+
+    def test_a_set_of_unrecorded_sizes_does_not_read_as_matching_cylinders(self) -> None:
+        """The trap the equality test would have walked into. `{None}` has one element, so
+        a set of all-NULL volumes satisfies "every volume is exactly equal" - an assertion
+        that the cylinders match, arriving from the fact that nothing is known about any of
+        them. The size guard refuses the set before the pooling test is reached, so there
+        is no pooled SAC to be wrong: the answer is no figure at all.
+        """
+        assert (
+            compute_parallel_gas_use(
+                duration=59 * 60,
+                avg_depth=22.6,
+                mixtures=[_parallel(volume=None), _parallel(volume=None)],
+            )
             is None
         )
 

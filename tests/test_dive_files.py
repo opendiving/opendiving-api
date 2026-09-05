@@ -630,6 +630,25 @@ class TestMixtureFieldMerge:
 
         assert merge_mixture_fields(parsed, stored) == [(11, {"po2_limit": 1.4, "gas_number": 1})]
 
+    def test_a_fraction_the_stored_row_never_recorded_is_not_a_mismatch_either(self) -> None:
+        """The mirror of the case above, and the one the columns becoming nullable created.
+        The import no longer defaults a mix the document never carried, so a stored row can
+        say "not recorded" in exactly the way a parsed one always could - and a guard that
+        only looked at the parsed side would read `parsed 21` against `stored NULL` as two
+        different gases and refuse every such dive.
+        """
+        parsed = [self._parsed(oxygen=21.0, helium=0.0)]
+        stored = [self._stored(11, oxygen=None, helium=None)]
+
+        assert merge_mixture_fields(parsed, stored) == [(11, {"po2_limit": 1.4, "gas_number": 1})]
+
+    def test_a_fraction_both_sides_recorded_is_still_compared(self) -> None:
+        """What the widened guard does not cost: a real disagreement is still a refusal."""
+        parsed = [self._parsed(oxygen=50.0)]
+        stored = [self._stored(11, oxygen=32.0)]
+
+        assert merge_mixture_fields(parsed, stored) is None
+
     def test_the_fraction_guard_cannot_catch_a_mis_ordered_all_null_list(self) -> None:
         """Why `get_mixtures_for_dive` has to order by `id`, stated as a test.
 

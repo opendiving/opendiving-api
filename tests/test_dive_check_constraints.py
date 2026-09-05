@@ -318,6 +318,37 @@ class TestDiveMixtureCheckConstraints:
         db.add(_make_mixture(dive.id, volume=12, oxygen=21, helium=0))
         db.commit()
 
+    def test_a_cylinder_may_record_a_mix_without_a_vessel(self, db: Session, dive: Dive) -> None:
+        """The row this whole change exists for: a gas link and no `<tankvolume>`."""
+        db.add(_make_mixture(dive.id, volume=None, start_pressure=200, end_pressure=80))
+        db.commit()
+
+    def test_a_cylinder_may_record_a_vessel_without_a_mix(self, db: Session, dive: Dive) -> None:
+        """The mirror, and the one §6.3 spells out: absent `oxygen` is not 21."""
+        db.add(_make_mixture(dive.id, oxygen=None, helium=None))
+        db.commit()
+
+    def test_a_cylinder_may_record_none_of_the_three(self, db: Session, dive: Dive) -> None:
+        db.add(_make_mixture(dive.id, volume=None, oxygen=None, helium=None))
+        db.commit()
+
+    def test_a_null_operand_does_not_switch_the_sum_constraint_off_for_the_other(self, db: Session, dive: Dive) -> None:
+        """`oxygen + helium <= 100` passes on UNKNOWN, so a NULL half admits the row -
+        and that has to stay true only for the *pair*. A recorded fraction on its own is
+        still bounded by its own range constraint, which is what the restatement in
+        revision `d3b1700eb489` had to preserve rather than accidentally relax."""
+        db.add(_make_mixture(dive.id, oxygen=95, helium=None))
+        db.commit()
+        _assert_violates(db, _make_mixture(dive.id, oxygen=None, helium=101), "ck_dive_mixture_helium_range")
+
+    def test_the_restated_constraints_still_reject_what_they_always_did(self, db: Session, dive: Dive) -> None:
+        """Spelling the null case out is a restatement, not a relaxation: every recorded
+        value is bounded exactly as it was before the columns became nullable."""
+        _assert_violates(db, _make_mixture(dive.id, volume=0), "ck_dive_mixture_volume_positive")
+        _assert_violates(db, _make_mixture(dive.id, oxygen=-1, helium=0), "ck_dive_mixture_oxygen_range")
+        _assert_violates(db, _make_mixture(dive.id, oxygen=0, helium=-1), "ck_dive_mixture_helium_range")
+        _assert_violates(db, _make_mixture(dive.id, oxygen=60, helium=50), "ck_dive_mixture_oxygen_helium_sum")
+
     def test_end_pressure_greater_than_start_pressure_is_rejected(self, db: Session, dive: Dive) -> None:
         _assert_violates(
             db,

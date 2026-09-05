@@ -132,6 +132,13 @@ ALTER TABLE dive ADD CONSTRAINT ck_dive_max_depth_positive CHECK (max_depth IS N
 ALTER TABLE dive ADD CONSTRAINT ck_dive_avg_depth_positive CHECK (avg_depth IS NULL OR avg_depth > 0);
 ```
 
+The four `dive_mixture` texts above are the era's, and the first four have since been restated as
+`X IS NULL OR …` by revision `d3b1700eb489`, which made those columns nullable (*A cylinder may
+record a mix without a vessel*). That does not change what this list is for: a database stamped out
+of the pre-migration era is repaired by adding what it is missing and then letting
+`alembic upgrade head` bring the text forward, and the revision drops each constraint by name before
+recreating it either way.
+
 A constraint violation surfaces as an `IntegrityError`/`asyncpg.CheckViolationError` from the DB
 layer, not a Pydantic validation error - if adding more of these, make sure callers (or a shared
 exception handler) turn that into a sensible 4xx response instead of a raw 500.
@@ -266,11 +273,13 @@ Always pair `Field(default=None)` with an `X | None` type annotation.
 ## `DiveMixture.po2` was replaced with `helium`
 
 Mixtures originally tracked a PO₂ set-point (bar); this was replaced with a `helium` percentage (for
-trimix), handled identically to `oxygen` - a plain required `float` on both the model and
-`DiveMixtureBase`, defaulting to `0.0` (vs. oxygen's `21.0`), with the same 0-100 range validation
-on the frontend (`diveMixtureSchema`). This was a genuine schema swap (not an added column), so
-applying it to the live dev DB per the "no migration tool" workflow above took two manual steps
-rather than one:
+trimix), handled identically to `oxygen` - at the time a plain required `float` on both the model
+and `DiveMixtureBase`, defaulting to `0.0` (vs. oxygen's `21.0`), with the same 0-100 range
+validation on the frontend (`diveMixtureSchema`). Both are nullable now and neither carries a
+default on the wire (*A cylinder may record a mix without a vessel*); what has not changed is that
+the two are handled identically, which is the point this section is making. This was a genuine
+schema swap (not an added column), so applying it to the live dev DB per the "no migration tool"
+workflow above took two manual steps rather than one:
 
 ```sql
 ALTER TABLE dive_mixture ADD COLUMN helium DOUBLE PRECISION NOT NULL DEFAULT 0.0;
@@ -14576,14 +14585,13 @@ profile's span: the profile is the recording of that very dive. A dive with no `
 placeholder, because duplicate dive numbers are legal by design (`DiveNumberingSummary` counts them
 rather than refusing them) and dropping the dive would lose everything else it carries.
 
-**A cylinder needs `volume`, `oxygen` and `helium`, and is skipped when it lacks any of them.** All
-three are `NOT NULL` here and all three are OPTIONAL in the format; §6.3 blesses a cylinder
-converted from a mix-only source with its vessel members absent, and says of `oxygen` in as many
-words that absent means not recorded, **not 21**. Divers plan gas off these numbers, so a supply
-whose size or mix this app would have to guess at is reported rather than guessed. The cost falls on
-the UDDF converter, whose sources routinely carry a mix with no cylinder size: those entries will
-not import until `dive_mixture.volume` becomes nullable, which is its own change with
-`services/dive_gas.py`, the dive form and the read schema all downstream of it.
+**A cylinder used to need `volume`, `oxygen` and `helium`, and was skipped when it lacked any of
+them — no longer.** All three were `NOT NULL` here and all three are OPTIONAL in the format, so the
+skip was this rule's answer while the columns could hold nothing else. The change that answer was
+waiting for has landed: the three columns are nullable, absence is stored as absence, and a cylinder
+is no longer skipped for lacking any of them. See *A cylinder may record a mix without a vessel*,
+which supersedes this paragraph and records what it cost across the gas arithmetic and the
+exporters. The class this section is about is unchanged — it is one column fewer.
 
 **The one place the format is *finer* than this app is `visibility`**, a number in the spec (§6.2 —
 half-metre visibility is a real low-vis fact) and whole metres here. A fractional value is dropped
@@ -14999,3 +15007,118 @@ Pydantic's per-field `detail` array, and the case that is still refused answers 
 structurally rather than through `getApiErrorMessage` sees the difference; one that told a diver
 "start time needs a timezone" before ever calling the API now refuses a save the API would have
 accepted.
+
+## A cylinder may record a mix without a vessel
+
+`dive_mixture.volume`, `.oxygen` and `.helium` are nullable, and NULL is a third state rather than a
+missing value: the source never recorded one. The same shape `dive.utc_offset_minutes` already
+carries, arriving from the same place — a migration source that is poorer than this app's columns.
+
+All three are OPTIONAL in DiveJSON. §6.3 blesses a cylinder converted from a mix-only source with
+its vessel members absent, and says of `oxygen` in as many words that absent means not recorded,
+**not 21**. So this is the app catching up to the format it already writes; no spec change is owed,
+and the entry in *Where the format is optional and this app is not* that said a cylinder is skipped
+when it lacks any of the three is superseded by this one.
+
+**UDDF is where it arrives from.** `<tankvolume>` is `minOccurs="0"` in the 3.2.2 XSD vendored under
+`tests/fixtures/uddf/`, and foreign exporters routinely omit it — a `<tankdata>` that is a gas link
+and a pair of pressures is an ordinary shape out there, and Shearwater Cloud emits linkless
+`<tankdata>` too. Until this change such a cylinder could not be stored at all: `_plan_cylinders`
+skipped it and reported the loss, so a diver migrating a logbook lost the pressures and the gas
+number along with the size nobody had written down.
+
+**The write-side defaults were the half that would have made this achieve nothing.** `oxygen` and
+`helium` carried `default=21.0` / `default=0.0` on `DiveMixtureBase`, which `DiveMixtureCreate`
+inherits, so migrating the columns alone would have left the table able to hold "not recorded" while
+the API could not express it — and the import skip would have survived untouched. Removing them is
+an OpenAPI contract change that reaches `opendiving-web` and `opendiving-ios`: a client generated
+against the old schema reads `oxygen: number` and is now sent `null`. The prefill is a convenience
+that belongs in a form a diver can see and change, which is where it stays.
+
+**The read schema was widened first, and that ordering is not cosmetic.** `DiveMixtureBase` is
+validated over every stored row on every dive read *and* is the export document's cylinder shape, so
+a NULL arriving under a `float` annotation is a 500 on `GET /dive/{uuid}` and a failure of the whole
+logbook export rather than of one dive. Its own docstring already argued the case for the pressure
+bounds: a read schema that can reject its own table is a liability.
+
+**The four `CHECK`s did not break; they went quiet, which is worse.** SQL `CHECK` passes on UNKNOWN,
+so `volume > 0` already admitted a NULL and `oxygen + helium <= 100` already admitted a row with one
+operand missing. Nothing *had* to be rewritten. They are restated as `X IS NULL OR …` anyway, in
+revision `d3b1700eb489`, because every other nullable column on that table spells its null case out
+and leaving these four as the exceptions invites the next reader to redo the reasoning. Autogenerate
+cannot see a constraint whose text changed under an unchanged name, so that half is hand-written —
+the same thing revision `b1dbbf0d263e` ran into. The comment claiming the constraints mirror the
+frontend's Zod validation went with them: `opendiving-web` learns the blank case in its own change,
+and a comment pointing at a file about to say something different is worse than no pointer.
+
+**What a missing size costs, and where that is decided.** `_pressure_used`'s docstring had already
+written the rule: a capacity that cannot become litres "is a reason it produces no figure, checked
+where the multiplication happens … not a reason to decide it was never breathed". So three guards in
+`services/dive_gas.py` became null-aware and none of them moved. `compute_gas_use` gains a refusal a
+diver can actually reach — one cylinder, an average depth, both pressures, a real drop between them,
+and no recorded size — and the browser owns the sentence that says which input is missing
+(`lib/dive-gas.ts` is a deliberate mirror of these guard clauses, and its own docstring says it has
+to change when they do).
+
+**The trap in the parallel path was not mechanical.** `compute_parallel_gas_use` pools a SAC only
+when `len({volumes}) == 1`, an equality test whose whole job is to prove the cylinders match — and a
+set of all-NULL volumes collapses to one element, satisfying it while meaning that nothing is known
+about any of them. The size guard above refuses that set before the pooling test is reached, and the
+volumes are re-derived from the narrowed list under `zip(..., strict=True)` rather than read off the
+mixtures again, so the equality test can only ever see real numbers.
+
+**Three exporters needed a null tier and the format decided two of them.** `gas_name`
+(`services/export/naming.py`) raised `TypeError` on `None`, and it is the shared helper all three
+export call sites pass these fields into. UDDF's `<mix>` extends `namedType`, whose `<name>` is
+mandatory, so it has to return a string — it spells an unrecorded fraction out (`Unrecorded gas`,
+`O2 32% / He unrecorded`) on exactly the terms it already spelled out an impossible one, rather than
+naming a gas it does not have. `<o2>`, `<he>` and `<tankvolume>` are all `minOccurs="0"`, so an
+unrecorded fraction or size is simply not written; a `0` there would say there is no oxygen in the
+cylinder. That mirrors the documented skip precedent for a missing `<tankpressurebegin>` in the form
+the optional element allows: the mandatory one loses its whole `<tankdata>`, the optional one loses
+only itself. `export/envelope.py` needed nothing — its encoder already passes `exclude_none=True`,
+which is the format's nothing-invented rule at the serializer.
+
+**`merge_mixture_fields`'s agreement guard met the change too.** It compared `(oxygen, helium)`
+one-sidedly, treating a parsed `None` as no evidence either way because it "cannot be checked
+against the default the form filled in". A stored NULL is now the same kind of thing, and a
+one-sided guard would read `parsed 21` against `stored NULL` as two different gases and refuse the
+backfill for exactly the mix-less imports this change exists for. Both sides are checked for absence
+now. It does widen the window that function's ordering warning names — a pair with nothing recorded
+on one side agrees by default — which is why `get_mixtures_for_dive`'s `ORDER BY id` is a
+precondition rather than a nicety.
+
+**The import stopped skipping anything.** `_plan_cylinders` used to have three skip branches; it now
+has none. `volume`, `oxygen` and `helium` joined `_MIXTURE_BOUNDS`, so a *recorded* value this app
+cannot store is dropped with a note like an out-of-range pressure and the cylinder keeps everything
+else, and the oxygen-plus-helium rule follows the shape the pressure pair beside it always had —
+neither of two recorded numbers says which is wrong, so both go and the row stays. What is no longer
+skipped is the cylinder itself, because absence is now storable and the alternative was losing the
+members the document *did* carry.
+
+## The vendored schema's freeze note names no condition but the tag
+
+`tests/fixtures/divejson/README.md` records where `divejson.schema.json` came from, and part of that
+is what the version string means: 1.0 is a working draft, and the note says when it stops being one.
+It used to say the specification "freezes at 1.0 once the reference implementation's export/import
+round-trip passes against it". It now says the draft freezes as version 1.0 **when its maintainers
+tag it**, and nothing more.
+
+The old sentence was not merely vague — it named a condition that has since been **met**. This app
+is that reference implementation, and its export/import round-trip passes; the format's maintainers
+held the tag anyway, on the stronger ground that a format tested only against the implementation
+that wrote it has not really been tested. So the published promise was looser than the actual bar,
+and a reader who checked it would have expected a tag that was not coming. Every replacement
+*condition* has the same defect one step later: whatever event is named, the sentence reads as a
+broken promise for however long the tag waits behind it, and the tag is deliberately a human step
+with no schedule.
+
+Naming the tag is circular, and that is the cost the format's maintainers accepted rather than an
+oversight. What it buys is a sentence that cannot come untrue. The bar itself is a decision recorded
+where such decisions are made, not in normative text that would have to be edited every time the
+corpus grew.
+
+The same sentence appears in several places across the format's own repositories and is being
+reworded in all of them; this file is the copy that lives here, and it is reworded here because a
+provenance note that summarises a stale promise is a stale note. Anyone re-fetching the schema
+should carry the wording forward from upstream rather than from this paragraph.

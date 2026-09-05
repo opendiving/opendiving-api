@@ -620,15 +620,17 @@ def merge_mixture_fields(
     the import and says nothing about which parsed cylinder it came from. Position alone
     is too weak to trust on its own, though - a diver who deleted their deco bottle and
     added a different one would have the parsed second gas written onto it. So the counts
-    must match **and** every pair must still agree on `(oxygen, helium)`, which is the
-    part of a cylinder a diver has no reason to retype and every reason to leave alone.
+    must match **and** every pair must still agree on the `(oxygen, helium)` both sides
+    recorded, which is the part of a cylinder a diver has no reason to retype and every
+    reason to leave alone.
 
     Because the join is positional, **`stored` must be in the order the cylinders were
     saved in**, which is what `get_mixtures_for_dive`'s `ORDER BY id` guarantees and
     nothing in this function can check. The `(oxygen, helium)` agreement above is not a
     backstop for a mis-ordered list either: a parser that records no fractions at all
     leaves both `None` on every row, and `None` is explicitly not evidence of a mismatch
-    (below). A 2026 Suunto Ocean export is exactly that shape - `_mixtures_from_cylinders`
+    (below) - on the parsed side or, since the columns became nullable, on the stored one.
+    A 2026 Suunto Ocean export is exactly that shape - `_mixtures_from_cylinders`
     reconstructs its cylinders from sample data, which carries pressures and gas numbers
     but no `Gases` block - so on the one format whose `gas_number` is the file's own label
     rather than a synthesized position, an unordered read would swap the labels with
@@ -643,13 +645,25 @@ def merge_mixture_fields(
 
     updates: list[tuple[int, dict[str, object]]] = []
     for parsed_mix, stored_mix in zip(parsed, stored, strict=True):
-        # `None` on the parsed side means the file never recorded a fraction, which
-        # cannot be checked against the default the form filled in - so it is not
-        # evidence of a mismatch, and not evidence of a match either. Only recorded
-        # fractions are compared.
-        if parsed_mix.oxygen is not None and parsed_mix.oxygen != stored_mix.oxygen:
+        # `None` on **either** side means that side never recorded a fraction, which is
+        # not evidence of a mismatch and not evidence of a match either. Only fractions
+        # both sides actually recorded are compared.
+        #
+        # The parsed side was the whole of this rule while the stored side could not be
+        # null: a file that recorded nothing could not be checked against the default the
+        # form had filled in. `dive_mixture.oxygen` and `.helium` are nullable now, and
+        # the import path stores that absence rather than defaulting it, so a stored row
+        # can say "not recorded" in the same way - and a one-sided guard would read
+        # `parsed 21` against `stored NULL` as two different gases and refuse the whole
+        # dive. That would fall on exactly the mix-less imports this change exists for.
+        #
+        # It does widen the window the docstring's ordering warning names: a pair with
+        # nothing recorded on one side agrees by default, so the positional join carries
+        # more of the weight there. The `ORDER BY id` that join depends on is what keeps
+        # it honest, which is why it is a precondition rather than a nicety.
+        if parsed_mix.oxygen is not None and stored_mix.oxygen is not None and parsed_mix.oxygen != stored_mix.oxygen:
             return None
-        if parsed_mix.helium is not None and parsed_mix.helium != stored_mix.helium:
+        if parsed_mix.helium is not None and stored_mix.helium is not None and parsed_mix.helium != stored_mix.helium:
             return None
         # **Fill-only: a parsed `None` is dropped, not written.** This is the same rule as
         # the fraction comparison above, applied to the write instead of the guard.

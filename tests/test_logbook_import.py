@@ -1050,11 +1050,17 @@ class TestNothingInventedNothingFatal:
         assert ImportNoteCode.RECORD_SKIPPED in _codes(plan)
 
     @pytest.mark.asyncio
-    async def test_a_cylinder_with_no_mix_is_skipped_and_the_dive_is_not(
+    async def test_a_cylinder_with_no_mix_is_stored_with_its_mix_absent(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
         """§6.3: absent `oxygen` means not recorded, not 21 - and divers plan gas off these
-        numbers, so the supply goes rather than the assumption being made."""
+        numbers, so nothing is assumed. The cylinder itself is real either way, which is
+        why it is now stored with the member missing rather than skipped: dropping it lost
+        the pressures and the gas number the document *did* carry.
+
+        The inverse of a test that asserted the skip. `dive_mixture.oxygen` was `NOT NULL`
+        when it was written, and the skip was the honest answer while it was.
+        """
         _, document = seeded
         parsed = json.loads(document)
         del parsed["dives"][0]["cylinders"][0]["oxygen"]
@@ -1063,10 +1069,70 @@ class TestNothingInventedNothingFatal:
         plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
 
         assert _counts(plan)["dives"] == (1, 0, 0, 0)
+        assert ImportNoteCode.RECORD_SKIPPED not in _codes(plan)
         dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
-        assert (
-            not (await async_db.execute(select(DiveMixture.id).where(DiveMixture.dive_id == dive.id))).scalars().all()
-        )
+        stored = (await async_db.execute(select(DiveMixture).where(DiveMixture.dive_id == dive.id))).scalars().all()
+        assert [mixture.oxygen for mixture in stored] == [None]
+        assert [mixture.volume for mixture in stored] == [parsed["dives"][0]["cylinders"][0]["volume"]]
+
+    @pytest.mark.asyncio
+    async def test_a_cylinder_with_no_volume_is_stored_with_its_size_absent(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The mix-only cylinder: the shape a UDDF `<tankdata>` with a gas link and no
+        `<tankvolume>` converts to, and the one this app could not hold at all."""
+        _, document = seeded
+        parsed = json.loads(document)
+        del parsed["dives"][0]["cylinders"][0]["volume"]
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["dives"] == (1, 0, 0, 0)
+        assert ImportNoteCode.RECORD_SKIPPED not in _codes(plan)
+        dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        stored = (await async_db.execute(select(DiveMixture).where(DiveMixture.dive_id == dive.id))).scalars().one()
+        assert stored.volume is None
+        assert stored.oxygen == parsed["dives"][0]["cylinders"][0]["oxygen"]
+
+    @pytest.mark.asyncio
+    async def test_a_cylinder_size_outside_what_this_app_stores_goes_without_the_cylinder(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """A *recorded* member the app cannot hold is still dropped - what changed is that
+        the rest of the cylinder no longer goes with it."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["cylinders"][0]["volume"] = -3.0
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert ImportNoteCode.VALUE_DROPPED in _codes(plan)
+        dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        stored = (await async_db.execute(select(DiveMixture).where(DiveMixture.dive_id == dive.id))).scalars().one()
+        assert stored.volume is None
+        assert stored.oxygen == parsed["dives"][0]["cylinders"][0]["oxygen"]
+
+    @pytest.mark.asyncio
+    async def test_a_mix_adding_past_100_percent_loses_both_fractions_and_keeps_the_cylinder(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """Neither fraction says which of them is wrong, so both go - the same answer the
+        pressure pair beside it has always given, now that there is somewhere to put it."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["cylinders"][0]["oxygen"] = 60.0
+        parsed["dives"][0]["cylinders"][0]["helium"] = 50.0
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert ImportNoteCode.VALUE_DROPPED in _codes(plan)
+        dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        stored = (await async_db.execute(select(DiveMixture).where(DiveMixture.dive_id == dive.id))).scalars().one()
+        assert (stored.oxygen, stored.helium) == (None, None)
+        assert stored.volume == parsed["dives"][0]["cylinders"][0]["volume"]
 
     @pytest.mark.asyncio
     async def test_an_unknown_gear_type_reads_as_absent(self, seeded: Any, db: Session, async_db: AsyncSession) -> None:
@@ -1367,11 +1433,12 @@ class TestTheBoundsCensus:
             "ck_dive_mixture_pressure_order",
         }
     )
-    # Columns the *record* cannot exist without, so the planner skips the record rather than
-    # dropping a value. Each is checked explicitly by a test above.
-    REQUIRED_COLUMNS = frozenset(
-        {"ck_dive_mixture_volume_positive", "ck_dive_mixture_oxygen_range", "ck_dive_mixture_helium_range"}
-    )
+    # There used to be a third exclusion here, for the three `dive_mixture` bounds whose
+    # columns the record could not exist without - the planner skipped the whole cylinder
+    # rather than dropping a value, so no `_MIXTURE_BOUNDS` entry could cover them. Those
+    # columns are nullable now and each has its own bound, so the exclusion is gone and the
+    # census covers them like everything else.
+    #
     # Single-column bounds guarded by `_Planner._position` rather than by `_DIVE_BOUNDS`,
     # because a coordinate arrives as a Position object and goes as a pair: dropping half of
     # one would leave a dive pinned to the equator, which `ck_dive_*_position_pair` refuses
@@ -1398,7 +1465,7 @@ class TestTheBoundsCensus:
             table = model.__table__
             for constraint in table.constraints:
                 name = getattr(constraint, "name", None)
-                excluded = self.PAIR_RULES | self.REQUIRED_COLUMNS | self.POSITION_RULES
+                excluded = self.PAIR_RULES | self.POSITION_RULES
                 if not name or not name.startswith("ck_") or name in excluded:
                     continue
                 sqltext = str(getattr(constraint, "sqltext", ""))

@@ -10,9 +10,9 @@ conforms without reaching the network.
   published at <https://divejson.org/schema/1.0/divejson.schema.json>
 - Fetched: 2026-09-04, at `f8fb353` (the commit that last touched the schema; the repository was at
   `c5a4ee4`)
-- Version: 1.0 — a working draft. The specification freezes at 1.0 once the reference
-  implementation's export/import round-trip passes against it, and until then normative text, this
-  schema and the upstream fixtures may change together without a version bump.
+- Version: 1.0 — a working draft. The specification freezes as version 1.0 when its maintainers tag
+  it; until then normative text, this schema and the upstream fixtures may change together without a
+  version bump.
 - License: MIT (the spec prose is CC BY 4.0; schema, fixtures and tools are MIT).
 
 The file is unmodified. If it is ever re-fetched, update the commit and date above and re-run

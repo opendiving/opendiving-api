@@ -342,9 +342,13 @@ _DIVE_BOUNDS: tuple[_Bound, ...] = (
 )
 
 # The mixture bounds, same rules, from `models/dive_mixture.py`. `volume`, `oxygen` and
-# `helium` are absent because they are required rather than bounded-and-droppable - see
-# `_plan_cylinder`.
+# `helium` are here rather than handled apart because they became nullable columns: they
+# are bounded-and-droppable like every other member on this list, and a document that
+# recorded none of them now produces a cylinder rather than a note - see `_plan_cylinders`.
 _MIXTURE_BOUNDS: tuple[_Bound, ...] = (
+    _Bound("volume", lambda value: value > 0, "a cylinder volume must be greater than zero"),
+    _Bound("oxygen", lambda value: 0 <= value <= 100, "an oxygen fraction must be between 0 and 100 percent"),
+    _Bound("helium", lambda value: 0 <= value <= 100, "a helium fraction must be between 0 and 100 percent"),
     _Bound("start_pressure", lambda value: 0 < value <= 350, "a start pressure must be between 0 and 350 bar"),
     _Bound("end_pressure", lambda value: 0 <= value <= 350, "an end pressure must be between 0 and 350 bar"),
     _Bound("po2_limit", lambda value: 0.4 <= value <= 2.0, "a ppO2 limit must be between 0.4 and 2.0 bar"),
@@ -1440,49 +1444,36 @@ class _Planner:
     def _plan_cylinders(self, dive: ImportDive) -> list[dict[str, Any]]:
         """A dive's gas supplies, as `dive_mixture` rows.
 
-        **A cylinder the app cannot represent is skipped, not filled in.** `volume`,
-        `oxygen` and `helium` are all `NOT NULL` here and all OPTIONAL in the format, whose
-        §6.3 blesses a cylinder converted from a mix-only source with its vessel members
-        absent - and §6.3 says of `oxygen` in as many words that absent means not recorded,
-        not 21. Divers plan gas off these numbers, so a supply whose mix or size this app
-        would have to guess at is reported rather than guessed. `DECISIONS.md` records the
-        cost, which falls on the UDDF converter's flagship path.
+        **A cylinder the document did not fully describe is stored as it was recorded, not
+        filled in and no longer skipped.** `volume`, `oxygen` and `helium` are OPTIONAL in
+        the format - §6.3 blesses a cylinder converted from a mix-only source with its
+        vessel members absent, and says of `oxygen` in as many words that absent means not
+        recorded, not 21 - and they are nullable columns here now, so absence has somewhere
+        to land. Divers plan gas off these numbers, which is why nothing is guessed; the
+        cylinder itself is real either way, and dropping it lost the pressures, the role
+        and the gas number it *did* carry along with the member it didn't.
+
+        A member the document records but this app cannot store is a different case and
+        still goes: `_MIXTURE_BOUNDS` drops it with a note, exactly as it does an
+        out-of-range pressure or a `NaN`, and the cylinder keeps everything else. So does
+        each of the two cross-field rules, which is what the pressure pair below has always
+        done - an oxygen and a helium summing past 100 cannot both be right and neither
+        says which is wrong, so both go and the row stays. Nothing in here skips a cylinder
+        any more.
         """
         rows: list[dict[str, Any]] = []
         for index, cylinder in enumerate(dive.cylinders):
-            volume, oxygen, helium = cylinder.volume, cylinder.oxygen, cylinder.helium
-            missing = [
-                name
-                for name, value in (("volume", volume), ("oxygen", oxygen), ("helium", helium))
-                if value is None or not _finite(value)
-            ]
-            if missing or volume is None or oxygen is None or helium is None:
-                self._note(
-                    ImportNoteCode.RECORD_SKIPPED,
-                    f"Cylinder {index + 1} records no {', '.join(missing)}, which this app cannot store without "
-                    "assuming a value the document does not carry, so it was skipped.",
-                    collection="dives",
-                    uuid=dive.uuid,
-                )
-                continue
-            if not (volume > 0 and 0 <= oxygen <= 100 and 0 <= helium <= 100):
-                self._note(
-                    ImportNoteCode.RECORD_SKIPPED,
-                    f"Cylinder {index + 1} records a size or a gas fraction outside what this app can store, "
-                    "so it was skipped.",
-                    collection="dives",
-                    uuid=dive.uuid,
-                )
-                continue
-            if oxygen + helium > 100:
-                self._note(
-                    ImportNoteCode.RECORD_SKIPPED,
-                    f"Cylinder {index + 1}'s oxygen and helium add up to more than 100 percent, so it was skipped.",
-                    collection="dives",
-                    uuid=dive.uuid,
-                )
-                continue
             bounded = self._bounded("dives", dive.uuid, cylinder, _MIXTURE_BOUNDS)
+            volume = bounded.get("volume")
+            oxygen = bounded.get("oxygen")
+            helium = bounded.get("helium")
+            if oxygen is not None and helium is not None and oxygen + helium > 100:
+                self._dropped(
+                    "dives",
+                    dive.uuid,
+                    f"Cylinder {index + 1}'s oxygen and helium add up to more than 100 percent, so both went",
+                )
+                oxygen = helium = None
             start_pressure = bounded.get("start_pressure")
             end_pressure = bounded.get("end_pressure")
             if start_pressure is not None and end_pressure is not None and end_pressure > start_pressure:

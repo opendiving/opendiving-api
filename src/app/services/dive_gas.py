@@ -82,16 +82,25 @@ def compute_gas_use(
     - **No average depth**, or a nonsensical one. Max depth is not a substitute: a dive
       spends only a moment there, so it would understate consumption by a wide margin.
     - **Either cylinder pressure missing.** Half a pressure pair says nothing.
+    - **No recorded cylinder size.** A pressure drop is bar, and litres are what the
+      figure is in: without the volume to multiply by there is no amount of gas, only a
+      rate of change in a vessel of unknown size. `volume` is nullable and NULL means the
+      source never recorded one (a UDDF `<tankdata>` with a gas link and no
+      `<tankvolume>`), so this is a real refusal rather than a defensive one - and it is
+      the last of these a diver meets, since the depth and pressure checks above run
+      first. `lib/dive-gas.ts` in the web client mirrors the list and owns the sentence
+      that says which input is missing.
     - **No pressure drop at all.** A cylinder that came up as full as it went down
       wasn't breathed - that's an unused pony bottle or a typo, not a diver with a
       0 L/min consumption rate.
 
-    `duration` and `volume` are already `CHECK`-constrained positive at the database
-    level (`ck_dive_duration_positive`, `ck_dive_mixture_volume_positive`), as is the
-    pressure ordering (`ck_dive_mixture_pressure_order`, so the drop can never come out
-    negative). They're re-checked here anyway - this is a pure function that also gets
-    called from tests and could one day be called on unsaved input, and a zero slipping
-    into the denominator would raise rather than return a wrong number.
+    `duration` is already `CHECK`-constrained positive at the database level
+    (`ck_dive_duration_positive`), as is a recorded `volume`
+    (`ck_dive_mixture_volume_positive`, which passes on a NULL like every `CHECK` does)
+    and the pressure ordering (`ck_dive_mixture_pressure_order`, so the drop can never
+    come out negative). They're re-checked here anyway - this is a pure function that also
+    gets called from tests and could one day be called on unsaved input, and a zero
+    slipping into the denominator would raise rather than return a wrong number.
     """
     if len(mixtures) != 1:
         return None
@@ -101,7 +110,7 @@ def compute_gas_use(
         return None
     if mixture.start_pressure is None or mixture.end_pressure is None:
         return None
-    if duration <= 0 or mixture.volume <= 0:
+    if duration <= 0 or mixture.volume is None or mixture.volume <= 0:
         return None
 
     pressure_used = mixture.start_pressure - mixture.end_pressure
@@ -180,10 +189,13 @@ def _tank_arithmetic(mixture: DiveMixtureRead, attributed: GasAttribution) -> _T
     pressure_used = _pressure_used(mixture)
     if pressure_used is None:
         return None
-    # `ck_dive_mixture_volume_positive` makes this unreachable from a stored row; it is
-    # here for the same reason `compute_gas_use` re-checks it, and because this is the
-    # line that would otherwise multiply by it.
-    if mixture.volume <= 0:
+    # This is the multiplication `_pressure_used`'s docstring defers to: a cylinder whose
+    # capacity cannot become litres produces no figure *here*, having already been counted
+    # as breathed up there. A NULL volume is the ordinary way to arrive - the source
+    # recorded a gas and no vessel - while a non-positive one is unreachable from a stored
+    # row (`ck_dive_mixture_volume_positive`) and re-checked for the reason
+    # `compute_gas_use` gives.
+    if mixture.volume is None or mixture.volume <= 0:
         return None
     if attributed.seconds <= 0 or attributed.mean_depth_cm <= 0:
         return None
@@ -373,6 +385,9 @@ def compute_parallel_gas_use(
     - **Both pressures on every cylinder.** One missing pressure anywhere refuses the
       whole dive, for the reason above: the cylinder was carried and probably breathed,
       and there is no way to leave it out honestly.
+    - **A recorded size on every cylinder**, on exactly the same terms. One cylinder with
+      no `volume` contributes no litres to a sum whose denominator still covers the whole
+      dive, which reports an RMV that is too low rather than none at all.
     - **A total drop above zero.** Per-row drops are summed rather than each being
       required positive, because a zero-drop row is the unused pony bottle `_pressure_used`
       documents - it contributes zero litres, and the denominator is still right, since the
@@ -381,7 +396,13 @@ def compute_parallel_gas_use(
       negative on a stored row (`ck_dive_mixture_pressure_order`).
 
     `sac_bar_per_min` is pooled - the mean drop across the cylinders per surface-minute -
-    **only when every volume is exactly equal**, and `None` otherwise. That is the
+    **only when every recorded volume is exactly equal**, and `None` otherwise. The word
+    *recorded* is load-bearing now that the column is nullable: a set of all-NULL volumes
+    collapses to a one-element set, which would satisfy an equality test that exists to
+    prove the cylinders match while meaning that nothing is known about any of them. The
+    guard above refuses that set before this line is reached, and the volumes are
+    re-derived from the narrowed list rather than read off the mixtures again, so the
+    equality test can only ever see real numbers. That is the
     constraint Shearwater imposes for its own pooled sidemount SAC and Garmin imposes at
     pairing time, and it is what makes the figure honest: bar/min is a rate against a known
     volume, so pooling drops across a 11.1 L and a 12 L would be averaging two different
@@ -402,26 +423,29 @@ def compute_parallel_gas_use(
         return None
     if avg_depth is None or avg_depth <= 0 or duration <= 0:
         return None
-    if any(mixture.volume <= 0 for mixture in mixtures):
+    if any(mixture.volume is None or mixture.volume <= 0 for mixture in mixtures):
         return None
     if any(mixture.start_pressure is None or mixture.end_pressure is None for mixture in mixtures):
         return None
 
-    # Narrowed by the guard above; re-derived rather than carried so the types stay honest.
+    # Narrowed by the guards above; re-derived rather than carried so the types stay
+    # honest. `strict=True` on the zip below is what makes that safe: a filter that
+    # dropped a row the guard was supposed to have refused raises instead of silently
+    # pairing one cylinder's drop with another's volume.
     drops = [
         mixture.start_pressure - mixture.end_pressure
         for mixture in mixtures
         if mixture.start_pressure is not None and mixture.end_pressure is not None
     ]
+    volumes = [mixture.volume for mixture in mixtures if mixture.volume is not None]
     if sum(drops) <= 0:
         return None
 
-    gas_used = sum(drop * mixture.volume for drop, mixture in zip(drops, mixtures, strict=True))
+    gas_used = sum(drop * volume for drop, volume in zip(drops, volumes, strict=True))
     ambient_pressure = 1 + avg_depth / METERS_PER_BAR
     surface_minutes = ambient_pressure * (duration / 60)
 
-    volumes = {mixture.volume for mixture in mixtures}
-    pooled_sac = (sum(drops) / len(drops)) / surface_minutes if len(volumes) == 1 else None
+    pooled_sac = (sum(drops) / len(drops)) / surface_minutes if len(set(volumes)) == 1 else None
 
     return DiveGasUse(
         gas_used=round(gas_used, 2),

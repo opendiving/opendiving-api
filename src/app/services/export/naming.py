@@ -22,7 +22,11 @@ _AIR_OXYGEN_MAX = 21.4
 _OXYGEN_MIN = 99.5
 
 
-def gas_name(oxygen: float, helium: float) -> str:
+def _fraction(percent: float | None) -> str:
+    return "unrecorded" if percent is None else f"{percent:g}%"
+
+
+def gas_name(oxygen: float | None, helium: float | None) -> str:
     """What a diver would call this gas: `Air`, `Oxygen`, `EAN32`, or `21/35` for trimix.
 
     Rounds to whole percent because the shorthand *is* integer shorthand - a 32.4 % fill
@@ -33,7 +37,19 @@ def gas_name(oxygen: float, helium: float) -> str:
     A mixture the constraints should have rejected (oxygen and helium summing past 100,
     or no oxygen at all) is spelled out rather than named, so an impossible gas cannot
     pass for a real one in a file someone imports elsewhere.
+
+    **An unrecorded fraction is spelled out on the same terms, and for a stronger reason.**
+    `oxygen` and `helium` are nullable, and NULL means the source never recorded a mix -
+    so naming a cylinder with `oxygen=32` and no helium `EAN32` would assert the helium
+    this app does not have, in a label a reader has no way to see behind. Every caller
+    needs *some* string (UDDF's `<mix>` extends `namedType`, whose `<name>` is mandatory),
+    which is why this returns one rather than `None`; the fractions themselves stay absent
+    wherever the format allows it.
     """
+    if oxygen is None and helium is None:
+        return "Unrecorded gas"
+    if oxygen is None or helium is None:
+        return f"O2 {_fraction(oxygen)} / He {_fraction(helium)}"
     if not (oxygen > 0 and helium >= 0 and oxygen + helium <= 100):
         return f"O2 {oxygen:g}% / He {helium:g}%"
     if helium > 0:

@@ -114,9 +114,15 @@ def _cylinder_summary(mixture: DiveMixtureRead) -> str:
     """One cylinder as a diver would read it out: `EAN32 12L 200->80bar`.
 
     Every part after the gas is dropped when it wasn't recorded, so a hand-entered
-    cylinder with no pressures reads `Air 12L` rather than `Air 12L None->Nonebar`.
+    cylinder with no pressures reads `Air 12L` rather than `Air 12L None->Nonebar`. The
+    size is now one of those parts rather than always present: a mix-only cylinder reads
+    `EAN32 200->80bar`, and `gas_name` carries the mirror case where the mix is what is
+    missing. A cylinder that recorded neither is still a row here, because the pressures
+    or the role it *did* record are what the diver is reading the column for.
     """
-    parts = [gas_name(mixture.oxygen, mixture.helium), f"{mixture.volume:g}L"]
+    parts = [gas_name(mixture.oxygen, mixture.helium)]
+    if mixture.volume is not None:
+        parts.append(f"{mixture.volume:g}L")
     if mixture.start_pressure is not None and mixture.end_pressure is not None:
         parts.append(f"{mixture.start_pressure:g}->{mixture.end_pressure:g}bar")
     elif mixture.start_pressure is not None:

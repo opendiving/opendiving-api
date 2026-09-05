@@ -31,7 +31,15 @@ from src.app.services.dive_profiles import LoadedProfile
 from src.app.services.export.envelope import write_divejson
 from src.app.services.export.paths import plan_archive_paths
 from tests.helpers.divejson import assert_conforms, conformance_issues, parse_document
-from tests.helpers.export import EXPORTED_AT, TRIMIX_PROFILE, UUIDS, build_bundle, full_bundle
+from tests.helpers.export import (
+    EXPORTED_AT,
+    TRIMIX_PROFILE,
+    UUIDS,
+    build_bundle,
+    full_bundle,
+    make_dive,
+    mixture,
+)
 
 
 async def _stream(bundle: Any, monkeypatch: Any, profiles: dict[int, dict] | None = None, duration: int = 90) -> bytes:
@@ -260,6 +268,24 @@ class TestWhatUddfCannotHold:
             ("deco", 1.6, "staged"),
         ]
         assert "usage" not in cylinders[0]
+
+    @pytest.mark.asyncio
+    async def test_a_cylinder_omits_the_size_and_mix_it_never_recorded(self, monkeypatch):
+        """All three are OPTIONAL in the format (§6.3), and absent is how it spells "not
+        recorded" - `oxygen` explicitly so, where the absence must not be read as 21. The
+        encoder's `exclude_none=True` is what makes this true for free, which is also what
+        makes it worth pinning: nothing else in this file would notice a `"volume": null`
+        appearing in a document that promises to invent nothing.
+        """
+        bundle = build_bundle(
+            dives=[make_dive(1, UUIDS["dive-air"])],
+            mixtures_by_dive={1: [mixture(volume=None, oxygen=None, helium=None, start_pressure=200.0)]},
+        )
+        document = await _render(bundle, monkeypatch)
+
+        cylinder = document["dives"][0]["cylinders"][0]
+        assert cylinder == {"start_pressure": 200.0}
+        assert_conforms(await _render(bundle, monkeypatch))
 
     @pytest.mark.asyncio
     async def test_multi_site_visit_order_is_a_list_not_a_primary_site(self, monkeypatch):
