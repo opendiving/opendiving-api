@@ -82,15 +82,48 @@ class DiveMixtureBase(BaseModel):
     therefore live on `DiveMixtureCreate`/`DiveMixtureUpdate` and on the DB `CHECK`s,
     which together are what keep the table clean; a row that somehow slips past both
     still reaches the diver as a field with a message rather than as a 500.
+
+    The same reasoning is why `volume`, `oxygen` and `helium` are typed `float | None`
+    here rather than only on the write schemas: their columns are nullable, this class is
+    validated over every stored row on every dive read *and* is the cylinder shape of the
+    export document, so a `float` annotation over a NULL would turn `GET /dive/{uuid}` and
+    the whole logbook export into a 500 the first time a mix-only cylinder was stored.
+    Absent means the source never recorded it - not 11.1 L, and for `oxygen` explicitly
+    not 21.
     """
 
-    volume: Annotated[float, Field(examples=[12.0], description="Cylinder volume in liters")]
+    volume: Annotated[
+        float | None,
+        Field(
+            default=None,
+            examples=[12.0],
+            description="Cylinder volume in liters. Null is 'not recorded' - a source that gave a gas and no vessel, "
+            "which is what an omitted UDDF `<tankvolume>` says. Gas consumption needs it, so a dive whose only "
+            "cylinder has none gets no figure.",
+        ),
+    ]
     start_pressure: Annotated[
         float | None, Field(default=None, examples=[200.0], description="Starting pressure in bar")
     ]
     end_pressure: Annotated[float | None, Field(default=None, examples=[50.0], description="Ending pressure in bar")]
-    oxygen: Annotated[float, Field(default=21.0, description="Oxygen percentage")]
-    helium: Annotated[float, Field(default=0.0, description="Helium percentage")]
+    oxygen: Annotated[
+        float | None,
+        Field(
+            default=None,
+            examples=[21.0],
+            description="Oxygen percentage. Null is 'not recorded', **not 21**: a diver plans gas off this number, "
+            "so a source that never carried a mix leaves it absent rather than having air assumed for it. Clients "
+            "offering air as a convenience default do so in their own form, not on the wire.",
+        ),
+    ]
+    helium: Annotated[
+        float | None,
+        Field(
+            default=None,
+            examples=[0.0],
+            description="Helium percentage. Null is 'not recorded', not 0 - the same rule as `oxygen`.",
+        ),
+    ]
     po2_limit: Annotated[
         float | None,
         Field(

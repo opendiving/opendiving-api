@@ -10,11 +10,17 @@ class DiveMixture(Base):
     id: Mapped[int] = mapped_column(autoincrement=True, nullable=False, primary_key=True, init=False)
     dive_id: Mapped[int] = mapped_column(ForeignKey("dive.id", ondelete="CASCADE"), index=True)
 
-    volume: Mapped[float] = mapped_column(Float)
+    # All three nullable, and NULL is "the source never recorded this" rather than a
+    # missing value - the same third state `dive.utc_offset_minutes` carries. A cylinder
+    # whose file gave a gas and no vessel is a real record: UDDF's `<tankvolume>` is
+    # optional and its exporters routinely omit it, and a mix a source spelled as a gas
+    # link alone has no size to store. Filling one in would put a number a diver plans gas
+    # off into a column nothing recorded it in, so the column takes the absence instead.
+    volume: Mapped[float | None] = mapped_column(Float, default=None)
     start_pressure: Mapped[float | None] = mapped_column(Float, default=None)
     end_pressure: Mapped[float | None] = mapped_column(Float, default=None)
-    oxygen: Mapped[float] = mapped_column(Float, default=21.0)
-    helium: Mapped[float] = mapped_column(Float, default=0.0)
+    oxygen: Mapped[float | None] = mapped_column(Float, default=None)
+    helium: Mapped[float | None] = mapped_column(Float, default=None)
 
     # The ppO2 this gas was planned to (bar) - a dive computer's own exposure limit for
     # the cylinder, which is what its MOD is actually derived from. Not a revival of the
@@ -43,12 +49,21 @@ class DiveMixture(Base):
     usage: Mapped[str | None] = mapped_column(String(20), default=None)
 
     __table_args__ = (
-        # Mirrors the frontend's Zod validation (`lib/validations/dive.ts`) at the DB
-        # layer, so direct API calls or bugs can't insert nonsensical gas mixtures.
-        CheckConstraint("volume > 0", name="ck_dive_mixture_volume_positive"),
-        CheckConstraint("oxygen >= 0 AND oxygen <= 100", name="ck_dive_mixture_oxygen_range"),
-        CheckConstraint("helium >= 0 AND helium <= 100", name="ck_dive_mixture_helium_range"),
-        CheckConstraint("oxygen + helium <= 100", name="ck_dive_mixture_oxygen_helium_sum"),
+        # A DB-level backstop for the same bounds the API schemas and the web form apply,
+        # so direct API calls or bugs can't insert nonsensical gas mixtures.
+        #
+        # The four constraints over `volume`, `oxygen` and `helium` spell their null case
+        # out, like every other nullable column here, and that is a **restatement rather
+        # than a change**: SQL `CHECK` passes on UNKNOWN, so `volume > 0` already admitted
+        # a NULL and `oxygen + helium <= 100` already admitted a row with one operand
+        # missing. Left implicit they would be the only four on this table that go quiet
+        # on a null without saying so, which is the reading the next person has to redo.
+        CheckConstraint("volume IS NULL OR volume > 0", name="ck_dive_mixture_volume_positive"),
+        CheckConstraint("oxygen IS NULL OR (oxygen >= 0 AND oxygen <= 100)", name="ck_dive_mixture_oxygen_range"),
+        CheckConstraint("helium IS NULL OR (helium >= 0 AND helium <= 100)", name="ck_dive_mixture_helium_range"),
+        CheckConstraint(
+            "oxygen IS NULL OR helium IS NULL OR oxygen + helium <= 100", name="ck_dive_mixture_oxygen_helium_sum"
+        ),
         CheckConstraint(
             "start_pressure IS NULL OR end_pressure IS NULL OR end_pressure <= start_pressure",
             name="ck_dive_mixture_pressure_order",

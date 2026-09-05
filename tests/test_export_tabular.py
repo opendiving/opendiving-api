@@ -152,6 +152,21 @@ class TestDivesCsv:
         rows = _parse(_render(write_dives_csv(bundle)))
         assert rows[1][DIVES_HEADER.index("cylinders")] == "Air 12L"
 
+    def test_a_cylinder_with_no_recorded_size_or_mix_says_only_what_it_knows_either(self):
+        """The size joined the parts that are dropped when they were not recorded, and the
+        gas is spelled out rather than named. `Air 12L` for a cylinder with neither would
+        be two inventions in four characters."""
+        bundle = build_bundle(
+            dives=[make_dive(1, full_bundle().dives[0].uuid), make_dive(2, full_bundle().dives[1].uuid)],
+            mixtures_by_dive={
+                1: [mixture(volume=None, oxygen=32.0, start_pressure=200.0, end_pressure=70.0)],
+                2: [mixture(volume=None, oxygen=None, helium=None, start_pressure=200.0, end_pressure=70.0)],
+            },
+        )
+        rows = _parse(_render(write_dives_csv(bundle)))
+        assert rows[1][DIVES_HEADER.index("cylinders")] == "EAN32 200->70bar"
+        assert rows[2][DIVES_HEADER.index("cylinders")] == "Unrecorded gas 200->70bar"
+
     def test_the_local_time_and_its_offset_are_separate_columns(self):
         """So a spreadsheet can sort on local time without parsing an offset out of a
         string. 06:15 UTC at +02:00 is 08:15 local."""
@@ -214,6 +229,16 @@ class TestTheNormalizedFiles:
         role, usage = MIXTURES_HEADER.index("role"), MIXTURES_HEADER.index("usage")
 
         assert [(row[role], row[usage]) for row in rows[1:]] == [("", ""), ("bottom", ""), ("deco", "staged")]
+
+    def test_an_unrecorded_size_or_fraction_is_an_empty_cell(self):
+        """The same spelling the pressures beside them already use, which is what makes a
+        spreadsheet read the column as "nothing here" rather than as a number."""
+        bundle = build_bundle(
+            dives=[make_dive(1, full_bundle().dives[0].uuid)],
+            mixtures_by_dive={1: [mixture(volume=None, oxygen=None, helium=None)]},
+        )
+        rows = _parse(_render(write_mixtures_csv(bundle)))
+        assert rows[1][2:6] == ["Unrecorded gas", "", "", ""]
 
     def test_trips_count_the_dives_that_reference_them(self):
         rows = _parse(_render(write_trips_csv(full_bundle())))

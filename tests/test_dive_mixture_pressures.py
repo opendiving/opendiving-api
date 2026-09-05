@@ -156,6 +156,18 @@ class TestTheReadSchemaStaysUnbounded:
 
         assert _mixture(row).start_pressure == start_pressure
 
+    def test_a_row_that_recorded_no_size_or_mix_reads_back(self) -> None:
+        """The same liability arriving from the other direction, and the one the columns
+        becoming nullable created: `volume`, `oxygen` and `helium` are NULL-able now, so a
+        `float` annotation on `DiveMixtureBase` would turn every mix-only cylinder into a
+        500 on `GET /dive/{uuid}` - and, through `envelope._mixture`, into a failure of the
+        whole logbook export rather than of one dive."""
+        row = DiveMixtureRead.model_validate({"id": 1, "volume": None, "oxygen": None, "helium": None})
+
+        assert (row.volume, row.oxygen, row.helium) == (None, None, None)
+        exported = _mixture(row)
+        assert (exported.volume, exported.oxygen, exported.helium) == (None, None, None)
+
 
 class TestTheParseLayerNullsRatherThanRejects:
     """A file with one unusable number is still a file worth storing - the

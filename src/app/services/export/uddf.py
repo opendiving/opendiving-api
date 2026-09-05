@@ -235,24 +235,38 @@ class _MixKey:
     bottom and 1.6 on the ascent has genuinely defined two mixes as far as UDDF is
     concerned - collapsing them would mean picking one limit and silently dropping the
     other.
+
+    An unrecorded `oxygen` or `helium` is a key value of its own rather than a zero, on
+    exactly that reasoning: "no mix was recorded" and "air" are different gases, and one
+    `<mix>` cannot be both. All such cylinders do share a single `<mix>`, which is
+    correct - the document has one gas it knows nothing about, not one per cylinder.
     """
 
-    oxygen: float
-    helium: float
+    oxygen: float | None
+    helium: float | None
     po2_limit: float | None
 
     @property
     def sort_key(self) -> tuple[float, float, float]:
-        # `-1.0` sorts "no recorded limit" ahead of every real one (the constraint floor
-        # is 0.4 bar), so the mix list is stable without special-casing `None`.
-        return (self.oxygen, self.helium, -1.0 if self.po2_limit is None else self.po2_limit)
+        # `-1.0` sorts an unrecorded value ahead of every real one - the fractions floor
+        # at 0 and the ppO2 constraint at 0.4 bar - so the mix list is stable without
+        # special-casing `None`.
+        return (
+            -1.0 if self.oxygen is None else self.oxygen,
+            -1.0 if self.helium is None else self.helium,
+            -1.0 if self.po2_limit is None else self.po2_limit,
+        )
+
+
+def _rounded(value: float | None) -> float | None:
+    return None if value is None else round(value, _MIX_PRECISION)
 
 
 def _mix_key(mixture: DiveMixtureRead) -> _MixKey:
     return _MixKey(
-        oxygen=round(mixture.oxygen, _MIX_PRECISION),
-        helium=round(mixture.helium, _MIX_PRECISION),
-        po2_limit=None if mixture.po2_limit is None else round(mixture.po2_limit, _MIX_PRECISION),
+        oxygen=_rounded(mixture.oxygen),
+        helium=_rounded(mixture.helium),
+        po2_limit=_rounded(mixture.po2_limit),
     )
 
 
@@ -389,10 +403,16 @@ def _gasdefinitions_element(mix_ids: dict[_MixKey, str]) -> ET.Element | None:
     gasdefinitions = ET.Element("gasdefinitions")
     for key, mix_id in mix_ids.items():
         mix = _sub(gasdefinitions, "mix", id=mix_id)
+        # `<name>` is mandatory - `mixType` extends `namedType` - so `gas_name` always
+        # returns a string, and says "unrecorded" rather than naming a gas it doesn't have.
         _sub(mix, "name", gas_name(key.oxygen, key.helium))
-        # Fractions, not percentages: UDDF's `<o2>`/`<he>` are 0-1.
-        _sub(mix, "o2", _num(key.oxygen / 100.0))
-        _sub(mix, "he", _num(key.helium / 100.0))
+        # Fractions, not percentages: UDDF's `<o2>`/`<he>` are 0-1. Both are
+        # `minOccurs="0"`, so a fraction the source never recorded is simply not written -
+        # the format can say "no mix here" and a zero would say "no oxygen here".
+        if key.oxygen is not None:
+            _sub(mix, "o2", _num(key.oxygen / 100.0))
+        if key.helium is not None:
+            _sub(mix, "he", _num(key.helium / 100.0))
         if key.po2_limit is not None:
             # Bar in both formats - the one pressure UDDF does *not* express in Pascal,
             # which is exactly why it gets its own line and its own test.
@@ -652,7 +672,13 @@ def _dive_element(
             continue
         tank = _sub(element, "tankdata")
         _sub(tank, "link", ref=mix_ids[_mix_key(mixture)])
-        _sub(tank, "tankvolume", _num(mixture.volume / LITRES_PER_CUBIC_METRE))
+        # `<tankvolume>` is `minOccurs="0"` where `<tankpressurebegin>` above is not, so a
+        # cylinder whose size nobody recorded is omitted rather than skipped - the same
+        # answer the mandatory element gets, in the form this optional one allows. This is
+        # the shape the app now stores and the one foreign UDDF routinely emits, so it is
+        # also what a round trip through this writer has to preserve.
+        if mixture.volume is not None:
+            _sub(tank, "tankvolume", _num(mixture.volume / LITRES_PER_CUBIC_METRE))
         _sub(tank, "tankpressurebegin", _num(mixture.start_pressure * PASCAL_PER_BAR))
         if mixture.end_pressure is not None:
             _sub(tank, "tankpressureend", _num(mixture.end_pressure * PASCAL_PER_BAR))

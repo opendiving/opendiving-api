@@ -376,6 +376,75 @@ class TestDiveContent:
         assert len(_tree(document).findall(f"{UDDF}gasdefinitions/{UDDF}mix")) == 1
 
     @pytest.mark.asyncio
+    async def test_a_cylinder_with_no_recorded_size_omits_the_tankvolume(self, schema, monkeypatch):
+        """The mirror of the case above, and the reason it is a mirror rather than a copy:
+        `<tankvolume>` is `minOccurs="0"` where `<tankpressurebegin>` is mandatory, so this
+        cylinder *is* a valid `<tankdata>` with one child left out. Validated against the
+        XSD, because omitting a child of an `xs:sequence` is exactly the mistake that reads
+        fine and does not parse."""
+        bundle = build_bundle(
+            dives=[make_dive(1, full_bundle().dives[0].uuid)],
+            mixtures_by_dive={1: [mixture(volume=None, start_pressure=200.0, end_pressure=80.0)]},
+        )
+        document = await _render(bundle, monkeypatch=monkeypatch)
+        schema.validate(document)
+
+        tanks = _dive(_tree(document), 0).findall(f"{UDDF}tankdata")
+        assert len(tanks) == 1
+        assert tanks[0].find(f"{UDDF}tankvolume") is None
+        assert _text(tanks[0], f"{UDDF}tankpressurebegin") == "20000000"
+
+    @pytest.mark.asyncio
+    async def test_a_mix_nobody_recorded_is_named_and_carries_no_fractions(self, schema, monkeypatch):
+        """`<name>` is mandatory - `mixType` extends `namedType` - so the mix has to say
+        something, and what it says is that nothing was recorded rather than `Air`. `<o2>`
+        and `<he>` are both optional, so a fraction the source never had is simply not
+        written: a `0` there would claim there is no oxygen in the cylinder."""
+        bundle = build_bundle(
+            dives=[make_dive(1, full_bundle().dives[0].uuid)],
+            mixtures_by_dive={1: [mixture(oxygen=None, helium=None)]},
+        )
+        document = await _render(bundle, monkeypatch=monkeypatch)
+        schema.validate(document)
+
+        mixes = _tree(document).findall(f"{UDDF}gasdefinitions/{UDDF}mix")
+        assert len(mixes) == 1
+        assert _text(mixes[0], f"{UDDF}name") == "Unrecorded gas"
+        assert mixes[0].find(f"{UDDF}o2") is None
+        assert mixes[0].find(f"{UDDF}he") is None
+
+    @pytest.mark.asyncio
+    async def test_a_half_recorded_mix_is_spelled_out_rather_than_named(self, schema, monkeypatch):
+        """`EAN32` would assert the helium this cylinder does not have, and a name is the
+        one place a reader cannot see behind - so the half that was recorded is written and
+        the half that was not says so, in the register the impossible-gas fallback already
+        uses. The recorded `<o2>` still travels; only the unrecorded `<he>` is absent."""
+        bundle = build_bundle(
+            dives=[make_dive(1, full_bundle().dives[0].uuid)],
+            mixtures_by_dive={1: [mixture(oxygen=32.0, helium=None)]},
+        )
+        document = await _render(bundle, monkeypatch=monkeypatch)
+        schema.validate(document)
+
+        mixes = _tree(document).findall(f"{UDDF}gasdefinitions/{UDDF}mix")
+        assert _text(mixes[0], f"{UDDF}name") == "O2 32% / He unrecorded"
+        assert _text(mixes[0], f"{UDDF}o2") == "0.32"
+        assert mixes[0].find(f"{UDDF}he") is None
+
+    def test_an_unrecorded_mix_is_not_the_same_mix_as_air(self):
+        """`collect_mixes` keys on the fractions, and "nothing was recorded" is a value of
+        its own there: one `<mix>` cannot be both air and an unknown gas. All the unknown
+        ones do share a single entry, which is right - the document has one gas it knows
+        nothing about, not one per cylinder."""
+        bundle = build_bundle(
+            dives=[make_dive(1, full_bundle().dives[0].uuid)],
+            mixtures_by_dive={
+                1: [mixture(), mixture(id=2, oxygen=None, helium=None), mixture(id=3, oxygen=None, helium=None)]
+            },
+        )
+        assert len(collect_mixes(bundle)) == 2
+
+    @pytest.mark.asyncio
     async def test_the_altitude_lands_between_the_datetime_and_the_equipment(self, schema, monkeypatch):
         """`informationbeforediveType` is an `xs:sequence`, so the position is the test:
         emitted anywhere else the document stops validating. The air dive records 0 m -
