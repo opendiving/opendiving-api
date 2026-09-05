@@ -353,6 +353,16 @@ FETCH_OWNED_ROUTES = [
     *(
         OwnedRoute(
             method,
+            "/api/v1/dive-form-preset/{uuid}",
+            "src.app.api.v1.dive_form_presets:crud_dive_form_presets",
+            "Dive form preset not found",
+            extra,
+        )
+        for method, extra in _CRUD_METHODS
+    ),
+    *(
+        OwnedRoute(
+            method,
             "/api/v1/certification/{uuid}",
             "src.app.api.v1.certifications:crud_certifications",
             "Certification not found",

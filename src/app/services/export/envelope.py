@@ -111,16 +111,26 @@ def _diver(bundle: ExportBundle) -> ExportDiver:
         username=user.username,
         email=user.email,
         created_at=user.created_at,
-        # The two account-level preferences there are. They are here because
-        # `/export/archive` says nothing in the account is reachable only through the app -
-        # and under this producer's key because they are application settings rather than
-        # logbook data, which the format gives no core member (spec §6.1). `units` in
-        # particular is the diver's own setting travelling with a document whose
-        # measurements deliberately do not bend to it (see `schemas/export.py`).
+        # The account-level preferences. They are here because `/export/archive` says
+        # nothing in the account is reachable only through the app - and under this
+        # producer's key because they are application settings rather than logbook data,
+        # which the format gives no core member (spec §6.1). `units` in particular is the
+        # diver's own setting travelling with a document whose measurements deliberately do
+        # not bend to it (see `schemas/export.py`).
+        #
+        # The presets are `{name, hidden_fields}` and nothing else: `uuid`, `user_uuid` and
+        # `created_at` identify a row in *this* instance, and a document that is going to be
+        # read somewhere else has no use for them. Ordered the way `GET /dive-form-presets`
+        # orders them, which is what makes the golden-file test meaningful.
         extensions={
             DIVEJSON_PRODUCER_KEY: {
                 "units": user.units,
                 "gear_service_emails": user.gear_service_emails,
+                "dive_form_hidden_fields": list(user.dive_form_hidden_fields),
+                "dive_form_presets": [
+                    {"name": preset.name, "hidden_fields": list(preset.hidden_fields)}
+                    for preset in bundle.dive_form_presets
+                ],
             }
         },
     )

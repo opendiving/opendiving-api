@@ -174,6 +174,7 @@ PAGINATED_LIST_ROUTES: dict[str, tuple[str, ...]] = {
     "admin.py": ("read_invite_requests",),
     "certifications.py": ("read_certifications",),
     "courses.py": ("read_courses",),
+    "dive_form_presets.py": ("read_dive_form_presets",),
     "dive_sites.py": ("read_dive_sites",),
     "dives.py": ("read_dives",),
     "gear_items.py": ("read_gear_items",),

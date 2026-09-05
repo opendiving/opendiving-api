@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Index, String, func
+from sqlalchemy import JSON, Boolean, Index, String, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -62,6 +62,25 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # reason - the column is NOT NULL, so the migration adding it needs a server-side
     # default to backfill the existing rows.
     units: Mapped[str] = mapped_column(String(16), default="metric", server_default="metric")
+
+    # Which dive-form fields this diver currently keeps hidden - `DiveFormField` values in
+    # `schemas/dive_form_preset.py`, canonicalized on every write. The account's *current*
+    # state, not a preset: applying a preset copies that preset's set in here, and toggling
+    # a single field afterwards moves this column alone.
+    #
+    # Server-side rather than per device, unlike the per-field entry-unit switch, so the
+    # form a diver arranged follows them across devices and the first paint already has the
+    # right fields - the list rides along on `get_current_user`, which selects every mapped
+    # column, so nothing has to be loaded before the form knows what to show.
+    #
+    # `[]` on a fresh account: a new diver sees the form exactly as it was before presets
+    # existed, and the three seeded presets are one click away.
+    #
+    # `JSON` for the same reason `dive_form_preset.hidden_fields` is (see there), and the
+    # same `default_factory`/`server_default` pairing as the two columns above - `default=`
+    # is client-side and invisible to Alembic, so only `server_default` gives the migration
+    # adding this NOT NULL column a value for the rows already in the table.
+    dive_form_hidden_fields: Mapped[list[str]] = mapped_column(JSON, default_factory=list, server_default="[]")
 
     # Overrides `SoftDeleteMixin.is_deleted` to add an index: unlike Dive, Certification and
     # GearServiceRecord (each of which has a compound partial index whose predicate already

@@ -107,6 +107,7 @@ from ...services.auth_service import (
     issue_tokens,
     resolve_identity,
 )
+from ...services.dive_form_presets import seed_default_presets
 from ...services.email_service import send_magic_link_email
 from ...services.passkey_service import finish_sign_in, start_sign_in
 from ...services.registration_gate import admit_or_refuse, refuse_uninvited
@@ -699,6 +700,9 @@ async def complete_profile(
     non-fatal in every failure mode (see `import_google_avatar`) and it is a one-off:
     signing in later never re-imports, because by then the picture is the diver's to
     manage and overwriting it because Google's changed would be Gravatar in new clothes.
+
+    The new account is seeded with the three default dive-form presets in the same
+    transaction: a registration either creates the account with them or creates nothing.
     """
     await enforce_rate_limit(
         f"auth:complete:ip:{client_ip(request)}",
@@ -756,6 +760,13 @@ async def complete_profile(
             ),
             commit=False,
         )
+        # The three default dive-form presets, in the same transaction as the account:
+        # a registration either creates the account with them or creates nothing. This is
+        # the one place self-service registration makes a `User` row, so it is the one
+        # place they can be seeded eagerly - the other two writers (the admin panel's
+        # generic insert and `scripts/create_first_superuser.py`) are not registration and
+        # reach the same three through `POST /dive-form-presets/defaults` instead.
+        await seed_default_presets(db, user_id=created_user.id, commit=False)
         # In the same transaction as the account, which is the whole invariant: an address
         # whose account exists must have no live invitation left, or the gate would admit
         # it a second time. Every live invitation for it, not one - two members may each

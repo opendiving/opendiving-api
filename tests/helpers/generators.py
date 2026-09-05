@@ -192,6 +192,24 @@ def create_gear_set(db: Session, user: models.User) -> models.GearSet:
     )
 
 
+def create_dive_form_preset(db: Session, user: models.User) -> models.DiveFormPreset:
+    """A dive form preset of this user's. Uniquely named for the same two reasons
+    `create_gear_set` is: these rows persist in the suite's own database, and
+    `dive_form_preset_name_exists` treats names as unique per user.
+
+    Deliberately not one of the three seeded defaults - a fixture called "Basic" would make
+    every restore test's "add what is missing" arithmetic depend on which builder ran first.
+    """
+    return _persist(
+        db,
+        models.DiveFormPreset(
+            user_id=user.id,
+            name=f"Warm water {uuid7().hex[-8:]}",
+            hidden_fields=["altitude", "mixture.po2_limit"],
+        ),
+    )
+
+
 def create_species(db: Session, *, aphia_id: int | None = None, **overrides: Any) -> models.Species:
     """A catalog row.
 

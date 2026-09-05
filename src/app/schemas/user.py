@@ -2,9 +2,10 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, ClassVar
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls
+from .dive_form_preset import DiveFormField, canonical_hidden_fields
 
 
 class UnitSystem(StrEnum):
@@ -53,6 +54,11 @@ class UserRead(PublicUUIDSchema):
     # Feeds the settings page's units toggle, and every measurement the web app renders.
     # Same note as its neighbour above on what the default is and isn't for.
     units: UnitSystem = UnitSystem.METRIC
+    # Which dive-form fields this diver keeps hidden. Read on `GET /user` and carried by
+    # `get_current_user`, so the form's first paint already omits them - which is the whole
+    # reason this lives on the account rather than on the device. Same note as its two
+    # neighbours above on what the default is and isn't for.
+    dive_form_hidden_fields: Annotated[list[DiveFormField], Field(default_factory=list)]
     # The caller's own record of whether they are this instance's operator, so a client can
     # decide whether to offer the operator's surface at all. Not a disclosure about anybody
     # else: `GET /user` returns the caller's row and no route returns another account's.
@@ -129,6 +135,7 @@ class UserUpdate(RejectsExplicitNulls):
         "username",
         "gear_service_emails",
         "units",
+        "dive_form_hidden_fields",
     )
 
     name: Annotated[str | None, Field(min_length=2, max_length=30, examples=["User Userberg"], default=None)]
@@ -145,6 +152,25 @@ class UserUpdate(RejectsExplicitNulls):
     units: Annotated[
         UnitSystem | None, Field(default=None, description="Measurement system to display and accept values in")
     ]
+    # Same `extra="forbid"` reasoning again: without this field the dive form's Fields panel
+    # would 422 rather than save a toggle. Replaced wholesale - there is no "hide this one
+    # more" verb, because the panel holds the whole set and sends it.
+    dive_form_hidden_fields: Annotated[
+        list[DiveFormField] | None,
+        Field(
+            default=None,
+            max_length=len(DiveFormField),
+            description="Dive form fields to keep hidden, in any order - stored in form order, duplicates collapsed",
+        ),
+    ]
+
+    @field_validator("dive_form_hidden_fields")
+    @classmethod
+    def _canonicalize_hidden_fields(cls, value: list[DiveFormField] | None) -> list[DiveFormField] | None:
+        """The same canonical form a preset's `hidden_fields` is stored in, so "does the
+        current state equal this preset?" stays a list comparison for the client.
+        """
+        return None if value is None else canonical_hidden_fields(value)
 
 
 class UserUpdateInternal(UserUpdate):

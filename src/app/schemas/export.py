@@ -120,10 +120,11 @@ class ExportBoundingBox(BaseModel):
 class ExportDiver(PublicUUIDSchema):
     """Whose logbook this is.
 
-    `units` and `gear_service_emails` are application preferences rather than logbook
-    data, so the format gives them no core member and they travel under this producer's
-    key (spec §6.1). They are here at all because `/export/archive` promises nothing in
-    the account is reachable only through the app.
+    `units`, `gear_service_emails` and the dive form's hidden fields and presets are
+    application preferences rather than logbook data, so the format gives them no core
+    member and they travel under this producer's key (spec §6.1). They are here at all
+    because `/export/archive` promises nothing in the account is reachable only through the
+    app - which is the whole reason the presets ride along too, UI configuration or not.
     """
 
     name: str

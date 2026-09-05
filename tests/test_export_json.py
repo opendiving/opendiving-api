@@ -240,18 +240,37 @@ class TestWhatUddfCannotHold:
         assert course["training_center"] == "Blue Ocean"
 
     @pytest.mark.asyncio
-    async def test_both_account_preferences_travel_under_this_producer_s_key(self, monkeypatch):
+    async def test_the_account_preferences_travel_under_this_producer_s_key(self, monkeypatch):
         """`/export/archive` promises nothing in the account is reachable only through the
-        app, and these two are the whole of what an account can be set to.
+        app, and these are the whole of what an account can be set to.
 
         They ride `extensions.opendiving` because they are application preferences, not
         logbook data, and the format gives them no core member (spec §6.1) - a writer may
         not invent one. `units` in particular travels as *account data*: it says which
         system the diver reads in, and every measurement in this document stays metric
         regardless.
+
+        The dive-form settings are here for that promise and nothing else - they configure
+        a form no reader of this document has. A preset travels as `{name, hidden_fields}`:
+        its uuid and timestamps identify a row in *this* instance and mean nothing anywhere
+        else. Asserting the whole extension object rather than its keys one at a time is the
+        point - a fourth preference added without a decision fails here.
         """
         document = await _render(full_bundle(), monkeypatch)
-        assert document["diver"]["extensions"] == {"opendiving": {"units": "metric", "gear_service_emails": True}}
+        assert document["diver"]["extensions"] == {
+            "opendiving": {
+                "units": "metric",
+                "gear_service_emails": True,
+                "dive_form_hidden_fields": ["altitude", "mixture.po2_limit"],
+                "dive_form_presets": [
+                    {"name": "Recreational", "hidden_fields": ["altitude", "mixture.po2_limit"]},
+                    # The empty set is written as `[]`, not omitted: "Technical hides
+                    # nothing" is a preset, and a reader that saw no key could not tell it
+                    # from a preset that failed to export.
+                    {"name": "Technical", "hidden_fields": []},
+                ],
+            }
+        }
         assert document["dives"][0]["max_depth"] == 28.4
 
     @pytest.mark.asyncio

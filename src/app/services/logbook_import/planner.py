@@ -759,8 +759,8 @@ class _Planner:
         if self._document.diver is not None:
             self._note(
                 ImportNoteCode.DIVER_NOT_APPLIED,
-                "The document names its own diver, with a display name, email and unit preference. None of that is "
-                "applied: this account keeps its own identity and settings.",
+                "The document names its own diver, with a display name, email, unit preference and dive form "
+                "settings. None of that is applied: this account keeps its own identity and settings.",
             )
         await self._plan_trips()
         await self._plan_courses()

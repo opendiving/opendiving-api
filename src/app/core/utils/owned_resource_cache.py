@@ -26,7 +26,7 @@ class OwnedResourceCache[InternalT, PublicT]:
 
     Resources whose read/list logic does more than a straight `get_multi`/`get` plus a shape
     conversion don't fit this shape and should keep their own hand-written cache helpers
-    instead of forcing themselves through this factory. The seven that opt out, and why:
+    instead of forcing themselves through this factory. The eight that opt out, and why:
 
     - `dives.py` - enriches each row with related trips/courses/dive sites/gear and supports
       several extra filters.
@@ -45,12 +45,19 @@ class OwnedResourceCache[InternalT, PublicT]:
       with no `nullslast()` reachable and (in `search_multi`'s case) only one sort column by
       signature. So one hand-written `select()` serves both its searched and unsearched
       branches. Like `trips.py` it still constructs one of these for the key shapes.
-    - `passkeys.py` - the odd one out, and for the opposite reason: it is not *enriched*, it
-      is not cached at all. `GET /user/passkeys` is unpaginated and returns the handful of
-      rows registration lets an account accumulate, and nothing anywhere embeds a credential
-      - so there is no page to cache and no invalidation obligation to get wrong. Caching it
-      would be inventing a thing that can go stale.
-    - `sessions.py` - also uncached, but for a reason neither of the others has: caching
+    - `passkeys.py` - the first of the three that opt out for the opposite reason: not
+      *enriched*, not cached at all. `GET /user/passkeys` is unpaginated and returns the
+      handful of rows registration lets an account accumulate, and nothing anywhere embeds a
+      credential - so there is no page to cache and no invalidation obligation to get wrong.
+      Caching it would be inventing a thing that can go stale.
+    - `dive_form_presets.py` - uncached, and the plainest case of it: the read *would* fit
+      this factory exactly, and there is simply nothing to cache for. Nothing embeds a
+      preset - no dive, no user payload, no list anywhere carries one - so there is no
+      second cache to invalidate and no staleness to trade against, and the panel that
+      reads the list reads it once, when it opens. What caching it would buy is one Redis
+      round trip saved on an interaction that happens once per form; what it would cost is
+      an invalidation obligation on five mutating routes.
+    - `sessions.py` - also uncached, but for a reason none of the others has: caching
       `GET /user/sessions` would be a **correctness** bug rather than a staleness trade. The
       response carries `current: bool` per row, resolved from the requesting token's `sid`,
       so it varies by *credential* and not merely by user - and every key here is
