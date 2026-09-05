@@ -92,13 +92,15 @@ class TestTheVocabularyNamesRealFields:
 
     A `DiveFormField` value is a *key of the dive resource*, not a UI label, and this is what
     holds it to that: every member has to name a field the API itself accepts and does not
-    require. The web half is an equality check against its form schema, so between them the
-    hand-kept mirror is pinned from both ends with no cross-repo test.
+    require. The web half is an equality check against its form schema, minus the keys that
+    side exempts by name, so between them the hand-kept mirror is pinned from both ends with
+    no cross-repo test.
 
-    Subset here, equality there, deliberately: API-optional is wider than form-optional.
-    `oxygen` and `helium` default on the wire and are required in the form, and `gas_number`
-    has no input at all - so the API has optional fields with no business being hideable,
-    while every hideable field must be one the API will accept omitted.
+    Subset here, equality there, deliberately: API-optional is wider than what is hideable.
+    `gas_number` has no input at all, and a cylinder's `volume`, `oxygen` and `helium` are
+    optional on both sides but always shown, exempt by name on the web side - so the API has
+    optional fields with no business being hideable, while every hideable field must be one
+    the API will accept omitted.
     """
 
     def test_every_value_names_a_field_of_the_create_request(self) -> None:
