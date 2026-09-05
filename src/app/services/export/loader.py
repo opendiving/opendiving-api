@@ -246,8 +246,8 @@ async def _owned(db: AsyncSession, model: Any, *, user_id: int, order_by: Any) -
     """One user's rows from a table, in a stable order - the live ones, where the table
     still has a notion of liveness.
 
-    Three of the nine tables read through here soft-delete (`Dive`, `GearServiceRecord`,
-    `Certification`); the other six hard-delete, and asking a `Trip` for `is_deleted`
+    Three of the tables read through here soft-delete (`Dive`, `GearServiceRecord`,
+    `Certification`); the rest hard-delete, and asking a `Trip` for `is_deleted`
     would be an `AttributeError` rather than a filter that quietly matches everything. The
     check is on the model rather than a per-call flag so that a soft-deleting table added
     to this bundle later is filtered by default: the failure mode of forgetting is a

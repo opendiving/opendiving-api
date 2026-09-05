@@ -34,7 +34,7 @@ Where it differs from the API's own read shapes, and why:
   meant to outlive it. Spec §5.3 makes that the format's rule and adds referential
   closure: every uuid a record names is defined in the same document.
 - **Whatever the format has no core member for rides `extensions.opendiving`** (spec
-  §5.5): the diver's two account preferences, and which parser read a stored dive-computer
+  §5.5): the diver's account preferences, and which parser read a stored dive-computer
   file. A writer may not invent core members, so this is the sanctioned slot.
 
 The one derived value in here is `archive_path`, which is a fact about the zip rather than

@@ -11030,12 +11030,16 @@ Every other owned resource goes through that factory. This one is unpaginated, a
 and embedded by nothing anywhere — so there is no page worth caching and no invalidation obligation
 to get wrong. Caching it would be inventing a thing that can go stale. Four of the others opt out
 for the opposite reason (their reads enrich rows with a second query), `courses.py` for an ordering
-the factory cannot express, and `sessions.py` because *its* response varies by credential rather
-than by user; the class docstring lists all seven.
+the factory cannot express, `sessions.py` because *its* response varies by credential rather than by
+user, and `dive_form_presets.py` for this same one; the class docstring is the list, and it says how
+many it has.
 
-Both ordinals in this heading and paragraph were stale before they were corrected here — written
-when there were five, left alone when courses became the sixth, and only re-derived when sessions
-arrived to make seven. Prefer counting the docstring's list to trusting a number written beside it.
+The ordinal in this heading was stale twice before it was corrected here — written when there were
+five, left alone when courses became the sixth, and only re-derived when sessions arrived. The total
+that used to sit in the paragraph above went stale a third time when dive form presets arrived, and
+is gone rather than bumped: prefer counting the docstring's list to trusting a number written beside
+it. The heading keeps its ordinal because passkeys' *position* in that list does not move when
+something is appended after it.
 
 The list's own `limit` is `_LIST_LIMIT`, deliberately *above* `PASSKEY_MAX_CREDENTIALS_PER_USER`
 rather than equal to it. The cap is enforced at registration, so lowering the setting afterwards
