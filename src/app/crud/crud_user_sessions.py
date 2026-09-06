@@ -29,8 +29,10 @@ MAX_LIVE_SESSIONS_PER_USER = 100
 def _live(now: datetime) -> ColumnElement[bool]:
     """The predicate for "this row can still authenticate something".
 
-    One definition, used by the list, the refresh check, the cap count and the bulk revoke,
-    because a fifth spelling of it is a fifth chance to forget one of the two clauses.
+    One definition, used by the list, the cap count, the bulk revoke and `live_session_for`
+    - which is itself asked by two callers now, `/auth/refresh` before it rotates and
+    `get_current_user` on every authenticated request. Another spelling of it would be
+    another chance to forget one of the two clauses.
     """
     return and_(UserSession.revoked_at.is_(None), UserSession.expires_at > now)
 
@@ -85,12 +87,17 @@ async def evict_stalest_sessions(db: AsyncSession, *, user_id: int, keep: int) -
 async def live_session_for(
     db: AsyncSession, *, session_uuid: uuid_pkg.UUID, user_id: int
 ) -> UserSessionReadInternal | None:
-    """The session a refresh token's `sid` names, if it can still authenticate and belongs
-    to the token's subject.
+    """The session a token's `sid` names, if it can still authenticate and belongs to the
+    token's subject.
 
     All three conditions in one statement rather than a fetch plus checks: "revoked",
-    "expired" and "somebody else's" are one answer to the caller (the same uniform 401
-    every other refresh failure gets), so there is nothing for the route to tell apart.
+    "expired" and "somebody else's" are one answer to the caller - the same uniform 401 -
+    so there is nothing for either caller to tell apart.
+
+    Two of them now. `POST /auth/refresh` asks before it will rotate, and
+    `api.dependencies.get_current_user` asks on every authenticated request, which is what
+    makes a revoke end the device's access token rather than only its refresh. One lookup
+    for both, so the two can never answer differently about the same row.
     """
     row = await db.execute(
         select(UserSession).where(
@@ -136,10 +143,11 @@ async def revoke_other_sessions(db: AsyncSession, *, user_id: int, except_uuid: 
     """Revoke every live session on the account except the caller's own, returning the
     count. Commits nothing.
 
-    `except_uuid` is `None` for an access token minted before this feature existed, which
-    carries no `sid`. That signs every session out including the caller's, which is the
-    honest answer: with no way to identify the current session there is no way to spare it,
-    and the caller's next refresh simply asks them to sign in again.
+    `except_uuid=None` revokes every session including the caller's own - the honest answer
+    when nothing identifies the current one, since a session that cannot be named cannot be
+    spared. No route arrives that way any more: `get_current_user` refuses a token carrying
+    no `sid`, so `DELETE /user/sessions` always has one to pass. The branch stays because
+    this is a store function and "spare nothing" is a coherent thing to ask it for.
     """
     now = datetime.now(UTC)
     conditions = [UserSession.user_id == user_id, _live(now)]

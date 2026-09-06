@@ -11,6 +11,12 @@ The refresh half lives in `tests/test_auth_refresh.py` beside the rotation it co
 What is here is the store it rotates against, and the one thing the fake there cannot
 answer: that the lookup really does refuse a dead row.
 
+`TestARevokedSessionEndsItsAccessToken` is the third consumer of that same predicate, and
+the only place in the suite that drives `get_current_user` end to end with a token this app
+actually minted. Every other test overrides that dependency, which is exactly why the gap it
+covers could exist unnoticed: a revoked device went on being authenticated for up to
+`ACCESS_TOKEN_EXPIRE_MINUTES` and no test in the suite was positioned to see it.
+
 The Postgres-backed classes skip silently without a reachable database - on a developer's
 machine that means `POSTGRES_SERVER=localhost`, since `src/.env` points at the compose
 hostname. CI sets it and fails the job if anything skips. See CONTRIBUTING.md.
@@ -30,8 +36,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
+from src.app.api.dependencies import get_current_user
 from src.app.api.v1.sessions import _LIST_LIMIT, erase_other_sessions, erase_session, read_sessions
-from src.app.core.exceptions.http_exceptions import NotFoundException
+from src.app.core.exceptions.http_exceptions import NotFoundException, UnauthorizedException
 from src.app.core.security import (
     ALGORITHM,
     SECRET_KEY,
@@ -111,8 +118,9 @@ class TestTheCurrentMarkerComesFromTheToken:
         assert to_public_session(_internal(), current_session_uuid=uuid7()).current is False
 
     def test_a_token_with_no_sid_marks_nothing(self) -> None:
-        """An access token minted before this feature carries no `sid`, and for its
-        remaining minutes the honest answer is "I cannot tell" rather than a guess."""
+        """No route hands this `None` any more - `get_current_user` refuses a token carrying
+        no `sid` - but "I cannot tell" stays the answer for it rather than a guess, so that
+        the shaping function never becomes the place that assumes one."""
         assert to_public_session(_internal(), current_session_uuid=None).current is False
 
     def test_the_public_shape_carries_nothing_token_derived(self) -> None:
@@ -127,8 +135,9 @@ class TestRevokeOneSession:
     @pytest.mark.asyncio
     async def test_the_current_session_is_a_409_not_a_revoke(self, mock_db) -> None:
         """GitLab-style: ending your own session is what `POST /auth/logout` is, and it
-        also has to clear the cookie and blacklist the presented pair. A revoke here would
-        leave the browser holding a live access token and no way to refresh."""
+        also has to clear the cookie and blacklist the presented pair. A revoke here does
+        sign the browser out now that `get_current_user` checks the `sid` - it just leaves
+        a stale cookie behind and neither token blacklisted, which is a half-logout."""
         current = uuid7()
 
         with patch("src.app.api.v1.sessions.fetch_owned_or_raise", new_callable=AsyncMock) as owned:
@@ -322,8 +331,9 @@ class TestSessionStore:
     async def test_revoke_others_with_no_current_session_signs_everything_out(
         self, db: Session, async_db: AsyncSession, diver: User
     ) -> None:
-        """An access token minted before this feature names no session to spare, so there
-        is nothing to exclude and the caller goes with the rest."""
+        """With nothing named to spare there is nothing to exclude, and the caller goes with
+        the rest. No route asks for that now, since `get_current_user` refuses a token
+        carrying no `sid`; this pins the store's own answer to the question."""
         self._session(db, diver)
         self._session(db, diver)
 
@@ -523,6 +533,110 @@ class TestEveryMintingPathCreatesExactlyOneSession:
 
         assert after.last_used_at > before_used
         assert after.expires_at > before_expiry
+
+
+@needs_a_database
+class TestARevokedSessionEndsItsAccessToken:
+    """Revoking used to kill the refresh and nothing else, so the revoked device went on
+    working with the access token it already held for up to `ACCESS_TOKEN_EXPIRE_MINUTES` -
+    exactly the window the button exists for.
+
+    Driven through `get_current_user` rather than through a route, because that dependency is
+    what every authenticated route shares, and against real Postgres for the reason
+    `TestSessionStore` gives: what is pinned here is a `WHERE` clause, and a mocked session
+    evaluates none of it. The tokens are minted by `issue_tokens`, so these are the tokens
+    the app actually issues rather than hand-built stand-ins.
+    """
+
+    @staticmethod
+    async def _sign_in(async_db: AsyncSession, diver: User) -> tuple[str, uuid_pkg.UUID]:
+        tokens = await issue_tokens(Response(), diver.uuid, db=async_db, context=CONTEXT, user_id=diver.id)
+        session_uuid = token_session_id(tokens["access_token"])
+        assert session_uuid is not None, "issue_tokens minted an access token with no sid"
+        return tokens["access_token"], session_uuid
+
+    @pytest.mark.asyncio
+    async def test_a_live_sessions_token_authenticates(self, async_db: AsyncSession, diver: User) -> None:
+        """The other half of the assertion, and the one that fails if the new check is wrong
+        about anything: a check that refused everything would satisfy every case below."""
+        access, _ = await self._sign_in(async_db, diver)
+
+        user = await get_current_user(access, async_db)
+
+        assert user is not None
+        assert user["id"] == diver.id
+
+    @pytest.mark.asyncio
+    async def test_a_revoked_sessions_token_stops_on_the_very_next_request(
+        self, async_db: AsyncSession, diver: User
+    ) -> None:
+        """The next request, not the next refresh. The same token authenticates before the
+        revoke and is refused after it, with nothing else changed in between."""
+        access, session_uuid = await self._sign_in(async_db, diver)
+        assert await get_current_user(access, async_db) is not None
+
+        await revoke_session(async_db, session_uuid=session_uuid)
+        await async_db.commit()
+
+        with pytest.raises(UnauthorizedException):
+            await get_current_user(access, async_db)
+
+    @pytest.mark.asyncio
+    async def test_revoking_one_device_leaves_the_others_signed_in(self, async_db: AsyncSession, diver: User) -> None:
+        """A revoke is per row, and a dependency that had keyed on the account instead would
+        pass the case above and fail the diver - signing every device out of an account the
+        moment one of them was revoked."""
+        first, first_uuid = await self._sign_in(async_db, diver)
+        second, _ = await self._sign_in(async_db, diver)
+
+        await revoke_session(async_db, session_uuid=first_uuid)
+        await async_db.commit()
+
+        with pytest.raises(UnauthorizedException):
+            await get_current_user(first, async_db)
+        assert await get_current_user(second, async_db) is not None
+
+    @pytest.mark.asyncio
+    async def test_an_expired_session_is_refused_too(self, db: Session, async_db: AsyncSession, diver: User) -> None:
+        """`_live` is two clauses, and this is the one a revoke never exercises. Checking
+        only `revoked_at` would pass every other case in this class."""
+        row = UserSession(
+            user_id=diver.id,
+            expires_at=datetime.now(UTC) - timedelta(minutes=1),
+            ip="203.0.113.7",
+            user_agent="TestAgent/1.0",
+            last_used_at=datetime.now(UTC),
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        access = await create_access_token(data={"sub": str(diver.uuid)}, session_uuid=row.uuid)
+
+        with pytest.raises(UnauthorizedException):
+            await get_current_user(access, async_db)
+
+    @pytest.mark.asyncio
+    async def test_a_token_naming_no_session_is_refused(self, async_db: AsyncSession, diver: User) -> None:
+        """No shim for the tokens minted before sessions existed. `issue_tokens` is the only
+        mint site and it always names a session, so a `sid`-less token is one this build
+        cannot have issued - and everyone holding one is signed out a single time."""
+        old = await create_access_token(data={"sub": str(diver.uuid)})
+
+        with pytest.raises(UnauthorizedException):
+            await get_current_user(old, async_db)
+
+    @pytest.mark.asyncio
+    async def test_another_accounts_session_does_not_authenticate(
+        self, async_db: AsyncSession, diver: User, other_diver: User
+    ) -> None:
+        """The `user_id` clause `live_session_for` already carried, now load-bearing on every
+        authenticated request rather than only at refresh. Invisible in any test that uses
+        one account."""
+        _, theirs = await self._sign_in(async_db, other_diver)
+        forged = await create_access_token(data={"sub": str(diver.uuid)}, session_uuid=theirs)
+
+        with pytest.raises(UnauthorizedException):
+            await get_current_user(forged, async_db)
 
 
 class TestTheSidClaim:

@@ -96,9 +96,10 @@ class TokenData(BaseModel):
     user_uuid: uuid_pkg.UUID
 
     # The `user_session` row this token belongs to, carried unchanged across every
-    # rotation. `None` for a token minted before sessions existed - such a token's next
-    # refresh 401s and the diver signs in again, which is a one-time global sign-out on
-    # upgrade and the whole of the compatibility story (there is no shim).
+    # rotation. `None` for a token minted before sessions existed, and both halves of such
+    # a pair are now refused for want of it - the access token on its next request, the
+    # refresh cookie on its next rotation. The diver signs in again once, which is the whole
+    # of the compatibility story (there is no shim).
     #
     # A field rather than a second return type: `verify_token` runs on every authenticated
     # request, and widening its return into a discriminated result is the change

@@ -86,9 +86,11 @@ class SessionRevokedResponse(BaseModel):
 def to_public_session(row: UserSessionReadInternal, *, current_session_uuid: uuid_pkg.UUID | None) -> UserSessionRead:
     """The one place a stored row becomes the diver's view of it.
 
-    `current_session_uuid` is `None` for an access token minted before this feature existed
-    (it carries no `sid`), and for its remaining minutes nothing is marked current rather
-    than something being marked wrongly.
+    `current_session_uuid` is `None` only where nothing identified the requesting device, and
+    then nothing is marked current rather than something being marked wrongly. No route hands
+    it `None` any more - `get_current_user` refuses a token carrying no `sid` - and the
+    branch stays because "I cannot tell" is the right answer to keep available, not a state
+    to assume away.
     """
     return UserSessionRead(
         uuid=row.uuid,

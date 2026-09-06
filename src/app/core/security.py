@@ -386,8 +386,11 @@ async def verify_token(token: str, expected_token_type: TokenType, db: AsyncSess
 
     The `sid` claim rides back on `TokenData` and is *not* validated here - this function
     says nothing about whether the session it names is still live, only what the token
-    claims. `POST /auth/refresh` is the one caller that asks the second question, against
-    the database, before it will mint a replacement.
+    claims. Two callers ask that second question against the database: `POST /auth/refresh`
+    before it will mint a replacement, and `api.dependencies.get_current_user` on every
+    authenticated request, which is what makes revoking a session end its access token as
+    well as its refresh. Both put the question to `crud_user_sessions.live_session_for`, so
+    there is one predicate rather than two that can drift.
     """
     is_blacklisted = await crud_token_blacklist.exists(db, token=token)
     if is_blacklisted:

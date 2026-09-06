@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.db.database import async_get_db
 from ..core.exceptions.http_exceptions import ForbiddenException, NotFoundException, UnauthorizedException
 from ..core.security import TokenType, oauth2_scheme, token_session_id, verify_token
+from ..crud.crud_user_sessions import live_session_for
 from ..crud.crud_users import crud_users
 
 logger = logging.getLogger(__name__)
@@ -16,23 +17,49 @@ logger = logging.getLogger(__name__)
 async def get_current_user(
     token: Annotated[str, Depends(oauth2_scheme)], db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> dict[str, Any] | None:
-    """Resolve a Bearer access token to the account it was issued for.
+    """Resolve a Bearer access token to the account it was issued for, and refuse it unless
+    the session it names can still authenticate.
 
-    This single lookup is the root of the entire ownership model - `fetch_owned_or_raise`
+    The account lookup is the root of the entire ownership model - `fetch_owned_or_raise`
     below compares against the `id` it returns - so it has to name an account that cannot
     change hands. It keys on the immutable `uuid` the token carries as its subject; it
     used to key on the username, which `PATCH /user` can change and release for anyone
     else to claim (see `services.auth_service.issue_tokens` and DECISIONS.md).
+
+    **The `sid` is checked against the database on every authenticated request**, which is
+    what makes `DELETE /user/session/{uuid}` take effect on the revoked device's next request
+    rather than at its next `/auth/refresh`. That window was up to
+    `ACCESS_TOKEN_EXPIRE_MINUTES` long and is exactly the one the button exists for - a
+    laptop that has just been lost is not signed out by a promise about half an hour's time.
+
+    `live_session_for` is reused rather than restated: it already is the unrevoked-and-
+    unexpired predicate `/auth/refresh` asks, and a second spelling of it is a second chance
+    for the two to drift. It carries the `user_id` clause too, so a `sid` lifted onto another
+    account's token resolves to nothing. It has to run *after* the account lookup, which is
+    where the `user_id` it needs comes from.
+
+    A token carrying no `sid` at all is refused here as well, with no shim. `issue_tokens` is
+    the only mint site and it always names a session, so the claim is absent only on a token
+    minted before sessions existed - and signing those out once is the compatibility story
+    that feature already had.
+
+    Both refusals answer the same `UnauthorizedException` as every other failure here. There
+    is nothing for a caller to tell apart, and no reason to hand one an oracle for whether a
+    given `sid` names a real row.
     """
     token_data = await verify_token(token, TokenType.ACCESS, db)
     if token_data is None:
         raise UnauthorizedException("User not authenticated.")
 
     user = await crud_users.get(db=db, uuid=token_data.user_uuid, is_deleted=False)
-    if user:
-        return user
+    if not user:
+        raise UnauthorizedException("User not authenticated.")
 
-    raise UnauthorizedException("User not authenticated.")
+    session_uuid = token_data.session_uuid
+    if session_uuid is None or await live_session_for(db, session_uuid=session_uuid, user_id=user["id"]) is None:
+        raise UnauthorizedException("User not authenticated.")
+
+    return user
 
 
 async def current_session_uuid(token: Annotated[str, Depends(oauth2_scheme)]) -> uuid_pkg.UUID | None:
@@ -51,10 +78,12 @@ async def current_session_uuid(token: Annotated[str, Depends(oauth2_scheme)]) ->
     `get_current_user` would be trusting a claim nothing had authorized - every current
     caller does, and `test_route_authentication.py` is what would notice if one stopped.
 
-    `None` on two paths that need no distinguishing: a token minted before sessions existed
-    carries no `sid` at all, and one that fails to decode has already been rejected by the
-    dependency beside this one. In both cases the effect is the same - nothing is marked as
-    the current device for that token's remaining minutes.
+    `None` is unreachable beside that dependency now, and the return type keeps it anyway.
+    Both roads to it - a token carrying no `sid`, and one that fails to decode - are refused
+    by `get_current_user` before this runs, so every current caller gets a real uuid. The
+    optional half is what keeps the two functions independent: this one still authorizes
+    nothing on its own, and a route that ever reached for it without `get_current_user`
+    should degrade to "I cannot tell" rather than to a claim nothing checked.
     """
     return token_session_id(token)
 

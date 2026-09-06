@@ -497,9 +497,12 @@ end:
 
 Three things are worth knowing about what a revoke does.
 
-**It ends the refresh, not the access token.** A revoked row cannot rotate anything, so the device
-is signed out at its next `/auth/refresh`; the access token it already holds stays valid for up to
-`ACCESS_TOKEN_EXPIRE_MINUTES`. That is the same shape `DELETE /user` has always had.
+**It ends the access token as well as the refresh.** A revoked row cannot rotate anything, and
+`get_current_user` asks the same live-or-not question of the presented token's `sid` on every
+authenticated request - so the revoked device is refused on its very next call, not at its next
+`/auth/refresh`. It used to be only the refresh, which left the device working with the access token
+it already held for up to `ACCESS_TOKEN_EXPIRE_MINUTES` - and that window is precisely the one this
+button exists for, since the case it is pressed for is a laptop that has just gone missing.
 
 **`expires_at` is an inactivity window, not a session length.** Each refresh stamps `last_used_at`
 and slides the expiry out by `REFRESH_TOKEN_EXPIRE_DAYS`, so a browser in daily use never expires
@@ -514,9 +517,10 @@ token by value a per-issuance revocation; `sid` identifies the device and is car
 across every rotation. Detecting a replayed refresh token still revokes nothing - it records an
 event and logs a line, as before.
 
-**Upgrading signs everyone out once.** A refresh cookie minted before this feature carries no `sid`,
-so its next refresh answers 401 and the diver signs in again. There is no compatibility shim, and
-nothing else about the account is affected.
+**Upgrading signs everyone out once.** Neither half of a pair minted before this feature carries a
+`sid`, and both halves are now refused for want of one - the access token on its next request, the
+refresh cookie on its next rotation. So the diver signs in again, once. There is no compatibility
+shim, and nothing else about the account is affected.
 
 ### The auth audit trail
 
