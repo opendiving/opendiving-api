@@ -8102,7 +8102,9 @@ iteration 2's photos nearly free.
 
 So the division of labour is fixed: **WoRMS owns the taxonomy** (scientific names, synonyms, the
 accepted-taxon mapping) and **Wikidata owns the common names**. A merged hit is a WoRMS record with
-a Wikidata name on it.
+a Wikidata name on it — or, where Wikidata has no English name to give, with the English vernacular
+WoRMS itself matched on (*An English vername names a row Wikidata left bare*). Wikidata still owns
+the field: it is asked first and its answer is never overwritten.
 
 **That division is now a statement about *ordering* as well as about names.** WoRMS cannot rank at
 all: its OpenAPI spec carries no sort or order parameter on any endpoint, and invented ones
@@ -8522,18 +8524,19 @@ renders the stored string raw) agreeing — a render-side fix would have left th
 
 **The reject list reaches resolve only, and search knowingly shows an unvetted name.** The
 capitalisation reaches every surface, because it lives inside `_choose_common_name` and both paths
-call it — but the reject list is an *input* only resolve can supply. Synonyms come from a separate
-WoRMS call keyed to one AphiaID, so vetting a search page would mean up to fifty extra outbound
-calls against a six-second keystroke budget, on a path that has already released its read
-transaction to go outbound. Not worth it, and not close. The consequence is stated rather than
-hidden: `?q=orca` displays "Orca gladiator" for as long as *Orcinus orca* is not in the catalog, and
-the diver who picks that row gets "Orca whale" stored. That disagreement is real, and it is the
-tolerable direction of it — the wrong name is never *written*, it is transient per taxon rather than
-per search, and the first resolve fixes the row for everyone. The picker then follows on its own,
-through the rule in `search_species` that a catalog row wins the merge outright rather than being
-overwritten by a live provider. That rule was written to stop a dive's species card disagreeing with
-the picker that filled it, it is unchanged here, and it is the mechanism this gap heals through
-rather than a second guarantee to hold beside it.
+call it, and so does the vernacular fallback now that search has a vernacular to offer it (*An
+English vername names a row Wikidata left bare*) — but the reject list is an *input* only resolve
+can supply. Synonyms come from a separate WoRMS call keyed to one AphiaID, so vetting a search page
+would mean up to fifty extra outbound calls against a six-second keystroke budget, on a path that
+has already released its read transaction to go outbound. Not worth it, and not close. The
+consequence is stated rather than hidden: `?q=orca` displays "Orca gladiator" for as long as
+*Orcinus orca* is not in the catalog, and the diver who picks that row gets "Orca whale" stored.
+That disagreement is real, and it is the tolerable direction of it — the wrong name is never
+*written*, it is transient per taxon rather than per search, and the first resolve fixes the row for
+everyone. The picker then follows on its own, through the rule in `search_species` that a catalog
+row wins the merge outright rather than being overwritten by a live provider. That rule was written
+to stop a dive's species card disagreeing with the picker that filled it, it is unchanged here, and
+it is the mechanism this gap heals through rather than a second guarantee to hold beside it.
 `test_search_shows_the_unvetted_name_until_a_resolve_fixes_it` pins the gap so that closing it is a
 decision somebody makes rather than a diff nobody notices.
 
@@ -8767,7 +8770,9 @@ appears.
 `AphiaRecord` has 28 keys and not one of them is a vernacular. So a search for "turtle" returned
 *Batis maritima*, a saltmarsh plant, in second place with nothing on screen to account for it.
 `AjaxAphiaRecordsByNamePart?combine_vernaculars=true` is the only WoRMS endpoint that knows, and it
-chains inside `_worms_by_vernacular` purely to fill `matched_name`.
+chains inside `_worms_by_vernacular` to fill `matched_name` — and, since the vernacular it names is
+often the name a diver would use, the `common_name` the record endpoint cannot supply either. See
+*An English vername names a row Wikidata left bare* below for that half.
 
 **Annotation rather than a second row source, on three measurements.** Its taxa are a subset of the
 record endpoint's everywhere sampled (`whale`: all 11 of its ids sit on by-vernacular's first page;
@@ -8836,6 +8841,62 @@ minute instead of two, and `_claim_provider_slot` is first-come across both legs
 minute either can lose the slot. A denied annotation ships the rows unannotated; a denied *record*
 leg costs the source its rows for that entry. Both land on the same hour TTL, both are bounded
 because cache hits ask no provider anything, and both are gone when the burst is.
+
+### An English vername names a row Wikidata left bare
+
+**Search and resolve read different sources for the same field, and the picker showed the seam.**
+Searching "queenfish" returned four *Scomberoides*, three of them by name and the fourth as
+`Scomberoides tol · Species · matched "needlescaled queenfish"` — and picking that fourth one filed
+it as **Needlescaled queenfish**. Nothing was broken: a display name at search time could only come
+from Wikidata, whose English label for Q1872666 is the binomial itself and which carries no English
+alias, so the entity does not even surface for `?q=queenfish`. Its three neighbours were named
+because Wikidata happened to carry theirs. `resolve_species` then reaches a third source search
+never did — `AphiaVernacularsByAphiaID`, one call per taxon — and `_choose_common_name` falls
+through to it. The vernacular was in the ajax annotation the whole time, spent on the hint.
+
+So the annotation's English half now fills `common_name`, and the three rules holding it in place
+are each a consequence of something already decided here:
+
+- **After the merge, into an empty `common_name` only.** WoRMS writes the merged row first, so
+  filling inside `_worms_result` would have a vernacular beat the Wikidata name on every row that
+  has both — the reverse of `_choose_common_name`'s order, and a picker disagreeing with the catalog
+  row it fills. `_fill_vernacular_names` runs where `_drop_redundant_hints` runs, and before it, so
+  a hint the new name has made redundant still goes.
+- **Through `_choose_common_name`, not a `str.capitalize()` beside it.** That keeps the
+  binomial-prefix refusal and the one-capital rule identical on both paths — a vername that is the
+  binomial wearing decoration is refused here exactly as it would be at resolve. The reject list
+  stays resolve-only and is not missed: it exists for junior *scientific* synonyms wearing a
+  different genus, which is a Wikidata-alias failure, and a WoRMS vernacular is a common name by
+  construction.
+- **Never across an accepted-taxon fold.** Ajax rows carry no `valid_AphiaID`, so a vernacular
+  belongs to the record it was attached to — and the `whale` answer contains an unaccepted "blue
+  whale" whose accepted taxon is the **fin** whale. `_worms_page` compares the id it handed
+  `_worms_result` against the id that came back and fills only when they are equal. For a true
+  synonym that refuses a name it would have been right about; nothing in the payload tells the two
+  apart, and this is the direction that cannot be wrong.
+
+**Two maps, not one map plus a language tag.** `matched` takes the best vername in any language,
+because a Spanish word is what accounts for a Spanish-named row; `english` takes the best English
+one, because that is what a diver reads. They differ exactly when a foreign vername matched better
+than an English one, which is a row that would otherwise be *placed* by the Spanish word and left
+unnamed for want of a name it has.
+
+**It narrows the gap rather than closing it, and the remainder is known.** Ajax returns only the
+vernames that *matched* — *Orcinus orca* answers `grampus` with two of its six English names — so a
+taxon reached by its binomial gets nothing (`?q=scomberoides tol` returns the row with `vername`
+null on every one of its rows, measured), and a taxon with several English names can display the one
+that matched rather than the one `AphiaVernacularsByAphiaID` will hand resolve. Closing that needs a
+per-row vernacular call, fifty of them against a six-second keystroke budget, which is the same
+arithmetic that keeps the synonym list out of search. The residue is the disagreement already
+recorded under *The common-name rule* and heals the same way: nothing wrong is ever **written**, and
+the first resolve fixes the row for everyone.
+
+**The visible cost is fewer hints.** An English vername that named a row also accounts for the
+query, so `_drop_redundant_hints` nulls it — `Orcinus orca · Species · matched "killer whale"` is
+now `Killer whale · Orcinus orca`, which is the point. It can also take a *fold's* hint, where the
+new name answers the query and the synonym the diver typed goes unexplained; that was already true
+of a Wikidata name and is why several tests in `TestExplainingAVernacularHit` now need a Wikidata
+label that does *not* answer the query before there is a hint left to assert on.
 
 ### Test fixtures in a global table are visible to real accounts
 
