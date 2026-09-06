@@ -260,7 +260,7 @@ class TestTheFirstSuperuserAddressHasNoDefault:
 
 
 class TestRegistrationSettings:
-    """`REGISTRATION_MODE` and the four numbers beside it.
+    """`REGISTRATION_MODE`, `PROJECT_OPERATED` and the four numbers beside them.
 
     The default is the load-bearing one and it is a **breaking change**: an instance that
     sets nothing is now invite-only, where before it took anybody. Read off a `config.py`
@@ -288,6 +288,19 @@ class TestRegistrationSettings:
         selecting a mode nobody chose. `EnvironmentOption` is the shape being copied."""
         with pytest.raises(ValueError):
             _settings(REGISTRATION_MODE=value)
+
+    def test_an_instance_that_configures_nothing_is_not_the_project_s(self, tmp_path, monkeypatch):
+        """`PROJECT_OPERATED` is off unless somebody says otherwise: the generic landing-page
+        copy is the one true of every install, and only the instance the project itself runs
+        has a reason to claim to be it. Read off a `config.py` loaded with no `.env` in reach,
+        for the reason the mode's default is."""
+        monkeypatch.delenv("PROJECT_OPERATED", raising=False)
+        module = _config_loaded_without_an_env_file(tmp_path, monkeypatch)
+
+        assert module.settings.PROJECT_OPERATED is False
+
+    def test_the_project_s_own_instance_switches_it_on(self):
+        assert _settings(PROJECT_OPERATED=True).PROJECT_OPERATED is True
 
     def test_the_quota_defaults_to_five_a_day(self, tmp_path, monkeypatch):
         """A rate rather than a lifetime allotment. Both halves are read together because
@@ -344,6 +357,7 @@ class TestRegistrationSettings:
 
         for name in (
             "REGISTRATION_MODE",
+            "PROJECT_OPERATED",
             "INVITATIONS_PER_USER",
             "INVITATIONS_WINDOW_DAYS",
             "INVITATION_ATTEMPT_RATE_LIMIT_PER_USER",
@@ -357,6 +371,7 @@ class TestRegistrationSettings:
         # flips away from its default in the bundle's own template: uncommenting a block is
         # a decision, and a template that restated the default would make it a no-op.
         assert '# REGISTRATION_MODE="open"' in template
+        assert "# PROJECT_OPERATED=true" in template
 
 
 class TestLogLevel:

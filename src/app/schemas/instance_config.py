@@ -1,8 +1,8 @@
 """What `GET /config` tells an anonymous browser about this instance.
 
 Named for the thing rather than for the setting: `ConfigContext` is already the web app's
-word for "what this instance is configured to do", and the endpoint is expected to grow a
-second field before it grows a second route.
+word for "what this instance is configured to do", and the endpoint was expected to grow a
+second field before it grew a second route - which is what `project_operated` is.
 """
 
 from pydantic import BaseModel
@@ -11,15 +11,21 @@ from ..core.config import RegistrationMode
 
 
 class InstanceConfigRead(BaseModel):
-    """One field, and it discloses nothing a visitor could not already see.
+    """Two fields, and neither discloses anything a visitor could not already see.
 
     In `invite` mode the landing page shows a request-an-invite form and in `open` mode a
-    sign-in form, so the mode is legible from the page itself; publishing it here only
-    saves the client from guessing. What it buys is that the *API* stays the single source
-    of the mode - the alternative, a copy in the web container's own environment, would be
-    a second place for it to be wrong, would make flipping it a web restart as well as an
-    API one (the web memoises its runtime config for the life of the process), and would
-    be a compose change that an existing install's `docker compose pull` does not deliver.
+    sign-in form, so the mode is legible from the page itself; and that form carries either
+    the project's own waitlist wording or the generic wording true of any instance, which is
+    how `project_operated` shows. Publishing them here only saves the client from guessing.
+    What it buys is that the *API* stays the single source of each - the alternative, a copy
+    in the web container's own environment, would be a second place for it to be wrong,
+    would make flipping it a web restart as well as an API one (the web memoises its runtime
+    config for the life of the process), and would be a compose change that an existing
+    install's `docker compose pull` does not deliver.
+
+    `project_operated` has a second reason to be API truth: this API will want the same fact
+    for its own invitation email one day, and a web-side variable could never reach it.
     """
 
     registration_mode: RegistrationMode
+    project_operated: bool

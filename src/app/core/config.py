@@ -230,6 +230,20 @@ class RegistrationSettings(BaseSettings):
     # import.
     REGISTRATION_MODE: RegistrationMode = config("REGISTRATION_MODE", default=RegistrationMode.INVITE)
 
+    # **Whether the OpenDiving project itself operates this instance.** Named for the fact
+    # it asserts rather than for a nickname: an operator who sets it is claiming to *be*
+    # the project, and the default is what every self-hosted install gets without touching
+    # anything. What it does today is select copy. The web app reads it off `GET /config`
+    # before the landing page paints and picks the request-an-invite form's wording on it -
+    # the generic wording, true of any instance, by default; the project's own waitlist
+    # wording ("join the waitlist", "we'll notify you when your spot is ready") when true.
+    #
+    # This API's own invitation email does not branch on it yet. "X invited you to their
+    # log book" reads wrongly on a waitlist instance, and this field is where that branch
+    # would hang when it comes. Keep every use to copy selection and route each one through
+    # this field, so a single grep for it lists every place the app knows who runs it.
+    PROJECT_OPERATED: bool = config("PROJECT_OPERATED", default=False)
+
     # A *rate*, not a lifetime allotment: a member who invites five friends today can
     # invite five more tomorrow. Counted from the `invitation` table rather than from the
     # Redis limiter, because the limiter fails open on a Redis outage by design (see

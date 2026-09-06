@@ -193,11 +193,12 @@ merely on having a token. All of those want a bearer token. The ones that don't 
 auth routes themselves, the two health checks — `/health` says the process is up, `/health/ready`
 says Postgres and Redis answered, and 503s when they didn't — `POST /invite-requests`, which is how
 somebody with no account asks a closed instance for an invitation, `GET /config`, which tells the
-web app whether registration is open before anyone has signed in, and `GET /species/{uuid}/photo`,
-which serves a public Commons image to an `<img>` tag that has no way to send a token.
-`tests/test_route_authentication.py` is the guard that keeps the *anonymous* half of that list
-honest — it compares the app's real route table against its own allowlist and holds the reason for
-each — but nothing checks this paragraph, so a new route family belongs here by hand.
+web app whether registration is open - and whether the project itself operates the instance - before
+anyone has signed in, and `GET /species/{uuid}/photo`, which serves a public Commons image to an
+`<img>` tag that has no way to send a token. `tests/test_route_authentication.py` is the guard that
+keeps the *anonymous* half of that list honest — it compares the app's real route table against its
+own allowlist and holds the reason for each — but nothing checks this paragraph, so a new route
+family belongs here by hand.
 
 A typical import flow:
 
