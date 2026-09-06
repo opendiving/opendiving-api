@@ -5,13 +5,17 @@ The read-and-revoke half of server-side sessions. The half that *creates* the ro
 as passkey registration and passkey sign-in are split between `api.v1.passkeys` and
 `api.v1.auth`.
 
-**Revoking a session ends its refresh, not its access token.** A revoked row cannot rotate
-anything, so the device is signed out at its next `/auth/refresh`; the access token it is
-already holding stays valid for up to `ACCESS_TOKEN_EXPIRE_MINUTES`. That is the shape
-`DELETE /user` has always had - other devices go inert at the next refresh rather than
-instantly - and the alternative, a session-liveness query inside `get_current_user`, was
-rejected for buying at most half an hour of promptness at the cost of a database read on
-every authenticated request in the app.
+**Revoking a session ends its access token as well as its refresh.** The revoked row cannot
+rotate anything, and `get_current_user` asks the same live-or-not question of the presented
+token's `sid` on every authenticated request - so the device is refused on its very next
+call rather than at its next `/auth/refresh`.
+
+That per-request check was once rejected here for buying at most `ACCESS_TOKEN_EXPIRE_MINUTES`
+of promptness at the price of "a database read on every authenticated request". The costing
+was wrong: `get_current_user` already made two (the blacklist `exists` inside `verify_token`,
+and the account lookup), so this is a third indexed read and not the first. And the
+promptness is the whole of what the button is for - a laptop that has just been lost is not
+signed out by a promise about half an hour's time.
 """
 
 import uuid as uuid_pkg
@@ -88,22 +92,23 @@ async def erase_session(
     404 unless the caller owns it, exactly as for a session that does not exist - the
     ownership contract every keyed route here honours.
 
-    **409 for the caller's own session, which is the one deliberate departure from
-    "revoke = remove the row".** Ending your own session is what `POST /auth/logout` is,
-    and it has to also clear the refresh cookie and blacklist the presented pair; a revoke
-    that left the browser holding a live access token and no cookie would be a worse
-    logout than the one that already exists. So the current row is marked in the list and
-    carries no revoke control, and this status is the backstop rather than the UX.
+    **409 for the caller's own session, kept deliberately now that it is optional.** Since
+    `get_current_user` began checking the `sid`, a self-revoke would in fact sign the browser
+    out - so the status no longer stands between the caller and a no-op. It stands between
+    them and a half-logout: ending your own session is what `POST /auth/logout` is, and
+    logout also clears the refresh cookie and blacklists the presented pair. A revoke that
+    skipped both would leave a browser holding a dead access token, a live cookie that
+    cannot rotate, and nothing on the blacklist. So the current row is marked in the list
+    and carries no revoke control, and this status is the backstop rather than the UX.
 
     A second revoke of an already-revoked session succeeds and changes nothing, unlike the
     hard-deleting resources whose second `DELETE` is a 404: the row is not what is being
     removed, and the caller already owns it.
 
-    An access token minted before this feature names no session, so for its remaining
-    minutes the 409 cannot fire and such a caller *can* revoke the row they are on. That is
-    deliberate rather than a hole: with no `sid` there is nothing to compare against, the
-    list marks nothing "This device" either, and the only consequence is the 401 at their
-    next refresh - which a token that old is heading for regardless.
+    `session_uuid` is typed optional because `current_session_uuid` is, and it cannot
+    actually be `None` here - `get_current_user` refuses a token carrying no `sid` before
+    this handler runs. The comparison is written to tolerate one regardless, so this route
+    never becomes the place where that assumption is load-bearing.
     """
     await fetch_owned_or_raise(
         db=db,
@@ -144,9 +149,9 @@ async def erase_other_sessions(
     come from here.
 
     The caller's own session is spared, which is what makes this "sign out other sessions"
-    rather than a global logout. An access token minted before sessions existed names no
-    session to spare, so from such a token this signs everything out including the caller -
-    the honest answer for the one access-token lifetime in which it can happen.
+    rather than a global logout. There is no token left that names no session to spare:
+    `get_current_user` refuses one before this handler runs, so `except_uuid` is always a
+    real uuid here and the store's spare-nothing branch is never reached from a route.
 
     One event for the whole action, not one per row. The rows revoked here are the
     *subject* of the event, and a per-row row would turn one deliberate act into ninety-nine

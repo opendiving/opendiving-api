@@ -13369,11 +13369,14 @@ Both the account lookup and the session lookup happen **before** the presented t
 request that answers 401 writes nothing — the same ordering, for the same reason, as the liveness
 check that preceded it.
 
-**Access tokens are not session-checked per request.** Revoking a session kills its refresh
-immediately; the outstanding access token survives up to `ACCESS_TOKEN_EXPIRE_MINUTES`. That is the
-shape `DELETE /user` has always had, and the alternative — a liveness query inside
-`get_current_user` — buys at most half an hour of promptness for a database read on every
-authenticated request in the app.
+**Access tokens are not session-checked per request.** This paragraph used to close the argument
+here: revoking a session killed its refresh immediately, the outstanding access token survived up to
+`ACCESS_TOKEN_EXPIRE_MINUTES`, and the alternative — a liveness query inside `get_current_user` —
+was said to buy at most half an hour of promptness for "a database read on every authenticated
+request in the app". **That claim is struck on both halves**, rather than annotated around: the
+costing was wrong, and the window it waved away is the one the revoke button exists for. The check
+is in `get_current_user` now — see *"Revoking a session ends its access token too, and the read it
+costs was miscounted"* below.
 
 ### Everyone is signed out once, and that is the whole compatibility story
 
@@ -13381,6 +13384,12 @@ A refresh cookie minted before this carries no `sid`, so its next refresh 401s a
 in again. No shim. *There is no production* (umbrella `CLAUDE.md`), and for a future self-hoster a
 one-time sign-out on upgrade is a clean event rather than corruption — which is what the `!` in the
 PR title names.
+
+**The access half of such a pair is refused too, since the change below.** When this section was
+written it survived up to `ACCESS_TOKEN_EXPIRE_MINUTES` past the cookie's refusal;
+`get_current_user` now wants a `sid` as well, so the sign-out is one event on the next request
+rather than one event plus half an hour of afterlife. It is still the same single sign-out, which is
+why that story did not need reopening — only correcting.
 
 ### `DELETE /user` revokes its own session and no others
 
@@ -15454,3 +15463,84 @@ through a derived flag or a second setting - `git grep PROJECT_OPERATED` and
 `git grep project_operated` list every branch it has created, here and in the web app. An operator
 who sets it on an instance that is not the project's gets a landing page that claims to be the
 project's, and nothing else changes: it gates no feature, unlocks no route and reaches no row.
+
+## Revoking a session ends its access token too, and the read it costs was miscounted
+
+`DELETE /user/session/{uuid}` stamped `revoked_at`, which killed the row's refresh — and nothing
+else. `get_current_user` never asked whether the session behind the presented *access* token was
+still live, so a revoked device went on being authenticated with the token it already held for up to
+`ACCESS_TOKEN_EXPIRE_MINUTES`: half an hour on the stock setting, and exactly the window somebody
+pressing that button is trying to close. The case the control exists for is a laptop that has just
+gone missing, and "signed out within the half hour" is not what the screen offers.
+
+It asks now. After the account lookup — which is where the `user_id` it needs comes from — it calls
+the same `live_session_for` that `/auth/refresh` calls, and `None` raises the same
+`UnauthorizedException` every other failure in that dependency raises. Nothing distinguishes a
+revoked session from an expired one, from another account's, or from a token that named no session
+at all; there is nothing for a caller to act on differently, and no reason to hand one an oracle for
+whether a given `sid` names a real row.
+
+### The reason it had been rejected was a wrong number
+
+The recorded argument against it was "a database read on every authenticated request in the app".
+That cost is real and it was already being paid, twice. `get_current_user` made two Postgres round
+trips before this change: the blacklist `exists` that is the first statement of `verify_token`, and
+`crud_users.get`. So the honest costing is a **third** indexed read on a path that already makes
+two, not a first read on a path that made none — `user_session.uuid` is unique and indexed
+(`PublicUUIDMixin`), and live sessions are capped at 100 per account, so it is a single-row hit on a
+small index. Written down because the wrong figure is what carried the original decision, and
+whoever weighs this next should be weighing the right one.
+
+### Reusing `live_session_for` rather than spelling the predicate again
+
+`_live` is one definition with four call sites for the reason its own docstring gives: another
+spelling of it is another chance to forget one of its two clauses. Reusing the whole lookup rather
+than the predicate buys the `user_id` clause as well, so a `sid` lifted onto a token minted for
+another account resolves to nothing — a check that is now made on every authenticated request rather
+than only at refresh. `live_session_for` gained a second caller and no new query was written, which
+is the entire argument for it having been a function in the first place.
+
+### A token carrying no `sid` is refused, and there is no shim
+
+`services.auth_service.issue_tokens` is the only production mint site for an access token, and by
+the time it reaches `create_access_token` the session uuid is non-`None` on both of its branches: it
+either started a row or continued one. Every sign-in path funnels through it (see *"The row is
+created in `issue_tokens`"* above). So a `sid`-less access token is one this build cannot have
+issued, and refusing it costs nothing that was not already owed — *"Everyone is signed out once"*
+described precisely this for the refresh cookie, and the access half now answers the same way on its
+next request instead of outliving it by half an hour. *There is no production* (umbrella
+`CLAUDE.md`), so there is nothing to be compatible with.
+
+**The `| None` did not leave the code, deliberately.** Four functions still return or accept one:
+`core.security._session_id` reports an absent `sid`, `current_session_uuid` passes it on,
+`to_public_session` answers "I cannot tell" for it, and `revoke_other_sessions(except_uuid=None)`
+means "spare nothing". None of those branches is reachable from a route any more, and each stays
+because the function it lives in should not become the place that assumes a `sid` nobody checked —
+the decision belongs to `get_current_user` and `/auth/refresh`, which is where it now is.
+
+What did change is every docstring that justified one of them by "an access token minted before this
+feature, for its remaining minutes". Those minutes no longer exist, and a reason that has stopped
+being true is worse than none, so all four were rewritten in the same change. The count is written
+down because the first attempt corrected three and left `_session_id` — the one that is a decode
+helper rather than a session function, and so did not come up when the others did.
+
+### The 409 on revoking your own session stays
+
+With a per-request check it becomes technically optional — a self-revoke would now genuinely sign
+the browser out rather than being the no-op the 409 was originally protecting against. It stays
+because ending your own session is what `POST /auth/logout` is, and logout also clears the refresh
+cookie and blacklists the presented pair. A self-revoke does neither, so it would leave a browser
+holding a dead access token, a live cookie that can no longer rotate anything, and nothing on the
+blacklist: a half-logout rather than a logout. The status is still the backstop rather than the UX —
+the current row is marked in the list and carries no revoke control.
+
+### The test that could not have existed before
+
+Every other test in this suite authenticates by overriding `get_current_user` through
+`app.dependency_overrides`, which is why this gap could sit in the code unnoticed: nothing in the
+suite was positioned to watch that dependency decide anything, and adding the check broke not one
+existing test. `TestARevokedSessionEndsItsAccessToken` in `tests/test_sessions.py` is the one that
+is positioned — Postgres-backed, tokens minted by `issue_tokens` rather than hand-built, calling the
+dependency directly. Five of its six cases fail without the check. The sixth asserts that a *live*
+session's token still authenticates, and it is there because a check that refused everything would
+otherwise pass the whole class.

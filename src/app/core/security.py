@@ -386,8 +386,11 @@ async def verify_token(token: str, expected_token_type: TokenType, db: AsyncSess
 
     The `sid` claim rides back on `TokenData` and is *not* validated here - this function
     says nothing about whether the session it names is still live, only what the token
-    claims. `POST /auth/refresh` is the one caller that asks the second question, against
-    the database, before it will mint a replacement.
+    claims. Two callers ask that second question against the database: `POST /auth/refresh`
+    before it will mint a replacement, and `api.dependencies.get_current_user` on every
+    authenticated request, which is what makes revoking a session end its access token as
+    well as its refresh. Both put the question to `crud_user_sessions.live_session_for`, so
+    there is one predicate rather than two that can drift.
     """
     is_blacklisted = await crud_token_blacklist.exists(db, token=token)
     if is_blacklisted:
@@ -411,11 +414,15 @@ def _session_id(payload: dict[str, Any]) -> uuid_pkg.UUID | None:
     """The `sid` claim off an already-decoded payload, or `None` if it is absent or is not
     a uuid.
 
-    Absent is the ordinary case for one access-token lifetime after this feature ships, and
-    for any token minted by an older build. Unparseable is not reachable through anything
-    this app signs, and is tolerated rather than raised for the same reason `verify_token`
-    tolerates a non-uuid `sub`: an escaping `ValueError` on a decode path is a 500 where a
-    401 belongs.
+    Absent means a token minted before sessions existed, and it stopped being an ordinary
+    case for anything: `api.dependencies.get_current_user` and `POST /auth/refresh` both
+    refuse a token that names no session, so the `None` now runs into a decision rather than
+    into a tolerated gap. This function still reports it rather than raising, because saying
+    "there is no session here" is its whole job and deciding what that costs is theirs.
+
+    Unparseable is not reachable through anything this app signs, and is tolerated rather
+    than raised for the same reason `verify_token` tolerates a non-uuid `sub`: an escaping
+    `ValueError` on a decode path is a 500 where a 401 belongs.
     """
     raw = payload.get("sid")
     if not isinstance(raw, str):

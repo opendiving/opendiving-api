@@ -1008,10 +1008,12 @@ async def refresh_access_token(
 
     **Nor is it the same thing as a session that is still live.** The presented token's
     `sid` has to resolve to an unrevoked, unexpired row belonging to this subject, which is
-    what makes "sign out my other devices" mean anything: revoking a row kills its refresh
-    at the next rotation. A token carrying no `sid` at all - anything minted before this
-    feature - fails that check and the diver signs in again. That is a one-time global
-    sign-out on upgrade, and deliberately not shimmed.
+    half of what makes "sign out my other devices" mean anything: revoking a row stops it
+    rotating here. The other half is `get_current_user`, which asks the same question of the
+    access token on every authenticated request, so the revoked device is refused there
+    first. A token carrying no `sid` at all - anything minted before this feature - fails
+    both checks and the diver signs in again. That is a one-time global sign-out on upgrade,
+    and deliberately not shimmed.
 
     All four ways to fail here answer the same uniform 401 the endpoint already answered,
     which is the property `DECISIONS.md` pins rather than one this change gets to relax.
