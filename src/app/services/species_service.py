@@ -16,6 +16,8 @@ identity - but its vernacular coverage is thin to the point of uselessness for a
 *Amphiprion ocellaris* carries exactly one common name in WoRMS, and it is in Japanese, so a
 diver typing "clownfish" would not find Nemo. Wikidata fills that in, is CC0, and is keyed
 to WoRMS through property P850, which is what lets the two be merged on `aphia_id` at all.
+What WoRMS vernaculars there are still reach a search, but only as second choice and only
+through the annotation call that knows which one matched - see `_fill_vernacular_names`.
 
 **Why this asks one taxon at a time rather than importing the register.** WoRMS's full
 database download is proprietary - registration, a vetted application, a non-transferable
@@ -39,7 +41,7 @@ traffic is low is not one.
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote
 
@@ -170,7 +172,7 @@ _MISS_TTL_SECONDS = 60 * 60
 # Bumped whenever the cached shape or the way it is composed changes. What is cached is the
 # *normalized, merged* remote list rather than raw provider payloads, so a change to the
 # normalizer has to invalidate the old entries - a new prefix does that without a flush.
-_CACHE_VERSION = "v5"
+_CACHE_VERSION = "v6"
 
 # Wikidata's "WoRMS AphiaID" property. The single hinge the whole two-source design turns
 # on: without a shared key there would be nothing to merge two registers *on*.
@@ -739,24 +741,52 @@ def _worms_taxon(row: Any) -> _Taxon | None:
     )
 
 
-def _vername_map(rows: Any, query: str) -> dict[int, str] | None:
-    """AphiaID to the one vernacular that best explains why the taxon matched `query`, or
-    `None` when the annotation call did not answer.
+@dataclass(frozen=True, slots=True)
+class _Vernames:
+    """What the ajax annotation call learned, split by the two different questions asked of it.
+
+    `matched` answers "why is this row here" and takes the best vername in **any** language;
+    `english` answers "what would a diver call this animal" and takes the best **English** one.
+    Two maps rather than one plus a language tag, because the answers genuinely differ: a taxon
+    whose Spanish name matched better than its English one is explained by the Spanish word and
+    still displays the English one, and collapsing them would have to sacrifice one of those.
+
+    Both are keyed by the raw, unfolded AphiaID WoRMS put on the ajax row - see `_vername_map`.
+    """
+
+    matched: dict[int, str]
+    english: dict[int, str]
+
+
+def _vername_map(rows: Any, query: str) -> _Vernames | None:
+    """The vernaculars an ajax answer accounts for a query with, or `None` when that call did
+    not answer.
 
     Built from `AjaxAphiaRecordsByNamePart`, which is the only WoRMS endpoint that says
     *which* vernacular a hit matched on - an `AphiaRecord` carries no vernacular field at all,
     which is why by-vernacular rows have no explanation of their own.
 
-    **Every language, not just English.** The English-only rule governs the *display* name; a
-    foreign word that accounts for a row is information rather than noise. `?q=orca` returns a
-    shad (*Alosa alosa*) because its Spanish vernacular is "samborca", and `matched
-    "samborca"` is precisely what makes that row make sense. So no `languages[]` filter is
-    sent, and `eng` only wins as a tie-break.
+    **`matched` takes every language, not just English.** The English-only rule governs the
+    *display* name; a foreign word that accounts for a row is information rather than noise.
+    `?q=orca` returns a shad (*Alosa alosa*) because its Spanish vernacular is "samborca", and
+    `matched "samborca"` is precisely what makes that row make sense. So no `languages[]`
+    filter is sent, and `eng` only wins as a tie-break.
 
-    **Keyed by the raw, unfolded id WoRMS sent**, because these rows carry no `valid_AphiaID`
-    and no `status`: the ajax answer for `whale` contains two "blue whale" rows under
-    different ids, one of them an unaccepted homonym. The caller looks this up with the
-    record's own id, *before* its fold, so the wrong-taxon lookup cannot happen.
+    **`english` is the display half, and it is a separate pass rather than a filter over the
+    first.** A taxon whose best match is foreign can still carry an English name worth showing:
+    one answering `?q=orca` with both "orca" (Spanish) and "orca whale" (English) is *placed* by
+    the Spanish word and *named* by the English one, and reading the language off the winner of
+    the first pass would leave that row unnamed. What lands here is still only what the query
+    dragged in: the endpoint returns the vernames that *matched*, not a taxon's whole set -
+    *Orcinus orca* answers `grampus` with two of its six English names - so this is a best effort
+    at the name `resolve_species` will store, never a promise of it. The disagreement it leaves is
+    the one recorded in DECISIONS.md under the common-name rule, and it heals the same way: the
+    first resolve fixes the row for everyone.
+
+    **Both maps are keyed by the raw, unfolded id WoRMS sent**, because these rows carry no
+    `valid_AphiaID` and no `status`: the ajax answer for `whale` contains two "blue whale" rows
+    under different ids, one of them an unaccepted homonym. Every caller looks these up with
+    the record's own id, *before* its fold, so the wrong-taxon lookup cannot happen.
 
     A taxon with several vernames - *Balaena mysticetus* has nine for `whale` - keeps the one
     that matched best, English first at equal quality, then casefolded alphabetical order.
@@ -769,6 +799,7 @@ def _vername_map(rows: Any, query: str) -> dict[int, str] | None:
         return None
 
     best: dict[int, tuple[int, int, str, str]] = {}
+    best_english: dict[int, tuple[int, str, str]] = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -779,10 +810,20 @@ def _vername_map(rows: Any, query: str) -> dict[int, str] | None:
         if not isinstance(aphia_id, int) or aphia_id <= 0 or vername is None:
             continue
         language = _text(row.get("language"), _LANGUAGE_CODE_MAX_LENGTH)
-        candidate = (_match_bucket(query, vername), 0 if language == "eng" else 1, vername.casefold(), vername)
+        bucket = _match_bucket(query, vername)
+        candidate = (bucket, 0 if language == "eng" else 1, vername.casefold(), vername)
         if (current := best.get(aphia_id)) is None or candidate < current:
             best[aphia_id] = candidate
-    return {aphia_id: chosen[-1] for aphia_id, chosen in best.items()}
+        if language == "eng":
+            # No language term in this key: the map is English by construction, so the
+            # tie-breaks left are the two name-intrinsic ones the map above ends with.
+            english_candidate = (bucket, vername.casefold(), vername)
+            if (current_english := best_english.get(aphia_id)) is None or english_candidate < current_english:
+                best_english[aphia_id] = english_candidate
+    return _Vernames(
+        matched={aphia_id: chosen[-1] for aphia_id, chosen in best.items()},
+        english={aphia_id: chosen[-1] for aphia_id, chosen in best_english.items()},
+    )
 
 
 def _worms_result(row: Any, vernames: dict[int, str] | None = None) -> SpeciesSearchResult | None:
@@ -793,12 +834,12 @@ def _worms_result(row: Any, vernames: dict[int, str] | None = None) -> SpeciesSe
     request - and the superseded name the diver actually typed becomes `matched_name`, since
     being silently handed a different binomial is baffling.
 
-    `vernames` is the by-vernacular source's annotation map, and it fills the same field for
-    rows the fold has nothing to say about: a row that matched on a common name WoRMS will not
-    tell us about otherwise. **The fold wins any collision**, because it is the truer account
-    of what the diver's query actually hit - the ajax row for the unaccepted "blue whale"
-    (AphiaID 380449) folds to the fin whale, and reporting "blue whale" there would be a
-    different animal's name.
+    `vernames` is the *matched* half of the by-vernacular source's annotation (`_Vernames`), and
+    it fills the same field for rows the fold has nothing to say about: a row that matched on a
+    common name WoRMS will not tell us about otherwise. **The fold wins any collision**, because
+    it is the truer account of what the diver's query actually hit - the ajax row for the
+    unaccepted "blue whale" (AphiaID 380449) folds to the fin whale, and reporting "blue whale"
+    there would be a different animal's name.
 
     Neither hint is guaranteed to survive: whatever is set here is nulled downstream on any
     row whose visible names already match the query, which is `SpeciesSearchResult`'s own
@@ -1148,6 +1189,11 @@ class _SourceAnswer:
     # what the merge does afterwards.
     page_was_full: bool
     ok: bool
+    # Accepted AphiaID to the English vernacular this source can name it by, and empty for
+    # every source but WoRMS by-vernacular. It rides out here rather than being applied to
+    # `results` because the fill it feeds has to happen *after* the merge - see
+    # `_fill_vernacular_names`.
+    english_vernames: dict[int, str] = field(default_factory=dict)
 
 
 async def _worms_by_name(query: str) -> _SourceAnswer:
@@ -1164,14 +1210,23 @@ async def _worms_by_vernacular(query: str) -> _SourceAnswer:
     """Common names, as far as WoRMS has them - which is not far, hence Wikidata.
 
     **Two calls, concurrently, and only one of them makes rows.** `AphiaRecordsByVernacular`
-    is the row source, exactly as before; `AjaxAphiaRecordsByNamePart` chains alongside it
-    purely to learn *which* vernacular matched, the way `_wikidata_entities` chains inside
+    is the row source, exactly as before; `AjaxAphiaRecordsByNamePart` chains alongside it to
+    learn the vernaculars themselves, the way `_wikidata_entities` chains inside
     `_wikidata_search`. It is an annotation and never a source, for three measured reasons:
     its taxa are a subset of the record endpoint's everywhere sampled, it is useless for some
     queries (`orca` spends its whole row budget on scientific-name prefixes and omits the
     animal), and its rows are raw unfolded ids with no `valid_AphiaID` - so using them as rows
     would need a second fold call and would ship the duplicate taxa that fold away here. The
     one thing it uniquely knows is the vername string, and that is all this takes.
+
+    **It now answers two questions rather than one**, and the second is why an `AphiaRecord`
+    can carry a common name at all: which vernacular *matched* fills `matched_name`, and the
+    best **English** one fills the `common_name` this leg could otherwise never supply - the
+    record endpoint has no vernacular field, so before this a WoRMS-only row displayed its
+    binomial while the catalog row a resolve wrote from the same vernacular displayed a name.
+    The fill itself is not applied here; it rides out on `_SourceAnswer.english_vernames` and
+    lands after the merge, so that a name Wikidata supplied still wins - which is the order
+    `_choose_common_name` uses at resolve time.
 
     Because it contributes no rows, `has_more` never sees it and the source count is unchanged.
 
@@ -1186,7 +1241,7 @@ async def _worms_by_vernacular(query: str) -> _SourceAnswer:
     month-long cache entry of unexplained rows.
     """
     rows: Any = None
-    vernames: dict[int, str] | None = None
+    vernames: _Vernames | None = None
 
     async def records() -> None:
         nonlocal rows
@@ -1217,10 +1272,15 @@ async def _worms_by_vernacular(query: str) -> _SourceAnswer:
     page = _worms_page(rows, vernames)
     # An *empty* ajax answer is a complete one - WoRMS says "no match" with a 204 that
     # `_request` maps to `[]` - so only `None`, the failure and the budget expiry, drops `ok`.
-    return _SourceAnswer(page.results, page.page_was_full, ok=page.ok and vernames is not None)
+    return _SourceAnswer(
+        page.results,
+        page.page_was_full,
+        ok=page.ok and vernames is not None,
+        english_vernames=page.english_vernames,
+    )
 
 
-def _worms_page(rows: Any, vernames: dict[int, str] | None = None) -> _SourceAnswer:
+def _worms_page(rows: Any, vernames: _Vernames | None = None) -> _SourceAnswer:
     """A page of WoRMS records as results, plus whether the page was full and whether WoRMS
     answered at all.
 
@@ -1229,18 +1289,42 @@ def _worms_page(rows: Any, vernames: dict[int, str] | None = None) -> _SourceAns
     the register genuinely said "no such name". That distinction is preserved here rather
     than collapsed, because it decides how long the merged answer is cached for.
 
-    `vernames` is `_worms_by_vernacular`'s annotation map; the by-name source has no such
-    thing and passes nothing. It is threaded through here rather than applied afterwards
-    because the lookup needs each record's *pre-fold* id, which stops existing the moment
-    `_worms_result` has returned.
+    `vernames` is `_worms_by_vernacular`'s annotation; the by-name source has no such thing and
+    passes nothing. It is threaded through here rather than applied afterwards because both
+    lookups need each record's *pre-fold* id, which stops existing the moment `_worms_result`
+    has returned.
+
+    **A vername crosses to the display name only on a record the fold did not move**, which is
+    the same refusal `_worms_result` makes for `matched_name` and matters more here. The ajax
+    rows carry no `valid_AphiaID`, so an unaccepted record's vernacular is a name somebody
+    attached to *that* record: for a true synonym it is the same animal, but the `whale` answer
+    contains an unaccepted "blue whale" whose accepted taxon is the **fin** whale, and carrying
+    it across the fold would put "Blue whale" on a different animal's row - permanently, as far
+    as that search is concerned, and in the one field a diver reads as the answer. Refusing
+    costs the folded row a display name it would often have been right about; nothing here can
+    tell those two cases apart, and this is the direction that cannot be wrong.
     """
     if rows is None:
         return _SourceAnswer([], False, ok=False)
     if not isinstance(rows, list):
         # Valid JSON that is not an array is not WoRMS answering - a proxy or an error page.
         return _SourceAnswer([], False, ok=False)
-    results = [result for row in rows if (result := _worms_result(row, vernames)) is not None]
-    return _SourceAnswer(results, len(rows) >= _WORMS_PAGE_SIZE, ok=True)
+
+    results: list[SpeciesSearchResult] = []
+    english_vernames: dict[int, str] = {}
+    for row in rows:
+        result = _worms_result(row, vernames.matched if vernames is not None else None)
+        if result is None:
+            continue
+        results.append(result)
+        # Equal ids *are* the "did not fold" test, and it is written as one rather than by
+        # re-reading `valid_AphiaID`: the fold rule is `_worms_result`'s, and comparing what it
+        # returned against what it was given asks the question without owning a second copy of
+        # the answer.
+        if vernames is not None and row.get("AphiaID") == result.aphia_id:
+            if (vername := vernames.english.get(result.aphia_id)) is not None:
+                english_vernames[result.aphia_id] = vername
+    return _SourceAnswer(results, len(rows) >= _WORMS_PAGE_SIZE, ok=True, english_vernames=english_vernames)
 
 
 async def _wikidata_search(query: str) -> _SourceAnswer:
@@ -1573,16 +1657,24 @@ async def _remote_search(query: str) -> SpeciesSearchResponse:
     collected.sort(key=lambda entry: entry[0])
 
     merged: dict[int, SpeciesSearchResult] = {}
+    english_vernames: dict[int, str] = {}
     truncated = False
     for _, answer in collected:
         truncated = truncated or answer.page_was_full
         for result in answer.results:
             _merge_result(merged, result)
+        # First writer wins here too, and for the same reason the merge above has one: only
+        # by-vernacular ever fills this, so today the loop sees at most one non-empty map and
+        # the rule is what keeps a second one from depending on the weather.
+        for aphia_id, vername in answer.english_vernames.items():
+            english_vernames.setdefault(aphia_id, vername)
 
-    # After the merge, because whether a hint is redundant depends on the `common_name` the
-    # merge just supplied - and before the cache, so the stored entry keeps the schema's
-    # contract rather than repairing it on every read.
-    ordered = _ordered(_drop_redundant_hints(list(merged.values()), query), query)
+    # All three after the merge, because each depends on what the merge settled: a vernacular
+    # may only name a row Wikidata left unnamed, whether a hint is redundant depends on the
+    # `common_name` that leaves, and the order depends on both. Before the cache, so the stored
+    # entry keeps the schema's contract rather than repairing it on every read.
+    filled = _fill_vernacular_names(list(merged.values()), english_vernames)
+    ordered = _ordered(_drop_redundant_hints(filled, query), query)
     response = SpeciesSearchResponse(results=ordered[:_MAX_RESULTS], has_more=truncated or len(ordered) > _MAX_RESULTS)
     await _store_search(key, response, complete=complete)
     return response
@@ -1613,6 +1705,51 @@ def _merge_result(merged: dict[int, SpeciesSearchResult], result: SpeciesSearchR
             "status": existing.status if existing.status != "unknown" else result.status,
         }
     )
+
+
+def _fill_vernacular_names(
+    results: list[SpeciesSearchResult], english_vernames: dict[int, str]
+) -> list[SpeciesSearchResult]:
+    """Give a row still showing nothing but its binomial the English vernacular WoRMS knows it
+    by, so search displays the name a resolve is about to store.
+
+    **The gap this closes is that search and resolve read different sources.** A display name
+    at search time could only ever come from Wikidata: `AphiaRecord` has 28 fields and not one
+    is a vernacular, so `_worms_result` hardcodes `common_name=None`. `resolve_species` then
+    asks `AphiaVernacularsByAphiaID` - a per-taxon call search cannot afford fifty of - and
+    `_choose_common_name` falls through to it. So *Scomberoides tol*, whose Wikidata label is
+    its own binomial and which has no English alias there, was picked from the menu as
+    `Scomberoides tol · matched "needlescaled queenfish"` and came back as
+    `Needlescaled queenfish`, while the three sibling queenfishes on the same page showed
+    their names throughout because Wikidata happened to carry them. The vernacular was in the
+    ajax answer the whole time, spent on the hint.
+
+    **After the merge, and only into a `common_name` still empty**, which is what reproduces
+    resolve's precedence - Wikidata label, then its aliases, then a WoRMS vernacular - rather
+    than inverting it because WoRMS writes the merged row first. `_choose_common_name` does
+    the choosing, so the binomial-prefix test and the single capital are the same rule on both
+    paths; a vername that is the binomial with decoration on it is refused here exactly as it
+    would be at resolve, and the row keeps its bare name.
+
+    The reject list stays resolve-only and is not missed: it exists for junior *scientific*
+    synonyms wearing a different genus, which is a Wikidata-alias failure. A WoRMS vernacular
+    is a common name by construction.
+    """
+    if not english_vernames:
+        return results
+
+    filled = []
+    for result in results:
+        vername = english_vernames.get(result.aphia_id) if result.common_name is None else None
+        common_name = (
+            None
+            if vername is None
+            else _choose_common_name(
+                scientific_name=result.scientific_name, label=None, aliases=(), vernaculars=(vername,)
+            )
+        )
+        filled.append(result if common_name is None else result.model_copy(update={"common_name": common_name}))
+    return filled
 
 
 def _visible_bucket(result: SpeciesSearchResult, query: str) -> int:

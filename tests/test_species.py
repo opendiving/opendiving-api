@@ -247,6 +247,20 @@ def _entity(
     return entity
 
 
+def _wikidata_names(aphia_id: int, taxon_name: str, label: str) -> dict[str, Any]:
+    """The `_registers` kwargs for "Wikidata calls this taxon `label`", as one entity.
+
+    Several vername tests need it, and not for the name itself: once an English vername can
+    become the row's `common_name`, a hint quoting that same vername is redundant and gets
+    nulled - so a test about *which* vername the annotation chose has nothing left to read.
+    A label that does not answer the query keeps the display silent about it and the hint
+    observable, which is also the live shape (`?q=grampus` on a row Wikidata calls the killer
+    whale).
+    """
+    entity = _entity("Q1", aphia_id=str(aphia_id), taxon_name=taxon_name, label=label)
+    return {"wikidata_search": _generator_search("Q1"), "wikidata_entities": {"entities": {"Q1": entity}}}
+
+
 def _worms_record(aphia_id: int, scientific_name: str, *, rank: str = "Species") -> dict[str, Any]:
     """One accepted `AphiaRecord`, trimmed to the fields the search path reads."""
     return {
@@ -585,6 +599,10 @@ class TestMergingTwoRegisters:
         shape; not harmless once by-vernacular rows carry vernames, because then network
         weather decides whether a folded row's hint reads as the synonym the diver typed or as
         somebody's common name. Run twice with the slow leg swapped, byte for byte.
+
+        The vername is Spanish so that the collision stays *visible*: an English one would name
+        the row instead, and a hint the display already accounts for is nulled downstream -
+        which would leave both runs agreeing on `None` and prove nothing about who won.
         """
         synonym = {
             "AphiaID": 384056,
@@ -607,7 +625,7 @@ class TestMergingTwoRegisters:
                 _registers(
                     by_name=[synonym],
                     by_vernacular=[_worms_record(137107, "Stenella coeruleoalba")],
-                    ajax=[_ajax_row(137107, "Stenella coeruleoalba", "orca dolphin")],
+                    ajax=[_ajax_row(137107, "Stenella coeruleoalba", "orca dolphin", "spa")],
                 ),
                 patch.object(species_service, "_worms", paced),
             ):
@@ -1105,7 +1123,12 @@ class TestExplainingAVernacularHit:
     """
 
     @pytest.mark.asyncio
-    async def test_a_vername_says_why_a_by_vernacular_row_matched(self, no_redis: None):
+    async def test_an_english_vername_names_the_row_rather_than_explaining_it(self, no_redis: None):
+        """What a by-vernacular row does with the vernacular it matched on, now that it has
+        somewhere to put it: the name goes in the display slot and the hint is redundant. This
+        used to ship as `Orcinus orca · Species · matched "killer whale"` - a binomial and an
+        apology - while the catalog row a resolve wrote from the same vernacular read
+        `Killer whale · Orcinus orca`."""
         db = _empty_db()
         with _registers(
             by_vernacular=[_worms_record(137102, "Orcinus orca")],
@@ -1113,7 +1136,9 @@ class TestExplainingAVernacularHit:
         ):
             response = await species_service.search_species(db, "killer whale")
 
-        assert [(r.scientific_name, r.matched_name) for r in response.results] == [("Orcinus orca", "killer whale")]
+        assert [(r.scientific_name, r.common_name, r.matched_name) for r in response.results] == [
+            ("Orcinus orca", "Killer whale", None)
+        ]
 
     @pytest.mark.asyncio
     async def test_a_folded_row_keeps_the_folds_own_account_of_the_match(self, no_redis: None):
@@ -1145,7 +1170,9 @@ class TestExplainingAVernacularHit:
         ):
             response = await species_service.search_species(db, "orca")
 
-        assert [r.matched_name for r in response.results] == ["samborca"]
+        # And it explains the row without *naming* it: the app has no i18n, so a Spanish word
+        # on a dive card would be a bug where the same word as a hint is the whole point.
+        assert [(r.common_name, r.matched_name) for r in response.results] == [(None, "samborca")]
 
     @pytest.mark.asyncio
     async def test_the_better_match_beats_the_english_one(self, no_redis: None):
@@ -1158,6 +1185,7 @@ class TestExplainingAVernacularHit:
                 _ajax_row(137111, "Feresa attenuata", "orca whale", "eng"),
                 _ajax_row(137111, "Feresa attenuata", "orca", "spa"),
             ],
+            **_wikidata_names(137111, "Feresa attenuata", "pygmy killer whale"),
         ):
             response = await species_service.search_species(db, "orca")
 
@@ -1174,6 +1202,7 @@ class TestExplainingAVernacularHit:
                 _ajax_row(137111, "Feresa attenuata", "orca aaa", "spa"),
                 _ajax_row(137111, "Feresa attenuata", "orca zzz", "eng"),
             ],
+            **_wikidata_names(137111, "Feresa attenuata", "pygmy killer whale"),
         ):
             response = await species_service.search_species(db, "orca")
 
@@ -1192,15 +1221,20 @@ class TestExplainingAVernacularHit:
                 _ajax_row(137021, "Delphinidae", "orca zulu"),
                 _ajax_row(137021, "Delphinidae", "orca alpha"),
             ],
+            **_wikidata_names(137021, "Delphinidae", "oceanic dolphin"),
         ):
             response = await species_service.search_species(db, "orca")
 
         assert [r.matched_name for r in response.results] == ["orca alpha"]
 
     @pytest.mark.asyncio
-    async def test_a_vername_that_merely_repeats_the_binomial_is_not_a_hint(self, no_redis: None):
+    async def test_a_vername_that_merely_repeats_the_binomial_is_neither_a_hint_nor_a_name(self, no_redis: None):
         """`combine_vernaculars=true` adds vernacular matching to a scientific-name search, so
-        a name the row is already showing can come back as its own explanation."""
+        a name the row is already showing can come back as its own explanation - and, since
+        that vername is English, as a candidate display name too. `_choose_common_name`'s
+        binomial-prefix test is what refuses the second, which is the same refusal resolve
+        makes and the reason the fill goes through that function rather than capitalising a
+        string itself."""
         db = _empty_db()
         with _registers(
             by_vernacular=[_worms_record(137102, "Orcinus orca")],
@@ -1208,7 +1242,7 @@ class TestExplainingAVernacularHit:
         ):
             response = await species_service.search_species(db, "whale")
 
-        assert [r.matched_name for r in response.results] == [None]
+        assert [(r.common_name, r.matched_name) for r in response.results] == [(None, None)]
 
     @pytest.mark.asyncio
     async def test_a_hint_is_dropped_once_the_merged_display_name_explains_the_row(self, no_redis: None):
@@ -1309,6 +1343,100 @@ class TestExplainingAVernacularHit:
             response = await species_service.search_species(db, "whale")
 
         assert response.results == []
+
+
+class TestAVernacularNamesTheRow:
+    """The other half of what the ajax annotation is for: the English vernacular becomes the
+    row's `common_name` when nothing else supplied one.
+
+    Search could only ever display a Wikidata name - `AphiaRecord` has 28 fields and not one
+    is a vernacular - while `resolve_species` asks `AphiaVernacularsByAphiaID`, a per-taxon
+    call a fifty-row keystroke path cannot afford. So a taxon Wikidata labels with its own
+    binomial was picked as a binomial and came back named, and its neighbours on the same page
+    were named throughout. The vernacular was in the ajax answer the whole time.
+
+    Three rules hold it in place, and each has a test below: a Wikidata name still wins, the
+    fill only ever speaks English, and a vername never crosses an accepted-taxon fold.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_vernacular_names_a_row_wikidata_left_bare(self, no_redis: None):
+        """The reported case, end to end. Q1872666's English label is "Scomberoides tol" and it
+        has no English alias, so Wikidata has no name to give and the entity does not even
+        surface for `?q=queenfish` - while WoRMS has "needlescaled queenfish" and hands it over
+        in the annotation call. The row now reads the way the catalog row will."""
+        db = _empty_db()
+        with _registers(
+            by_vernacular=[_worms_record(218433, "Scomberoides tol")],
+            ajax=[_ajax_row(218433, "Scomberoides tol", "needlescaled queenfish")],
+        ):
+            response = await species_service.search_species(db, "queenfish")
+
+        assert [(r.scientific_name, r.common_name, r.matched_name) for r in response.results] == [
+            ("Scomberoides tol", "Needlescaled queenfish", None)
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_wikidata_name_still_wins(self, no_redis: None):
+        """The reason the fill lands after the merge rather than inside `_worms_result`. WoRMS
+        writes the merged row first, so filling there would have a vernacular beat the Wikidata
+        name for every row that has both - reversing the order `_choose_common_name` uses at
+        resolve time, and leaving the picker disagreeing with the catalog row it fills."""
+        db = _empty_db()
+        with _registers(
+            by_vernacular=[_worms_record(218434, "Scomberoides lysan")],
+            ajax=[_ajax_row(218434, "Scomberoides lysan", "queenfish")],
+            **_wikidata_names(218434, "Scomberoides lysan", "doublespotted queenfish"),
+        ):
+            response = await species_service.search_species(db, "queenfish")
+
+        assert [r.common_name for r in response.results] == ["Doublespotted queenfish"]
+
+    @pytest.mark.asyncio
+    async def test_an_english_vername_names_a_row_a_foreign_one_placed(self, no_redis: None):
+        """Why `_Vernames` carries two maps rather than one plus a language tag. The Spanish
+        "orca" is the better match and so is what accounts for the row; the English "orca
+        whale" is what a diver would call the animal. Reading the language off the winner of
+        the first choice would leave this row unnamed for want of a name it has."""
+        db = _empty_db()
+        with _registers(
+            by_vernacular=[_worms_record(137111, "Feresa attenuata")],
+            ajax=[
+                _ajax_row(137111, "Feresa attenuata", "orca whale", "eng"),
+                _ajax_row(137111, "Feresa attenuata", "orca", "spa"),
+            ],
+        ):
+            response = await species_service.search_species(db, "orca")
+
+        assert [(r.common_name, r.matched_name) for r in response.results] == [("Orca whale", None)]
+
+    @pytest.mark.asyncio
+    async def test_a_vernacular_does_not_cross_the_fold(self, no_redis: None):
+        """The trap that decides the whole rule. Ajax rows carry no `valid_AphiaID`, so a
+        vernacular belongs to the record WoRMS attached it to - and the `whale` answer contains
+        an unaccepted "blue whale" whose accepted taxon is the *fin* whale. Carried across the
+        fold it would put "Blue whale" in the one field a diver reads as the answer, on a
+        different animal. A true synonym would have been named correctly and is refused too:
+        nothing in the data tells the two apart, and this is the direction that cannot be
+        wrong."""
+        db = _empty_db()
+        unaccepted = {
+            "AphiaID": 380449,
+            "scientificname": "Balaena rostrata",
+            "status": "unaccepted",
+            "rank": "Species",
+            "valid_AphiaID": 137091,
+            "valid_name": "Balaenoptera physalus",
+        }
+        with _registers(
+            by_vernacular=[unaccepted],
+            ajax=[_ajax_row(380449, "Balaena rostrata", "blue whale")],
+        ):
+            response = await species_service.search_species(db, "whale")
+
+        assert [(r.scientific_name, r.common_name, r.matched_name) for r in response.results] == [
+            ("Balaenoptera physalus", None, "Balaena rostrata")
+        ]
 
 
 class TestChoosingTheDisplayName:
