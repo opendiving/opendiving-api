@@ -414,11 +414,15 @@ def _session_id(payload: dict[str, Any]) -> uuid_pkg.UUID | None:
     """The `sid` claim off an already-decoded payload, or `None` if it is absent or is not
     a uuid.
 
-    Absent is the ordinary case for one access-token lifetime after this feature ships, and
-    for any token minted by an older build. Unparseable is not reachable through anything
-    this app signs, and is tolerated rather than raised for the same reason `verify_token`
-    tolerates a non-uuid `sub`: an escaping `ValueError` on a decode path is a 500 where a
-    401 belongs.
+    Absent means a token minted before sessions existed, and it stopped being an ordinary
+    case for anything: `api.dependencies.get_current_user` and `POST /auth/refresh` both
+    refuse a token that names no session, so the `None` now runs into a decision rather than
+    into a tolerated gap. This function still reports it rather than raising, because saying
+    "there is no session here" is its whole job and deciding what that costs is theirs.
+
+    Unparseable is not reachable through anything this app signs, and is tolerated rather
+    than raised for the same reason `verify_token` tolerates a non-uuid `sub`: an escaping
+    `ValueError` on a decode path is a 500 where a 401 belongs.
     """
     raw = payload.get("sid")
     if not isinstance(raw, str):

@@ -15511,13 +15511,18 @@ described precisely this for the refresh cookie, and the access half now answers
 next request instead of outliving it by half an hour. *There is no production* (umbrella
 `CLAUDE.md`), so there is nothing to be compatible with.
 
-**The `| None` did not leave the code, deliberately.** `current_session_uuid` still returns an
-optional, `to_public_session` still answers "I cannot tell" for a `None`, and
-`revoke_other_sessions(except_uuid=None)` still means "spare nothing". None of those branches is
-reachable from a route any more, and each stays because the function it lives in should not become
-the place that assumes a `sid` nobody checked. The docstrings that used to justify them by "an
-access token minted before this feature, for its remaining minutes" were all corrected in the same
-change: those minutes no longer exist, and a reason that has stopped being true is worse than none.
+**The `| None` did not leave the code, deliberately.** Four functions still return or accept one:
+`core.security._session_id` reports an absent `sid`, `current_session_uuid` passes it on,
+`to_public_session` answers "I cannot tell" for it, and `revoke_other_sessions(except_uuid=None)`
+means "spare nothing". None of those branches is reachable from a route any more, and each stays
+because the function it lives in should not become the place that assumes a `sid` nobody checked —
+the decision belongs to `get_current_user` and `/auth/refresh`, which is where it now is.
+
+What did change is every docstring that justified one of them by "an access token minted before this
+feature, for its remaining minutes". Those minutes no longer exist, and a reason that has stopped
+being true is worse than none, so all four were rewritten in the same change. The count is written
+down because the first attempt corrected three and left `_session_id` — the one that is a decode
+helper rather than a session function, and so did not come up when the others did.
 
 ### The 409 on revoking your own session stays
 
