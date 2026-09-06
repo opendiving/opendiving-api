@@ -15151,10 +15151,10 @@ every enum value names a field of `DiveCreateRequest`, or with the `mixture.` pr
 equals its form schema's optional keys exactly, minus the keys that side exempts by name
 (`NON_HIDEABLE_MIXTURE_SCHEMA_KEYS`, which carries a reason per name). The asymmetry is deliberate
 and is the interesting part — API-optional is wider than what is hideable (`gas_number` has no input
-at all; a cylinder's `volume`, `oxygen` and `helium` are optional on both sides and exempt by name),
-so an equality check on this side would fail against fields that have no business being hideable,
-while a subset check on the web side would let a new optional input go unregistered. Between them
-the mirror is pinned from both ends.
+at all; a cylinder's `volume` and `oxygen` are optional on both sides and exempt by name), so an
+equality check on this side would fail against fields that have no business being hideable, while a
+subset check on the web side would let a new optional input go unregistered. Between them the mirror
+is pinned from both ends.
 
 **Absent from the vocabulary does not mean required.** It did once: `dive_number`, `start_time`,
 `duration` and the cylinder trio `volume`/`oxygen`/`helium` were all absent because the form refused
@@ -15164,6 +15164,15 @@ substance, that they are what a cylinder *is*, and a tank card that can lose all
 with nothing in it. So the exemption is now written down as an exemption, with its reason, rather
 than falling out of a `required` the schema no longer has. Anything reasoning from "it is absent, so
 the form must require it" is reasoning from a rule that stopped holding.
+
+**And the trio is a pair now.** `helium` gained a `mixture.helium` member, because the substance
+argument turns out not to cover it: a cylinder recording neither volume nor oxygen says nothing at
+all, while one recording no helium is a cylinder of air. It is the one of the three a diver is
+certain of without measuring, so a logbook that never sees a trimix fill was asking a question whose
+answer is always zero. `volume` and `oxygen` keep the exemption on the original ground. Whoever
+reaches this paragraph looking for the exempt set should take it from
+`NON_HIDEABLE_MIXTURE_SCHEMA_KEYS` on the web side, which is the list the guard actually reads —
+this section has now been the stale copy of it once.
 
 **The `mixture.` prefix, not react-hook-form's `mixtures.${index}.po2_limit`.** A key names a field
 of *every* cylinder, not of one; hiding `mixture.role` hides that input on every tank card. Note the
@@ -15259,6 +15268,18 @@ twice, and so a hand re-run cannot trip the unique index. That callable is also 
 test can create an account "before the revision", and
 `tests/test_dive_form_presets.py::TestTheBackfill` reaches the module through Alembic's
 `ScriptDirectory` by revision id rather than by filename.
+
+**And it asserts against the revision's own copy, which it did not at first.** The test compared the
+backfilled rows to today's `DEFAULT_PRESETS` — asserting exactly the coupling the paragraph above
+says does not exist. It passed for as long as the two agreed, and failed the first time they did
+not: `mixture.helium` becoming hideable added a key to Basic and Recreational. The frozen copy was
+right and the assertion was wrong, so the assertion now reads `_DEFAULT_PRESETS` out of the revision
+module beside `_backfill_default_presets`. A test that compares a frozen thing to a living one is a
+drift alarm wearing the clothes of a correctness check, and the alarm here would fire on every
+future change to the defaults while telling you nothing about whether the backfill works.
+
+If new accounts on an old instance should get a *later* set of defaults, that is a new revision, not
+an edit to this one.
 
 Soft-deleted accounts are backfilled too. They are pending purge and the cascade takes these rows
 with them, so the cost is nothing — and `POST /auth/restore` can bring one back, at which point

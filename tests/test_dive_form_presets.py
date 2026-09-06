@@ -97,10 +97,10 @@ class TestTheVocabularyNamesRealFields:
     no cross-repo test.
 
     Subset here, equality there, deliberately: API-optional is wider than what is hideable.
-    `gas_number` has no input at all, and a cylinder's `volume`, `oxygen` and `helium` are
-    optional on both sides but always shown, exempt by name on the web side - so the API has
-    optional fields with no business being hideable, while every hideable field must be one
-    the API will accept omitted.
+    `gas_number` has no input at all, and a cylinder's `volume` and `oxygen` are optional on
+    both sides but always shown, exempt by name on the web side - so the API has optional
+    fields with no business being hideable, while every hideable field must be one the API
+    will accept omitted.
     """
 
     def test_every_value_names_a_field_of_the_create_request(self) -> None:
@@ -564,9 +564,13 @@ class TestTheBackfill:
     """
 
     @staticmethod
-    def _backfill() -> Any:
+    def _revision_module() -> Any:
         script = ScriptDirectory.from_config(alembic_config())
-        return script.get_revision(BACKFILL_REVISION).module._backfill_default_presets
+        return script.get_revision(BACKFILL_REVISION).module
+
+    @staticmethod
+    def _backfill() -> Any:
+        return TestTheBackfill._revision_module()._backfill_default_presets
 
     @pytest.mark.asyncio
     async def test_an_account_with_no_presets_gets_the_three_defaults(
@@ -583,7 +587,14 @@ class TestTheBackfill:
 
         assert written >= 3
         stored = await _stored_presets(async_db, diver.id)
-        assert stored == {preset.name: list(preset.hidden_fields) for preset in DEFAULT_PRESETS}
+        # Against the revision's *own* frozen copy, not `DEFAULT_PRESETS`. The module
+        # docstring is explicit that the live definition owes the copy nothing and that
+        # what the copy owes the accounts it seeded is the defaults as they stood on the
+        # day. Asserting today's constant asserted a coupling that is documented not to
+        # exist, and held only until the two first diverged - which `mixture.helium`
+        # becoming hideable is.
+        frozen = self._revision_module()._DEFAULT_PRESETS
+        assert stored == {name: list(fields) for name, fields in frozen}
 
     @pytest.mark.asyncio
     async def test_an_account_that_already_has_one_keeps_its_own_and_gains_the_rest(
