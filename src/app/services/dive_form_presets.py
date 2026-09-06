@@ -33,9 +33,10 @@ class DefaultPreset(NamedTuple):
 DEFAULT_PRESETS: tuple[DefaultPreset, ...] = (
     DefaultPreset(
         # Keeps the required three plus trip, dive site, maximum depth, bottom temperature
-        # and notes: a holiday diver's whole logbook entry. The five per-cylinder keys only
+        # and notes: a holiday diver's whole logbook entry. The six per-cylinder keys only
         # matter once Gas Mixtures is shown again, and they are hidden so that showing it
-        # gives a plain tank card rather than a technical one.
+        # gives a plain tank card rather than a technical one - helium among them, since a
+        # holiday diver's cylinder holds air or nitrox and the answer is always zero.
         name="Basic",
         hidden_fields=(
             DiveFormField.COURSE_UUID,
@@ -48,6 +49,7 @@ DEFAULT_PRESETS: tuple[DefaultPreset, ...] = (
             DiveFormField.WEIGHT,
             DiveFormField.SPECIES_UUIDS,
             DiveFormField.MIXTURE_PO2_LIMIT,
+            DiveFormField.MIXTURE_HELIUM,
             DiveFormField.MIXTURE_START_PRESSURE,
             DiveFormField.MIXTURE_END_PRESSURE,
             DiveFormField.MIXTURE_ROLE,
@@ -56,12 +58,14 @@ DEFAULT_PRESETS: tuple[DefaultPreset, ...] = (
     ),
     DefaultPreset(
         # Gas is on screen with its pressures - a recreational diver logs a cylinder and
-        # what it read - but not the planning fields a ppO2 limit and a gas role are, and
-        # not altitude, which almost nobody dives at.
+        # what it read - but not the planning fields a ppO2 limit and a gas role are, not
+        # helium, which is nitrox and air's constant zero, and not altitude, which almost
+        # nobody dives at.
         name="Recreational",
         hidden_fields=(
             DiveFormField.ALTITUDE,
             DiveFormField.MIXTURE_PO2_LIMIT,
+            DiveFormField.MIXTURE_HELIUM,
             DiveFormField.MIXTURE_ROLE,
             DiveFormField.MIXTURE_USAGE,
         ),

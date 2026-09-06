@@ -40,11 +40,17 @@ class DiveFormField(StrEnum):
     clients take their panel rows from.
 
     Fields that cannot be hidden are deliberately absent, and for two different reasons.
-    `dive_number`, `start_time` and `duration` the form requires. A cylinder's `volume`,
-    `oxygen` and `helium` it does not - they became blank-able when a cylinder was allowed
-    to record a mix with no vessel - but the web side shows all three always and exempts
-    each by name from the registry its equality check reads, on the ground that they are
-    what a cylinder *is*. Either way there is no member here to hide them by.
+    `dive_number`, `start_time` and `duration` the form requires. A cylinder's `volume`
+    and `oxygen` it does not - they became blank-able when a cylinder was allowed to record
+    a mix with no vessel - but the web side shows both always and exempts each by name from
+    the registry its equality check reads, on the ground that they are what a cylinder
+    *is*. Either way there is no member here to hide them by.
+
+    `helium` was in that second group and is not any more. It is the one of the three a
+    diver can be certain about without measuring: a cylinder of air or nitrox has none, and
+    a logbook that never records a trimix fill is asking a question whose answer is always
+    the same. Volume and oxygen stay exempt because a cylinder that records neither says
+    nothing at all; one that records no helium is a cylinder of air.
     """
 
     TRIP_UUID = "trip_uuid"
@@ -63,6 +69,7 @@ class DiveFormField(StrEnum):
     NOTES = "notes"
 
     MIXTURE_PO2_LIMIT = "mixture.po2_limit"
+    MIXTURE_HELIUM = "mixture.helium"
     MIXTURE_START_PRESSURE = "mixture.start_pressure"
     MIXTURE_END_PRESSURE = "mixture.end_pressure"
     MIXTURE_ROLE = "mixture.role"

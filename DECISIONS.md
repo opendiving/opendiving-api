@@ -15260,6 +15260,18 @@ test can create an account "before the revision", and
 `tests/test_dive_form_presets.py::TestTheBackfill` reaches the module through Alembic's
 `ScriptDirectory` by revision id rather than by filename.
 
+**And it asserts against the revision's own copy, which it did not at first.** The test compared the
+backfilled rows to today's `DEFAULT_PRESETS` — asserting exactly the coupling the paragraph above
+says does not exist. It passed for as long as the two agreed, and failed the first time they did
+not: `mixture.helium` becoming hideable added a key to Basic and Recreational. The frozen copy was
+right and the assertion was wrong, so the assertion now reads `_DEFAULT_PRESETS` out of the revision
+module beside `_backfill_default_presets`. A test that compares a frozen thing to a living one is a
+drift alarm wearing the clothes of a correctness check, and the alarm here would fire on every
+future change to the defaults while telling you nothing about whether the backfill works.
+
+If new accounts on an old instance should get a *later* set of defaults, that is a new revision, not
+an edit to this one.
+
 Soft-deleted accounts are backfilled too. They are pending purge and the cascade takes these rows
 with them, so the cost is nothing — and `POST /auth/restore` can bring one back, at which point
 being the one account on the instance with no presets would be a puzzle with no visible cause.
