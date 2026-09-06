@@ -22,9 +22,9 @@ class DiveFormField(StrEnum):
     `DiveMixtureCreate` - that is *not required* there, and the web half asserts its own
     registry equals its form schema's optional keys exactly, minus a short list of keys
     that side exempts by name. API-optional is deliberately wider than what is hideable
-    (`gas_number` has no input at all; a cylinder's `volume`, `oxygen` and `helium` are
-    optional on both sides and exempt by name on the web side), which is why this side is
-    a subset check and the other is an equality check.
+    (`gas_number` has no input at all; a cylinder's `volume` and `oxygen` are optional on
+    both sides and exempt by name on the web side), which is why this side is a subset
+    check and the other is an equality check.
 
     **These values are stored data, not labels.** A preset row and a user's current state
     name them, so renaming a member is a data migration over `dive_form_preset.hidden_fields`

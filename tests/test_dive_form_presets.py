@@ -97,10 +97,10 @@ class TestTheVocabularyNamesRealFields:
     no cross-repo test.
 
     Subset here, equality there, deliberately: API-optional is wider than what is hideable.
-    `gas_number` has no input at all, and a cylinder's `volume`, `oxygen` and `helium` are
-    optional on both sides but always shown, exempt by name on the web side - so the API has
-    optional fields with no business being hideable, while every hideable field must be one
-    the API will accept omitted.
+    `gas_number` has no input at all, and a cylinder's `volume` and `oxygen` are optional on
+    both sides but always shown, exempt by name on the web side - so the API has optional
+    fields with no business being hideable, while every hideable field must be one the API
+    will accept omitted.
     """
 
     def test_every_value_names_a_field_of_the_create_request(self) -> None:
