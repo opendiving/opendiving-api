@@ -56,6 +56,10 @@ def _mode(mode: RegistrationMode) -> Any:
     return patch.object(settings, "REGISTRATION_MODE", mode)
 
 
+def _operated(value: bool) -> Any:
+    return patch.object(settings, "PROJECT_OPERATED", value)
+
+
 def _request() -> Mock:
     request = Mock()
     request.client = Mock(host="203.0.113.7")
@@ -746,11 +750,25 @@ class TestTheConfigRoute:
             assert (await read_instance_config()).registration_mode is mode
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("operated", [False, True])
+    async def test_it_reports_whether_the_project_operates_the_instance(self, operated: bool) -> None:
+        """Patched like the mode, and for the same reason: `settings` read the developer's own
+        `src/.env` at import, so the live value proves nothing about the code. The declared
+        default is asserted in `test_config_safety.py`, off a `config.py` loaded with no
+        `.env` in reach."""
+        with _operated(operated):
+            assert (await read_instance_config()).project_operated is operated
+
+    @pytest.mark.asyncio
     async def test_it_carries_nothing_else(self) -> None:
-        """One field, and adding a second is a decision rather than a convenience: this
-        endpoint is anonymous, so everything on it is public."""
-        with _mode(RegistrationMode.INVITE):
-            assert (await read_instance_config()).model_dump() == {"registration_mode": RegistrationMode.INVITE}
+        """Two fields, and adding another is a decision rather than a convenience: this
+        endpoint is anonymous, so everything on it is public. Dumped in JSON mode because
+        this is the wire shape the web app is written against, name for name."""
+        with _mode(RegistrationMode.INVITE), _operated(False):
+            assert (await read_instance_config()).model_dump(mode="json") == {
+                "registration_mode": "invite",
+                "project_operated": False,
+            }
 
 
 @pytest.mark.skipif(not db_available(), reason="No database connection available")

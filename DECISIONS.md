@@ -15408,3 +15408,49 @@ A preset travels as `{name, hidden_fields}` and nothing else. Its `uuid`, `user_
 `created_at` identify a row in *this* instance and mean nothing in a document that is going to be
 read somewhere else. The empty set is written as `[]` rather than omitted: "Technical hides nothing"
 is a preset, and a reader that saw no key could not tell it from one that failed to export.
+
+## `PROJECT_OPERATED` is the first setting that knows who runs the instance, and it selects copy only
+
+The project's own hosted instance wants its request-an-invite form to read as a waitlist - "Get
+early access", "join the waitlist", "we'll notify you when your spot is ready, no spam". Every one
+of those sentences is false on a self-hosted instance, where the same form has to stay true of a
+household install whose operator decides by hand who gets in. So `RegistrationSettings` grew a
+boolean, `PROJECT_OPERATED`, default `false`, and `GET /config` grew its second field,
+`project_operated`, beside `registration_mode`. The web app selects the form's copy on it, and
+nothing else reads it. Anonymous, and still not a leak: the landing page discloses the value anyway
+by which copy it shows, exactly as it discloses the mode by which form.
+
+It is named for the fact it asserts rather than for a nickname like "flagship": an operator who sets
+it is claiming to *be* the project, and the default is what every install gets without touching
+anything. Nobody but the project has a reason to set it, because the generic copy is already right
+for a self-hoster - which is also why it is documented in this repo's `src/.env.example` only and
+stays out of the install bundle's `example.env` and operator docs on purpose. A setting a
+self-hoster has no reason to type is noise in the page they read to set up.
+
+**Rejected: operator-configurable free text.** The copy is not one string. The heading, the blurb,
+the button label and the success state move together, and the success state is where the two
+versions diverge in substance rather than tone: the generic one says whoever runs this instance
+decides, the waitlist one says we'll notify you, and a form whose heading promised the second while
+its success state delivered the first would contradict itself. Prose in an environment variable also
+escapes the review and the render tests every claim on the landing page goes through, and multi-line
+markdown from an operator variable is a rendering and sanitisation surface bought for one heading
+and one paragraph - all of it for a knob that, by the paragraph above, exactly one operator would
+ever turn.
+
+**Rejected: a web-side environment variable, or a hostname check.** `GET /config` exists for exactly
+this shape of fact - one the web has to know before its first paint and has no other channel for -
+and its schema said from the start that it expected a second field before a second route. The web
+already waits for that response before painting the hero, so the second field costs no flicker and
+no extra request. And this API is going to want the same fact for itself: its invitation email says
+"X invited you to their log book", which reads wrongly on a waitlist instance, and a web variable
+can never reach that template. The email does not branch yet, and when it does the branch hangs off
+this same field. Hostname sniffing was the other candidate, and it is magic that breaks the day the
+host moves.
+
+**What it is not.** This is the first piece of code that knows the project runs one particular copy
+of the app; everything else in it is written to be true everywhere. That is a line worth holding, so
+its uses stay confined to copy selection, and every one routes through this one field rather than
+through a derived flag or a second setting - `git grep PROJECT_OPERATED` and
+`git grep project_operated` list every branch it has created, here and in the web app. An operator
+who sets it on an instance that is not the project's gets a landing page that claims to be the
+project's, and nothing else changes: it gates no feature, unlocks no route and reaches no row.

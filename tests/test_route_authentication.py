@@ -92,9 +92,10 @@ ANONYMOUS_BY_DESIGN: dict[tuple[str, str], str] = {
     ),
     # 5. The caller is a browser deciding what to render before anyone has signed in.
     ("GET", "/api/v1/config"): (
-        "Tells the landing page whether registration is open or by invitation, which it has to know "
-        "before its first paint - and before any session exists. Discloses one bit the page discloses "
-        "anyway by which form it then shows."
+        "Tells the landing page whether registration is open or by invitation, and whether the project "
+        "itself operates the instance, which it has to know before its first paint - and before any "
+        "session exists. Discloses two bits the page discloses anyway: by which form it then shows, "
+        "and by which copy that form carries."
     ),
 }
 
