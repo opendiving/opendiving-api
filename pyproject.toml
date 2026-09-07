@@ -32,6 +32,13 @@ dependencies = [
     "gunicorn>=23.0.0",
     "defusedxml>=0.7.1",
     "fitdecode>=0.11.0",
+    # The DiveJSON converter, and the only reason logbook import accepts anything but
+    # DiveJSON. Runtime rather than dev: `services/logbook_import/reader.py` sniffs and
+    # converts on the request path, so an import that lives in the `dev` extra would fail
+    # at container start with every test green (`DECISIONS.md`, *The importer is a reader,
+    # not a validator*). It also carries the JSON Schema and the beyond-schema rules the
+    # tests used to reach through a vendored copy.
+    "divejson>=0.3.0",
     "webauthn>=3.0.0",
     # Decodes and re-encodes uploaded avatars (`services/user_avatars.py`) - the only
     # image processing in the app. 12.0.0 is the first release with official Python 3.14
