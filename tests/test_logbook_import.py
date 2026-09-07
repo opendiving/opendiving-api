@@ -25,6 +25,7 @@ import json
 import uuid as uuid_pkg
 import zipfile
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -70,6 +71,7 @@ from src.app.services.logbook_import import (
     plan_import,
     write_import,
 )
+from src.app.services.logbook_import import reader as import_reader
 from src.app.services.logbook_import.planner import _DIVE_BOUNDS, _MIXTURE_BOUNDS
 from src.app.services.logbook_import.reader import DuplicateMemberError, MalformedImportError
 from tests.conftest import db_available
@@ -195,6 +197,72 @@ def _seed_logbook(db: Session) -> Any:
 async def seeded(db: Session, async_db: AsyncSession) -> Any:
     user = _seed_logbook(db)
     return user, await _export(async_db, user.id)
+
+
+# ------------------------------------------------------- converted uploads
+
+UDDF_CORPUS = Path(__file__).parent / "fixtures" / "uddf" / "demo-account.uddf"
+
+
+async def _convert_and_plan(
+    db: AsyncSession, user_id: int, data: bytes, moment: datetime, monkeypatch: pytest.MonkeyPatch
+) -> tuple[dict, Any]:
+    """One conversion, stamped with a chosen `exported_at`, plus the plan it produces."""
+    monkeypatch.setattr(import_reader, "_conversion_moment", lambda: moment)
+    with await load_import(_upload(data, "demo-account.uddf")) as loaded:
+        assert loaded.conversion is not None
+        return loaded.conversion.document, await plan_import(db, user_id=user_id, loaded=loaded)
+
+
+class TestConvertedUploads:
+    """A logbook this app did not write, through the same four stages.
+
+    The corpus is `tests/fixtures/uddf/demo-account.uddf` - a real download of a whole demo
+    account out of this app's own UDDF writer - because it is the only captured
+    dive-computer-shaped document this repository has and it exercises the widest document
+    the converter will meet here. The library's own fixtures cover the readers themselves.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_uddf_logbook_imports(self, db: Session, async_db: AsyncSession) -> None:
+        user = create_user(db)
+
+        plan = await _apply(async_db, user.id, UDDF_CORPUS.read_bytes(), "demo-account.uddf")
+
+        created = _counts(plan)["dives"][0]
+        assert created > 0
+        stored = (await async_db.execute(select(Dive).where(Dive.user_id == user.id))).scalars().all()
+        assert len(stored) == created
+
+    @pytest.mark.asyncio
+    async def test_converting_twice_plans_identically(
+        self, db: Session, async_db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Why apply can re-convert instead of spooling the preview's result.
+
+        `exported_at` is the one value in a converted document that is not a function of the
+        source, and nothing downstream reads it - which is what makes the token over the
+        *uploaded* bytes an honest receipt. Everything else is frozen namespaces, `uuid5`
+        identities and positional fallback in document order, so a conversion an hour later
+        is the same document and the same plan.
+        """
+        user = create_user(db)
+        source = UDDF_CORPUS.read_bytes()
+
+        morning, plan_a = await _convert_and_plan(
+            async_db, user.id, source, datetime(2026, 4, 17, 9, 0, tzinfo=UTC), monkeypatch
+        )
+        evening, plan_b = await _convert_and_plan(
+            async_db, user.id, source, datetime(2026, 9, 7, 18, 30, tzinfo=UTC), monkeypatch
+        )
+
+        assert morning["exported_at"] != evening["exported_at"], "the two runs must differ somewhere"
+        assert divejson.compared(morning) == divejson.compared(evening)
+        assert _counts(plan_a) == _counts(plan_b)
+        assert [(note.code, note.collection, note.uuid, note.message) for note in plan_a.notes] == [
+            (note.code, note.collection, note.uuid, note.message) for note in plan_b.notes
+        ]
+        assert plan_a.file_report() == plan_b.file_report()
 
 
 # ------------------------------------------------------------------ the round trip

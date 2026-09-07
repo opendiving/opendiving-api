@@ -39,7 +39,11 @@ WORKDIR /code
 CMD ["pytest", "tests/", "-v"]
 
 # --------- Final Stage ---------
-FROM python:3.14-slim-bookworm
+# Named so CI can build exactly this stage and import the app out of it - see the
+# `runtime-imports` job in `.github/workflows/tests.yml`. The test stage above carries the
+# `dev` extra, so a runtime import of something that only lives there is green everywhere
+# except in the image that ships.
+FROM python:3.14-slim-bookworm AS runtime
 
 # Create a non-root user for security
 RUN groupadd --gid 1000 app \
