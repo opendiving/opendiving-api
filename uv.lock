@@ -438,6 +438,19 @@ wheels = [
 ]
 
 [[package]]
+name = "divejson"
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "fitdecode" },
+    { name = "jsonschema" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c4/f8/6fbb898f8a6eb454ede64b75cdbef968a19464e3bc6bc3fc3649e717a7dd/divejson-0.3.0.tar.gz", hash = "sha256:f185d1c45f4692bba8deb1719a95c2dc1a5ede583a4d9e9e87f461d0177374dc", size = 309702, upload-time = "2026-09-07T16:38:03.982Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f8/0d/0b0e9365138139efcfc12aaeeb5361792c32eff1f4dfaec8f7098f143f5a/divejson-0.3.0-py3-none-any.whl", hash = "sha256:0a169522c8443b80a3bf08186511259b362926dfdddcd8cb0d99d1723d252dbc", size = 114917, upload-time = "2026-09-07T16:38:02.349Z" },
+]
+
+[[package]]
 name = "dnspython"
 version = "2.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -957,6 +970,7 @@ dependencies = [
     { name = "bcrypt" },
     { name = "crudadmin" },
     { name = "defusedxml" },
+    { name = "divejson" },
     { name = "fastapi" },
     { name = "fastcrud" },
     { name = "fitdecode" },
@@ -985,7 +999,6 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "faker" },
-    { name = "jsonschema" },
     { name = "mdformat" },
     { name = "mdformat-gfm" },
     { name = "mypy" },
@@ -1011,6 +1024,7 @@ requires-dist = [
     { name = "bcrypt", specifier = ">=4.1.1" },
     { name = "crudadmin", specifier = ">=0.4.2" },
     { name = "defusedxml", specifier = ">=0.7.1" },
+    { name = "divejson", specifier = ">=0.3.0" },
     { name = "faker", marker = "extra == 'dev'", specifier = ">=26.0.0" },
     { name = "fastapi", specifier = ">=0.109.1" },
     { name = "fastcrud", specifier = ">=0.15.5" },
@@ -1020,7 +1034,6 @@ requires-dist = [
     { name = "gunicorn", specifier = ">=23.0.0" },
     { name = "httptools", specifier = ">=0.6.1" },
     { name = "httpx", specifier = ">=0.26.0" },
-    { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.25.0" },
     { name = "mdformat", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "mdformat-gfm", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },

@@ -158,3 +158,31 @@ jobs:
         if: always() && steps.tests.outcome != 'skipped'
         run: |
           { echo "## Test Coverage"; echo; uv run coverage report --format=markdown; } >> "$GITHUB_STEP_SUMMARY"
+
+  # The suite runs in the `test` stage, which carries the `dev` extra. The image that ships
+  # carries only the main dependency set, so an endpoint importing a dev-only package is
+  # green in every other job here and dies at *container start* for anyone who installs it.
+  # `DECISIONS.md` records that hazard; this is the check that would have caught it, and it
+  # exists because logbook import now imports `divejson` on the request path.
+  #
+  # `python -c` rather than a health check against a running container: the route module is
+  # what has the import graph, and importing it needs neither Postgres nor Redis.
+  runtime-imports:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Build the image that ships
+        run: docker build --target runtime -t opendiving-api:runtime-check .
+
+      - name: The request path imports out of the runtime image
+        run: |
+          docker run --rm \
+            -e ENVIRONMENT=local \
+            -e SECRET_KEY=test-secret-key-for-testing-only \
+            opendiving-api:runtime-check \
+            python -c "import app.api.v1.logbook_import, app.api.v1.dives, app.main"
+

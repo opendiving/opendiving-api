@@ -15,13 +15,16 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     token proving where they came from. That is still the whole reason `/dive/parse`
     doesn't return a profile - see `services/dive_profiles.py`.
 
-    **The exception is logbook import**, which restores the caller's own DiveJSON backup
-    and so does write samples the client supplied. It is the one sanctioned path, on the
-    terms `DECISIONS.md` records under *"Importing a logbook is the one client-supplied
-    profile"*: the caller's own logbook, a two-phase preview/apply, and every channel
-    re-validated and re-normalized before it is stored. The provenance columns below say
-    which path a row came from - `parser_key` is `divejson_import` on a row that arrived
-    that way.
+    **The exception is logbook import**, which does write samples the client supplied. It
+    is the one sanctioned path, on the terms `DECISIONS.md` records under *"Importing a
+    logbook is the one client-supplied profile"*: the samples land in the importer's own
+    logbook and nowhere else, through a two-phase preview/apply, with every channel
+    re-validated and re-normalized before it is stored. Deliberately not "the caller's own
+    backup" - that route converts a UDDF file or a `.ssrf` on the way in, so the document
+    may have been written by another application entirely, and the argument is about whose
+    logbook it lands in rather than about who wrote the file. The provenance columns below
+    say which path a row came from - `parser_key` is `divejson_import` on a row that
+    arrived that way, whatever the upload was before it was converted.
 
     One row per dive, with each channel's series in a JSONB `data` payload rather than a
     row per sample: several hundred (Suunto) to several thousand (Ocean, 1 Hz) readings

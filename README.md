@@ -62,11 +62,14 @@ else; what is here is the source, and the notes for working on it.
 - **[DiveJSON](https://divejson.org)** — the open dive-log interchange format this project
   maintains, and this is its reference implementation: a lossless structured copy of the whole
   logbook, where UDDF measurably loses trips, gear, weights and UTC offsets.
-- **Logbook import** — put a DiveJSON document or a full-export archive back into an account, in two
-  phases: a preview that reports exactly what would be created, linked to something you already
-  have, restored from your deleted records or skipped, and then an apply that writes the lot in one
-  transaction. Restore a backup, migrate between instances, or bring a whole logbook across from
-  anything that can produce DiveJSON.
+- **Logbook import** — put a whole logbook into an account, in two phases: a preview that reports
+  exactly what would be created, linked to something you already have, restored from your deleted
+  records or skipped, and then an apply that writes the lot in one transaction. A DiveJSON document
+  or a full-export archive goes in as it is; a UDDF file, a Subsurface `.ssrf`, a FIT file, a Suunto
+  app export, or a `.zip` whose files are all one of those is converted on the way in by the
+  [`divejson`](https://pypi.org/project/divejson/) package, and the report says what the conversion
+  could not carry. Restore a backup, migrate between instances, or bring a logbook across from
+  whatever you were keeping it in.
 - **Passwordless auth** — email sign-in (over SMTP, so any relay or provider works), Google Sign-In,
   and passkeys, with automatic account linking, short-lived access tokens, and httpOnly refresh
   cookies. The sign-in email carries a magic link *and* a six-digit code, so reading your mail on a
@@ -77,9 +80,9 @@ else; what is here is the source, and the notes for working on it.
 
 ## Planned
 
-- **More parsers** — Subsurface XML and UDDF (which also admits Apple Watch dives via Oceanic+'s
-  UDDF export), then Shearwater Cloud exports; a pluggable importer layer so every supported format
-  is a migration path in.
+- **More formats in** — a reader is a contribution to the `divejson` package rather than a change
+  here, and this app reads whatever the release it pins registers. Suunto DM5 XML is next;
+  Shearwater Cloud exports after it.
 - **Public share links** — read-only dive/trip pages.
 - **Statistics endpoints** — records, per-year aggregates, site maps, a life list.
 
@@ -184,21 +187,21 @@ read the per-sample profile back — alongside **trips**, **dive sites**, the sh
 catalog a dive can reference, and a **geocoding** helper for naming a site pinned on a map; **gear**
 as items, sets, service schedules and service records; **certifications** with their card images and
 the **courses** that issued them; **export** in DiveJSON, UDDF, CSV or full-archive form and
-**import** back from either of the first and the last; **invitations**, which exist only where the
-operator has closed registration (`REGISTRATION_MODE`, documented with the rest of the settings in
-`src/.env.example`) — a member sends and revokes their own, and the routes answer 404 on an open
-instance; and **admin**, the operator's own — the queue of people who have asked to be let in, and
-inviting or removing them in a batch — which is the one family gated on `is_superuser` rather than
-merely on having a token. All of those want a bearer token. The ones that don't are **contact**, the
-auth routes themselves, the two health checks — `/health` says the process is up, `/health/ready`
-says Postgres and Redis answered, and 503s when they didn't — `POST /invite-requests`, which is how
-somebody with no account asks a closed instance for an invitation, `GET /config`, which tells the
-web app whether registration is open - and whether the project itself operates the instance - before
-anyone has signed in, and `GET /species/{uuid}/photo`, which serves a public Commons image to an
-`<img>` tag that has no way to send a token. `tests/test_route_authentication.py` is the guard that
-keeps the *anonymous* half of that list honest — it compares the app's real route table against its
-own allowlist and holds the reason for each — but nothing checks this paragraph, so a new route
-family belongs here by hand.
+**import** back from either of the first and the last, or from any format the converter reads;
+**invitations**, which exist only where the operator has closed registration (`REGISTRATION_MODE`,
+documented with the rest of the settings in `src/.env.example`) — a member sends and revokes their
+own, and the routes answer 404 on an open instance; and **admin**, the operator's own — the queue of
+people who have asked to be let in, and inviting or removing them in a batch — which is the one
+family gated on `is_superuser` rather than merely on having a token. All of those want a bearer
+token. The ones that don't are **contact**, the auth routes themselves, the two health checks —
+`/health` says the process is up, `/health/ready` says Postgres and Redis answered, and 503s when
+they didn't — `POST /invite-requests`, which is how somebody with no account asks a closed instance
+for an invitation, `GET /config`, which tells the web app whether registration is open - and whether
+the project itself operates the instance - before anyone has signed in, and
+`GET /species/{uuid}/photo`, which serves a public Commons image to an `<img>` tag that has no way
+to send a token. `tests/test_route_authentication.py` is the guard that keeps the *anonymous* half
+of that list honest — it compares the app's real route table against its own allowlist and holds the
+reason for each — but nothing checks this paragraph, so a new route family belongs here by hand.
 
 A typical import flow:
 
@@ -224,11 +227,13 @@ And a whole logbook, in and out:
 curl -OJ http://localhost:8000/api/v1/export/divejson -H "Authorization: Bearer $TOKEN"
 
 # Back in, in two phases. The preview writes nothing and reports what it would do;
-# the token it returns says which bytes that report was about.
-curl -X POST http://localhost:8000/api/v1/import/divejson/preview \
+# the token it returns says which bytes that report was about. The file can be any
+# format the converter reads - `dives.uddf`, `logbook.ssrf`, `garmin-export.zip` -
+# and `conversion` in the report then says what the conversion could not carry.
+curl -X POST http://localhost:8000/api/v1/import/logbook/preview \
   -H "Authorization: Bearer $TOKEN" -F "file=@logbook.divejson"
 
-curl -X POST http://localhost:8000/api/v1/import/divejson \
+curl -X POST http://localhost:8000/api/v1/import/logbook \
   -H "Authorization: Bearer $TOKEN" -F "file=@logbook.divejson" -F "token=$PREVIEW_TOKEN"
 ```
 

@@ -153,7 +153,7 @@ class DiveFileTokenData(BaseModel):
 class LogbookImportTokenData(BaseModel):
     """Decoded payload of a logbook-import token (see `create_logbook_import_token`/
     `verify_logbook_import_token` in `core.security`), minted by
-    `POST /import/divejson/preview` and presented again by `POST /import/divejson`.
+    `POST /import/logbook/preview` and presented again by `POST /import/logbook`.
 
     The same shape and the same modest claim as `DiveFileTokenData` above, minus the
     parser: this server read *these exact bytes* for *this user* and showed them a report
