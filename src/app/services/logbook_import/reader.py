@@ -427,6 +427,16 @@ def _claims_to_be_json(head: bytes) -> bool:
     return head.lstrip()[:1] == b"{"
 
 
+def _conversion_moment() -> datetime:
+    """The `exported_at` a conversion stamps on its output.
+
+    Its own function so that a test can say "convert these bytes as if it were another
+    hour" and hold the rest of the document to being identical - which is the whole claim
+    behind re-converting on apply instead of spooling the preview's result.
+    """
+    return datetime.now(UTC)
+
+
 def _convert(buffer: IO[bytes], *, source_format: str | None) -> Conversion:
     """Hand the spool to the converter, rewound, with the caps on the branch that reads them.
 
@@ -449,7 +459,7 @@ def _convert(buffer: IO[bytes], *, source_format: str | None) -> Conversion:
     planner never looks.
     """
     buffer.seek(0)
-    exported_at = datetime.now(UTC)
+    exported_at = _conversion_moment()
     # `convert` is annotated `BinaryIO`, which differs from the `IO[bytes]` this module
     # spools into only in what `__enter__` returns - and `convert` never enters it. It reads
     # and seeks, both of which a `SpooledTemporaryFile` does.
