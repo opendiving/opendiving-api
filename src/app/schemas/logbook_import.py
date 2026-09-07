@@ -1,6 +1,11 @@
 """The shapes logbook import reads and reports - a DiveJSON document seen from the
 *reader* side, and the report that says what importing one would do.
 
+A converted upload - a UDDF file, a `.ssrf`, a FIT, a Suunto app export, a zip of any one
+of them - arrives here as a DiveJSON document like any other, because the converter's
+output is one. Nothing below the reader learns an upload was converted; the only trace is
+`ImportReport.conversion`, which is what the conversion could not carry.
+
 **This is not `schemas/export.py` inverted, and the differences are the whole point.**
 That module is the writer's declaration: it emits exactly what DiveJSON 1.0 defines and a
 test holds it to the schema. A reader has different obligations, all of them in the
@@ -18,12 +23,13 @@ specification's own words:
   that meets one SHOULD carry on, so every optional member is `T | None` and every
   collection tolerates a null in place of an empty array.
 
-What this deliberately does **not** do is check conformance. `divejson validate` and its
-port at `tests/helpers/divejson.py` are the writer-facing statement of spec §3, and this
-importer is not a second copy of it: it skips and reports a dangling reference where the
-validator rejects the document, because a reader's job is to salvage a logbook rather than
-to grade one. `DECISIONS.md`, *"The importer is a reader, not a validator"*, has the
-reasoning and the reason `jsonschema` stayed a test-only dependency.
+What this deliberately does **not** do is check conformance. `divejson.validate_document`
+is the writer-facing statement of spec §3, and this importer is not a second copy of it: it
+skips and reports a dangling reference where the validator rejects the document, because a
+reader's job is to salvage a logbook rather than to grade one. That the package is now on
+the request path changes nothing here - a converter validates what it writes, which is a
+writer's obligation, and the importer still grades nothing it is handed. `DECISIONS.md`,
+*"The importer is a reader, not a validator"*, has the reasoning.
 
 String bounds *are* enforced here, and they are the specification's own (§6): a value
 longer than the format allows is a malformed document rather than something to truncate,
@@ -477,12 +483,86 @@ class ImportFileReport(BaseModel):
     skipped: Annotated[int, Field(description="Files whose bytes are here but could not be stored")]
 
 
+class ConversionConverter(BaseModel):
+    """What converted the upload, so a report can be attributed to a version of it."""
+
+    name: Annotated[str, Field(examples=["divejson"])]
+    version: Annotated[str, Field(examples=["0.3.0"])]
+
+
+class ConversionNoteGroup(BaseModel):
+    """One thing the conversion could not carry, and everywhere it came up.
+
+    **`kind` is an opaque string and must stay one.** The converter's kind set grew from
+    three to four while this feature was being built, and the pin that decides which set
+    this build sees moves without anybody here touching a line - so a kind this app has
+    never seen can arrive between one deploy and the next. As a `StrEnum` or a `Literal`
+    that would raise while *serialising the response*, turning a readable logbook into a
+    500; as a string it renders as itself and a client styles what it knows. This is the
+    api half of a tolerance the web card relies on, and the deliberate opposite of
+    `ImportNote.code`, which is this app's own closed vocabulary and can be an enum
+    precisely because nothing outside this repository adds to it.
+    """
+
+    kind: Annotated[
+        str,
+        Field(
+            description="What sort of finding this is - `absent`, `inferred`, `resolved`, `dropped` at the time of "
+            "writing. Treat an unfamiliar value as a plain finding rather than an error.",
+            examples=["absent"],
+        ),
+    ]
+    message: Annotated[str, Field(description="One sentence, ready to render")]
+    count: Annotated[int, Field(description="How many places raised this, which may be more than `wheres` lists")]
+    wheres: Annotated[
+        list[str],
+        Field(
+            default_factory=list,
+            description="Up to three paths into the source document, e.g. `dive/0/tankdata/1`",
+            examples=[["dive/0", "dive/3"]],
+        ),
+    ]
+
+
+class ConversionReport(BaseModel):
+    """What converting a non-DiveJSON upload could not carry. `null` for a native document.
+
+    Grouped here rather than in the browser, and rather than folded into `notes`: one source
+    habit makes one finding per record - eight dives with no UTC offset are eight findings -
+    and the converter's list is unbounded, where `notes` has the planner's 500-note cap. The
+    grouping is where a cap can live at all, which is also why these are not a twelfth
+    `ImportNoteCode`: a conversion finding has a source path rather than a uuid and a
+    collection, and none of the eleven codes describes it.
+    """
+
+    format: Annotated[
+        str, Field(description="The format the upload was read as, as the converter names it", examples=["uddf"])
+    ]
+    converter: ConversionConverter
+    groups: Annotated[
+        list[ConversionNoteGroup],
+        Field(default_factory=list, description="Findings grouped by kind and message, in first-seen order"),
+    ]
+    groups_truncated: Annotated[
+        int,
+        Field(
+            default=0,
+            description="Groups beyond the cap that are not in `groups`. Non-zero means the list above is a prefix.",
+        ),
+    ]
+
+
 class ImportReport(BaseModel):
     """The body of both responses: the same shape whether it is a plan or a result.
 
     Deliberately one model rather than two: a preview a diver approved and the result they
     got back are only worth comparing if they are the same shape, and the two are produced
     by the same planner run against the same document.
+
+    `conversion` is on the report rather than on the preview alone for the same reason: the
+    result panel is what stays on screen after an import, and a diver who was told at
+    preview that their computer's gas mixes could not be carried should still be told it
+    afterwards.
     """
 
     collections: Annotated[
@@ -502,25 +582,44 @@ class ImportReport(BaseModel):
             "not the whole story - the counts are still complete.",
         ),
     ]
+    conversion: Annotated[
+        ConversionReport | None,
+        Field(
+            default=None,
+            description="Present when the upload was converted from another format; `null` when it was DiveJSON.",
+        ),
+    ]
 
 
 class ImportPreview(ImportReport):
-    """What `POST /import/divejson/preview` returns. Nothing has been written."""
+    """What `POST /import/logbook/preview` returns. Nothing has been written.
 
-    format: Annotated[str, Field(description="The document's own `format` marker", examples=["divejson"])]
-    version: Annotated[str, Field(description="The document's declared version", examples=["1.0"])]
+    `format`, `version` and `generator` are the *imported document's*, which for a converted
+    upload is the converter's output rather than the file a diver picked - so they read
+    `divejson`, `1.0` and `divejson convert` there. What the diver's file was is
+    `conversion.format`.
+    """
+
+    format: Annotated[str, Field(description="The imported document's own `format` marker", examples=["divejson"])]
+    version: Annotated[str, Field(description="The imported document's declared version", examples=["1.0"])]
     generator: Annotated[
-        ImportGenerator | None, Field(default=None, description="What produced the document, if it said")
+        ImportGenerator | None, Field(default=None, description="What produced the imported document, if it said")
     ]
-    archive: Annotated[bool, Field(description="Whether this upload was a container carrying the stored files")]
+    archive: Annotated[
+        bool,
+        Field(
+            description="Whether this upload was a container carrying the stored files. A zip of dive-computer "
+            "files is not one: it converts to a logbook that references no stored files at all."
+        ),
+    ]
     token: Annotated[
         str,
         Field(
-            description="Hand this back to `POST /import/divejson` with the same file. It attests which bytes this "
-            "report describes and nothing else - the import re-plans the document from scratch."
+            description="Hand this back to `POST /import/logbook` with the same file. It attests which bytes this "
+            "report describes and nothing else - the import re-reads, re-converts and re-plans from scratch."
         ),
     ]
 
 
 class ImportResult(ImportReport):
-    """What `POST /import/divejson` returns. Everything in it has been committed."""
+    """What `POST /import/logbook` returns. Everything in it has been committed."""

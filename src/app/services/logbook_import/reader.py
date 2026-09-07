@@ -1,37 +1,62 @@
 """Getting an upload as far as a parsed DiveJSON document, and no further.
 
-Two shapes arrive here and one comes out: a bare `.divejson` document, or the archive
+Four shapes arrive here and one comes out: a bare `.divejson` document; the archive
 `GET /export/archive` produces, whose `logbook.divejson` member is the same document with
-the stored binaries beside it. Everything downstream works on `ImportDocument` plus a way
-to fetch those binaries, so the container is this module's problem alone.
+the stored binaries beside it; a logbook in any format the `divejson` converter reads; and
+a zip whose members are all one of those formats, which is one logbook. Everything
+downstream works on `ImportDocument` plus a way to fetch the archive's binaries, so both
+the container and the conversion are this module's problem alone.
+
+**The converter is consulted once, on a bounded head, before the JSON parse.** Not at the
+refusal sites further down: an `.ssrf` or a UDDF upload is valid UTF-8 that is not JSON and
+would die in `parse_document` before any of them was reached, told that a file which never
+claimed to be DiveJSON is a broken DiveJSON document. So `load_import` reads
+`divejson.SNIFF_BYTES` off the spool and asks `divejson.sniff` - which takes *bytes* and
+reads nothing itself - right after the zip decision. A named format is converted; `None`
+means nothing claimed the bytes, and the DiveJSON path below is untouched for anything that
+parses as JSON.
+
+**A zip is this module's to recognise and the library's to read.** The `PK\\x03\\x04` sniff
+and `_open_archive`'s declared-size guard stay here, because they are what keeps a zip bomb
+off the disk; a container carrying `logbook.divejson` is the app's own export, and one
+without goes to the converter whole, under this module's own member caps.
 
 **Spooled, never buffered.** The upload is read in bounded chunks into a
 `SpooledTemporaryFile` - the export path's own pattern, in the other direction - because
 half a gigabyte resident per in-flight request is what `SPOOL_THRESHOLD` exists to avoid.
 The recorded limit of that: parsing the JSON itself still materializes the whole document,
-so the *document* cap rather than the archive one is the real memory ceiling, and a
-logbook large enough to matter wants a streaming parser or an arq job. `DECISIONS.md`,
-*"Logbook import spools its upload and still parses the document whole"*, carries the
-trade.
+and a named format hands the converter `stream.read()`, so the *document* cap rather than
+the archive one is the real memory ceiling either way, and a logbook large enough to matter
+wants a streaming parser or an arq job. `DECISIONS.md`, *"Logbook import spools its upload
+and still parses the document whole"*, carries the trade.
 
 The caps are new constants rather than a reuse of any existing upload limit: the largest
 one this app has is the 10 MB card scan, and a logbook with a thousand sampled dives is
 two orders of magnitude past it.
 """
 
+import codecs
 import hashlib
 import json
 import logging
 import tempfile
 import zipfile
 from dataclasses import dataclass
-from typing import IO, Any
+from datetime import UTC, datetime
+from typing import IO, Any, BinaryIO, cast
 
+import divejson
+from divejson import Conversion, ConverterError, NonConformingOutputError, SourceTooLargeError, UnsupportedSourceError
 from fastapi import UploadFile
 from pydantic import ValidationError
 
 from ...schemas.export import DIVEJSON_FORMAT, DIVEJSON_VERSION
-from ...schemas.logbook_import import ImportDocument
+from ...schemas.logbook_import import (
+    ConversionConverter,
+    ConversionNoteGroup,
+    ConversionReport,
+    ImportDocument,
+)
 from ..export.archive import DIVEJSON_NAME, SPOOL_THRESHOLD
 
 logger = logging.getLogger(__name__)
@@ -62,12 +87,35 @@ MAX_ARCHIVE_SIZE = 500 * 1024 * 1024  # 500 MB
 # whose documents deflate well while refusing anything shaped like a bomb.
 MAX_ARCHIVE_EXTRACTED_SIZE = 2 * MAX_ARCHIVE_SIZE
 
+# The most files a zip of one source format may hold. A watch writes one FIT per dive and
+# a vendor's account export is a zip of them, so this is a dive count rather than a file
+# count: a career of five thousand dives goes in one upload, and anything past it is asked
+# to come in parts. The library refuses off the central directory, before it inflates
+# anything, and it reads a `SNIFF_BYTES` head per member to decide the format - so the cap
+# also bounds that walk.
+#
+# What one such member may declare is `MAX_DOCUMENT_SIZE` rather than a fourth number: a
+# member *is* a logbook document in some other format, materialized whole by whichever
+# reader claims it, exactly as a bare document is.
+MAX_ARCHIVE_MEMBERS = 5000
+
 # Zip's local file header. Sniffed rather than trusting the filename or the client's
 # content type, on the same principle as `certification_files.sniff_content_type`: the
 # bytes say what they are.
 _ZIP_MAGIC = b"PK\x03\x04"
 
 _READ_CHUNK_SIZE = 1024 * 1024
+
+# How each registered format is named to a diver. An id the library grows past this table -
+# and it will, since the pin moves without a change here - falls back to the id itself, so
+# the sentence stays true and only gets terser. The same tolerance the conversion report's
+# `kind` has, for the same reason.
+_FORMAT_LABELS = {
+    "uddf": "UDDF (.uddf)",
+    "ssrf": "Subsurface (.ssrf)",
+    "fit": "FIT (.fit)",
+    "suunto_json": "Suunto app JSON (.json)",
+}
 
 # The major version this reader implements. A reader accepts any document whose *major*
 # version it implements and ignores what it does not recognize (spec §§4, 5.6, 7), so a
@@ -76,17 +124,19 @@ _SUPPORTED_MAJOR = DIVEJSON_VERSION.split(".", 1)[0]
 
 
 class UnsupportedImportError(Exception):
-    """The upload is not a DiveJSON document this reader implements - a 415.
+    """No reader claims these bytes - a 415.
 
     Deliberately the same distinction `POST /dive/parse` draws: 415 is "this is not a file
     I can read", 422 is "this is one, and it is broken". The two land in different places
     in a client, and collapsing them would tell a diver their export is corrupt when they
-    have handed over a photo.
+    have handed over a photo. Since the converter joined this path, "a file I can read" is
+    a DiveJSON document, the export archive, or any format `divejson.read_formats()` names,
+    so the message says which rather than naming one format.
     """
 
 
 class MalformedImportError(Exception):
-    """The upload is a DiveJSON document and cannot be read - a 422."""
+    """A reader claimed the upload and could not read it - a 422."""
 
 
 class ImportTooLargeError(Exception):
@@ -133,11 +183,23 @@ class LoadedImport:
     Holds an open temp file and possibly an open `ZipFile`, so it is a context manager and
     the caller must use it as one. The spool deletes itself on close, exactly as the
     export path's does.
+
+    `conversion` and `source_format` are the converter's, and both are `None` for a native
+    DiveJSON upload. Nothing below this module reads either: the converted document enters
+    the planner through `ImportDocument` like any other, so neither the planner nor the
+    writer ever learns the logbook was not written by this app. They are here because the
+    *report* is a route concern and the route has nothing else to build it from.
+
+    `is_archive` stays "this upload carries the stored binaries", which a converted zip does
+    not - the converter emits no `files` at all - so it is `False` there even though the
+    upload was a container.
     """
 
     document: ImportDocument
     digest: str
     is_archive: bool
+    conversion: Conversion | None
+    source_format: str | None
     _spool: IO[bytes]
     _archive: zipfile.ZipFile | None
 
@@ -235,15 +297,22 @@ def _digest(buffer: IO[bytes]) -> str:
     return hasher.hexdigest()
 
 
-def _document_bytes(buffer: IO[bytes], archive: zipfile.ZipFile | None) -> bytes:
-    if archive is None:
-        return buffer.read()
+def _logbook_member(archive: zipfile.ZipFile) -> zipfile.ZipInfo | None:
+    """The archive's `logbook.divejson`, or `None` when it has none.
+
+    `None` is not a refusal any more: a zip without one is a zip of dive-computer files,
+    which the converter reads as one logbook. It used to be the first of this module's five
+    415s.
+    """
     try:
-        info = archive.getinfo(DIVEJSON_NAME)
+        return archive.getinfo(DIVEJSON_NAME)
     except KeyError:
-        raise UnsupportedImportError(
-            f"This archive has no {DIVEJSON_NAME} member, so there is no logbook in it to import."
-        ) from None
+        return None
+
+
+def _document_bytes(buffer: IO[bytes], archive: zipfile.ZipFile | None, info: zipfile.ZipInfo | None) -> bytes:
+    if archive is None or info is None:
+        return buffer.read()
     if info.file_size > MAX_DOCUMENT_SIZE:
         raise ImportTooLargeError(
             f"The {DIVEJSON_NAME} inside this archive is larger than the {MAX_DOCUMENT_SIZE // (1024 * 1024)} MB limit."
@@ -284,9 +353,14 @@ def _validate_envelope(raw: Any) -> ImportDocument:
     is broken.
     """
     if not isinstance(raw, dict):
-        raise UnsupportedImportError("This file is not a DiveJSON document.")
+        raise UnsupportedImportError(
+            f"This file is not a DiveJSON document. This app also reads: {formats_this_build_reads()}."
+        )
     if raw.get("format") != DIVEJSON_FORMAT:
-        raise UnsupportedImportError("This file is not a DiveJSON document - its `format` member says otherwise.")
+        raise UnsupportedImportError(
+            "This file is not a DiveJSON document - its `format` member says otherwise. "
+            f"This app also reads: {formats_this_build_reads()}."
+        )
 
     version = raw.get("version")
     if not isinstance(version, str) or version.split(".", 1)[0] != _SUPPORTED_MAJOR:
@@ -323,8 +397,181 @@ def _first_error(exc: ValidationError) -> str:
     return f"This DiveJSON document could not be read: {location}: {first['msg']}."
 
 
+def formats_this_build_reads() -> str:
+    """The registry's read formats, as a diver would name them.
+
+    Derived from `divejson.read_formats()` on every call rather than written out: the pin
+    moves on its own, and a sentence listing four formats while the build reads five is the
+    one failure a message like this can have.
+    """
+    return ", ".join(_FORMAT_LABELS.get(fmt, fmt) for fmt in divejson.read_formats())
+
+
+def _unrecognized() -> UnsupportedImportError:
+    return UnsupportedImportError(
+        "This file is not a logbook this app can read. It reads a DiveJSON document, the full-export archive, "
+        f"and dive-computer exports in these formats: {formats_this_build_reads()}."
+    )
+
+
+def _claims_to_be_json(head: bytes) -> bool:
+    """Whether a bounded head is text opening an object, i.e. a file claiming to be JSON.
+
+    The one thing standing between a truncated `.divejson` - the app's own export, cut off
+    by a failed download, and much the commonest real failure this endpoint meets - and
+    being told the app does not recognise its own format. A file that opens `{` claimed to
+    be a document; anything else that neither sniffs nor parses never did.
+    """
+    if head.startswith(codecs.BOM_UTF8):
+        head = head[len(codecs.BOM_UTF8) :]
+    return head.lstrip()[:1] == b"{"
+
+
+def _convert(buffer: IO[bytes], *, source_format: str | None) -> Conversion:
+    """Hand the spool to the converter, rewound, with the caps on the branch that reads them.
+
+    **The rewind is not optional.** `registry.convert` reads its own sniff head from the
+    stream's *current* position and seeks back only on the `format=None` branch, so a spool
+    left where this module's own sniff put it would feed the archive walker bytes 8192
+    onward - which sniffs `None` and turns a perfectly good zip into a 415 - and would hand
+    a named reader its file minus the first 8 KB.
+
+    **The caps go with `format=None` and nowhere else.** As shipped, a named format converts
+    `stream.read()` from the current position and never consults `max_members` or
+    `max_member_size`; passing them there would look like a guard and be inert. The whole
+    upload is already bounded by `MAX_ARCHIVE_SIZE` on the way in and, for a non-zip, by
+    `MAX_DOCUMENT_SIZE` below.
+
+    `exported_at` is passed rather than defaulted because the library's default is *now, in
+    the local zone*, and this is the one value in a converted document that is not a
+    function of the source. Preview and apply convert the same bytes minutes apart and must
+    plan identically, so nothing downstream reads it - `divejson.compared` drops it, and the
+    planner never looks.
+    """
+    buffer.seek(0)
+    exported_at = datetime.now(UTC)
+    # `convert` is annotated `BinaryIO`, which differs from the `IO[bytes]` this module
+    # spools into only in what `__enter__` returns - and `convert` never enters it. It reads
+    # and seeks, both of which a `SpooledTemporaryFile` does.
+    stream = cast(BinaryIO, buffer)
+    if source_format is not None:
+        return divejson.convert(stream, format=source_format, exported_at=exported_at)
+    return divejson.convert(
+        stream,
+        exported_at=exported_at,
+        max_members=MAX_ARCHIVE_MEMBERS,
+        max_member_size=MAX_DOCUMENT_SIZE,
+    )
+
+
+def _converted_from(document: Any, fallback: str | None) -> str | None:
+    """Which format the converted document says it came from.
+
+    On the archive path this is the only place the answer exists: the api decided "zip" and
+    the library decided which reader every member named. `converting.md`'s *Provenance*
+    block is where it records that, and a member the merge dropped leaves the fallback -
+    what this module sniffed - which is `None` for an archive and honest either way.
+    """
+    if not isinstance(document, dict):
+        return fallback
+    extensions = document.get("extensions")
+    block = extensions.get(divejson.PRODUCER_KEY) if isinstance(extensions, dict) else None
+    value = block.get("converted_from") if isinstance(block, dict) else None
+    return value if isinstance(value, str) else fallback
+
+
+_CONVERTER_BUG = (
+    "This file was recognised, and converting it produced a logbook this app cannot read. That is a bug in the "
+    "converter rather than anything wrong with your file - please report it."
+)
+
+
+def _convert_source(buffer: IO[bytes], *, source_format: str | None) -> tuple[ImportDocument, Conversion, str | None]:
+    """Convert the spool and take the result through `_validate_envelope` like any upload.
+
+    Every refusal below is the converter's, translated into this module's three so the route
+    keeps one taxonomy. The last arm is the one that matters: a `ConverterError` this build
+    has never seen still lands as a 422 rather than escaping as a 500, and the registry may
+    grow one at any pin bump.
+    """
+    try:
+        conversion = _convert(buffer, source_format=source_format)
+    except SourceTooLargeError as exc:
+        raise ImportTooLargeError(
+            f"This archive is past what one import reads: at most {MAX_ARCHIVE_MEMBERS} files, each of them under "
+            f"{MAX_DOCUMENT_SIZE // (1024 * 1024)} MB. Split it and import the parts. ({exc})"
+        ) from exc
+    except UnsupportedSourceError as exc:
+        raise UnsupportedImportError(
+            f"{exc}. An archive of dive-computer files is read as one logbook, so every file in it has to be one "
+            f"format, and this app reads: {formats_this_build_reads()}."
+        ) from exc
+    except NonConformingOutputError as exc:
+        # A converter bug, not a diver's file: the library validates its own output and this
+        # is it saying no. Logged with a traceback because nobody else will see it, and 422
+        # rather than 500 because the registry backstop is that this endpoint does not 500.
+        logger.exception("The converter produced a non-conforming document during a logbook import")
+        raise MalformedImportError(_CONVERTER_BUG) from exc
+    except ConverterError as exc:
+        raise MalformedImportError(f"This logbook could not be converted: {exc}.") from exc
+
+    try:
+        document = _validate_envelope(conversion.document)
+    except (UnsupportedImportError, MalformedImportError) as exc:
+        logger.exception("A converted document did not survive this app's own envelope check")
+        raise MalformedImportError(_CONVERTER_BUG) from exc
+    return document, conversion, _converted_from(conversion.document, source_format)
+
+
+# How many distinct `(kind, message)` pairs a report carries. The converter's own note list
+# is unbounded and a thousand-dive logbook with one habit per record makes thousands of
+# them, so a cap has to live somewhere; grouping is the only place it can, since the counts
+# stay complete either way. Far below `planner.MAX_NOTES` on purpose - a group is a *kind
+# of* finding, and a hundred distinct ones is already more than any adapter emits.
+MAX_CONVERSION_GROUPS = 100
+
+# Enough to point at without becoming the report. A diver who wants every path has the
+# source file; three says "here, and here, and elsewhere".
+MAX_CONVERSION_WHERES = 3
+
+# The *package*, whose version is the pin a report is attributable to - not the document's
+# `generator.name`, which is the CLI's name and already on `ImportPreview.generator`.
+_CONVERTER_NAME = "divejson"
+
+# Only reachable if a converted document arrived without the provenance member that says
+# which format it came from, which the converter writes on every path it has. Named rather
+# than guessed at, so a report that somehow lands here says so instead of claiming a format.
+_UNKNOWN_SOURCE_FORMAT = "unknown"
+
+
+def conversion_report(loaded: LoadedImport) -> ConversionReport | None:
+    """What the conversion could not carry, or `None` for a native DiveJSON upload.
+
+    Built here rather than in the browser so preview and result render one shape from one
+    grouping, and built from `Conversion.grouped()` rather than by regrouping the notes,
+    because the library's grouping is the one the CLI prints and two of them would drift.
+    """
+    if loaded.conversion is None:
+        return None
+    groups = loaded.conversion.grouped()
+    return ConversionReport(
+        format=loaded.source_format or _UNKNOWN_SOURCE_FORMAT,
+        converter=ConversionConverter(name=_CONVERTER_NAME, version=divejson.__version__),
+        groups=[
+            ConversionNoteGroup(
+                kind=group.kind,
+                message=group.message,
+                count=len(group.wheres),
+                wheres=group.wheres[:MAX_CONVERSION_WHERES],
+            )
+            for group in groups[:MAX_CONVERSION_GROUPS]
+        ],
+        groups_truncated=max(len(groups) - MAX_CONVERSION_GROUPS, 0),
+    )
+
+
 async def load_import(upload: UploadFile) -> LoadedImport:
-    """Read an upload into a parsed document, spooling as it goes.
+    """Read an upload into a parsed document, converting it first where it needs it.
 
     The caller owns the result and must close it - `with load_import(...) as loaded` -
     which is what deletes the spool and, on the archive path, releases the container.
@@ -333,34 +580,86 @@ async def load_import(upload: UploadFile) -> LoadedImport:
     archive: zipfile.ZipFile | None = None
     try:
         digest = _digest(buffer)
-        is_archive = buffer.read(len(_ZIP_MAGIC)) == _ZIP_MAGIC
+        head = buffer.read(divejson.SNIFF_BYTES)
         buffer.seek(0)
 
-        if is_archive:
+        logbook: zipfile.ZipInfo | None = None
+        if head.startswith(_ZIP_MAGIC):
+            # Opened here, and by this module's guard, before the converter is given the
+            # same spool: `_open_archive` is what refuses a zip bomb off the central
+            # directory, and the library's per-member caps are a second bound rather than a
+            # replacement for it.
             archive = _open_archive(buffer)
+            logbook = _logbook_member(archive)
+            if logbook is None:
+                # Not this app's export archive: a zip of dive-computer files, which is one
+                # logbook. The container is the library's to walk - a FIT's magic sits eight
+                # bytes into the *member*, so no bounded head of the zip could decide it here.
+                archive.close()
+                archive = None
+                document, conversion, source_format = _convert_source(buffer, source_format=None)
+                return LoadedImport(
+                    document=document,
+                    digest=digest,
+                    is_archive=False,
+                    conversion=conversion,
+                    source_format=source_format,
+                    _spool=buffer,
+                    _archive=None,
+                )
         elif buffer.seek(0, 2) > MAX_DOCUMENT_SIZE:
             # The upload was admitted against the archive cap because nothing said which
-            # shape it was until now. A bare document gets the smaller one.
+            # shape it was until now. Anything but a container gets the smaller one.
             raise ImportTooLargeError(
-                f"A DiveJSON document may be up to {MAX_DOCUMENT_SIZE // (1024 * 1024)} MB. "
-                "Import the archive if you are restoring a whole account with its files."
+                f"A logbook document may be up to {MAX_DOCUMENT_SIZE // (1024 * 1024)} MB. "
+                "Import the full-export archive if you are restoring a whole account with its files."
             )
         buffer.seek(0)
 
-        raw_bytes = _document_bytes(buffer, archive)
+        if archive is None:
+            # `sniff` also answers `zip`, which is a container marker rather than a reader
+            # anyone can ask for - and this branch is the one where the bytes were not a
+            # zip anyway. Asking `read_formats()` rather than excluding that one value is
+            # what keeps this true when the registry grows another container.
+            claimed = divejson.sniff(head)
+            if claimed is not None and claimed in divejson.read_formats():
+                document, conversion, source_format = _convert_source(buffer, source_format=claimed)
+                return LoadedImport(
+                    document=document,
+                    digest=digest,
+                    is_archive=False,
+                    conversion=conversion,
+                    source_format=source_format,
+                    _spool=buffer,
+                    _archive=None,
+                )
+            buffer.seek(0)
+
+        raw_bytes = _document_bytes(buffer, archive, logbook)
         try:
             raw = parse_document(raw_bytes)
         except DuplicateMemberError:
             raise
-        except UnicodeDecodeError as exc:
-            raise UnsupportedImportError("This file is not a DiveJSON document - it is not UTF-8 text.") from exc
-        except json.JSONDecodeError as exc:
-            raise MalformedImportError(f"This DiveJSON document is not valid JSON: {exc.msg} at line {exc.lineno}.")
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            # Nothing claimed these bytes and they are not JSON. A head that opens `{` is a
+            # file that claimed to be a document, so it keeps the 422 it has always had;
+            # anything else - a `.txt`, a CSV, a photo - never claimed to be one, and being
+            # told it is a broken DiveJSON document is the wrong sentence. Read off the
+            # *document's* head rather than the upload's, which on the archive path is the
+            # zip's; an archive that carries a `logbook.divejson` claimed to be this app's
+            # export whatever is inside it, so that path keeps the 422 unconditionally.
+            if archive is None and not _claims_to_be_json(raw_bytes[: divejson.SNIFF_BYTES]):
+                raise _unrecognized() from exc
+            if isinstance(exc, UnicodeDecodeError):
+                raise MalformedImportError("This logbook document is not valid JSON: it is not UTF-8 text.") from exc
+            raise MalformedImportError(f"This logbook document is not valid JSON: {exc.msg} at line {exc.lineno}.")
 
         return LoadedImport(
             document=_validate_envelope(raw),
             digest=digest,
             is_archive=archive is not None,
+            conversion=None,
+            source_format=None,
             _spool=buffer,
             _archive=archive,
         )
