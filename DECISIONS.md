@@ -2251,13 +2251,14 @@ use for while filling in a form, and it would have to be posted back to be store
 the stored samples client-supplied and reopen the exact trust problem the parse token exists to
 close.
 
-**Widened, not overturned, by logbook import.** `POST /import/divejson` does store client-supplied
-samples, and it is the one path that does; the sentence above is about `/dive/parse`, which still
-neither returns nor accepts a profile. See *"Importing a logbook is the one client-supplied
-profile"* below for why the two are different questions. The "`ParsedDiveSchema`/`DiveMixtureSchema`
-trimmed..." decision already deleted `DiveSampleSchema` for this reason; this is its complement. It
-is called server-side from `PUT /dive/{uuid}/file`, the only place with both the bytes and proof of
-where they came from.
+**Widened, not overturned, by logbook import.** `POST /import/logbook` does store client-supplied
+samples, and it is the one path that does — including for a logbook this app did not write, since
+that route converts a UDDF file or a `.ssrf` on the way in; the sentence above is about
+`/dive/parse`, which still neither returns nor accepts a profile. See *"Importing a logbook is the
+one client-supplied profile"* below for why the two are different questions. The
+"`ParsedDiveSchema`/`DiveMixtureSchema` trimmed..." decision already deleted `DiveSampleSchema` for
+this reason; this is its complement. It is called server-side from `PUT /dive/{uuid}/file`, the only
+place with both the bytes and proof of where they came from.
 
 Non-abstract so a new format can ship header-only and grow a profile extraction later without a flag
 day. `None` means "this file carries no samples"; malformed samples raise `DiveParseError`. Dispatch
@@ -14348,14 +14349,22 @@ rename, it is paid once; the cost of two formats is paid on every change forever
 lists five classes of normative requirement JSON Schema cannot express — identifier uniqueness and
 referential closure, cross-member arithmetic, profile-series integrity, the `exported_at` offset,
 and the `format`/`version` member order — so a document the schema accepts can still be
-non-conforming. `tests/fixtures/divejson/divejson.schema.json` is vendored the way the UDDF XSD is
+non-conforming. `tests/fixtures/divejson/divejson.schema.json` was vendored the way the UDDF XSD is
 (source, upstream commit and licence recorded in the README beside it), and
-`tests/helpers/divejson.py` is a port of the upstream validator's beyond-schema half. Both are
-checked on every generated document. This is not a theoretical gap: the writer's `profile.duration`
-was schema-valid and rule-invalid while the spec required `duration` to cover the *events* too, and
-nothing but a reading of §3 would have caught it — the spec was amended (upstream `d39c700`) rather
-than the writer, since `services/dive_profiles.py` deliberately does not clamp a marker pressed
-after the last sample.
+`tests/helpers/divejson.py` was a port of the upstream validator's beyond-schema half. Both are
+checked on every generated document.
+
+**Both are gone, and the check now runs through the `divejson` package.** It became a *runtime*
+dependency when logbook import started converting on the request path, which removed the reason
+either copy existed: the api could not reach the upstream validator, and now it can.
+`divejson.validate_document` is the reference implementation itself rather than a port of it, so
+"conforming here" and "conforming to `divejson validate`" stopped being two claims that could drift.
+`divejson.load_schema()` serves the schema out of the wheel. What is left in this repository is the
+UDDF XSD, which has no such package behind it. This is not a theoretical gap: the writer's
+`profile.duration` was schema-valid and rule-invalid while the spec required `duration` to cover the
+*events* too, and nothing but a reading of §3 would have caught it — the spec was amended (upstream
+`d39c700`) rather than the writer, since `services/dive_profiles.py` deliberately does not clamp a
+marker pressed after the last sample.
 
 **What changed on the wire**, since every member below is a breaking change to the old format and
 there is nowhere it is deployed to break: `user` → `diver` (with `units` and `gear_service_emails`
@@ -14482,8 +14491,8 @@ suggests is wrong.
 DiveJSON's conformance rules are addressed to *writers*. §3 lists five classes the JSON Schema
 cannot express — identifier closure, cross-member arithmetic, profile-series integrity, the
 `exported_at` offset, the `format`/`version` member order — and `divejson validate` checks the lot;
-`tests/helpers/divejson.py` is that rule set ported, and it is what holds this app's *export*
-honest. The importer deliberately does not run it, and the difference is not laziness.
+`divejson.validate_document` is that rule set, and it is what holds this app's *export* honest. The
+importer deliberately does not run it, and the difference is not laziness.
 
 **A reader's job is to salvage a logbook, not to grade one.** Every §3 rule has a strictly better
 answer available on the way in than "refuse the file". A dangling `trip_uuid` is imported without
@@ -14493,27 +14502,42 @@ rule, which is four lines to check and which the parse already has the informati
 alone: refusing an otherwise readable logbook over the order two members were written in is
 precisely the data loss this format exists to end.
 
-That decision also settles a hazard `api-1` left behind and the suite could not have caught.
-`jsonschema` sits in the **`dev` extra**, beside `xmlschema`, and the `Dockerfile` states that the
-runtime image "deliberately carries only the main dependency set" and copies just `src/app`,
-`src/migrations` and `src/alembic.ini`. An import endpoint importing `jsonschema` — or
-`tests.helpers.divejson` — would therefore fail at *container start*, with every test green. Not
-running the rule set at request time means the dependency stays where it is.
+**A converter validates its own output, and that changes nothing here.** `divejson.convert` runs the
+§3 rule set over the document it writes and raises `NonConformingOutputError` rather than handing
+back something non-conforming — because it is a *writer*, and §3 is addressed to writers. The
+importer is still a reader and still grades nothing it is handed: a converted document goes through
+`_validate_envelope` exactly like an uploaded one, and every invariant above applies to it
+unchanged. The one thing the api does with that refusal is log it with a traceback and answer 422,
+because it is a bug in the converter rather than anything wrong with a diver's file, and this
+endpoint does not 500.
 
-Rejected: moving the checker under `src/` and promoting `jsonschema` to a runtime dependency. It
-would have made §3 available on the request path, but the importer would still not have been able to
-*use* it as a gate without contradicting every invariant above — so what it bought was a runtime
-dependency and a second place for the format's rules to live.
+That decision also settled a hazard the suite could not have caught, and the hazard is now the
+reason for a CI job. `jsonschema` sat in the **`dev` extra**, beside `xmlschema`, and the
+`Dockerfile` states that the runtime image "deliberately carries only the main dependency set" and
+copies just `src/app`, `src/migrations` and `src/alembic.ini`. An import endpoint importing a
+dev-only package would therefore fail at *container start*, with every test green — the suite runs
+in the `test` stage, which has the extra. `divejson` is now a **main** dependency precisely because
+the request path imports it, `jsonschema` comes in behind it, and `tests.yml`'s `runtime-imports`
+job builds the `runtime` stage and imports the route module out of it. That job is the check this
+paragraph used to be a warning about.
 
-Rejected too: a second, importer-local statement of §3's rules. That is the two-shapes-for-one-fact
+Rejected: a second, importer-local statement of §3's rules. That is the two-shapes-for-one-fact
 disease decision 3 of the format's own supersession rejects, and it would drift.
+
+Rejected, before the package existed: moving the port under `src/` and promoting `jsonschema` to a
+runtime dependency. It would have made §3 available on the request path, but the importer would
+still not have been able to *use* it as a gate without contradicting every invariant above — so what
+it bought was a runtime dependency and a second place for the format's rules to live. The package
+supersedes the question: the rules arrive as somebody else's library, and the importer still does
+not run them.
 
 **One rule is shared rather than duplicated, and it is the exception that proves the shape.** Spec
 §9's duplicate-member rule is a *parsing* rule, not a conformance one: `json` silently keeps the
 last value, so a document with two `max_depth` members has no reading a parser can pick honestly.
 The importer has to reject it. So `parse_document` and `DuplicateMemberError` live in
-`services/logbook_import/reader.py` and `tests/helpers/divejson.py` re-exports them — one
-implementation, two callers, and the test helper's public surface unchanged.
+`services/logbook_import/reader.py`, which is also where the app's callers get them — the package
+has its own `parse_document` with the same rule, and it takes `str` where an upload arrives as
+bytes.
 
 ## A uuid is preserved, matched, restored or remapped, and which one is a property of the instance
 
@@ -14743,14 +14767,26 @@ two tests that assert the parser's band *is* the column's.
 
 `/dive/parse` deliberately neither returns nor accepts samples: a profile posted back would make the
 stored samples client-supplied and reopen the trust problem the parse token closes. That rule is
-unchanged. **Logbook import is a different question**, and the answer is different: it restores the
-caller's own DiveJSON backup, which is the whole point of the feature, through a two-phase
-preview/apply flow, with every channel re-validated against §6.5's rules and re-normalized through
-the same `derive_gas_attribution` → `downsample` sequence a dive-computer file goes through.
+unchanged. **Logbook import is a different question**, and the answer is different: the samples go
+into the caller's own account and nowhere else, through a two-phase preview/apply flow, with every
+channel re-validated against §6.5's rules and re-normalized through the same
+`derive_gas_attribution` → `downsample` sequence a dive-computer file goes through.
 
 There is no trust problem to reopen because there is no trust being claimed. The provenance columns
 say where the row came from: `parser_key` is `divejson_import` on a bare import, and the restored
 file's own key on the archive path, where a real file exists for a backfill to re-read.
+
+**This used to be argued from "it is the caller's own backup", and that premise is no longer true.**
+The route converts a UDDF file, a `.ssrf`, a FIT or a Suunto export on the way in, so the document a
+diver imports may have been written by Subsurface or by a watch and converted minutes ago — never by
+this app, and never by that diver's own export. The argument that survives is the one that was doing
+the work all along, and it is about *authority*, not provenance: a profile imported here lands in
+the importer's own logbook, changes nothing anyone else can see, and is never claimed by this
+instance to have been extracted from bytes it holds. A diver free to type a dive in by hand is not
+being given a new power by being allowed to bring one in from the computer that recorded it — which
+is the whole point of the feature, stated without the assumption that the app wrote the file.
+`parser_key` stays literally accurate on the converted path: the document the planner sees *is*
+DiveJSON, whatever it arrived as, and `divejson_import` names the shape rather than the source.
 
 **`source_sha256` splits by path, and the reason is that column's documented job**: it matches the
 dive's *file* digest, which `should_extract` and the backfill's candidate query both select on. On
@@ -14857,10 +14893,12 @@ restored account whose dashboard reads zero dives.
 them and recomputing against the destination's live counters is the reset-every-baseline failure the
 distinction exists to prevent: `GearServiceSchedule.dive_count_at_start` and
 `GearServiceRecord.dive_count_at_service`. Their models' per-column comments exist to stop live-API
-spoofing of a lifetime counter; a restore of the caller's own backup is the one context where
-accepting them is the point, and the preview reports them like everything else. Classify a new
-column by whether a recomputation procedure exists for it, not by the phrase in its comment — the
-wording varies and does not reliably name the same bin.
+spoofing of a lifetime counter; an import into the importer's own logbook is the one context where
+accepting them is the point, and the preview reports them like everything else. (These two members
+are DiveJSON's own, so in practice only a document some implementation of the format wrote carries
+them at all — but the reason they are accepted is the authority argument above, not an assumption
+about who wrote the file.) Classify a new column by whether a recomputation procedure exists for it,
+not by the phrase in its comment — the wording varies and does not reliably name the same bin.
 
 **`created_at` imports from the document.** It is logbook history and restore means restore; a dive
 logged in 2019 that comes back out of a backup is still a 2019 record. `updated_at` is minted by the
@@ -14950,6 +14988,87 @@ Both endpoints are rate-limited per user on their own budget rather than sharing
 import is a different kind of expensive, and a diver restoring a backup should not find their next
 export refused because of it. The default is twenty rather than ten because **one import is two
 calls**.
+
+## Logbook import reads whatever the converter reads, and the routes are `/import/logbook/*`
+
+`POST /import/divejson/preview` and `POST /import/divejson` are now `POST /import/logbook/preview`
+and `POST /import/logbook`, and they accept a DiveJSON document, the full-export archive, or any
+format the `divejson` registry sniffs — UDDF, Subsurface `.ssrf`, FIT and the Suunto app's JSON at
+the pin this repository carries, plus a `.zip` whose files are all one of those. The old paths are
+**gone rather than aliased**: there is no deployment but the local one, the web app moves in the
+same change, and a `deprecated=True` alias would be a hedge against a rollout that does not exist.
+
+**The converter is asked once, on a bounded head of the spool, before the JSON parse** — not at the
+reader's refusal sites. An `.ssrf` and a UDDF file are valid UTF-8 that is not JSON, so they died in
+`load_import`'s `json.JSONDecodeError` arm before any of those sites was reached, and the sentence a
+diver got was "This DiveJSON document is not valid JSON" about a file that never claimed to be one.
+So the reader takes `divejson.SNIFF_BYTES` off the spool and hands them to `divejson.sniff`, which
+takes **bytes** and reads nothing itself, right after the zip decision.
+
+**Two facts about that seam will bite anybody who assumes otherwise, and both are load-bearing.**
+`registry.convert` reads its own sniff head from the stream's *current position* and seeks back only
+on the `format=None` branch — so the spool has to be rewound after the api's own sniff, before
+either call, or `format=None` sniffs bytes 8192 onward, answers `None`, and turns a valid zip into a
+415\. And `max_members`/`max_member_size` are consulted **only** on that same branch: a named format
+converts `stream.read()` from the current position and never looks at them, so passing them there
+would read as a guard and be inert. `_convert` is one function with both rules in its docstring for
+exactly that reason.
+
+**A zip is this repository's to recognise and the library's to read.** The `PK\x03\x04` sniff and
+`_open_archive`'s declared-size guard stay here, because they are what keeps a zip bomb off the
+disk; a container with a `logbook.divejson` member is this app's own export and takes the path it
+always did; one without goes to the converter whole, which walks the members under the caps above,
+requires every one of them to name a single registered format, and converts them as one logbook.
+That case exists because a watch writes one file per dive: one file per import against a rate limit
+of twenty calls an hour, two calls per import, would cap a diver at ten dives an hour.
+
+**Three refusals moved, and every one of them was for bytes that never claimed to be DiveJSON.** A
+`.txt` or a CSV is 415 naming the formats, where it used to be the 422 above. A non-UTF-8 body is
+the same 415 unless a reader claimed it — a FIT is claimed by the sniffer first. And a zip with no
+`logbook.divejson` member is no longer a flat 415. The **exception is the one that matters**: a head
+whose first non-whitespace byte is `{` is a file that claimed to be a document, so a truncated
+`.divejson` — the app's own export cut off by a failed download, much the commonest real failure
+this endpoint meets — keeps today's 422 "not valid JSON … at line N" rather than being told the app
+does not recognise its own format. That test is made against the *document's* head, which on the
+archive path is the member's rather than the zip's. `_validate_envelope`'s own refusals are
+untouched: a document that parses as JSON and is not DiveJSON is still 415 there.
+
+**The token is minted over the uploaded bytes, and apply converts again.** Not over the converted
+document — the token's job is to say which file a diver was shown a report for, and that is the file
+they picked. Re-converting is honest because the conversion is deterministic in everything the
+planner reads: frozen namespaces, `uuid5` identities, positional fallback in document order. The one
+value that is not a function of the source is `exported_at`, which the api passes explicitly in UTC
+(the library's default is *now, in the local zone*) and which nothing downstream reads —
+`divejson.compared` drops it, and the planner never looks. `_conversion_moment` exists so a test can
+say "convert these bytes as if it were another hour" and hold the rest of the document, and the
+plan, to being identical.
+
+**What a conversion could not carry is a `conversion` block on `ImportReport`**, present on preview
+and on the result and `null` for a native document: `{format, converter, groups, groups_truncated}`,
+grouped by `(kind, message)` through the library's own `Conversion.grouped()` rather than by a
+second grouping written here. On the report rather than on the preview alone because the result
+panel is what stays on screen, and the two have to render as one shape. Not a twelfth
+`ImportNoteCode`: a conversion finding has a source path where a note has a uuid and a collection,
+and the library's note list is unbounded where the report's is capped — the grouping is the only
+place a cap can live, which `MAX_CONVERSION_GROUPS` and `MAX_CONVERSION_WHERES` do.
+
+**`groups[].kind` is an opaque string, and must stay one.** Never a `StrEnum`, never a Pydantic
+`Literal` — deliberately the opposite of `ImportNote.code`, which is this app's own closed
+vocabulary and can be an enum precisely because nothing outside this repository adds to it. The
+converter's kind set grew from three to four while this feature was being built, and the pin that
+decides which set a build sees moves by a dependency bump with no code change here, so a kind this
+build has never seen can arrive between one deploy and the next. Typed as an enum that raises while
+*serialising the response* — a 500 from an endpoint whose whole contract is a 415/422/413 taxonomy,
+on a logbook that read perfectly. `formats_this_build_reads()` has the same shape one level up: it
+is derived from `divejson.read_formats()` on every call, and a format id past its label table falls
+back to the id, so the sentence a diver reads gets terser rather than wrong.
+
+Rejected: a second route family beside the old one, chosen by extension in the browser — it
+duplicates `_load`, the rate limit, the token check and the cache invalidations, and hands the
+browser a sniff the api already does. Rejected: hashing the converted document into the token, which
+detaches the token from the file a diver picked. Rejected: per-format size caps, a second table to
+keep in step; a non-zip source uses the document bucket and a zip member uses it too, because a
+member *is* a logbook document in another format.
 
 ## An `Integer` column's real bound is its width, and no `CheckConstraint` census can see one
 
@@ -15174,11 +15293,16 @@ members the document *did* carry.
 
 ## The vendored schema's freeze note names no condition but the tag
 
-`tests/fixtures/divejson/README.md` records where `divejson.schema.json` came from, and part of that
-is what the version string means: 1.0 is a working draft, and the note says when it stops being one.
-It used to say the specification "freezes at 1.0 once the reference implementation's export/import
-round-trip passes against it". It now says the draft freezes as version 1.0 **when its maintainers
-tag it**, and nothing more.
+**The vendored schema is gone**, and with it the README this section is about: the `divejson`
+package is a runtime dependency and publishes both the schema and the validator, so nothing in this
+repository carries a copy to write a provenance note against. What follows is why the note said what
+it said, kept because the wording is still upstream's and the reasoning is still the reason.
+
+`tests/fixtures/divejson/README.md` recorded where `divejson.schema.json` came from, and part of
+that was what the version string means: 1.0 is a working draft, and the note says when it stops
+being one. It used to say the specification "freezes at 1.0 once the reference implementation's
+export/import round-trip passes against it". It now says the draft freezes as version 1.0 **when its
+maintainers tag it**, and nothing more.
 
 The old sentence was not merely vague — it named a condition that has since been **met**. This app
 is that reference implementation, and its export/import round-trip passes; the format's maintainers

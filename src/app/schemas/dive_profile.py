@@ -7,9 +7,11 @@ posted back to be stored - which would make the stored samples client-supplied a
 reopen the exact trust problem the parse token exists to close.
 
 That rule is about `/dive/parse` and is unchanged. **Logbook import is the one path that
-does store client-supplied samples**, because restoring a diver's own DiveJSON backup is
-exactly what it is for; `DECISIONS.md`, *"Importing a logbook is the one client-supplied
-profile"*, records why that is a different question from posting a parse back.
+does store client-supplied samples**, because bringing a whole logbook into your own
+account is exactly what it is for - and that logbook may be a UDDF file or a `.ssrf` the
+route converted, rather than anything this app wrote. `DECISIONS.md`, *"Importing a
+logbook is the one client-supplied profile"*, records why that is a different question
+from posting a parse back, and why the answer does not rest on who produced the document.
 
 One shape here is neither wire nor parser: `GasAttribution` is what a summary *column*
 holds. It lives here rather than in the service because it is read back out of JSONB and
