@@ -94,12 +94,14 @@ MAX_ARCHIVE_SIZE = 500 * 1024 * 1024  # 500 MB
 MAX_ARCHIVE_EXTRACTED_SIZE = 2 * MAX_ARCHIVE_SIZE
 
 # The most files a zip of one source format may hold. This bounds the *walk* rather than the
-# bytes: the library reads a `SNIFF_BYTES` head per member off the central directory to
-# decide its format, so an archive of half a million tiny files is a lot of work inside one
-# request even when it fits under the size bound below. It is deliberately not a promise
-# about how many dives go in one upload - `_refuse_oversized_source` is what a real
-# dive-computer export meets first, and at 30 KB a FIT file that is a few thousand of them.
-# The library refuses off the directory listing, before it inflates anything.
+# bytes: to decide a member's format the library has to open it and inflate a `SNIFF_BYTES`
+# head - a FIT's magic sits eight bytes into the member, so no listing can answer it - and
+# it does that once per member before converting any of them. An archive of half a million
+# tiny files is a lot of work inside one request even when it fits under the size bound
+# below. Deliberately not a promise about how many dives go in one upload:
+# `_refuse_oversized_source` is what a real dive-computer export meets first, and at 30 KB a
+# FIT file that is a few thousand of them. The count itself is refused off the directory
+# listing, before anything is opened.
 #
 # What one such member may declare is `MAX_DOCUMENT_SIZE` rather than a fourth number: a
 # member *is* a logbook document in some other format, materialized whole by whichever
@@ -560,9 +562,17 @@ async def _convert_source(
         # claim a cause that cannot be one. `max_member_size` is the case in point - the sum
         # check upstream already bounds it, so a per-member refusal is unreachable, and a
         # message asserting it would send a diver looking for one huge file.
-        raise ImportTooLargeError(
-            f"This archive is past what one import reads - {exc}. Split it and import the parts."
-        ) from exc
+        #
+        # **And this is not an archive-only refusal**, which the container framing hid: an
+        # adapter sets caps of its own on the work one already-bounded file may ask for - the
+        # FIT reader refuses past a hundred thousand messages - and that reaches here on the
+        # named-format path, where there is no container and nothing to split. `source_format`
+        # is exactly the difference, so the advice goes with the branch that can act on it.
+        if source_format is None:
+            raise ImportTooLargeError(
+                f"This archive is past what one import reads - {exc}. Split it and import the parts."
+            ) from exc
+        raise ImportTooLargeError(f"This file is past what one import reads - {exc}.") from exc
     except UnsupportedSourceError as exc:
         # The converter's own sentence, prefixed rather than replaced. It reaches here for
         # three container cases - an empty archive, a member no reader claims, an archive

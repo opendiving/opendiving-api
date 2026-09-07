@@ -498,6 +498,23 @@ class TestWhenTheConversionFails:
         assert response.status_code == 422
         assert "could not be converted" in response.json()["detail"]
 
+    def test_a_single_file_over_an_adapter_cap_is_413_and_is_not_called_an_archive(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        """`SourceTooLargeError` is not the container's alone: the FIT reader raises it for
+        one file past a hundred thousand messages, and there is nothing to split there."""
+
+        def refuse(buffer: Any, *, source_format: str | None) -> Any:
+            raise divejson.SourceTooLargeError("this FIT file holds more than 100,000 messages")
+
+        monkeypatch.setattr(reader, "_convert", refuse)
+        response = client.post(PREVIEW_PATH, files=_files(SSRF, "logbook.ssrf"))
+
+        assert response.status_code == 413
+        detail = response.json()["detail"]
+        assert "archive" not in detail
+        assert "Split it" not in detail
+
     def test_a_doctype_is_refused_as_422(self, signed_in: Any, client: TestClient) -> None:
         """The converter refuses a `<!DOCTYPE>` outright rather than expanding it, which is
         the entity-expansion guard this app already keeps on its own XML parsers."""
