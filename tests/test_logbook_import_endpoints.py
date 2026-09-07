@@ -412,7 +412,9 @@ class TestWhenTheConversionFails:
         says so and the traceback goes to the log where somebody can act on it."""
 
         def refuse(buffer: Any, *, source_format: str | None) -> Any:
-            raise divejson.NonConformingOutputError("$: something the writer should not have emitted")
+            raise divejson.NonConformingOutputError(
+                [divejson.Issue("$", "something the writer should not have emitted")]
+            )
 
         monkeypatch.setattr(reader, "_convert", refuse)
         response = client.post(PREVIEW_PATH, files=_files(SSRF, "logbook.ssrf"))
