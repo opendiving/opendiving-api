@@ -15085,6 +15085,42 @@ detaches the token from the file a diver picked. Rejected: per-format size caps,
 keep in step; a non-zip source uses the document bucket and a zip member uses it too, because a
 member *is* a logbook document in another format.
 
+## Two readings of one Suunto file now live here, and they disagree by design
+
+`divejson` reads the Suunto app's JSON export, and so does `services/dive_parsers/suunto_json.py`.
+Both are in this repository as of the converter seam and neither is going away: `POST /dive/parse`
+fills in a *form* from one file and wants this app's own parser keys, its prefill shape and its
+rounding; logbook import wants a whole logbook in a format other applications can also write. A
+single-dive entry point on the library would put the form's shape into a package other applications
+install, which is the wrong direction for both.
+
+The consequence is that the same file, read the two ways, does not produce identical numbers — and a
+diver who parses a file through `/dive/parse` and then imports the same logbook meets every one of
+these as an apparent import bug. **None is a defect and none is reconcilable by changing one side.**
+
+- **`gas_number`.** The library resolves it to a **0-based position in document order**, in both
+  Suunto shapes, because that is how `converting.md` numbers cylinders. `SuuntoJsonParser` passes
+  the *source* number through, which is 0-based on a 2026 Ocean and 1-based in a `Gases[]` block. So
+  a D5's second cylinder is `1` in the parser and `1` in the library only by coincidence, and a
+  single-cylinder `Gases[]` dive is `1` here and `0` there.
+- **`bottom_temperature`.** The library maps nothing from `Header.Temperature`, because on **all
+  nineteen** Ocean files in the owner's corpus the block's `Max` is *lower* than its `Min` — a
+  reading of nothing that the format has a member for reporting as absent. This parser derives a
+  proxy instead, which is the right call for a form a diver is about to edit and the wrong one for a
+  document another application will read as recorded fact.
+- **Precision.** The library carries a source reading exactly: `Decimal(pascal) / 100000`, so
+  `21 162 500 Pa` is `211.625` bar and not `211.62`. `_round2_or_none` here quantizes to two decimal
+  places, ties to even, which is why the table under *"The 2026 Suunto Ocean JSON is a third header
+  shape"* reads `211.62 → 127.16` where the library's own fixture reads `211.625 → 127.15625`. That
+  helper covers `cns_start`, `cns_end`, `otu_start`, `otu_end`, `oxygen`, `helium` and `po2_limit`
+  as well, so the two readings differ on every one of them for the same file. The library quantizes
+  only *derived* values — coordinates, an inferred mean — and nothing a source recorded.
+
+**This list is a floor, not a census**, and it is written down because the failure mode is silent:
+nothing downstream compares the two readings, no test can see a difference that only shows up
+against a file neither corpus holds, and the first report will arrive as "the import got my tank
+pressure wrong". Add to it when you find another rather than reconciling one side to the other.
+
 ## An `Integer` column's real bound is its width, and no `CheckConstraint` census can see one
 
 The importer mirrors every `CheckConstraint` a document can reach, and a test counts them so a new
