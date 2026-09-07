@@ -20,6 +20,7 @@ check is dropped.
 import hashlib
 import io
 import json
+import threading
 import uuid as uuid_pkg
 import zipfile
 from collections.abc import Generator
@@ -397,15 +398,73 @@ class TestTheFormatsItAccepts:
         assert response.status_code == 413
         assert "at most 1 files" in response.json()["detail"]
 
-    def test_a_zip_member_over_the_document_cap_is_413(
+    def test_a_zip_whose_members_sum_past_the_document_cap_is_413(
         self, signed_in: Any, client: TestClient, monkeypatch: Any
     ) -> None:
-        """The declared size in the directory, checked before the member is opened - a
-        member is a logbook document and gets the document cap."""
+        """The *sum* of the declared sizes, off the central directory before anything is
+        read. Every member of a zip of dive-computer files is converted and every result is
+        held until they merge, so the sum is what ends up in memory - `MAX_ARCHIVE_EXTRACTED_SIZE`
+        is ten times larger and guards the export archive, whose members are written out one
+        at a time.
+        """
         monkeypatch.setattr(reader, "MAX_DOCUMENT_SIZE", 100)
-        response = client.post(PREVIEW_PATH, files=_files(_zip({"dive-1.uddf": _uddf()}), "watch-export.zip"))
+        payload = _zip({"dive-1.uddf": _uddf("dive-1"), "dive-2.uddf": _uddf("dive-2")})
+        response = client.post(PREVIEW_PATH, files=_files(payload, "watch-export.zip"))
 
         assert response.status_code == 413
+        assert "converted in one import" in response.json()["detail"]
+
+    def test_the_sum_is_checked_before_a_member_is_read(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        """Off the directory, so a member that could not be inflated at all is still refused
+        by size rather than by failing to read."""
+        payload = _zip({"dive-1.uddf": _uddf("dive-1"), "dive-2.uddf": _uddf("dive-2")})
+        read_calls: list[str] = []
+        opened = zipfile.ZipFile.open
+
+        def record(self: Any, name: Any, *args: Any, **kwargs: Any) -> Any:
+            read_calls.append(str(name))
+            return opened(self, name, *args, **kwargs)
+
+        # Patched only now: `_zip` writes through the same method, so patching any earlier
+        # records the test building its own fixture.
+        monkeypatch.setattr(reader, "MAX_DOCUMENT_SIZE", 100)
+        monkeypatch.setattr(zipfile.ZipFile, "open", record)
+
+        assert client.post(PREVIEW_PATH, files=_files(payload, "watch-export.zip")).status_code == 413
+        assert read_calls == []
+
+
+class TestWhereTheConversionRuns:
+    def test_the_conversion_is_not_on_the_event_loop(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        """Reading a FIT file is the same pure-Python decode `POST /dive/parse` hands to
+        `run_in_threadpool` at about two seconds a megabyte, and a zip of them is that many
+        times over. Inline in an `async def` one upload stalls every other request on the
+        worker.
+
+        Asserted against the thread the *rest* of `load_import` runs on rather than against
+        the main thread: `TestClient` drives the app from a portal thread of its own, so
+        "not the main thread" would pass even with the hop removed.
+        """
+        digest, convert = reader._digest, reader._convert
+        seen: dict[str, str] = {}
+
+        def record_spool(buffer: Any) -> Any:
+            seen["spool"] = threading.current_thread().name
+            return digest(buffer)
+
+        def record_convert(buffer: Any, *, source_format: str | None) -> Any:
+            seen["convert"] = threading.current_thread().name
+            return convert(buffer, source_format=source_format)
+
+        monkeypatch.setattr(reader, "_digest", record_spool)
+        monkeypatch.setattr(reader, "_convert", record_convert)
+
+        assert client.post(PREVIEW_PATH, files=_files(SSRF, "logbook.ssrf")).status_code == 200
+        assert seen["convert"] != seen["spool"]
 
 
 class TestWhenTheConversionFails:

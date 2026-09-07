@@ -19,16 +19,21 @@ parses as JSON.
 **A zip is this module's to recognise and the library's to read.** The `PK\\x03\\x04` sniff
 and `_open_archive`'s declared-size guard stay here, because they are what keeps a zip bomb
 off the disk; a container carrying `logbook.divejson` is the app's own export, and one
-without goes to the converter whole, under this module's own member caps.
+without goes to the converter whole, under this module's own caps.
 
-**Spooled, never buffered.** The upload is read in bounded chunks into a
-`SpooledTemporaryFile` - the export path's own pattern, in the other direction - because
-half a gigabyte resident per in-flight request is what `SPOOL_THRESHOLD` exists to avoid.
-The recorded limit of that: parsing the JSON itself still materializes the whole document,
-and a named format hands the converter `stream.read()`, so the *document* cap rather than
-the archive one is the real memory ceiling either way, and a logbook large enough to matter
-wants a streaming parser or an arq job. `DECISIONS.md`, *"Logbook import spools its upload
-and still parses the document whole"*, carries the trade.
+**Spooled, never buffered, and converted in a thread.** The upload is read in bounded chunks
+into a `SpooledTemporaryFile` - the export path's own pattern, in the other direction -
+because half a gigabyte resident per in-flight request is what `SPOOL_THRESHOLD` exists to
+avoid. Conversion then goes through `run_in_threadpool`, as `POST /dive/parse` does with the
+same decoders and for the same reason.
+
+`MAX_DOCUMENT_SIZE` is the memory ceiling on every path, and each one reaches it
+differently: a bare document is parsed whole, a named format hands the converter
+`stream.read()`, and a zip of dive-computer files has the *sum* of its declared member sizes
+checked against it before anything is read, because every member of one of those is
+converted and every result is held until they merge. A logbook large enough to matter wants
+a streaming parser or an arq job. `DECISIONS.md`, *"Logbook import spools its upload and
+still parses the document whole"*, carries the trade.
 
 The caps are new constants rather than a reuse of any existing upload limit: the largest
 one this app has is the 10 MB card scan, and a logbook with a thousand sampled dives is
@@ -49,6 +54,7 @@ import divejson
 from divejson import Conversion, ConverterError, NonConformingOutputError, SourceTooLargeError, UnsupportedSourceError
 from fastapi import UploadFile
 from pydantic import ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from ...schemas.export import DIVEJSON_FORMAT, DIVEJSON_VERSION
 from ...schemas.logbook_import import (
@@ -329,6 +335,34 @@ def _document_bytes(buffer: IO[bytes], archive: zipfile.ZipFile | None, info: zi
         ) from exc
 
 
+def _refuse_oversized_source(archive: zipfile.ZipFile) -> None:
+    """The whole conversion's memory ceiling, off the central directory before anything runs.
+
+    `MAX_ARCHIVE_EXTRACTED_SIZE` is not this bound and never was: it guards the *export
+    archive*, whose members are written to the file store one at a time and whose only
+    resident object is the `logbook.divejson` under `MAX_DOCUMENT_SIZE`. A zip of
+    dive-computer files is the opposite shape - every member is converted and every member's
+    result is held until the merge - so without this the ceiling would be the 1 GB the
+    zip-bomb guard admits, ten times the number this module's own docstring calls the
+    ceiling, and reached by an upload well under `MAX_ARCHIVE_SIZE` because XML deflates
+    about ten to one. `max_member_size` bounds one member and `MAX_ARCHIVE_MEMBERS` bounds
+    the count; neither bounds the sum, which is the thing that ends up in memory.
+
+    `MAX_DOCUMENT_SIZE` rather than a fourth number, for the same reason a member gets it:
+    whatever shape a logbook arrives in, at most a document's worth of source becomes one
+    in-memory logbook. Every entry counts, including the directory entries and the `__MACOSX`
+    tree the converter skips - a bound slightly stricter than the set actually read is the
+    safe direction, and matching the library's member filter here would be a second copy of
+    a rule that lives there.
+    """
+    declared = sum(info.file_size for info in archive.infolist())
+    if declared > MAX_DOCUMENT_SIZE:
+        raise ImportTooLargeError(
+            f"This archive holds {declared // (1024 * 1024)} MB of logbooks uncompressed, and at most "
+            f"{MAX_DOCUMENT_SIZE // (1024 * 1024)} MB are converted in one import. Split it and import the parts."
+        )
+
+
 def _open_archive(buffer: IO[bytes]) -> zipfile.ZipFile:
     try:
         archive = zipfile.ZipFile(buffer)
@@ -448,9 +482,11 @@ def _convert(buffer: IO[bytes], *, source_format: str | None) -> Conversion:
 
     **The caps go with `format=None` and nowhere else.** As shipped, a named format converts
     `stream.read()` from the current position and never consults `max_members` or
-    `max_member_size`; passing them there would look like a guard and be inert. The whole
-    upload is already bounded by `MAX_ARCHIVE_SIZE` on the way in and, for a non-zip, by
-    `MAX_DOCUMENT_SIZE` below.
+    `max_member_size`; passing them there would look like a guard and be inert. On the branch
+    that does read them, `max_member_size` is belt to `_refuse_oversized_source`'s braces -
+    the sum is already bounded by the same number, so no single member can exceed it - and it
+    stays because a bound inside the library is the one that still holds if this module ever
+    hands over a container it did not open itself.
 
     `exported_at` is passed rather than defaulted because the library's default is *now, in
     the local zone*, and this is the one value in a converted document that is not a
@@ -496,8 +532,17 @@ _CONVERTER_BUG = (
 )
 
 
-def _convert_source(buffer: IO[bytes], *, source_format: str | None) -> tuple[ImportDocument, Conversion, str | None]:
+async def _convert_source(
+    buffer: IO[bytes], *, source_format: str | None
+) -> tuple[ImportDocument, Conversion, str | None]:
     """Convert the spool and take the result through `_validate_envelope` like any upload.
+
+    **In a thread, never on the event loop.** Reading a FIT file is the same pure-Python
+    decode `POST /dive/parse` hands to `run_in_threadpool` at about two seconds a megabyte,
+    and a zip of them is that many times over - inline in an `async def` one upload stalls
+    every other request on the worker, `/health/ready` included. `DECISIONS.md`, *"Uploaded
+    files are parsed in a thread, not on the event loop"*, is the rule and this is the same
+    work.
 
     Every refusal below is the converter's, translated into this module's three so the route
     keeps one taxonomy. The last arm is the one that matters: a `ConverterError` this build
@@ -505,7 +550,7 @@ def _convert_source(buffer: IO[bytes], *, source_format: str | None) -> tuple[Im
     grow one at any pin bump.
     """
     try:
-        conversion = _convert(buffer, source_format=source_format)
+        conversion = await run_in_threadpool(_convert, buffer, source_format=source_format)
     except SourceTooLargeError as exc:
         raise ImportTooLargeError(
             f"This archive is past what one import reads: at most {MAX_ARCHIVE_MEMBERS} files, each of them under "
@@ -609,9 +654,10 @@ async def load_import(upload: UploadFile) -> LoadedImport:
                 # Not this app's export archive: a zip of dive-computer files, which is one
                 # logbook. The container is the library's to walk - a FIT's magic sits eight
                 # bytes into the *member*, so no bounded head of the zip could decide it here.
+                _refuse_oversized_source(archive)
                 archive.close()
                 archive = None
-                document, conversion, source_format = _convert_source(buffer, source_format=None)
+                document, conversion, source_format = await _convert_source(buffer, source_format=None)
                 return LoadedImport(
                     document=document,
                     digest=digest,
@@ -637,7 +683,7 @@ async def load_import(upload: UploadFile) -> LoadedImport:
             # what keeps this true when the registry grows another container.
             claimed = divejson.sniff(head)
             if claimed is not None and claimed in divejson.read_formats():
-                document, conversion, source_format = _convert_source(buffer, source_format=claimed)
+                document, conversion, source_format = await _convert_source(buffer, source_format=claimed)
                 return LoadedImport(
                     document=document,
                     digest=digest,

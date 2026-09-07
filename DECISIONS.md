@@ -14486,7 +14486,7 @@ than compute wrongly when it is absent. Rejected: swapping the pair, which inven
 the diver typed them the wrong way round; and clearing both, which discards a number nothing
 suggests is wrong.
 
-## The importer is a reader, not a validator, and that is why `jsonschema` stayed a test dependency
+## The importer is a reader, not a validator, and the schema is never a gate
 
 DiveJSON's conformance rules are addressed to *writers*. §3 lists five classes the JSON Schema
 cannot express — identifier closure, cross-member arithmetic, profile-series integrity, the
@@ -15022,6 +15022,30 @@ requires every one of them to name a single registered format, and converts them
 That case exists because a watch writes one file per dive: one file per import against a rate limit
 of twenty calls an hour, two calls per import, would cap a diver at ten dives an hour.
 
+**That zip needed a bound the export archive never did, and `MAX_ARCHIVE_EXTRACTED_SIZE` is not
+it.** The two containers have opposite memory shapes. In the export archive only `logbook.divejson`
+becomes an object — bounded by `MAX_DOCUMENT_SIZE` — and the blobs are read one at a time and
+written straight to the file store, so the 1 GB zip-bomb guard is a *disk* bound and the document
+cap really is the memory ceiling. In a zip of dive-computer files every member is converted and
+every member's result is held until they merge, so the ceiling is the **sum**, which nothing
+bounded: `max_member_size` bounds one member, `MAX_ARCHIVE_MEMBERS` bounds the count, and an upload
+well under `MAX_ARCHIVE_SIZE` can declare close to a gigabyte because XML deflates about ten to one.
+`_refuse_oversized_source` checks that sum against `MAX_DOCUMENT_SIZE` off the central directory,
+before a member is opened — the same number a bare document and a single member get, because
+whatever shape a logbook arrives in, at most a document's worth of source becomes one in-memory
+logbook. It counts every entry, including the directory entries and the `__MACOSX` tree the
+converter skips: a bound slightly stricter than the set actually read is the safe direction, and
+matching the library's member filter here would be a second copy of a rule that lives there.
+
+**And the conversion runs in `run_in_threadpool`.** Reading a FIT file is the same pure-Python
+decode `POST /dive/parse` already hands to a thread at about two seconds a megabyte, and a zip of
+them is that many times over; inline in an `async def` one upload stalls every other request on the
+worker, `/health/ready` included. *"Uploaded files are parsed in a thread, not on the event loop"*
+is the rule and this is the same work, on a bigger input. The `json.loads` of a bare document is
+**not** hopped and stays where it was — a separate, older trade recorded under *"Logbook import
+spools its upload and still parses the document whole"*, and moving it is a change to that decision
+rather than to this one.
+
 **A zip with no members at all is not recognised as a zip, and both sides agree.** `PK\x03\x04` is
 the *local file header*, so an archive with nothing in it starts `PK\x05\x06` — this module's sniff
 does not claim it and neither does the library's, and it comes back as the general 415 rather than
@@ -15094,32 +15118,123 @@ rounding; logbook import wants a whole logbook in a format other applications ca
 single-dive entry point on the library would put the form's shape into a package other applications
 install, which is the wrong direction for both.
 
-The consequence is that the same file, read the two ways, does not produce identical numbers — and a
+The consequence is that the same file, read the two ways, does not produce identical values — and a
 diver who parses a file through `/dive/parse` and then imports the same logbook meets every one of
 these as an apparent import bug. **None is a defect and none is reconcilable by changing one side.**
+The list below was derived by running both implementations over the owner's 35-file corpus (16
+D5-shaped, 19 Ocean) plus constructed inputs for the shapes that corpus does not contain. "Attested"
+means a real file showed it; "by construction" means the input was built to reach the branch.
 
-- **`gas_number`.** The library resolves it to a **0-based position in document order**, in both
-  Suunto shapes, because that is how `converting.md` numbers cylinders. `SuuntoJsonParser` passes
-  the *source* number through, which is 0-based on a 2026 Ocean and 1-based in a `Gases[]` block. So
-  a D5's second cylinder is `1` in the parser and `1` in the library only by coincidence, and a
-  single-cylinder `Gases[]` dive is `1` here and `0` there.
-- **`bottom_temperature`.** The library maps nothing from `Header.Temperature`, because on **all
-  nineteen** Ocean files in the owner's corpus the block's `Max` is *lower* than its `Min` — a
-  reading of nothing that the format has a member for reporting as absent. This parser derives a
-  proxy instead, which is the right call for a form a diver is about to edit and the wrong one for a
-  document another application will read as recorded fact.
-- **Precision.** The library carries a source reading exactly: `Decimal(pascal) / 100000`, so
-  `21 162 500 Pa` is `211.625` bar and not `211.62`. `_round2_or_none` here quantizes to two decimal
-  places, ties to even, which is why the table under *"The 2026 Suunto Ocean JSON is a third header
-  shape"* reads `211.62 → 127.16` where the library's own fixture reads `211.625 → 127.15625`. That
-  helper covers `cns_start`, `cns_end`, `otu_start`, `otu_end`, `oxygen`, `helium` and `po2_limit`
-  as well, so the two readings differ on every one of them for the same file. The library quantizes
-  only *derived* values — coordinates, an inferred mean — and nothing a source recorded.
+### The three the plan named, with corrections
+
+- **`gas_number`.** The library resolves it to a **position** in document order; this parser keeps
+  the file's own number. Three corrections to how that was stated. On a `Gases[]` block this parser
+  is not passing a source number through at all — the block carries no `GasNumber`, and
+  `_parse_mixture`'s caller synthesises a 1-based `enumerate` index; the *value* is 1-based as
+  described, but nothing in the file said so. On the Ocean shape the library's mapping is the
+  **identity** on all nineteen corpus files, because they switch gases in the order `[0]` or
+  `[0, 1]` — it becomes a visible reordering only under a non-monotonic switch order, where a file
+  switching to gas 2 then gas 0 gives `[2, 0]` here and `[0, 1]` there. And the library **omits**
+  `gas_number` entirely unless the profile carries a pressure channel or a numbered switch event, so
+  a `Gases[]` file with neither gets `1` here and no member at all there. Attested on the 16 D5
+  files (`1` here, `0` there); the rest by construction.
+- **`bottom_temperature`.** The library maps nothing, and on the Ocean files the reason is that
+  `Header.Temperature.Max` is *lower* than `Min` on all nineteen. On the 16 D5 files there is no
+  `Header.Temperature` block at all, and this parser's value there comes from its own fallback scan
+  of every sample's `Temperature`, taking the minimum — a different derivation from the same
+  conclusion. Attested on all 35.
+- **Precision, and the mechanism is broader than `_round2_or_none`.** The library parses with
+  `parse_float=Decimal` and keeps the source's digits end to end; this parser round-trips every
+  reading through `float` and re-derives a `Decimal` from `str(value)` before quantising to two
+  places, ties to even. Attested on `start_pressure` (23 cylinders), `end_pressure` (24) and
+  `otu_start`/`otu_end` (19). The other members the helper covers — `cns_start`, `cns_end`,
+  `oxygen`, `helium`, `po2_limit` — produced identical values on all 35 files, because the source
+  writes them as short decimals; the difference is real in principle and unobserved in practice.
+
+### Attested on real files, and not in the plan's list
+
+- **The whole profile time axis is offset by about a second, and it is the largest difference
+  here.** This parser emits fractional seconds from `Header.DateTime`, and `dive_profiles.normalize`
+  then rebases the profile onto **the earliest reading across all channels** and rounds ties to
+  even. The library's origin is `Header.DateTime` itself and its rounding is half-away-from-zero.
+  Fourteen depth channels, thirteen temperature channels and three ceiling channels in the corpus
+  are a clean **+1 s shift** of each other, and the shift is not constant within a file. Every
+  sample time, every event time and the profile `duration` move with it.
+- **`duration` rounds the other way on a half-second.** `round()` here, `ROUND_HALF_UP` there:
+  `DiveTime: 3038.5` is 3038 and 3039. Four of the five corpus files with a `.5` `DiveTime` differ;
+  the fifth agrees by luck, its neighbour being odd.
+- **A `DiveRouteOrigin` coordinate is rounded to six places here and carried exactly there.**
+  `positions.geo_fix` rounds *every* fix; the library quantises only the radian sample fixes and
+  passes a degrees-verbatim origin through. Attested on 16 of the 19 Ocean files — every one that
+  yields an entry position. Exit positions, which are radian fixes, agree exactly everywhere.
+- **Temperature channels carry a different number of samples.** The library merges entries per
+  second before filling a channel and keeps the **first**; `dive_profiles._rebase` collapses onto
+  integer seconds afterwards and keeps the **last**. Eight of 35 files differ in count. No surviving
+  *value* differed on this corpus, so the first-versus-last rule alone has never changed a reading —
+  only the counts.
+
+### The edges, verified by construction
+
+Each of these is a branch no corpus file reaches, and each would change a stored value on a file
+that did.
+
+- **Bounds this parser does not apply.** A gas fraction outside 0-100 % is kept here (`Oxygen: 1.5`
+  → `oxygen: 150.0`) and dropped there, as are both fractions when they sum past 100 %. A profile
+  pressure reading above 350 bar is stored here and dropped there. `Gases[]` is uncapped here and
+  capped at 16 there. An `avg_depth` deeper than `max_depth` is kept here and dropped there. A
+  `TankSize` of 0 becomes `volume: 0.0` here and no member there.
+- **Zero and the floor it sits on.** An `end_pressure` of exactly 0 is dropped here — the schema's
+  `_drop_unpressurized` wants both pressures strictly positive — and kept there, the format's own
+  floor for that member being inclusive. A ceiling that *scales* to zero is dropped here and
+  recorded as `0` there, because the library tests the raw value before scaling.
+- **Missing, null and wrongly typed.** A present-but-`null` `DiveTime` or `DepthAverage` defeats
+  this parser's `dict.get(key, fallback)` and yields `None`; the library skips a `None` and takes
+  the fallback. A `DiveTime` under a second rounds to `0` and is stored here, where the library
+  rejects it against the format's floor and falls through to `Duration`. A string or boolean where a
+  number belongs is coerced by Pydantic here (`"20.5"` → `20.5`, `true` → `1.0`) and refused there.
+  A structurally wrong sub-block — `Depth` as a list, `Gases` as a list of strings — raises out of
+  this parser and fails the whole dive with a 422, where the library's `isinstance` guards convert
+  the rest of the header.
+- **What counts as a dive, and what counts as its start.** The library drops a record whose
+  `ActivityType` states anything but 51 and drops a dive with no `Header.DateTime`; this parser
+  reads neither rule, parsing a non-dive activity and returning a dive with `start_time: None`. All
+  35 corpus files are `ActivityType` 51.
+- **Samples and events at the edges.** A sample dated before `Header.DateTime` is kept here, with
+  the profile rebased onto it, and dropped there. A sample carrying only events and no channel
+  reading yields no profile here and an events-only profile there. One event written under both
+  `Events` and `DiveEvents` is deduplicated here and appears twice there. A gas switch recorded
+  under `Events` rather than `DiveEvents` is invisible to this parser's Ocean cylinder
+  reconstruction and read there. A pressure channel for a slot the cylinder list does not name is
+  emitted here and suppressed there. An alarm label is truncated to 120 characters here and carried
+  whole there, and the event list is capped at 200 here and uncapped there.
+- **`Header.DateTime` text.** Carried verbatim here and re-spelled into the one form spec §5.2 takes
+  there, so `"2026-01-01 10:00:00+0200"` becomes `"2026-01-01T10:00:00+02:00"`. A lowercase `z` is
+  worse than cosmetic here: `datetime.fromisoformat` raises, the failure is logged and swallowed,
+  and the cylinders are silently lost. All 35 corpus files are already canonical.
+- **Which files each will read at all.** `can_parse` requires a `.json` filename; the library's
+  sniff requires only a `{` head containing `"DeviceLog"`. A Suunto export under any other extension
+  is refused by `/dive/parse` and accepted by import.
+
+### What only one side has
+
+The library records `Device.Name` and `Device.Info.SW` as the converted document's
+`source_generator`, and emits a report — 35 identity notes, 23 "no gas mixture recorded", 4
+temperature-collision notes and 2 Null Island notes over the corpus. This parser has no equivalent
+field and writes two warnings to the application log. Neither reads `Header.Notes`,
+`Header.Altitude`, `Header.Activity`, `Header.Settings`, `Header.SampleInterval`,
+`Header.Ventilation`, `PauseDuration`, `Ascent`/`Descent`, `MaxDepthAverage` or `DiveTimeMax`, all
+of which the 19 Ocean files carry; both deliberately skip `DeviceInternalAbsPressure`, and for the
+same reason.
 
 **This list is a floor, not a census**, and it is written down because the failure mode is silent:
 nothing downstream compares the two readings, no test can see a difference that only shows up
 against a file neither corpus holds, and the first report will arrive as "the import got my tank
-pressure wrong". Add to it when you find another rather than reconciling one side to the other.
+pressure wrong". Add to it when you find another rather than reconciling one side to the other. Two
+candidates were investigated and **not** established as differences, which is worth recording so
+nobody re-derives them: the sample-fix coordinate rounding (six places ties-to-even on both sides,
+but binary float here and 28-digit decimal there — a last-digit divergence is possible in principle
+and none was produced), and a sample carrying both a `Latitude` and a `DiveRouteOrigin`, where the
+two read different members and select the same fix anyway.
 
 ## An `Integer` column's real bound is its width, and no `CheckConstraint` census can see one
 
