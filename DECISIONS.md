@@ -15022,6 +15022,13 @@ requires every one of them to name a single registered format, and converts them
 That case exists because a watch writes one file per dive: one file per import against a rate limit
 of twenty calls an hour, two calls per import, would cap a diver at ten dives an hour.
 
+**A zip with no members at all is not recognised as a zip, and both sides agree.** `PK\x03\x04` is
+the *local file header*, so an archive with nothing in it starts `PK\x05\x06` — this module's sniff
+does not claim it and neither does the library's, and it comes back as the general 415 rather than
+as a container refusal. A zip holding only a directory entry and a `__MACOSX` shadow tree *is*
+claimed, and the converter's "no files to convert" is what a diver gets. Worth pinning because the
+two paths reach the same answer by different routes.
+
 **Three refusals moved, and every one of them was for bytes that never claimed to be DiveJSON.** A
 `.txt` or a CSV is 415 naming the formats, where it used to be the 422 above. A non-UTF-8 body is
 the same 415 unless a reader claimed it — a FIT is claimed by the sniffer first. And a zip with no
@@ -15062,6 +15069,14 @@ build has never seen can arrive between one deploy and the next. Typed as an enu
 on a logbook that read perfectly. `formats_this_build_reads()` has the same shape one level up: it
 is derived from `divejson.read_formats()` on every call, and a format id past its label table falls
 back to the id, so the sentence a diver reads gets terser rather than wrong.
+
+That list is deliberately **not** appended to the container 415, which is the one message here that
+is mostly the library's own. `UnsupportedSourceError` reaches the route for three different
+container cases — an empty archive, a member no reader claims, an archive mixing two formats — and
+the exception type cannot tell them apart, while each of the three says something more useful than a
+list of formats would. The one case that wants the list already carries the registry's own names, so
+appending ours would print the same list twice in two spellings. The cost is that this single 415
+names formats as registry ids where every other one uses labels.
 
 Rejected: a second route family beside the old one, chosen by extension in the browser — it
 duplicates `_load`, the rate limit, the token check and the cache invalidations, and hands the

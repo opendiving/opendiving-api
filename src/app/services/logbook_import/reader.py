@@ -512,10 +512,14 @@ def _convert_source(buffer: IO[bytes], *, source_format: str | None) -> tuple[Im
             f"{MAX_DOCUMENT_SIZE // (1024 * 1024)} MB. Split it and import the parts. ({exc})"
         ) from exc
     except UnsupportedSourceError as exc:
-        raise UnsupportedImportError(
-            f"{exc}. An archive of dive-computer files is read as one logbook, so every file in it has to be one "
-            f"format, and this app reads: {formats_this_build_reads()}."
-        ) from exc
+        # The converter's own sentence, prefixed rather than replaced. It reaches here for
+        # three container cases - an empty archive, a member no reader claims, an archive
+        # mixing two formats - and the api cannot tell them apart from the exception type,
+        # while each of the three says something more useful than a list of formats would.
+        # The one that *wants* the list carries the registry's own names already, which is
+        # why this deliberately does not append `formats_this_build_reads()`: the same list
+        # twice, spelled two ways, is worse than the library's spelling of it once.
+        raise UnsupportedImportError(f"This archive is not one logbook this app can read - {exc}.") from exc
     except NonConformingOutputError as exc:
         # A converter bug, not a diver's file: the library validates its own output and this
         # is it saying no. Logged with a traceback because nobody else will see it, and 422

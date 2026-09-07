@@ -294,7 +294,39 @@ class TestTheFormatsItAccepts:
         response = client.post(PREVIEW_PATH, files=_files(payload, "notes.zip"))
 
         assert response.status_code == 415
-        assert reader.formats_this_build_reads() in response.json()["detail"]
+        # The converter's own sentence for this case carries the registry's names, so this
+        # is the one 415 whose list is spelled in format ids rather than in labels.
+        detail = response.json()["detail"]
+        assert all(fmt in detail for fmt in divejson.read_formats())
+
+    def test_a_zip_holding_only_packaging_is_415(self, signed_in: Any, client: TestClient) -> None:
+        """A folder zipped on a Mac with nothing in it: a directory entry and the `__MACOSX`
+        shadow tree, neither of which is a file to convert. Not a format problem, so the
+        message is the converter's reason rather than a list of formats."""
+        payload = _zip({"logbooks/": b"", "__MACOSX/._logbooks": b"x"})
+        response = client.post(PREVIEW_PATH, files=_files(payload, "logbooks.zip"))
+
+        assert response.status_code == 415
+        assert "no files to convert" in response.json()["detail"]
+
+    def test_a_zip_with_no_members_at_all_is_not_even_a_zip(self, signed_in: Any, client: TestClient) -> None:
+        """`PK\x03\x04` is the *local file header*, so an archive with no members does not
+        carry it - and neither this module's sniff nor the library's claims one. The answer
+        is the general 415 rather than a container refusal, and the two agree about it,
+        which is the part worth pinning.
+        """
+        response = client.post(PREVIEW_PATH, files=_files(_zip({}), "empty.zip"))
+
+        assert response.status_code == 415
+        assert "not a logbook this app can read" in response.json()["detail"]
+
+    def test_a_zip_mixing_two_formats_is_415(self, signed_in: Any, client: TestClient) -> None:
+        """An archive is one logbook, so its files have to be one format - otherwise the
+        positional identities of two readers' records would share one document."""
+        response = client.post(PREVIEW_PATH, files=_files(_zip({"a.uddf": _uddf(), "b.ssrf": SSRF}), "mixed.zip"))
+
+        assert response.status_code == 415
+        assert "one format" in response.json()["detail"]
 
     def test_a_file_no_reader_claims_is_415_naming_the_formats(self, signed_in: Any, client: TestClient) -> None:
         """A 415 rather than the 422 it used to get. "This DiveJSON document is not valid
