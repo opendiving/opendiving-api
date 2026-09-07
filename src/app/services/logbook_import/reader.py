@@ -168,10 +168,10 @@ def parse_document(text: str | bytes) -> Any:
     Member order survives into the parsed dict, which is what lets a caller check the
     `format`/`version` rule without re-reading the text.
 
-    `tests/helpers/divejson.py` re-exports this rather than carrying its own copy: it is
-    the one piece of that validator port with a reader on the request path, and two
-    spellings of "reject a repeated member" is precisely the two-shapes-for-one-fact
-    problem the format's own supersession decision rejects.
+    The app's own rather than `divejson.parse_document`, which is the same rule and takes
+    `str` where an upload arrives as bytes. The duplicate-member refusal is the one §9 rule
+    the importer has to enforce itself: `json` keeps the last value silently, so a document
+    with two `max_depth` members has no reading a parser can pick honestly.
     """
     return json.loads(text, object_pairs_hook=_reject_duplicate_members)
 

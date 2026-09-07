@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import divejson
 import pytest
 import pytest_asyncio
 from fastapi import UploadFile
@@ -65,13 +66,13 @@ from src.app.services.logbook_import import (
     ImportTooLargeError,
     UnsupportedImportError,
     load_import,
+    parse_document,
     plan_import,
     write_import,
 )
 from src.app.services.logbook_import.planner import _DIVE_BOUNDS, _MIXTURE_BOUNDS
 from src.app.services.logbook_import.reader import DuplicateMemberError, MalformedImportError
 from tests.conftest import db_available
-from tests.helpers.divejson import SCHEMA_PATH, assert_conforms, parse_document
 from tests.helpers.generators import (
     create_certification,
     create_course,
@@ -130,7 +131,7 @@ async def _preview(db: AsyncSession, user_id: int, data: bytes, filename: str = 
 
 
 async def _apply(db: AsyncSession, user_id: int, data: bytes, filename: str = "logbook.divejson") -> Any:
-    """Plan and write in one transaction, exactly as `POST /import/divejson` does.
+    """Plan and write in one transaction, exactly as `POST /import/logbook` does.
 
     The species pre-pass is deliberately absent: it makes an outbound call, and every
     species in these tests is either already in the catalog or meant to be reported as
@@ -240,7 +241,8 @@ class TestTheRoundTrip:
         await _apply(async_db, destination.id, document)
 
         re_exported = parse_document(await _export(async_db, destination.id))
-        assert_conforms(re_exported)
+        issues = divejson.validate_document(re_exported)
+        assert not issues, [str(issue) for issue in issues]
 
         original = parse_document(document)
         for collection in ("dives", "trips", "sites", "gear", "gear_sets", "certifications"):
@@ -845,7 +847,8 @@ class TestTheOffsetUnknownState:
 
         re_exported = parse_document(await _export(async_db, destination.id))
         assert re_exported["dives"][0]["started_at"] == "2026-04-17T11:49:23"
-        assert_conforms(re_exported)
+        issues = divejson.validate_document(re_exported)
+        assert not issues, [str(issue) for issue in issues]
 
     @pytest.mark.asyncio
     async def test_the_column_readers_do_not_fault_on_it(
@@ -1904,7 +1907,7 @@ class TestTheAgencyVocabulary:
         """A REQUIRED member of a vocabulary the format freezes at 1.0 (spec §§6.16, 7), so
         laundering five real agencies through `other` would have made a round trip lossy on
         the one member the format guarantees cannot grow."""
-        schema = json.loads((SCHEMA_PATH).read_text(encoding="utf-8"))
+        schema = divejson.load_schema()
         published = schema["$defs"]["certification"]["properties"]["agency"]["enum"]
 
         assert [member.value for member in CertificationAgency] == published

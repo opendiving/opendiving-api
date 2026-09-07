@@ -65,7 +65,10 @@ dev = [
     # (tests/fixtures/uddf/) in tests only - the runtime writer builds its XML with the
     # stdlib and never validates.
     "xmlschema>=3.0.0",
-    "jsonschema>=4.25.0",
+    # `jsonschema` is deliberately absent: the vendored schema and the port of the
+    # reference validator that needed it are gone, and `divejson` - a main dependency
+    # since the importer converts on the request path - brings it in for the tests that
+    # call `divejson.validate_document`.
 ]
 
 [build-system]

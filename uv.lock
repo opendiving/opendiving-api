@@ -999,7 +999,6 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "faker" },
-    { name = "jsonschema" },
     { name = "mdformat" },
     { name = "mdformat-gfm" },
     { name = "mypy" },
@@ -1035,7 +1034,6 @@ requires-dist = [
     { name = "gunicorn", specifier = ">=23.0.0" },
     { name = "httptools", specifier = ">=0.6.1" },
     { name = "httpx", specifier = ">=0.26.0" },
-    { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.25.0" },
     { name = "mdformat", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "mdformat-gfm", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },

@@ -62,10 +62,10 @@ class TokenType(StrEnum):
     # `verify_dive_file_token` below, and `PUT /dive/{uuid}/file`. Carries no authority;
     # the upload route still checks that the caller owns the dive.
     DIVE_FILE = "dive_file"
-    # The same kind of receipt for a whole logbook: `POST /import/divejson/preview` read
+    # The same kind of receipt for a whole logbook: `POST /import/logbook/preview` read
     # these bytes for this user and reported what importing them would do - see
     # `create_logbook_import_token`/`verify_logbook_import_token`, and
-    # `POST /import/divejson`. Its own member rather than a reused `DIVE_FILE` so a parse
+    # `POST /import/logbook`. Its own member rather than a reused `DIVE_FILE` so a parse
     # receipt cannot be spent at the import endpoint or the other way round.
     LOGBOOK_IMPORT = "logbook_import"
 
@@ -674,10 +674,10 @@ def verify_dive_file_token(token: str) -> DiveFileTokenData | None:
 
 # -------------- logbook import tokens --------------
 def create_logbook_import_token(*, user_uuid: uuid_pkg.UUID, sha256: str) -> str:
-    """Mints the receipt `POST /import/divejson/preview` hands back with its report.
+    """Mints the receipt `POST /import/logbook/preview` hands back with its report.
 
     Binds two things: who was shown the report, and exactly which bytes it was a report
-    *about*. `POST /import/divejson` re-hashes the body it receives and refuses a mismatch,
+    *about*. `POST /import/logbook` re-hashes the body it receives and refuses a mismatch,
     so the file a diver approves is the file that gets imported - the shape
     `create_dive_file_token` already uses for the parse-then-attach pair, minus its
     `parser_key`, which has no counterpart here.

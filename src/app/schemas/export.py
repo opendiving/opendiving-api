@@ -5,8 +5,10 @@ this project maintains (<https://divejson.org>, repository of record
 <https://github.com/divejson/divejson>), and its specification - not this module - is the
 normative statement of the shape. What lives here is the writer's half of the
 reference implementation: every member below is defined in `spec/divejson.md` §§4-6, and
-the JSON Schema vendored at `tests/fixtures/divejson/` plus the beyond-schema rules in
-that spec's §3 are what `tests/test_export_json.py` holds this to.
+the JSON Schema the `divejson` package publishes plus the beyond-schema rules in that
+spec's §3 are what `tests/test_export_json.py` holds this to, through
+`divejson.validate_document` - the reference validator itself, no longer a copy of it kept
+in this repository.
 
 It replaced the app's own `opendiving-export` format rather than sitting beside it: two
 JSON shapes for one logbook is two things to keep in step forever, and the public one

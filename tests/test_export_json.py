@@ -3,11 +3,12 @@
 Three jobs, and they are not interchangeable.
 
 **Conformance.** The app claims to be DiveJSON's reference implementation, so the streamed
-bytes are checked against the vendored JSON Schema *and* against the rules spec §3 says
+bytes are checked against the published JSON Schema *and* against the rules spec §3 says
 the schema cannot express - identifier closure, cross-member arithmetic, profile-series
-integrity, the `exported_at` offset, the member order. `tests/helpers/divejson.py` is that
-whole rule set, ported from the reference validator; a schema-only check would pass
-documents `divejson validate` rejects, which is not a hypothetical (see that module).
+integrity, the `exported_at` offset, the member order. `divejson.validate_document` is that
+whole rule set, from the reference implementation itself rather than a port of it; a
+schema-only check would pass documents `divejson validate` rejects, which is not a
+hypothetical (see `test_the_checker_is_not_vacuous`).
 
 **The declared shape.** `envelope.py` streams the file a record at a time rather than
 serializing an `ExportEnvelope`, so the declared shape is *not* on the write path and
@@ -24,13 +25,14 @@ import json
 from typing import Any
 from unittest.mock import AsyncMock
 
+import divejson
 import pytest
 
 from src.app.schemas.export import DIVEJSON_FORMAT, DIVEJSON_VERSION, ExportCourse, ExportEnvelope
 from src.app.services.dive_profiles import LoadedProfile
 from src.app.services.export.envelope import write_divejson
 from src.app.services.export.paths import plan_archive_paths
-from tests.helpers.divejson import assert_conforms, conformance_issues, parse_document
+from src.app.services.logbook_import import parse_document
 from tests.helpers.export import (
     EXPORTED_AT,
     TRIMIX_PROFILE,
@@ -74,6 +76,16 @@ async def _render(
     return document
 
 
+def _issues(document: Any) -> list[str]:
+    """Every way `document` fails DiveJSON 1.0, exactly as `divejson validate` reports it."""
+    return [str(issue) for issue in divejson.validate_document(document)]
+
+
+def _assert_conforms(document: Any) -> None:
+    issues = _issues(document)
+    assert not issues, "document is not conforming DiveJSON:\n" + "\n".join(issues)
+
+
 def _nulls(value: Any, path: str = "$") -> list[str]:
     """Every path in the document holding an explicit null."""
     if value is None:
@@ -91,13 +103,13 @@ class TestConformance:
 
     @pytest.mark.asyncio
     async def test_the_awkward_case_logbook_is_a_conforming_divejson_document(self, monkeypatch):
-        assert_conforms(await _render(full_bundle(), monkeypatch, {2: TRIMIX_PROFILE}))
+        _assert_conforms(await _render(full_bundle(), monkeypatch, {2: TRIMIX_PROFILE}))
 
     @pytest.mark.asyncio
     async def test_an_empty_logbook_is_a_conforming_document_too(self, monkeypatch):
         """The floor case: a fresh account with nothing in it still exports something a
         reader can dispatch on."""
-        assert_conforms(await _render(build_bundle(), monkeypatch))
+        _assert_conforms(await _render(build_bundle(), monkeypatch))
 
     @pytest.mark.asyncio
     async def test_an_archive_layout_stays_conforming(self, monkeypatch):
@@ -105,7 +117,7 @@ class TestConformance:
         own constraints (spec §6.7 and Appendix A)."""
         bundle = full_bundle()
         document = await _render(bundle, monkeypatch, {2: TRIMIX_PROFILE}, paths=plan_archive_paths(bundle))
-        assert_conforms(document)
+        _assert_conforms(document)
 
     @pytest.mark.asyncio
     async def test_the_checker_is_not_vacuous(self, monkeypatch):
@@ -115,27 +127,27 @@ class TestConformance:
 
         broken = json.loads(json.dumps(document))
         broken["dives"][0]["avg_depth"] = broken["dives"][0]["max_depth"] + 1
-        assert any("avg_depth exceeds max_depth" in issue for issue in conformance_issues(broken))
+        assert any("avg_depth exceeds max_depth" in issue for issue in _issues(broken))
 
         broken = json.loads(json.dumps(document))
         broken["dives"][0]["site_uuids"] = ["019f0000-0000-7000-8000-000000000099"]
-        assert any("not present in sites" in issue for issue in conformance_issues(broken))
+        assert any("not present in sites" in issue for issue in _issues(broken))
 
         broken = json.loads(json.dumps(document))
         broken["dives"][1]["profile"]["depth"]["values"].append(1)
-        assert any("samples but values has" in issue for issue in conformance_issues(broken))
+        assert any("samples but values has" in issue for issue in _issues(broken))
 
         broken = json.loads(json.dumps(document))
         broken["exported_at"] = broken["exported_at"].replace("+00:00", "")
-        assert any("must carry a UTC offset" in issue for issue in conformance_issues(broken))
+        assert any("must carry a UTC offset" in issue for issue in _issues(broken))
 
         broken = {"version": document["version"], **document}
         del broken["format"]
-        assert any('"format" MUST come first' in issue for issue in conformance_issues(broken))
+        assert any('"format" MUST come first' in issue for issue in _issues(broken))
 
         broken = json.loads(json.dumps(document))
         broken["dives"][0]["mixtures"] = []
-        assert any("Additional properties" in issue for issue in conformance_issues(broken))
+        assert any("Additional properties" in issue for issue in _issues(broken))
 
     @pytest.mark.asyncio
     async def test_the_document_holds_no_explicit_nulls(self, monkeypatch):
@@ -165,7 +177,7 @@ class TestConformance:
 
         assert document["dives"][1]["profile"]["duration"] == 60
         assert document["dives"][1]["profile"]["events"] == [{"time": 95, "type": "bookmark"}]
-        assert conformance_issues(document) == []
+        assert _issues(document) == []
 
 
 class TestTheDeclaredShape:
@@ -304,7 +316,7 @@ class TestWhatUddfCannotHold:
 
         cylinder = document["dives"][0]["cylinders"][0]
         assert cylinder == {"start_pressure": 200.0}
-        assert_conforms(await _render(bundle, monkeypatch))
+        _assert_conforms(await _render(bundle, monkeypatch))
 
     @pytest.mark.asyncio
     async def test_multi_site_visit_order_is_a_list_not_a_primary_site(self, monkeypatch):
