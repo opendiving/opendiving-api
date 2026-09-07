@@ -326,6 +326,33 @@ class TestTheFormatsItAccepts:
         assert response.status_code == 422
         assert "not valid JSON" in response.json()["detail"]
 
+    def test_a_bare_document_over_the_document_cap_is_413(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        """The upload is admitted against the archive cap because nothing says which shape it
+        is until the zip sniff. Anything but a container then gets the smaller one."""
+        monkeypatch.setattr(reader, "MAX_DOCUMENT_SIZE", 8)
+        response = client.post(PREVIEW_PATH, files=_files())
+
+        assert response.status_code == 413
+        assert "logbook document may be up to" in response.json()["detail"]
+
+    def test_a_document_that_claims_json_and_is_not_utf8_is_422(self, signed_in: Any, client: TestClient) -> None:
+        """It opened `{`, so it claimed to be a document - the same reason a truncated one
+        keeps its 422 rather than being told the app does not recognise its own format."""
+        response = client.post(PREVIEW_PATH, files=_files(b'{"generator": "\xff\xfe"}'))
+
+        assert response.status_code == 422
+        assert "not UTF-8 text" in response.json()["detail"]
+
+    def test_a_byte_order_mark_does_not_hide_the_json_claim(self, signed_in: Any, client: TestClient) -> None:
+        """A BOM in front of `{` is still a document claiming to be one, and Windows editors
+        write them."""
+        response = client.post(PREVIEW_PATH, files=_files(b"\xef\xbb\xbf" + MINIMAL[: len(MINIMAL) // 2]))
+
+        assert response.status_code == 422
+        assert "not valid JSON" in response.json()["detail"]
+
     def test_a_zip_with_more_members_than_one_import_reads_is_413(
         self, signed_in: Any, client: TestClient, monkeypatch: Any
     ) -> None:
@@ -347,6 +374,66 @@ class TestTheFormatsItAccepts:
         response = client.post(PREVIEW_PATH, files=_files(_zip({"dive-1.uddf": _uddf()}), "watch-export.zip"))
 
         assert response.status_code == 413
+
+
+class TestWhenTheConversionFails:
+    """A reader claimed the bytes and could not read them: 422 with the converter's own
+    sentence, never a 500. The endpoint's whole contract is a 415/422/413 taxonomy, and the
+    registry can grow an error class this build has never heard of at any pin bump - so the
+    last arm is a bare `ConverterError`.
+    """
+
+    def test_a_malformed_source_document_is_422(self, signed_in: Any, client: TestClient) -> None:
+        truncated = (
+            b'<?xml version="1.0"?>\n<uddf xmlns="http://www.streit.cc/uddf/3.2/" version="3.2.2">\n<generator>\n'
+        )
+        response = client.post(PREVIEW_PATH, files=_files(truncated, "dives.uddf"))
+
+        assert response.status_code == 422
+        assert "could not be converted" in response.json()["detail"]
+
+    def test_a_doctype_is_refused_as_422(self, signed_in: Any, client: TestClient) -> None:
+        """The converter refuses a `<!DOCTYPE>` outright rather than expanding it, which is
+        the entity-expansion guard this app already keeps on its own XML parsers."""
+        payload = (
+            b'<?xml version="1.0"?>\n<!DOCTYPE uddf [<!ENTITY x "y">]>\n'
+            b'<uddf xmlns="http://www.streit.cc/uddf/3.2/" version="3.2.2">'
+            b"<generator><name>x</name></generator></uddf>\n"
+        )
+        response = client.post(PREVIEW_PATH, files=_files(payload, "dives.uddf"))
+
+        assert response.status_code == 422
+        assert "DOCTYPE" in response.json()["detail"]
+
+    def test_a_converter_that_writes_a_non_conforming_document_is_422(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        """A bug in the converter rather than anything wrong with the file, so the message
+        says so and the traceback goes to the log where somebody can act on it."""
+
+        def refuse(buffer: Any, *, source_format: str | None) -> Any:
+            raise divejson.NonConformingOutputError("$: something the writer should not have emitted")
+
+        monkeypatch.setattr(reader, "_convert", refuse)
+        response = client.post(PREVIEW_PATH, files=_files(SSRF, "logbook.ssrf"))
+
+        assert response.status_code == 422
+        assert "bug in the converter" in response.json()["detail"]
+
+    def test_a_converted_document_this_app_cannot_read_is_422(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        """The second backstop: the library validated its output against the format and this
+        app's own envelope still refused it. Also not a 500."""
+
+        def wrong_shape(buffer: Any, *, source_format: str | None) -> Any:
+            return divejson.Conversion({"format": "uddf", "version": "3.2.2"}, ())
+
+        monkeypatch.setattr(reader, "_convert", wrong_shape)
+        response = client.post(PREVIEW_PATH, files=_files(SSRF, "logbook.ssrf"))
+
+        assert response.status_code == 422
+        assert "bug in the converter" in response.json()["detail"]
 
 
 class TestTheConversionReport:
