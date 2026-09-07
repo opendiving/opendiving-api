@@ -93,12 +93,13 @@ MAX_ARCHIVE_SIZE = 500 * 1024 * 1024  # 500 MB
 # whose documents deflate well while refusing anything shaped like a bomb.
 MAX_ARCHIVE_EXTRACTED_SIZE = 2 * MAX_ARCHIVE_SIZE
 
-# The most files a zip of one source format may hold. A watch writes one FIT per dive and
-# a vendor's account export is a zip of them, so this is a dive count rather than a file
-# count: a career of five thousand dives goes in one upload, and anything past it is asked
-# to come in parts. The library refuses off the central directory, before it inflates
-# anything, and it reads a `SNIFF_BYTES` head per member to decide the format - so the cap
-# also bounds that walk.
+# The most files a zip of one source format may hold. This bounds the *walk* rather than the
+# bytes: the library reads a `SNIFF_BYTES` head per member off the central directory to
+# decide its format, so an archive of half a million tiny files is a lot of work inside one
+# request even when it fits under the size bound below. It is deliberately not a promise
+# about how many dives go in one upload - `_refuse_oversized_source` is what a real
+# dive-computer export meets first, and at 30 KB a FIT file that is a few thousand of them.
+# The library refuses off the directory listing, before it inflates anything.
 #
 # What one such member may declare is `MAX_DOCUMENT_SIZE` rather than a fourth number: a
 # member *is* a logbook document in some other format, materialized whole by whichever
@@ -357,8 +358,10 @@ def _refuse_oversized_source(archive: zipfile.ZipFile) -> None:
     """
     declared = sum(info.file_size for info in archive.infolist())
     if declared > MAX_DOCUMENT_SIZE:
+        # Rounded *up*, as `_spool_upload` rounds its own: floored, an archive one byte over
+        # the cap reports the cap back at itself and reads as a refusal for no reason.
         raise ImportTooLargeError(
-            f"This archive holds {declared // (1024 * 1024)} MB of logbooks uncompressed, and at most "
+            f"This archive holds {-(-declared // (1024 * 1024))} MB of logbooks uncompressed, and at most "
             f"{MAX_DOCUMENT_SIZE // (1024 * 1024)} MB are converted in one import. Split it and import the parts."
         )
 
@@ -552,9 +555,13 @@ async def _convert_source(
     try:
         conversion = await run_in_threadpool(_convert, buffer, source_format=source_format)
     except SourceTooLargeError as exc:
+        # The converter's own sentence again, and for the same reason as the 415 below: it
+        # names which of its bounds fired, and restating them here would let this message
+        # claim a cause that cannot be one. `max_member_size` is the case in point - the sum
+        # check upstream already bounds it, so a per-member refusal is unreachable, and a
+        # message asserting it would send a diver looking for one huge file.
         raise ImportTooLargeError(
-            f"This archive is past what one import reads: at most {MAX_ARCHIVE_MEMBERS} files, each of them under "
-            f"{MAX_DOCUMENT_SIZE // (1024 * 1024)} MB. Split it and import the parts. ({exc})"
+            f"This archive is past what one import reads - {exc}. Split it and import the parts."
         ) from exc
     except UnsupportedSourceError as exc:
         # The converter's own sentence, prefixed rather than replaced. It reaches here for

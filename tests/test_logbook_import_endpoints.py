@@ -396,7 +396,10 @@ class TestTheFormatsItAccepts:
         response = client.post(PREVIEW_PATH, files=_files(payload, "watch-export.zip"))
 
         assert response.status_code == 413
-        assert "at most 1 files" in response.json()["detail"]
+        # The converter's own sentence, which names the bound that fired - the api's wrapper
+        # deliberately restates none of them, so that no message can claim a cause that
+        # cannot be one.
+        assert "at most 1" in response.json()["detail"]
 
     def test_a_zip_whose_members_sum_past_the_document_cap_is_413(
         self, signed_in: Any, client: TestClient, monkeypatch: Any
@@ -413,6 +416,18 @@ class TestTheFormatsItAccepts:
 
         assert response.status_code == 413
         assert "converted in one import" in response.json()["detail"]
+
+    def test_the_size_it_reports_is_rounded_up(self, signed_in: Any, client: TestClient, monkeypatch: Any) -> None:
+        """Floored, an archive a byte over the cap reports the cap back at itself - "holds
+        100 MB, and at most 100 MB are converted" - which reads as a refusal for no reason.
+        `_spool_upload` already rounds its own figure up."""
+        monkeypatch.setattr(reader, "MAX_DOCUMENT_SIZE", 1024 * 1024)
+        payload = _zip({"dive-1.uddf": _uddf(), "pad.uddf": b"x" * (1024 * 1024)})
+
+        detail = client.post(PREVIEW_PATH, files=_files(payload, "watch-export.zip")).json()["detail"]
+
+        assert "holds 2 MB" in detail
+        assert "at most 1 MB" in detail
 
     def test_the_sum_is_checked_before_a_member_is_read(
         self, signed_in: Any, client: TestClient, monkeypatch: Any
