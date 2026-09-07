@@ -124,13 +124,15 @@ def _gas_switches(root: ET.Element) -> list[ParsedProfileEvent]:
     **`<Marks>` is deliberately not read**, though it is the only other event-shaped block
     in the format and the obvious candidate for bookmarks and stops. Its `<Type>` is an
     undocumented numeric code, and the corpus says plainly that it cannot be guessed: 29
-    distinct values across 4 068 marks, of which the two most common (`257` and `19`) appear
-    in **all 384** exports at about 1.3 per dive, which is not what a diver-pressed bookmark
-    looks like. `<Heading>` is nil on 4 068 of them. Mapping `276`/`277` onto "deep stop
-    entered/left" would be the same mistake as reading `<Type>1</Type>` on a `<DiveMixture>`
-    as a gas role - a confident label over a number nobody has decoded. The JSON export of
-    these same dives spells its events out in words (`"Deep Stop"`, `"Ceiling Broken"`), so
-    a diver who wants them has a file that says so; this one does not.
+    distinct values across 4 095 marks. The two that appear in **all 384** exports - `257`
+    and `19`, 503 each, about 1.3 per dive - are not what a diver-pressed bookmark looks
+    like, and they are not even the commonest: that is `262` at 739 and `261` at 658,
+    neither of which reaches every export. `<Heading>` is nil on 4 068 of the 4 095.
+    Mapping `276`/`277` onto "deep stop entered/left" would be the same mistake as reading
+    `<Type>1</Type>` on a `<DiveMixture>` as a gas role - a confident label over a number
+    nobody has decoded. The JSON export of these same dives spells its events out in words
+    (`"Deep Stop"`, `"Ceiling Broken"`), so a diver who wants them has a file that says so;
+    this one does not.
     """
     switches: list[ParsedProfileEvent] = []
     for gas_number, mix in enumerate(root.findall(f"{_tag('DiveMixtures')}/{_tag('DiveMixture')}"), start=1):
