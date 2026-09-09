@@ -371,10 +371,12 @@ class TestSuuntoXmlParserParse:
         assert parsed.max_depth == 25.5
         assert parsed.start_time == "2024-05-01T09:00:00"
 
-    def test_ignores_the_computers_own_dive_counter(self):
+    def test_the_computers_own_counter_is_not_the_dives_number(self):
         """`DiveNumberInSerie` is the device's counter, which restarts on a new or
-        factory-reset computer - importing it would stamp a #5 onto a diver's 300th dive.
-        The number comes from the dive's date instead (`services/dive_numbering.py`)."""
+        factory-reset computer - importing it as the dive's would stamp a #5 onto a diver's
+        300th dive. The dive's number comes from its date instead
+        (`services/dive_numbering.py`). The counter itself is not discarded - it is read
+        onto `device.dive_number`, which `TestParsersReportTheDevice` covers."""
         assert "<DiveNumberInSerie>5</DiveNumberInSerie>" in VALID_SUUNTO_XML
 
         assert SuuntoXmlParser.parse(VALID_SUUNTO_XML.encode()).dive_number is None
@@ -927,10 +929,12 @@ class TestFitParserParse:
 
         assert FitParser.parse(content).start_time == "2026-04-17T09:49:23+00:00"
 
-    def test_never_imports_the_computer_s_dive_number(self):
+    def test_the_computers_own_counter_is_not_the_dives_number(self):
         """`session.dive_number` counts dives on *that device*, not in the diver's log:
         it restarts at 1 after a factory reset or a new computer. The corpus shows it
-        outright - a D5 reporting `dive_number` 5 for a dive the diver labelled "#28"."""
+        outright - a D5 reporting `dive_number` 5 for a dive the diver labelled "#28". It
+        is read onto `device.dive_number` rather than thrown away, which
+        `TestParsersReportTheDevice` covers."""
         content = dive_fit_file(dive_number=5)
 
         assert FitParser.parse(content).dive_number is None
