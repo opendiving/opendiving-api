@@ -1948,10 +1948,21 @@ class TestParsersReportTheDevice:
     def test_creating_a_dive_still_forbids_the_member(self):
         """The device is a fact about a file, not a field of the logbook entry, and there is
         nowhere to put one yet. `DiveCreate` is `extra="forbid"`, so a client echoing the
-        parse response straight back gets a 422 rather than a silently dropped member."""
+        parse response straight back gets a 422 rather than a silently dropped member.
+
+        The body is otherwise complete, and the error type is asserted rather than the bare
+        raise: `DiveCreate` has three required fields, so a payload that omits any of them
+        raises whether or not the extra member was rejected, and the test would pass with
+        `extra="forbid"` removed.
+        """
         assert "device" not in DiveCreate.model_fields
-        with pytest.raises(ValidationError):
-            DiveCreate(start_time="2026-04-17T11:49:23+02:00", device={"manufacturer": "Suunto"})
+        valid = {"dive_number": 1, "duration": 1800, "start_time": "2026-04-17T11:49:23+02:00"}
+        assert DiveCreate(**valid).dive_number == 1
+
+        with pytest.raises(ValidationError) as raised:
+            DiveCreate(**valid, device={"manufacturer": "Suunto"})
+
+        assert [(error["type"], error["loc"]) for error in raised.value.errors()] == [("extra_forbidden", ("device",))]
 
 
 class TestTechScalars:

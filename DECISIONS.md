@@ -4401,11 +4401,10 @@ prefilled form cannot hand it back, and there is no column behind any of the six
 source file, and identical bytes are stored once per diver"*), which is the assumption that made the
 provenance question easy: the file *is* the dive's record, `parser_key` and `sha256` say enough
 about it, and nothing needed to know what wrote it. A logbook that can hold two records of one dive
-
-- a diver on two computers, a computer whose export came in twice - cannot get by on that. The only
-  thing distinguishing one record from another is the device, and the only thing that reliably
-  distinguishes two devices is a serial. A start time does not: two computers on one diver start
-  within seconds of each other. Nor does a model: two Perdix 3s are two devices.
+(a diver on two computers, or a computer whose export came in twice) cannot get by on that. The only
+thing distinguishing one record from another is the device, and the only thing that reliably
+distinguishes two devices is a serial. A start time does not: two computers on one diver start
+within seconds of each other. Nor does a model: two Perdix 3s are two devices.
 
 So a serial is not a field this reports because the format has one. It is the field the question
 "are these two files the same record, or one dive recorded twice?" turns on, and reading it now is
