@@ -182,6 +182,98 @@ class DiveMixtureSchema(_ParserOutput):
         return None if value is not None and not (0.4 <= value <= 2.0) else value
 
 
+class ParsedDevice(_ParserOutput):
+    """The computer that recorded a dive, as its own export names it.
+
+    Every member is nullable on `DiveMixtureSchema`'s terms - `None` means "the file did
+    not say", never a stand-in for something it didn't - and a device carrying no member
+    at all is not a device: `ParsedDiveSchema._drop_empty_device` nulls the whole object
+    rather than reporting one that describes nothing.
+
+    **`name` is not `model`.** `name` is what the computer calls itself and its owner may
+    set: the Suunto Ocean in the corpus answers `Porvoo` to `Header.Device.Name`, while
+    the same computer's FIT export names the model `Suunto Ocean` in
+    `file_id.product_name`. Folding the two together would either lose the model or claim
+    the diver named their computer after it.
+
+    Every field is defaulted, unlike `DiveMixtureSchema`'s undefaulted block, and for the
+    reason `water_type` is: no format carries all six, so each parser passes the subset
+    its format records and matching the stricter style would make every parse a
+    `ValidationError`. What each parser reads is documented on its own `_device`.
+
+    No length bound on any member, unlike the bounded readings on `ParsedDiveSchema`
+    below. Those mirror a `CHECK` on the column they land in; nothing stores a device yet,
+    so a cap here would be a rule no constraint mirrors and a second place to be wrong
+    when one is added.
+    """
+
+    manufacturer: str | None = None
+    model: str | None = None
+    serial: str | None = None
+    firmware: str | None = None
+    name: str | None = None
+    dive_number: int | None = None
+
+    @field_validator("manufacturer", "model", "serial", "firmware", "name", mode="before")
+    @classmethod
+    def _as_trimmed_text(cls, value: object) -> str | None:
+        """Whatever the file wrote, as the text an identity is - or nothing.
+
+        `mode="before"`, and it does two jobs each of the three parsers would otherwise do
+        for itself. **Coercion**, because one member arrives in several shapes: a FIT
+        `serial_number` is a `uint32z` and its `software_version` a `uint16` the profile
+        scales to a float, while `<SerialNumber>` and `Header.Device.SerialNumber` are
+        already text. One member, one type, decided once. **Trimming**, because an empty or
+        padded string is not an identity - `""` compares unequal to `None`, so a device
+        that named itself nothing would fail to match the same computer read out of
+        another export, which is the one comparison a device exists to support.
+
+        Anything else - a list, an object, a JSON `true`, a non-finite float - comes back
+        `None` on the `_drop_unpressurized` principle: a file with one unusable field is
+        still a file worth importing, and raising here would fail the whole upload over a
+        member no format is required to carry. `bool` is excluded before `int` because
+        `isinstance(True, int)` is true and a flag is not an identity.
+        """
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, float) and not math.isfinite(value):
+            # `str(float("nan"))` is `"nan"`, which would read as a serial. Caught here
+            # rather than by `_ParserOutput._drop_non_finite`, which runs after this and
+            # would be looking at the string by then.
+            return None
+        if isinstance(value, (int, float)):
+            value = str(value)
+        return value.strip() or None if isinstance(value, str) else None
+
+    @field_validator("dive_number", mode="before")
+    @classmethod
+    def _as_count(cls, value: object) -> int | None:
+        """The device's own counter as a whole number, where the file wrote one.
+
+        The mirror of `_as_trimmed_text`, `mode="before"` for the same reason: FIT decodes
+        `session.dive_number` to an `int`, `<DiveNumberInSerie>` has already been through
+        `int()`, and a JSON export can write any number at all. A float that is a whole
+        number is that number; anything else is not a count, and a file with an unusable
+        one is still a file worth importing.
+        """
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, float):
+            return int(value) if value.is_integer() else None
+        return value if isinstance(value, int) else None
+
+    @field_validator("dive_number")
+    @classmethod
+    def _drop_negative_dive_number(cls, value: int | None) -> int | None:
+        """A counter, but not a negative one.
+
+        `< 0`, not `<= 0`, and the same distinction `_drop_negative_gas_number` makes: a
+        computer that has recorded no dive yet counts 0, and telling that apart from "the
+        file didn't say" is why this member is nullable in the first place.
+        """
+        return None if value is not None and value < 0 else value
+
+
 class ParsedDiveSchema(_ParserOutput):
     avg_depth: float | None
     bottom_temperature: float | None
@@ -203,6 +295,15 @@ class ParsedDiveSchema(_ParserOutput):
     # for Suunto" true. No validator: the enum type is the guard, and the column has no
     # `CHECK` to mirror.
     water_type: WaterType | None = None
+
+    # What recorded the file, on the same all-nullable terms as everything else here. Not
+    # a form field and not a server-side write either, which makes it the first member on
+    # this schema that is neither: nothing stores a device yet, and this reports what the
+    # export said so that a caller holding two files of one dive can tell whether they
+    # came off the same computer. `POST /dive` still forbids the member - `DiveCreate` is
+    # `extra="forbid"` - so a prefilled form cannot hand it back as though a diver had
+    # typed it.
+    device: ParsedDevice | None = None
 
     # Oxygen exposure and surface pressure, on the same all-nullable terms as everything
     # above. These have no place on the dive *form* - they are the device's own
@@ -341,6 +442,23 @@ class ParsedDiveSchema(_ParserOutput):
             if (values[0] is None) != (values[1] is None) or values == (0.0, 0.0):
                 setattr(self, latitude, None)
                 setattr(self, longitude, None)
+        return self
+
+    @model_validator(mode="after")
+    def _drop_empty_device(self) -> Self:
+        """A device with nothing on it is not a device the file described.
+
+        Reachable only through `ParsedDevice`'s own field validators, which is why this
+        runs after them rather than instead of them: a parser that hands over five empty
+        strings and an unreadable counter has built an object of six `None`s, and
+        reporting that would tell a caller the export named a computer when it named
+        nothing at all. The same move `_drop_half_positions` makes above, and here rather
+        than in each parser for the same reason it is: a fourth parser inherits it.
+        """
+        if self.device is not None and all(
+            getattr(self.device, member) is None for member in ParsedDevice.model_fields
+        ):
+            self.device = None
         return self
 
 

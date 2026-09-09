@@ -1197,6 +1197,14 @@ already did (`header.get("DepthAverage", depth.get("Avg"))`)
 
 ## `ParsedDiveSchema`/`DiveMixtureSchema` trimmed to fields the backend models actually support
 
+**Superseded for three of the fields listed below**, and the rule itself no longer holds as stated.
+`serial_number`, `software` and `source` are read again - not as the flat dive fields removed here,
+but as `serial`, `firmware` and `model` on `ParsedDiveSchema.device`, which has no column behind it
+by design. See *"A parser reports what recorded the file"* for what changed and why "a direct `Dive`
+column equivalent, or it is dead weight" was the right test then and is not the whole test now. What
+came back is an identity for the recording device, grouped into an object of its own - not a second
+copy of the export's field set, and none of the other names struck out below.
+
 `ParsedDiveSchema` and `DiveMixtureSchema` (`schemas/parsed_dive.py`) originally mirrored the
 *source* export formats' full field sets (Suunto DM5 XML's algorithm/tissue-loading/CNS/OTU/CNS
 stats, PO2 set points, per-mixture gas-change events, per-sample depth/temperature profiles, etc.)
@@ -2931,6 +2939,15 @@ dives that already existed.
 
 ## A dive computer's own counter is not the diver's dive number
 
+**Superseded in one particular: the counter now has a home of its own.** Everything below still
+holds about `dive_number` on the *dive* - all three parsers leave it null, and the number still
+comes from `GET /dives/next-number`. What changed is that the counter is no longer discarded on the
+way past. `ParsedDiveSchema.device` carries a `ParsedDevice` whose `dive_number` is the device's own
+count, read from `<DiveNumberInSerie>`, `Header.Diving.NumberInSeries` and `session.dive_number`;
+see *"A parser reports what recorded the file"* below for why it is worth having. The two numbers
+are different quantities that happened to share a field, which is what made discarding the one the
+only safe thing to do with it, and giving it a name of its own is what stops that being true.
+
 `SuuntoXmlParser` used to import `DiveNumberInSerie` as `dive_number`, while `SuuntoJsonParser` left
 it null. The XML behaviour was the wrong one: that field is the *device's* counter, which starts at
 1 on a new or factory-reset computer and restarts again on the next one, so importing it stamps a #5
@@ -4372,6 +4389,86 @@ Both entry points decode the file in full. A FIT file is a stream whose `session
 *after* the samples it summarizes, so there is no cheap header-only read to be had - `parse()` pays
 for the whole pass either way, which is also what makes the coldest-sample temperature fallback
 free.
+
+## A parser reports what recorded the file
+
+`ParsedDiveSchema.device` is a `ParsedDevice` (`schemas/parsed_dive.py`): `manufacturer`, `model`,
+`serial`, `firmware`, `name` and `dive_number`, all nullable, and every parser fills what its format
+carries. Nothing stores it. `POST /dive/parse` returns it, `DiveCreate` is `extra="forbid"` so a
+prefilled form cannot hand it back, and there is no column behind any of the six.
+
+**Why read a serial at all.** A dive has had at most one source file (see *"A dive has at most one
+source file, and identical bytes are stored once per diver"*), which is the assumption that made the
+provenance question easy: the file *is* the dive's record, `parser_key` and `sha256` say enough
+about it, and nothing needed to know what wrote it. A logbook that can hold two records of one dive
+(a diver on two computers, or a computer whose export came in twice) cannot get by on that. The only
+thing distinguishing one record from another is the device, and the only thing that reliably
+distinguishes two devices is a serial. A start time does not: two computers on one diver start
+within seconds of each other. Nor does a model: two Perdix 3s are two devices.
+
+So a serial is not a field this reports because the format has one. It is the field the question
+"are these two files the same record, or one dive recorded twice?" turns on, and reading it now is
+what keeps that question answerable later.
+
+**This is the first thing a parser reports with no column behind it**, which is a real departure
+from *"`ParsedDiveSchema`/`DiveMixtureSchema` trimmed to fields the backend models actually
+support"* above - that section removed `serial_number`, `software` and `source` by name. The rule it
+set was "a direct `Dive` column equivalent, or it is dead weight", and it was right about those
+three at the time: they were flat strings on the dive, mirroring a source format's field set,
+answering no question anybody had. What they come back as is different in kind - an identity for the
+thing that recorded the file, grouped into an object that means something on its own - and the
+answer to "what downstream can use it?" is a caller comparing two parses, which needs no column to
+do.
+
+**Where each member comes from.** FIT: `file_id.manufacturer`; `file_id.product_name` and nothing
+behind it; the serial off the `device_info` whose `device_index` is 0, else `file_id.serial_number`;
+the `software_version` of the first `device_info` naming the file's own manufacturer; and
+`session.dive_number`. Suunto JSON: `Header.Device` (with the top-level `DeviceLog.Device` behind
+it) for `SerialNumber`, `Info.SW` and `Name`, plus `Header.Diving.NumberInSeries`. Suunto XML:
+`<Source>` as the model, `<SerialNumber>`, `<Software>` and `<DiveNumberInSerie>`. Both Suunto
+parsers fix the manufacturer as the literal `Suunto` rather than reading it, because neither format
+has an element for it and `can_parse` has already decided the question.
+
+Several things in that mapping are not obvious and each cost something to find:
+
+- **A FIT file with no `product_name` has no model, and `file_id.product` is not a substitute.** The
+  obvious fallback is wrong twice over. `product` is a *vendor id*, and `fitdecode` resolves it only
+  for the manufacturers the profile gives a subfield (`garmin_product`, `favero_product`), so a
+  Suunto's stays the bare integer `62` - the model on the corpus's Ocean, had it not written a
+  `product_name`, would have been the string `62`. And where a subfield does resolve it, what comes
+  back is a profile constant (`descent_mk2s`) rather than the vendor's own string, which would make
+  the member two different kinds of thing depending on who wrote the file. `divejson`'s reference
+  FIT reader declines it on the same grounds - `product_name` else the manufacturer, never
+  `product`. Its own fallback is not one here either: the manufacturer is a member of its own, so
+  falling back to it would report `suunto` twice and lose the fact that the file named no model.
+- **`device_index` has to be read raw.** The FIT profile keeps an enum in that slot
+  (`{0: 'creator'}`), so `fitdecode` renders the 0 as the string `creator` and a parser comparing
+  the decoded value to `0` matches nothing at all. `_native_raw` exists for exactly this shape - see
+  *"FIT is one parser for both vendors"* and the `message_index` bitfield it was written for.
+- **A `device_info` is not necessarily the computer.** A tank pod and a strap write one too. The
+  firmware is taken only from a message whose manufacturer matches the `file_id`'s, which is the
+  rule `divejson`'s own FIT reader applies, so that one file read by the two of them cannot describe
+  two different firmwares.
+- **`Name` in the Suunto JSON is a name, not a model.** The Ocean in the corpus answers `Porvoo` -
+  what its owner called it - while the same computer's FIT names the model `Suunto Ocean` in
+  `product_name`. The JSON export carries no model at all and the FIT no name, so the two shapes
+  fill different members and neither is back-derived from the other.
+- **The manufacturer's case differs by format and is kept as read.** A FIT decodes to the profile's
+  lowercase `suunto`; the Suunto parsers write the literal `Suunto`. Neither is normalised here - a
+  parser reports what the file said - so any comparison of two devices has to fold case itself.
+
+**An empty member is absent, and a device with no members is no device.** `ParsedDevice` trims every
+string and reads the empty result as `None`, because `""` compares unequal to `None` and a device
+that named itself nothing would fail to match the same computer read out of another export - the one
+comparison the object exists to support. `ParsedDiveSchema._drop_empty_device` then nulls the whole
+object when all six members are, on the same terms as `_drop_half_positions` beside it: a file that
+said nothing about what wrote it must not come back claiming it named a computer.
+
+**`dive_number` on the device is the computer's counter, and it is `>= 0`.** `0` is a real count - a
+computer that has recorded no dive yet writes it - so the guard is `< 0`, the same distinction
+`_drop_negative_gas_number` makes. The dive's own `dive_number` is still always null out of every
+parser; see *"A dive computer's own counter is not the diver's dive number"* for the failure that
+rule exists to prevent.
 
 ## A zero cylinder pressure is not a reading, and that does not contradict the rule above
 
