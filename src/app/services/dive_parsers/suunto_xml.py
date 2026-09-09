@@ -11,7 +11,7 @@ from ...schemas.dive_profile import (
     ParsedSeries,
     ProfileEventType,
 )
-from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
+from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDevice, ParsedDiveSchema
 from .base import DiveParser
 from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, ceiling_cm, scaled_int_or_none
 from .exceptions import EXTRACTION_ERRORS, DiveParseError, UnsupportedDiveFileError
@@ -46,13 +46,22 @@ _TENTH_BAR_PER_MILLIBAR = Decimal("0.01")
 # `<Pressure>` per sample with no cylinder identity attached, so there is nothing to
 # group by - but the series still needs a label, and `1` is what the *same dive* exported
 # as JSON reports for it (`Cylinders: [{GasNumber: 1, ...}]` on a D5). Deliberately not
-# the mixture's `<TransmitterId>`: that is a device serial (e.g. 2411100050), so using it
+# the mixture's `<TransmitterId>`: that is a device serial (e.g. 2411100050) - the tank
+# pod's, not the computer's, which `_device` reads from `<SerialNumber>` - so using it
 # would both read as nonsense in a chart legend and make one dive disagree with itself
 # depending on which export it was imported from.
 #
 # Only the *fallback* now - `_transmitted_gas_number` resolves the real one where the file
 # says which cylinder the pod was on. Kept for the cases where it can't.
 _XML_GAS_NUMBER = 1
+
+# The manufacturer every file this parser accepts came from. It is the format's rather
+# than a field's: the export has no manufacturer element, and `can_parse` has already
+# required the `Suunto.Diving.Dal` namespace above. Written out because a device with a
+# serial and no manufacturer cannot be lined up against the same computer's FIT export,
+# where `file_id.manufacturer` decodes to `suunto`. `SuuntoJsonParser` says the same thing
+# about its own format.
+_MANUFACTURER = "Suunto"
 
 
 def _tag(name: str) -> str:
@@ -198,6 +207,10 @@ class SuuntoXmlParser(DiveParser):
     (algorithm/tissue-loading stats, planned deco stops) with nowhere to persist them, so
     they aren't parsed at all, and `<Marks>` is a refusal rather than an omission - see
     `_gas_switches`.
+
+    The exception is `_device`'s four elements, which have no column behind them either
+    and are read all the same: two exports of one dive can only be told apart by what
+    recorded them.
     """
 
     key = "suunto_xml"
@@ -343,8 +356,9 @@ class SuuntoXmlParser(DiveParser):
         """Map a `<Dive>` element onto `ParsedDiveSchema`.
 
         Unlike the JSON export this one records `BottomTemperature` directly, so it is read
-        rather than derived. `DiveNumberInSerie` is deliberately ignored - see the comment
-        below for why importing it would misnumber a diver's log.
+        rather than derived. `DiveNumberInSerie` is read onto the *device* rather than onto
+        the dive - see the comment at `dive_number` below for why the two are not the same
+        number.
         """
         mixtures = [
             cls._parse_mixture(mix, gas_number)
@@ -366,19 +380,47 @@ class SuuntoXmlParser(DiveParser):
             # pressures are: the Decimal division is already exact (105700 -> 1.057), and
             # rounding to 2 places would throw away the file's own 100 Pa resolution.
             surface_pressure_bar=_pascals_to_bar(_float(root, "SurfacePressure")),
-            # Deliberately not parsed, though the export has a `DiveNumberInSerie`. That
-            # is the *computer's* counter, not the diver's lifetime dive number: it starts
-            # at 1 on a new or factory-reset device and restarts again on the next one, so
-            # importing it would stamp a dive #1 onto someone's 300th dive. The field stays
-            # on `ParsedDiveSchema` for a format that does carry a real lifetime number
-            # (Subsurface's XML does); until then both Suunto parsers leave it null and the
-            # number comes from `GET /dives/next-number`, which derives it from the dive's
-            # own date - see `services/dive_numbering.py`.
+            # Not the diver's number, and no longer discarded either. `DiveNumberInSerie`
+            # is the *computer's* counter: it starts at 1 on a new or factory-reset device
+            # and restarts again on the next one, so writing it here would stamp a dive #1
+            # onto someone's 300th. It goes on the device below instead, where it says what
+            # it is - and where two exports of one dive can be told apart by it. This field
+            # stays on `ParsedDiveSchema` for a format that does carry a real lifetime
+            # number (Subsurface's XML does); until then all three parsers leave it null
+            # and the number comes from `GET /dives/next-number`, which derives it from the
+            # dive's own date - see `services/dive_numbering.py`.
             dive_number=None,
+            device=cls._device(root),
             duration=_int(root, "Duration"),
             max_depth=_float(root, "MaxDepth"),
             start_time=_text(root, "StartTime"),
             mixtures=mixtures,
+        )
+
+    @staticmethod
+    def _device(root: ET.Element) -> ParsedDevice:
+        """The computer this export came off.
+
+        `<Source>` is the model, and it carries the manufacturer with it - `Suunto D5` on
+        every export in the corpus that names one at all - which is why `_MANUFACTURER`
+        beside it is not redundant: the two members are compared separately, and a model
+        that happens to begin with the maker's name is not a manufacturer field.
+
+        `<SerialNumber>` is the *computer's* serial, and the one place this format could be
+        misread: `<TransmitterId>` on a `<DiveMixture>` is a serial too, but a tank pod's -
+        see `_transmitted_gas_number`. The format records no name its owner set, unlike the
+        JSON export's `Header.Device.Name`, so `name` stays null rather than being filled
+        from `<Source>`.
+        """
+        return ParsedDevice(
+            manufacturer=_MANUFACTURER,
+            model=_text(root, "Source"),
+            serial=_text(root, "SerialNumber"),
+            firmware=_text(root, "Software"),
+            # Through `_int`, like `Duration` above: a non-numeric counter is a malformed
+            # export in this format rather than an absent field, and the caller turns the
+            # `ValueError` into a `DiveParseError` naming the file.
+            dive_number=_int(root, "DiveNumberInSerie"),
         )
 
     @staticmethod

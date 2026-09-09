@@ -31,7 +31,7 @@ from ...schemas.dive_profile import (
     ParsedProfileSchema,
     ProfileEventType,
 )
-from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
+from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDevice, ParsedDiveSchema
 from .base import DiveParser
 from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, ceiling_cm, scaled_int, series
 from .exceptions import EXTRACTION_ERRORS, DiveParseError
@@ -139,6 +139,15 @@ _MAX_CYLINDERS = 16
 # in the corpus produces 17 markers.
 _MAX_EVENTS = 100
 
+# How many `device_info` messages are kept while looking for the computer's serial and
+# firmware. A device writes one every few minutes - the Suunto Ocean export in the corpus
+# writes two across a 58-minute dive, at 12:17 and 12:54 - and at most two of them are ever
+# read: whichever names `device_index` 0, and the first that names the file's own
+# manufacturer. Bounded for the reason `_MAX_EVENTS` is: `_MAX_FRAMES` allows 100 000
+# frames and a `device_info` is a few dozen bytes, so this caps a list nothing downstream
+# would.
+_MAX_DEVICE_INFO = 8
+
 
 def _native_value(frame: fitdecode.FitDataMessage, name: str) -> Any | None:
     """Read a field by name, ignoring any *developer* field that shares the name.
@@ -186,6 +195,17 @@ def _native_raw(frame: fitdecode.FitDataMessage, name: str) -> Any | None:
     """
     field_data = _native_field(frame, name)
     return field_data.raw_value if field_data is not None else None
+
+
+def _maybe_value(frame: fitdecode.FitDataMessage | None, name: str) -> Any | None:
+    """`_native_value` for a message that may not be in the file at all.
+
+    Every other caller either has a frame in hand or writes the `is not None` guard
+    inline, which is the right shape for the one or two fields each of them reads. The
+    device reads five off a `file_id` a file need not carry, where five inline guards
+    would be most of the function.
+    """
+    return _native_value(frame, name) if frame is not None else None
 
 
 def _role(gas: fitdecode.FitDataMessage | None) -> GasRole | None:
@@ -289,6 +309,15 @@ class _FitScan:
 
     session: fitdecode.FitDataMessage | None = None
     activity: fitdecode.FitDataMessage | None = None
+    # The file's own identity message, which is where the computer that wrote it names
+    # itself. First one wins, like `session`/`activity`.
+    file_id: fitdecode.FitDataMessage | None = None
+    # Every `device_info` in the file, up to `_MAX_DEVICE_INFO`. Kept as a list rather
+    # than as "the first one" because neither field read off it can be resolved from a
+    # single message: the serial comes from whichever names `device_index` 0 and the
+    # firmware from the first that names the file's own manufacturer, and a pod's message
+    # can precede the computer's.
+    devices: list[fitdecode.FitDataMessage] = field(default_factory=list)
     # The device's own salinity setting, and the only water-type evidence a FIT file
     # carries. First one wins, like `session`/`activity`.
     dive_settings: fitdecode.FitDataMessage | None = None
@@ -328,6 +357,11 @@ class FitParser(DiveParser):
     are reduced to the dive's entry and exit positions; see `positions.py`. FIT activity
     files carry a great deal more (the rest of the GPS track, ascent rates, heart rate,
     battery telemetry) with nowhere to persist it, so none of that is parsed.
+
+    The one exception to "a direct equivalent on the models" is the `ParsedDevice` built
+    by `_device`, which has no column behind it: it is reported so that a caller holding
+    two exports can tell whether they came off the same computer, and `session.dive_number`
+    finally has somewhere honest to go.
     """
 
     key = "fit"
@@ -468,6 +502,20 @@ class FitParser(DiveParser):
         elif frame.name == "activity":
             if scan.activity is None:
                 scan.activity = frame
+        elif frame.name == "file_id":
+            if scan.file_id is None:
+                scan.file_id = frame
+        elif frame.name == "device_info":
+            # Above the first-session cut, like `dive_settings` and for a stronger version
+            # of its reason: a `device_info` is a statement about the computer, not about a
+            # dive, so which dive it happens to follow changes nothing about what it says.
+            # Nothing in the corpus pins where a device puts them - the Ocean export writes
+            # both of its own before the session, eight seconds and 36 minutes into a
+            # 58-minute dive - and gating them on the cut would risk the failure
+            # `tank_summary`'s comment records for no gain, since the cap is what bounds
+            # the list either way.
+            if len(scan.devices) < _MAX_DEVICE_INFO:
+                scan.devices.append(frame)
         elif frame.name == "dive_settings":
             # Above the first-session cut for the same reason `tank_summary` is, and not
             # because this one is known to be written late: nothing about a settings
@@ -663,21 +711,106 @@ class FitParser(DiveParser):
             entry_longitude=None if entry is None else entry.longitude,
             exit_latitude=None if exit_fix is None else exit_fix.latitude,
             exit_longitude=None if exit_fix is None else exit_fix.longitude,
-            # Deliberately not parsed, though `session.dive_number` is right there. It is
-            # the *computer's* counter, not the diver's lifetime dive number - it starts
-            # at 1 on a new or factory-reset device. The example corpus shows this
-            # outright: a D5 export whose `dive_number` is 5 carries the diver's own
-            # label for the same dive in `session.description`, "#28: Elphinstone Reef".
-            # Importing it would stamp a dive #5 onto someone's 28th dive. Both Suunto
-            # parsers leave this null for the same reason; the number comes from
-            # `GET /dives/next-number` instead - see `services/dive_numbering.py`.
+            # Still not the diver's number, and no longer thrown away either.
+            # `session.dive_number` is the *computer's* counter, which starts at 1 on a new
+            # or factory-reset device, so importing it here would stamp a dive #5 onto
+            # someone's 28th - the corpus says so outright, a D5 export whose `dive_number`
+            # is 5 carrying the diver's own label for the same dive in
+            # `session.description`, "#28: Elphinstone Reef". It goes on the device below
+            # instead, where it says what it is and nothing reads it as a logbook number.
+            # Both Suunto parsers make the same move; a dive's own number still comes from
+            # `GET /dives/next-number` - see `services/dive_numbering.py`.
             dive_number=None,
+            device=cls._device(scan, session),
             duration=round(duration) if duration is not None else None,
             max_depth=cls._depth(session, summary, "max_depth"),
             start_time=start_time.isoformat() if isinstance(start_time, datetime) else None,
             water_type=cls._water_type(scan),
             mixtures=cls._mixtures(scan),
         )
+
+    @classmethod
+    def _device(cls, scan: _FitScan, session: fitdecode.FitDataMessage) -> ParsedDevice:
+        """The computer that wrote this file, off `file_id`, `device_info` and the session.
+
+        A file need not carry a `file_id` at all - nothing in this parser has ever required
+        one - so every member here degrades to `None` and `_drop_empty_device` throws the
+        object away when they all do.
+        """
+        file_id = scan.file_id
+        return ParsedDevice(
+            manufacturer=_maybe_value(file_id, "manufacturer"),
+            # `product_name` first: it is the readable one where a vendor writes it, and
+            # both Ocean exports in the corpus do (`Suunto Ocean`). `product` behind it is
+            # two different things depending on the vendor, and both are worth having.
+            # `fitdecode` resolves Garmin's through the profile's `garmin_product`
+            # subfield, so a Descent reads `descent_mk2s`; Suunto's has no subfield and
+            # stays the bare id the file wrote, `62` on the Ocean. Neither is invented -
+            # what the device recorded as its product is what comes back.
+            #
+            # `or` rather than `_first_not_none`, deliberately: that helper exists because
+            # a physical reading of 0 must not fall through to the next candidate, and
+            # these are identities, where an empty `product_name` and a product id of 0
+            # both mean the field said nothing.
+            model=_maybe_value(file_id, "product_name") or _maybe_value(file_id, "product"),
+            serial=cls._serial(scan),
+            firmware=cls._firmware(scan),
+            # FIT has no field for a name its owner chose. `product_name` is the model, and
+            # nothing on `file_id` or `device_info` carries the `Porvoo` the same computer
+            # answers to in its own JSON export - see `SuuntoJsonParser._device`.
+            name=None,
+            dive_number=_native_value(session, "dive_number"),
+        )
+
+    @staticmethod
+    def _serial(scan: _FitScan) -> Any | None:
+        """The computer's serial - the `device_info` that *is* the computer, else `file_id`.
+
+        `device_index` 0 is the profile's `creator`, the device writing the file, as
+        against the pods, phones and straps a `device_info` equally describes. So the
+        serial on that message is the computer's and a sensor's is not.
+
+        **Read through `_native_raw`, and that is the whole trap.** `device_index` carries
+        an enum in the profile's own slot (`{0: 'creator'}`), so `fitdecode` renders the 0
+        as the **string** `creator` and an `== 0` against the decoded value never matches -
+        the same shape as the `message_index` bitfield that function was written for.
+
+        `file_id.serial_number` stands in where nothing names index 0, which is the
+        corpus's own shape: the Ocean export writes two `device_info` messages, neither
+        carrying a `device_index` at all, and no serial anywhere in the file. A message at
+        index 0 that carries no serial falls through to the same fallback rather than
+        ending the search - it has said nothing about the serial, not that there isn't one.
+        """
+        for device in scan.devices:
+            if _native_raw(device, "device_index") == 0:
+                serial = _native_value(device, "serial_number")
+                if serial is not None:
+                    return serial
+        return _maybe_value(scan.file_id, "serial_number")
+
+    @staticmethod
+    def _firmware(scan: _FitScan) -> Any | None:
+        """The version the computer was running, off the `device_info` that is the computer.
+
+        Matched on manufacturer rather than taken from the first message, and `device_index`
+        is deliberately not the test here as it is in `_serial`: a `device_info` naming a
+        manufacturer the `file_id` does not is another link in the chain - a tank pod, a
+        strap - and reading its `software_version` as the computer's would put a
+        transmitter's firmware on the dive.
+
+        Unattested from this direction: the Ocean export's two messages carry no
+        `software_version` at all. The rule is `divejson`'s, whose FIT reader resolves the
+        same field the same way, so that one file read by the two of them cannot describe
+        two different firmwares.
+        """
+        maker = _maybe_value(scan.file_id, "manufacturer")
+        for device in scan.devices:
+            if _native_value(device, "manufacturer") != maker:
+                continue
+            firmware = _native_value(device, "software_version")
+            if firmware is not None:
+                return firmware
+        return None
 
     @staticmethod
     def _water_type(scan: _FitScan) -> WaterType | None:

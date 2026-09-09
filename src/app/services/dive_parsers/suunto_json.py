@@ -11,7 +11,7 @@ from ...schemas.dive_profile import (
     ParsedProfileSchema,
     ProfileEventType,
 )
-from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
+from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDevice, ParsedDiveSchema
 from .base import DiveParser
 from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, ceiling_cm, scaled_int_or_none, series
 from .exceptions import EXTRACTION_ERRORS, DiveParseError
@@ -47,6 +47,14 @@ _TENTH_BAR_PER_PASCAL = Decimal("0.0001")
 # same reason: each becomes a `DiveMixtureSchema` in the `/dive/parse` response, and a
 # `GasSwitch` event is a few dozen bytes, so nothing else bounds the count.
 _MAX_CYLINDERS = 16
+
+# The manufacturer every file this parser accepts came from. It is the format's rather
+# than a field's: `can_parse` requires a `DeviceLog.Header`, which is Suunto's own
+# envelope, and no export in the corpus writes a manufacturer anywhere. Written out
+# because a device with a serial and no manufacturer cannot be lined up against the same
+# computer's FIT export, where `file_id.manufacturer` decodes to `suunto`.
+# `SuuntoXmlParser` says the same thing about its own format.
+_MANUFACTURER = "Suunto"
 
 
 def _decimal_multiply(value: float | None, factor: Decimal) -> float | None:
@@ -240,6 +248,43 @@ def _parse_mixture(gas: dict[str, Any], gas_number: int) -> DiveMixtureSchema:
         role=_role(gas.get("State")),
         start_pressure=_round2_or_none(_pascals_to_bar(gas.get("StartPressure"))),
         volume=_cubic_meters_to_liters(gas.get("TankSize")),
+    )
+
+
+def _device(device_log: dict[str, Any], header: dict[str, Any], diving: dict[str, Any]) -> ParsedDevice:
+    """The computer this export came off, out of `Header.Device` and `Header.Diving`.
+
+    **`Header.Device` first, the top-level `DeviceLog.Device` behind it**, and where both
+    exist they are the same object: the 2026 Ocean export in the corpus carries an
+    identical block in each, and the five older fixtures carry only the header's. Reading
+    the header's first keeps the device beside the dive it describes rather than beside the
+    file.
+
+    **`Name` is the device's name, not its model.** An Ocean whose owner called it `Porvoo`
+    answers `Porvoo` here; a D5 nobody renamed answers `Suunto D5`. The format records no
+    model of its own - `Info.HW` is a board revision (`Seal_RevA3`) - so `model` stays null
+    rather than being back-derived from a name a diver may have chosen. `Info.SW` is the
+    firmware (`2.51.28`), and `Info.BSL` beside it is the bootloader, which is not.
+
+    `NumberInSeries` sits under `Header.Diving`, so it is absent from every export that has
+    no `Diving` block - the whole 2026 Ocean shape, including the one file in the corpus
+    that does carry a serial. Absent is what that means; the counter is not reconstructed
+    from anything else.
+    """
+    device = header.get("Device")
+    if not isinstance(device, dict):
+        device = device_log.get("Device")
+    if not isinstance(device, dict):
+        device = {}
+    info = device.get("Info")
+    if not isinstance(info, dict):
+        info = {}
+    return ParsedDevice(
+        manufacturer=_MANUFACTURER,
+        serial=device.get("SerialNumber"),
+        firmware=info.get("SW"),
+        name=device.get("Name"),
+        dive_number=diving.get("NumberInSeries"),
     )
 
 
@@ -544,7 +589,9 @@ class SuuntoJsonParser(DiveParser):
     `positions.py`. The export has plenty of other
     fields (per-compartment tissue loading, algorithm metadata, the rest of the
     GPS track, battery telemetry) with nowhere to persist them, so they aren't
-    parsed at all. Gas mixtures come from
+    parsed at all - except `Header.Device`, which has no column behind it either
+    and is read all the same, as the `ParsedDevice` `_device` builds: two exports
+    of one dive can only be told apart by what recorded them. Gas mixtures come from
     `DeviceLog.Header.Diving.Gases` (present in Suunto D5-style exports; absent
     from "clean"/header-only exports, which don't have gas data at all).
     """
@@ -785,7 +832,11 @@ class SuuntoJsonParser(DiveParser):
             entry_longitude=None if entry is None else entry.longitude,
             exit_latitude=None if exit_fix is None else exit_fix.latitude,
             exit_longitude=None if exit_fix is None else exit_fix.longitude,
+            # Null for the reason `SuuntoXmlParser` spells out at its own `dive_number`:
+            # `Header.Diving.NumberInSeries` is the *computer's* counter, not the diver's
+            # lifetime number. It is read, and it goes on the device below.
             dive_number=None,
+            device=_device(data["DeviceLog"], header, diving),
             # D5-style exports report this as `Duration` rather than `DiveTime`.
             duration=_round_or_none(header.get("DiveTime", header.get("Duration"))),
             max_depth=depth.get("Max"),

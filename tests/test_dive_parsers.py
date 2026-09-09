@@ -6,21 +6,22 @@ import random
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import CheckConstraint
 
 from src.app.models.dive import Dive
 from src.app.models.dive_mixture import DiveMixture
-from src.app.schemas.dive import WaterType
+from src.app.schemas.dive import DiveCreate, WaterType
 from src.app.schemas.dive_mixture import GasRole
 from src.app.schemas.parsed_dive import (
     LATITUDE_LIMIT,
     LONGITUDE_LIMIT,
     DiveMixtureSchema,
+    ParsedDiveResponse,
     ParsedDiveSchema,
 )
 from src.app.services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file
-from src.app.services.dive_parsers.fit import _MAX_CYLINDERS, FitParser
+from src.app.services.dive_parsers.fit import _MAX_CYLINDERS, _MAX_DEVICE_INFO, FitParser
 from src.app.services.dive_parsers.fit import _MAX_FRAMES as MAX_FRAMES
 from src.app.services.dive_parsers.suunto_json import _MAX_CYLINDERS as JSON_MAX_CYLINDERS
 from src.app.services.dive_parsers.suunto_json import SuuntoJsonParser
@@ -1669,6 +1670,290 @@ class TestFitWaterType:
         assert SuuntoJsonParser.parse(json_content).water_type is None
 
 
+class TestParsersReportTheDevice:
+    """What recorded the file - which every export names, and none of them used to report.
+
+    A logbook that can hold two records of one dive has to be able to tell them apart, and
+    what distinguishes them is the computer that wrote each. So every parser now returns a
+    `ParsedDevice` beside the dive. Nothing here is stored: `POST /dive/parse` returns it,
+    and `DiveCreate` is `extra="forbid"`, so a prefilled form cannot hand it back.
+
+    The figures are the corpus's own, and one pair carries the argument. A single dive off
+    Dahab exists both as a Suunto Ocean JSON export and as the same computer's FIT export,
+    and neither carries what the other does: the JSON has the serial `253810000400` and the
+    name its owner set, `Porvoo`, with no model anywhere; the FIT has the model
+    `Suunto Ocean` and no serial at all. Reading only one of the two shapes would leave
+    half the identity behind.
+    """
+
+    def test_xml_reports_the_computer_that_wrote_it(self):
+        """`<Source>` is the model and `<Software>` the firmware. The manufacturer is the
+        format's rather than a field's - a DM5 export has no element for it, and `can_parse`
+        has already required the Suunto namespace."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <DiveNumberInSerie>5</DiveNumberInSerie>
+  <SerialNumber>192410004212</SerialNumber>
+  <Software>2.5.1947</Software>
+  <Source>Suunto D5</Source>
+</Dive>
+""".encode()
+
+        device = SuuntoXmlParser.parse(content).device
+
+        assert device is not None
+        assert (device.manufacturer, device.model) == ("Suunto", "Suunto D5")
+        assert (device.serial, device.firmware) == ("192410004212", "2.5.1947")
+        assert device.dive_number == 5
+        # The format records no name its owner chose, unlike the JSON export's
+        # `Header.Device.Name`. Filling it from `<Source>` would invent one.
+        assert device.name is None
+
+    def test_the_xml_counter_lands_on_the_device_and_not_on_the_dive(self):
+        """`<DiveNumberInSerie>` restarts at 1 on a factory-reset computer, so it was never
+        the diver's number and is still not written as one. What changed is that it is no
+        longer thrown away."""
+        parsed = SuuntoXmlParser.parse(VALID_SUUNTO_XML.encode())
+
+        assert parsed.dive_number is None
+        assert parsed.device is not None
+        assert parsed.device.dive_number == 5
+
+    def test_json_reports_the_computer_that_wrote_it(self):
+        """`Name` is the device's own name, not its model: this Ocean's owner called it
+        `Porvoo`. `Info.SW` is the firmware - `Info.HW` beside it is a board revision and
+        `Info.BSL` a bootloader, and neither of those is one."""
+        content = json.dumps(
+            {
+                "DeviceLog": {
+                    "Header": {
+                        "DateTime": "2026-09-08T15:17:38+03:00",
+                        "Device": {
+                            "Info": {"BSL": "2.51.28", "HW": "Seal_RevA3", "SW": "2.51.28"},
+                            "Name": "Porvoo",
+                            "SerialNumber": "253810000400",
+                        },
+                    }
+                }
+            }
+        ).encode()
+
+        device = SuuntoJsonParser.parse(content).device
+
+        assert device is not None
+        assert (device.manufacturer, device.model) == ("Suunto", None)
+        assert (device.serial, device.firmware, device.name) == ("253810000400", "2.51.28", "Porvoo")
+
+    def test_json_falls_back_to_the_top_level_device_block(self):
+        """The 2026 Ocean export writes the same object twice, under `Header.Device` and
+        under `DeviceLog.Device`. The header's is read first so the device sits beside the
+        dive it describes; this is what an export carrying only the outer one yields."""
+        content = json.dumps(
+            {
+                "DeviceLog": {
+                    "Header": {"Duration": 1800},
+                    "Device": {"Name": "Porvoo", "SerialNumber": "253810000400"},
+                }
+            }
+        ).encode()
+
+        device = SuuntoJsonParser.parse(content).device
+
+        assert device is not None
+        assert (device.serial, device.name) == ("253810000400", "Porvoo")
+
+    def test_json_without_a_diving_block_reports_no_counter(self):
+        """`NumberInSeries` lives under `Header.Diving`, and the whole 2026 Ocean shape has
+        no `Diving` block at all - including the one export in the corpus that carries a
+        serial. Absent is what that means; nothing reconstructs the counter from elsewhere.
+        """
+        content = json.dumps(
+            {"DeviceLog": {"Header": {"Duration": 1800, "Device": {"SerialNumber": "253810000400"}}}}
+        ).encode()
+        assert "Diving" not in json.loads(content)["DeviceLog"]["Header"]
+
+        device = SuuntoJsonParser.parse(content).device
+
+        assert device is not None
+        assert device.serial == "253810000400"
+        assert device.dive_number is None
+
+    def test_the_json_counter_lands_on_the_device_and_not_on_the_dive(self):
+        content = json.dumps({"DeviceLog": {"Header": {"Diving": {"NumberInSeries": 5}}}}).encode()
+
+        parsed = SuuntoJsonParser.parse(content)
+
+        assert parsed.dive_number is None
+        assert parsed.device is not None
+        assert parsed.device.dive_number == 5
+
+    def test_fit_reports_the_computer_that_wrote_it(self):
+        """`file_id.product_name` is the model, and the manufacturer decodes to the
+        profile's lowercase `suunto` where the JSON export of the same computer writes the
+        literal `Suunto` - both are kept as read.
+
+        Not built through `dive_fit_file`, which writes a `file_id` of its own: only the
+        first is kept, so a second one would say nothing.
+        """
+        content = fit_file(
+            message("file_id", type="activity", manufacturer="suunto", product_name="Suunto Ocean", product=62),
+            message("session", sport="diving", start_time=DIVE_START, total_elapsed_time=3473.0, dive_number=3),
+        )
+
+        device = FitParser.parse(content).device
+
+        assert device is not None
+        assert (device.manufacturer, device.model) == ("suunto", "Suunto Ocean")
+        assert device.dive_number == 3
+        # The corpus's Ocean FIT carries no serial anywhere and no name its owner set,
+        # which is exactly why the same dive's JSON export is worth reading too.
+        assert (device.serial, device.firmware, device.name) == (None, None, None)
+
+    def test_fit_falls_back_to_the_product_id_where_there_is_no_product_name(self):
+        """`product` is two things depending on the vendor, and both are what the file
+        recorded: `fitdecode` resolves Garmin's through the profile's `garmin_product`
+        subfield, so a Descent reads `descent_mk2s` rather than `3542`."""
+        content = fit_file(
+            message("file_id", type="activity", manufacturer="garmin", product=3542),
+            message("session", sport="diving", start_time=DIVE_START, total_elapsed_time=3473.0),
+        )
+
+        device = FitParser.parse(content).device
+
+        assert device is not None
+        assert (device.manufacturer, device.model) == ("garmin", "descent_mk2s")
+
+    def test_the_fit_counter_lands_on_the_device_and_not_on_the_dive(self):
+        """The move `session.dive_number`'s comment used to describe as "deliberately not
+        parsed". It is parsed now, onto the counter that says what it is."""
+        parsed = FitParser.parse(dive_fit_file(dive_number=3))
+
+        assert parsed.dive_number is None
+        assert parsed.device is not None
+        assert parsed.device.dive_number == 3
+
+    def test_fit_takes_the_serial_from_the_device_info_for_the_computer_itself(self):
+        """`device_index` 0 is the profile's `creator` - the computer writing the file, as
+        against the pods and straps a `device_info` equally describes.
+
+        The index has to be read *raw*, and this is the case that proves it: the profile
+        keeps an enum in that slot, so `fitdecode` renders the 0 as the string `creator`
+        and a comparison against the decoded value matches nothing. Both messages here
+        carry a serial, and only the computer's may come back.
+        """
+        content = dive_fit_file(
+            message("device_info", device_index=1, manufacturer="suunto", serial_number=2411100050),
+            message("device_info", device_index=0, manufacturer="suunto", serial_number=1924100042),
+        )
+
+        device = FitParser.parse(content).device
+
+        assert device is not None
+        assert device.serial == "1924100042"
+
+    def test_fit_falls_back_to_the_file_ids_serial(self):
+        """Where nothing names index 0 - the corpus's own shape, both of the Ocean's
+        `device_info` messages carrying no `device_index` at all - the file's own identity
+        message is what claims a serial for the computer that wrote it."""
+        content = fit_file(
+            message("file_id", type="activity", manufacturer="suunto", serial_number=1924100042),
+            message("device_info", manufacturer="suunto", serial_number=2411100050),
+            message("session", sport="diving", start_time=DIVE_START, total_elapsed_time=3473.0),
+        )
+
+        device = FitParser.parse(content).device
+
+        assert device is not None
+        assert device.serial == "1924100042"
+
+    def test_fit_takes_the_firmware_from_the_computers_own_device_info(self):
+        """A `device_info` naming a manufacturer the `file_id` does not is another link in
+        the chain - a tank pod, a strap - and reading its `software_version` as the
+        computer's would put a transmitter's firmware on the dive."""
+        content = dive_fit_file(
+            message("device_info", manufacturer="garmin", software_version=9.9),
+            message("device_info", manufacturer="suunto", software_version=2.51),
+        )
+
+        device = FitParser.parse(content).device
+
+        assert device is not None
+        assert device.firmware == "2.51"
+
+    def test_fit_keeps_no_more_device_info_messages_than_the_cap(self):
+        """A device writes one every few minutes and nothing downstream bounds the list, so
+        this parser does - the same reason `_MAX_EVENTS` exists. The cap is on what is
+        *kept*, not on what the file may hold: a file over it still parses, and the
+        firmware it carries past the cap is simply not read."""
+        content = dive_fit_file(
+            *(message("device_info", manufacturer="suunto") for _ in range(_MAX_DEVICE_INFO + 4)),
+            message("device_info", manufacturer="suunto", software_version=2.51),
+        )
+
+        device = FitParser.parse(content).device
+
+        assert device is not None
+        assert device.firmware is None
+
+    def test_a_file_that_names_no_device_reports_none(self):
+        """A FIT file need not carry a `file_id` at all, and one that doesn't, whose session
+        carries no counter either, has said nothing about what wrote it. A `ParsedDevice` of
+        six nulls would claim otherwise, so `_drop_empty_device` throws it away."""
+        content = fit_file(message("session", sport="diving", start_time=DIVE_START, total_elapsed_time=3473.0))
+
+        assert FitParser.parse(content).device is None
+
+    def test_a_padded_or_empty_identity_is_absent_rather_than_empty(self):
+        """`""` compares unequal to `None`, so a device that named itself nothing would
+        fail to match the same computer read out of another export - which is the one
+        comparison a device exists to support."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">
+  <SerialNumber>   </SerialNumber>
+  <Software></Software>
+  <Source>  Suunto D5  </Source>
+</Dive>
+""".encode()
+
+        device = SuuntoXmlParser.parse(content).device
+
+        assert device is not None
+        assert device.model == "Suunto D5"
+        assert (device.serial, device.firmware) == (None, None)
+
+    def test_a_negative_counter_is_not_a_count(self):
+        """`< 0`, not `<= 0`: a computer that has recorded no dive yet counts 0, and telling
+        that apart from "the file didn't say" is why the member is nullable."""
+        template = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}"><DiveNumberInSerie>{{number}}</DiveNumberInSerie></Dive>
+"""
+
+        zero = SuuntoXmlParser.parse(template.format(number=0).encode()).device
+        negative = SuuntoXmlParser.parse(template.format(number=-1).encode()).device
+
+        assert zero is not None and zero.dive_number == 0
+        assert negative is not None and negative.dive_number is None
+
+    def test_the_parse_response_carries_the_device_through(self):
+        """`ParsedDiveResponse` subclasses the parse schema, so the member reaches
+        `POST /dive/parse` without the route naming it - the same way every field above it
+        does."""
+        parsed = SuuntoXmlParser.parse(VALID_SUUNTO_XML.encode())
+
+        response = ParsedDiveResponse(**parsed.model_dump(), file_token="token")
+
+        assert response.device is not None
+        assert response.device.dive_number == 5
+
+    def test_creating_a_dive_still_forbids_the_member(self):
+        """The device is a fact about a file, not a field of the logbook entry, and there is
+        nowhere to put one yet. `DiveCreate` is `extra="forbid"`, so a client echoing the
+        parse response straight back gets a 422 rather than a silently dropped member."""
+        assert "device" not in DiveCreate.model_fields
+        with pytest.raises(ValidationError):
+            DiveCreate(start_time="2026-04-17T11:49:23+02:00", device={"manufacturer": "Suunto"})
+
+
 class TestTechScalars:
     """CNS/OTU/surface pressure and the per-mixture ppO2, role and gas number.
 
@@ -2314,6 +2599,45 @@ class TestParsersInventNothing:
         # threshold for the whole dive rather than this cylinder's plan, so reading it
         # here would attribute a global setting to every gas.
         assert parsed.mixtures[0].po2_limit is None
+
+    def test_xml_leaves_an_unnamed_device_null(self):
+        """Every device member but the manufacturer, which is the format's rather than a
+        field's: a DM5 export is a Suunto export by its namespace, and `can_parse` has
+        already required it. A model or a serial standing in for one the export never wrote
+        would be the same failure as a `volume: 0.0`."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}"><Duration>1800</Duration></Dive>
+""".encode()
+
+        device = SuuntoXmlParser.parse(content).device
+
+        assert device is not None
+        assert device.manufacturer == "Suunto"
+        assert (device.model, device.serial, device.firmware) == (None, None, None)
+        assert (device.name, device.dive_number) == (None, None)
+
+    def test_json_leaves_an_unnamed_device_null(self):
+        """The header-only shape, which is most of the corpus: no `Device` block at all,
+        and so nothing to say beyond the manufacturer the format itself fixes."""
+        content = json.dumps({"DeviceLog": {"Header": {"Duration": 1800}}}).encode()
+
+        device = SuuntoJsonParser.parse(content).device
+
+        assert device is not None
+        assert device.manufacturer == "Suunto"
+        assert (device.model, device.serial, device.firmware) == (None, None, None)
+        assert (device.name, device.dive_number) == (None, None)
+
+    def test_fit_leaves_an_unnamed_device_null(self):
+        """A `file_id` naming a manufacturer and nothing else, which is the least a FIT
+        file says about itself. FIT has no field for a name its owner chose at all, so
+        `name` is null on every file rather than only on this one."""
+        device = FitParser.parse(dive_fit_file()).device
+
+        assert device is not None
+        assert device.manufacturer == "suunto"
+        assert (device.model, device.serial, device.firmware) == (None, None, None)
+        assert (device.name, device.dive_number) == (None, None)
 
     def test_an_explicitly_recorded_zero_is_still_a_reading(self):
         """The rule is "don't invent", not "treat zero as missing" - a nitrox export
