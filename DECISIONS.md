@@ -4420,18 +4420,27 @@ thing that recorded the file, grouped into an object that means something on its
 answer to "what downstream can use it?" is a caller comparing two parses, which needs no column to
 do.
 
-**Where each member comes from.** FIT: `file_id.manufacturer`; `file_id.product_name` else
-`file_id.product`; the serial off the `device_info` whose `device_index` is 0, else
-`file_id.serial_number`; the `software_version` of the first `device_info` naming the file's own
-manufacturer; and `session.dive_number`. Suunto JSON: `Header.Device` (with the top-level
-`DeviceLog.Device` behind it) for `SerialNumber`, `Info.SW` and `Name`, plus
-`Header.Diving.NumberInSeries`. Suunto XML: `<Source>` as the model, `<SerialNumber>`, `<Software>`
-and `<DiveNumberInSerie>`. Both Suunto parsers fix the manufacturer as the literal `Suunto` rather
-than reading it, because neither format has an element for it and `can_parse` has already decided
-the question.
+**Where each member comes from.** FIT: `file_id.manufacturer`; `file_id.product_name` and nothing
+behind it; the serial off the `device_info` whose `device_index` is 0, else `file_id.serial_number`;
+the `software_version` of the first `device_info` naming the file's own manufacturer; and
+`session.dive_number`. Suunto JSON: `Header.Device` (with the top-level `DeviceLog.Device` behind
+it) for `SerialNumber`, `Info.SW` and `Name`, plus `Header.Diving.NumberInSeries`. Suunto XML:
+`<Source>` as the model, `<SerialNumber>`, `<Software>` and `<DiveNumberInSerie>`. Both Suunto
+parsers fix the manufacturer as the literal `Suunto` rather than reading it, because neither format
+has an element for it and `can_parse` has already decided the question.
 
-Four things in that mapping are not obvious and each cost something to find:
+Several things in that mapping are not obvious and each cost something to find:
 
+- **A FIT file with no `product_name` has no model, and `file_id.product` is not a substitute.** The
+  obvious fallback is wrong twice over. `product` is a *vendor id*, and `fitdecode` resolves it only
+  for the manufacturers the profile gives a subfield (`garmin_product`, `favero_product`), so a
+  Suunto's stays the bare integer `62` - the model on the corpus's Ocean, had it not written a
+  `product_name`, would have been the string `62`. And where a subfield does resolve it, what comes
+  back is a profile constant (`descent_mk2s`) rather than the vendor's own string, which would make
+  the member two different kinds of thing depending on who wrote the file. `divejson`'s reference
+  FIT reader declines it on the same grounds - `product_name` else the manufacturer, never
+  `product`. Its own fallback is not one here either: the manufacturer is a member of its own, so
+  falling back to it would report `suunto` twice and lose the fact that the file named no model.
 - **`device_index` has to be read raw.** The FIT profile keeps an enum in that slot
   (`{0: 'creator'}`), so `fitdecode` renders the 0 as the string `creator` and a parser comparing
   the decoded value to `0` matches nothing at all. `_native_raw` exists for exactly this shape - see

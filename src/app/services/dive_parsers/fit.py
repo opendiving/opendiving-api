@@ -202,8 +202,8 @@ def _maybe_value(frame: fitdecode.FitDataMessage | None, name: str) -> Any | Non
 
     Every other caller either has a frame in hand or writes the `is not None` guard
     inline, which is the right shape for the one or two fields each of them reads. The
-    device reads five off a `file_id` a file need not carry, where five inline guards
-    would be most of the function.
+    device reads a `file_id` a file need not carry from several places across three
+    methods, where an inline guard at each would be most of what they say.
     """
     return _native_value(frame, name) if frame is not None else None
 
@@ -740,19 +740,21 @@ class FitParser(DiveParser):
         file_id = scan.file_id
         return ParsedDevice(
             manufacturer=_maybe_value(file_id, "manufacturer"),
-            # `product_name` first: it is the readable one where a vendor writes it, and
-            # both Ocean exports in the corpus do (`Suunto Ocean`). `product` behind it is
-            # two different things depending on the vendor, and both are worth having.
-            # `fitdecode` resolves Garmin's through the profile's `garmin_product`
-            # subfield, so a Descent reads `descent_mk2s`; Suunto's has no subfield and
-            # stays the bare id the file wrote, `62` on the Ocean. Neither is invented -
-            # what the device recorded as its product is what comes back.
-            #
-            # `or` rather than `_first_not_none`, deliberately: that helper exists because
-            # a physical reading of 0 must not fall through to the next candidate, and
-            # these are identities, where an empty `product_name` and a product id of 0
-            # both mean the field said nothing.
-            model=_maybe_value(file_id, "product_name") or _maybe_value(file_id, "product"),
+            # `product_name` and nothing behind it: a file that does not write one has
+            # not named its model, and the device says so rather than substituting
+            # something. The obvious fallback, `file_id.product`, is a *vendor id* and not
+            # a name - `fitdecode` resolves it only for the manufacturers the profile
+            # gives a subfield (`garmin_product`, `favero_product`), so a Suunto's stays
+            # the bare integer `62` and reading it as a model would write "62" into a
+            # logbook where the model should be. Even where a subfield does resolve it,
+            # what comes back is a profile constant (`descent_mk2s`) rather than the
+            # vendor's own string, so taking it would make the member two different kinds
+            # of thing depending on who wrote the file. `divejson`'s reference FIT reader
+            # declines it on the same grounds - `product_name` else the manufacturer,
+            # never `product` - and its fallback is not one here because the manufacturer
+            # is a member of its own above: falling back to it would report `suunto`
+            # twice and lose the fact that the file named no model.
+            model=_maybe_value(file_id, "product_name"),
             serial=cls._serial(scan),
             firmware=cls._firmware(scan),
             # FIT has no field for a name its owner chose. `product_name` is the model, and

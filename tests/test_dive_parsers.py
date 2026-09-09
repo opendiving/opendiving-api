@@ -1790,7 +1790,8 @@ class TestParsersReportTheDevice:
     def test_fit_reports_the_computer_that_wrote_it(self):
         """`file_id.product_name` is the model, and the manufacturer decodes to the
         profile's lowercase `suunto` where the JSON export of the same computer writes the
-        literal `Suunto` - both are kept as read.
+        literal `Suunto` - both are kept as read. The `product` beside it is the corpus
+        Ocean's own `62`, carried here because the file carries it and read by nothing.
 
         Not built through `dive_fit_file`, which writes a `file_id` of its own: only the
         first is kept, so a second one would say nothing.
@@ -1809,19 +1810,30 @@ class TestParsersReportTheDevice:
         # which is exactly why the same dive's JSON export is worth reading too.
         assert (device.serial, device.firmware, device.name) == (None, None, None)
 
-    def test_fit_falls_back_to_the_product_id_where_there_is_no_product_name(self):
-        """`product` is two things depending on the vendor, and both are what the file
-        recorded: `fitdecode` resolves Garmin's through the profile's `garmin_product`
-        subfield, so a Descent reads `descent_mk2s` rather than `3542`."""
+    @pytest.mark.parametrize(("manufacturer", "product"), [("suunto", 62), ("garmin", 3542)])
+    def test_fit_reports_no_model_where_there_is_no_product_name(self, manufacturer: str, product: int) -> None:
+        """`file_id.product` is a vendor id, not a name, and is never read as the model.
+
+        Both vendors are here because the field is wrong in two different ways. `fitdecode`
+        resolves `product` only for the manufacturers the profile gives a subfield, so a
+        Suunto's stays the bare integer `62` and taking it would put the string `62` in a
+        logbook where the model belongs. Garmin's *does* have one (`garmin_product`), so
+        `3542` decodes to the readable `descent_mk2s` - and that is still declined, because
+        it is a profile constant rather than the vendor's own string and the member would
+        otherwise be two different kinds of thing depending on who wrote the file.
+
+        The manufacturer is unaffected either way: it is `file_id.manufacturer`, a member
+        of its own, and is not what the model falls back to.
+        """
         content = fit_file(
-            message("file_id", type="activity", manufacturer="garmin", product=3542),
+            message("file_id", type="activity", manufacturer=manufacturer, product=product),
             message("session", sport="diving", start_time=DIVE_START, total_elapsed_time=3473.0),
         )
 
         device = FitParser.parse(content).device
 
         assert device is not None
-        assert (device.manufacturer, device.model) == ("garmin", "descent_mk2s")
+        assert (device.manufacturer, device.model) == (manufacturer, None)
 
     def test_the_fit_counter_lands_on_the_device_and_not_on_the_dive(self):
         """The move `session.dive_number`'s comment used to describe as "deliberately not
