@@ -14800,10 +14800,13 @@ three shapes. Review found this twice running, once per spelling; the second was
 introduced by the fix for the first.
 
 **`ux_dive_file_user_id_sha256` is the one collision with no link available**, and it is skip-and-
-report. Link-to-existing is impossible there: `dive_id` is `NOT NULL` under the full-unique
-`ux_dive_file_dive_id`, and `ux_dive_file_storage_key` forbids sharing a key, so one row cannot
-serve two dives. The collision means this diver already stores identical bytes against another dive;
-the restored dive simply has no source file and the preview says so. Still not an error.
+report. Link-to-existing is impossible there: one `dive_file` row names one `recording_id`, and
+`ux_dive_file_storage_key` forbids sharing a key, so one row cannot serve two recordings. (This
+argument used to run through `ux_dive_file_dive_id`, which no longer exists — see *"A dive has
+recordings, and a file belongs to one of them"*. The rule it supported survives its index: what
+stops a row serving two is now that it belongs to one recording rather than that it belongs to one
+dive.) The collision means this diver already stores identical bytes against another recording; the
+restored recording simply has that file missing and the preview says so. Still not an error.
 
 ## Where the format is optional and this app is not, the record goes rather than a value being invented
 

@@ -677,9 +677,24 @@ def finalize_profile(parsed: ParsedProfileSchema | None) -> NormalizedProfile | 
     and throws away the samples between them. Deriving it here, where both are in view,
     is what stops the two ever being sequenced the other way round.
     """
-    if parsed is None:
-        return None
-    normalized = normalize(parsed)
+    return attribute_and_cap(normalize(parsed) if parsed is not None else None)
+
+
+def attribute_and_cap(normalized: NormalizedProfile | None) -> NormalizedProfile | None:
+    """`finalize_profile`'s last two steps, over an already-normalized profile.
+
+    Split out for `dive_files.extract_recording`, which normalizes each of a recording's files
+    separately, fills the channels across them and then has to finish the pipeline **once**
+    over the merged result. Doing it per file and merging afterwards would attribute against
+    the wrong channels - a recording whose depth came from one file and whose gas switches came
+    from another - and would cap twice.
+
+    **The order is the whole of what this function is for**, and getting it backwards is not
+    hypothetical: `derive_gas_attribution` reads a mean depth off the channel, `downsample`
+    keeps each bucket's extremes and throws the rest away, so attributing afterwards means a
+    mean of the dive's peaks and troughs rather than of the dive - for any channel past
+    `MAX_POINTS_PER_CHANNEL`, silently, in a summary column nothing re-derives.
+    """
     if normalized is None:
         return None
     return downsample(replace(normalized, gas_attribution=derive_gas_attribution(normalized)))

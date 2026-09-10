@@ -50,14 +50,12 @@ from . import blob_store, dive_recordings
 from .dive_parsers import PARSER_BY_KEY, DiveParseError, DiveParser, UnsupportedDiveFileError
 from .dive_profiles import (
     NormalizedProfile,
+    attribute_and_cap,
     delete_profile_for_recording,
     delete_profiles_for_dive,
-    derive_gas_attribution,
-    downsample,
-    extract_profile,
     fill_channels,
-    finalize_profile,
     get_existing_profile,
+    normalize,
     recording_source_digest,
     should_extract,
     store_profile,
@@ -241,6 +239,14 @@ class FileExtraction:
     `parsed` is `None` when the header could not be read at all, which is a different fact
     from a header that read and said nothing - the first leaves the recording's device
     columns untouched, the second is a device the file did not name.
+
+    **`profile` is normalized and nothing more** - not attributed, not capped. Those two
+    steps belong to the recording rather than to the file: `extract_recording` fills the
+    channels across a recording's files and then runs them *once*, which is the only order
+    under which the gas attribution is computed against the channels it will be stored beside
+    and at the resolution `derive_gas_attribution` requires. `NormalizedProfile.duration` is
+    the same either way (`downsample` keeps each channel's first and last sample), so the
+    caller reading a sampled span off this gets the same number it always did.
     """
 
     parsed: ParsedDiveSchema | None
@@ -273,7 +279,7 @@ def _extract_all(parser: type[DiveParser], content: bytes) -> FileExtraction:
         # per-half message that says which of the two actually went wrong.
         return FileExtraction(
             parsed=_parse_header(parser, content),
-            profile=extract_profile(parser, content),
+            profile=_normalized_profile(parser, content),
             scalars=extract_tech_scalars(parser, content),
         )
 
@@ -284,10 +290,29 @@ def _extract_all(parser: type[DiveParser], content: bytes) -> FileExtraction:
         scalars = None
 
     try:
-        return FileExtraction(parsed=parsed, profile=finalize_profile(profile), scalars=scalars)
+        return FileExtraction(
+            parsed=parsed, profile=normalize(profile) if profile is not None else None, scalars=scalars
+        )
     except Exception:
         logger.exception("Unexpected error extracting a profile from a %s file", parser.key)
         return FileExtraction(parsed=parsed, profile=None, scalars=scalars)
+
+
+def _normalized_profile(parser: type[DiveParser], content: bytes) -> NormalizedProfile | None:
+    """One file's samples, normalized and no further, never raising.
+
+    `extract_profile`'s contract with `extract_profile`'s two steps removed - see
+    `FileExtraction.profile` for why the attribution and the cap belong to the recording.
+    """
+    try:
+        parsed = parser.parse_profile(content)
+    except DiveParseError:
+        logger.warning("Profile extraction failed for a %s file: malformed samples", parser.key, exc_info=True)
+        return None
+    except Exception:
+        logger.exception("Unexpected error extracting a profile from a %s file", parser.key)
+        return None
+    return normalize(parsed) if parsed is not None else None
 
 
 def _parse_header(parser: type[DiveParser], content: bytes) -> ParsedDiveSchema | None:
@@ -370,17 +395,14 @@ def extract_recording(
             unreadable=result.unreadable,
         )
 
-    if result.profile is None:
-        return result
-
-    # Re-derived here rather than carried across from a half of it: attribution reads the gas
-    # switches back against the depth channel, and after a fill those two may have come from
-    # different files. Capped first and attributed second, which is `finalize_profile`'s
-    # ordering rule for the single-file case and load-bearing for the same reason: attribution
-    # reads a mean depth off the channel, and `downsample` throws away the samples between
-    # each bucket's extremes.
-    capped = downsample(replace(result.profile, gas_attribution=[]))
-    return replace(result, profile=replace(capped, gas_attribution=derive_gas_attribution(capped)))
+    # Attributed and capped **once, here**, over the filled channels - which is why every
+    # `FileExtraction.profile` above is normalized and nothing more. Attribution reads the gas
+    # switches back against the depth channel and after a fill those two may have come from
+    # different files, so it has to be derived from the merged result; and it has to be derived
+    # *before* the cap, because `downsample` keeps each bucket's extremes and throws the rest
+    # away. `attribute_and_cap` is the same two steps `finalize_profile` runs, in the same
+    # order, which is what stops a recording's profile and a single file's ever disagreeing.
+    return replace(result, profile=attribute_and_cap(result.profile))
 
 
 def extract_recording_profile(files: Sequence[LoadedDiveFile]) -> tuple[NormalizedProfile | None, bool]:

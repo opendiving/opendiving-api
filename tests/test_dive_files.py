@@ -1096,3 +1096,63 @@ class TestScalarsAreWrittenAtAttach:
 
         assert extraction.scalars["cns_end"] == 20.0
         assert extraction.scalars["otu_end"] == 44.0
+
+
+class TestARecordingsProfileIsAttributedBeforeItIsCapped:
+    """`extract_recording` runs `finalize_profile`'s last two steps, in that order.
+
+    The ordering `derive_gas_attribution`'s own docstring states and `finalize_profile`
+    implements: attribution reads a mean depth off the channel, and `downsample` keeps each
+    bucket's extremes and throws the rest away, so attributing afterwards is a mean of the
+    dive's peaks and troughs rather than of the dive.
+
+    **It regressed once and nothing caught it**, because it is invisible below
+    `MAX_POINTS_PER_CHANNEL` and because the wrong number is a summary column no other test
+    re-derives. So this is asserted against the *dive*'s own mean rather than against
+    `finalize_profile`'s output - two implementations agreeing is not evidence when the same
+    hand wrote both.
+    """
+
+    # Whole metres, so the stored centimetres are exact and the expected mean has no
+    # rounding of its own to argue with.
+    DEPTHS_M = [second // 80 for second in range(2_400)]
+
+    @classmethod
+    def _one_hertz_dive(cls) -> bytes:
+        """A 1 Hz descent well past the cap - the cadence every FIT export uses, which
+        reaches 1 200 samples inside twenty minutes."""
+        samples = "".join(
+            f"<Dive.Sample><Time>{second}</Time><Depth>{depth}</Depth></Dive.Sample>"
+            for second, depth in enumerate(cls.DEPTHS_M)
+        )
+        return f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}"><DiveMixtures><DiveMixture><Oxygen>0.21</Oxygen>
+<DiveGasChanges><DiveGasChange><GasChangeTime>0</GasChangeTime></DiveGasChange></DiveGasChanges>
+</DiveMixture></DiveMixtures><DiveSamples>{samples}</DiveSamples></Dive>
+""".encode()
+
+    def test_the_mean_depth_is_the_dives_and_not_the_thinned_channels(self) -> None:
+        content = self._one_hertz_dive()
+        depths = [metres * 100 for metres in self.DEPTHS_M]
+
+        extraction = extract_recording(
+            [
+                LoadedDiveFile(
+                    data=content,
+                    content_type="application/xml",
+                    original_filename="export.xml",
+                    sha256=_digest(content),
+                    parser_key=SuuntoXmlParser.key,
+                )
+            ]
+        )
+
+        assert extraction.profile is not None
+        assert extraction.profile.depth is not None
+        assert extraction.profile.gas_attribution, "the file records a gas switch, so there is one to attribute"
+        stored_depth = extraction.profile.depth
+
+        assert extraction.profile.gas_attribution[0].mean_depth_cm == round(sum(depths) / len(depths))
+        # And the channel really was thinned, so the mean could not have come off it.
+        assert len(stored_depth.t) < len(depths)
+        assert extraction.profile.gas_attribution[0].mean_depth_cm != round(sum(stored_depth.v) / len(stored_depth.v))

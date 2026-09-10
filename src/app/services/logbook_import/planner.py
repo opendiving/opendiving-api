@@ -511,10 +511,9 @@ class _Planner:
         self._files_skipped = 0
         self._species_row_by_uuid: dict[uuid_pkg.UUID, int] = {}
         # Digests this account already stores, plus the ones this import is about to add.
-        # `ux_dive_file_user_id_sha256` is per user, so a second dive carrying identical
-        # bytes cannot have a row of its own - and `dive_id` being NOT NULL under
-        # `ux_dive_file_dive_id` means one row cannot serve two dives either. The file is
-        # skipped and reported; the dive is not.
+        # `ux_dive_file_user_id_sha256` is per user, so a second recording carrying identical
+        # bytes cannot have a row of its own - and one row names one `recording_id`, so it
+        # cannot serve two either. The file is skipped and reported; the dive is not.
         self._claimed_digests: set[str] = set()
         # Incoming recordings that belong to dives this account already has - see
         # `PlannedRecordingMatch`. Filled by `_plan_dives`, walked by the writer.
