@@ -589,15 +589,16 @@ def fill_mixture_fields(
     both sides recorded - a `None` on either side being an absent reading rather than a
     disagreement. A list that half-matches is an edited list describing other cylinders.
 
-    **A fill the table would reject is dropped, and only for the row it belongs to.** Three of
-    these columns are half of a pair the schema constrains - `end_pressure <= start_pressure`,
-    `oxygen + helium <= 100` - so filling one half against a stored other half can produce a
-    row the database refuses, and an `IntegrityError` here would surface to the diver as a
-    failed upload or take a whole logbook import down with it. Where that happens the file and
-    the stored row cannot both be describing this cylinder, and the stored row is the diver's:
-    it stands, whole. Per row rather than per dive, unlike `merge_mixture_fields`' refusal,
-    because nothing is being overwritten - a filled cylinder beside an unfilled one is two
-    rows each carrying what it always did, not two rows sourced from different places.
+    **A fill the table would reject is dropped, and only for the row it belongs to.** All of
+    these but `volume` are half of a pair the schema constrains - `end_pressure <=
+    start_pressure`, `oxygen + helium <= 100` - so filling one half against a stored other
+    half can produce a row the database refuses, and an `IntegrityError` here would surface to
+    the diver as a failed upload or take a whole logbook import down with it. Where that
+    happens the file and the stored row cannot both be describing this cylinder, and the
+    stored row is the diver's: it stands, whole. Per row rather than per dive, unlike
+    `merge_mixture_fields`' refusal, because nothing is being overwritten - a filled cylinder
+    beside an unfilled one is two rows each carrying what it always did, not two rows sourced
+    from different places.
     """
     if len(parsed) != len(stored) or not parsed:
         return None
