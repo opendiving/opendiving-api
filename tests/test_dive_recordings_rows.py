@@ -272,13 +272,14 @@ class TestFillingTheDivesCylinders:
         assert cylinder.gas_number == 0
 
     @pytest.mark.asyncio
-    async def test_a_recordings_first_file_fills_nothing(
+    async def test_the_upload_that_creates_a_recording_fills_nothing(
         self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
     ) -> None:
         """The same branch `store_tech_scalars`/`fill_tech_scalars` turn on, applied to the
-        cylinders. A recording's first file has nothing to add: the dive's rows came off the
-        form this very parse pre-filled, so a fill here would only put back a blank the diver
-        had just cleared."""
+        cylinders. This dive has no recording yet, so the upload makes one and there is
+        nothing to add: the dive's rows came off the form this very parse pre-filled, and a
+        fill would only put back a blank the diver had just cleared. **Not "a recording's
+        first file"** - the test below is one of those and it fills."""
         self._seed_cylinder(db, dive, gas_number=0, start_pressure=200.0)
 
         await _attach(async_db, diver, dive, _export(cylinder="<Oxygen>33</Oxygen>"), filename="ocean.xml")

@@ -16175,8 +16175,8 @@ recording writes the dive's tech scalars outright — `None` included, so a read
 cleared — because there was nothing on the dive to lose. Every other file fills.
 `_rederive_recording` takes that answer as its `fresh` parameter rather than deciding it inside a
 write, so the asymmetry cannot be reached by the wrong branch. What `fresh` means is worth knowing
-before relying on it, and it is **not** "the recording had files a moment ago" — the last paragraph
-of this section says what it is.
+before relying on it, and it is **not** "the recording had no files a moment ago" — the last
+paragraph of this section says what it is.
 
 **The dive's readings are the primary recording's and nothing else's.** A second computer's CNS
 clock is its own device's arithmetic, and writing it onto the dive would attribute one machine's

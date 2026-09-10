@@ -1013,8 +1013,8 @@ class TestReExtractionFailureDoesNotFailTheRequest:
 
         **The asymmetry is now structural rather than conditional**, which is the change worth
         pinning: the re-derivation picks `store_tech_scalars` (which clears) or
-        `fill_tech_scalars` (which cannot) on whether the recording had files a moment ago,
-        so this branch cannot reach the clearing write at all.
+        `fill_tech_scalars` (which cannot) on its `fresh` parameter - "this upload created the
+        recording" - so this branch cannot reach the clearing write at all.
         """
         writes: list[dict] = []
         cleared: list[dict] = []
@@ -1126,10 +1126,12 @@ class TestScalarsAreWrittenAtAttach:
     """The import path owns these columns outright - the form cannot set them at all
     (`DiveTechScalars` is on the read shapes only), so this is the only write.
 
-    **Outright for a recording's first file, filled for every later one**, and that split is
-    what the tests below are about. A recording that had no files a moment ago has nothing to
-    lose by a write that clears what it no longer yields; a recording gaining a *second* file
-    has a first file's readings on the dive and must not overwrite them.
+    **Outright for the upload that created the recording, filled for every other file**, and
+    that split is what the tests below are about. A dive with nothing yet on this recording
+    has nothing to lose by a write that clears what the files no longer yield; a recording
+    gaining a file it did not begin with has earlier readings on the dive and must not
+    overwrite them. The condition is `_rederive_recording`'s `fresh`, which is *not* "the
+    recording had no files" - see its docstring for the case where the two differ.
     """
 
     XML_WITH_EXPOSURE = f"""<?xml version="1.0" encoding="utf-8"?>
@@ -1200,9 +1202,9 @@ class TestScalarsAreWrittenAtAttach:
 
     @pytest.mark.asyncio
     async def test_an_export_that_records_none_clears_what_was_there(self, monkeypatch) -> None:
-        """Unconditional on a recording's first file, unlike the profile write beside it:
-        leaving a previous export's CNS on a recording whose files have changed would
-        attribute a reading to bytes it didn't come from."""
+        """Unconditional on the `fresh` branch, unlike the profile write beside it: leaving a
+        previous export's CNS on a recording whose files have changed would attribute a
+        reading to bytes it didn't come from."""
         empty = f'<?xml version="1.0" encoding="utf-8"?><Dive xmlns="{SUUNTO_NS}"/>'.encode()
 
         chosen = await self._rederive(self._files(empty), monkeypatch, fresh=True)
