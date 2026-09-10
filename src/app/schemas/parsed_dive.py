@@ -397,7 +397,7 @@ class ParsedDiveSchema(_ParserOutput):
         1.031-1.067 bar and the 531 JSON readings 0.997-1.067, so not one of the 915 comes
         near either bound. It is here because of where the value lands, rather than because
         a file was caught writing a bad one - `store_tech_scalars` runs
-        inside `store_dive_file`'s transaction, so a `CHECK` violation from a parsed number
+        inside `store_recording_file`'s transaction, so a `CHECK` violation from a parsed number
         surfaces to the diver as `IntegrityError` -> "the file changed while this upload was
         in flight", advice that would be both wrong and unactionable: the retry it asks for
         fails identically every time.

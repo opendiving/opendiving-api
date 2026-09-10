@@ -140,7 +140,7 @@ class DiveTechScalars(BaseModel):
 
     Its own mixin rather than fields on `DiveBase` precisely so it lands on the read
     shapes and *not* on `DiveCreate`/`DiveUpdate`: these are written only by the import
-    path (`services/dive_files.py::store_dive_file`), and `DiveCreate`'s `extra="forbid"`
+    path (`services/dive_files.py::store_recording_file`), and `DiveCreate`'s `extra="forbid"`
     then makes an attempt to set one a 422 rather than a silently accepted fiction.
 
     CNS and OTU depend on the decompression algorithm the device ran and on the diver's

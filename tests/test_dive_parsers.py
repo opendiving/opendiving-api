@@ -1354,7 +1354,7 @@ class TestFitParserParse:
 
         A device writes one definition record and then a long run of 10-byte `record`
         messages, so a file at `MAX_DIVE_FILE_SIZE` holds ~524 000 of them and takes ~10 s
-        to decode - paid twice per import, since `/dive/parse` and `PUT /dive/{uuid}/file`
+        to decode - paid twice per import, since `/dive/parse` and `POST /dive/{uuid}/recordings`
         each read the file. Capping *collected samples* would not have helped: bare
         decoding is 8 s of that 10 s, and the collection is under 1 s.
 
@@ -2107,7 +2107,7 @@ class TestTechScalars:
     def test_an_out_of_band_surface_pressure_reads_as_no_reading(self):
         """Unattested in the corpus - all 384 XML exports land in 1.031-1.067 bar - but
         the band is the one `ck_dive_surface_pressure_range` enforces, and the column is
-        written inside `store_dive_file`'s transaction. A value the CHECK rejects would
+        written inside `store_recording_file`'s transaction. A value the CHECK rejects would
         therefore fail the *attach* of an otherwise importable file, reported to the diver
         as a concurrent-upload conflict that no retry can clear. Nulled here instead."""
         for reading in ("0", "105700000", "-105700"):
@@ -2148,7 +2148,7 @@ class TestTechScalars:
 
     def test_a_negative_exposure_reading_reads_as_no_reading(self):
         """Oxygen loading does not run backwards. Unguarded, a negative here violated
-        `ck_dive_cns_start_non_negative` *inside* `store_dive_file`'s transaction, so the
+        `ck_dive_cns_start_non_negative` *inside* `store_recording_file`'s transaction, so the
         attach rolled back and the diver got a 409 telling them to retry an upload that
         could never succeed."""
         content = f"""<?xml version="1.0" encoding="utf-8"?>

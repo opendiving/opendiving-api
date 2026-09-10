@@ -59,7 +59,7 @@ class TokenType(StrEnum):
     RESTORE = "restore"
     # Not a session at all: a receipt from `POST /dive/parse` attesting that this server
     # parsed a specific set of bytes for a specific user - see `create_dive_file_token`/
-    # `verify_dive_file_token` below, and `PUT /dive/{uuid}/file`. Carries no authority;
+    # `verify_dive_file_token` below, and `POST /dive/{uuid}/recordings`. Carries no authority;
     # the upload route still checks that the caller owns the dive.
     DIVE_FILE = "dive_file"
     # The same kind of receipt for a whole logbook: `POST /import/logbook/preview` read

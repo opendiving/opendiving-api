@@ -372,7 +372,7 @@ class TestWhatUddfCannotHold:
 
 
 class TestTheProfileVocabulary:
-    """One profile vocabulary across the app: `GET /dive/{uuid}/profile` and this document
+    """One profile vocabulary across the app: `GET /dive/{uuid}/recording/{rid}/profile` and this document
     both serve `DiveProfileRead`, whose member names are the format's."""
 
     @pytest.mark.asyncio

@@ -106,7 +106,7 @@ def _known_transports(transports: list[str] | None) -> list[AuthenticatorTranspo
 def _at_the_cap() -> HTTPException:
     """409, not 422: the request body is fine, the *account's state* is what conflicts -
     which is the line `AGENTS.md` draws between the two codes. A raw `HTTPException` for
-    the same reason `PUT /dive/{uuid}/file`'s conflicts are raw ones:
+    the same reason `POST /dive/{uuid}/recordings`'s conflicts are raw ones:
     `core/exceptions/http_exceptions.py` has no class for 409.
 
     A factory, and so is `_already_registered` below - **never** a module-level constant,

@@ -27,7 +27,7 @@ Where it differs from the API's own read shapes, and why:
 - **Nothing is re-scaled or re-unitised.** Depths meters, pressures bar, temperatures
   Celsius, durations seconds - which is the format's own canonical system (spec §5.1), so
   the app's wire values travel unchanged. The embedded profile keeps the integer scales
-  `GET /dive/{uuid}/profile` uses, which the spec fixes too. The diver's `units`
+  `GET /dive/{uuid}/recording/{rid}/profile` uses, which the spec fixes too. The diver's `units`
   preference is account data, says which system they read in, and changes none of it
   (DECISIONS.md, *"Measurements are metric in the database and on the wire; `units` is
   who's looking"*).

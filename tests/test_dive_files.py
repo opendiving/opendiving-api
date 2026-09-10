@@ -102,7 +102,7 @@ def _existing(*, dive_id: int, content: bytes = VALID_SUUNTO_XML) -> _ExistingRo
 
 
 class TestDiveFileToken:
-    """The token is the whole admission control for `PUT /dive/{uuid}/file`: without it
+    """The token is the whole admission control for `POST /dive/{uuid}/recordings`: without it
     the endpoint would store any blob shaped like an export."""
 
     def test_round_trips_what_it_attests(self) -> None:
@@ -181,7 +181,7 @@ class TestDiveFileToken:
         assert verify_dive_file_token("not.a.jwt") is None
 
     def test_binds_the_hash_of_the_specific_bytes_parsed(self) -> None:
-        """`store_dive_file` compares this against a digest of the body it receives, so a
+        """`store_recording_file` compares this against a digest of the body it receives, so a
         token for one file cannot admit another."""
         token = create_dive_file_token(user_uuid=USER_UUID, sha256=_digest(VALID_SUUNTO_XML), parser_key="suunto_xml")
 
@@ -206,7 +206,7 @@ class TestParserMetadata:
         assert len(keys) == len(set(keys))
 
     def test_parser_by_key_covers_the_registry(self) -> None:
-        """`store_dive_file` resolves a token's `parser_key` through this map to get the
+        """`store_recording_file` resolves a token's `parser_key` through this map to get the
         `content_type` it serves the file back as; a gap would reject a valid import."""
         assert PARSER_BY_KEY == {parser.key: parser for parser in parsers_module._PARSERS}
 

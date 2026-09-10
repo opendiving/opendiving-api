@@ -1985,7 +1985,7 @@ class _Planner:
 
         self._claimed_digests.add(stored.sha256)
         self._files_restored += 1
-        # The parser registry decides the content type, exactly as `store_dive_file` does -
+        # The parser registry decides the content type, exactly as `store_recording_file` does -
         # that value ends up in a response header on download, so it is resolved here rather
         # than taken from a document that could name anything.
         parser_key = _producer_entry(stored, "parser_key")

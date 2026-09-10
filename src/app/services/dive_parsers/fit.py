@@ -62,7 +62,7 @@ _MAX_UTC_OFFSET_MINUTES = 14 * 60
 # like a denial-of-service. Decoding is linear in frames and is *the* cost here: a 5 MB
 # file (`MAX_DIVE_FILE_SIZE`) of bare 10-byte `record` messages, which is how a device
 # actually encodes a long log, holds ~524 000 of them and takes ~10 s to decode - paid
-# twice per import, since `POST /dive/parse` and `PUT /dive/{uuid}/file` each read the
+# twice per import, since `POST /dive/parse` and `POST /dive/{uuid}/recordings` each read the
 # file. Stopping at this cap holds that to ~1.5 s.
 #
 # The largest real file in the corpus is a 72-minute multi-channel Suunto Ocean dive at

@@ -80,7 +80,7 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     )
 
     # Oxygen-exposure and surface-pressure readings, written **only** by the import path
-    # (`services/dive_files.py::store_dive_file`) and never through the dive form. They
+    # (`services/dive_files.py::store_recording_file`) and never through the dive form. They
     # are the dive computer's own accounting - CNS and OTU depend on the algorithm the
     # device ran and on the diver's exposure history, neither of which is reconstructable
     # from a logged dive - so a hand-typed value would be a guess wearing a reading's

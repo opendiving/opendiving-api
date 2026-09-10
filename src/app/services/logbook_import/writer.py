@@ -10,7 +10,7 @@ and one whose bytes are not a format this app stores.
 the caller does, once, at the end - so a failed, refused or interrupted import writes no
 rows at all, and a retry after a timeout can never half-duplicate a logbook. The files
 volume is written *before* the transaction that references it, which is the ordering
-`store_dive_file` and `store_certification_file` already use for the same reason: every
+`store_recording_file` and `store_certification_file` already use for the same reason: every
 database-visible state names bytes that exist, and the only thing a failure can leave is an
 unreferenced file. That is the recorded and accepted orphan case, reclaimed by
 `sweep_orphaned_files.py`; there is no compensating unlink, which is the concurrent-write
