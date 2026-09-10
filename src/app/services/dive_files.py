@@ -827,16 +827,35 @@ async def _repeat_upload(
     server refuses the very bytes that would fix it. The write re-`put`s the key the row
     already carries rather than minting one, and a `put` of a key whose name ends in these
     bytes' hash is byte-identical to what was there.
+
+    **The volume repair runs first, before anything reads the recording's files.** It has to:
+    re-deriving a recording loads every file it holds, and `load_recording_files` raises
+    `BlobMissingError` on bytes that are gone - so repairing second would make this path fail
+    on exactly the condition it exists to fix. That ordering did not matter while a dive had
+    one file and the re-extraction read the bytes it had just been handed; it matters now,
+    and nothing but a test would have caught it.
     """
+    if not await blob_store.has(existing.storage_key):
+        logger.warning("Rewriting the missing stored file for dive %s from a re-upload", dive_id)
+        await blob_store.put(existing.storage_key, data)
+
     ordinal = (
         await db.execute(select(DiveRecording.ordinal).where(DiveRecording.id == existing.recording_id))
     ).scalar_one_or_none()
-    stored_digest = recording_source_digest(
-        [file.sha256 for file in await load_recording_files(db, recording_id=existing.recording_id)]
-    )
-    if should_extract(await get_existing_profile(db, recording_id=existing.recording_id), sha256=stored_digest) == (
-        "extract"
-    ):
+    try:
+        digests = [file.sha256 for file in await load_recording_files(db, recording_id=existing.recording_id)]
+    except blob_store.BlobMissingError:
+        # A *sibling* file of this recording is missing, which these bytes cannot repair. The
+        # upload is still a no-op and still the right answer; what is skipped is the
+        # opportunistic upgrade, and `backfill_profiles` reports the recording when it
+        # reaches it.
+        logger.error("Skipping re-extraction for recording %s: a sibling file is missing", existing.recording_id)
+        return StoredRecordingFile(recording_id=existing.recording_id, file_uuid=existing.uuid)
+
+    if digests and should_extract(
+        await get_existing_profile(db, recording_id=existing.recording_id),
+        sha256=recording_source_digest(digests),
+    ) == ("extract"):
         await release_read_transaction(db)
         try:
             await _rederive_recording(
@@ -854,10 +873,6 @@ async def _repeat_upload(
             # failed transaction and the *next* statement on it dies somewhere unrelated.
             logger.exception("Opportunistic re-extraction for recording %s could not be stored", existing.recording_id)
             await db.rollback()
-
-    if not await blob_store.has(existing.storage_key):
-        logger.warning("Rewriting the missing stored file for dive %s from a re-upload", dive_id)
-        await blob_store.put(existing.storage_key, data)
 
     return StoredRecordingFile(recording_id=existing.recording_id, file_uuid=existing.uuid)
 
@@ -1014,12 +1029,16 @@ async def delete_files_for_dive(db: AsyncSession, *, dive_id: int, commit: bool 
     from `dive_recording` *does* fire, which is why removing the recordings is enough to take
     the files and the profiles with them.
     """
-    recording_ids = (await db.execute(select(DiveRecording.id).where(DiveRecording.dive_id == dive_id))).scalars().all()
-    keys = await dive_recordings.storage_keys_for_recordings(db, recording_ids=list(recording_ids))
+    # By dive rather than through the recordings, which is a strict superset and one query
+    # fewer - and the keys have to be in hand before the cascade removes the rows naming them.
+    keys = list((await db.execute(select(DiveFile.storage_key).where(DiveFile.dive_id == dive_id))).scalars())
     await db.execute(delete(DiveRecording).where(DiveRecording.dive_id == dive_id))
-    # Belt and braces for a row the cascade cannot reach: `dive_profile` rows written before
-    # recordings existed are migrated onto one, but a profile whose recording was removed by
-    # some other path would be left behind by the cascade alone.
+    # The cascade has already taken these, and the two statements below cost one empty
+    # `DELETE` each on every ordinary path. They stay because `recording_id` is the *only*
+    # thing tying a file or a profile to a recording, and a row that lost its recording by
+    # any route the cascade does not cover would otherwise outlive the dive it belongs to -
+    # keeping its slot in `ux_dive_file_user_id_sha256` and blocking a re-import of the same
+    # export into a fresh dive, which is the failure this function exists to prevent.
     await db.execute(delete(DiveProfile).where(DiveProfile.dive_id == dive_id))
     await db.execute(delete(DiveFile).where(DiveFile.dive_id == dive_id))
     blob_store.delete_after_commit(db, keys)

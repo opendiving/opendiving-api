@@ -171,6 +171,28 @@ class TestWhereAFileLands:
         assert await _cns_end(async_db, dive) == 9.0
 
     @pytest.mark.asyncio
+    async def test_re_uploading_repairs_a_file_that_vanished_from_the_volume(
+        self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
+    ) -> None:
+        """ "Just upload it again" is the natural repair after a partial volume loss, and the
+        order of the two halves is what makes it work: the bytes go back **before** anything
+        reads the recording's files. Re-deriving a recording loads every file it holds and
+        raises on bytes that are gone, so repairing second would fail on exactly the
+        condition this path exists to fix.
+        """
+        content = _export(cns_end=9.0, samples=_samples((0, "0")))
+        stored = await _attach(async_db, diver, dive, content)
+        key = (
+            await async_db.execute(select(DiveFile.storage_key).where(DiveFile.recording_id == stored.recording_id))
+        ).scalar_one()
+        (volume / key).unlink()
+
+        again = await _attach(async_db, diver, dive, content)
+
+        assert again.recording_id == stored.recording_id
+        assert (volume / key).read_bytes() == content
+
+    @pytest.mark.asyncio
     async def test_the_same_bytes_twice_are_a_no_op(
         self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
     ) -> None:
