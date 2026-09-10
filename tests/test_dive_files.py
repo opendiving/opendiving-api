@@ -1152,13 +1152,16 @@ class TestScalarsAreWrittenAtAttach:
         ]
 
     @staticmethod
-    async def _rederive(files: list[LoadedDiveFile], monkeypatch, *, fresh: bool, ordinal: int = 0) -> dict:
+    async def _rederive(
+        files: list[LoadedDiveFile], monkeypatch, *, fresh: bool, ordinal: int = 0, joined: bool = False
+    ) -> dict:
         """Run the re-derivation over `files` and report which write it chose and with what.
 
         Captured at the two `store_tech_scalars`/`fill_tech_scalars` seams rather than by
         inspecting the emitted `UPDATE`: the decision under test is *what the attach decided
         to write*, and reading it back off SQLAlchemy's statement internals would pin the
-        assertion to how the write is spelled rather than to what it says.
+        assertion to how the write is spelled rather than to what it says. The cylinder fill
+        is captured the same way, under `"cylinders"`.
         """
         chosen: dict = {}
 
@@ -1168,8 +1171,12 @@ class TestScalarsAreWrittenAtAttach:
         async def fill(db, *, dive_id, scalars):
             chosen["fill"] = scalars
 
+        async def cylinders(db, *, dive_id, parsed):
+            chosen["cylinders"] = list(parsed)
+
         monkeypatch.setattr("src.app.services.dive_files.store_tech_scalars", outright)
         monkeypatch.setattr("src.app.services.dive_files.fill_tech_scalars", fill)
+        monkeypatch.setattr("src.app.services.dive_files.fill_dive_mixtures", cylinders)
         monkeypatch.setattr("src.app.services.dive_files.store_profile", AsyncMock())
         monkeypatch.setattr("src.app.services.dive_files.delete_profile_for_recording", AsyncMock())
 
@@ -1179,6 +1186,7 @@ class TestScalarsAreWrittenAtAttach:
             dive_id=7,
             ordinal=ordinal,
             fresh=fresh,
+            joined=joined,
             files=files,
             extraction=extract_recording(files),
         )
@@ -1219,10 +1227,28 @@ class TestScalarsAreWrittenAtAttach:
         absent from it rather than present as `None`."""
         empty = f'<?xml version="1.0" encoding="utf-8"?><Dive xmlns="{SUUNTO_NS}"/>'.encode()
 
-        chosen = await self._rederive(self._files(empty, self.XML_WITH_EXPOSURE), monkeypatch, fresh=False)
+        chosen = await self._rederive(self._files(empty, self.XML_WITH_EXPOSURE), monkeypatch, fresh=False, joined=True)
 
         assert "outright" not in chosen
         assert chosen["fill"] == dict.fromkeys(TECH_SCALAR_FIELDS) | {"cns_end": 20.0, "surface_pressure_bar": 1.057}
+
+    @pytest.mark.asyncio
+    async def test_re_reading_the_same_files_fills_the_scalars_and_not_the_cylinders(self, monkeypatch) -> None:
+        """**The two questions `fresh` and `joined` answer are different**, and this is where
+        they part company: `_repeat_upload` re-reads bytes the recording already had, so a
+        re-parse yielding less must not clear the dive's readings (`fresh=False`) - but
+        nothing arrived that could put a value into a cylinder (`joined=False`).
+
+        Gating the cylinders on `fresh` instead made re-uploading a file undo an edit: the
+        diver attaches an export, clears the `oxygen` the form pre-filled from it, uploads
+        the same file again, and the fill reads it straight back off those very bytes. A
+        sample-less export reaches this on *every* repeat upload, `should_extract` answering
+        "extract" unconditionally where there is no stored profile.
+        """
+        chosen = await self._rederive(self._files(self.XML_WITH_EXPOSURE), monkeypatch, fresh=False, joined=False)
+
+        assert "fill" in chosen
+        assert "cylinders" not in chosen
 
     @pytest.mark.asyncio
     async def test_a_secondary_recording_never_touches_them(self, monkeypatch) -> None:

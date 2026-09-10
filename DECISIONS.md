@@ -16258,17 +16258,33 @@ ordinal on `PlannedRecordingMatch`. Read-then-write rather than a `COALESCE` per
 every single-column fill: the join is positional and the alignment exists only in Python, so the
 statement would have to name a row the SQL cannot pick out.
 
-**The `fresh` branch governs the cylinders too, and `fresh` is not "this recording had no files".**
-The attach path sets it from `matched is None`, so it is true of a recording *this upload created*
-and of nothing else. That is the case where a fill has nothing to add: the dive's rows came off the
-form that same parse pre-filled, so it would only put back a blank the diver had just cleared. Every
-other file fills — including the first file ever to reach a **file-less recording a logbook import
-created earlier**, which is not a contradiction but the case the gate exists for: the recording
-predates the upload, so the bytes are a second reading of a record the dive already describes. Same
-parameter, same place, as the outright-versus-fill choice for the scalars — and the phrasing matters
-because "the recording's first file" reads as the rule and is not it; `delete_dive_file` passes
-`fresh=True` for a recording that plainly did have files, since there the point is to stop claiming
-a reading the remaining ones no longer yield.
+**The cylinders get their own gate — `joined`, not `fresh` — and the two are different questions.**
+`fresh` asks whether the dive has anything on this recording to lose, and decides the
+outright-versus -fill choice for the scalars. `joined` asks whether **new bytes arrived on a
+recording that already existed**, which is the only event that can put a reading into a cylinder. On
+the attach path they are each other's negation, which is exactly why one parameter looked sufficient
+and was not: the other two callers of `_rederive_recording` have no new bytes at all, and one of
+them answers `fresh` the same way the attach path does when it fills.
+
+That one is `_repeat_upload`, and gating the cylinders on `fresh` made it undo an edit. Re-uploading
+a file the dive already holds is a no-op that opportunistically re-derives, so it passes
+`fresh=False` — a re-parse yielding less must not clear the dive's readings. With the cylinders on
+that branch, the sequence is: the diver attaches an export, clears the `oxygen` the form pre-filled
+from it, uploads the same file again, and the fill reads that 33 straight back off the very bytes
+they were editing away from. Not a rare path either: `should_extract` answers "extract"
+unconditionally where there is no stored profile, so a sample-less export re-derives on *every*
+repeat upload rather than only after a `PROFILE_EXTRACTOR_VERSION` bump. `delete_dive_file` is the
+third caller and has no new bytes either. Both now pass `joined=False`, and the parameter is
+required rather than defaulted so a fourth caller has to answer it.
+
+**`fresh` itself is still not "this recording had no files"**, and that is worth keeping straight
+because the wrong reading of it is what the paragraph above is about. The attach path sets it from
+`matched is None`, so it is true of a recording *this upload created* and of nothing else. The first
+file ever to reach a **file-less recording a logbook import created earlier** is therefore not fresh
+and does fill — not a contradiction but the case the same-recording gate exists for: the recording
+predates the upload, so the bytes are a second reading of a record the dive already describes. And
+`delete_dive_file` passes `fresh=True` for a recording that plainly did have files, since there the
+point is to stop claiming a reading the remaining ones no longer yield.
 
 ## A profile has one of three provenances, and a recording need not have a file
 

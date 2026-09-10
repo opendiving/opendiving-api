@@ -875,6 +875,7 @@ async def store_recording_file(
             dive_id=dive_id,
             ordinal=ordinal,
             fresh=matched is None,
+            joined=matched is not None,
             files=files,
             extraction=recording_extraction,
         )
@@ -977,6 +978,7 @@ async def _rederive_recording(
     dive_id: int,
     ordinal: int,
     fresh: bool,
+    joined: bool,
     files: Sequence[LoadedDiveFile],
     extraction: RecordingExtraction,
 ) -> None:
@@ -1005,8 +1007,20 @@ async def _rederive_recording(
     **A secondary recording's cylinder labels are mapped onto the dive's**, which is the other
     half of that asymmetry: its samples stay, and only the numbers naming which tank they
     came out of move. The *primary* recording's cylinders are joined to the dive's rows
-    positionally instead and fill their blanks, which is the same first-file-wins rule the
-    scalars follow one paragraph up, on the same `fresh` branch.
+    positionally instead and fill their blanks - the same first-file-wins rule the scalars
+    follow one paragraph up.
+
+    **`joined` and not `fresh` is what gates that, and the two are different questions.**
+    `fresh` asks whether the dive has anything on this recording to lose; `joined` asks
+    whether *new bytes* arrived on a recording that already existed, which is the only event
+    that can put a reading into a cylinder. They agree on the attach path and part company
+    everywhere else: `_repeat_upload` re-reads bytes the recording already had, so it fills
+    the scalars (a re-parse yielding less must not clear them) and must **not** touch the
+    cylinders - a diver who cleared a value the form pre-filled from that very file would have
+    it put back by re-uploading the file. `delete_dive_file` has no new bytes either. Two
+    parameters rather than one because conflating them is the bug: a caller reasoning only
+    about the scalars gets the cylinders wrong for free. Required rather than defaulted, so a
+    fourth caller has to answer it.
     """
     from ..crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
     from ..schemas.dive_mixture import DiveMixtureCreate
@@ -1056,13 +1070,11 @@ async def _rederive_recording(
         )
     else:
         await fill_tech_scalars(db, dive_id=dive_id, scalars=extraction.scalars)
-        # The cylinders go the same way as the scalars and on the same branch, which is what
-        # keeps `fresh` the one place this asymmetry is decided. The branch not taken is the
-        # recording this very upload created, where a fill has nothing to add: the dive's
-        # rows came off the form that same parse pre-filled, so it would only put back a
-        # blank the diver had just cleared. Here the recording predates the upload, and the
-        # bytes are a second reading of a record the dive already describes - the FIT's
-        # `oxygen` 33 landing in the cylinder the JSON gave pressures and no mix.
+
+    # Its own branch, not the `fresh` one - see the docstring for the two callers where the
+    # answers differ. New bytes on a recording that already existed is the whole of the case:
+    # the FIT's `oxygen` 33 landing in the cylinder the JSON gave pressures and no mix.
+    if joined:
         await fill_dive_mixtures(db, dive_id=dive_id, parsed=extraction.mixtures)
 
 
@@ -1146,6 +1158,8 @@ async def _repeat_upload(
                 dive_id=dive_id,
                 ordinal=ordinal or 0,
                 fresh=False,
+                # No new bytes: these are the recording's own files, read again.
+                joined=False,
                 files=files,
                 extraction=extraction,
             )
@@ -1297,6 +1311,8 @@ async def delete_dive_file(db: AsyncSession, *, file_id: int, commit: bool = Tru
             dive_id=row.dive_id,
             ordinal=ordinal or 0,
             fresh=True,
+            # A deletion removes bytes; nothing arrived that could fill a cylinder.
+            joined=False,
             files=remaining,
             extraction=await run_in_threadpool(extract_recording, remaining),
         )

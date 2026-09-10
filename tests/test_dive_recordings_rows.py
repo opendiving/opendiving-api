@@ -275,14 +275,34 @@ class TestFillingTheDivesCylinders:
     async def test_the_upload_that_creates_a_recording_fills_nothing(
         self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
     ) -> None:
-        """The same branch `store_tech_scalars`/`fill_tech_scalars` turn on, applied to the
-        cylinders. This dive has no recording yet, so the upload makes one and there is
-        nothing to add: the dive's rows came off the form this very parse pre-filled, and a
-        fill would only put back a blank the diver had just cleared. **Not "a recording's
-        first file"** - the test below is one of those and it fills."""
+        """Nothing arrived on a recording that already existed, because there wasn't one:
+        this dive has no recording yet, so the upload makes it, and the dive's cylinders came
+        off the form this very parse pre-filled. A fill would only put back a blank the diver
+        had just cleared. **Not "a recording's first file"** - two tests below are that and
+        one of them fills."""
         self._seed_cylinder(db, dive, gas_number=0, start_pressure=200.0)
 
         await _attach(async_db, diver, dive, _export(cylinder="<Oxygen>33</Oxygen>"), filename="ocean.xml")
+
+        assert (await self._cylinder(async_db, dive)).oxygen is None
+
+    @pytest.mark.asyncio
+    async def test_re_uploading_the_creating_file_does_not_undo_an_edit(
+        self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        """ "Just upload it again" must not put back a value the diver deliberately cleared.
+
+        The same bytes reach `_repeat_upload`, which re-derives opportunistically - and this
+        export carries no samples, so no profile row exists and `should_extract` answers
+        "extract" on *every* such upload rather than only after a version bump. Nothing new
+        arrived, so nothing may fill: the file's `oxygen` 33 is exactly what the diver removed
+        from the form, and reading it straight back off those bytes is the edit undone.
+        """
+        self._seed_cylinder(db, dive, gas_number=0, start_pressure=200.0)
+        export = _export(cylinder="<Oxygen>33</Oxygen>")
+        await _attach(async_db, diver, dive, export, filename="ocean.xml")
+
+        await _attach(async_db, diver, dive, export, filename="ocean.xml")
 
         assert (await self._cylinder(async_db, dive)).oxygen is None
 
