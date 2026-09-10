@@ -986,15 +986,21 @@ async def _rederive_recording(
     **The dive's tech scalars are the primary recording's, and only the primary's.** A
     secondary recording is a second computer's account of the same dive; its CNS clock is its
     own device's and writing it onto the dive would attribute one computer's arithmetic to
-    another's. `fresh` says whether this recording had no files a moment ago, which is what
-    decides between the outright write (clearing what nothing yields) and the fill.
+    another's. **`fresh` says the dive had nothing on this recording to lose** - the caller's
+    answer, not a property of the row - which is what decides between the outright write
+    (clearing what nothing yields) and the fill. The attach path sets it from
+    `matched is None`, so it is true of a recording this very upload created and **false of a
+    file-less one a logbook import created earlier**: that recording's first file is a second
+    reading of a record the logbook already holds, and fills. It is deliberately *not* "had no
+    files a moment ago" - `delete_dive_file` passes `fresh=True` for a recording that plainly
+    did, because there the point is to stop claiming a reading the remaining files no longer
+    yield.
 
     **A secondary recording's cylinder labels are mapped onto the dive's**, which is the other
     half of that asymmetry: its samples stay, and only the numbers naming which tank they
     came out of move. The *primary* recording's cylinders are joined to the dive's rows
     positionally instead and fill their blanks, which is the same first-file-wins rule the
-    scalars follow one line up and is likewise reached only when the recording already had
-    files.
+    scalars follow one paragraph up, on the same `fresh` branch.
     """
     from ..crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
     from ..schemas.dive_mixture import DiveMixtureCreate
@@ -1045,11 +1051,12 @@ async def _rederive_recording(
     else:
         await fill_tech_scalars(db, dive_id=dive_id, scalars=extraction.scalars)
         # The cylinders go the same way as the scalars and on the same branch, which is what
-        # keeps `fresh` the one place this asymmetry is decided. A recording's *first* file
-        # has nothing to add: the dive's rows came off the form this very parse pre-filled,
-        # so a fill there would only put back a blank the diver had just cleared. A later
-        # file is the case the rule is about - the FIT's `oxygen` 33 landing in the cylinder
-        # the JSON gave pressures and no mix.
+        # keeps `fresh` the one place this asymmetry is decided. The branch not taken is the
+        # recording this very upload created, where a fill has nothing to add: the dive's
+        # rows came off the form that same parse pre-filled, so it would only put back a
+        # blank the diver had just cleared. Here the recording predates the upload, and the
+        # bytes are a second reading of a record the dive already describes - the FIT's
+        # `oxygen` 33 landing in the cylinder the JSON gave pressures and no mix.
         await fill_dive_mixtures(db, dive_id=dive_id, parsed=extraction.mixtures)
 
 

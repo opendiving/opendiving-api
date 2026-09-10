@@ -16241,11 +16241,17 @@ the two cannot disagree about it. Read-then-write rather than a `COALESCE` per c
 single-column fill: the join is positional and the alignment exists only in Python, so the statement
 would have to name a row the SQL cannot pick out.
 
-**The `fresh` branch governs the cylinders too.** A recording's *first* file fills nothing: the
-dive's rows came off the form that very parse pre-filled, so the only thing a fill could do there is
-put back a blank the diver had just cleared. Every later file fills — including the first file to
-reach a recording a logbook import created without one, which is the converted-import case meeting
-its own bytes. Same parameter, same place, as the outright-versus-fill choice for the scalars.
+**The `fresh` branch governs the cylinders too, and `fresh` is not "this recording had no files".**
+The attach path sets it from `matched is None`, so it is true of a recording *this upload created*
+and of nothing else. That is the case where a fill has nothing to add: the dive's rows came off the
+form that same parse pre-filled, so it would only put back a blank the diver had just cleared. Every
+other file fills — including the first file ever to reach a **file-less recording a logbook import
+created earlier**, which is not a contradiction but the case the gate exists for: the recording
+predates the upload, so the bytes are a second reading of a record the dive already describes. Same
+parameter, same place, as the outright-versus-fill choice for the scalars — and the phrasing matters
+because "the recording's first file" reads as the rule and is not it; `delete_dive_file` passes
+`fresh=True` for a recording that plainly did have files, since there the point is to stop claiming
+a reading the remaining ones no longer yield.
 
 ## A profile has one of three provenances, and a recording need not have a file
 

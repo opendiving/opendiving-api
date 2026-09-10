@@ -285,6 +285,34 @@ class TestFillingTheDivesCylinders:
 
         assert (await self._cylinder(async_db, dive)).oxygen is None
 
+    @pytest.mark.asyncio
+    async def test_the_first_file_of_an_imported_recording_does_fill(
+        self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        """**`fresh` is "this upload created the recording", not "it had no files"**, and this
+        is where the two answers differ.
+
+        A converted logbook import creates a recording with samples, no device and no bytes.
+        When the diver later attaches the export it was converted from, that is the
+        recording's *first* file and still a second reading of a record the dive already
+        describes - so it fills. A `fresh` that keyed on the file count would take the
+        outright branch here and the cylinder would keep its blank.
+        """
+        recording = create_dive_recording(db, diver, dive)
+        await async_db.execute(
+            update(DiveRecording)
+            .where(DiveRecording.id == recording.id)
+            .values(start_time=datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC), utc_offset_minutes=180)
+        )
+        await async_db.commit()
+        self._seed_cylinder(db, dive, gas_number=0, start_pressure=200.0)
+
+        await _attach(async_db, diver, dive, _export(cylinder="<Oxygen>33</Oxygen>"), filename="ocean.xml")
+
+        # One recording still, so the file landed on the imported one rather than beside it.
+        assert [row.id for row in await _recordings(async_db, dive)] == [recording.id]
+        assert (await self._cylinder(async_db, dive)).oxygen == 33.0
+
 
 class TestFillingAStart:
     """The two start columns are one value, and filling half of them corrupts the other.
