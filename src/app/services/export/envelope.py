@@ -41,6 +41,7 @@ from ...schemas.export import (
     ExportBoundingBox,
     ExportCertification,
     ExportCourse,
+    ExportDevice,
     ExportDive,
     ExportDiver,
     ExportDiveSite,
@@ -50,6 +51,7 @@ from ...schemas.export import (
     ExportGearSet,
     ExportGenerator,
     ExportPosition,
+    ExportRecording,
     ExportSpecies,
     ExportStoredFile,
     ExportTrip,
@@ -57,7 +59,7 @@ from ...schemas.export import (
 )
 from ...schemas.trip import TripLocationRead
 from ..dive_profiles import LoadedProfile, load_profile, to_read_schema
-from .loader import ExportBundle
+from .loader import ExportBundle, ExportFileRow, ExportRecordingRow
 from .paths import ArchivePaths
 
 
@@ -153,28 +155,80 @@ def _trip_location(location: TripLocationRead) -> ExportTripLocation:
     )
 
 
-def _dive(bundle: ExportBundle, dive: Dive, *, profile: LoadedProfile | None, paths: ArchivePaths | None) -> ExportDive:
-    file_info = bundle.file_by_dive[dive.id]
-    # The metadata and the digest are two statements of the same read transaction, so a
-    # file deleted between them leaves one with a row and the other without a key. Narrow,
-    # but `archive._write_blobs` already handles the same race for the bytes, and a
-    # download that 500s because a file vanished mid-export is the wrong answer to it.
-    digest = bundle.dive_file_sha256.get(dive.id)
-    source_file = None
-    if file_info is not None and digest is not None:
-        source_file = ExportStoredFile(
-            uuid=file_info.uuid,
-            original_filename=file_info.original_filename,
-            content_type=file_info.content_type,
-            byte_size=file_info.byte_size,
-            sha256=digest,
-            archive_path=None if paths is None else paths.dive_files.get(dive.id),
-            # Which of this app's parsers understood the file. Parser registries are
-            # application-specific, so the format has no core member for one (spec §6.7)
-            # and it rides this producer's key - where the archive-restore path reads it
-            # back.
-            extensions={DIVEJSON_PRODUCER_KEY: {"parser_key": file_info.parser_key}},
-        )
+def _stored_file(bundle: ExportBundle, file: ExportFileRow, paths: ArchivePaths | None) -> ExportStoredFile | None:
+    """One stored export as the format's Stored File, or `None` if its digest has gone.
+
+    The metadata and the digest are two statements of the same read transaction, so a file
+    deleted between them leaves one with a row and the other without a key. Narrow, but
+    `archive._write_blobs` already handles the same race for the bytes, and a download that
+    500s because a file vanished mid-export is the wrong answer to it.
+    """
+    digest = bundle.dive_file_sha256.get(file.id)
+    if digest is None:
+        return None
+    return ExportStoredFile(
+        uuid=file.info.uuid,
+        original_filename=file.info.original_filename,
+        content_type=file.info.content_type,
+        byte_size=file.info.byte_size,
+        sha256=digest,
+        archive_path=None if paths is None else paths.dive_files.get(file.id),
+        # Which of this app's parsers understood the file. Parser registries are
+        # application-specific, so the format has no core member for one (spec §6.7)
+        # and it rides this producer's key - where the archive-restore path reads it
+        # back.
+        extensions={DIVEJSON_PRODUCER_KEY: {"parser_key": file.info.parser_key}},
+    )
+
+
+def _recording(
+    bundle: ExportBundle,
+    dive: Dive,
+    row: ExportRecordingRow,
+    *,
+    profile: LoadedProfile | None,
+    paths: ArchivePaths | None,
+) -> ExportRecording | None:
+    """One recording, or `None` when nothing about it survived to be written.
+
+    §3's rule 4 - a recording carries at least one of its device, its profile and its files -
+    is satisfied here rather than asserted: a row with no device columns, no samples and no
+    file left after the digest race above describes nothing, and a document is better without
+    it than with an empty object a reader has to skip.
+
+    **`started_at` is written only when it differs from the dive's**, §6.4a's absent-means-
+    the-dive's rule. Compared on the stored column pair rather than on the combined string,
+    because two recordings of one dive may legitimately carry different offsets and a
+    string comparison would call `12:17:38Z` and `15:17:38+03:00` different starts.
+    """
+    files = [stored for file in row.files if (stored := _stored_file(bundle, file, paths)) is not None]
+    device = ExportDevice(**row.device) if row.device else None
+    if device is None and profile is None and not files:
+        return None
+
+    differs = row.start_time is not None and (
+        row.start_time != dive.start_time or row.utc_offset_minutes != dive.utc_offset_minutes
+    )
+    return ExportRecording(
+        device=device,
+        started_at=combine_start_time(row.start_time, row.utc_offset_minutes) if differs else None,
+        source_files=files,
+        profile=None if profile is None else to_read_schema(profile),
+    )
+
+
+def _dive(
+    bundle: ExportBundle,
+    dive: Dive,
+    *,
+    profiles: dict[int, LoadedProfile | None],
+    paths: ArchivePaths | None,
+) -> ExportDive:
+    recordings = [
+        written
+        for row in bundle.recordings_by_dive.get(dive.id, [])
+        if (written := _recording(bundle, dive, row, profile=profiles.get(row.id), paths=paths)) is not None
+    ]
 
     trip = bundle.trip_for(dive)
     course = bundle.course_for(dive)
@@ -209,8 +263,7 @@ def _dive(bundle: ExportBundle, dive: Dive, *, profile: LoadedProfile | None, pa
         # `DiveMixtureBase`, not `DiveMixtureRead`: the latter carries the internal row
         # `id`, and nothing in this document references a cylinder by anything.
         cylinders=[_mixture(mixture) for mixture in bundle.mixtures_by_dive[dive.id]],
-        source_file=source_file,
-        profile=None if profile is None else to_read_schema(profile),
+        recordings=recordings,
         created_at=dive.created_at,
     )
 
@@ -459,9 +512,15 @@ async def write_divejson(
 
     yield b'"dives":['
     for index, dive in enumerate(bundle.dives):
-        profile = await load_profile(db, dive_id=dive.id)
+        # One dive's profiles at a time, which is what keeps peak memory to a dive rather
+        # than a logbook - the same contract as before, now over however many recordings the
+        # dive has instead of exactly one.
+        profiles = {
+            row.id: await load_profile(db, recording_id=row.id) if row.has_profile else None
+            for row in bundle.recordings_by_dive.get(dive.id, [])
+        }
         separator = b",\n" if index else b"\n"
-        yield separator + _encode(_dive(bundle, dive, profile=profile, paths=paths))
+        yield separator + _encode(_dive(bundle, dive, profiles=profiles, paths=paths))
     yield b"\n],\n" if bundle.dives else b"],\n"
 
     collections = _collections(bundle, paths)

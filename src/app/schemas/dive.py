@@ -1,7 +1,7 @@
 import uuid as uuid_pkg
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, ClassVar, Self
+from typing import Annotated, ClassVar, Literal, Self
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
@@ -311,14 +311,105 @@ class DiveReadInternal(DiveBase, DiveTechScalars, PublicUUIDSchema):
 
 
 class DiveFileInfo(PublicUUIDSchema):
-    """Metadata about the dive-computer export a dive was imported from - never its
-    bytes, which are only ever served by `GET /dive/{uuid}/file`."""
+    """Metadata about one dive-computer export a recording was read from - never its
+    bytes, which are only ever served by `GET /dive/{uuid}/file/{fid}`."""
 
     original_filename: str
     content_type: str
     byte_size: int
     parser_key: Annotated[str, Field(description="Identifier of the parser that read this file, e.g. `suunto_xml`")]
     updated_at: datetime | None = None
+
+
+class RecordingDevice(BaseModel):
+    """What recorded a dive, as its own export named it.
+
+    The read-side twin of `ParsedDevice` (`schemas/parsed_dive.py`), and deliberately a
+    separate model rather than a reuse of it: that one is a *parser's* output, carrying the
+    validators that turn a file's bytes into text, and this one is six stored columns. Every
+    member is nullable because no format carries all six, and a recording whose source named
+    no computer at all reports `null` for the whole object rather than six nulls.
+
+    Values are as the file wrote them, never normalized - a FIT decodes its maker to the
+    lowercase `suunto` and the app's JSON writes `Suunto`. Anything comparing two devices
+    folds case itself (`services/dive_recordings.py`).
+    """
+
+    brand: Annotated[str | None, Field(default=None, examples=["Suunto"], description="The maker")]
+    model: Annotated[str | None, Field(default=None, examples=["Suunto Ocean"], description="The product string")]
+    serial: Annotated[
+        str | None,
+        Field(default=None, examples=["253810000400"], description="Opaque, as the file wrote it; never parsed"),
+    ]
+    firmware: Annotated[str | None, Field(default=None, examples=["2.51"])]
+    name: Annotated[
+        str | None,
+        Field(default=None, examples=["Porvoo"], description="What the computer calls itself, as its owner set it"),
+    ]
+    dive_number: Annotated[
+        int | None,
+        Field(
+            default=None,
+            examples=[248],
+            description="The **device's** own counter, not the diver's numbering - that is the dive's `dive_number`",
+        ),
+    ]
+
+
+class RecordingRead(BaseModel):
+    """One device's record of a dive: what recorded it, when it started, its files and a
+    summary of its samples.
+
+    Ordered by `ordinal` within a dive, and **0 is primary** - the recording a single-profile
+    consumer takes, the one whose files write the dive's oxygen-exposure readings, and the
+    one the app's own UDDF export writes. Order rather than a flag, matching the published
+    format: a flag every writer has to set is a value every reader has to default.
+
+    `files` is in attach order, and there may legitimately be more than one: the same
+    computer exported as JSON and again as FIT is one record of one dive in two spellings,
+    each filling what the other left blank. `profile` may be present with `files` empty -
+    that is what a recording logbook import created from a converted document is, and it is
+    first-class rather than degenerate.
+    """
+
+    uuid: uuid_pkg.UUID
+    ordinal: Annotated[int, Field(description="Position among this dive's recordings; 0 is primary")]
+    device: RecordingDevice | None = None
+    started_at: Annotated[
+        DiveLocalStartTime | None,
+        Field(
+            default=None,
+            examples=[_START_TIME_EXAMPLE],
+            description="This device's own start - not the dive's, which a second computer entering the water later "
+            "legitimately differs from. Offset-less where the source recorded no offset, exactly as a dive's is. The "
+            "profile's `times` are elapsed seconds from this instant.",
+        ),
+    ]
+    files: Annotated[list[DiveFileInfo], Field(default_factory=list, description="In attach order")]
+    profile: Annotated[
+        DiveProfileInfo | None,
+        Field(default=None, description="Summary of this recording's samples, or null when it has none"),
+    ]
+    updated_at: datetime | None = None
+
+
+class RecordingUpdateRequest(BaseModel):
+    """The one thing about a recording a diver changes: which of them is primary.
+
+    Not a `RejectsExplicitNulls` subclass and not a partial-update shape, because there is
+    nothing optional here: `primary` is required and must be `true`. A `false` is refused
+    with a 422 rather than ignored - *something* has to be primary, so "make this one not
+    primary" is not an operation, and a diver who sends it means to promote a different
+    recording. Everything else about a recording is what a file said, and is not the
+    diver's to retype.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    primary: Annotated[
+        Literal[True],
+        Field(description="Move this recording to the front. Must be `true`; there is no un-primary operation."),
+    ]
 
 
 class DiveTankGasUse(BaseModel):
@@ -506,15 +597,28 @@ class DiveReadWithMixtures(DiveRead):
     # existed lacks the key and would fail validation on read. Same lesson as
     # `TripRead.locations`.
     species: Annotated[list[SpeciesInfo], Field(default_factory=list)]
+    # **`source_file` and `profile` are gone**, and `recordings` replaces both. A dive had
+    # at most one of each while a dive had at most one record; it now has an ordered list of
+    # recordings, each of which carries its own files and its own profile summary. A client
+    # that wants "the" file or "the" profile takes the first recording's, which is what
+    # ordinal 0 means.
+    #
     # Deliberately here rather than on `DiveRead`, which `DiveReadWithMixtures` extends:
     # putting it on the parent would inherit it onto the paginated list response too,
-    # adding a query to `_cached_read_dives` - the hottest path in the app - for
-    # something only the detail page renders.
-    source_file: Annotated[
-        DiveFileInfo | None,
-        Field(default=None, description="The dive-computer export this dive was imported from, if any"),
+    # adding queries to `_cached_read_dives` - the hottest path in the app - for something
+    # only the detail page renders. `get_recordings_for_dives` is already batched for the
+    # day a recordings marker in the list changes that.
+    #
+    # `default_factory=list` is load-bearing rather than tidy, for `species`' reason one
+    # field up: `user_{id}_dive:{uuid}` entries live an hour and replay through this schema.
+    #
+    # Summaries only. The series themselves are tens of KB and are fetched separately, with
+    # their own ETag, from `GET /dive/{uuid}/recording/{rid}/profile`.
+    recordings: Annotated[
+        list[RecordingRead],
+        Field(default_factory=list, description="What recorded this dive, in order; the first is primary"),
     ]
-    # Here rather than on `DiveRead` for the same reason as `source_file` above, with one
+    # Here rather than on `DiveRead` for the same reason as `recordings` above, with one
     # extra: it's derived from the mixtures, which the list response doesn't carry at all.
     # Putting it on the parent would mean a batched mixture lookup in `_cached_read_dives`
     # purely to compute it.
@@ -523,20 +627,6 @@ class DiveReadWithMixtures(DiveRead):
         Field(
             default=None,
             description="Surface-normalized gas consumption, or null when the dive doesn't record enough to derive it",
-        ),
-    ]
-    # Here rather than on `DiveRead` for the same reason as `source_file` above: on the
-    # parent it would land on the paginated list and cost `_cached_read_dives` - the
-    # hottest path in the app - another query per page for something only the detail page
-    # renders. `get_profile_infos_for_dives` is already batched for the day that changes.
-    #
-    # A summary only. The series themselves are tens of KB and are fetched separately,
-    # with their own ETag, from `GET /dive/{uuid}/profile`.
-    profile: Annotated[
-        DiveProfileInfo | None,
-        Field(
-            default=None,
-            description="Summary of this dive's per-sample profile, or null when it has none",
         ),
     ]
 

@@ -54,6 +54,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -619,6 +620,18 @@ def _waypoints(
             _sub(waypoint, "temperature", _num(temperature[second] / TEMPERATURE_SCALE + KELVIN_OFFSET))
 
 
+def _deepest(profile_data: dict[str, Any] | None) -> float | None:
+    """The deepest sampled reading in a stored payload, in metres, or `None`.
+
+    Reads the stored depth channel directly rather than a summary column, because the two
+    would otherwise have to be fetched from different rows for the same recording - and the
+    one thing `<greatestdepth>` must not do is disagree with the waypoints beside it.
+    """
+    depth = (profile_data or {}).get("depth")
+    values = (depth or {}).get("v") or []
+    return max(values) / DEPTH_SCALE if values else None
+
+
 def _dive_element(
     bundle: ExportBundle,
     dive: Dive,
@@ -692,8 +705,12 @@ def _dive_element(
     # `<greatestdepth>` is mandatory and our column is not, so a dive with no recorded
     # depth falls back to the profile's deepest sample and then to 0. Zero here means
     # "the log never recorded one" - the format has no way to say that.
-    profile_info = bundle.profile_by_dive[dive.id]
-    greatest = dive.max_depth if dive.max_depth is not None else (profile_info.max_depth if profile_info else None)
+    # From the samples this writer is about to emit - the primary recording's - rather than
+    # from a stored summary. A dive with several recordings has several deepest readings and
+    # `<greatestdepth>` takes one number, so it takes the one belonging to the profile in the
+    # document beside it.
+    sampled = _deepest(profile_data)
+    greatest = dive.max_depth if dive.max_depth is not None else sampled
     _sub(after, "greatestdepth", _num(greatest if greatest is not None else 0.0))
     _optional(after, "visibility", dive.visibility)
     if dive.notes:
@@ -730,7 +747,16 @@ async def write_uddf(db: AsyncSession, bundle: ExportBundle, *, exported_at: dat
         # hollow one that would not validate.
         yield f'{_INDENT}<profiledata>\n{_INDENT * 2}<repetitiongroup id="rg-1">\n'.encode()
         for dive in bundle.dives:
-            profile = await load_profile(db, dive_id=dive.id)
+            # **The primary recording's profile, and nothing of the others.** UDDF 3.2.2 has
+            # one waypoint stream per `<dive>`, so a dive recorded by two computers has to
+            # choose - and the choice is the same one the format's own reference writer
+            # makes and the same one ordinal 0 means everywhere else in this app: the record
+            # a reader shows by default. DiveJSON is this app's interchange of record and
+            # carries all of them; UDDF is its courtesy to other programs and carries one.
+            primary = next(iter(bundle.recordings_by_dive.get(dive.id, [])), None)
+            profile = (
+                await load_profile(db, recording_id=primary.id) if primary is not None and primary.has_profile else None
+            )
             element = _dive_element(bundle, dive, mix_ids=mix_ids, profile_data=profile.data if profile else None)
             yield _serialize(element, level=3)
         yield f"{_INDENT * 2}</repetitiongroup>\n{_INDENT}</profiledata>\n".encode()

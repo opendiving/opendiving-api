@@ -6,7 +6,7 @@ from ..core.db.models import PublicUUIDMixin, TimestampMixin
 
 
 class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
-    """The dive-computer export a dive was imported from.
+    """One dive-computer export, belonging to one recording of one dive.
 
     Kept so that new parsing features can be developed and backfilled against real data.
     The parsers currently read a handful of header fields (see `services/dive_parsers/`);
@@ -16,11 +16,19 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
     and only *backfillable* if each file is still attached to the dive it produced.
 
     Only files that became a dive are stored. `POST /dive/parse` stays parse-only and
-    in-memory; the bytes arrive here from `PUT /dive/{uuid}/file` after the dive exists,
-    carrying a signed token from that parse (see `create_dive_file_token` in
+    in-memory; the bytes arrive here from `POST /dive/{uuid}/recordings` after the dive
+    exists, carrying a signed token from that parse (see `create_dive_file_token` in
     `core/security.py`) which proves this server parsed these exact bytes for this user.
     Without it the endpoint would accept any blob shaped vaguely like an export, and a
     stored file could not be trusted to be the one that pre-filled the dive's form.
+
+    **A file belongs to a recording, not to a dive.** That is the whole of what changed
+    when `dive_recording` arrived, and both halves matter. One recording may hold several
+    files - the same computer exported as JSON and again as FIT is one record of one dive
+    in two spellings, and each fills what the other left blank without either overwriting
+    it. One dive may hold several recordings, which is a diver on two computers. `dive_id`
+    stays as a denormalized read key so a dive's files are one indexed query rather than a
+    join through the recordings; nothing writes it independently of `recording_id`.
 
     Bytes live on the files volume, not in this table: the row carries a `storage_key`
     and `services/blob_store.py` holds the file. `services/dive_files.py` is still the
@@ -35,8 +43,8 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
 
     No `SoftDeleteMixin`. A soft-deleted row holds a file nothing can read; these are
     hard-deleted, including when their dive is soft-deleted (see `erase_dive`) - which
-    also frees both unique slots below, so re-importing the same export into a new dive
-    isn't blocked by a dive the diver can no longer see. The stored file goes with the
+    also frees the per-diver digest slot below, so re-importing the same export into a new
+    dive isn't blocked by a dive the diver can no longer see. The stored file goes with the
     row, unlinked after the deleting transaction commits.
     """
 
@@ -46,7 +54,13 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
     # The owner is denormalized off `dive` rather than joined for it, because the dedupe
     # index below is per-user and has to be enforceable in one table.
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"))
-    dive_id: Mapped[int] = mapped_column(ForeignKey("dive.id", ondelete="CASCADE"))
+    # The recording this file is one export of. `index=True` because every read of a
+    # recording's files goes through it, and every fill decision reads them in attach order.
+    recording_id: Mapped[int] = mapped_column(ForeignKey("dive_recording.id", ondelete="CASCADE"), index=True)
+    # Denormalized off the recording, and deliberately kept: `erase_dive`, the export
+    # loader and the archive writer all want "this dive's files" and none of them wants
+    # anything else off `dive_recording`.
+    dive_id: Mapped[int] = mapped_column(ForeignKey("dive.id", ondelete="CASCADE"), index=True)
     # Hex SHA-256 of the stored bytes. Four jobs now: the `ETag` on the download endpoint,
     # the dedupe key below, the value the upload token is checked against - it is what ties
     # a set of bytes to a parse this server performed - and half of `storage_key`.
@@ -74,15 +88,18 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
     @classmethod
     def __table_args__(cls) -> tuple:
         return (
-            # One source file per dive. Re-importing replaces it rather than
-            # accumulating versions: a diver who imports the wrong export and fixes it
-            # wants the fix, not both. Enforced here as well as in `store_dive_file` so
-            # two concurrent uploads can't both win.
-            Index("ux_dive_file_dive_id", "dive_id", unique=True),
+            # `ux_dive_file_dive_id` - one file per dive, unique - is **gone**, and its
+            # absence is the point of this table's change rather than a relaxation of it.
+            # A dive holds as many files as it has recordings holding them, and what is
+            # still bounded is bounded by the two indexes below and by
+            # `services/dive_recordings.py`, not by a slot.
+            #
             # Byte-identical content is stored once per diver. An export normally holds
             # a single dive, so the same bytes turning up against a second dive means a
-            # duplicate import - which `store_dive_file` reports rather than silently
-            # storing twice or moving the file off the dive that already has it.
+            # duplicate import - which the attach route reports rather than silently
+            # storing twice or moving the file off the dive that already has it. It also
+            # survives recordings unchanged: the same bytes belong to one recording, and
+            # re-uploading them is the same-recording match's cheapest case.
             #
             # Also the index a backfill reads by: `user_id` leads, so no separate
             # single-column index on it is needed.

@@ -11,6 +11,7 @@ from .dive_form_preset import DiveFormPreset
 from .dive_gear_item import DiveGearItem
 from .dive_mixture import DiveMixture
 from .dive_profile import DiveProfile
+from .dive_recording import DiveRecording
 from .dive_site import DiveSite
 from .dive_species import DiveSpecies
 from .gear_item import GearItem

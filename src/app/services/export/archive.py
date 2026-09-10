@@ -230,17 +230,21 @@ async def _write_blobs(
             archive.writestr(_member(AVATAR_FILENAME, exported_at, compress_type=zipfile.ZIP_STORED), avatar)
 
     for dive in bundle.dives:
-        member = paths.dive_files.get(dive.id)
-        if member is None:
-            continue
-        try:
-            stored = await load_dive_file(db, dive_id=dive.id)
-        except BlobMissingError:
-            logger.error("Skipping dive %s's export: its stored file is missing from the volume", dive.id)
-            continue
-        if stored is None:
-            continue
-        archive.writestr(_member(member, exported_at, compress_type=zipfile.ZIP_STORED), stored.data)
+        for recording in bundle.recordings_by_dive.get(dive.id, []):
+            for file in recording.files:
+                member = paths.dive_files.get(file.id)
+                if member is None:
+                    continue
+                try:
+                    stored = await load_dive_file(db, file_id=file.id)
+                except BlobMissingError:
+                    logger.error(
+                        "Skipping dive %s's export %s: its stored file is missing from the volume", dive.id, file.id
+                    )
+                    continue
+                if stored is None:
+                    continue
+                archive.writestr(_member(member, exported_at, compress_type=zipfile.ZIP_STORED), stored.data)
 
     for certification in bundle.certifications:
         for info in bundle.cert_files_by_cert.get(certification.id, []):

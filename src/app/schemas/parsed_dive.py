@@ -1,7 +1,9 @@
 import math
-from typing import Self
+import uuid as uuid_pkg
+from datetime import datetime
+from typing import Annotated, Self
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .dive import WaterType
 from .dive_mixture import GasRole
@@ -467,14 +469,51 @@ class ParsedDiveSchema(_ParserOutput):
         return self
 
 
+class ParsedDiveMatch(BaseModel):
+    """A dive of the caller's this file might already belong to.
+
+    **Offered, never applied.** The form names the dive and the device and lets the diver
+    choose *Attach there* or *Log as a new dive*; nothing on this path attaches by itself,
+    because a wrong match on a form is a dive the diver did not ask for with nothing on
+    screen to refuse it. Logbook import is the opposite case and attaches automatically -
+    its preview is already the confirmation step - and it does so under a much stricter test
+    than the one that produced this list.
+
+    `same_recording` is the flag that separates the two kinds of offer. `true` means this
+    file looks like a **second export of a record that dive already has** - the same
+    computer's JSON beside its FIT - so attaching fills that recording's blanks. `false`
+    means only the start times are close, which is every second computer and also every
+    unrelated dive that began within the window; there the diver is deciding whether these
+    are two records of one dive at all.
+    """
+
+    dive_uuid: Annotated[uuid_pkg.UUID, Field(description="The candidate dive")]
+    dive_number: Annotated[int, Field(description="The diver's own number for it, for naming it on a form")]
+    started_at: Annotated[
+        datetime | None,
+        Field(default=None, description="When the matched recording started, offset-less where its source had none"),
+    ]
+    recording_uuid: Annotated[uuid_pkg.UUID, Field(description="Which of that dive's recordings matched")]
+    device: ParsedDevice | None = None
+    same_recording: Annotated[
+        bool,
+        Field(description="Whether this file is a second export of that recording, rather than a second computer"),
+    ]
+
+
 class ParsedDiveResponse(ParsedDiveSchema):
-    """What `POST /dive/parse` returns: the parsed dive, plus a token the client hands
-    back to `PUT /dive/{uuid}/file` to attach the file it came from.
+    """What `POST /dive/parse` returns: the parsed dive, a token the client hands back to
+    `POST /dive/{uuid}/recordings` to attach the file it came from, and any dives it might
+    already belong to.
 
     A subclass rather than a wrapper object (`{dive: ..., file_token: ...}`) so the
     response stays flat and the frontend's existing form-filling code is unaffected.
-    Parsers keep returning a bare `ParsedDiveSchema` - the token is minted by the route,
-    which is the only layer that knows who is asking.
+    Parsers keep returning a bare `ParsedDiveSchema` - the token and the matches are added
+    by the route, which is the only layer that knows who is asking.
     """
 
     file_token: str
+    matches: Annotated[
+        list[ParsedDiveMatch],
+        Field(default_factory=list, description="Dives of the caller's this file may belong to, nearest start first"),
+    ]
