@@ -47,6 +47,7 @@ from ...models.certification import Certification
 from ...models.course import Course
 from ...models.dive import Dive
 from ...models.dive_file import DiveFile
+from ...models.dive_recording import DiveRecording
 from ...models.dive_site import DiveSite
 from ...models.gear_item import GearItem
 from ...models.gear_service_record import GearServiceRecord
@@ -512,6 +513,8 @@ class _Planner:
         # Incoming recordings that belong to dives this account already has - see
         # `PlannedRecordingMatch`. Filled by `_plan_dives`, walked by the writer.
         self._recording_matches: list[PlannedRecordingMatch] = []
+        # `None` until asked. See `_has_recordings`.
+        self._account_has_recordings: bool | None = None
 
     # ------------------------------------------------------------------ notes
 
@@ -1393,14 +1396,31 @@ class _Planner:
             self._records["dives"][dive.uuid] = await self._plan_dive(dive, existing)
 
     async def _load_candidates(self, around: datetime) -> list[RecordingCandidate]:
-        """This account's recordings near an incoming start, read once per document.
+        """This account's recordings near one incoming start.
 
-        The window is generous by design (see `CANDIDATE_WINDOW`), so one read covering the
-        first dive's neighbourhood would not cover a document spanning a week. Read per
-        dive-that-needs-one, and only for a dive whose uuid is new: a document of a hundred
-        hand-entered dives asks no gate anything and issues no query at all.
+        **One indexed range scan per incoming recording, and there is no batching to be had.**
+        The window is anchored on each recording's own start, and a logbook spans years, so a
+        single read covering the whole document would be the whole table - which is the query
+        the index exists to avoid. What bounds the cost instead is `_has_recordings`: an
+        account with none answers every gate without a query at all, which is what an import
+        into a fresh account is and what makes restoring a whole archive cost nothing here.
         """
+        if not await self._has_recordings():
+            return []
         return await load_candidates(self._db, user_id=self._user_id, around=around)
+
+    async def _has_recordings(self) -> bool:
+        """Whether this account has any recording at all, asked once per document.
+
+        The guard that keeps the gates off the hot path for the case they can never fire on:
+        an import into an empty account has nothing to match against, and asking per
+        recording would be one range scan per dive to learn that the table is empty.
+        """
+        if self._account_has_recordings is None:
+            self._account_has_recordings = (
+                await self._db.execute(select(DiveRecording.id).where(DiveRecording.user_id == self._user_id).limit(1))
+            ).scalar_one_or_none() is not None
+        return self._account_has_recordings
 
     async def _match_recordings(
         self,

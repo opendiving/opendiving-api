@@ -2024,3 +2024,158 @@ class TestTheFormatLabelTable:
         stale = [fmt for fmt in import_reader._FORMAT_LABELS if fmt not in divejson.read_formats()]
 
         assert not stale, f"`_FORMAT_LABELS` names a format `divejson` no longer reads: {stale}"
+
+
+class TestTheImportGates:
+    """A dive whose uuid is new is still matched against the logbook, recording by recording.
+
+    Uuid matching has nothing to work with here and that is the point: another instance's
+    export carries identifiers that mean nothing on this one, so the device and the clock are
+    all there is. Without these gates a diver who imports their second computer's file after
+    logging the dive from their first gets a second dive.
+    """
+
+    START = datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC)
+
+    @staticmethod
+    def _document(recording: dict[str, Any], **dive: Any) -> bytes:
+        body = {
+            "format": "divejson",
+            "version": "1.0",
+            "exported_at": "2026-09-09T10:00:00+00:00",
+            "dives": [
+                {
+                    "uuid": str(uuid7()),
+                    "dive_number": 1,
+                    "started_at": "2026-09-08T15:17:38+03:00",
+                    "duration": 3051,
+                    "max_depth": 19.04,
+                    "recordings": [recording],
+                    "created_at": "2026-09-09T10:00:00+00:00",
+                    **dive,
+                }
+            ],
+        }
+        return json.dumps(body).encode()
+
+    def _seed(self, db: Session, **device: Any) -> tuple[Any, Dive]:
+        """A dive with one recording carrying a device, a start and the two gate figures -
+        which is what an attach through the create form leaves behind."""
+        user = create_user(db)
+        dive = create_dive(db, user)
+        dive.start_time = self.START
+        dive.utc_offset_minutes = 180
+        dive.duration = 3051
+        dive.max_depth = 19.04
+        recording = create_dive_recording(db, user, dive)
+        recording.start_time = self.START
+        recording.utc_offset_minutes = 180
+        recording.duration = 3051
+        recording.max_depth = 19.04
+        for column, value in device.items():
+            setattr(recording, column, value)
+        db.commit()
+        return user, dive
+
+    @pytest.mark.asyncio
+    async def test_the_same_computers_second_export_fills_and_creates_no_dive(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The FIT arriving after the JSON was logged through the form. Nothing is created:
+        every recording of the incoming dive is already in the logbook."""
+        user, dive = self._seed(db, device_brand="Suunto", device_serial="253810000400")
+        document = self._document(
+            {
+                "device": {"brand": "suunto", "model": "Suunto Ocean"},
+                "started_at": "2026-09-08T15:17:38+03:00",
+                "profile": {"duration": 3473, "depth": {"times": [0, 3473], "values": [0, 1904]}},
+            },
+            cns_end=9.0,
+        )
+
+        plan = await _apply(async_db, user.id, document)
+
+        assert ImportNoteCode.RECORDING_FILLED in _codes(plan)
+        assert _counts(plan)["dives"] == (0, 0, 0, 1)
+        assert len((await async_db.execute(select(Dive.id).where(Dive.user_id == user.id))).scalars().all()) == 1
+        # The stored recording keeps its serial and gains the model the incoming one had.
+        recording = (await async_db.execute(select(DiveRecording).where(DiveRecording.dive_id == dive.id))).scalar_one()
+        assert (recording.device_serial, recording.device_model) == ("253810000400", "Suunto Ocean")
+        # And the dive's blank exposure reading fills from the document.
+        assert (await async_db.execute(select(Dive.cns_end).where(Dive.id == dive.id))).scalar_one() == 9.0
+
+    @pytest.mark.asyncio
+    async def test_a_second_computer_is_attached_rather_than_logged_again(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The strict gate: a *different* device, well inside the window, agreeing on depth
+        and duration. It joins the dive the caller already has."""
+        user, dive = self._seed(db, device_brand="Suunto", device_serial="253810000400")
+        document = self._document(
+            {
+                "device": {"brand": "Shearwater Research, Inc", "model": "Perdix 3", "serial": "D9772626"},
+                "started_at": "2026-09-08T15:19:38+03:00",
+                # The samples span 2940 s, which is what the gate compares. **Not the
+                # declared `duration`**: a document may legitimately declare a span longer
+                # than its own samples (a computer that stops sampling at the surface), and
+                # what an imported recording's figures mean is "the samples' own".
+                "profile": {"duration": 2940, "depth": {"times": [0, 2940], "values": [0, 1900]}},
+            }
+        )
+
+        plan = await _apply(async_db, user.id, document)
+
+        assert ImportNoteCode.RECORDING_ATTACHED in _codes(plan)
+        assert len((await async_db.execute(select(Dive.id).where(Dive.user_id == user.id))).scalars().all()) == 1
+        recordings = (
+            (
+                await async_db.execute(
+                    select(DiveRecording).where(DiveRecording.dive_id == dive.id).order_by(DiveRecording.ordinal)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert [row.ordinal for row in recordings] == [0, 1]
+        assert recordings[1].device_serial == "D9772626"
+        # **The samples' own span and deepest reading**, which is what an imported recording
+        # has: a Recording carries no scalars of its own, so the document offers nowhere else
+        # to read the two figures the strict gate compares from.
+        assert (recordings[1].duration, recordings[1].max_depth) == (2940, 19.0)
+
+    @pytest.mark.asyncio
+    async def test_an_unrelated_dive_is_still_a_dive(self, db: Session, async_db: AsyncSession) -> None:
+        """The gate has to refuse as well as fire. A dive the next morning is nobody's second
+        computer, and importing it must create a dive rather than fold it into yesterday's."""
+        user, _ = self._seed(db, device_brand="Suunto", device_serial="253810000400")
+        document = self._document(
+            {
+                # Everything but the clock agrees with the seeded dive, so the start window
+                # is the clause doing the refusing here rather than a depth or a duration.
+                "device": {"brand": "Garmin", "serial": "3542000001"},
+                "started_at": "2026-09-09T09:00:00+03:00",
+                "profile": {"duration": 2940, "depth": {"times": [0, 2940], "values": [0, 1904]}},
+            },
+            started_at="2026-09-09T09:00:00+03:00",
+        )
+
+        plan = await _apply(async_db, user.id, document)
+
+        assert ImportNoteCode.RECORDING_ATTACHED not in _codes(plan)
+        assert ImportNoteCode.RECORDING_FILLED not in _codes(plan)
+        assert _counts(plan)["dives"] == (1, 0, 0, 0)
+
+    @pytest.mark.asyncio
+    async def test_an_empty_account_asks_no_gate_anything(self, db: Session, async_db: AsyncSession) -> None:
+        """The guard that keeps the gates off the hot path: an account with no recordings has
+        nothing to match against, and a whole-archive restore is exactly that. The dive is
+        created and no note is raised."""
+        user = create_user(db)
+        document = self._document(
+            {"device": {"brand": "Suunto"}, "profile": {"duration": 60, "depth": {"times": [0], "values": [0]}}}
+        )
+
+        plan = await _apply(async_db, user.id, document)
+
+        assert _counts(plan)["dives"] == (1, 0, 0, 0)
+        assert not {ImportNoteCode.RECORDING_ATTACHED, ImportNoteCode.RECORDING_FILLED} & _codes(plan)
