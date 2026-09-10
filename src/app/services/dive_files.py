@@ -14,10 +14,12 @@ readings).
 
 *A second file of one recording fills and never overwrites*, and that rule is written once per
 thing it applies to - the device columns, the two match figures, the recording's start, the
-dive's tech scalars, the profile's channels and the dive's cylinders, which is
-`git grep -n "def fill_" -- src/app/services`. Each takes every value from the *first* file
-that recorded it. The rejected alternative is "the later file wins", which silently loses a
-value a diver corrected between two uploads.
+dive's tech scalars, the profile's channels and the dive's cylinders. Derive them from
+`git grep -n "def fill_" -- src/app/services` rather than from a count here, which is what
+stops the list going stale; read it as a superset, since the cylinder one is implemented by
+two pure helpers that match the same grep and are not themselves things the rule applies to.
+Each takes every value from the *first* file that recorded it. The rejected alternative is
+"the later file wins", which silently loses a value a diver corrected between two uploads.
 """
 
 import hashlib

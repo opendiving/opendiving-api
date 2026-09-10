@@ -16134,7 +16134,16 @@ recording: the device columns (`fill_device_fields`), the two figures the match 
 fastidiousness: this paragraph said "three times" from the day it was written, while the code
 already had more, and a later sentence then counted `fill_start` as "a fourth" off that wrong base.
 A figure restated away from the thing it counts is a second place to be wrong;
-`git grep -n "def fill_" -- src/app/services` is the list, and it returns every one of them.
+`git grep -n "def fill_" -- src/app/services` is where the list is derived from, and it returns
+every one of them.
+
+**It returns more than them, and that is now worth saying rather than leaving to be rediscovered.**
+The grep matched the named set exactly until the cylinders arrived; `fill_dive_mixtures` brought two
+pure helpers with it, `fill_mixture_fields` (which decides and writes nothing) and
+`fill_parsed_mixtures` (the same rule across one recording's own files rather than against the
+dive's rows). Neither is a *thing the rule applies to* — they are how the cylinder one is
+implemented. So read the grep as a superset and the parenthesised names above as the set: the point
+of the derivation is that nobody has to maintain a count, not that the two coincide.
 
 Each takes every value from the **first file that recorded it** - the serial from the JSON and the
 model from the FIT, `cns_end` from the FIT beside the JSON's positions, the JSON's depth and
