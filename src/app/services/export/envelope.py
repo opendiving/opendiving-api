@@ -206,12 +206,14 @@ def _recording(
     if device is None and profile is None and not files:
         return None
 
-    differs = row.start_time is not None and (
+    started_at = None
+    if row.start_time is not None and (
         row.start_time != dive.start_time or row.utc_offset_minutes != dive.utc_offset_minutes
-    )
+    ):
+        started_at = combine_start_time(row.start_time, row.utc_offset_minutes)
     return ExportRecording(
         device=device,
-        started_at=combine_start_time(row.start_time, row.utc_offset_minutes) if differs else None,
+        started_at=started_at,
         source_files=files,
         profile=None if profile is None else to_read_schema(profile),
     )

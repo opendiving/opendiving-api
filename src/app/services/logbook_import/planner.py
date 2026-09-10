@@ -1853,7 +1853,8 @@ class _Planner:
                 for member in DEVICE_COLUMNS
                 if source.device is not None and getattr(source.device, member) is not None
             }
-            if device.get("device_dive_number") is not None and not (0 <= device["device_dive_number"] <= _INT32_MAX):
+            counter = device.get("device_dive_number")
+            if isinstance(counter, int) and not 0 <= counter <= _INT32_MAX:
                 self._dropped("dives", dive.uuid, "A device's own dive counter was outside the storable range")
                 device.pop("device_dive_number")
 

@@ -359,16 +359,17 @@ def extract_recording(files: Sequence[LoadedDiveFile]) -> RecordingExtraction:
             unreadable=result.unreadable,
         )
 
-    if result.profile is not None:
-        # Re-derived here rather than carried across from a half of it: attribution reads the
-        # gas switches back against the depth channel, and after a fill those two may have
-        # come from different files. `finalize_profile` states the same ordering rule for the
-        # single-file case.
-        result = replace(result, profile=downsample(replace(result.profile, gas_attribution=[])))
-        result = replace(
-            result, profile=replace(result.profile, gas_attribution=derive_gas_attribution(result.profile))
-        )
-    return result
+    if result.profile is None:
+        return result
+
+    # Re-derived here rather than carried across from a half of it: attribution reads the gas
+    # switches back against the depth channel, and after a fill those two may have come from
+    # different files. Capped first and attributed second, which is `finalize_profile`'s
+    # ordering rule for the single-file case and load-bearing for the same reason: attribution
+    # reads a mean depth off the channel, and `downsample` throws away the samples between
+    # each bucket's extremes.
+    capped = downsample(replace(result.profile, gas_attribution=[]))
+    return replace(result, profile=replace(capped, gas_attribution=derive_gas_attribution(capped)))
 
 
 def extract_recording_profile(files: Sequence[LoadedDiveFile]) -> tuple[NormalizedProfile | None, bool]:

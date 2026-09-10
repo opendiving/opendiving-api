@@ -392,10 +392,12 @@ class TestProfileExtractionReleasesTheTransaction:
     @pytest.mark.asyncio
     async def test_releases_before_handing_the_file_to_the_thread(self, monkeypatch) -> None:
         calls: list[str] = []
-        monkeypatch.setattr(
-            "src.app.services.dive_files._extract_all",
-            lambda parser, data: calls.append("extract") or _extract_all(parser, data),
-        )
+
+        def recording_extract(parser, data):
+            calls.append("extract")
+            return _extract_all(parser, data)
+
+        monkeypatch.setattr("src.app.services.dive_files._extract_all", recording_extract)
 
         user_uuid = uuid7()
         content = b"<Dive/>"
