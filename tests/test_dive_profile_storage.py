@@ -11,14 +11,17 @@ Same skip-if-unreachable guard and same write-real-rows-and-leave-them conventio
 `test_dive_check_constraints.py`; see the note there.
 """
 
+import hashlib
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio.session import AsyncSession
 from sqlalchemy.orm import Session
+from uuid6 import uuid7
 
 from src.app.models.dive import Dive
+from src.app.models.dive_file import DiveFile
 from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_recording import DiveRecording
 from src.app.models.user import User
@@ -26,6 +29,7 @@ from src.app.schemas.dive_profile import GasAttribution
 from src.app.services.dive_profiles import (
     NormalizedProfile,
     ProfileSeries,
+    backfill_profiles,
     get_gas_attribution_for_dives,
     store_profile,
 )
@@ -118,3 +122,65 @@ class TestGasAttributionRoundTrip:
         stored = db.execute(select(DiveProfile.gas_attribution).where(DiveProfile.dive_id == dive.id)).scalar_one()
 
         assert stored == []
+
+
+class TestTheBackfillSeesADigestThatDrifted:
+    """A recording whose stored profile came out of different bytes is a candidate again.
+
+    The criterion the old query spelled `DiveProfile.source_sha256 != DiveFile.sha256`, and
+    the one both `backfill_profiles`' docstring and the script's `--help` promise. Against a
+    real database because it is a *query* under test: the term lives in the `WHERE`, and a
+    mocked session would assert the SQL rather than what it selects.
+
+    Measured as a **delta over one run either way** rather than as an absolute count. The
+    suite's database is shared and other modules leave recordings behind, so the only number
+    attributable to this test is the change its own edit produces. `failed` is the counter to
+    watch: this recording's file has a `storage_key` naming bytes that were never written, so
+    being selected costs exactly one `BlobMissingError` - which proves selection without
+    needing a blob, a parser or a profile that extracts.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_current_version_profile_from_other_bytes_becomes_a_candidate(
+        self, async_db: AsyncSession, db: Session, dive: Dive, recording: DiveRecording
+    ) -> None:
+        stored = b"<Dive/>"
+        digest = hashlib.sha256(stored).hexdigest()
+        db.add(
+            DiveFile(
+                user_id=dive.user_id,
+                recording_id=recording.id,
+                dive_id=dive.id,
+                sha256=digest,
+                content_type="application/xml",
+                byte_size=len(stored),
+                original_filename="export.xml",
+                parser_key="suunto_xml",
+                storage_key=f"dive-files/ab/{uuid7()}_{digest}",
+            )
+        )
+        db.commit()
+        # Current extractor version and a digest that names the file the recording holds:
+        # nothing to do, and the query must not select it.
+        await store_profile(
+            async_db,
+            recording_id=recording.id,
+            dive_id=dive.id,
+            profile=_profile(),
+            source_sha256=digest,
+            parser_key="suunto_xml",
+            commit=True,
+        )
+        agreeing = (await backfill_profiles(async_db, dry_run=True)).failed
+
+        # The same row, its profile now claiming bytes the recording does not hold.
+        await async_db.execute(
+            update(DiveProfile).where(DiveProfile.recording_id == recording.id).values(source_sha256="f" * 64)
+        )
+        await async_db.commit()
+        drifted = (await backfill_profiles(async_db, dry_run=True)).failed
+
+        assert drifted == agreeing + 1, (
+            "a recording whose stored profile came out of different bytes has to be a candidate "
+            "without --force; the digest term is what selects it"
+        )

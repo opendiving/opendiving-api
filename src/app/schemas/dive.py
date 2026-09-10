@@ -159,10 +159,9 @@ class DiveTechScalars(BaseModel):
     read off `model_fields`, so a field added here is written by the import and picked up
     by `backfill_tech_fields` on its next run without either being edited.
 
-    On `DiveRead` rather than `DiveReadWithMixtures`, unlike `source_file`/`gas_use`/
-    `profile`: those are kept off the list response because each costs
-    `_cached_read_dives` an extra query, and these are plain columns on the row that is
-    being selected anyway.
+    On `DiveRead` rather than `DiveReadWithMixtures`, unlike `recordings`/`gas_use`: those
+    are kept off the list response because each costs `_cached_read_dives` an extra query,
+    and these are plain columns on the row that is being selected anyway.
     """
 
     cns_start: Annotated[
@@ -586,7 +585,7 @@ class DiveActivityPoint(BaseModel):
 
 class DiveReadWithMixtures(DiveRead):
     mixtures: Annotated[list[DiveMixtureRead], Field(default_factory=list)]
-    # Here rather than on `DiveRead` for the reason `source_file` below gives: on the parent
+    # Here rather than on `DiveRead` for the reason `recordings` below gives: on the parent
     # it would land on the paginated list and cost `_cached_read_dives` - the hottest path in
     # the app - a batched query per page for something only the detail page renders. The
     # loader is already batched (`get_species_for_dives`) for the day a list surface wants

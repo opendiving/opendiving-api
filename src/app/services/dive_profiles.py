@@ -35,7 +35,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from pydantic import ValidationError
-from sqlalchemy import CursorResult, delete, insert, select
+from sqlalchemy import CursorResult, delete, func, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import undefer
 from uuid6 import uuid7
@@ -1158,7 +1158,37 @@ async def backfill_profiles(
             .exists()
         )
     if not force:
-        stmt = stmt.where((DiveProfile.id.is_(None)) | (DiveProfile.extractor_version != PROFILE_EXTRACTOR_VERSION))
+        # **The digest term survives the move to recordings**, and it is the one the old query
+        # spelled `DiveProfile.source_sha256 != DiveFile.sha256` - "the profile came out of
+        # different bytes than the file now on the dive". Dropping it would have left
+        # `should_extract` below unable to answer `skip` for any row that reached it, and a
+        # recording whose stored profile is current-version but was derived from a different
+        # set of files unrepairable without `--force`.
+        #
+        # Only the single-file case is expressible here, because a recording holding several
+        # has a digest `recording_source_digest` derives in Python. So a recording holding
+        # anything other than exactly one file is admitted by the count term and settled by
+        # `should_extract` a few lines down - which is the same answer, one load later, and
+        # costs a re-read only for the rare recording with two files.
+        one_file = (
+            select(DiveFile.sha256)
+            .where(DiveFile.recording_id == DiveRecording.id)
+            .order_by(DiveFile.id)
+            .limit(1)
+            .scalar_subquery()
+        )
+        file_count = (
+            select(func.count())
+            .select_from(DiveFile)
+            .where(DiveFile.recording_id == DiveRecording.id)
+            .scalar_subquery()
+        )
+        stmt = stmt.where(
+            (DiveProfile.id.is_(None))
+            | (DiveProfile.extractor_version != PROFILE_EXTRACTOR_VERSION)
+            | (file_count != 1)
+            | (DiveProfile.source_sha256 != one_file)
+        )
     if limit is not None:
         stmt = stmt.limit(limit)
 
