@@ -14,10 +14,10 @@ readings).
 
 *A second file of one recording fills and never overwrites*, and that rule is written once per
 thing it applies to - the device columns, the two match figures, the recording's start, the
-dive's tech scalars and the profile's channels, which is `git grep -n "def fill_" --
-src/app/services`. Each takes every value from the *first* file that recorded it. The rejected
-alternative is "the later file wins", which silently loses a value a diver corrected between
-two uploads.
+dive's tech scalars, the profile's channels and the dive's cylinders, which is
+`git grep -n "def fill_" -- src/app/services`. Each takes every value from the *first* file
+that recorded it. The rejected alternative is "the later file wins", which silently loses a
+value a diver corrected between two uploads.
 """
 
 import hashlib
@@ -331,11 +331,14 @@ def _parse_header(parser: type[DiveParser], content: bytes) -> ParsedDiveSchema 
 class RecordingExtraction:
     """What a recording's files say, read in attach order under the fill rule.
 
-    One object rather than three returns because the three are read together everywhere and
-    every one of them is *the first file that recorded it*: the profile takes each channel
-    whole from the earliest file carrying it, the scalars take each reading likewise, and the
-    device likewise. `unreadable` says at least one file could not be re-read at all, which
-    is a parser regression the backfill counts rather than swallows.
+    One object rather than four returns because they are read together everywhere and every
+    one of them is *the first file that recorded it* - only the unit differs. The profile
+    takes each channel whole from the earliest file carrying it; the scalars take each
+    reading likewise; the device likewise; and the cylinders take each *member* of each
+    cylinder likewise, which is one level finer because a Suunto's two exports of one dive
+    split the pressures and the gas fraction between them. `unreadable` says at least one
+    file could not be re-read at all, which is a parser regression the backfill counts rather
+    than swallows.
     """
 
     profile: NormalizedProfile | None = None
@@ -391,7 +394,11 @@ def extract_recording(
             }
             or result.scalars,
             device_source=result.device_source or extraction.parsed,
-            mixtures=result.mixtures or (extraction.parsed.mixtures if extraction.parsed is not None else []),
+            # Per member, not per list - `fill_parsed_mixtures` says why the whole-list
+            # reading drops the one gas fraction the corpus pair records.
+            mixtures=fill_parsed_mixtures(
+                result.mixtures, [] if extraction.parsed is None else extraction.parsed.mixtures
+            ),
             unreadable=result.unreadable,
         )
 
@@ -468,9 +475,11 @@ def relabel_gas_numbers(
     dive's list does not have is a real one the second computer saw, appended with the next
     free label rather than dropped.
 
-    Pure and DB-free, beside `merge_mixture_fields` below - and deliberately *not* that
-    function, which answers a different question (may a backfill write these parsed values
-    onto these stored rows?) and refuses all-or-nothing where this one always answers.
+    Pure and DB-free, beside `fill_mixture_fields` and `merge_mixture_fields` below - and
+    deliberately neither of them. Those two join a *second reading of the same recording* to
+    the dive's rows by position and ask what may be written into them; this one joins a
+    *different computer's* cylinder list to the dive's by mix, and writes nothing at all -
+    its answer is a renumbering. It also always answers, where both of those can refuse.
     """
     remaining = list(stored)
     mapping: dict[int, int] = {}
@@ -543,6 +552,150 @@ def apply_gas_mapping(profile: NormalizedProfile | None, mapping: dict[int, int]
             for event in profile.events
         ],
     )
+
+
+# What a second reading of one recording may put into a cylinder the stored row left blank.
+# `po2_limit`, `role`, `gas_number` and `usage` are deliberately not here, and each for its own
+# reason: `usage` is a distinction no format records at all, `po2_limit` and `role` are the
+# diver's plan rather than the tank's contents, and `gas_number` is the join key to the stored
+# profile's pressure channels - a label taken from a second file would rename a cylinder whose
+# curves are already attributed under the first file's numbering.
+FILLABLE_MIXTURE_FIELDS = ("oxygen", "helium", "volume", "start_pressure", "end_pressure")
+
+
+def fill_mixture_fields(
+    parsed: Sequence[DiveMixtureSchema], stored: Sequence[DiveMixtureSchema | DiveMixtureRead]
+) -> list[dict[str, float]] | None:
+    """What a second reading of one recording may add to cylinders that already exist.
+
+    One dict per `stored` row **in order**, so the result indexes alongside the list it was
+    given; `None` when the two lists can't be shown to describe the same cylinders. An empty
+    dict means "this row is complete, or the file said nothing it lacks", which is the
+    ordinary answer and not a failure. Pure and DB-free, on this module's `reconcile` idiom.
+
+    **This is not `merge_mixture_fields`, and the two answer opposite questions.** That one
+    is the backfill's: may these parsed values be written *over* these stored rows? It writes
+    `po2_limit`, `gas_number` and `role`, and overwrites them. This one is the fill rule's
+    cylinder half - it writes only where the stored row has nothing, and only the five members
+    above, so a value the diver typed or an earlier file recorded can never be replaced. They
+    share the join and nothing else, which is why this is a second function rather than a flag
+    on that one.
+
+    **The join is positional, on `merge_mixture_fields`' terms and with its preconditions.**
+    Mixtures are replaced wholesale on every save, so a stored row's `id` postdates the file
+    and says nothing about which parsed cylinder it came from; `stored` must therefore be in
+    saved order, which `get_mixtures_for_dive`'s `ORDER BY id` guarantees and nothing here can
+    check. The counts must match and every pair must still agree on the `(oxygen, helium)`
+    both sides recorded - a `None` on either side being an absent reading rather than a
+    disagreement. A list that half-matches is an edited list describing other cylinders.
+
+    **A fill the table would reject is dropped, and only for the row it belongs to.** Three of
+    these columns are half of a pair the schema constrains - `end_pressure <= start_pressure`,
+    `oxygen + helium <= 100` - so filling one half against a stored other half can produce a
+    row the database refuses, and an `IntegrityError` here would surface to the diver as a
+    failed upload or take a whole logbook import down with it. Where that happens the file and
+    the stored row cannot both be describing this cylinder, and the stored row is the diver's:
+    it stands, whole. Per row rather than per dive, unlike `merge_mixture_fields`' refusal,
+    because nothing is being overwritten - a filled cylinder beside an unfilled one is two
+    rows each carrying what it always did, not two rows sourced from different places.
+    """
+    if len(parsed) != len(stored) or not parsed:
+        return None
+
+    filled: list[dict[str, float]] = []
+    for parsed_mix, stored_mix in zip(parsed, stored, strict=True):
+        if parsed_mix.oxygen is not None and stored_mix.oxygen is not None and parsed_mix.oxygen != stored_mix.oxygen:
+            return None
+        if parsed_mix.helium is not None and stored_mix.helium is not None and parsed_mix.helium != stored_mix.helium:
+            return None
+
+        values: dict[str, float] = {}
+        for name in FILLABLE_MIXTURE_FIELDS:
+            reading = getattr(parsed_mix, name)
+            if reading is not None and getattr(stored_mix, name) is None:
+                values[name] = reading
+        filled.append(values if _fill_is_storable(stored_mix, values) else {})
+    return filled
+
+
+def _fill_is_storable(stored_mix: DiveMixtureSchema | DiveMixtureRead, values: dict[str, float]) -> bool:
+    """Would the row `values` produces still satisfy `dive_mixture`'s own constraints?
+
+    The table's `CHECK`s over these five columns, restated here because this is the one write
+    path that can compose a row out of two sources: everything else that reaches these columns
+    arrives as a whole cylinder from one place, already validated by `DiveMixtureCreate` or by
+    the parse-side bounds on `DiveMixtureSchema`. A fill mixes them, and neither of those
+    layers sees the combination.
+
+    Deliberately checked rather than caught: `blob_store` writes and row inserts sit in the
+    same transaction as this update, and `CHECK` is not deferrable in Postgres, so the
+    exception would arrive from the `execute` in the middle of an attach or an import rather
+    than at a point either could recover at.
+    """
+    row = {name: values.get(name, getattr(stored_mix, name)) for name in FILLABLE_MIXTURE_FIELDS}
+    oxygen, helium = row["oxygen"], row["helium"]
+    start, end = row["start_pressure"], row["end_pressure"]
+    volume = row["volume"]
+    return not (
+        (volume is not None and volume <= 0)
+        or (oxygen is not None and not 0 <= oxygen <= 100)
+        or (helium is not None and not 0 <= helium <= 100)
+        or (oxygen is not None and helium is not None and oxygen + helium > 100)
+        or (start is not None and not 0 < start <= 350)
+        or (end is not None and not 0 <= end <= 350)
+        or (start is not None and end is not None and end > start)
+    )
+
+
+def fill_parsed_mixtures(
+    earlier: Sequence[DiveMixtureSchema], later: Sequence[DiveMixtureSchema]
+) -> list[DiveMixtureSchema]:
+    """A recording's cylinders once a later file of it has been read.
+
+    The mixture half of `extract_recording`'s "each value from the first file that recorded
+    it", and it has to be per *member* rather than per list: the corpus pair is a Suunto Ocean
+    JSON whose cylinder carries pressures and no gas fraction beside the same computer's FIT,
+    which carries `oxygen` 33 and no pressures. Taking the first list whole lands one of the
+    two and drops the other, which leaves the dive's only cylinder without the mix its own
+    computer recorded.
+
+    A later file whose cylinders cannot be joined to the earlier ones contributes nothing,
+    rather than replacing them: the earlier list is what the recording's stored profile is
+    already labelled against.
+    """
+    if not earlier:
+        return list(later)
+    values = fill_mixture_fields(later, earlier)
+    if values is None:
+        return list(earlier)
+    return [row.model_copy(update=fill) if fill else row for row, fill in zip(earlier, values, strict=True)]
+
+
+async def fill_dive_mixtures(db: AsyncSession, *, dive_id: int, parsed: Sequence[DiveMixtureSchema]) -> None:
+    """Write `fill_mixture_fields`' answer onto the dive's own cylinders.
+
+    Shared by the two paths a second reading of one recording arrives on - a file attached to
+    a recording that already has one, and a logbook import matching an incoming recording to a
+    stored one - so the rule is stated once and an attach and an import cannot disagree about
+    it. In the caller's transaction, like every other `fill_`: the file's row, the profile and
+    this land together or not at all.
+
+    Read-then-write rather than a `COALESCE` per column, unlike `fill_tech_scalars`, because
+    the join is positional and the alignment is only visible to Python - the statement would
+    have to name a row the SQL cannot pick out. There is no race to lose: every caller is
+    inside a transaction on a dive only its owner can reach.
+    """
+    from ..crud.crud_dive_mixtures import get_mixtures_for_dive
+
+    if not parsed:
+        return
+    stored = await get_mixtures_for_dive(db=db, dive_id=dive_id)
+    values = fill_mixture_fields(parsed, stored)
+    if values is None:
+        return
+    for row, fill in zip(stored, values, strict=True):
+        if fill:
+            await db.execute(update(DiveMixture).where(DiveMixture.id == row.id).values(**fill))
 
 
 @dataclass(frozen=True, slots=True)
@@ -837,7 +990,10 @@ async def _rederive_recording(
 
     **A secondary recording's cylinder labels are mapped onto the dive's**, which is the other
     half of that asymmetry: its samples stay, and only the numbers naming which tank they
-    came out of move.
+    came out of move. The *primary* recording's cylinders are joined to the dive's rows
+    positionally instead and fill their blanks, which is the same first-file-wins rule the
+    scalars follow one line up and is likewise reached only when the recording already had
+    files.
     """
     from ..crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
     from ..schemas.dive_mixture import DiveMixtureCreate
@@ -887,6 +1043,13 @@ async def _rederive_recording(
         )
     else:
         await fill_tech_scalars(db, dive_id=dive_id, scalars=extraction.scalars)
+        # The cylinders go the same way as the scalars and on the same branch, which is what
+        # keeps `fresh` the one place this asymmetry is decided. A recording's *first* file
+        # has nothing to add: the dive's rows came off the form this very parse pre-filled,
+        # so a fill there would only put back a blank the diver had just cleared. A later
+        # file is the case the rule is about - the FIT's `oxygen` 33 landing in the cylinder
+        # the JSON gave pressures and no mix.
+        await fill_dive_mixtures(db, dive_id=dive_id, parsed=extraction.mixtures)
 
 
 async def refresh_tech_scalars(db: AsyncSession, *, dive_id: int) -> None:

@@ -50,6 +50,8 @@ from src.app.services.dive_files import (
     backfill_tech_fields,
     extract_recording,
     extract_tech_scalars,
+    fill_mixture_fields,
+    fill_parsed_mixtures,
     merge_mixture_fields,
     reconcile,
     store_recording_file,
@@ -727,6 +729,152 @@ class TestMixtureFieldMerge:
         assert in_order is not None and reversed_order is not None
         assert [(mixture_id, values["gas_number"]) for mixture_id, values in in_order] == [(11, 0), (12, 1)]
         assert [(mixture_id, values["gas_number"]) for mixture_id, values in reversed_order] == [(12, 0), (11, 1)]
+
+
+class TestMixtureFieldFill:
+    """`fill_mixture_fields` decides what a second reading of one recording may *add*.
+
+    The other half of the pair, and the difference is the whole reason there are two: the
+    backfill above asks whether it may write over stored cylinders, this asks what it may put
+    into the blanks of cylinders that already exist. The corpus case is a Suunto Ocean JSON
+    whose one cylinder carries pressures and no gas fraction, meeting the same computer's FIT
+    which carries `oxygen` 33 and no pressures.
+    """
+
+    @staticmethod
+    def _parsed(**overrides: object) -> DiveMixtureSchema:
+        defaults: dict[str, object] = {
+            "end_pressure": None,
+            "gas_number": 1,
+            "helium": None,
+            "oxygen": None,
+            "po2_limit": None,
+            "role": None,
+            "start_pressure": None,
+            "volume": None,
+        }
+        return DiveMixtureSchema(**(defaults | overrides))  # type: ignore[arg-type]
+
+    @staticmethod
+    def _stored(mixture_id: int, **overrides: object) -> DiveMixtureRead:
+        defaults: dict[str, object] = {"id": mixture_id, "gas_number": 0}
+        return DiveMixtureRead(**(defaults | overrides))  # type: ignore[arg-type]
+
+    def test_a_blank_member_fills_and_a_recorded_one_does_not(self) -> None:
+        """The corpus pair, as one call. `oxygen` lands because the row has none; the
+        pressures do not, because it has them - and they differ, which is what makes this an
+        assertion about the rule rather than about two equal numbers."""
+        parsed = [self._parsed(oxygen=33.0, helium=0.0, start_pressure=210.0, end_pressure=50.0, volume=11.1)]
+        stored = [self._stored(11, start_pressure=207.34, end_pressure=47.47)]
+
+        assert fill_mixture_fields(parsed, stored) == [{"oxygen": 33.0, "helium": 0.0, "volume": 11.1}]
+
+    def test_the_three_members_it_never_writes(self) -> None:
+        """`po2_limit` and `role` are the diver's plan rather than the tank's contents, and
+        `gas_number` is the join key the stored profile's pressure channels are already
+        attributed under - a second file's own labelling would rename the cylinder those
+        curves hang off. All three are blank on the stored row here and stay blank."""
+        parsed = [self._parsed(po2_limit=1.4, role=GasRole.DECO, gas_number=1)]
+        stored = [self._stored(11, gas_number=None)]
+
+        assert fill_mixture_fields(parsed, stored) == [{}]
+
+    def test_one_answer_per_stored_row_in_order(self) -> None:
+        """The result indexes alongside `stored`, so a row with nothing to add is an empty
+        dict rather than an absence - which is what lets the caller zip the two."""
+        parsed = [self._parsed(), self._parsed(oxygen=50.0, gas_number=2)]
+        stored = [self._stored(11), self._stored(12)]
+
+        assert fill_mixture_fields(parsed, stored) == [{}, {"oxygen": 50.0}]
+
+    def test_refuses_when_the_counts_disagree(self) -> None:
+        assert fill_mixture_fields([self._parsed()], [self._stored(11), self._stored(12)]) is None
+        assert fill_mixture_fields([], []) is None
+        assert fill_mixture_fields([self._parsed()], []) is None
+
+    def test_refuses_when_a_fraction_both_sides_recorded_disagrees(self) -> None:
+        """A different gas in that position is a different cylinder, and the positional join
+        has nothing else to go on."""
+        parsed = [self._parsed(oxygen=50.0, volume=11.1)]
+        stored = [self._stored(11, oxygen=32.0)]
+
+        assert fill_mixture_fields(parsed, stored) is None
+
+    def test_a_fraction_only_one_side_recorded_is_not_a_disagreement(self) -> None:
+        """Which is the case this function exists for: the stored row's `oxygen` being null
+        is precisely why there is something to fill."""
+        parsed = [self._parsed(oxygen=33.0)]
+        stored = [self._stored(11, oxygen=None, helium=0.0)]
+
+        assert fill_mixture_fields(parsed, stored) == [{"oxygen": 33.0}]
+
+    def test_a_fill_the_table_would_reject_is_dropped(self) -> None:
+        """`end_pressure <= start_pressure` and `oxygen + helium <= 100` are pair
+        constraints, so filling one half against a stored other half can compose a row the
+        database refuses - and `CHECK` is not deferrable, so it would arrive as an
+        `IntegrityError` mid-attach rather than anywhere either caller could recover.
+        """
+        pressures = fill_mixture_fields([self._parsed(end_pressure=220.0)], [self._stored(11, start_pressure=200.0)])
+        fractions = fill_mixture_fields([self._parsed(helium=60.0)], [self._stored(11, oxygen=50.0)])
+
+        assert pressures == [{}]
+        assert fractions == [{}]
+
+    def test_a_rejected_fill_costs_only_its_own_row(self) -> None:
+        """Per row, unlike `merge_mixture_fields`' all-or-nothing refusal, and the difference
+        is that nothing here is being overwritten: a filled cylinder beside an unfilled one is
+        two rows each carrying what it always did."""
+        parsed = [self._parsed(end_pressure=220.0), self._parsed(oxygen=33.0, gas_number=2)]
+        stored = [self._stored(11, start_pressure=200.0), self._stored(12)]
+
+        assert fill_mixture_fields(parsed, stored) == [{}, {"oxygen": 33.0}]
+
+    def test_a_stored_row_with_nothing_at_all_takes_the_whole_cylinder(self) -> None:
+        """The bound checks are on the *result*, not on the fill, so a row that fills every
+        member is admitted as long as the cylinder it composes is one the table would take."""
+        parsed = [self._parsed(oxygen=33.0, helium=0.0, volume=11.1, start_pressure=207.34, end_pressure=47.47)]
+
+        assert fill_mixture_fields(parsed, [self._stored(11)]) == [
+            {"oxygen": 33.0, "helium": 0.0, "volume": 11.1, "start_pressure": 207.34, "end_pressure": 47.47}
+        ]
+
+
+class TestARecordingsCylindersFillMemberByMember:
+    """`fill_parsed_mixtures`, which is the same rule one level up: across a recording's own
+    files rather than between a file and the dive's rows.
+
+    Per member rather than per list, and that is the whole of it. Taking the first list whole
+    lands the JSON's pressures and drops the FIT's `oxygen` - the one gas fraction the corpus
+    pair records anywhere - so the dive's only cylinder ends up with no mix at all.
+    """
+
+    @staticmethod
+    def _mix(**overrides: object) -> DiveMixtureSchema:
+        return TestMixtureFieldFill._parsed(**overrides)
+
+    def test_each_member_comes_from_the_first_file_that_recorded_it(self) -> None:
+        earlier = [self._mix(gas_number=0, start_pressure=207.34, end_pressure=47.47)]
+        later = [self._mix(gas_number=1, oxygen=33.0, start_pressure=210.0)]
+
+        filled = fill_parsed_mixtures(earlier, later)
+
+        assert [(row.oxygen, row.start_pressure, row.end_pressure, row.gas_number) for row in filled] == [
+            (33.0, 207.34, 47.47, 0)
+        ]
+
+    def test_a_first_file_with_no_cylinders_takes_the_later_ones_whole(self) -> None:
+        later = [self._mix(gas_number=1, oxygen=33.0)]
+
+        assert fill_parsed_mixtures([], later) == later
+
+    def test_cylinders_that_cannot_be_joined_leave_the_earlier_list_alone(self) -> None:
+        """The earlier list is what the recording's stored profile is already labelled
+        against, so a later file describing other cylinders contributes nothing rather than
+        replacing it."""
+        earlier = [self._mix(gas_number=0, oxygen=32.0)]
+        later = [self._mix(gas_number=1, oxygen=50.0), self._mix(gas_number=2, oxygen=21.0)]
+
+        assert fill_parsed_mixtures(earlier, later) == earlier
 
 
 class TestStoredMixturesAreReadInSavedOrder:

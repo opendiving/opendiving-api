@@ -2105,6 +2105,38 @@ class TestTheImportGates:
         assert (await async_db.execute(select(Dive.cns_end).where(Dive.id == dive.id))).scalar_one() == 9.0
 
     @pytest.mark.asyncio
+    async def test_a_fill_puts_the_documents_mix_into_a_blank_cylinder(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The other half of what a fill writes onto the dive itself.
+
+        The stored cylinder came off the Suunto's JSON, which records pressures and no gas
+        fraction anywhere; the document arriving is the same computer's FIT, whose one
+        cylinder carries `oxygen` 33. The mix lands, the pressures stand - and so does
+        `gas_number`, which is the label the dive's own pressure channels are attributed
+        under and which the incoming document numbers its own way.
+        """
+        user, dive = self._seed(db, device_brand="Suunto", device_serial="253810000400")
+        db.add(DiveMixture(dive_id=dive.id, gas_number=0, start_pressure=207.34, end_pressure=47.47))
+        db.commit()
+        document = self._document(
+            {
+                "device": {"brand": "suunto", "model": "Suunto Ocean"},
+                "started_at": "2026-09-08T15:17:38+03:00",
+                "profile": {"duration": 3473, "depth": {"times": [0, 3473], "values": [0, 1904]}},
+            },
+            cylinders=[{"gas_number": 1, "oxygen": 33.0, "helium": 0.0}],
+        )
+
+        plan = await _apply(async_db, user.id, document)
+
+        assert ImportNoteCode.RECORDING_FILLED in _codes(plan)
+        cylinder = (await async_db.execute(select(DiveMixture).where(DiveMixture.dive_id == dive.id))).scalar_one()
+        assert (cylinder.oxygen, cylinder.helium) == (33.0, 0.0)
+        assert (cylinder.start_pressure, cylinder.end_pressure) == (207.34, 47.47)
+        assert cylinder.gas_number == 0
+
+    @pytest.mark.asyncio
     async def test_a_second_computer_is_attached_rather_than_logged_again(
         self, db: Session, async_db: AsyncSession
     ) -> None:

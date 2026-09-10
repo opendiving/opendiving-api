@@ -4816,6 +4816,11 @@ from either end: nothing in `merge_mixture_fields` reveals that it depends on a 
 module, and nothing in the crud module reveals that dropping the clause corrupts data rather than
 shuffling a list.
 
+`fill_mixture_fields` is a second caller of that same join and inherits the same dependency — see
+*"The cylinder half is a second function, not `merge_mixture_fields`"*. It is why the crud docstring
+names both rather than the backfill alone: a precondition attached to one named caller reads as that
+caller's problem, and the next one to arrive is the one that breaks it.
+
 **The mixture half is fill-only, and the dive's own scalars are not.** `merge_mixture_fields`
 originally spread all three fields into every update, `None`s included:
 
@@ -16124,11 +16129,12 @@ refuse it.
 The rule is written once per thing it applies to, and it applies to everything a file says about a
 recording: the device columns (`fill_device_fields`), the two figures the match gates compare
 (`fill_gate_figures`), the recording's own start (`fill_start`), the dive's oxygen-exposure readings
-(`fill_tech_scalars`) and the profile's channels (`fill_channels`). **No count is written here on
-purpose**, and the omission is not fastidiousness: this paragraph said "three times" from the day it
-was written, while the code already had more, and a later sentence then counted `fill_start` as "a
-fourth" off that wrong base. A figure restated away from the thing it counts is a second place to be
-wrong; `git grep -n "def fill_" -- src/app/services` is the list, and it returns every one of them.
+(`fill_tech_scalars`), the profile's channels (`fill_channels`) and the dive's cylinders
+(`fill_dive_mixtures`). **No count is written here on purpose**, and the omission is not
+fastidiousness: this paragraph said "three times" from the day it was written, while the code
+already had more, and a later sentence then counted `fill_start` as "a fourth" off that wrong base.
+A figure restated away from the thing it counts is a second place to be wrong;
+`git grep -n "def fill_" -- src/app/services` is the list, and it returns every one of them.
 
 Each takes every value from the **first file that recorded it** - the serial from the JSON and the
 model from the FIT, `cns_end` from the FIT beside the JSON's positions, the JSON's depth and
@@ -16145,10 +16151,13 @@ would double every gas switch the pair agree on. `gas_attribution` is not filled
 recomputed after the fill, because it is derived from the merged events and depth together -
 `finalize_profile`'s ordering rule, one level up.
 
-**Every fill but one is a `COALESCE` per column rather than a read-then-write.** One statement,
-nothing to race, and the rule stated once in SQL instead of once in SQL and once in Python.
+**The single-column fills are a `COALESCE` per column rather than a read-then-write.** One
+statement, nothing to race, and the rule stated once in SQL instead of once in SQL and once in
+Python. The two that are not — `fill_start` and `fill_dive_mixtures` — are both the same kind of
+exception, and the next two paragraphs say why each is: the value they are filling is not a column,
+so there is no column to `COALESCE`.
 
-**`fill_start` is the one of them that is not a `COALESCE`, because a recording's start is two
+**`fill_start` is one of the two that is not a `COALESCE`, because a recording's start is two
 columns holding one value.** A NULL `utc_offset_minutes` means `start_time` holds a wall clock
 labelled UTC rather than an instant, so a `COALESCE` that filled the offset alone would reinterpret
 a column nobody rewrote and read the recording back `offset` minutes late. The two are therefore
@@ -16174,6 +16183,67 @@ profile's pressure curve"*), so a second computer's own numbering is mapped onto
 by mix first, then by order, unmatched appended with the next free label - and its profile's
 pressure channels and gas-switch events are rewritten through that map. Subsurface renumbers a
 second computer's sensors onto the dive's cylinder list for the same reason.
+
+### The cylinder half is a second function, not `merge_mixture_fields`
+
+The dive's cylinders fill like everything else, and the corpus pair is the whole argument for it: a
+2026 Suunto Ocean's JSON export reconstructs its one cylinder from sample data — pressures and a gas
+number, no `Gases` block and so no fraction anywhere — while the same computer's FIT export of the
+same dive carries `oxygen` 33 and no pressures at all. Neither file describes that cylinder on its
+own. Without a fill the dive keeps whichever arrived first and the other reading is simply lost,
+which for the JSON-then-FIT order a diver actually uses means a cylinder with pressures and no mix.
+
+The obvious move was to reuse `merge_mixture_fields`, and it does not work — it answers a different
+question and gets this one wrong twice over. It writes `po2_limit`, `gas_number` and `role`, so it
+lands **no** `oxygen` and the cylinder above stays blank; and it *overwrites* the three it does
+write, which is the one thing this rule forbids. On the logbook-import path that second half was
+already doing damage rather than merely doing nothing: it wrote the incoming document's `gas_number`
+over the stored row's, and `gas_number` is the join key to `dive_profile.data.pressure[].gas_number`
+— so a FIT numbering from 1 renamed the cylinder a stored Ocean profile's curves were attributed
+under, and the chart then read that tank's pressure off nothing. Silently, because a `gas_number`
+that names *a* cylinder is indistinguishable from one that names the right one.
+
+So `fill_mixture_fields` is a second function and `merge_mixture_fields` stays the backfill's. It
+writes `oxygen`, `helium`, `volume`, `start_pressure` and `end_pressure`, and only where the stored
+row has none. The four it never writes each have their own reason, which is why the list is a
+constant (`FILLABLE_MIXTURE_FIELDS`) rather than a subtraction: `usage` is a distinction no format
+this app parses records at all; `po2_limit` and `role` are how the diver planned to breathe the
+cylinder rather than what was in it; and `gas_number` is the join key above, which a second file's
+own labelling must never rename.
+
+**The join is `merge_mixture_fields`', and so are its preconditions.** Counts must match, every pair
+must still agree on the `(oxygen, helium)` both sides recorded, and `stored` must be in saved order
+— `get_mixtures_for_dive`'s `ORDER BY id`, for the reason the section above this one gives. Sharing
+the join is what makes two functions the right shape rather than three: the disagreement they can
+detect is the same disagreement, and only the write differs.
+
+**A fill the table would reject is dropped, per row.** Three of the five columns are half of a pair
+`dive_mixture` constrains — `end_pressure <= start_pressure`, `oxygen + helium <= 100` — and this is
+the one write path that composes a row out of two sources, so a stored half and a filled half can
+make a row Postgres refuses even though both sides were individually valid. `CHECK` is not
+deferrable, so that arrives as an `IntegrityError` from the `execute` in the middle of an attach's
+transaction or a logbook import's, neither of which can recover there. `_fill_is_storable` therefore
+checks the composed row against those constraints first and drops the fill where it fails: the file
+and the stored row cannot both be describing that cylinder, and the stored row is the diver's. **Per
+row rather than per dive**, unlike `merge_mixture_fields`' all-or-nothing refusal, and the
+difference is that nothing here is being overwritten — a filled cylinder beside an unfilled one is
+two rows each still carrying exactly what it carried before, not two rows sourced from different
+places with nothing recording which is which.
+
+**It applies at two levels, and they are the same rule at different grain.** `fill_parsed_mixtures`
+runs inside `extract_recording`, across a recording's own files in attach order, and is why
+`RecordingExtraction.mixtures` is a per-*member* answer rather than the first file's list taken
+whole — the whole-list reading is precisely what drops the FIT's `oxygen`. `fill_dive_mixtures` then
+writes that answer onto the dive's rows, and is shared by the attach route and the import writer so
+the two cannot disagree about it. Read-then-write rather than a `COALESCE` per column, unlike every
+single-column fill: the join is positional and the alignment exists only in Python, so the statement
+would have to name a row the SQL cannot pick out.
+
+**The `fresh` branch governs the cylinders too.** A recording's *first* file fills nothing: the
+dive's rows came off the form that very parse pre-filled, so the only thing a fill could do there is
+put back a blank the diver had just cleared. Every later file fills — including the first file to
+reach a recording a logbook import created without one, which is the converted-import case meeting
+its own bytes. Same parameter, same place, as the outright-versus-fill choice for the scalars.
 
 ## A profile has one of three provenances, and a recording need not have a file
 

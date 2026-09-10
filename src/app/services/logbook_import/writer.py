@@ -42,7 +42,6 @@ from ...models.certification_file import CertificationFile
 from ...models.course import Course
 from ...models.dive import Dive
 from ...models.dive_file import DiveFile
-from ...models.dive_mixture import DiveMixture
 from ...models.dive_recording import DiveRecording
 from ...models.dive_site import DiveSite
 from ...models.gear_item import GearItem
@@ -64,8 +63,8 @@ from ..dive_files import (
     TECH_SCALAR_FIELDS,
     apply_gas_mapping,
     delete_files_for_dive,
+    fill_dive_mixtures,
     fill_tech_scalars,
-    merge_mixture_fields,
     relabel_gas_numbers,
 )
 from ..dive_profiles import IMPORT_PARSER_KEY, get_existing_profile, recording_source_digest, store_profile
@@ -484,8 +483,9 @@ class _Writer:
         A **fill** writes no recording row. It fills the stored recording's blanks - its
         device columns, its start, the two figures the gates compare - and, where that
         recording had no samples at all, its profile. The stored dive's own blanks fill too:
-        its oxygen-exposure readings, and its cylinders where they still demonstrably
-        describe the document's. Nothing is ever overwritten, which is the whole rule: the
+        its oxygen-exposure readings, and the members its cylinders have none of, where those
+        cylinders still demonstrably describe the document's. Nothing is ever overwritten,
+        which is the whole rule: the
         diver may have corrected any of it, and a fill that won an argument with an edit
         would be the silent loss this repository already refuses on the backfill path.
 
@@ -590,11 +590,16 @@ class _Writer:
             dive_id=match.dive_id,
             scalars={name: match.dive_values.get(name) for name in TECH_SCALAR_FIELDS},
         )
-        if match.mixtures:
-            stored_mixtures = await get_mixtures_for_dive(db=self._db, dive_id=match.dive_id)
-            updates = merge_mixture_fields([DiveMixtureSchema(**row) for row in match.mixtures], stored_mixtures)
-            for mixture_id, values in updates or []:
-                await self._db.execute(update(DiveMixture).where(DiveMixture.id == mixture_id).values(**values))
+        # The cylinders fill on the same terms as the readings above and through the same
+        # function the attach route uses: this document is a second reading of a record the
+        # logbook already holds, so its `oxygen` lands in a cylinder that has none and never
+        # over one that has. Not `merge_mixture_fields` - that is the backfill's question
+        # (may these values be written *over* these rows?) and it would put this document's
+        # `gas_number` on top of the label the stored profile's pressure channels are already
+        # attributed under.
+        await fill_dive_mixtures(
+            self._db, dive_id=match.dive_id, parsed=[DiveMixtureSchema(**row) for row in match.mixtures]
+        )
 
     def _stale_schedule(self, schedule_id: int | None) -> None:
         """Mark one schedule as needing its due dates recomputed. Deduped, order kept."""

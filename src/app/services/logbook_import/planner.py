@@ -283,7 +283,8 @@ class PlannedRecordingMatch:
     # the recording is a second computer's and the dive's figures are the primary's.
     dive_values: dict[str, Any] = field(default_factory=dict)
     # The incoming dive's cylinders, carried on **both** kinds and read differently by each:
-    # on a `fill` they are what `merge_mixture_fields` writes into the stored dive's rows, and
+    # on a `fill` they are what `fill_dive_mixtures` writes into the stored dive's blank
+    # cylinder members, and
     # on an `attach` they are the labelling this second computer's `gas_number`s are mapped
     # *from* onto the dive's own list. Defaulting to empty rather than being required is what
     # let the attach case ship without them once, with the whole relabelling unreachable.
@@ -1454,8 +1455,8 @@ class _Planner:
         readings the stored dive has none of; on an `attach` they are dropped, the recording
         being a second computer's and the dive's figures the primary recording's. Its
         **cylinders** ride along on both, and for two different jobs: on a fill they are what
-        `merge_mixture_fields` writes into the dive's own rows, and on an attach they are what
-        the second computer's `gas_number`s are mapped *from*.
+        `fill_dive_mixtures` writes into the blanks of the dive's own rows, and on an attach
+        they are what the second computer's `gas_number`s are mapped *from*.
         """
         remaining: list[PlannedRecording] = []
         taken = 0

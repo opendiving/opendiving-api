@@ -24,6 +24,7 @@ from src.app.core.security import create_dive_file_token
 from src.app.core.utils.datetime_offset import combine_start_time
 from src.app.models.dive import Dive
 from src.app.models.dive_file import DiveFile
+from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_recording import DiveRecording
 from src.app.models.user import User
@@ -47,15 +48,22 @@ pytestmark = pytest.mark.skipif(not db_available(), reason="No database connecti
 SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
 
 
-def _export(*, cns_end: float | None = None, samples: str = "", start: str = "2026-09-08T15:17:38.67+03:00") -> bytes:
+def _export(
+    *,
+    cns_end: float | None = None,
+    samples: str = "",
+    start: str = "2026-09-08T15:17:38.67+03:00",
+    cylinder: str = "",
+) -> bytes:
     """A minimal Suunto XML export. `SuuntoXmlParser` is the cheapest of the three and the
     one whose bytes can be written inline, which is what keeps these tests about the
     recording rather than about a format."""
     exposure = "" if cns_end is None else f"<CnsEnd>{cns_end}</CnsEnd>"
+    mixtures = "" if not cylinder else f"<DiveMixtures><DiveMixture>{cylinder}</DiveMixture></DiveMixtures>"
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <Dive xmlns="{SUUNTO_NS}"><StartTime>{start}</StartTime><Duration>1800</Duration>
 <MaxDepth>19.04</MaxDepth><SerialNumber>253810000400</SerialNumber>{exposure}
-{samples}</Dive>
+{mixtures}{samples}</Dive>
 """.encode()
 
 
@@ -206,6 +214,76 @@ class TestWhereAFileLands:
         assert again.recording_id == first.recording_id
         assert again.file_uuid == first.file_uuid
         assert len(await _recordings(async_db, dive)) == 1
+
+
+class TestFillingTheDivesCylinders:
+    """The cylinder half of the fill rule, against the rows a diver actually owns.
+
+    Here rather than beside the pure `fill_mixture_fields` tests because the interesting part
+    is the join: the parsed cylinders come off the recording's files, the stored ones off the
+    dive, and only a real `UPDATE` shows that the blanks moved and the rest did not.
+    """
+
+    @staticmethod
+    def _seed_cylinder(db: Session, dive: Dive, **columns: Any) -> None:
+        db.add(DiveMixture(dive_id=dive.id, **columns))
+        db.commit()
+
+    @staticmethod
+    async def _cylinder(db: AsyncSession, dive: Dive) -> DiveMixture:
+        return (await db.execute(select(DiveMixture).where(DiveMixture.dive_id == dive.id))).scalar_one()
+
+    @pytest.mark.asyncio
+    async def test_a_second_file_fills_the_blank_mix_and_leaves_the_pressures(
+        self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        """The corpus pair, as a dive: the Suunto's JSON records this cylinder's pressures
+        and no gas fraction anywhere, and the same computer's FIT records `oxygen` 33 and no
+        pressures. The stored `start_pressure` is deliberately *not* the second file's, so
+        the assertion is about the rule rather than about two numbers that agree.
+        """
+        self._seed_cylinder(db, dive, gas_number=0, start_pressure=200.0, end_pressure=47.47)
+
+        await _attach(
+            async_db,
+            diver,
+            dive,
+            _export(cns_end=9.0, cylinder="<StartPressure>207340</StartPressure><EndPressure>47470</EndPressure>"),
+            filename="ocean.xml",
+        )
+        await _attach(
+            async_db,
+            diver,
+            dive,
+            _export(
+                start="2026-09-08T15:17:39.17+03:00",
+                samples=_samples((0, "0"), (10, "5")),
+                cylinder="<Oxygen>33</Oxygen>",
+            ),
+            filename="ocean-fit.xml",
+        )
+
+        assert [row.ordinal for row in await _recordings(async_db, dive)] == [0]
+        cylinder = await self._cylinder(async_db, dive)
+        assert cylinder.oxygen == 33.0
+        assert (cylinder.start_pressure, cylinder.end_pressure) == (200.0, 47.47)
+        # The label the dive's stored pressure channels are attributed under. A second file's
+        # own numbering must never rename it - this format counts from 1, the Ocean from 0.
+        assert cylinder.gas_number == 0
+
+    @pytest.mark.asyncio
+    async def test_a_recordings_first_file_fills_nothing(
+        self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        """The same branch `store_tech_scalars`/`fill_tech_scalars` turn on, applied to the
+        cylinders. A recording's first file has nothing to add: the dive's rows came off the
+        form this very parse pre-filled, so a fill here would only put back a blank the diver
+        had just cleared."""
+        self._seed_cylinder(db, dive, gas_number=0, start_pressure=200.0)
+
+        await _attach(async_db, diver, dive, _export(cylinder="<Oxygen>33</Oxygen>"), filename="ocean.xml")
+
+        assert (await self._cylinder(async_db, dive)).oxygen is None
 
 
 class TestFillingAStart:

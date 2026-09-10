@@ -15,8 +15,9 @@ async def get_mixtures_for_dive(db: AsyncSession, dive_id: int) -> list[DiveMixt
     issues exactly such an `UPDATE`, so an unordered read here would come back in a
     different order on the run after a backfill than it did on the run before it.
 
-    `merge_mixture_fields` joins parsed cylinders to stored ones **by position** and is the
-    caller that would silently corrupt data without this - see its docstring.
+    `merge_mixture_fields` and `fill_mixture_fields` both join parsed cylinders to stored ones
+    **by position**, and they are the callers that would silently corrupt data without this -
+    see the first one's docstring.
     """
     result = await db.execute(select(DiveMixture).where(DiveMixture.dive_id == dive_id).order_by(DiveMixture.id))
     return [DiveMixtureRead.model_validate(row) for row in result.scalars().all()]
