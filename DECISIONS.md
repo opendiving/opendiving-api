@@ -16111,11 +16111,18 @@ refuse it.
 
 ## A second file of one recording fills, and never overwrites
 
-The rule appears three times, because it applies to three different things: the recording's device
-columns (`fill_device_fields`), the dive's oxygen-exposure readings (`fill_tech_scalars`), and the
-profile's channels (`fill_channels`). Each takes every value from the **first file that recorded
-it** - the serial from the JSON and the model from the FIT, `cns_end` from the FIT beside the JSON's
-positions, the JSON's depth and temperature beside a ceiling only the FIT carries.
+The rule is written once per thing it applies to, and it applies to everything a file says about a
+recording: the device columns (`fill_device_fields`), the two figures the match gates compare
+(`fill_gate_figures`), the recording's own start (`fill_start`), the dive's oxygen-exposure readings
+(`fill_tech_scalars`) and the profile's channels (`fill_channels`). **No count is written here on
+purpose**, and the omission is not fastidiousness: this paragraph said "three times" from the day it
+was written, while the code already had more, and a later sentence then counted `fill_start` as "a
+fourth" off that wrong base. A figure restated away from the thing it counts is a second place to be
+wrong; `git grep -n "def fill_" -- src/app/services` is the list, and it returns every one of them.
+
+Each takes every value from the **first file that recorded it** - the serial from the JSON and the
+model from the FIT, `cns_end` from the FIT beside the JSON's positions, the JSON's depth and
+temperature beside a ceiling only the FIT carries.
 
 *Rejected:* the later file wins. A diver who corrected a value between two uploads loses the
 correction, which is the objection this repository already records against profile-derived
@@ -16128,20 +16135,20 @@ would double every gas switch the pair agree on. `gas_attribution` is not filled
 recomputed after the fill, because it is derived from the merged events and depth together -
 `finalize_profile`'s ordering rule, one level up.
 
-**The fills are `COALESCE` per column rather than read-then-write.** One statement, nothing to race,
-and the rule stated once in SQL instead of once in SQL and once in Python.
+**Every fill but one is a `COALESCE` per column rather than a read-then-write.** One statement,
+nothing to race, and the rule stated once in SQL instead of once in SQL and once in Python.
 
-**`fill_start` is the one exception, and it is not a fourth thing being filled — it is the same
-recording's start, which is two columns holding one value.** A NULL `utc_offset_minutes` means
-`start_time` holds a wall clock labelled UTC rather than an instant, so a `COALESCE` that filled the
-offset alone would reinterpret a column nobody rewrote and read the recording back `offset` minutes
-late. The two are therefore filled together: where the row has a start and no offset, filling the
-offset also converts the stored clock face to the instant it names. That is **not** the fabrication
-*Clocks* rejects, and the difference is whose offset it is — that rejected alternative borrows the
-*account's or the dive's*, while this one comes from another export of the same device, which is the
-only match that reaches this function at all. Read-then-write because expressing it in SQL means a
-`CASE` over both columns and the rule is hard enough to state once; there is no race to lose, every
-caller being inside a transaction on a dive only its owner can reach.
+**`fill_start` is the one of them that is not a `COALESCE`, because a recording's start is two
+columns holding one value.** A NULL `utc_offset_minutes` means `start_time` holds a wall clock
+labelled UTC rather than an instant, so a `COALESCE` that filled the offset alone would reinterpret
+a column nobody rewrote and read the recording back `offset` minutes late. The two are therefore
+filled together: where the row has a start and no offset, filling the offset also converts the
+stored clock face to the instant it names. That is **not** the fabrication *Clocks* rejects, and the
+difference is whose offset it is — that rejected alternative borrows the *account's or the dive's*,
+while this one comes from another export of the same device, which is the only match that reaches
+this function at all. Read-then-write because expressing it in SQL means a `CASE` over both columns
+and the rule is hard enough to state once; there is no race to lose, every caller being inside a
+transaction on a dive only its owner can reach.
 
 **The outright write survives, and which one runs is now structural.** A recording's *first* file
 writes the dive's tech scalars outright - `None` included, so a reading nothing yields is cleared -

@@ -12,12 +12,12 @@ what happens once it has been made - the bytes, the row, the fill rule across a 
 files, and the two things derived from them (the profile, and the dive's oxygen-exposure
 readings).
 
-*A second file of one recording fills and never overwrites*, and that rule appears three
-times here because it applies to three different things: to the recording's device columns
-(`dive_recordings.fill_device_fields`), to the dive's tech scalars (`fill_tech_scalars`
-below), and to the profile's channels (`dive_profiles.fill_channels`). Each takes every
-value from the *first* file that recorded it. The rejected alternative is "the later file
-wins", which silently loses a value a diver corrected between two uploads.
+*A second file of one recording fills and never overwrites*, and that rule is written once per
+thing it applies to - the device columns, the two match figures, the recording's start, the
+dive's tech scalars and the profile's channels, which is `git grep -n "def fill_" --
+src/app/services`. Each takes every value from the *first* file that recorded it. The rejected
+alternative is "the later file wins", which silently loses a value a diver corrected between
+two uploads.
 """
 
 import hashlib
@@ -772,12 +772,12 @@ async def read_recording(
     the request's own thread, which is what *"Uploaded files are parsed in a thread, not on
     the event loop"* in `DECISIONS.md` requires.
 
-    **`release` is whether the caller has anything left in the transaction to lose**, and it
-    has to be the caller's answer rather than this function's. `release_read_transaction`
-    rolls back, so it frees the connection for the length of the parse only where nothing has
-    been written yet - which is true of `_repeat_upload`, whose reads are all lookups, and
-    false of `refresh_tech_scalars`, which every caller reaches after a delete or a promotion
-    has already been issued. There the connection is held for the duration, and that is the
+    **`release` says the caller has nothing left in the transaction to lose**, and it has to be
+    the caller's answer rather than this function's. `release_read_transaction` rolls back, so
+    it can free the connection for the length of the parse only where nothing has been written
+    yet - which is true of `_repeat_upload`, whose reads are all lookups, and false of
+    `refresh_tech_scalars`, which every caller reaches after a delete or a promotion has
+    already been issued. There the connection is held for the duration, and that is the
     accepted cost: what is bought either way is the event loop, which is the scarce thing.
     """
     files = await load_recording_files(db, recording_id=recording_id)
