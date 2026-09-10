@@ -16197,16 +16197,17 @@ which for the JSON-then-FIT order a diver actually uses means a cylinder with pr
 The obvious move was to reuse `merge_mixture_fields`, and it does not work — it answers a different
 question and gets this one wrong twice over. It writes `po2_limit`, `gas_number` and `role`, so it
 lands **no** `oxygen` and the cylinder above stays blank; and it *overwrites* the three it does
-write, which is the one thing this rule forbids. On the logbook-import path that second half was
-already doing damage rather than merely doing nothing: it wrote the incoming document's `gas_number`
-over the stored row's, and `gas_number` is the join key to `dive_profile.data.pressure[].gas_number`
-— so a FIT numbering from 1 renamed the cylinder a stored Ocean profile's curves were attributed
-under, and the chart then read that tank's pressure off nothing. Silently, because a `gas_number`
-that names *a* cylinder is indistinguishable from one that names the right one.
+write, which is the one thing this rule forbids. That second half is worse than doing nothing on the
+logbook-import path, where a document that carries a `gas_number` at all would have had it written
+over the stored row's — and `gas_number` is the join key to
+`dive_profile.data.pressure[].gas_number`, so a FIT numbering from 1 renames the cylinder a stored
+Ocean profile's curves are attributed under and the chart then reads that tank's pressure off
+nothing. Silently, because a `gas_number` that names *a* cylinder is indistinguishable from one that
+names the right one.
 
 So `fill_mixture_fields` is a second function and `merge_mixture_fields` stays the backfill's. It
 writes `oxygen`, `helium`, `volume`, `start_pressure` and `end_pressure`, and only where the stored
-row has none. The four it never writes each have their own reason, which is why the list is a
+row has none. The four it never writes are excluded deliberately, which is why the list is a
 constant (`FILLABLE_MIXTURE_FIELDS`) rather than a subtraction: `usage` is a distinction no format
 this app parses records at all; `po2_limit` and `role` are how the diver planned to breathe the
 cylinder rather than what was in it; and `gas_number` is the join key above, which a second file's
@@ -16218,18 +16219,18 @@ must still agree on the `(oxygen, helium)` both sides recorded, and `stored` mus
 the join is what makes two functions the right shape rather than three: the disagreement they can
 detect is the same disagreement, and only the write differs.
 
-**A fill the table would reject is dropped, per row.** Three of the five columns are half of a pair
-`dive_mixture` constrains — `end_pressure <= start_pressure`, `oxygen + helium <= 100` — and this is
-the one write path that composes a row out of two sources, so a stored half and a filled half can
-make a row Postgres refuses even though both sides were individually valid. `CHECK` is not
-deferrable, so that arrives as an `IntegrityError` from the `execute` in the middle of an attach's
-transaction or a logbook import's, neither of which can recover there. `_fill_is_storable` therefore
-checks the composed row against those constraints first and drops the fill where it fails: the file
-and the stored row cannot both be describing that cylinder, and the stored row is the diver's. **Per
-row rather than per dive**, unlike `merge_mixture_fields`' all-or-nothing refusal, and the
-difference is that nothing here is being overwritten — a filled cylinder beside an unfilled one is
-two rows each still carrying exactly what it carried before, not two rows sourced from different
-places with nothing recording which is which.
+**A fill the table would reject is dropped, per row.** Four of the five columns are half of a pair
+`dive_mixture` constrains — `end_pressure <= start_pressure`, `oxygen + helium <= 100`; `volume` is
+the only one that stands alone — and this is the one write path that composes a row out of two
+sources, so a stored half and a filled half can make a row Postgres refuses even though both sides
+were individually valid. `CHECK` is not deferrable, so that arrives as an `IntegrityError` from the
+`execute` in the middle of an attach's transaction or a logbook import's, neither of which can
+recover there. `_fill_is_storable` therefore checks the composed row against those constraints first
+and drops the fill where it fails: the file and the stored row cannot both be describing that
+cylinder, and the stored row is the diver's. **Per row rather than per dive**, unlike
+`merge_mixture_fields`' all-or-nothing refusal, and the difference is that nothing here is being
+overwritten — a filled cylinder beside an unfilled one is two rows each still carrying exactly what
+it carried before, not two rows sourced from different places with nothing recording which is which.
 
 **It applies at two levels, and they are the same rule at different grain.** `fill_parsed_mixtures`
 runs inside `extract_recording`, across a recording's own files in attach order, and is why
