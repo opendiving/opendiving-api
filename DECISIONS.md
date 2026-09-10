@@ -16184,6 +16184,17 @@ archive restores bytes"*), so every UDDF and `.ssrf` dive in the app arrives as 
 a device, a start and a profile and nothing else. It is deleted only through the recording route:
 there is no file whose deletion would take it.
 
+**`merge` names a route that does not exist yet, and that is deliberate.** There is no
+`POST /dives/merge` in this repository: folding two dives into one is the next change, and it
+arrives on top of this one. The constant, the `UNREPRODUCIBLE_PROVENANCES` set and the deletion rule
+that reads them ship *ahead* of it because they are not the merge feature - they are the property
+the rest of this module has to hold for the merge to be safe to add, and adding them afterwards
+would mean revisiting the backfills, `should_extract` and `delete_dive_file` in a change that is
+about something else. A reader who greps for the endpoint and finds nothing has found the right
+answer: `MERGE_PARSER_KEY` is written by nothing but a test until that change lands, and the test
+says so where it sets it by hand. This note exists because the absence reads as a defect twice out
+of two independent readings, which is once more than a comment in one file was going to survive.
+
 **`should_extract` refuses an unreproducible profile whatever its digest says**, and both backfills
 select on the *profile's* provenance rather than on a *file's*. That distinction is the correction
 this change carries. The old candidate query tested `dive_file.parser_key`, which would let a merged
