@@ -207,14 +207,19 @@ class ParsedDevice(_ParserOutput):
     when one is added.
     """
 
-    manufacturer: str | None = None
+    # `brand`, the word the published format uses for a maker on both a device and a gear
+    # item (DiveJSON §6.4b and §6.12). It was `manufacturer` for one PR, matching FIT's own
+    # `file_id.manufacturer` field name; the format settled on one word for one concept and
+    # this follows it, so a device read here and a device written to an export are spelled
+    # the same.
+    brand: str | None = None
     model: str | None = None
     serial: str | None = None
     firmware: str | None = None
     name: str | None = None
     dive_number: int | None = None
 
-    @field_validator("manufacturer", "model", "serial", "firmware", "name", mode="before")
+    @field_validator("brand", "model", "serial", "firmware", "name", mode="before")
     @classmethod
     def _as_trimmed_text(cls, value: object) -> str | None:
         """Whatever the file wrote, as the text an identity is - or nothing.

@@ -4392,10 +4392,20 @@ free.
 
 ## A parser reports what recorded the file
 
-`ParsedDiveSchema.device` is a `ParsedDevice` (`schemas/parsed_dive.py`): `manufacturer`, `model`,
-`serial`, `firmware`, `name` and `dive_number`, all nullable, and every parser fills what its format
-carries. Nothing stores it. `POST /dive/parse` returns it, `DiveCreate` is `extra="forbid"` so a
-prefilled form cannot hand it back, and there is no column behind any of the six.
+`ParsedDiveSchema.device` is a `ParsedDevice` (`schemas/parsed_dive.py`): `brand`, `model`, `serial`,
+`firmware`, `name` and `dive_number`, all nullable, and every parser fills what its format carries.
+`POST /dive/parse` returns it and `DiveCreate` is `extra="forbid"`, so a prefilled form cannot hand
+it back.
+
+**Two things this section said when it was written are no longer true, and both are corrections
+rather than changes of mind.** The maker's member was `manufacturer` for one PR and is `brand`: the
+published format uses one word for that concept on a device (§6.4b) and on a gear item (§6.12), and
+a member spelled differently here than in the document it is written to is a translation nobody
+asked for. FIT's own field is still `file_id.manufacturer` and is read under that name — a format's
+field name is not this schema's. And **the six do have columns behind them now**: `dive_recording`
+carries `device_brand`, `device_model`, `device_serial`, `device_firmware`, `device_name` and
+`device_dive_number`. The paragraph below arguing that a serial is worth reading with no column
+behind it is what led to those columns existing, so it is kept as written.
 
 **Why read a serial at all.** A dive has had at most one source file (see *"A dive has at most one
 source file, and identical bytes are stored once per diver"*), which is the assumption that made the
@@ -4420,14 +4430,15 @@ thing that recorded the file, grouped into an object that means something on its
 answer to "what downstream can use it?" is a caller comparing two parses, which needs no column to
 do.
 
-**Where each member comes from.** FIT: `file_id.manufacturer`; `file_id.product_name` and nothing
+**Where each member comes from.** FIT: `file_id.manufacturer` into `brand`; `file_id.product_name`
+and nothing
 behind it; the serial off the `device_info` whose `device_index` is 0, else `file_id.serial_number`;
 the `software_version` of the first `device_info` naming the file's own manufacturer; and
 `session.dive_number`. Suunto JSON: `Header.Device` (with the top-level `DeviceLog.Device` behind
 it) for `SerialNumber`, `Info.SW` and `Name`, plus `Header.Diving.NumberInSeries`. Suunto XML:
 `<Source>` as the model, `<SerialNumber>`, `<Software>` and `<DiveNumberInSerie>`. Both Suunto
-parsers fix the manufacturer as the literal `Suunto` rather than reading it, because neither format
-has an element for it and `can_parse` has already decided the question.
+parsers fix the brand as the literal `Suunto` rather than reading it (`_BRAND` in each), because
+neither format has an element for it and `can_parse` has already decided the question.
 
 Several things in that mapping are not obvious and each cost something to find:
 
@@ -4439,8 +4450,8 @@ Several things in that mapping are not obvious and each cost something to find:
   back is a profile constant (`descent_mk2s`) rather than the vendor's own string, which would make
   the member two different kinds of thing depending on who wrote the file. `divejson`'s reference
   FIT reader declines it on the same grounds - `product_name` else the manufacturer, never
-  `product`. Its own fallback is not one here either: the manufacturer is a member of its own, so
-  falling back to it would report `suunto` twice and lose the fact that the file named no model.
+  `product`. Its own fallback is not one here either: the brand is a member of its own, so falling
+  back to it would report `suunto` twice and lose the fact that the file named no model.
 - **`device_index` has to be read raw.** The FIT profile keeps an enum in that slot
   (`{0: 'creator'}`), so `fitdecode` renders the 0 as the string `creator` and a parser comparing
   the decoded value to `0` matches nothing at all. `_native_raw` exists for exactly this shape - see
@@ -4453,7 +4464,7 @@ Several things in that mapping are not obvious and each cost something to find:
   what its owner called it - while the same computer's FIT names the model `Suunto Ocean` in
   `product_name`. The JSON export carries no model at all and the FIT no name, so the two shapes
   fill different members and neither is back-derived from the other.
-- **The manufacturer's case differs by format and is kept as read.** A FIT decodes to the profile's
+- **The brand's case differs by format and is kept as read.** A FIT decodes to the profile's
   lowercase `suunto`; the Suunto parsers write the literal `Suunto`. Neither is normalised here - a
   parser reports what the file said - so any comparison of two devices has to fold case itself.
 
@@ -14875,8 +14886,9 @@ say where the row came from: `parser_key` is `divejson_import` on a bare import,
 file's own key on the archive path, where a real file exists for a backfill to re-read.
 
 **This used to be argued from "it is the caller's own backup", and that premise is no longer true.**
-The route converts a UDDF file, a `.ssrf`, a FIT or a Suunto export on the way in, so the document a
-diver imports may have been written by Subsurface or by a watch and converted minutes ago — never by
+The route converts a UDDF file, a `.ssrf`, a FIT or one of Suunto's two exports on the way in, so
+the document a diver imports may have been written by Subsurface or by a watch and converted minutes
+ago — never by
 this app, and never by that diver's own export. The argument that survives is the one that was doing
 the work all along, and it is about *authority*, not provenance: a profile imported here lands in
 the importer's own logbook, changes nothing anyone else can see, and is never claimed by this
@@ -15091,8 +15103,11 @@ calls**.
 
 `POST /import/divejson/preview` and `POST /import/divejson` are now `POST /import/logbook/preview`
 and `POST /import/logbook`, and they accept a DiveJSON document, the full-export archive, or any
-format the `divejson` registry sniffs — UDDF, Subsurface `.ssrf`, FIT and the Suunto app's JSON at
-the pin this repository carries, plus a `.zip` whose files are all one of those. The old paths are
+format the `divejson` registry sniffs — UDDF, Subsurface `.ssrf`, FIT and Suunto's two, the app's
+JSON and DM5's XML, at the pin this repository carries, plus a `.zip` whose files are all one of
+those. **The set is `divejson.read_formats()` and never a list**, but the *labels* are a table here
+(`reader.py`'s `_FORMAT_LABELS`) and a test now fails when the pin outgrows it — see *"A version
+bump can add a reader, and only a test notices"* below. The old paths are
 **gone rather than aliased**: there is no deployment but the local one, the web app moves in the
 same change, and a `deprecated=True` alias would be a hedge against a rollout that does not exist.
 

@@ -115,15 +115,18 @@ _ZIP_MAGIC = b"PK\x03\x04"
 
 _READ_CHUNK_SIZE = 1024 * 1024
 
-# How each registered format is named to a diver. An id the library grows past this table -
-# and it will, since the pin moves without a change here - falls back to the id itself, so
-# the sentence stays true and only gets terser. The same tolerance the conversion report's
-# `kind` has, for the same reason.
+# How each registered format is named to a diver. An id the library grows past this table
+# falls back to the id itself, so the sentence stays true and only gets terser - but that
+# tolerance is a floor, not the plan: `test_every_read_format_has_a_label` fails the build
+# when the pin moves past this table, because the fallback is invisible in every other
+# guard. A whole reader (`suunto_xml`, added in 0.4.0) arrived unnoticed that way, offered
+# by the API and greyed out by the picker, with nothing on either side able to see it.
 _FORMAT_LABELS = {
     "uddf": "UDDF (.uddf)",
     "ssrf": "Subsurface (.ssrf)",
     "fit": "FIT (.fit)",
     "suunto_json": "Suunto app JSON (.json)",
+    "suunto_xml": "Suunto DM5 XML (.xml)",
 }
 
 # The major version this reader implements. A reader accepts any document whose *major*

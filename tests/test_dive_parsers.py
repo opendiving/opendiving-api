@@ -1691,7 +1691,7 @@ class TestParsersReportTheDevice:
     """
 
     def test_xml_reports_the_computer_that_wrote_it(self):
-        """`<Source>` is the model and `<Software>` the firmware. The manufacturer is the
+        """`<Source>` is the model and `<Software>` the firmware. The brand is the
         format's rather than a field's - a DM5 export has no element for it, and `can_parse`
         has already required the Suunto namespace."""
         content = f"""<?xml version="1.0" encoding="utf-8"?>
@@ -1706,7 +1706,7 @@ class TestParsersReportTheDevice:
         device = SuuntoXmlParser.parse(content).device
 
         assert device is not None
-        assert (device.manufacturer, device.model) == ("Suunto", "Suunto D5")
+        assert (device.brand, device.model) == ("Suunto", "Suunto D5")
         assert (device.serial, device.firmware) == ("192410004212", "2.5.1947")
         assert device.dive_number == 5
         # The format records no name its owner chose, unlike the JSON export's
@@ -1745,7 +1745,7 @@ class TestParsersReportTheDevice:
         device = SuuntoJsonParser.parse(content).device
 
         assert device is not None
-        assert (device.manufacturer, device.model) == ("Suunto", None)
+        assert (device.brand, device.model) == ("Suunto", None)
         assert (device.serial, device.firmware, device.name) == ("253810000400", "2.51.28", "Porvoo")
 
     def test_json_falls_back_to_the_top_level_device_block(self):
@@ -1792,7 +1792,7 @@ class TestParsersReportTheDevice:
         assert parsed.device.dive_number == 5
 
     def test_fit_reports_the_computer_that_wrote_it(self):
-        """`file_id.product_name` is the model, and the manufacturer decodes to the
+        """`file_id.product_name` is the model, and the brand decodes to the
         profile's lowercase `suunto` where the JSON export of the same computer writes the
         literal `Suunto` - both are kept as read. The `product` beside it is the corpus
         Ocean's own `62`, carried here because the file carries it and read by nothing.
@@ -1808,7 +1808,7 @@ class TestParsersReportTheDevice:
         device = FitParser.parse(content).device
 
         assert device is not None
-        assert (device.manufacturer, device.model) == ("suunto", "Suunto Ocean")
+        assert (device.brand, device.model) == ("suunto", "Suunto Ocean")
         assert device.dive_number == 3
         # The corpus's Ocean FIT carries no serial anywhere and no name its owner set,
         # which is exactly why the same dive's JSON export is worth reading too.
@@ -1826,7 +1826,7 @@ class TestParsersReportTheDevice:
         it is a profile constant rather than the vendor's own string and the member would
         otherwise be two different kinds of thing depending on who wrote the file.
 
-        The manufacturer is unaffected either way: it is `file_id.manufacturer`, a member
+        The brand is unaffected either way: it is `file_id.manufacturer`, a member
         of its own, and is not what the model falls back to.
         """
         content = fit_file(
@@ -1837,7 +1837,7 @@ class TestParsersReportTheDevice:
         device = FitParser.parse(content).device
 
         assert device is not None
-        assert (device.manufacturer, device.model) == (manufacturer, None)
+        assert (device.brand, device.model) == (manufacturer, None)
 
     def test_the_fit_counter_lands_on_the_device_and_not_on_the_dive(self):
         """The move `session.dive_number`'s comment used to describe as "deliberately not
@@ -1976,7 +1976,7 @@ class TestParsersReportTheDevice:
         assert DiveCreate(**valid).dive_number == 1
 
         with pytest.raises(ValidationError) as raised:
-            DiveCreate(**valid, device={"manufacturer": "Suunto"})
+            DiveCreate(**valid, device={"brand": "Suunto"})
 
         assert [(error["type"], error["loc"]) for error in raised.value.errors()] == [("extra_forbidden", ("device",))]
 
@@ -2628,7 +2628,7 @@ class TestParsersInventNothing:
         assert parsed.mixtures[0].po2_limit is None
 
     def test_xml_leaves_an_unnamed_device_null(self):
-        """Every device member but the manufacturer, which is the format's rather than a
+        """Every device member but the brand, which is the format's rather than a
         field's: a DM5 export is a Suunto export by its namespace, and `can_parse` has
         already required it. A model or a serial standing in for one the export never wrote
         would be the same failure as a `volume: 0.0`."""
@@ -2639,30 +2639,30 @@ class TestParsersInventNothing:
         device = SuuntoXmlParser.parse(content).device
 
         assert device is not None
-        assert device.manufacturer == "Suunto"
+        assert device.brand == "Suunto"
         assert (device.model, device.serial, device.firmware) == (None, None, None)
         assert (device.name, device.dive_number) == (None, None)
 
     def test_json_leaves_an_unnamed_device_null(self):
         """The header-only shape, which is most of the corpus: no `Device` block at all,
-        and so nothing to say beyond the manufacturer the format itself fixes."""
+        and so nothing to say beyond the brand the format itself fixes."""
         content = json.dumps({"DeviceLog": {"Header": {"Duration": 1800}}}).encode()
 
         device = SuuntoJsonParser.parse(content).device
 
         assert device is not None
-        assert device.manufacturer == "Suunto"
+        assert device.brand == "Suunto"
         assert (device.model, device.serial, device.firmware) == (None, None, None)
         assert (device.name, device.dive_number) == (None, None)
 
     def test_fit_leaves_an_unnamed_device_null(self):
-        """A `file_id` naming a manufacturer and nothing else, which is the least a FIT
+        """A `file_id` naming a maker and nothing else, which is the least a FIT
         file says about itself. FIT has no field for a name its owner chose at all, so
         `name` is null on every file rather than only on this one."""
         device = FitParser.parse(dive_fit_file()).device
 
         assert device is not None
-        assert device.manufacturer == "suunto"
+        assert device.brand == "suunto"
         assert (device.model, device.serial, device.firmware) == (None, None, None)
         assert (device.name, device.dive_number) == (None, None)
 

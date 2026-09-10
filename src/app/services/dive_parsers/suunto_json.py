@@ -48,13 +48,13 @@ _TENTH_BAR_PER_PASCAL = Decimal("0.0001")
 # `GasSwitch` event is a few dozen bytes, so nothing else bounds the count.
 _MAX_CYLINDERS = 16
 
-# The manufacturer every file this parser accepts came from. It is the format's rather
-# than a field's: `can_parse` requires a `DeviceLog.Header`, which is Suunto's own
-# envelope, and no export in the corpus writes a manufacturer anywhere. Written out
-# because a device with a serial and no manufacturer cannot be lined up against the same
-# computer's FIT export, where `file_id.manufacturer` decodes to `suunto`.
-# `SuuntoXmlParser` says the same thing about its own format.
-_MANUFACTURER = "Suunto"
+# The brand every file this parser accepts came from. It is the format's rather than a
+# field's: `can_parse` requires a `DeviceLog.Header`, which is Suunto's own envelope, and
+# no export in the corpus writes a maker anywhere. Written out because a device with a
+# serial and no brand cannot be lined up against the same computer's FIT export, where
+# `file_id.manufacturer` decodes to `suunto`. `SuuntoXmlParser` says the same thing about
+# its own format.
+_BRAND = "Suunto"
 
 
 def _decimal_multiply(value: float | None, factor: Decimal) -> float | None:
@@ -280,7 +280,7 @@ def _device(device_log: dict[str, Any], header: dict[str, Any], diving: dict[str
     if not isinstance(info, dict):
         info = {}
     return ParsedDevice(
-        manufacturer=_MANUFACTURER,
+        brand=_BRAND,
         serial=device.get("SerialNumber"),
         firmware=info.get("SW"),
         name=device.get("Name"),

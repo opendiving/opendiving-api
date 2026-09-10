@@ -66,7 +66,8 @@ else; what is here is the source, and the notes for working on it.
   exactly what would be created, linked to something you already have, restored from your deleted
   records or skipped, and then an apply that writes the lot in one transaction. A DiveJSON document
   or a full-export archive goes in as it is; a UDDF file, a Subsurface `.ssrf`, a FIT file, a Suunto
-  app export, or a `.zip` whose files are all one of those is converted on the way in by the
+  app export, a Suunto DM5 XML export, or a `.zip` whose files are all one of those is converted on the
+  way in by the
   [`divejson`](https://pypi.org/project/divejson/) package, and the report says what the conversion
   could not carry. Restore a backup, migrate between instances, or bring a logbook across from
   whatever you were keeping it in.

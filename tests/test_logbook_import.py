@@ -1979,3 +1979,33 @@ class TestTheAgencyVocabulary:
         published = schema["$defs"]["certification"]["properties"]["agency"]["enum"]
 
         assert [member.value for member in CertificationAgency] == published
+
+
+class TestTheFormatLabelTable:
+    """`_FORMAT_LABELS` names every id `divejson.read_formats()` returns.
+
+    The one guard in this repository that can see a **new reader** arrive. Everything else
+    on both sides of the seam is written to tolerate an unknown format - the accepted set is
+    computed per call and never listed, `formats_this_build_reads` falls back to the raw id,
+    and the picker's extension list is the web app's - so a version bump that adds a reader
+    changes what the API accepts with nothing anywhere reporting it. That is not
+    hypothetical: `suunto_xml` shipped in `divejson` 0.4.0, and the pin crossed it into a
+    build whose "formats this build reads" sentence rendered the bare string `suunto_xml`
+    while the web app's picker refused the extension. Nobody saw it for ten review rounds.
+    """
+
+    def test_every_read_format_has_a_label(self) -> None:
+        unlabelled = [fmt for fmt in divejson.read_formats() if fmt not in import_reader._FORMAT_LABELS]
+
+        assert not unlabelled, (
+            "`divejson` reads a format this build has no name for, so the API accepts it while every message "
+            f"about it renders the raw id: {unlabelled}. Add it to `_FORMAT_LABELS`, and to the prose in "
+            "`README.md`, `api/v1/logbook_import.py` and `schemas/logbook_import.py` that lists the set."
+        )
+
+    def test_no_label_outlives_its_format(self) -> None:
+        """The mirror, and it is not symmetry for its own sake: a label for a format the
+        library has dropped is a format this build advertises and refuses."""
+        stale = [fmt for fmt in import_reader._FORMAT_LABELS if fmt not in divejson.read_formats()]
+
+        assert not stale, f"`_FORMAT_LABELS` names a format `divejson` no longer reads: {stale}"

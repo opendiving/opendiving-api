@@ -1,8 +1,8 @@
 """The shapes logbook import reads and reports - a DiveJSON document seen from the
 *reader* side, and the report that says what importing one would do.
 
-A converted upload - a UDDF file, a `.ssrf`, a FIT, a Suunto app export, a zip of any one
-of them - arrives here as a DiveJSON document like any other, because the converter's
+A converted upload - a UDDF file, a `.ssrf`, a FIT, a Suunto app or DM5 XML export, a zip
+of any one of them - arrives here as a DiveJSON document like any other, because the converter's
 output is one. Nothing below the reader learns an upload was converted; the only trace is
 `ImportReport.conversion`, which is what the conversion could not carry.
 

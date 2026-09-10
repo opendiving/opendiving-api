@@ -55,13 +55,13 @@ _TENTH_BAR_PER_MILLIBAR = Decimal("0.01")
 # says which cylinder the pod was on. Kept for the cases where it can't.
 _XML_GAS_NUMBER = 1
 
-# The manufacturer every file this parser accepts came from. It is the format's rather
-# than a field's: the export has no manufacturer element, and `can_parse` has already
-# required the `Suunto.Diving.Dal` namespace above. Written out because a device with a
-# serial and no manufacturer cannot be lined up against the same computer's FIT export,
-# where `file_id.manufacturer` decodes to `suunto`. `SuuntoJsonParser` says the same thing
-# about its own format.
-_MANUFACTURER = "Suunto"
+# The brand every file this parser accepts came from. It is the format's rather than a
+# field's: the export has no element for a maker, and `can_parse` has already required the
+# `Suunto.Diving.Dal` namespace above. Written out because a device with a serial and no
+# brand cannot be lined up against the same computer's FIT export, where
+# `file_id.manufacturer` decodes to `suunto`. `SuuntoJsonParser` says the same thing about
+# its own format.
+_BRAND = "Suunto"
 
 
 def _tag(name: str) -> str:
@@ -401,10 +401,10 @@ class SuuntoXmlParser(DiveParser):
     def _device(root: ET.Element) -> ParsedDevice:
         """The computer this export came off.
 
-        `<Source>` is the model, and it carries the manufacturer with it - `Suunto D5` on
-        every export in the corpus that names one at all - which is why `_MANUFACTURER`
-        beside it is not redundant: the two members are compared separately, and a model
-        that happens to begin with the maker's name is not a manufacturer field.
+        `<Source>` is the model, and it carries the maker's name with it - `Suunto D5` on
+        every export in the corpus that names one at all - which is why `_BRAND` beside it
+        is not redundant: the two members are compared separately, and a model that happens
+        to begin with the maker's name is not a brand field.
 
         `<SerialNumber>` is the *computer's* serial, and the one place this format could be
         misread: `<TransmitterId>` on a `<DiveMixture>` is a serial too, but a tank pod's -
@@ -413,7 +413,7 @@ class SuuntoXmlParser(DiveParser):
         from `<Source>`.
         """
         return ParsedDevice(
-            manufacturer=_MANUFACTURER,
+            brand=_BRAND,
             model=_text(root, "Source"),
             serial=_text(root, "SerialNumber"),
             firmware=_text(root, "Software"),
