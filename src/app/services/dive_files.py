@@ -680,9 +680,12 @@ async def fill_dive_mixtures(db: AsyncSession, *, dive_id: int, parsed: Sequence
 
     Shared by the two paths a second reading of one recording arrives on - a file attached to
     a recording that already has one, and a logbook import matching an incoming recording to a
-    stored one - so the rule is stated once and an attach and an import cannot disagree about
-    it. In the caller's transaction, like every other `fill_`: the file's row, the profile and
-    this land together or not at all.
+    stored one - so what a fill writes is stated once. **Whether one runs is still each
+    caller's**, and they differ: `_rederive_recording` returns before this for a secondary
+    recording, while the import writer has no ordinal to hand and calls it for whichever
+    recording matched, as it already does for `fill_tech_scalars`. In the caller's
+    transaction, like every other `fill_`: the file's row, the profile and this land together
+    or not at all.
 
     Read-then-write rather than a `COALESCE` per column, unlike `fill_tech_scalars`, because
     the join is positional and the alignment is only visible to Python - the statement would

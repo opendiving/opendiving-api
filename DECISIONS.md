@@ -16248,9 +16248,15 @@ runs inside `extract_recording`, across a recording's own files in attach order,
 `RecordingExtraction.mixtures` is a per-*member* answer rather than the first file's list taken
 whole — the whole-list reading is precisely what drops the FIT's `oxygen`. `fill_dive_mixtures` then
 writes that answer onto the dive's rows, and is shared by the attach route and the import writer so
-the two cannot disagree about it. Read-then-write rather than a `COALESCE` per column, unlike every
-single-column fill: the join is positional and the alignment exists only in Python, so the statement
-would have to name a row the SQL cannot pick out.
+the two cannot disagree about what a fill *writes*. They do still differ about *when* one runs: the
+attach path returns before it for a secondary recording (`ordinal != 0`), while the import writer's
+`_fill_recording` has no ordinal to hand and calls it for any matched recording, exactly as it
+already calls `fill_tech_scalars` there. The join's own guard is what keeps that from doing damage —
+a second computer's cylinder list has to agree on every recorded fraction and on the count before
+anything is written — but it is a guard rather than the rule, and closing the gap means carrying the
+ordinal on `PlannedRecordingMatch`. Read-then-write rather than a `COALESCE` per column, unlike
+every single-column fill: the join is positional and the alignment exists only in Python, so the
+statement would have to name a row the SQL cannot pick out.
 
 **The `fresh` branch governs the cylinders too, and `fresh` is not "this recording had no files".**
 The attach path sets it from `matched is None`, so it is true of a recording *this upload created*
