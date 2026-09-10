@@ -38,7 +38,7 @@ from src.app.services.dive_files import (
 )
 from src.app.services.dive_files import (
     load_dive_file,
-    store_dive_file,
+    store_recording_file,
 )
 from src.app.services.dive_parsers.suunto_xml import SuuntoXmlParser
 
@@ -71,15 +71,24 @@ def _token() -> tuple[str, uuid_pkg.UUID]:
 
 class TestDiveFileWriteOrdering:
     @staticmethod
-    def _session(*, existing_row: tuple | None = None, replaced_keys: list[str] | None = None) -> AsyncMock:
-        """A session whose dedupe lookup returns `existing_row` and whose `DELETE ...
-        RETURNING` hands back `replaced_keys`."""
+    def _session(*, existing_row: tuple | None = None, retired_keys: list[str] | None = None) -> AsyncMock:
+        """A session whose dedupe lookup returns `existing_row` and whose `scalars()` hands
+        back `retired_keys`.
+
+        One result object answers every statement the attach path issues, so it has to be
+        plausible for all of them: the dedupe lookup (`one_or_none`), the recording list
+        (iteration, empty - so the file gets a fresh recording), the recording insert's
+        `RETURNING id` (`scalar_one`), the file list behind the re-derivation (`all`), and
+        `delete_profile_for_recording`'s `rowcount`.
+        """
         result = MagicMock()
         result.one_or_none.return_value = existing_row
         result.one.return_value = SimpleNamespace(uuid=uuid7(), updated_at=None)
-        result.scalars.return_value = replaced_keys or []
-        # `delete_profile_for_dive` reads `rowcount`; one result object answers every
-        # statement here, so it has to be plausible for all of them.
+        result.scalars.return_value = retired_keys or []
+        result.scalar_one.return_value = 1
+        result.scalar_one_or_none.return_value = 0
+        result.all.return_value = []
+        result.__iter__.return_value = iter(())
         result.rowcount = 0
 
         db = AsyncMock()
@@ -96,7 +105,7 @@ class TestDiveFileWriteOrdering:
         db.commit = AsyncMock(side_effect=lambda: when_committed.append(any(volume.rglob("dive-files/*/*"))))
 
         token, user_uuid = _token()
-        await store_dive_file(
+        await store_recording_file(
             db, user_id=1, user_uuid=user_uuid, dive_id=7, upload=_upload(XML, "export.xml"), file_token=token
         )
 
@@ -108,7 +117,7 @@ class TestDiveFileWriteOrdering:
         row's - see `blob_store.new_key`."""
         db = self._session()
         token, user_uuid = _token()
-        await store_dive_file(
+        await store_recording_file(
             db, user_id=1, user_uuid=user_uuid, dive_id=7, upload=_upload(XML, "export.xml"), file_token=token
         )
 
@@ -118,22 +127,6 @@ class TestDiveFileWriteOrdering:
         assert kind == DIVE_KIND
         assert shard == XML_DIGEST[:2]
         assert name.endswith(f"_{XML_DIGEST}")
-
-    @pytest.mark.asyncio
-    async def test_the_replaced_file_is_registered_for_unlinking_and_not_unlinked_yet(self, volume: Path) -> None:
-        """Registered before the commit, because the hook fires *on* the commit - and the
-        old file has to survive a rollback, since the row referencing it would too."""
-        old_key = blob_store.new_key(DIVE_KIND, sha256="cd" + "0" * 62)
-        await blob_store.put(old_key, b"the previous export")
-
-        db = self._session(replaced_keys=[old_key])
-        token, user_uuid = _token()
-        await store_dive_file(
-            db, user_id=1, user_uuid=user_uuid, dive_id=7, upload=_upload(XML, "export.xml"), file_token=token
-        )
-
-        assert db.info[blob_store._PENDING_DELETES] == [old_key]
-        assert (volume / old_key).is_file()
 
     @pytest.fixture
     def no_reextraction(self, monkeypatch: pytest.MonkeyPatch):
@@ -155,11 +148,11 @@ class TestDiveFileWriteOrdering:
         500ing while the server refuses the very bytes that would fix it."""
         row_uuid = uuid7()
         key = blob_store.new_key(DIVE_KIND, sha256=XML_DIGEST)
-        existing = (1, 7, row_uuid, "application/xml", len(XML), "export.xml", "suunto_xml", key, None)
+        existing = (1, 7, 1, row_uuid, "application/xml", len(XML), "export.xml", "suunto_xml", key, None)
 
         db = self._session(existing_row=existing)
         token, user_uuid = _token()
-        await store_dive_file(
+        await store_recording_file(
             db, user_id=1, user_uuid=user_uuid, dive_id=7, upload=_upload(XML, "export.xml"), file_token=token
         )
 
@@ -173,10 +166,10 @@ class TestDiveFileWriteOrdering:
         await blob_store.put(key, XML)
         before = (volume / key).stat().st_mtime_ns
 
-        existing = (1, 7, row_uuid, "application/xml", len(XML), "export.xml", "suunto_xml", key, None)
+        existing = (1, 7, 1, row_uuid, "application/xml", len(XML), "export.xml", "suunto_xml", key, None)
         db = self._session(existing_row=existing)
         token, user_uuid = _token()
-        await store_dive_file(
+        await store_recording_file(
             db, user_id=1, user_uuid=user_uuid, dive_id=7, upload=_upload(XML, "export.xml"), file_token=token
         )
 
@@ -358,7 +351,7 @@ class TestAMissingFileIsNotAMissingRow:
 
     @pytest.mark.asyncio
     async def test_no_row_reads_as_none_for_a_dive_file(self, volume: Path) -> None:
-        assert await load_dive_file(self._session(None), dive_id=7) is None
+        assert await load_dive_file(self._session(None), file_id=7) is None
 
     @pytest.mark.asyncio
     async def test_no_row_reads_as_none_for_a_card(self, volume: Path) -> None:
@@ -368,10 +361,14 @@ class TestAMissingFileIsNotAMissingRow:
     @pytest.mark.asyncio
     async def test_a_row_whose_file_is_gone_raises_for_a_dive_file(self, volume: Path) -> None:
         row = SimpleNamespace(
-            storage_key="dive-files/ab/gone", content_type="application/xml", original_filename="x", sha256="ab"
+            storage_key="dive-files/ab/gone",
+            content_type="application/xml",
+            original_filename="x",
+            sha256="ab",
+            parser_key="suunto_xml",
         )
         with pytest.raises(blob_store.BlobMissingError):
-            await load_dive_file(self._session(row), dive_id=7)
+            await load_dive_file(self._session(row), file_id=7)
 
     @pytest.mark.asyncio
     async def test_a_row_whose_file_is_gone_raises_for_a_card(self, volume: Path) -> None:

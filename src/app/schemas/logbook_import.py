@@ -60,6 +60,9 @@ _SHORT_MAX = 64
 _DISPLAY_NAME_MAX = 512
 _QID_MAX = 32
 _SHA256_LENGTH = 64
+# §6.4b's own bounds on a device's members, and the widths of `dive_recording`'s columns.
+_DEVICE_MAX = 64
+_FIRMWARE_MAX = 32
 
 
 def _unknown_is_absent(enum: type[StrEnum]) -> BeforeValidator:
@@ -176,6 +179,41 @@ class ImportProfile(_ReadModel):
     events: Annotated[list[ImportEvent], Field(default_factory=list), _Collection]
 
 
+class ImportDevice(_ReadModel):
+    """What recorded one recording, as the document names it (spec §6.4b).
+
+    Every member is bounded to the length of the column it lands in, unlike most of this
+    module: these do not merely feed a report, they are stored on `dive_recording` and its
+    device columns are `String(64)` (and `String(32)` for firmware). A document naming a
+    serial longer than the column is a document this app cannot store that member of, and a
+    Pydantic bound is where that is decided rather than an `IntegrityError` mid-import.
+    """
+
+    brand: Annotated[str | None, Field(default=None, max_length=_DEVICE_MAX)]
+    model: Annotated[str | None, Field(default=None, max_length=_DEVICE_MAX)]
+    serial: Annotated[str | None, Field(default=None, max_length=_DEVICE_MAX)]
+    firmware: Annotated[str | None, Field(default=None, max_length=_FIRMWARE_MAX)]
+    name: Annotated[str | None, Field(default=None, max_length=_DEVICE_MAX)]
+    dive_number: int | None = None
+
+
+class ImportRecording(_ReadModel):
+    """One device's record of one dive (spec §6.4a).
+
+    `started_at` absent means *the dive's*, which is the format's rule and not a default this
+    app invented - so the planner substitutes the dive's start rather than leaving the column
+    NULL, and a recording whose device entered the water later carries its own.
+
+    A recording with none of `device`, `profile` and `source_files` describes nothing (§3's
+    rule 4) and the planner drops it with a note rather than creating an empty row.
+    """
+
+    device: ImportDevice | None = None
+    started_at: datetime | None = None
+    source_files: Annotated[list[ImportStoredFile], Field(default_factory=list), _Collection]
+    profile: ImportProfile | None = None
+
+
 class ImportCylinder(_ReadModel):
     volume: float | None = None
     start_pressure: float | None = None
@@ -221,8 +259,12 @@ class ImportDive(_ReadModel):
     gear_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list), _Collection]
     species_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list), _Collection]
     cylinders: Annotated[list[ImportCylinder], Field(default_factory=list), _Collection]
-    source_file: ImportStoredFile | None = None
-    profile: ImportProfile | None = None
+    # **`source_file` and `profile` are not members of a dive any more**, and this reader
+    # does not accept them under those names: `extra="ignore"` means a 1.0 document written
+    # before the change is read as a dive with no recordings rather than failing, which is
+    # the tolerance §5.6 asks for and the only behaviour available - there is no version
+    # member distinguishing the two shapes, 1.0 being untagged when the members moved.
+    recordings: Annotated[list[ImportRecording], Field(default_factory=list), _Collection]
     created_at: datetime | None = None
 
 
@@ -430,6 +472,13 @@ class ImportNoteCode(StrEnum):
     FILE_NOT_CONTAINED = "file_not_contained"
     # A file whose bytes are here but which cannot be stored against this account.
     FILE_SKIPPED = "file_skipped"
+    # A recording of a dive the document describes as new turned out to be a second
+    # computer's record of a dive the caller already has, so it was added to that dive
+    # instead of a second dive being created for it.
+    RECORDING_ATTACHED = "recording_attached"
+    # A recording matched one the caller already has - the same device, the same start -
+    # so it filled that recording's blanks rather than being added beside it.
+    RECORDING_FILLED = "recording_filled"
     # The `diver` member was read and deliberately not applied.
     DIVER_NOT_APPLIED = "diver_not_applied"
 

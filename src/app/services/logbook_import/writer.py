@@ -23,7 +23,7 @@ exists.
 import hashlib
 import logging
 import uuid as uuid_pkg
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -33,7 +33,7 @@ from uuid6 import uuid7
 
 from ...crud.crud_dive_dive_sites import replace_dive_sites_for_dive
 from ...crud.crud_dive_gear_items import replace_gear_items_for_dive
-from ...crud.crud_dive_mixtures import replace_mixtures_for_dive
+from ...crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
 from ...crud.crud_dive_species import replace_species_for_dive
 from ...crud.crud_gear_set_items import replace_gear_items_for_set
 from ...models.certification import Certification
@@ -41,6 +41,8 @@ from ...models.certification_file import CertificationFile
 from ...models.course import Course
 from ...models.dive import Dive
 from ...models.dive_file import DiveFile
+from ...models.dive_mixture import DiveMixture
+from ...models.dive_recording import DiveRecording
 from ...models.dive_site import DiveSite
 from ...models.gear_item import GearItem
 from ...models.gear_service_record import GearServiceRecord
@@ -51,17 +53,42 @@ from ...models.trip_location import TripLocation
 from ...schemas.certification import CertificationSide
 from ...schemas.dive_mixture import DiveMixtureCreate
 from ...schemas.logbook_import import ImportNote, ImportNoteCode
+from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDevice
 from ..blob_store import new_key
 from ..blob_store import put as put_blob
 from ..certification_files import KEY_KIND as CERTIFICATION_KEY_KIND
 from ..certification_files import UnsupportedCardFileError, sniff_content_type
 from ..dive_files import KEY_KIND as DIVE_FILE_KEY_KIND
-from ..dive_files import delete_dive_file
-from ..dive_profiles import store_profile
+from ..dive_files import (
+    TECH_SCALAR_FIELDS,
+    apply_gas_mapping,
+    delete_files_for_dive,
+    fill_tech_scalars,
+    merge_mixture_fields,
+    relabel_gas_numbers,
+)
+from ..dive_profiles import IMPORT_PARSER_KEY, get_existing_profile, recording_source_digest, store_profile
+from ..dive_recordings import (
+    DEVICE_COLUMNS,
+    create_recording,
+    fill_device_fields,
+    fill_gate_figures,
+    fill_start,
+    next_ordinal,
+)
 from ..dive_stats import recalculate_dive_stats
 from ..gear_service import recalculate_service_schedule
 from ..gear_stats import recalculate_gear_dive_counts
-from .planner import IMPORT_PARSER_KEY, MAX_NOTES, Action, ImportPlan, PlannedFile, PlannedProfile, PlannedRecord
+from .planner import (
+    MAX_NOTES,
+    Action,
+    ImportPlan,
+    PlannedFile,
+    PlannedProfile,
+    PlannedRecord,
+    PlannedRecording,
+    PlannedRecordingMatch,
+)
 from .reader import LoadedImport
 
 logger = logging.getLogger(__name__)
@@ -211,6 +238,9 @@ class _Writer:
         await self._write_service_records()
         await self._write_certifications()
         await self._write_dives()
+        # After the dives, deliberately: every match named a dive that predates this import,
+        # and writing them last keeps that true of the order as well as of the plan.
+        await self._write_recording_matches()
         await self._recalculate()
 
     async def _write_trips(self) -> None:
@@ -302,12 +332,12 @@ class _Writer:
     async def _write_dives(self) -> None:
         for record in self._plan.writable("dives"):
             if record.action is Action.RESTORE and record.row_id is not None:
-                # Before the row itself, not after: `delete_dive_file` clears the dive's
-                # tech scalars along with the file they were read off, so running it
-                # afterwards would wipe the CNS and OTU this import just wrote. It also
-                # takes the old profile, which is what stops a restored dive from keeping
-                # curves the document does not describe.
-                await delete_dive_file(self._db, dive_id=record.row_id, commit=False)
+                # Before the row itself, not after: `delete_files_for_dive` clears the
+                # dive's tech scalars along with the recordings they were read off, so
+                # running it afterwards would wipe the CNS and OTU this import just wrote. It
+                # also takes the old recordings and their profiles, which is what stops a
+                # restored dive from keeping curves the document does not describe.
+                await delete_files_for_dive(self._db, dive_id=record.row_id, commit=False)
 
             record.values["trip_id"] = self._id("trips", record.children.get("trip_uuid"))
             record.values["course_id"] = self._id("courses", record.children.get("course_uuid"))
@@ -334,29 +364,51 @@ class _Writer:
             await replace_species_for_dive(
                 db=self._db, dive_id=dive_id, species_ids=record.children.get("species_ids") or [], commit=False
             )
-            await self._write_dive_file_and_profile(record, dive_id)
+            for recording in record.children.get("recordings") or []:
+                await self._write_recording(record, dive_id, recording)
 
-    async def _write_dive_file_and_profile(self, record: PlannedRecord, dive_id: int) -> None:
-        """The dive's stored export and its samples, which have to agree with each other.
+    async def _write_recording(
+        self, record: PlannedRecord, dive_id: int, planned: PlannedRecording, *, ordinal: int | None = None
+    ) -> int:
+        """One recording, its files and its samples, which have to agree with each other.
 
-        `dive_profile.source_sha256`'s documented job is to match the dive's *file* digest -
-        `should_extract` and the backfill's candidate query both select on the mismatch - so
-        it splits by path. On the **archive** path it records the restored file's own
-        digest, which is truthful (the source instance extracted precisely this profile from
-        precisely those bytes) and leaves file and profile in agreement, so an
-        archive-restored dive is never a backfill candidate and the profile ETag still names
-        a real file digest. On the **bare** path there is no file row - the dive cannot be a
-        candidate regardless - and the column records the imported payload's own digest,
-        purely as provenance.
+        `dive_profile.source_sha256`'s documented job is to match what the profile was read
+        out of - `should_extract` and the backfill's candidate query both select on the
+        mismatch - so it splits by path. On the **archive** path it records the restored
+        files' digest, which is truthful (the source instance extracted precisely this
+        profile from precisely those bytes) and leaves files and profile in agreement, so an
+        archive-restored recording is never a backfill candidate and the profile ETag still
+        names real file digests. On the **bare** path there are no file rows - the recording
+        cannot be a candidate regardless - and the column records the imported payload's own
+        digest, purely as provenance.
 
         That is not the invention rule being bent: §5.4 governs logbook data a writer emits,
-        and these three columns describe where *this instance's copy* came from, which
-        really is the import.
+        and these columns describe where *this instance's copy* came from, which really is
+        the import.
+
+        `parser_key` is `divejson_import` whenever this instance stored no bytes, and that is
+        more than provenance: it is what tells both backfills these samples can never be
+        re-derived here, so nothing later overwrites them with an extraction off files the
+        recording does not have.
         """
-        planned_file: PlannedFile | None = record.children.get("source_file")
-        planned_profile: PlannedProfile | None = record.children.get("profile")
-        stored = None
-        if planned_file is not None:
+        recording_id = await create_recording(
+            self._db,
+            dive_id=dive_id,
+            user_id=self._user_id,
+            ordinal=planned.ordinal if ordinal is None else ordinal,
+            start_time=planned.start_time,
+            utc_offset_minutes=planned.utc_offset_minutes,
+            duration=planned.duration,
+            max_depth=planned.max_depth,
+        )
+        if planned.device:
+            await self._db.execute(
+                update(DiveRecording).where(DiveRecording.id == recording_id).values(**planned.device)
+            )
+
+        digests: list[str] = []
+        parser_key: str | None = None
+        for planned_file in planned.files:
             stored = await self._store_blob(
                 planned_file,
                 kind=DIVE_FILE_KEY_KIND,
@@ -364,10 +416,12 @@ class _Writer:
                 record_uuid=record.source_uuid,
                 sniff=False,
             )
-        if stored is not None and planned_file is not None:
+            if stored is None:
+                continue
             await self._db.execute(
                 insert(DiveFile).values(
                     user_id=self._user_id,
+                    recording_id=recording_id,
                     dive_id=dive_id,
                     sha256=stored.digest,
                     content_type=stored.content_type,
@@ -379,22 +433,126 @@ class _Writer:
                     created_at=self._now,
                 )
             )
+            digests.append(stored.digest)
+            parser_key = parser_key or planned_file.parser_key
 
-        if planned_profile is None:
-            return
-        source_sha256 = stored.digest if stored is not None else _payload_digest(planned_profile)
-        parser_key = (planned_file.parser_key if stored is not None and planned_file is not None else None) or (
-            IMPORT_PARSER_KEY
-        )
+        if planned.profile is None:
+            return recording_id
         await store_profile(
             self._db,
+            recording_id=recording_id,
             dive_id=dive_id,
-            profile=planned_profile.profile,
-            source_sha256=source_sha256,
-            parser_key=parser_key,
+            profile=planned.profile.profile,
+            source_sha256=recording_source_digest(digests) if digests else _payload_digest(planned.profile),
+            parser_key=(parser_key or IMPORT_PARSER_KEY) if digests else IMPORT_PARSER_KEY,
             commit=False,
-            duration=planned_profile.duration,
+            duration=planned.profile.duration,
         )
+        return recording_id
+
+    async def _write_recording_matches(self) -> None:
+        """Apply the incoming recordings that belong to dives the caller already has.
+
+        **After every dive is written**, which is what stops a match landing on a dive this
+        same import created: the gates ran against the logbook as it was when the plan was
+        made, so every `dive_id` here is a row that predates the import, and walking this list
+        last keeps the write in the same order the plan reasoned in.
+
+        A **fill** writes no recording row. It fills the stored recording's blanks - its
+        device columns, its start, the two figures the gates compare - and, where that
+        recording had no samples at all, its profile. The stored dive's own blanks fill too:
+        its oxygen-exposure readings, and its cylinders where they still demonstrably
+        describe the document's. Nothing is ever overwritten, which is the whole rule: the
+        diver may have corrected any of it, and a fill that won an argument with an edit
+        would be the silent loss this repository already refuses on the backfill path.
+
+        An **attach** appends a recording to that dive, after its last. It touches none of
+        the dive's own figures - those are the primary recording's - and it maps its
+        cylinder labels onto the dive's own list, because `gas_number` is dive-scoped and a
+        second computer numbers its tanks its own way.
+        """
+        for match in self._plan.recording_matches:
+            if match.kind == "attach":
+                await self._attach_recording(match)
+            else:
+                await self._fill_recording(match)
+
+    async def _attach_recording(self, match: PlannedRecordingMatch) -> None:
+        ordinal = await next_ordinal(self._db, dive_id=match.dive_id)
+        stored_mixtures = await get_mixtures_for_dive(db=self._db, dive_id=match.dive_id)
+        planned = match.recording
+        if planned.profile is not None and match.mixtures:
+            mapping, appended = relabel_gas_numbers(
+                [DiveMixtureSchema(**row) for row in match.mixtures], stored_mixtures
+            )
+            remapped = apply_gas_mapping(planned.profile.profile, mapping)
+            if remapped is not None:
+                planned = replace(planned, profile=replace(planned.profile, profile=remapped))
+            if appended:
+                await replace_mixtures_for_dive(
+                    db=self._db,
+                    dive_id=match.dive_id,
+                    mixtures=[
+                        *(DiveMixtureCreate(**row.model_dump(exclude={"id"})) for row in stored_mixtures),
+                        *(DiveMixtureCreate(**row.model_dump()) for row in appended),
+                    ],
+                    commit=False,
+                )
+        record = PlannedRecord(action=Action.CREATE, source_uuid=match.source_uuid, uuid=match.source_uuid)
+        await self._write_recording(record, match.dive_id, planned, ordinal=ordinal)
+
+    async def _fill_recording(self, match: PlannedRecordingMatch) -> None:
+        planned = match.recording
+        if match.recording_id is None:  # pragma: no cover - a `fill` always names one
+            return
+
+        await fill_device_fields(
+            self._db,
+            recording_id=match.recording_id,
+            device=ParsedDevice(**{member: planned.device.get(column) for member, column in DEVICE_COLUMNS.items()}),
+        )
+        await fill_gate_figures(
+            self._db, recording_id=match.recording_id, duration=planned.duration, max_depth=planned.max_depth
+        )
+        await fill_start(
+            self._db,
+            recording_id=match.recording_id,
+            start_time=planned.start_time,
+            utc_offset_minutes=planned.utc_offset_minutes,
+        )
+
+        if (
+            planned.profile is not None
+            and await get_existing_profile(self._db, recording_id=match.recording_id) is None
+        ):
+            # Samples for a record that had none - a device-only recording an older document
+            # created, meeting the document that carries its curves. A recording that already
+            # has samples keeps them: two readings of one sensor are not merged.
+            await store_profile(
+                self._db,
+                recording_id=match.recording_id,
+                dive_id=match.dive_id,
+                profile=planned.profile.profile,
+                source_sha256=_payload_digest(planned.profile),
+                parser_key=IMPORT_PARSER_KEY,
+                commit=False,
+                duration=planned.profile.duration,
+            )
+
+        # `dive_values` is `PlannedRecord.values`, which is already keyed by column name -
+        # the same dict the dive insert would have taken - so `TECH_SCALAR_FIELDS` indexes it
+        # directly. A member the document did not carry is `None` and `fill_tech_scalars`
+        # skips it; a member it did carry lands only where the stored dive has none.
+        await fill_tech_scalars(
+            self._db,
+            dive_id=match.dive_id,
+            scalars={name: match.dive_values.get(name) for name in TECH_SCALAR_FIELDS},
+        )
+        if match.mixtures:
+            stored_mixtures = await get_mixtures_for_dive(db=self._db, dive_id=match.dive_id)
+            updates = merge_mixture_fields([DiveMixtureSchema(**row) for row in match.mixtures], stored_mixtures)
+            for mixture_id, values in updates or []:
+                await self._db.execute(update(DiveMixture).where(DiveMixture.id == mixture_id).values(**values))
 
     def _stale_schedule(self, schedule_id: int | None) -> None:
         """Mark one schedule as needing its due dates recomputed. Deduped, order kept."""

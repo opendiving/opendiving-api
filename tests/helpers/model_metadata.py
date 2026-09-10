@@ -87,12 +87,19 @@ NOT_A_DIVERS_OWN_RESOURCE: dict[str, str] = {
         "owns its lifecycle, along with the files volume it writes to."
     ),
     "DiveFile": (
-        "The dive's source export, reached through the dive: `DELETE /dive/{uuid}/file` owns its "
-        "lifecycle, along with the files volume it writes to."
+        "One of a recording's stored exports, reached through the dive: "
+        "`DELETE /dive/{uuid}/file/{fid}` owns its lifecycle, along with the files volume it writes to."
     ),
     "DiveProfile": (
-        "The dive's depth samples. `GET /dive/{uuid}/profile` is the only route it has - rows go when "
-        "the file that produced them goes, never on their own."
+        "A recording's depth samples. `GET /dive/{uuid}/recording/{rid}/profile` is the only route it "
+        "has - rows go when the recording that produced them goes, never on their own."
+    ),
+    "DiveRecording": (
+        "One device's record of a dive, reached through the dive rather than by a route of its own: "
+        "`DELETE /dive/{uuid}/recording/{rid}` and `PATCH /dive/{uuid}/recording/{rid}` are its whole "
+        "surface, and both resolve the dive first. `DiveFile`'s reason exactly, one level up - there "
+        "is no `crud_dive_recordings` singleton for the three behaviour classes to exercise, because "
+        "nothing addresses a recording without naming the dive it belongs to."
     ),
     "Species": (
         "Everybody's row rather than one diver's, and nothing in the app deletes a species by design "

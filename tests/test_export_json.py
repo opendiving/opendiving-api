@@ -35,6 +35,7 @@ from src.app.services.export.paths import plan_archive_paths
 from src.app.services.logbook_import import parse_document
 from tests.helpers.export import (
     EXPORTED_AT,
+    PRIMARY_RECORDING_ID,
     TRIMIX_PROFILE,
     UUIDS,
     build_bundle,
@@ -47,8 +48,8 @@ from tests.helpers.export import (
 async def _stream(bundle: Any, monkeypatch: Any, profiles: dict[int, dict] | None = None, duration: int = 90) -> bytes:
     payloads = profiles or {}
 
-    async def fake_load_profile(db: Any, *, dive_id: int) -> LoadedProfile | None:
-        data = payloads.get(dive_id)
+    async def fake_load_profile(db: Any, *, recording_id: int) -> LoadedProfile | None:
+        data = payloads.get(recording_id)
         return None if data is None else LoadedProfile(duration=duration, data=data)
 
     monkeypatch.setattr("src.app.services.export.envelope.load_profile", fake_load_profile)
@@ -64,8 +65,8 @@ async def _render(
 ) -> dict:
     payloads = profiles or {}
 
-    async def fake_load_profile(db: Any, *, dive_id: int) -> LoadedProfile | None:
-        data = payloads.get(dive_id)
+    async def fake_load_profile(db: Any, *, recording_id: int) -> LoadedProfile | None:
+        data = payloads.get(recording_id)
         return None if data is None else LoadedProfile(duration=duration, data=data)
 
     monkeypatch.setattr("src.app.services.export.envelope.load_profile", fake_load_profile)
@@ -103,7 +104,7 @@ class TestConformance:
 
     @pytest.mark.asyncio
     async def test_the_awkward_case_logbook_is_a_conforming_divejson_document(self, monkeypatch):
-        _assert_conforms(await _render(full_bundle(), monkeypatch, {2: TRIMIX_PROFILE}))
+        _assert_conforms(await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}))
 
     @pytest.mark.asyncio
     async def test_an_empty_logbook_is_a_conforming_document_too(self, monkeypatch):
@@ -116,14 +117,16 @@ class TestConformance:
         """`archive_path` is the one member a document grows inside a zip, and it has its
         own constraints (spec §6.7 and Appendix A)."""
         bundle = full_bundle()
-        document = await _render(bundle, monkeypatch, {2: TRIMIX_PROFILE}, paths=plan_archive_paths(bundle))
+        document = await _render(
+            bundle, monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, paths=plan_archive_paths(bundle)
+        )
         _assert_conforms(document)
 
     @pytest.mark.asyncio
     async def test_the_checker_is_not_vacuous(self, monkeypatch):
         """A conformance assertion nobody has watched fail proves nothing. Breaking one
         rule from each of spec §3's checkable classes has to be caught."""
-        document = await _render(full_bundle(), monkeypatch, {2: TRIMIX_PROFILE})
+        document = await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
 
         broken = json.loads(json.dumps(document))
         broken["dives"][0]["avg_depth"] = broken["dives"][0]["max_depth"] + 1
@@ -134,7 +137,7 @@ class TestConformance:
         assert any("not present in sites" in issue for issue in _issues(broken))
 
         broken = json.loads(json.dumps(document))
-        broken["dives"][1]["profile"]["depth"]["values"].append(1)
+        broken["dives"][1]["recordings"][0]["profile"]["depth"]["values"].append(1)
         assert any("samples but values has" in issue for issue in _issues(broken))
 
         broken = json.loads(json.dumps(document))
@@ -156,7 +159,7 @@ class TestConformance:
         to be typed. This says it for the document as a whole, including the extension
         payloads the schema leaves open.
         """
-        document = await _render(full_bundle(), monkeypatch, {2: TRIMIX_PROFILE})
+        document = await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
         assert _nulls(document) == []
 
     @pytest.mark.asyncio
@@ -173,10 +176,10 @@ class TestConformance:
             "depth": {"t": [0, 30, 60], "v": [0, 1800, 300]},
             "events": [{"t": 95, "type": "bookmark"}],
         }
-        document = await _render(full_bundle(), monkeypatch, {2: profile}, duration=60)
+        document = await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: profile}, duration=60)
 
-        assert document["dives"][1]["profile"]["duration"] == 60
-        assert document["dives"][1]["profile"]["events"] == [{"time": 95, "type": "bookmark"}]
+        assert document["dives"][1]["recordings"][0]["profile"]["duration"] == 60
+        assert document["dives"][1]["recordings"][0]["profile"]["events"] == [{"time": 95, "type": "bookmark"}]
         assert _issues(document) == []
 
 
@@ -184,7 +187,7 @@ class TestTheDeclaredShape:
     @pytest.mark.asyncio
     async def test_the_streamed_bytes_validate_against_export_envelope(self, monkeypatch):
         """The whole reason `ExportEnvelope` is worth declaring - see the module docstring."""
-        document = await _render(full_bundle(), monkeypatch, {2: TRIMIX_PROFILE})
+        document = await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
         envelope = ExportEnvelope.model_validate(document)
         assert len(envelope.dives) == 3
 
@@ -364,8 +367,8 @@ class TestWhatUddfCannotHold:
     @pytest.mark.asyncio
     async def test_the_ceiling_channel_survives_in_the_embedded_profile(self, monkeypatch):
         """UDDF drops it (`<decostop>` needs a duration we do not have); this must not."""
-        document = await _render(full_bundle(), monkeypatch, {2: TRIMIX_PROFILE})
-        assert document["dives"][1]["profile"]["ceiling"] == {"times": [60, 90], "values": [600, 300]}
+        document = await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
+        assert document["dives"][1]["recordings"][0]["profile"]["ceiling"] == {"times": [60, 90], "values": [600, 300]}
 
 
 class TestTheProfileVocabulary:
@@ -374,8 +377,8 @@ class TestTheProfileVocabulary:
 
     @pytest.mark.asyncio
     async def test_the_channels_and_events_use_the_format_s_member_names(self, monkeypatch):
-        document = await _render(full_bundle(), monkeypatch, {2: TRIMIX_PROFILE})
-        profile = document["dives"][1]["profile"]
+        document = await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
+        profile = document["dives"][1]["recordings"][0]["profile"]
 
         assert set(profile) == {"duration", "depth", "ceiling", "temperature", "pressures", "events"}
         assert profile["depth"] == {"times": [0, 30, 60, 90], "values": [0, 1800, 5200, 300]}
@@ -386,8 +389,8 @@ class TestTheProfileVocabulary:
     async def test_the_samples_keep_the_stored_integer_scales(self, monkeypatch):
         """Depth in centimeters, temperature in tenths of a degree - the scales are part of
         the format (spec §5.1), chosen so a round trip cannot introduce float noise."""
-        document = await _render(full_bundle(), monkeypatch, {2: TRIMIX_PROFILE})
-        profile = document["dives"][1]["profile"]
+        document = await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
+        profile = document["dives"][1]["recordings"][0]["profile"]
         assert profile["depth"]["values"] == [0, 1800, 5200, 300]
         assert profile["temperature"] == {"times": [0, 60], "values": [249, 181]}
 
@@ -475,7 +478,7 @@ class TestReferences:
     async def test_no_internal_integer_id_leaks(self, monkeypatch):
         """They are an implementation detail of this database and actively misleading in
         a document meant to outlive it."""
-        document = await _render(full_bundle(), monkeypatch, {2: TRIMIX_PROFILE})
+        document = await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
         assert "id" not in document["dives"][0]
         assert "user_id" not in document["diver"]
         assert "gear_uuid" in document["gear_service_records"][0]
@@ -533,6 +536,10 @@ class TestAbsence:
             "gear_uuids",
             "species_uuids",
             "cylinders",
+            # An empty array, like the four above it: a hand-entered dive was recorded by
+            # nothing, and the collection members are written empty rather than omitted so a
+            # reader never has to tell "no recordings" from "this writer omits the member".
+            "recordings",
             "created_at",
         }
 
@@ -567,14 +574,14 @@ class TestStoredFiles:
     @pytest.mark.asyncio
     async def test_the_stored_digest_travels_with_the_metadata(self, monkeypatch):
         document = await _render(full_bundle(), monkeypatch)
-        assert document["dives"][1]["source_file"]["sha256"] == "a" * 64
+        assert document["dives"][1]["recordings"][0]["source_files"][0]["sha256"] == "a" * 64
 
     @pytest.mark.asyncio
     async def test_which_parser_read_the_file_rides_this_producer_s_key(self, monkeypatch):
         """Parser registries are application-specific, so the format has no core member for
         one (spec §6.7) - and the archive-restore path reads it back from here."""
         document = await _render(full_bundle(), monkeypatch)
-        source_file = document["dives"][1]["source_file"]
+        source_file = document["dives"][1]["recordings"][0]["source_files"][0]
         assert source_file["extensions"] == {"opendiving": {"parser_key": "suunto_json"}}
         assert "parser_key" not in source_file
 
@@ -593,7 +600,7 @@ class TestStoredFiles:
         """There is no zip for them to point into when the document is served alone, and
         the format has one spelling of that (spec §6.7)."""
         document = await _render(full_bundle(), monkeypatch)
-        assert "archive_path" not in document["dives"][1]["source_file"]
+        assert "archive_path" not in document["dives"][1]["recordings"][0]["source_files"][0]
         certification = document["certifications"][0]
         assert all("archive_path" not in certification[side] for side in ("front_file", "back_file"))
 
@@ -601,7 +608,13 @@ class TestStoredFiles:
     async def test_archive_paths_are_filled_in_inside_one(self, monkeypatch):
         bundle = full_bundle()
         document = await _render(bundle, monkeypatch, paths=plan_archive_paths(bundle))
-        assert document["dives"][1]["source_file"]["archive_path"] == "files/0002-Suunto-Ocean-2026-06-01.json"
+        # `{dive number}-{recording ordinal}-{stem}`: the ordinal is what tells two members
+        # of one dive apart, and it is the same number the document's `recordings[]` is
+        # ordered by, so a member can be matched to its recording by name alone.
+        assert (
+            document["dives"][1]["recordings"][0]["source_files"][0]["archive_path"]
+            == "files/0002-0-Suunto-Ocean-2026-06-01.json"
+        )
         certification = document["certifications"][0]
         assert certification["front_file"]["archive_path"] == "certifications/open-water-diver-front.jpg"
         assert certification["back_file"]["archive_path"] == "certifications/open-water-diver-back.png"

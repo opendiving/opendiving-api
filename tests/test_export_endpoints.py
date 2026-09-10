@@ -71,10 +71,10 @@ def signed_in(export_app: Any, monkeypatch: Any) -> Any:
     async def fake_load_bundle(db: Any, *, user_id: int) -> Any:
         return full_bundle()
 
-    async def fake_load_profile(db: Any, *, dive_id: int) -> None:
+    async def fake_load_profile(db: Any, *, recording_id: int) -> None:
         return None
 
-    async def fake_load_dive_file(db: Any, *, dive_id: int) -> None:
+    async def fake_load_dive_file(db: Any, *, file_id: int) -> None:
         return None
 
     async def fake_load_certification_file(db: Any, **kwargs: Any) -> None:
@@ -179,7 +179,9 @@ class TestBodies:
         for document in (standalone, member):
             document.pop("exported_at")
             for dive in document["dives"]:
-                dive.get("source_file", {}).pop("archive_path", None)
+                for recording in dive["recordings"]:
+                    for file in recording.get("source_files", []):
+                        file.pop("archive_path", None)
             for certification in document["certifications"]:
                 for side in ("front_file", "back_file"):
                     certification.get(side, {}).pop("archive_path", None)

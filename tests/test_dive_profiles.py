@@ -1293,17 +1293,27 @@ class TestFinalizeProfile:
         assert sum(entry.seconds for entry in profile.gas_attribution) == profile.duration
 
 
+def _row(source_sha256: str, extractor_version: int, parser_key: str = "suunto_xml") -> ExistingProfileRow:
+    return ExistingProfileRow(source_sha256=source_sha256, extractor_version=extractor_version, parser_key=parser_key)
+
+
 class TestShouldExtract:
     @pytest.mark.parametrize(
         ("existing", "sha256", "version", "expected"),
         [
             (None, "abc", 1, "extract"),
-            (ExistingProfileRow(source_sha256="abc", extractor_version=1), "abc", 1, "skip"),
-            (ExistingProfileRow(source_sha256="def", extractor_version=1), "abc", 1, "extract"),
-            (ExistingProfileRow(source_sha256="abc", extractor_version=1), "abc", 2, "extract"),
+            (_row("abc", 1), "abc", 1, "skip"),
+            (_row("def", 1), "abc", 1, "extract"),
+            (_row("abc", 1), "abc", 2, "extract"),
             # A row written by a *newer* extractor than this build is also "not current",
             # and re-extracting is the honest answer - it is what this build can vouch for.
-            (ExistingProfileRow(source_sha256="abc", extractor_version=3), "abc", 2, "extract"),
+            (_row("abc", 3), "abc", 2, "extract"),
+            # **Provenance beats both.** A profile a document supplied or a merge produced is
+            # never re-extracted, whatever its digest and version say, because nothing on this
+            # instance can produce those samples a second time - and for a merged recording
+            # what the files *would* yield is one half of what the profile describes.
+            (_row("abc", 1, parser_key="divejson_import"), "different", 1, "skip"),
+            (_row("abc", 1, parser_key="merge"), "different", 99, "skip"),
         ],
     )
     def test_table(self, existing, sha256, version, expected):

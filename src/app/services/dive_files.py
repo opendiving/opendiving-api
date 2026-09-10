@@ -44,7 +44,7 @@ from ..models.dive_file import DiveFile
 from ..models.dive_mixture import DiveMixture
 from ..models.dive_profile import DiveProfile
 from ..models.dive_recording import DiveRecording
-from ..schemas.dive import DiveFileInfo, DiveTechScalars, RecordingRead
+from ..schemas.dive import DiveFileInfo, DiveTechScalars
 from ..schemas.dive_mixture import DiveMixtureRead
 from ..schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from . import blob_store, dive_recordings
@@ -513,11 +513,16 @@ def apply_gas_mapping(profile: NormalizedProfile | None, mapping: dict[int, int]
 
 @dataclass(frozen=True, slots=True)
 class StoredRecordingFile:
-    """What the attach route answers with: the recording the bytes landed in, and whether it
-    was already there."""
+    """Where an attached file landed: the recording's row id and the file's public uuid.
 
-    recording: RecordingRead
-    file: DiveFileInfo
+    Row ids rather than the `RecordingRead` the route answers with, deliberately. This module
+    writes; shaping a response is the route's job, and reading one back here would have meant
+    a query issued *after* the commit purely to build a return value - a second read that
+    could see a concurrent change the write did not make.
+    """
+
+    recording_id: int
+    file_uuid: uuid_pkg.UUID
 
 
 async def store_recording_file(
@@ -660,7 +665,7 @@ async def store_recording_file(
             "This dive's recordings changed while this upload was in flight. Please try again."
         ) from exc
 
-    return await _stored_result(db, dive_id=dive_id, recording_id=recording_id, file_uuid=file_uuid)
+    return StoredRecordingFile(recording_id=recording_id, file_uuid=file_uuid)
 
 
 def _admit(*, user_uuid: uuid_pkg.UUID, digest: str, file_token: str) -> type[DiveParser]:
@@ -853,29 +858,7 @@ async def _repeat_upload(
         logger.warning("Rewriting the missing stored file for dive %s from a re-upload", dive_id)
         await blob_store.put(existing.storage_key, data)
 
-    return await _stored_result(db, dive_id=dive_id, recording_id=existing.recording_id, file_uuid=existing.uuid)
-
-
-async def _stored_result(
-    db: AsyncSession, *, dive_id: int, recording_id: int, file_uuid: uuid_pkg.UUID
-) -> StoredRecordingFile:
-    """The attach route's response: the whole recording the bytes landed in, plus which of
-    its files they are.
-
-    The recording rather than the file alone, because that is what the caller has to render:
-    a form showing "attached to your Perdix, alongside two other files" needs the device and
-    the sibling files, and a second request for them would race the write that just happened.
-    """
-    recordings = (await dive_recordings.get_recordings_for_dives(db, dive_ids=[dive_id])).get(dive_id, [])
-    recording = next(
-        (candidate for candidate in recordings if any(file.uuid == file_uuid for file in candidate.files)),
-        None,
-    )
-    if recording is None:  # pragma: no cover - the row was written in the transaction above
-        raise DiveFileConflictError("This dive's recordings changed while this upload was in flight.")
-    return StoredRecordingFile(
-        recording=recording, file=next(file for file in recording.files if file.uuid == file_uuid)
-    )
+    return StoredRecordingFile(recording_id=existing.recording_id, file_uuid=existing.uuid)
 
 
 async def load_dive_file(db: AsyncSession, *, file_id: int) -> LoadedDiveFile | None:

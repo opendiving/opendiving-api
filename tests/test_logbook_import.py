@@ -48,6 +48,7 @@ from src.app.models.dive_file import DiveFile
 from src.app.models.dive_gear_item import DiveGearItem
 from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_profile import DiveProfile
+from src.app.models.dive_recording import DiveRecording
 from src.app.models.dive_site import DiveSite
 from src.app.models.dive_species import DiveSpecies
 from src.app.models.gear_item import GearItem
@@ -79,6 +80,7 @@ from tests.helpers.generators import (
     create_certification,
     create_course,
     create_dive,
+    create_dive_recording,
     create_dive_site,
     create_gear_item,
     create_gear_service_record,
@@ -528,6 +530,7 @@ class TestFilesFollowTheirBytes:
         db.add(
             DiveFile(
                 user_id=user.id,
+                recording_id=create_dive_recording(db, user, dive).id,
                 dive_id=dive.id,
                 sha256="a" * 64,
                 content_type="application/json",
@@ -567,6 +570,7 @@ class TestFilesFollowTheirBytes:
         db.add(
             DiveFile(
                 user_id=user.id,
+                recording_id=create_dive_recording(db, user, dive).id,
                 dive_id=dive.id,
                 sha256=digest,
                 content_type="application/json",
@@ -579,7 +583,7 @@ class TestFilesFollowTheirBytes:
         db.commit()
 
         archive = _zip_of(await _export(async_db, user.id, archive_paths=True), {})
-        member = parse_document(_document_of(archive))["dives"][0]["source_file"]["archive_path"]
+        member = parse_document(_document_of(archive))["dives"][0]["recordings"][0]["source_files"][0]["archive_path"]
         archive = _zip_of(await _export(async_db, user.id, archive_paths=True), {member: payload})
         destination = create_user(db)
 
@@ -606,6 +610,7 @@ class TestFilesFollowTheirBytes:
         db.add(
             DiveFile(
                 user_id=user.id,
+                recording_id=create_dive_recording(db, user, dive).id,
                 dive_id=dive.id,
                 sha256=digest,
                 content_type="application/json",
@@ -617,7 +622,7 @@ class TestFilesFollowTheirBytes:
         )
         db.commit()
         document = await _export(async_db, user.id, archive_paths=True)
-        member = parse_document(document)["dives"][0]["source_file"]["archive_path"]
+        member = parse_document(document)["dives"][0]["recordings"][0]["source_files"][0]["archive_path"]
         archive = _zip_of(document, {member: b"not the bytes the manifest names"})
         destination = create_user(db)
 
@@ -654,6 +659,7 @@ class TestProfiles:
         dive = db.query(Dive).filter(Dive.user_id == user.id).one()
         db.add(
             DiveProfile(
+                recording_id=create_dive_recording(db, user, dive).id,
                 dive_id=dive.id,
                 source_sha256="b" * 64,
                 parser_key="suunto_json",
@@ -689,10 +695,9 @@ class TestProfiles:
     ) -> None:
         _, document = seeded
         parsed = json.loads(document)
-        parsed["dives"][0]["profile"] = {
-            "duration": 30,
-            "depth": {"times": [0, 20, 10], "values": [1, 2, 3]},
-        }
+        parsed["dives"][0]["recordings"] = [
+            {"profile": {"duration": 30, "depth": {"times": [0, 20, 10], "values": [1, 2, 3]}}}
+        ]
         destination = create_user(db)
 
         plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
@@ -1650,6 +1655,7 @@ class TestAnArchiveThatWillNotInflate:
         db.add(
             DiveFile(
                 user_id=user.id,
+                recording_id=create_dive_recording(db, user, dive).id,
                 dive_id=dive.id,
                 sha256=digest,
                 content_type="application/json",
@@ -1661,7 +1667,7 @@ class TestAnArchiveThatWillNotInflate:
         )
         db.commit()
         document = await _export(async_db, user.id, archive_paths=True)
-        member = parse_document(document)["dives"][0]["source_file"]["archive_path"]
+        member = parse_document(document)["dives"][0]["recordings"][0]["source_files"][0]["archive_path"]
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
             archive.writestr(DIVEJSON_NAME, document)
@@ -1729,10 +1735,9 @@ class TestNumbersWiderThanTheColumn:
     ) -> None:
         _, document = seeded
         parsed = json.loads(document)
-        parsed["dives"][0]["profile"] = {
-            "duration": 30,
-            "depth": {"times": [0, 10, 20], "values": [100, self.HUGE, 300]},
-        }
+        parsed["dives"][0]["recordings"] = [
+            {"profile": {"duration": 30, "depth": {"times": [0, 10, 20], "values": [100, self.HUGE, 300]}}}
+        ]
         destination = create_user(db)
 
         plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
@@ -1866,6 +1871,7 @@ class TestTheIntegerColumnCensus:
         ("dive_mixture", "dive_id"): "resolved from a row this import wrote",
         ("dive_mixture", "gas_number"): "bounded in `_MIXTURE_BOUNDS`",
         ("dive_profile", "id"): "the sequence's",
+        ("dive_profile", "recording_id"): "resolved from a row this import wrote",
         ("dive_profile", "dive_id"): "resolved from a row this import wrote",
         ("dive_profile", "extractor_version"): "this build's own constant",
         ("dive_profile", "duration"): "bounded in `_plan_profile`, against the samples and the declared span",
@@ -1916,7 +1922,15 @@ class TestTheIntegerColumnCensus:
         ("trip_location", "position"): "the list index, not the document's",
         ("dive_file", "id"): "the sequence's",
         ("dive_file", "user_id"): "the caller's",
+        ("dive_file", "recording_id"): "resolved from a row this import wrote",
         ("dive_file", "dive_id"): "resolved from a row this import wrote",
+        ("dive_recording", "id"): "the sequence's",
+        ("dive_recording", "user_id"): "the caller's",
+        ("dive_recording", "dive_id"): "resolved from a row this import wrote",
+        ("dive_recording", "ordinal"): "the list index, not the document's",
+        ("dive_recording", "device_dive_number"): "bounded in `_plan_recordings`",
+        ("dive_recording", "utc_offset_minutes"): "derived from a parsed UTC offset, which Python bounds at a day",
+        ("dive_recording", "duration"): "the samples' own span, capped by `_plan_profile`",
         ("dive_file", "byte_size"): "the restored bytes' own length, capped by `MAX_DIVE_FILE_SIZE`",
         ("certification_file", "id"): "the sequence's",
         ("certification_file", "certification_id"): "resolved from a row this import wrote",
@@ -1940,6 +1954,7 @@ class TestTheIntegerColumnCensus:
         written: tuple[Any, ...] = (
             Dive,
             DiveMixture,
+            DiveRecording,
             DiveProfile,
             Trip,
             TripLocation,

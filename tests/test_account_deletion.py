@@ -32,7 +32,7 @@ from src.app.models.dive_file import DiveFile
 from src.app.models.user import User
 from src.app.services import blob_store
 from tests.conftest import db_available
-from tests.helpers.generators import create_dive, create_user
+from tests.helpers.generators import create_dive, create_dive_recording, create_user
 from tests.helpers.mocks import fake_request
 
 
@@ -484,6 +484,7 @@ class TestPurgeDeletedAccountsAgainstPostgres:
             [
                 DiveFile(
                     user_id=diver.id,
+                    recording_id=create_dive_recording(db, diver, dive).id,
                     dive_id=dive.id,
                     sha256="c" * 64,
                     content_type="application/octet-stream",

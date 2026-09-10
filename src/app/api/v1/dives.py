@@ -1239,7 +1239,13 @@ async def write_dive_recording(
     # Dive reads embed every recording, its files' metadata *and* the summary of the profile
     # extracted from them, so they're now stale.
     await invalidate_dive_caches(current_user["id"])
-    return stored.recording
+
+    # Read back after the write rather than returned from it: the response is the *recording*
+    # - its device, its files, its profile summary - and assembling that is this layer's job
+    # rather than the storage service's. A caller that got only the file back would have to
+    # issue this very query itself to render anything.
+    recordings = (await get_recordings_for_dives(db=db, dive_ids=[db_dive.id])).get(db_dive.id, [])
+    return next(recording for recording in recordings if any(file.uuid == stored.file_uuid for file in recording.files))
 
 
 @router.get("/dive/{uuid}/file/{fid}")

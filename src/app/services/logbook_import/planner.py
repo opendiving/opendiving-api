@@ -36,7 +36,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -55,7 +55,7 @@ from ...models.gear_set import GearSet
 from ...models.species import Species
 from ...models.trip import Trip
 from ...schemas.certification import AGENCY_OTHER_NOT_ALLOWED_MESSAGE, CertificationAgency, CertificationSide
-from ...schemas.dive_profile import ProfileEventType
+from ...schemas.dive_profile import DEPTH_SCALE, ProfileEventType
 from ...schemas.export import DIVEJSON_PRODUCER_KEY
 from ...schemas.gear_item import GearType
 from ...schemas.logbook_import import (
@@ -87,6 +87,15 @@ from ..dive_profiles import (
     ProfileSeries,
     derive_gas_attribution,
     downsample,
+)
+from ..dive_recordings import (
+    DEVICE_COLUMNS,
+    DeviceIdentity,
+    RecordingCandidate,
+    RecordingFacts,
+    is_same_dive_strict,
+    is_same_recording,
+    load_candidates,
 )
 from .reader import LoadedImport
 
@@ -220,6 +229,60 @@ class PlannedProfile:
     duration: int
 
 
+@dataclass(frozen=True, slots=True)
+class PlannedRecording:
+    """One device's record of a dive, planned but not yet written.
+
+    `device` is keyed by **column** name, ready to spread into the insert - the members are
+    already bounded to the widths `dive_recording` declares, and keeping the translation here
+    means the writer never has to know that the format says `brand` and the column says
+    `device_brand`.
+
+    **`duration` and `max_depth` are derived from the profile's own samples**, which is what
+    an imported recording has to do: a DiveJSON Recording carries no scalars of its own, so
+    the document offers nowhere else to read the two figures the strict gate compares from.
+    Left `None` where the recording has no profile - and a recording with no figures simply
+    cannot be strict-matched, which is honest rather than lossy.
+    """
+
+    ordinal: int
+    device: dict[str, Any] = field(default_factory=dict)
+    start_time: datetime | None = None
+    utc_offset_minutes: int | None = None
+    duration: int | None = None
+    max_depth: float | None = None
+    profile: PlannedProfile | None = None
+    files: list[PlannedFile] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class PlannedRecordingMatch:
+    """An incoming recording that turned out to belong to a dive the caller already has.
+
+    Two kinds, and the difference is which gate admitted it. **`fill`** passed the
+    same-recording test: this is a second reading of a record that dive already holds - the
+    same computer exported twice - so it fills that recording's blanks, and the dive's, and
+    writes no new row. **`attach`** passed the strict same-dive test: a *different* computer
+    recorded the same dive, so a new recording is appended to that dive.
+
+    Neither creates a dive. Which is why a document dive whose every recording matched is not
+    created either: there is nothing left of it that is not already in the logbook, and a
+    second dive row would be the duplicate the gates exist to prevent.
+    """
+
+    kind: Literal["fill", "attach"]
+    dive_id: int
+    dive_uuid: uuid_pkg.UUID
+    source_uuid: uuid_pkg.UUID
+    recording_id: int | None
+    recording: PlannedRecording
+    # The incoming *dive's* values, carried for a `fill` only: a match that writes no dive
+    # row can still supply readings the existing dive has none of. Ignored on `attach`, where
+    # the recording is a second computer's and the dive's figures are the primary's.
+    dive_values: dict[str, Any] = field(default_factory=dict)
+    mixtures: list[dict[str, Any]] = field(default_factory=list)
+
+
 @dataclass(slots=True)
 class PlannedRecord:
     """One record of the document, and what will become of it.
@@ -251,6 +314,11 @@ class ImportPlan:
 
     is_archive: bool
     records: dict[str, dict[uuid_pkg.UUID, PlannedRecord]]
+    # Incoming recordings that belong to dives the caller already has. Held beside the
+    # records rather than inside them because they are not records of any collection: no dive
+    # is created for them, and the writer walks this list after the dives so that a match
+    # against a dive *this same import* created is impossible by construction.
+    recording_matches: list[PlannedRecordingMatch]
     notes: list[ImportNote]
     notes_dropped: int
     files_referenced: int
@@ -371,6 +439,18 @@ def _finite(value: float | None) -> bool:
     return value is None or math.isfinite(value)
 
 
+def _deepest_metres(profile: PlannedProfile | None) -> float | None:
+    """A planned profile's deepest sample, in metres, or `None`.
+
+    Off the stored integer centimetres rather than off any summary, because at this point
+    there is no row to have a summary: this is the figure the strict gate compares, and it
+    has to come out of the same samples that are about to be written.
+    """
+    if profile is None or profile.profile.depth is None or not profile.profile.depth.v:
+        return None
+    return max(profile.profile.depth.v) / DEPTH_SCALE
+
+
 def _within_int32(values: Sequence[int]) -> bool:
     """Every element storable in a Postgres `Integer` column."""
     return all(_INT32_MIN <= value <= _INT32_MAX for value in values)
@@ -429,6 +509,9 @@ class _Planner:
         # `ux_dive_file_dive_id` means one row cannot serve two dives either. The file is
         # skipped and reported; the dive is not.
         self._claimed_digests: set[str] = set()
+        # Incoming recordings that belong to dives this account already has - see
+        # `PlannedRecordingMatch`. Filled by `_plan_dives`, walked by the writer.
+        self._recording_matches: list[PlannedRecordingMatch] = []
 
     # ------------------------------------------------------------------ notes
 
@@ -775,6 +858,7 @@ class _Planner:
         return ImportPlan(
             is_archive=self._loaded.is_archive,
             records=self._records,
+            recording_matches=self._recording_matches,
             notes=self._notes,
             notes_dropped=self._notes_dropped,
             files_referenced=self._files_referenced,
@@ -1273,7 +1357,7 @@ class _Planner:
             )
         record = self._resolve(collection, certification.uuid, existing)
         if record.action not in (Action.CREATE, Action.RESTORE):
-            self._count_uncontained_files(certification.front_file, certification.back_file)
+            self._count_uncontained_cards(certification.front_file, certification.back_file)
             return record
 
         record.values = {
@@ -1306,20 +1390,134 @@ class _Planner:
         )
         for dive in self._document.dives:
             self._claim_document_uuid("dives", dive)
-            self._records["dives"][dive.uuid] = self._plan_dive(dive, existing)
+            self._records["dives"][dive.uuid] = await self._plan_dive(dive, existing)
 
-    def _plan_dive(self, dive: ImportDive, existing: dict[uuid_pkg.UUID, _ExistingRow]) -> PlannedRecord:
+    async def _load_candidates(self, around: datetime) -> list[RecordingCandidate]:
+        """This account's recordings near an incoming start, read once per document.
+
+        The window is generous by design (see `CANDIDATE_WINDOW`), so one read covering the
+        first dive's neighbourhood would not cover a document spanning a week. Read per
+        dive-that-needs-one, and only for a dive whose uuid is new: a document of a hundred
+        hand-entered dives asks no gate anything and issues no query at all.
+        """
+        return await load_candidates(self._db, user_id=self._user_id, around=around)
+
+    async def _match_recordings(
+        self,
+        dive: ImportDive,
+        recordings: list[PlannedRecording],
+        values: dict[str, Any],
+        mixtures: list[dict[str, Any]],
+    ) -> tuple[list[PlannedRecording], int]:
+        """Attach what belongs to a dive the caller already has; return what is left and how
+        many were taken.
+
+        **The count is not `len(recordings) - len(remaining)`**, and that is the whole reason
+        it is returned rather than derived: a recording can also leave this list by having
+        been dropped upstream for describing nothing, and a caller reading the difference
+        would take "one unusable recording" for "one recording already in the logbook" and
+        skip a dive it should have created.
+
+        **Same-recording first, then same-dive-strict**, and the order is the whole of the
+        rule: a file that is a second reading of a record the logbook already holds must fill
+        that record rather than be appended beside it as though a second computer had
+        recorded it. The loose gate is not used here at all - it is a form's, where a diver
+        decides - because an import that attached on a start window alone would silently fold
+        a repetitive dive into the one before it.
+
+        The dive's own values ride along on a `fill` so a match can still supply readings the
+        stored dive has none of; they are dropped on an `attach`, where the recording is a
+        second computer's and the dive's figures are the primary recording's.
+        """
+        remaining: list[PlannedRecording] = []
+        taken = 0
+        for recording in recordings:
+            if recording.start_time is None:
+                remaining.append(recording)
+                continue
+
+            incoming = RecordingFacts(
+                device=DeviceIdentity(
+                    brand=recording.device.get("device_brand"),
+                    model=recording.device.get("device_model"),
+                    serial=recording.device.get("device_serial"),
+                    dive_number=recording.device.get("device_dive_number"),
+                ),
+                start_time=recording.start_time,
+                utc_offset_minutes=recording.utc_offset_minutes,
+                duration=recording.duration,
+                max_depth=recording.max_depth,
+                sampled_span=None if recording.profile is None else recording.profile.profile.duration,
+            )
+            candidates = await self._load_candidates(recording.start_time)
+
+            filled = next((candidate for candidate in candidates if is_same_recording(incoming, candidate.facts)), None)
+            if filled is not None:
+                self._recording_matches.append(
+                    PlannedRecordingMatch(
+                        kind="fill",
+                        dive_id=filled.dive_id,
+                        dive_uuid=filled.dive_uuid,
+                        source_uuid=dive.uuid,
+                        recording_id=filled.id,
+                        recording=recording,
+                        dive_values=values,
+                        mixtures=mixtures,
+                    )
+                )
+                self._note(
+                    ImportNoteCode.RECORDING_FILLED,
+                    "A recording of this dive is one your logbook already has - the same device, the same start - "
+                    "so it filled in what that record was missing rather than being added again. Dive "
+                    f"{filled.dive_number} kept everything it already recorded.",
+                    collection="dives",
+                    uuid=dive.uuid,
+                )
+                taken += 1
+                continue
+
+            attached = next(
+                (candidate for candidate in candidates if is_same_dive_strict(incoming, candidate.facts)), None
+            )
+            if attached is not None:
+                self._recording_matches.append(
+                    PlannedRecordingMatch(
+                        kind="attach",
+                        dive_id=attached.dive_id,
+                        dive_uuid=attached.dive_uuid,
+                        source_uuid=dive.uuid,
+                        recording_id=None,
+                        recording=recording,
+                    )
+                )
+                self._note(
+                    ImportNoteCode.RECORDING_ATTACHED,
+                    "A different computer recorded a dive your logbook already has, so this recording was added to "
+                    f"dive {attached.dive_number} rather than a second dive being created for it.",
+                    collection="dives",
+                    uuid=dive.uuid,
+                )
+                taken += 1
+                continue
+
+            remaining.append(recording)
+        return remaining, taken
+
+    async def _plan_dive(self, dive: ImportDive, existing: dict[uuid_pkg.UUID, _ExistingRow]) -> PlannedRecord:
         collection = "dives"
         if dive.started_at is None:
             return self._skip(collection, dive.uuid, "A dive needs a start time, and this one has none.")
 
         record = self._resolve(collection, dive.uuid, existing)
         if record.action not in (Action.CREATE, Action.RESTORE):
-            self._count_uncontained_files(dive.source_file)
+            self._count_uncontained_files(dive)
             return record
 
         bounded = self._bounded(collection, dive.uuid, dive, _DIVE_BOUNDS)
-        profile = self._plan_profile(dive)
+        recordings = self._plan_recordings(dive)
+        # The primary recording's profile, for the two dive-level jobs a profile still has:
+        # standing in for an unrecorded duration below, and keeping the skip message honest.
+        profile = recordings[0].profile if recordings else None
 
         duration = bounded.get("duration")
         if duration is None and profile is not None:
@@ -1399,15 +1597,38 @@ class _Planner:
             "exit_longitude": exit_[1],
             "created_at": self._created_at(dive.created_at),
         }
+        mixtures = self._plan_cylinders(dive)
+
+        # **The gates run before a dive is created, and only for a uuid this instance has
+        # never seen.** A `RESTORE` is the caller's own deleted dive coming back under its
+        # own identity, and a `LINK` is a dive they already have - matching either against
+        # the logbook would be asking whether a dive is itself. `CREATE` covers both the
+        # genuinely new dive and the remapped one, and the remapped case is where this
+        # matters most: another account's export carries uuids that mean nothing here, so
+        # uuid matching has nothing to work with and the device and the clock are all there
+        # is.
+        if record.action is Action.CREATE:
+            recordings, matched = await self._match_recordings(dive, recordings, record.values, mixtures)
+            if matched and not recordings:
+                # Every recording of this dive is now on a dive the caller already has, so
+                # there is nothing left for a dive row to hold. Creating one would be the
+                # duplicate the gates exist to prevent. The notes above already say which
+                # dive each recording reached.
+                #
+                # `matched` rather than "the document listed recordings": a dive whose only
+                # recording was *dropped* for describing nothing still has everything else
+                # the document says about it, and skipping it would lose a real dive over an
+                # unusable object inside it.
+                return PlannedRecord(action=Action.SKIP, source_uuid=dive.uuid, uuid=record.uuid)
+
         record.children = {
             "trip_uuid": self._reference(collection, dive.uuid, "trips", dive.trip_uuid),
             "course_uuid": self._reference(collection, dive.uuid, "courses", dive.course_uuid),
             "site_uuids": self._reference_list(collection, dive.uuid, "sites", dive.site_uuids),
             "gear_uuids": self._reference_list(collection, dive.uuid, "gear", dive.gear_uuids),
             "species_ids": self._plan_species_links(dive),
-            "mixtures": self._plan_cylinders(dive),
-            "profile": profile,
-            "source_file": self._plan_dive_file(dive),
+            "mixtures": mixtures,
+            "recordings": recordings,
         }
         return record
 
@@ -1496,7 +1717,7 @@ class _Planner:
             )
         return rows
 
-    def _plan_profile(self, dive: ImportDive) -> PlannedProfile | None:
+    def _plan_profile(self, dive_uuid: uuid_pkg.UUID, source: Any) -> PlannedProfile | None:
         """A dive's samples, as the stored shape - or nothing, with a note.
 
         Built directly rather than through `normalize()`, and that is deliberate:
@@ -1508,24 +1729,23 @@ class _Planner:
         and `downsample`, in that order, because attribution reads a mean depth off the
         full-resolution channel.
         """
-        if dive.profile is None:
+        if source is None:
             return None
-        source = dive.profile
-        depth = self._series("dives", dive.uuid, source.depth, "depth")
-        ceiling = self._series("dives", dive.uuid, source.ceiling, "ceiling")
-        temperature = self._series("dives", dive.uuid, source.temperature, "temperature")
+        depth = self._series("dives", dive_uuid, source.depth, "depth")
+        ceiling = self._series("dives", dive_uuid, source.ceiling, "ceiling")
+        temperature = self._series("dives", dive_uuid, source.temperature, "temperature")
         pressures: list[ProfilePressureSeries] = []
         for series in source.pressures:
             if series.gas_number is None or series.gas_number < 0:
-                self._dropped("dives", dive.uuid, "A pressure channel with no gas number was dropped")
+                self._dropped("dives", dive_uuid, "A pressure channel with no gas number was dropped")
                 continue
-            checked = self._series("dives", dive.uuid, series, f"pressure (gas {series.gas_number})")
+            checked = self._series("dives", dive_uuid, series, f"pressure (gas {series.gas_number})")
             if checked is not None:
                 pressures.append(ProfilePressureSeries(t=checked.t, v=checked.v, gas_number=series.gas_number))
 
         if depth is None and ceiling is None and temperature is None and not pressures:
             if any((source.depth, source.ceiling, source.temperature, source.pressures)):
-                self._dropped("dives", dive.uuid, "This dive's profile carried no usable channel, and was dropped")
+                self._dropped("dives", dive_uuid, "A recording's profile carried no usable channel, and was dropped")
             return None
 
         profile = NormalizedProfile(
@@ -1533,7 +1753,7 @@ class _Planner:
             ceiling=ceiling,
             temperature=temperature,
             pressure=pressures,
-            events=self._events(dive.uuid, source),
+            events=self._events(dive_uuid, source),
         )
         attributed = replace(profile, gas_attribution=derive_gas_attribution(profile))
         capped = downsample(attributed)
@@ -1544,7 +1764,7 @@ class _Planner:
         declared = source.duration if source.duration is not None else 0
         if not 0 <= declared <= _INT32_MAX:
             self._dropped(
-                "dives", dive.uuid, "The profile declared a span this app cannot store, so its samples' own was used"
+                "dives", dive_uuid, "The profile declared a span this app cannot store, so its samples' own was used"
             )
             declared = 0
         return PlannedProfile(profile=capped, duration=max(declared, capped.duration))
@@ -1610,22 +1830,94 @@ class _Planner:
             ordered.append(ProfileEvent(t=key[0], type=key[1], gas_number=key[2], label=key[3]))
         return ordered
 
+    # ------------------------------------------------------------------ recordings
+
+    def _plan_recordings(self, dive: ImportDive) -> list[PlannedRecording]:
+        """A dive's recordings, in the document's order - the first primary.
+
+        **A recording carrying none of its device, its profile and its files is dropped**,
+        which is §3's beyond-schema rule 4 applied on the way in rather than asserted about
+        the way out: an object that describes nothing would become a row nothing can render,
+        with a `start_time` and no reason to exist.
+
+        `started_at` absent means the dive's (§6.4a), so it is substituted here rather than
+        left NULL - a reader that treated the absence as "unknown" would put every
+        single-computer recording outside every gate's reach.
+        """
+        planned: list[PlannedRecording] = []
+        for source in dive.recordings:
+            device = {
+                DEVICE_COLUMNS[member]: self._text(getattr(source.device, member))
+                if isinstance(getattr(source.device, member), str)
+                else getattr(source.device, member)
+                for member in DEVICE_COLUMNS
+                if source.device is not None and getattr(source.device, member) is not None
+            }
+            if device.get("device_dive_number") is not None and not (0 <= device["device_dive_number"] <= _INT32_MAX):
+                self._dropped("dives", dive.uuid, "A device's own dive counter was outside the storable range")
+                device.pop("device_dive_number")
+
+            profile = self._plan_profile(dive.uuid, source.profile)
+            files = [
+                planned_file
+                for stored in source.source_files
+                if (planned_file := self._plan_dive_file(dive, stored)) is not None
+            ]
+            if not device and profile is None and not source.source_files:
+                self._dropped(
+                    "dives", dive.uuid, "A recording described no device, no samples and no file, and was dropped"
+                )
+                continue
+
+            started_at = source.started_at if source.started_at is not None else dive.started_at
+            start_time, offset_minutes = (None, None)
+            if started_at is not None:
+                start_time, offset_minutes = split_local_start_time(started_at)
+
+            planned.append(
+                PlannedRecording(
+                    ordinal=len(planned),
+                    device=device,
+                    start_time=start_time,
+                    utc_offset_minutes=offset_minutes,
+                    # **Derived from the samples**, which is the only place a document offers
+                    # them: a Recording carries no scalars of its own, so a recording with no
+                    # profile has no figures and cannot be strict-matched. Left NULL rather
+                    # than borrowed from the dive - the dive's are the diver's logbook entry
+                    # and may have been hand-edited, and a gate comparing an edited number
+                    # against another device's samples is comparing two different things.
+                    duration=None if profile is None else profile.profile.duration,
+                    max_depth=_deepest_metres(profile),
+                    profile=profile,
+                    files=files,
+                )
+            )
+        return planned
+
     # ------------------------------------------------------------------ files
 
-    def _count_uncontained_files(self, *files: ImportStoredFile | None) -> None:
-        """Count the binaries of a record the import is not writing.
+    def _count_uncontained_files(self, dive: ImportDive) -> None:
+        """Count the binaries of a dive the import is not writing.
 
-        A linked or skipped record still *references* its files, and the report's
-        `referenced` count is about the document rather than about what got written - so
-        they are counted, and counted as not restored.
+        A linked or skipped dive still *references* its files, and the report's `referenced`
+        count is about the document rather than about what got written - so they are counted,
+        and counted as not restored.
         """
+        for recording in dive.recordings:
+            for stored in recording.source_files:
+                if stored is not None:
+                    self._files_referenced += 1
+                    self._files_not_contained += 1
+
+    def _count_uncontained_cards(self, *files: ImportStoredFile | None) -> None:
+        """`_count_uncontained_files` for a certification's two card images."""
         for stored in files:
             if stored is not None:
                 self._files_referenced += 1
                 self._files_not_contained += 1
 
-    def _plan_dive_file(self, dive: ImportDive) -> PlannedFile | None:
-        """The dive-computer export behind a dive, when the container carries its bytes.
+    def _plan_dive_file(self, dive: ImportDive, stored: ImportStoredFile | None) -> PlannedFile | None:
+        """One dive-computer export behind a recording, when the container carries its bytes.
 
         **A bare document never creates a file row.** It carries the metadata and none of
         the bytes, and in this repo a file row's existence is the claim that the bytes
@@ -1634,14 +1926,13 @@ class _Planner:
         byteless row would need an invented key as well as an invented promise. The dive
         imports, the file is reported, and the archive is what puts it back.
         """
-        stored = dive.source_file
         if stored is None:
             return None
         self._files_referenced += 1
         if not self._loaded.is_archive or stored.archive_path is None:
             self._note(
                 ImportNoteCode.FILE_NOT_CONTAINED,
-                "This dive's original dive-computer file is named by the document but not contained in it. Import the "
+                "A dive-computer file of this dive is named by the document but not contained in it. Import the "
                 "archive to restore it.",
                 collection="dives",
                 uuid=dive.uuid,
@@ -1652,7 +1943,7 @@ class _Planner:
             self._files_skipped += 1
             self._note(
                 ImportNoteCode.FILE_SKIPPED,
-                "This dive's original file carries no digest to verify it against, so it was not restored.",
+                "A dive-computer file of this dive carries no digest to verify it against, so it was not restored.",
                 collection="dives",
                 uuid=dive.uuid,
             )
@@ -1662,7 +1953,7 @@ class _Planner:
             self._files_skipped += 1
             self._note(
                 ImportNoteCode.FILE_SKIPPED,
-                "This dive's original file is named by the document but missing from the archive.",
+                "A dive-computer file of this dive is named by the document but missing from the archive.",
                 collection="dives",
                 uuid=dive.uuid,
             )
@@ -1671,21 +1962,21 @@ class _Planner:
             self._files_skipped += 1
             self._note(
                 ImportNoteCode.FILE_SKIPPED,
-                f"This dive's original file is larger than the {MAX_DIVE_FILE_SIZE // (1024 * 1024)} MB this app "
-                "stores, so it was not restored.",
+                f"A dive-computer file of this dive is larger than the {MAX_DIVE_FILE_SIZE // (1024 * 1024)} MB this "
+                "app stores, so it was not restored.",
                 collection="dives",
                 uuid=dive.uuid,
             )
             return None
         if stored.sha256 in self._claimed_digests:
-            # `ux_dive_file_user_id_sha256`. Link-to-existing is impossible here: `dive_id`
-            # is `NOT NULL` under the full-unique `ux_dive_file_dive_id`, so one row cannot
-            # serve two dives. The dive keeps everything else and simply has no source file.
+            # `ux_dive_file_user_id_sha256`. Link-to-existing is impossible here: one row
+            # names one `recording_id`, so one set of bytes cannot serve two recordings. The
+            # recording keeps everything else and simply has that file missing.
             self._files_skipped += 1
             self._note(
                 ImportNoteCode.FILE_SKIPPED,
-                "You already store an identical dive-computer file against another dive, and a file belongs to one "
-                "dive, so this copy was not restored.",
+                "You already store an identical dive-computer file against another recording, and a file belongs to "
+                "one recording, so this copy was not restored.",
                 collection="dives",
                 uuid=dive.uuid,
             )

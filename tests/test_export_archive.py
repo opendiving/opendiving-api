@@ -29,9 +29,18 @@ from src.app.services.blob_store import BlobMissingError
 from src.app.services.certification_files import LoadedCardFile, get_file_infos_for_certifications
 from src.app.services.dive_files import LoadedDiveFile
 from src.app.services.export.archive import write_archive
+from src.app.services.export.loader import ExportRecordingRow
 from src.app.services.export.paths import archive_member_name, plan_archive_paths
 from src.app.services.export.uddf import write_uddf
-from tests.helpers.export import EXPORTED_AT, UUIDS, build_bundle, full_bundle, make_dive
+from tests.helpers.export import (
+    EXPORTED_AT,
+    UUIDS,
+    build_bundle,
+    full_bundle,
+    make_dive,
+    make_file_row,
+    make_recording,
+)
 
 DIVE_FILE_BYTES = b'{"DeviceLog": {"Header": {}}}'
 CARD_FRONT_BYTES = b"\xff\xd8\xff\xe0front"
@@ -51,19 +60,20 @@ def _install_blob_loaders(monkeypatch: Any) -> None:
     """Stand in for the two `deferred`-column readers the archive writer calls per row,
     plus the profile read both document writers make."""
 
-    async def fake_load_dive_file(db: Any, *, dive_id: int) -> LoadedDiveFile:
+    async def fake_load_dive_file(db: Any, *, file_id: int) -> LoadedDiveFile:
         return LoadedDiveFile(
             data=DIVE_FILE_BYTES,
             content_type="application/json",
             original_filename="export.json",
             sha256=_digest(DIVE_FILE_BYTES),
+            parser_key="suunto_json",
         )
 
     async def fake_load_certification_file(db: Any, *, certification_id: int, side: Any) -> LoadedCardFile:
         data = CARD_FRONT_BYTES if side == CertificationSide.FRONT else CARD_BACK_BYTES
         return LoadedCardFile(data=data, content_type="image/jpeg", original_filename="card.jpg", sha256=_digest(data))
 
-    async def fake_load_profile(db: Any, *, dive_id: int) -> None:
+    async def fake_load_profile(db: Any, *, recording_id: int) -> None:
         return None
 
     monkeypatch.setattr("src.app.services.export.archive.load_dive_file", fake_load_dive_file)
@@ -76,7 +86,7 @@ def _bundle_matching_the_stub_blobs() -> Any:
     """`full_bundle` pins placeholder digests; the inventory test needs the real ones so
     that "hashes to what the database recorded" is a claim about the round trip."""
     bundle = full_bundle()
-    bundle.dive_file_sha256[2] = _digest(DIVE_FILE_BYTES)
+    bundle.dive_file_sha256[1] = _digest(DIVE_FILE_BYTES)
     bundle.cert_file_sha256[(1, "front")] = _digest(CARD_FRONT_BYTES)
     bundle.cert_file_sha256[(1, "back")] = _digest(CARD_BACK_BYTES)
     return bundle
@@ -107,7 +117,7 @@ class TestInventory:
             "csv/gear-items.csv",
             "csv/gear-service.csv",
             "csv/certifications.csv",
-            "files/0002-Suunto-Ocean-2026-06-01.json",
+            "files/0002-0-Suunto-Ocean-2026-06-01.json",
             "certifications/open-water-diver-front.jpg",
             "certifications/open-water-diver-back.png",
         }
@@ -120,7 +130,12 @@ class TestInventory:
         archive = await _build(_bundle_matching_the_stub_blobs(), monkeypatch)
         envelope = json.loads(archive.read("logbook.divejson"))
 
-        stored = [dive["source_file"] for dive in envelope["dives"] if "source_file" in dive]
+        stored = [
+            file
+            for dive in envelope["dives"]
+            for recording in dive["recordings"]
+            for file in recording.get("source_files", [])
+        ]
         stored += [
             cert[side] for cert in envelope["certifications"] for side in ("front_file", "back_file") if side in cert
         ]
@@ -135,7 +150,12 @@ class TestInventory:
     async def test_no_blob_is_in_the_archive_the_document_does_not_name(self, monkeypatch):
         archive = await _build(_bundle_matching_the_stub_blobs(), monkeypatch)
         envelope = json.loads(archive.read("logbook.divejson"))
-        named = {dive["source_file"]["archive_path"] for dive in envelope["dives"] if "source_file" in dive}
+        named = {
+            file["archive_path"]
+            for dive in envelope["dives"]
+            for recording in dive["recordings"]
+            for file in recording.get("source_files", [])
+        }
         named |= {
             cert[side]["archive_path"]
             for cert in envelope["certifications"]
@@ -230,6 +250,19 @@ def _file_info(original_filename: str) -> DiveFileInfo:
     )
 
 
+def _one_file_each(*names: str) -> dict[int, list[ExportRecordingRow]]:
+    """One dive per name, each with one recording holding one file.
+
+    The file row ids run from 1 and are what `ArchivePaths.dive_files` is keyed on now: a
+    dive holds as many exports as its recordings hold, so a path plan cannot be keyed on the
+    dive any more.
+    """
+    return {
+        index: [make_recording(index, UUIDS["recording"], files=[make_file_row(index, original_filename=name)])]
+        for index, name in enumerate(names, start=1)
+    }
+
+
 class TestCertificationFileOrder:
     """Pinned because three separate reviews read `get_file_infos_for_certifications`,
     saw no `ORDER BY`, and concluded the archive's member order varies run to run.
@@ -303,11 +336,11 @@ class TestMemberNames:
                 make_dive(1, UUIDS["dive-air"], dive_number=7),
                 make_dive(2, UUIDS["dive-trimix"], dive_number=7),
             ],
-            file_by_dive={1: _file_info("export.xml"), 2: _file_info("export.xml")},
+            recordings_by_dive=_one_file_each("export.xml", "export.xml"),
         )
         assert plan_archive_paths(bundle).dive_files == {
-            1: "files/0007-export.xml",
-            2: "files/0007-export-2.xml",
+            1: "files/0007-0-export.xml",
+            2: "files/0007-0-export-2.xml",
         }
 
     def test_collisions_are_resolved_case_insensitively(self):
@@ -318,7 +351,7 @@ class TestMemberNames:
                 make_dive(1, UUIDS["dive-air"], dive_number=7),
                 make_dive(2, UUIDS["dive-trimix"], dive_number=7),
             ],
-            file_by_dive={1: _file_info("dive.xml"), 2: _file_info("DIVE.XML")},
+            recordings_by_dive=_one_file_each("dive.xml", "DIVE.XML"),
         )
         paths = plan_archive_paths(bundle)
         assert paths.dive_files[1].lower() != paths.dive_files[2].lower()
@@ -347,7 +380,7 @@ class TestMemberNames:
         drops the member, which is the failure this module exists to prevent."""
         bundle = build_bundle(
             dives=[make_dive(1, UUIDS["dive-air"], dive_number=7)],
-            file_by_dive={1: _file_info("x" * 250 + ".xml")},
+            recordings_by_dive=_one_file_each("x" * 250 + ".xml"),
         )
         member = plan_archive_paths(bundle).dive_files[1]
         assert len(member.removeprefix("files/")) <= 255
@@ -363,7 +396,7 @@ class TestMemberNames:
                 make_dive(1, UUIDS["dive-air"], dive_number=7),
                 make_dive(2, UUIDS["dive-trimix"], dive_number=7),
             ],
-            file_by_dive={1: _file_info(long_name), 2: _file_info(long_name)},
+            recordings_by_dive=_one_file_each(long_name, long_name),
         )
         paths = plan_archive_paths(bundle)
         assert paths.dive_files[1] != paths.dive_files[2]
@@ -376,9 +409,9 @@ class TestMemberNames:
                 make_dive(1, UUIDS["dive-air"], dive_number=9),
                 make_dive(2, UUIDS["dive-trimix"], dive_number=104),
             ],
-            file_by_dive={1: _file_info("export.xml"), 2: _file_info("export.xml")},
+            recordings_by_dive=_one_file_each("export.xml", "export.xml"),
         )
         assert list(plan_archive_paths(bundle).dive_files.values()) == [
-            "files/0009-export.xml",
-            "files/0104-export.xml",
+            "files/0009-0-export.xml",
+            "files/0104-0-export.xml",
         ]

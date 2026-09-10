@@ -31,10 +31,9 @@ from src.app.models.user import User
 from src.app.schemas.certification import CertificationFileInfo, CertificationSide
 from src.app.schemas.dive import DiveFileInfo
 from src.app.schemas.dive_mixture import DiveMixtureRead
-from src.app.schemas.dive_profile import DiveProfileInfo
 from src.app.schemas.trip import TripLocationRead
 from src.app.services.dive_profiles import ProfileGasAttribution
-from src.app.services.export.loader import ExportBundle
+from src.app.services.export.loader import ExportBundle, ExportFileRow, ExportRecordingRow
 
 # Fixed uuids, so a golden file stays golden. uuid7's first hex digit is its version
 # nibble in the third group; nothing here depends on that, only on the values being
@@ -66,9 +65,17 @@ UUIDS = {
             "species-manta",
             "dive-form-preset-1",
             "dive-form-preset-2",
+            "recording",
+            "recording-second",
         )
     )
 }
+
+# `full_bundle`'s one recording, on its one dive with a file. Named because the writers key
+# profiles by *recording* now, so a test supplying one has to say which recording it belongs
+# to rather than which dive - and `2` (the dive) reading as a recording id would silently
+# supply nothing.
+PRIMARY_RECORDING_ID = 1
 
 EXPORTED_AT = datetime(2026, 8, 14, 9, 30, tzinfo=UTC)
 CREATED_AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
@@ -147,6 +154,33 @@ def mixture(**overrides: Any) -> DiveMixtureRead:
     return DiveMixtureRead(**defaults)
 
 
+def make_file_row(row_id: int, **overrides: Any) -> ExportFileRow:
+    """One stored export as an export writer addresses it: the row id plus its metadata."""
+    defaults: dict[str, Any] = {
+        "uuid": UUIDS["dive-file"],
+        "original_filename": "dive.json",
+        "content_type": "application/json",
+        "byte_size": 1024,
+        "parser_key": "suunto_json",
+    }
+    defaults.update(overrides)
+    return ExportFileRow(id=row_id, info=DiveFileInfo(**defaults))
+
+
+def make_recording(row_id: int, uuid: uuid_pkg.UUID, **overrides: Any) -> ExportRecordingRow:
+    """One recording, defaulted to the ordinary case: primary, device-less, no samples."""
+    defaults: dict[str, Any] = {
+        "ordinal": 0,
+        "device": {},
+        "start_time": None,
+        "utc_offset_minutes": None,
+        "files": [],
+        "has_profile": False,
+    }
+    defaults.update(overrides)
+    return ExportRecordingRow(id=row_id, uuid=uuid, **defaults)
+
+
 def build_bundle(
     *,
     dives: list[Dive] | None = None,
@@ -154,8 +188,7 @@ def build_bundle(
     site_ids_by_dive: dict[int, list[int]] | None = None,
     gear_ids_by_dive: dict[int, list[int]] | None = None,
     species_ids_by_dive: dict[int, list[int]] | None = None,
-    file_by_dive: dict[int, DiveFileInfo | None] | None = None,
-    profile_by_dive: dict[int, DiveProfileInfo | None] | None = None,
+    recordings_by_dive: dict[int, list[ExportRecordingRow]] | None = None,
     trips: list[Trip] | None = None,
     locations_by_trip: dict[int, list[TripLocationRead]] | None = None,
     courses: list[Course] | None = None,
@@ -175,18 +208,22 @@ def build_bundle(
 ) -> ExportBundle:
     """An `ExportBundle` with every per-dive map defaulted to "nothing for any dive".
 
-    A stored file always has a digest in the database (`sha256` is `NOT NULL`), so
-    supplying `file_by_dive` without `dive_file_sha256` fills in a placeholder rather than
-    producing a bundle that cannot exist - the export treats a missing digest as "the row
-    vanished mid-read" and skips the file, which would silently empty half these tests.
-    Pass both explicitly to exercise that path.
+    A stored file always has a digest in the database (`sha256` is `NOT NULL`), so supplying
+    `recordings_by_dive` without `dive_file_sha256` fills in a placeholder **keyed by file
+    row id** rather than producing a bundle that cannot exist - the export treats a missing
+    digest as "the row vanished mid-read" and skips the file, which would silently empty half
+    these tests. Pass both explicitly to exercise that path.
     """
     dives = dives or []
     dive_ids = [dive.id for dive in dives]
-    files = file_by_dive or {}
     certificate_files = cert_files_by_cert or {}
     if dive_file_sha256 is None:
-        dive_file_sha256 = {dive_id: "0" * 64 for dive_id, info in files.items() if info is not None}
+        dive_file_sha256 = {
+            file.id: "0" * 64
+            for recordings in (recordings_by_dive or {}).values()
+            for recording in recordings
+            for file in recording.files
+        }
     if cert_file_sha256 is None:
         cert_file_sha256 = {
             (cert_id, info.side.value): "0" * 64 for cert_id, infos in certificate_files.items() for info in infos
@@ -198,8 +235,7 @@ def build_bundle(
         site_ids_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(site_ids_by_dive or {})},
         gear_ids_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(gear_ids_by_dive or {})},
         species_ids_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(species_ids_by_dive or {})},
-        file_by_dive={**dict.fromkeys(dive_ids), **(file_by_dive or {})},
-        profile_by_dive={**dict.fromkeys(dive_ids), **(profile_by_dive or {})},
+        recordings_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(recordings_by_dive or {})},
         attribution_by_dive={dive_id: ProfileGasAttribution() for dive_id in dive_ids},
         trips=trips or [],
         locations_by_trip={**{trip.id: [] for trip in (trips or [])}, **(locations_by_trip or {})},
@@ -474,19 +510,27 @@ def full_bundle() -> ExportBundle:
         site_ids_by_dive={1: [1, 2], 2: [2]},
         gear_ids_by_dive={1: [1, 2, 3], 2: [1]},
         species_ids_by_dive={1: [1, 2], 2: [1]},
-        file_by_dive={
-            2: DiveFileInfo(
-                uuid=UUIDS["dive-file"],
-                original_filename="Suunto Ocean 2026-06-01.json",
-                content_type="application/json",
-                byte_size=2048,
-                parser_key="suunto_json",
-            )
-        },
-        profile_by_dive={
-            2: DiveProfileInfo(
-                uuid=UUIDS["dive-file"], duration=2700, depth_sample_count=4, channels=["depth"], max_depth=52.0
-            )
+        recordings_by_dive={
+            2: [
+                make_recording(
+                    1,
+                    UUIDS["recording"],
+                    device={"brand": "Suunto", "model": "Suunto Ocean", "serial": "253810000400"},
+                    start_time=datetime(2026, 6, 1, 6, 15, tzinfo=UTC),
+                    utc_offset_minutes=120,
+                    files=[
+                        make_file_row(
+                            1,
+                            uuid=UUIDS["dive-file"],
+                            original_filename="Suunto Ocean 2026-06-01.json",
+                            content_type="application/json",
+                            byte_size=2048,
+                            parser_key="suunto_json",
+                        )
+                    ],
+                    has_profile=True,
+                )
+            ]
         },
         trips=[trip],
         locations_by_trip={1: trip_locations},
@@ -518,7 +562,7 @@ def full_bundle() -> ExportBundle:
                 ),
             ]
         },
-        dive_file_sha256={2: "a" * 64},
+        dive_file_sha256={1: "a" * 64},
         cert_file_sha256={(1, "front"): "b" * 64, (1, "back"): "c" * 64},
         # A non-empty current state and two presets, one of them the empty set: the
         # `diver` member's extension is the only place these appear, and an all-empty
