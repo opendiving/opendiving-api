@@ -150,10 +150,13 @@ class DiveTechScalars(BaseModel):
     The entry/exit coordinates join them for the *mechanism* rather than that argument: a
     diver could in principle type a position, but nothing offers to, so these travel the
     same import-owned path. That has one consequence worth stating, because it is what
-    would break first if a form ever did offer them: `store_tech_scalars` writes every
-    field of this mixin on every attach, `None` included, so re-attaching an export
-    overwrites whatever these hold. Adding a hand-set position means taking it off this
-    mixin, not adding a special case to that write.
+    would break first if a form ever did offer them: a recording's **first** file writes
+    every field of this mixin outright, `None` included (`store_tech_scalars`), so attaching
+    to a recording that had no files overwrites whatever these hold. A *later* file of the
+    same recording fills instead and cannot overwrite (`fill_tech_scalars`) - but that is a
+    property of which write runs, not a protection these fields have. Adding a hand-set
+    position means taking it off this mixin, not relying on the fill or adding a special
+    case to the outright write.
 
     The membership is load-bearing in the other direction too - `TECH_SCALAR_FIELDS` is
     read off `model_fields`, so a field added here is written by the import and picked up

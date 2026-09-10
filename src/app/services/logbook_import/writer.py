@@ -23,6 +23,7 @@ exists.
 import hashlib
 import logging
 import uuid as uuid_pkg
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
@@ -406,14 +407,49 @@ class _Writer:
                 update(DiveRecording).where(DiveRecording.id == recording_id).values(**planned.device)
             )
 
+        digests, parser_key = await self._write_recording_files(
+            record.source_uuid, recording_id=recording_id, dive_id=dive_id, planned_files=planned.files
+        )
+
+        if planned.profile is None:
+            return recording_id
+        await store_profile(
+            self._db,
+            recording_id=recording_id,
+            dive_id=dive_id,
+            profile=planned.profile.profile,
+            source_sha256=recording_source_digest(digests) if digests else _payload_digest(planned.profile),
+            parser_key=(parser_key or IMPORT_PARSER_KEY) if digests else IMPORT_PARSER_KEY,
+            commit=False,
+            duration=planned.profile.duration,
+        )
+        return recording_id
+
+    async def _write_recording_files(
+        self,
+        source_uuid: uuid_pkg.UUID,
+        *,
+        recording_id: int,
+        dive_id: int,
+        planned_files: Sequence[PlannedFile],
+    ) -> tuple[list[str], str | None]:
+        """Store an archive's bytes against one recording. Returns their digests, in order.
+
+        Shared by both write paths, and that is the point: a recording the import *creates*
+        and one it *fills* are alike in this respect - each is a record whose files the
+        archive is carrying, and the planner has already counted and claimed them either
+        way. It lived inside `_write_recording` while only that path had files, and the fill
+        path then silently dropped every one of them while the report went on saying
+        `files.restored`.
+        """
         digests: list[str] = []
         parser_key: str | None = None
-        for planned_file in planned.files:
+        for planned_file in planned_files:
             stored = await self._store_blob(
                 planned_file,
                 kind=DIVE_FILE_KEY_KIND,
                 collection="dives",
-                record_uuid=record.source_uuid,
+                record_uuid=source_uuid,
                 sniff=False,
             )
             if stored is None:
@@ -435,20 +471,7 @@ class _Writer:
             )
             digests.append(stored.digest)
             parser_key = parser_key or planned_file.parser_key
-
-        if planned.profile is None:
-            return recording_id
-        await store_profile(
-            self._db,
-            recording_id=recording_id,
-            dive_id=dive_id,
-            profile=planned.profile.profile,
-            source_sha256=recording_source_digest(digests) if digests else _payload_digest(planned.profile),
-            parser_key=(parser_key or IMPORT_PARSER_KEY) if digests else IMPORT_PARSER_KEY,
-            commit=False,
-            duration=planned.profile.duration,
-        )
-        return recording_id
+        return digests, parser_key
 
     async def _write_recording_matches(self) -> None:
         """Apply the incoming recordings that belong to dives the caller already has.
@@ -519,6 +542,25 @@ class _Writer:
             recording_id=match.recording_id,
             start_time=planned.start_time,
             utc_offset_minutes=planned.utc_offset_minutes,
+        )
+
+        # **The archive's bytes go onto the stored recording**, which is the one thing a fill
+        # writes rather than fills: a file is not a value that can already be there. This is
+        # the second export of a record the logbook already holds - the case a recording
+        # exists to make representable - so it joins that recording's files exactly as it
+        # would through the attach route. The planner has already counted these as restored
+        # and claimed their digests, so dropping them here reported bytes as stored that were
+        # never written.
+        #
+        # The stored profile is left alone. Its `source_sha256` no longer names what the
+        # recording holds, which makes it a `backfill_profiles` candidate - and re-deriving
+        # from the newly arrived bytes is that script's job rather than an import's, an import
+        # being the one path that stores samples it did not extract.
+        await self._write_recording_files(
+            match.source_uuid,
+            recording_id=match.recording_id,
+            dive_id=match.dive_id,
+            planned_files=planned.files,
         )
 
         if (

@@ -1963,7 +1963,7 @@ admin form that could meaningfully accept a file upload.
 ## Dive source files are stored only once a dive exists
 
 `POST /dive/parse` stays exactly what it was: it reads the upload, parses it, and drops the bytes.
-Storage happens in a second request, `PUT /dive/{uuid}/file`, which the web app sends after
+Storage happens in a second request, `POST /dive/{uuid}/recordings`, which the web app sends after
 `POST /dive` (or `PATCH /dive/{uuid}`) has succeeded.
 
 Two reasons it isn't folded into the create call. `DiveCreateRequest` is `extra="forbid"` JSON, so a
@@ -1982,8 +1982,8 @@ preserve it would be much worse than losing it.
 
 ## A signed parse token, not `can_parse`, decides what may be stored
 
-`PUT /dive/{uuid}/file` requires a `file_token` - a short-lived JWT (`create_dive_file_token`,
-`TokenType.DIVE_FILE`) minted by `/dive/parse` binding
+`POST /dive/{uuid}/recordings` requires a `file_token` - a short-lived JWT
+(`create_dive_file_token`, `TokenType.DIVE_FILE`) minted by `/dive/parse` binding
 `(user uuid, sha256 of the bytes, the parser that succeeded)`. The store path re-hashes the body it
 receives and refuses anything whose digest doesn't match.
 
@@ -2063,9 +2063,9 @@ ever runs and the FK's `ON DELETE CASCADE` never fires.
 
 Leaving the row would do more than strand bytes. It would keep the file's slot in *both* unique
 indexes, so re-importing the same export into a fresh dive would 409 against a dive the diver can no
-longer see. `DELETE /dive/{uuid}/file` likewise hard-deletes rather than unlinking - a "delete"
-button that only hides the file would be a worse trade than losing it from the corpus, and it's a
-raw device export, which is more identifying than a card scan.
+longer see. `DELETE /dive/{uuid}/file/{fid}` likewise hard-deletes rather than unlinking - a
+"delete" button that only hides the file would be a worse trade than losing it from the corpus, and
+it's a raw device export, which is more identifying than a card scan.
 
 ## `source_file` is on the dive detail response only
 
@@ -2283,8 +2283,8 @@ that route converts a UDDF file or a `.ssrf` on the way in; the sentence above i
 `/dive/parse`, which still neither returns nor accepts a profile. See *"Importing a logbook is the
 one client-supplied profile"* below for why the two are different questions. The
 "`ParsedDiveSchema`/`DiveMixtureSchema` trimmed..." decision already deleted `DiveSampleSchema` for
-this reason; this is its complement. It is called server-side from `PUT /dive/{uuid}/file`, the only
-place with both the bytes and proof of where they came from.
+this reason; this is its complement. It is called server-side from `POST /dive/{uuid}/recordings`,
+the only place with both the bytes and proof of where they came from.
 
 Non-abstract so a new format can ship header-only and grow a profile extraction later without a flag
 day. `None` means "this file carries no samples"; malformed samples raise `DiveParseError`. Dispatch
@@ -2841,8 +2841,8 @@ number.** Every channel is bounded by `MAX_POINTS_PER_CHANNEL`, and every other 
 `label` is text copied straight off an uploaded file, so without a bound of its own the payload's
 real ceiling is `MAX_DIVE_FILE_SIZE` - a 2.4 MB export of long alert strings measured at 2.4 MB
 stored, essentially 1:1, on a table whose whole design assumes tens of KB and serves them whole on
-every `GET /dive/{uuid}/profile`. `MAX_LABEL_CHARS = 120` closes it, and the same file now stores 10
-KB. Self-inflicted and per-user rather than cross-tenant, but the row outlives the upload.
+every profile read. `MAX_LABEL_CHARS = 120` closes it, and the same file now stores 10 KB.
+Self-inflicted and per-user rather than cross-tenant, but the row outlives the upload.
 
 Truncated in `_rebase_events` rather than bounded by a `Field(max_length=...)`, which would raise:
 `extract_profile` must never fail the upload it rode in on, and a file whose one long alert took its
@@ -3835,7 +3835,7 @@ interpolate that stored name straight into the header:
 Starlette encodes every header value as latin-1 while building the response, so anything above
 U+00FF raises `UnicodeEncodeError` *before* a single byte is sent. That is not a garbled filename,
 it is a 500 - and a permanent one, on every subsequent `GET /certification/{uuid}/file/{side}` or
-`GET /dive/{uuid}/file` for that row, because the name causing it is stored. The upload, the
+`GET /dive/{uuid}/file/{fid}` for that row, because the name causing it is stored. The upload, the
 metadata reads and the card thumbnail all keep working; only the download breaks.
 
 Three things conspire to hide it:
@@ -4196,9 +4196,9 @@ format we do not control, while the header fields are what the diver actually ca
 
 ## Uploaded files are parsed in a thread, not on the event loop
 
-`POST /dive/parse` and `PUT /dive/{uuid}/file` both hand their bytes to `run_in_threadpool`. Parsing
-is pure CPU with nothing awaited inside it, and the FIT decoder is pure Python: ~2 s per MB of
-densely-encoded FIT, against ~0.07 s for a 2.8 MB Suunto JSON export through the C-accelerated
+`POST /dive/parse` and `POST /dive/{uuid}/recordings` both hand their bytes to `run_in_threadpool`.
+Parsing is pure CPU with nothing awaited inside it, and the FIT decoder is pure Python: ~2 s per MB
+of densely-encoded FIT, against ~0.07 s for a 2.8 MB Suunto JSON export through the C-accelerated
 `json` module - two orders of magnitude more CPU per byte. Inline in an `async def`, a single large
 upload would stall every other request on that worker. The XML and JSON parsers went the same way
 rather than being special-cased: they are the same shape of work, just faster today.
@@ -4217,10 +4217,10 @@ originally sized the worst case from a 500 KB file at ~0.6 s, extrapolating to ~
 `MAX_DIVE_FILE_SIZE`. That was measured on a sparsely-encoded file and under-counted: a device
 writes *one* definition record followed by a long run of bare 10-byte `record` messages, so a 5 MB
 file holds ~524 000 of them and takes **~10 s** to decode - and the two-step import pays it twice,
-once at `/dive/parse` and once at `PUT /dive/{uuid}/file`. `run_in_threadpool` keeps the event loop
-free but AnyIO's default limiter is 40 threads, so 40 such uploads saturate the pool and everything
-else queues behind them. It needs authentication, so it is not an open DoS - but one diver with a
-long, high-rate log could do it by accident.
+once at `/dive/parse` and once at `POST /dive/{uuid}/recordings`. `run_in_threadpool` keeps the
+event loop free but AnyIO's default limiter is 40 threads, so 40 such uploads saturate the pool and
+everything else queues behind them. It needs authentication, so it is not an open DoS - but one
+diver with a long, high-rate log could do it by accident.
 
 `_MAX_FRAMES` (100 000) is the actual bound, and it is on **frames decoded**, not samples collected.
 That distinction is the whole fix: of the ~10 s, bare decoding is ~8 s and collecting the samples is
@@ -5778,8 +5778,8 @@ wildcard there either. `expose_headers` gets neither treatment - it is emitted v
 exactly why this one had to be spelled out.
 
 The `/export/*` endpoints are the reason it came up, but the fix is not export-specific:
-`GET /dive/{uuid}/file` and `GET /certification/{uuid}/file/{side}` build a `Content-Disposition`
-through `content_disposition_attachment` and were equally unreadable.
+`GET /dive/{uuid}/file/{fid}` and `GET /certification/{uuid}/file/{side}` build a
+`Content-Disposition` through `content_disposition_attachment` and were equally unreadable.
 
 `tests/test_cors.py` asserts it on a real (401) `GET` rather than on the preflight, because
 `Access-Control-Expose-Headers` is only sent on actual responses - a preflight would pass whatever
@@ -14546,30 +14546,31 @@ from the column default.
 
 ## The profile speaks one vocabulary, storage included
 
-`ExportDive.profile` is typed `DiveProfileRead` — the same class `GET /dive/{uuid}/profile` serves —
-so making the exported profile speak DiveJSON changed that endpoint's shape too. The rename was
-taken *through* rather than around: `duration_seconds` → `duration`, `t`/`v` → `times`/`values`,
-`pressure` → `pressures`, and an event's `t` → `time`, on `DiveProfileRead`, `DiveProfileSeries`,
-`DiveProfilePressureSeries` and `DiveProfileEvent`.
+`ExportRecording.profile` is typed `DiveProfileRead` — the same class
+`GET /dive/{uuid}/recording/{rid}/profile` serves — so making the exported profile speak DiveJSON
+changed that endpoint's shape too. The rename was taken *through* rather than around:
+`duration_seconds` → `duration`, `t`/`v` → `times`/`values`, `pressure` → `pressures`, and an
+event's `t` → `time`, on `DiveProfileRead`, `DiveProfileSeries`, `DiveProfilePressureSeries` and
+`DiveProfileEvent`.
 
-The alternative was export-local profile models, which would have left `GET /dive/{uuid}/profile`
-untouched and cost nothing today. It was rejected because the cost is permanent: the project would
-speak two profile vocabularies on two surfaces, forever, and every future profile change would have
-to be made twice. A rename is paid once, and there is nowhere this is deployed.
+The alternative was export-local profile models, which would have left that route untouched and cost
+nothing today. It was rejected because the cost is permanent: the project would speak two profile
+vocabularies on two surfaces, forever, and every future profile change would have to be made twice.
+A rename is paid once, and there is nowhere this is deployed.
 
 **The web half is a separate, sequenced change, and nothing automated will tell you it is missing.**
-`GET /dive/{uuid}/profile` and the `profile`/`gas_use` members of `GET /dive/{uuid}` change shape
-here, and `opendiving-web` declares and reads every renamed member: `duration` and `pressures` on
-the profile, `times`/`values` on a channel, an event's `time`, `DiveProfileInfo.duration` and
-`DiveGasUse.duration`. Enumerated rather than counted, because this paragraph is the checklist for
-the web change and a reader working from a figure stops wherever the figure is wrong — the chart's x
-domain, every `.t` it plots, and `gasAttributionNote`'s coverage fraction are all on that list. No
-CI job runs the two repos together (`CONTRIBUTING.md`, *Changes that span both repos*), so between
-this merging and the web change merging the chart and the gas-use card render nothing, with both
-suites green. That is the accepted shape of every breaking API change here — api first, web second,
-the two PRs linked — and it is written down because the failure is silent in both directions: a
-reviewer looking only at this repo cannot see it, and a reviewer looking only at web sees a client
-that matches nothing.
+`GET /dive/{uuid}/recording/{rid}/profile` and the `recordings`/`gas_use` members of
+`GET /dive/{uuid}` change shape here, and `opendiving-web` declares and reads every renamed member:
+`duration` and `pressures` on the profile, `times`/`values` on a channel, an event's `time`,
+`DiveProfileInfo.duration` and `DiveGasUse.duration`. Enumerated rather than counted, because this
+paragraph is the checklist for the web change and a reader working from a figure stops wherever the
+figure is wrong — the chart's x domain, every `.t` it plots, and `gasAttributionNote`'s coverage
+fraction are all on that list. No CI job runs the two repos together (`CONTRIBUTING.md`, *Changes
+that span both repos*), so between this merging and the web change merging the chart and the gas-use
+card render nothing, with both suites green. That is the accepted shape of every breaking API change
+here — api first, web second, the two PRs linked — and it is written down because the failure is
+silent in both directions: a reviewer looking only at this repo cannot see it, and a reviewer
+looking only at web sees a client that matches nothing.
 
 **It reaches storage.** `dive_profile.duration_seconds` is now `dive_profile.duration` (revision
 `b1c7f0e4a2d9`, an `ALTER TABLE ... RENAME COLUMN` — autogenerate renders a rename as a drop plus an

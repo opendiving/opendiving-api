@@ -2203,6 +2203,60 @@ class TestTheImportGates:
         assert [event["gas_number"] for event in data["events"]] == [2]
 
     @pytest.mark.asyncio
+    async def test_a_fills_archived_bytes_are_stored_against_the_recording_it_filled(
+        self, db: Session, async_db: AsyncSession, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """A fill writes no dive row, but a file is not a value that can already be there.
+
+        The archive is carrying this recording's other export, the planner has already
+        counted it as restored and claimed its digest, and the only place it can go is the
+        recording it matched. Dropping it reported `files.restored` for bytes that were never
+        written and discarded them silently - the one failure mode an import has no way to
+        report, because the count says the opposite.
+        """
+        from src.app.services import blob_store
+
+        monkeypatch.setattr(blob_store, "storage_root", lambda: tmp_path)
+        user, dive = self._seed(db, device_brand="Suunto", device_serial="253810000400")
+        recording = (
+            await async_db.execute(select(DiveRecording.id).where(DiveRecording.dive_id == dive.id))
+        ).scalar_one()
+        payload = b'{"DeviceLog": {"Header": {}}}'
+        digest = hashlib.sha256(payload).hexdigest()
+        document = self._document(
+            {
+                "device": {"brand": "suunto", "model": "Suunto Ocean"},
+                "started_at": "2026-09-08T15:17:38+03:00",
+                "profile": {"duration": 3473, "depth": {"times": [0, 3473], "values": [0, 1904]}},
+                "source_files": [
+                    {
+                        "uuid": str(uuid7()),
+                        "original_filename": "Suunto Ocean.json",
+                        "content_type": "application/json",
+                        "byte_size": len(payload),
+                        "sha256": digest,
+                        "archive_path": "files/0001-0-ocean.json",
+                    }
+                ],
+            }
+        )
+
+        plan = await _apply(
+            async_db,
+            user.id,
+            _zip_of(document, {"files/0001-0-ocean.json": payload}),
+            filename="logbook.zip",
+        )
+
+        assert ImportNoteCode.RECORDING_FILLED in _codes(plan)
+        assert plan.files_restored == 1
+        stored = (await async_db.execute(select(DiveFile).where(DiveFile.recording_id == recording))).scalars().all()
+        assert [row.sha256 for row in stored] == [digest], (
+            "the report said one file was restored, so one file has to be on the recording it filled"
+        )
+        assert await blob_store.get(stored[0].storage_key) == payload
+
+    @pytest.mark.asyncio
     async def test_an_unrelated_dive_is_still_a_dive(self, db: Session, async_db: AsyncSession) -> None:
         """The gate has to refuse as well as fire. A dive the next morning is nobody's second
         computer, and importing it must create a dive rather than fold it into yesterday's."""
