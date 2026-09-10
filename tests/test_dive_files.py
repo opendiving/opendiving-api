@@ -32,6 +32,7 @@ from src.app.models.dive import Dive
 from src.app.schemas.dive import DiveFileInfo, DiveTechScalars
 from src.app.schemas.dive_mixture import DiveMixtureRead, GasRole
 from src.app.schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
+from src.app.services import dive_files as dive_files_module
 from src.app.services import dive_parsers as parsers_module
 from src.app.services.blob_store import new_key
 from src.app.services.cache_invalidation import invalidate_dive_caches
@@ -377,14 +378,26 @@ class TestProfileExtractionReleasesTheTransaction:
     FIT uploads ties up pool connections doing nothing.
 
     An ordering test rather than a behavioural one: what can regress here is somebody
-    moving the extraction back above the release, and this is what would catch it.
+    moving an extraction back above the release, and this is what would catch it.
+
+    **The attach path releases twice, and the assertion below is written to see the second
+    one.** Recordings gave it a second hop - the incoming file is parsed to decide where it
+    lands, and then the whole recording is parsed to derive what comes off it - and the
+    lookups in between reopen the transaction the first release closed. `calls.index()`
+    reports the *first* occurrence of each, so a test written that way is satisfied by the
+    first release alone and blind to a second hop taken with a connection pinned.
     """
 
     @staticmethod
     def _session(calls: list[str]) -> AsyncMock:
         result = _attach_result()
+
+        async def execute(*args: object, **kwargs: object) -> MagicMock:
+            calls.append("query")
+            return result
+
         db = AsyncMock()
-        db.execute = AsyncMock(return_value=result)
+        db.execute = execute
         db.rollback = AsyncMock(side_effect=lambda: calls.append("release"))
         db.commit = AsyncMock(side_effect=lambda: calls.append("commit"))
         return db
@@ -392,12 +405,19 @@ class TestProfileExtractionReleasesTheTransaction:
     @pytest.mark.asyncio
     async def test_releases_before_handing_the_file_to_the_thread(self, monkeypatch) -> None:
         calls: list[str] = []
+        real_extract_all = dive_files_module._extract_all
+        real_extract_recording = dive_files_module.extract_recording
 
-        def recording_extract(parser, data):
+        def first_hop(parser, data):
             calls.append("extract")
-            return _extract_all(parser, data)
+            return real_extract_all(parser, data)
 
-        monkeypatch.setattr("src.app.services.dive_files._extract_all", recording_extract)
+        def second_hop(files, known=None):
+            calls.append("extract")
+            return real_extract_recording(files, known)
+
+        monkeypatch.setattr("src.app.services.dive_files._extract_all", first_hop)
+        monkeypatch.setattr("src.app.services.dive_files.extract_recording", second_hop)
 
         user_uuid = uuid7()
         content = b"<Dive/>"
@@ -414,9 +434,17 @@ class TestProfileExtractionReleasesTheTransaction:
             ),
         )
 
-        assert calls.index("release") < calls.index("extract"), (
-            f"the read transaction is still open during extraction: {calls}"
-        )
+        # Both hops, and each against the release that precedes *it*: what regresses here is a
+        # query issued between a release and the extraction after it, which reopens the
+        # transaction and pins the connection for the parse. A positional `index()` cannot
+        # express that pairing - it reports the first release and the first extraction and is
+        # satisfied by them however the rest is ordered.
+        assert calls.count("extract") == 2, f"the attach path takes two extraction hops: {calls}"
+        for position, call in enumerate(calls):
+            if call == "extract":
+                assert calls[position - 1] in ("release", "extract"), (
+                    f"an extraction ran with the read transaction reopened: {calls}"
+                )
 
 
 class TestExtractAllSharesOneDecode:

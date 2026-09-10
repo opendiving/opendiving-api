@@ -16131,6 +16131,18 @@ recomputed after the fill, because it is derived from the merged events and dept
 **The fills are `COALESCE` per column rather than read-then-write.** One statement, nothing to race,
 and the rule stated once in SQL instead of once in SQL and once in Python.
 
+**`fill_start` is the one exception, and it is not a fourth thing being filled — it is the same
+recording's start, which is two columns holding one value.** A NULL `utc_offset_minutes` means
+`start_time` holds a wall clock labelled UTC rather than an instant, so a `COALESCE` that filled the
+offset alone would reinterpret a column nobody rewrote and read the recording back `offset` minutes
+late. The two are therefore filled together: where the row has a start and no offset, filling the
+offset also converts the stored clock face to the instant it names. That is **not** the fabrication
+*Clocks* rejects, and the difference is whose offset it is — that rejected alternative borrows the
+*account's or the dive's*, while this one comes from another export of the same device, which is the
+only match that reaches this function at all. Read-then-write because expressing it in SQL means a
+`CASE` over both columns and the rule is hard enough to state once; there is no race to lose, every
+caller being inside a transaction on a dive only its owner can reach.
+
 **The outright write survives, and which one runs is now structural.** A recording's *first* file
 writes the dive's tech scalars outright - `None` included, so a reading nothing yields is cleared -
 because there was nothing on the dive to lose. Every later file fills. `_rederive_recording` picks

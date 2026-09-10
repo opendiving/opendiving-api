@@ -622,6 +622,13 @@ async def store_recording_file(
     # Appended last, which is where `ORDER BY dive_file.id` will put it once the row lands -
     # and attach order is the whole of what "the first file that recorded it" means.
     files = [*existing_files, incoming_file]
+    # Released a *second* time, because the two reads above reopened a transaction the first
+    # release had closed and nothing has been written yet. Without this the connection sits
+    # idle-in-transaction across the parse of every file already on the recording and the blob
+    # write below - which is the pool exhaustion `release_read_transaction` exists to prevent,
+    # arrived at from the other side. Safe for the reason that function documents: everything
+    # this still needs (`matched`, `files`) is a frozen dataclass, detached from the session.
+    await release_read_transaction(db)
     recording_extraction = await run_in_threadpool(extract_recording, files, {digest: extraction})
     # The file lands on the volume *before* the transaction that references it. Every
     # database-visible state therefore names bytes that exist; the only thing a crash
@@ -753,24 +760,31 @@ def _incoming_facts(extraction: FileExtraction) -> dive_recordings.RecordingFact
 
 
 async def read_recording(
-    db: AsyncSession, *, recording_id: int, known: Mapping[str, FileExtraction] | None = None
+    db: AsyncSession,
+    *,
+    recording_id: int,
+    known: Mapping[str, FileExtraction] | None = None,
+    release: bool = False,
 ) -> tuple[list[LoadedDiveFile], RecordingExtraction]:
     """A recording's files and what they say, with the parsing done **off the event loop**.
 
     The seam that keeps `extract_recording` - pure CPU, up to ~1.7 s of it per FIT - out of
     the request's own thread, which is what *"Uploaded files are parsed in a thread, not on
-    the event loop"* in `DECISIONS.md` requires. Every request path calls this and hands the
-    result to `_rederive_recording`, which then only writes.
+    the event loop"* in `DECISIONS.md` requires.
 
-    The read transaction is deliberately **not** released around the hop, unlike the one
-    before `store_recording_file`'s first parse: every caller here is mid-transaction with
-    writes already issued, and rolling that back to free the connection would discard them.
-    What is bought is the loop, which is the scarce thing; the connection is held for the
-    duration and that is the accepted cost.
+    **`release` is whether the caller has anything left in the transaction to lose**, and it
+    has to be the caller's answer rather than this function's. `release_read_transaction`
+    rolls back, so it frees the connection for the length of the parse only where nothing has
+    been written yet - which is true of `_repeat_upload`, whose reads are all lookups, and
+    false of `refresh_tech_scalars`, which every caller reaches after a delete or a promotion
+    has already been issued. There the connection is held for the duration, and that is the
+    accepted cost: what is bought either way is the event loop, which is the scarce thing.
     """
     files = await load_recording_files(db, recording_id=recording_id)
     if not files:
         return [], RecordingExtraction()
+    if release:
+        await release_read_transaction(db)
     return files, await run_in_threadpool(extract_recording, files, known)
 
 
@@ -865,6 +879,8 @@ async def refresh_tech_scalars(db: AsyncSession, *, dive_id: int) -> None:
     A dive whose primary recording has no files - or which has no recordings at all - has its
     readings cleared, which is what "nothing here can re-derive them" means.
     """
+    # Never `release=True`: every caller reaches this after a delete or a promotion has been
+    # issued, and rolling the transaction back to free the connection would discard them.
     primary = (await dive_recordings.primary_recording_ids(db, dive_ids=[dive_id])).get(dive_id)
     scalars = {} if primary is None else (await read_recording(db, recording_id=primary))[1].scalars
     await store_tech_scalars(
@@ -920,8 +936,10 @@ async def _repeat_upload(
         await get_existing_profile(db, recording_id=existing.recording_id),
         sha256=recording_source_digest(digests),
     ) == ("extract"):
-        files, extraction = await read_recording(db, recording_id=existing.recording_id)
-        await release_read_transaction(db)
+        # `release=True`: nothing above this has written anything - the blob repair is on the
+        # volume, not in the transaction - so the connection is freed for the parse rather
+        # than pinned across it.
+        files, extraction = await read_recording(db, recording_id=existing.recording_id, release=True)
         try:
             await _rederive_recording(
                 db,
