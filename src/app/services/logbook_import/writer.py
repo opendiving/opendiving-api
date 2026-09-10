@@ -485,9 +485,9 @@ class _Writer:
         recording had no samples at all, its profile. The stored dive's own blanks fill too:
         its oxygen-exposure readings, and the members its cylinders have none of, where those
         cylinders still demonstrably describe the document's. Nothing is ever overwritten,
-        which is the whole rule: the
-        diver may have corrected any of it, and a fill that won an argument with an edit
-        would be the silent loss this repository already refuses on the backfill path.
+        which is the whole rule: the diver may have corrected any of it, and a fill that won
+        an argument with an edit would be the silent loss this repository already refuses on
+        the backfill path.
 
         An **attach** appends a recording to that dive, after its last. It touches none of
         the dive's own figures - those are the primary recording's - and it maps its

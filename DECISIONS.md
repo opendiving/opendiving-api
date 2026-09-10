@@ -16151,11 +16151,12 @@ would double every gas switch the pair agree on. `gas_attribution` is not filled
 recomputed after the fill, because it is derived from the merged events and depth together -
 `finalize_profile`'s ordering rule, one level up.
 
-**The single-column fills are a `COALESCE` per column rather than a read-then-write.** One
-statement, nothing to race, and the rule stated once in SQL instead of once in SQL and once in
-Python. The two that are not — `fill_start` and `fill_dive_mixtures` — are both the same kind of
-exception, and the next two paragraphs say why each is: the value they are filling is not a column,
-so there is no column to `COALESCE`.
+**Most of the fills are a `COALESCE` per column rather than a read-then-write.** One statement,
+nothing to race, and the rule stated once in SQL instead of once in SQL and once in Python. Two are
+not, for two unrelated reasons, and neither is "the column is awkward": `fill_start`'s is below, and
+`fill_dive_mixtures`' is that its join is positional and the alignment exists only in Python, so the
+statement would have to name a row the SQL cannot pick out — see *"The cylinder half is a second
+function, not `merge_mixture_fields`"* at the end of this section.
 
 **`fill_start` is one of the two that is not a `COALESCE`, because a recording's start is two
 columns holding one value.** A NULL `utc_offset_minutes` means `start_time` holds a wall clock
