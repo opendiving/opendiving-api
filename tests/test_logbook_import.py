@@ -2144,6 +2144,65 @@ class TestTheImportGates:
         assert (recordings[1].duration, recordings[1].max_depth) == (2940, 19.0)
 
     @pytest.mark.asyncio
+    async def test_an_attached_recordings_cylinder_labels_are_mapped_onto_the_dives(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """`gas_number` is dive-scoped, so a second computer's own numbering has to move.
+
+        This dive has EAN32 on cylinder 1 and a 50 % deco bottle on 2; the incoming computer
+        numbers them the other way round. Without the mapping its pressure channel lands on
+        the dive's back gas and the whole multi-tank figure is computed off the wrong tank -
+        which nothing downstream can detect, because a `gas_number` that names *a* cylinder
+        is indistinguishable from one that names the right one.
+        """
+        user, dive = self._seed(db, device_brand="Suunto", device_serial="253810000400")
+        db.add_all(
+            [
+                DiveMixture(dive_id=dive.id, gas_number=1, oxygen=32.0, helium=0.0),
+                DiveMixture(dive_id=dive.id, gas_number=2, oxygen=50.0, helium=0.0),
+            ]
+        )
+        db.commit()
+        document = self._document(
+            {
+                "device": {"brand": "Shearwater Research, Inc", "model": "Perdix 3", "serial": "D9772626"},
+                "started_at": "2026-09-08T15:19:38+03:00",
+                "profile": {
+                    "duration": 2940,
+                    "depth": {"times": [0, 2940], "values": [0, 1900]},
+                    "pressures": [{"gas_number": 1, "times": [0], "values": [2000]}],
+                    "events": [{"time": 0, "type": "gas_switch", "gas_number": 1}],
+                },
+            },
+            # The incoming document's own cylinders, in its own labelling: its 1 is the deco
+            # bottle the dive calls 2.
+            cylinders=[
+                {"gas_number": 1, "oxygen": 50.0, "helium": 0.0},
+                {"gas_number": 2, "oxygen": 32.0, "helium": 0.0},
+            ],
+        )
+
+        plan = await _apply(async_db, user.id, document)
+
+        assert ImportNoteCode.RECORDING_ATTACHED in _codes(plan)
+        attached = (
+            (
+                await async_db.execute(
+                    select(DiveRecording.id).where(DiveRecording.dive_id == dive.id, DiveRecording.ordinal == 1)
+                )
+            )
+            .scalars()
+            .one()
+        )
+        # `DiveProfile.data` is `deferred`, so it has to be named in the select rather than
+        # touched off an instance - a lazy load here is IO outside the greenlet.
+        data = (
+            await async_db.execute(select(DiveProfile.data).where(DiveProfile.recording_id == attached))
+        ).scalar_one()
+        assert [series["gas_number"] for series in data["pressure"]] == [2]
+        assert [event["gas_number"] for event in data["events"]] == [2]
+
+    @pytest.mark.asyncio
     async def test_an_unrelated_dive_is_still_a_dive(self, db: Session, async_db: AsyncSession) -> None:
         """The gate has to refuse as well as fire. A dive the next morning is nobody's second
         computer, and importing it must create a dive rather than fold it into yesterday's."""

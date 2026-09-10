@@ -898,8 +898,8 @@ async def _cached_read_dive(
     #
     # Only for a dive that can use it, which the mixtures just read already say. Anything
     # else - every single-cylinder dive, and every dive logged without a cylinder at all -
-    # would be paying a round trip against the row `get_profile_infos_for_dives` just read
-    # for a value `compute_multi_tank_gas_use` discards on its first line.
+    # would be paying a round trip against the row the recordings read just touched, for a
+    # value `compute_multi_tank_gas_use` discards on its first line.
     attribution = None
     if len(mixtures) >= 2:
         attribution = (await get_gas_attribution_for_dives(db=db, dive_ids=[db_dive["id"]]))[db_dive["id"]]

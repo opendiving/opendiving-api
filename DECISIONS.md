@@ -2397,10 +2397,12 @@ the one place where that is not obviously right - a dive is the record the whole
 and folding these two blob paths into the cascade is the work that would have to come with it. See
 *"The row goes, and so does everything pointing at it"*.
 
-What actually removes them is `delete_profile_for_dive`, called from `delete_dive_file`. That covers
-**both** paths for free: the explicit `DELETE /dive/{uuid}/file`, and `delete_files_for_dive`, which
-`erase_dive` calls when a dive is deleted. Verified by reading `delete_files_for_dive` rather than
-assumed.
+What actually removes them is `delete_profile_for_recording` on the file path and
+`delete_profiles_for_dive` on the dive path - the two names the functions carry now that a profile
+hangs off a recording. They used to be one function covering both, which was true while a dive had
+exactly one of each; the paths diverged with recordings, because deleting a *file* re-derives what
+is left of its recording while deleting a *dive* takes every one of them. Verified by reading
+`delete_files_for_dive` rather than assumed.
 
 A profile goes with its file rather than outliving it: nothing cascades from removing the export,
 and a profile whose source is gone can never be re-derived or checked against anything.

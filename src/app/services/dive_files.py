@@ -42,7 +42,6 @@ from ..core.utils.uploads import read_upload_within_limit, safe_filename
 from ..models.dive import Dive
 from ..models.dive_file import DiveFile
 from ..models.dive_mixture import DiveMixture
-from ..models.dive_profile import DiveProfile
 from ..models.dive_recording import DiveRecording
 from ..schemas.dive import DiveFileInfo, DiveTechScalars
 from ..schemas.dive_mixture import DiveMixtureRead
@@ -52,6 +51,7 @@ from .dive_parsers import PARSER_BY_KEY, DiveParseError, DiveParser, Unsupported
 from .dive_profiles import (
     NormalizedProfile,
     delete_profile_for_recording,
+    delete_profiles_for_dive,
     derive_gas_attribution,
     downsample,
     extract_profile,
@@ -1134,7 +1134,12 @@ async def delete_files_for_dive(db: AsyncSession, *, dive_id: int, commit: bool 
     # any route the cascade does not cover would otherwise outlive the dive it belongs to -
     # keeping its slot in `ux_dive_file_user_id_sha256` and blocking a re-import of the same
     # export into a fresh dive, which is the failure this function exists to prevent.
-    await db.execute(delete(DiveProfile).where(DiveProfile.dive_id == dive_id))
+    #
+    # Through `delete_profiles_for_dive` rather than a `DELETE` written out here, so that
+    # `models/dive_profile.py`'s "what actually removes these rows" is a function a reader can
+    # find. It said so while the statement was inline, which made the docstring false and the
+    # function dead in one move.
+    await delete_profiles_for_dive(db, dive_id=dive_id, commit=False)
     await db.execute(delete(DiveFile).where(DiveFile.dive_id == dive_id))
     blob_store.delete_after_commit(db, keys)
     await store_tech_scalars(db, dive_id=dive_id, scalars=dict.fromkeys(TECH_SCALAR_FIELDS), commit=False)

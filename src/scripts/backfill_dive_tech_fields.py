@@ -7,13 +7,20 @@ Run once after deploying the columns, from the API container:
     docker compose exec api python -m src.scripts.backfill_dive_tech_fields --dry-run
 
 Fills `dive.cns_start/cns_end/otu_start/otu_end/surface_pressure_bar`, the entry/exit
-coordinates beside them, and - where the stored cylinders still demonstrably match the
-file's - `dive_mixture.po2_limit/gas_number/role`. The dive columns are whatever
-`DiveTechScalars` publishes rather than a list kept here, which is what let the
-coordinates arrive without editing this script. Every dive with a stored export is a
-candidate on every run; see
-`services/dive_files.py::backfill_tech_fields` for why there is no version column to
-select on and why the mixture half is deliberately the timid one.
+coordinates beside them, `dive_recording`'s six device columns, and - where the stored
+cylinders still demonstrably match the file's - `dive_mixture.po2_limit/gas_number/role`.
+The dive columns are whatever `DiveTechScalars` publishes rather than a list kept here,
+which is what let the coordinates arrive without editing this script.
+
+**Every primary recording holding a stored file is a candidate on every run**, and only the
+primary: a second computer's exposure readings are its own device's arithmetic and are never
+written onto the dive. See `services/dive_files.py::backfill_tech_fields` for why there is no
+version column to select on, why the run no longer *clears* a reading no file yields, and why
+the mixture half is deliberately the timid one.
+
+**One run is the upgrade step for an existing instance.** The migration that introduced
+recordings leaves every migrated one device-less - nothing in the old schema recorded what
+wrote a file - and this is what fills them, because it re-parses every stored export anyway.
 
 A script rather than an arq job, and a second script rather than a flag on
 `backfill_dive_profiles`, for the reasons recorded in that file and in DECISIONS.md.
@@ -37,10 +44,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--parser-key",
         default=None,
-        help="Only re-read files recorded under this parser (e.g. `suunto_xml`). "
-        "This is what `dive_file.parser_key` is for.",
+        help="Only re-read recordings holding a file recorded under this parser (e.g. `suunto_xml`). "
+        "This is what `dive_file.parser_key` is for; a recording holding two files is a candidate "
+        "when either of them names it.",
     )
-    parser.add_argument("--limit", type=int, default=None, help="Stop after this many candidate files.")
+    parser.add_argument("--limit", type=int, default=None, help="Stop after this many candidate recordings.")
     parser.add_argument("--dry-run", action="store_true", help="Report what would be written, write nothing.")
     return parser.parse_args()
 

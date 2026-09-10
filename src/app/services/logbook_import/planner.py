@@ -282,6 +282,11 @@ class PlannedRecordingMatch:
     # row can still supply readings the existing dive has none of. Ignored on `attach`, where
     # the recording is a second computer's and the dive's figures are the primary's.
     dive_values: dict[str, Any] = field(default_factory=dict)
+    # The incoming dive's cylinders, carried on **both** kinds and read differently by each:
+    # on a `fill` they are what `merge_mixture_fields` writes into the stored dive's rows, and
+    # on an `attach` they are the labelling this second computer's `gas_number`s are mapped
+    # *from* onto the dive's own list. Defaulting to empty rather than being required is what
+    # let the attach case ship without them once, with the whole relabelling unreachable.
     mixtures: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -1446,9 +1451,12 @@ class _Planner:
         decides - because an import that attached on a start window alone would silently fold
         a repetitive dive into the one before it.
 
-        The dive's own values ride along on a `fill` so a match can still supply readings the
-        stored dive has none of; they are dropped on an `attach`, where the recording is a
-        second computer's and the dive's figures are the primary recording's.
+        The dive's own *values* ride along on a `fill` only, so a match can still supply
+        readings the stored dive has none of; on an `attach` they are dropped, the recording
+        being a second computer's and the dive's figures the primary recording's. Its
+        **cylinders** ride along on both, and for two different jobs: on a fill they are what
+        `merge_mixture_fields` writes into the dive's own rows, and on an attach they are what
+        the second computer's `gas_number`s are mapped *from*.
         """
         remaining: list[PlannedRecording] = []
         taken = 0
@@ -1509,6 +1517,14 @@ class _Planner:
                         source_uuid=dive.uuid,
                         recording_id=None,
                         recording=recording,
+                        # **Carried on an attach as well as on a fill**, and for a different
+                        # job: not to fill the dive's cylinders but to *read* the incoming
+                        # dive's, so the writer can map this second computer's `gas_number`s
+                        # onto the ones the dive already has. Without them the mapping has
+                        # nothing to map from and the recording's pressure channels land
+                        # naming another computer's tanks - the misattribution
+                        # `relabel_gas_numbers` exists to prevent.
+                        mixtures=mixtures,
                     )
                 )
                 self._note(
