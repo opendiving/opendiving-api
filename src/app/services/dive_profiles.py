@@ -1177,6 +1177,8 @@ async def backfill_profiles(
                 skipped += 1
                 continue
 
+        # Synchronously: a one-shot script's loop has nothing else on it, so the threadpool
+        # hop the request paths need (`dive_files.read_recording`) would buy nothing here.
         profile, unreadable = extract_recording_profile(files)
         if unreadable:
             # At least one of this recording's files is recorded under a parser key this

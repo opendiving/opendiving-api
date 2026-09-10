@@ -81,6 +81,7 @@ from ..certification_files import MAX_CARD_FILE_SIZE
 from ..dive_files import MAX_DIVE_FILE_SIZE
 from ..dive_parsers import PARSER_BY_KEY
 from ..dive_profiles import (
+    IMPORT_PARSER_KEY,
     MAX_LABEL_CHARS,
     NormalizedProfile,
     ProfileEvent,
@@ -139,13 +140,13 @@ _RESOLUTION_ORDER: tuple[str, ...] = (
 # real import - a clean round trip of the demo logbook produces a handful.
 MAX_NOTES = 500
 
-# What `dive_profile.parser_key` records for a profile that arrived through import with no
-# file behind it. Deliberately not a key in `PARSER_BY_KEY`: there is no parser that would
-# re-read it, and `backfill_profiles` selects its candidates from `dive_file`, so a
-# bare-imported dive is never one. On the archive path the dive *does* get a file, and the
-# profile records that file's own parser key instead - the file is real and a later
-# backfill can legitimately re-read it.
-IMPORT_PARSER_KEY = "divejson_import"
+# `IMPORT_PARSER_KEY` is **defined in `services/dive_profiles.py`** and imported above rather
+# than declared here, because that module is where the value means something: it is one of
+# the two `UNREPRODUCIBLE_PROVENANCES` both backfills refuse to overwrite. It lived here
+# while this module was the only writer of it and the justification was "a bare-imported dive
+# is never a backfill candidate, because `backfill_profiles` selects from `dive_file`" - which
+# stopped being how that query works when recordings arrived. The guard is on the *profile's*
+# provenance now, so the constant and the rule that reads it belong together.
 
 # What a restored dive-computer file is recorded as when the document does not say which
 # parser read it, or names one this build no longer has. `dive_file.content_type` is

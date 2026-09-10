@@ -2018,13 +2018,11 @@ not for cards: a successful parse is a strictly stronger guarantee than magic by
 ## A dive has at most one source file, and identical bytes are stored once per diver
 
 **Superseded**, and only in its cardinality: see *"A dive has recordings, and a file belongs to one
-of them"* below. `ux_dive_file_dive_id` is gone - a dive holds as many exports as its recordings
-hold
-
-- and everything else here still holds, `ux_dive_file_user_id_sha256` and the three-outcome
-  `reconcile()` included. Kept as written because the reasoning is what survives: why a 409 rather
-  than a silent re-point, why no fourth "unlinked row you could re-claim" case, and why the write
-  wraps `IntegrityError` rather than taking a lock.
+of them"* below. `ux_dive_file_dive_id` is gone, because a dive holds as many exports as its
+recordings hold. Everything else here still holds, `ux_dive_file_user_id_sha256` and the
+three-outcome `reconcile()` included, and the section is kept as written because the reasoning is
+what survives: why a 409 rather than a silent re-point, why no fourth "unlinked row you could
+re-claim" case, and why the write wraps `IntegrityError` rather than taking a lock.
 
 Two unique indexes on `dive_file`: `ux_dive_file_dive_id` and `ux_dive_file_user_id_sha256`.
 Together they reduce every upload to three cases, which `reconcile()` in `services/dive_files.py`
@@ -2056,10 +2054,8 @@ and the UI disables the button in flight, so a retry beats `SELECT ... FOR UPDAT
 
 **Still true, one level up**: `delete_files_for_dive` removes the dive's *recordings*, and the FK
 cascade from `dive_recording` takes their files and profiles with them. The sentence below about
-keeping "the file's slot in *both* unique indexes" now names one index,
-`ux_dive_file_user_id_sha256`
-
-- see *"A dive has recordings, and a file belongs to one of them"*.
+keeping "the file's slot in *both* unique indexes" now names one index only,
+`ux_dive_file_user_id_sha256`, per *"A dive has recordings, and a file belongs to one of them"*.
 
 `erase_dive` calls `delete_files_for_dive` before `crud_dives.delete`, for the same reason
 `erase_certification` does: deletion is application-level (`is_deleted`), so no `DELETE FROM dive`
@@ -4866,7 +4862,7 @@ What makes it worth guarding anyway is that `store_tech_scalars` runs *inside*
 
 ```python
 except IntegrityError as exc:
-    raise DiveFileConflictError("The source file for this dive changed while this upload was in flight. Please try again.")
+    raise DiveFileConflictError("This dive's recordings changed while this upload was in flight. Please try again.")
 ```
 
 That message is about a concurrent upload winning a race on a unique index. A `CHECK` violation from
@@ -4917,10 +4913,11 @@ other five — `cns_start`, `cns_end`, `otu_start`, `otu_end` (`>= 0` each) and 
 The CNS/OTU gap was the live one, and it is the exact failure the surface-pressure validator was
 written to prevent, on the columns right beside it: a `<CnsStart>-4</CnsStart>` in an export makes
 `store_tech_scalars` violate `ck_dive_cns_start_non_negative` inside `store_recording_file`'s
-transaction, so `PUT /dive/{uuid}/file` rolls back and answers **409 "The source file for this dive
-changed while this upload was in flight. Please try again."** The file is never stored and every
-retry fails identically — flatly contradicting `extract_tech_scalars`' own stated priority that a
-header this build can't read must not fail the upload that would have preserved it.
+transaction, so `POST /dive/{uuid}/recordings` rolls back and answers **409 "This dive's recordings
+changed while this upload was in flight. Please try again."** (the message was worded for the
+one-file-per-dive era and is quoted here as it now reads). The file is never stored and every retry
+fails identically — flatly contradicting `extract_tech_scalars`' own stated priority that a header
+this build can't read must not fail the upload that would have preserved it.
 
 `gas_number` lands differently but is the same bug as `po2_limit`'s: only `_mixtures_from_cylinders`
 reads a number a *file* chose (`int(cylinder["GasNumber"])` out of the Ocean's sample data) — the

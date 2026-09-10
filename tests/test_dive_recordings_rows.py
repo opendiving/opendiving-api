@@ -11,7 +11,7 @@ Same skip-if-unreachable guard and same write-real-rows-and-leave-them conventio
 
 import hashlib
 import io
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from src.app.core.security import create_dive_file_token
+from src.app.core.utils.datetime_offset import combine_start_time
 from src.app.models.dive import Dive
 from src.app.models.dive_file import DiveFile
 from src.app.models.dive_profile import DiveProfile
@@ -32,6 +33,7 @@ from src.app.services.dive_parsers.suunto_xml import SuuntoXmlParser
 from src.app.services.dive_profiles import IMPORT_PARSER_KEY, MERGE_PARSER_KEY, NormalizedProfile, ProfileSeries
 from src.app.services.dive_recordings import (
     delete_recording,
+    fill_start,
     get_recordings_for_dives,
     make_primary,
     next_ordinal,
@@ -204,6 +206,101 @@ class TestWhereAFileLands:
         assert again.recording_id == first.recording_id
         assert again.file_uuid == first.file_uuid
         assert len(await _recordings(async_db, dive)) == 1
+
+
+class TestFillingAStart:
+    """The two start columns are one value, and filling half of them corrupts the other.
+
+    A NULL `utc_offset_minutes` means `start_time` holds a *wall clock labelled UTC* rather
+    than an instant. Writing an offset beside it without moving the clock silently
+    reinterprets a column nobody rewrote - and it is reachable by the ordinary route: a
+    recording logbook import created from a Shearwater UDDF carries no offset, and the same
+    computer's next export carries one.
+    """
+
+    WALL_CLOCK = datetime(2026, 9, 8, 15, 18, 10, tzinfo=UTC)
+
+    @pytest.mark.asyncio
+    async def test_an_offset_arriving_later_moves_the_clock_onto_a_real_instant(
+        self, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        recording = create_dive_recording(db, diver, dive)
+        await async_db.execute(
+            update(DiveRecording)
+            .where(DiveRecording.id == recording.id)
+            .values(start_time=self.WALL_CLOCK, utc_offset_minutes=None)
+        )
+        await async_db.commit()
+
+        await fill_start(
+            async_db,
+            recording_id=recording.id,
+            start_time=self.WALL_CLOCK - timedelta(hours=3),
+            utc_offset_minutes=180,
+        )
+        await async_db.commit()
+
+        row = (
+            await async_db.execute(
+                select(DiveRecording.start_time, DiveRecording.utc_offset_minutes).where(
+                    DiveRecording.id == recording.id
+                )
+            )
+        ).one()
+        assert row.utc_offset_minutes == 180
+        # The instant moved back three hours, so the clock face the diver read is unchanged.
+        assert row.start_time == self.WALL_CLOCK - timedelta(hours=3)
+        assert combine_start_time(row.start_time, row.utc_offset_minutes).replace(tzinfo=None) == (
+            self.WALL_CLOCK.replace(tzinfo=None)
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_start_already_known_is_never_overwritten(
+        self, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        """Fill-only, like every other fill: a second file two seconds off must not move the
+        record's start onto its own clock."""
+        recording = create_dive_recording(db, diver, dive)
+        await async_db.execute(
+            update(DiveRecording)
+            .where(DiveRecording.id == recording.id)
+            .values(start_time=self.WALL_CLOCK, utc_offset_minutes=180)
+        )
+        await async_db.commit()
+
+        await fill_start(
+            async_db, recording_id=recording.id, start_time=self.WALL_CLOCK + timedelta(seconds=2), utc_offset_minutes=0
+        )
+        await async_db.commit()
+
+        row = (
+            await async_db.execute(
+                select(DiveRecording.start_time, DiveRecording.utc_offset_minutes).where(
+                    DiveRecording.id == recording.id
+                )
+            )
+        ).one()
+        assert (row.start_time, row.utc_offset_minutes) == (self.WALL_CLOCK, 180)
+
+    @pytest.mark.asyncio
+    async def test_a_recording_with_no_start_takes_the_incoming_one_whole(
+        self, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        recording = create_dive_recording(db, diver, dive)
+        await async_db.execute(update(DiveRecording).where(DiveRecording.id == recording.id).values(start_time=None))
+        await async_db.commit()
+
+        await fill_start(async_db, recording_id=recording.id, start_time=self.WALL_CLOCK, utc_offset_minutes=180)
+        await async_db.commit()
+
+        row = (
+            await async_db.execute(
+                select(DiveRecording.start_time, DiveRecording.utc_offset_minutes).where(
+                    DiveRecording.id == recording.id
+                )
+            )
+        ).one()
+        assert (row.start_time, row.utc_offset_minutes) == (self.WALL_CLOCK, 180)
 
 
 class TestDeletingAFile:

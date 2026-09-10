@@ -597,14 +597,50 @@ async def fill_start(
     them wrote is a fact about this record rather than an invention. A second *device*'s
     offset is its own clock's and says nothing about this one, which is why the same-dive
     gates never reach this.
+
+    **The two columns are filled together or not at all, and this is the one fill in the
+    module that cannot be a pair of `COALESCE`s.** They are not two independent values: a NULL
+    offset means `start_time` holds a *wall clock labelled UTC* rather than an instant
+    (`core/utils/datetime_offset.py`), so writing an offset onto a row that already has a
+    start silently reinterprets a column nobody rewrote - and `combine_start_time` then reads
+    the recording back three hours late for exactly the Shearwater pair the *Clocks* rule
+    exists for. Filling the offset therefore converts the wall clock to the instant it names,
+    which preserves the clock face the diver read and is the only reading under which both
+    columns stay true.
+
+    Read-then-write rather than one statement, deliberately: expressing that as SQL means a
+    `CASE` over both columns, and the rule is hard enough to state once. Every caller is
+    inside a transaction on a dive only its owner can reach, so there is no race for the read
+    to lose.
     """
-    values: dict[str, object] = {}
-    if start_time is not None:
-        values["start_time"] = func.coalesce(DiveRecording.start_time, start_time)
-    if utc_offset_minutes is not None:
-        values["utc_offset_minutes"] = func.coalesce(DiveRecording.utc_offset_minutes, utc_offset_minutes)
-    if values:
-        await db.execute(update(DiveRecording).where(DiveRecording.id == recording_id).values(**values))
+    if start_time is None:
+        return
+
+    stored = (
+        await db.execute(
+            select(DiveRecording.start_time, DiveRecording.utc_offset_minutes).where(DiveRecording.id == recording_id)
+        )
+    ).one_or_none()
+    if stored is None:  # pragma: no cover - the caller matched against this row
+        return
+
+    if stored.start_time is None:
+        values: dict[str, object] = {"start_time": start_time, "utc_offset_minutes": utc_offset_minutes}
+    elif stored.utc_offset_minutes is None and utc_offset_minutes is not None:
+        # The stored column is the wall clock; the incoming offset is what makes it an
+        # instant. Subtracting rather than trusting the incoming `start_time` keeps the
+        # stored recording's own clock reading, which may differ from this file's by the two
+        # seconds the same-recording gate admits.
+        values = {
+            "start_time": stored.start_time - timedelta(minutes=utc_offset_minutes),
+            "utc_offset_minutes": utc_offset_minutes,
+        }
+    else:
+        # A start already known on the terms it was written under. Nothing to fill, and
+        # nothing here may overwrite.
+        return
+
+    await db.execute(update(DiveRecording).where(DiveRecording.id == recording_id).values(**values))
 
 
 async def storage_keys_for_recordings(db: AsyncSession, *, recording_ids: Sequence[int]) -> list[str]:

@@ -858,7 +858,7 @@ class TestReExtractionFailureDoesNotFailTheRequest:
         monkeypatch.setattr("src.app.services.blob_store.has", AsyncMock(return_value=True))
         monkeypatch.setattr(
             "src.app.services.dive_files.extract_recording",
-            lambda files: RecordingExtraction(unreadable=True),
+            lambda files, known=None: RecordingExtraction(unreadable=True),
         )
 
         user_uuid = uuid7()
@@ -992,11 +992,18 @@ class TestScalarsAreWrittenAtAttach:
 
         monkeypatch.setattr("src.app.services.dive_files.store_tech_scalars", outright)
         monkeypatch.setattr("src.app.services.dive_files.fill_tech_scalars", fill)
-        monkeypatch.setattr("src.app.services.dive_files.load_recording_files", AsyncMock(return_value=files))
         monkeypatch.setattr("src.app.services.dive_files.store_profile", AsyncMock())
         monkeypatch.setattr("src.app.services.dive_files.delete_profile_for_recording", AsyncMock())
 
-        await _rederive_recording(AsyncMock(), recording_id=1, dive_id=7, ordinal=ordinal, fresh=fresh)
+        await _rederive_recording(
+            AsyncMock(),
+            recording_id=1,
+            dive_id=7,
+            ordinal=ordinal,
+            fresh=fresh,
+            files=files,
+            extraction=extract_recording(files),
+        )
         return chosen
 
     @pytest.mark.asyncio

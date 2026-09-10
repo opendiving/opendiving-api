@@ -620,10 +620,10 @@ def create_dive_file_token(*, user_uuid: uuid_pkg.UUID, sha256: str, parser_key:
     """Mints the receipt `POST /dive/parse` hands back with the parsed dive.
 
     Binds three things the upload route needs to trust: who parsed the file, exactly
-    which bytes were parsed (by content hash), and which parser succeeded. `PUT
-    /dive/{uuid}/file` re-hashes the body it receives and stores the file only if the
-    hash matches, so the only bytes that can ever enter `dive_file` are bytes this
-    server has already parsed.
+    which bytes were parsed (by content hash), and which parser succeeded.
+    `POST /dive/{uuid}/recordings` re-hashes the body it receives and stores the file
+    only if the hash matches, so the only bytes that can ever enter `dive_file` are
+    bytes this server has already parsed.
 
     Deliberately *not* blacklisted after use, unlike `create_onboarding_token`:
     re-uploading the same file to the same dive is an idempotent no-op by design, and

@@ -23,7 +23,7 @@ wins", which silently loses a value a diver corrected between two uploads.
 import hashlib
 import logging
 import uuid as uuid_pkg
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Literal
@@ -320,27 +320,38 @@ class RecordingExtraction:
     unreadable: bool = False
 
 
-def extract_recording(files: Sequence[LoadedDiveFile]) -> RecordingExtraction:
+def extract_recording(
+    files: Sequence[LoadedDiveFile], known: Mapping[str, FileExtraction] | None = None
+) -> RecordingExtraction:
     """Read a recording's files in order and fill each answer from the first that carries it.
 
     Pure and DB-free, on this module's `reconcile` idiom: the fill rule is the decision worth
-    testing, and it is testable with a list of bytes and no database at all.
+    testing, and it is testable with a list of bytes and no database at all. **Pure CPU, and
+    the whole of it** - every caller on a request path hands it to `run_in_threadpool`, for
+    the reason *"Uploaded files are parsed in a thread, not on the event loop"* in
+    `DECISIONS.md` gives: a FIT is up to ~1.7 s of Python at `_MAX_FRAMES`.
 
     **Order is attach order** and the caller guarantees it (`ORDER BY dive_file.id`), because
     "the first file that recorded it" is meaningless without one. A file whose parser this
     build no longer has, or which stopped parsing, sets `unreadable` and contributes nothing -
     it is not silently treated as a file that said nothing, because those two facts lead to
     opposite repairs.
+
+    `known` maps a digest to an extraction the caller already has, and exists for exactly one
+    caller: the attach path has just decoded the incoming file to decide which recording it
+    belongs to, and would otherwise decode it a second time here - the double decode
+    `parse_all` was introduced to remove, reintroduced one level up.
     """
     result = RecordingExtraction()
     for file in files:
-        parser = PARSER_BY_KEY.get(file.parser_key)
-        if parser is None:
-            logger.warning("A stored file is recorded under a parser key this build lacks: %r", file.parser_key)
-            result = replace(result, unreadable=True)
-            continue
-
-        extraction = _extract_all(parser, file.data)
+        extraction = (known or {}).get(file.sha256)
+        if extraction is None:
+            parser = PARSER_BY_KEY.get(file.parser_key)
+            if parser is None:
+                logger.warning("A stored file is recorded under a parser key this build lacks: %r", file.parser_key)
+                result = replace(result, unreadable=True)
+                continue
+            extraction = _extract_all(parser, file.data)
         if extraction.parsed is None and extraction.profile is None and extraction.scalars is None:
             result = replace(result, unreadable=True)
             continue
@@ -593,8 +604,25 @@ async def store_recording_file(
         None,
     )
 
+    # The matched recording's existing files, and what the whole set says once these bytes
+    # join it - **both read and parsed before the transaction opens**, so the write below is
+    # writes only. `known` hands over the extraction of the incoming file, which was decoded
+    # a few lines up to decide where it lands: without it this would decode it a second time,
+    # which is the double decode `parse_all` exists to remove.
     filename = safe_filename(upload.filename, default="dive-file")
     now = datetime.now(UTC)
+    incoming_file = LoadedDiveFile(
+        data=data,
+        content_type=parser.content_type,
+        original_filename=filename,
+        sha256=digest,
+        parser_key=parser.key,
+    )
+    existing_files = [] if matched is None else await load_recording_files(db, recording_id=matched.id)
+    # Appended last, which is where `ORDER BY dive_file.id` will put it once the row lands -
+    # and attach order is the whole of what "the first file that recorded it" means.
+    files = [*existing_files, incoming_file]
+    recording_extraction = await run_in_threadpool(extract_recording, files, {digest: extraction})
     # The file lands on the volume *before* the transaction that references it. Every
     # database-visible state therefore names bytes that exist; the only thing a crash
     # between the two can produce is an unreferenced file, which is harmless until the
@@ -653,7 +681,13 @@ async def store_recording_file(
             )
         )
         await _rederive_recording(
-            db, recording_id=recording_id, dive_id=dive_id, ordinal=ordinal, fresh=matched is None
+            db,
+            recording_id=recording_id,
+            dive_id=dive_id,
+            ordinal=ordinal,
+            fresh=matched is None,
+            files=files,
+            extraction=recording_extraction,
         )
         await db.commit()
     except IntegrityError as exc:
@@ -718,13 +752,46 @@ def _incoming_facts(extraction: FileExtraction) -> dive_recordings.RecordingFact
     )
 
 
-async def _rederive_recording(db: AsyncSession, *, recording_id: int, dive_id: int, ordinal: int, fresh: bool) -> None:
-    """Re-read every file of one recording and rewrite what is derived from them.
+async def read_recording(
+    db: AsyncSession, *, recording_id: int, known: Mapping[str, FileExtraction] | None = None
+) -> tuple[list[LoadedDiveFile], RecordingExtraction]:
+    """A recording's files and what they say, with the parsing done **off the event loop**.
 
-    Called after any change to a recording's files. Re-reading them all, rather than folding
-    the new one into what is stored, is what makes the fill rule mean the same thing on every
-    path: the answer is a function of the files in attach order and of nothing else, so an
-    attach, a deletion and a backfill run cannot disagree about it.
+    The seam that keeps `extract_recording` - pure CPU, up to ~1.7 s of it per FIT - out of
+    the request's own thread, which is what *"Uploaded files are parsed in a thread, not on
+    the event loop"* in `DECISIONS.md` requires. Every request path calls this and hands the
+    result to `_rederive_recording`, which then only writes.
+
+    The read transaction is deliberately **not** released around the hop, unlike the one
+    before `store_recording_file`'s first parse: every caller here is mid-transaction with
+    writes already issued, and rolling that back to free the connection would discard them.
+    What is bought is the loop, which is the scarce thing; the connection is held for the
+    duration and that is the accepted cost.
+    """
+    files = await load_recording_files(db, recording_id=recording_id)
+    if not files:
+        return [], RecordingExtraction()
+    return files, await run_in_threadpool(extract_recording, files, known)
+
+
+async def _rederive_recording(
+    db: AsyncSession,
+    *,
+    recording_id: int,
+    dive_id: int,
+    ordinal: int,
+    fresh: bool,
+    files: Sequence[LoadedDiveFile],
+    extraction: RecordingExtraction,
+) -> None:
+    """Rewrite everything derived from one recording's files. **Writes only.**
+
+    Called after any change to a recording's files, with the files and their extraction from
+    `read_recording` - which is what keeps the parsing off the event loop and out of this
+    function entirely. Deriving from *all* of them, rather than folding the new one into what
+    is stored, is what makes the fill rule mean the same thing on every path: the answer is a
+    function of the files in attach order and of nothing else, so an attach, a deletion and a
+    backfill run cannot disagree about it.
 
     **The dive's tech scalars are the primary recording's, and only the primary's.** A
     secondary recording is a second computer's account of the same dive; its CNS clock is its
@@ -739,12 +806,10 @@ async def _rederive_recording(db: AsyncSession, *, recording_id: int, dive_id: i
     from ..crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
     from ..schemas.dive_mixture import DiveMixtureCreate
 
-    files = await load_recording_files(db, recording_id=recording_id)
     if not files:
         await delete_profile_for_recording(db, recording_id=recording_id, commit=False)
         return
 
-    extraction = extract_recording(files)
     profile = extraction.profile
 
     if ordinal != 0 and extraction.mixtures:
@@ -801,8 +866,7 @@ async def refresh_tech_scalars(db: AsyncSession, *, dive_id: int) -> None:
     readings cleared, which is what "nothing here can re-derive them" means.
     """
     primary = (await dive_recordings.primary_recording_ids(db, dive_ids=[dive_id])).get(dive_id)
-    files = [] if primary is None else await load_recording_files(db, recording_id=primary)
-    scalars = extract_recording(files).scalars if files else {}
+    scalars = {} if primary is None else (await read_recording(db, recording_id=primary))[1].scalars
     await store_tech_scalars(
         db, dive_id=dive_id, scalars={name: scalars.get(name) for name in TECH_SCALAR_FIELDS}, commit=False
     )
@@ -856,10 +920,17 @@ async def _repeat_upload(
         await get_existing_profile(db, recording_id=existing.recording_id),
         sha256=recording_source_digest(digests),
     ) == ("extract"):
+        files, extraction = await read_recording(db, recording_id=existing.recording_id)
         await release_read_transaction(db)
         try:
             await _rederive_recording(
-                db, recording_id=existing.recording_id, dive_id=dive_id, ordinal=ordinal or 0, fresh=False
+                db,
+                recording_id=existing.recording_id,
+                dive_id=dive_id,
+                ordinal=ordinal or 0,
+                fresh=False,
+                files=files,
+                extraction=extraction,
             )
             # One commit for the profile and the scalars: they come out of the same bytes,
             # and a dive whose exposure readings were upgraded but whose profile wasn't would
@@ -1004,7 +1075,13 @@ async def delete_dive_file(db: AsyncSession, *, file_id: int, commit: bool = Tru
 
     if remaining:
         await _rederive_recording(
-            db, recording_id=row.recording_id, dive_id=row.dive_id, ordinal=ordinal or 0, fresh=True
+            db,
+            recording_id=row.recording_id,
+            dive_id=row.dive_id,
+            ordinal=ordinal or 0,
+            fresh=True,
+            files=remaining,
+            extraction=await run_in_threadpool(extract_recording, remaining),
         )
     else:
         existing = await get_existing_profile(db, recording_id=row.recording_id)
@@ -1257,6 +1334,9 @@ async def backfill_tech_fields(
             # can say about the dive that is not already stored.
             continue
 
+        # Synchronously, unlike every request path: this runs from a one-shot script whose
+        # event loop has nothing else on it, so the threadpool hop would buy nothing and cost
+        # a handoff per recording in the corpus.
         extraction = extract_recording(files)
         if extraction.unreadable:
             # A file that parsed at import time and does not now is a parser regression, and
