@@ -1,4 +1,5 @@
-"""Integration tests for the `dive_profile` summary columns against a live Postgres.
+"""What `dive_profile` needs a live Postgres to say: the summary round trip, and the query
+that selects a profile for re-extraction.
 
 The rest of the profile suite is pure and DB-free (`test_dive_profiles.py`), and
 `get_gas_attribution_for_dives` is covered there against a mocked session - which pins
@@ -6,6 +7,11 @@ every shape the *reader* has to survive but cannot check the one thing a mock ne
 touches: that what `store_profile` writes into a JSONB column is what comes back out of
 it. `gas_attribution` is the first summary column whose stored shape can drift, since it
 is a list of objects rather than an integer, so the round trip is worth a test of its own.
+
+`backfill_profiles`' candidate selection is here for the neighbouring reason: the criterion
+lives in a `WHERE` clause, so a mocked session could only assert the SQL that was written
+rather than the rows it comes back with - which is exactly the difference that let the
+digest term go missing.
 
 Same skip-if-unreachable guard and same write-real-rows-and-leave-them convention as
 `test_dive_check_constraints.py`; see the note there.

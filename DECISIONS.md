@@ -2446,10 +2446,14 @@ done.
 docker compose exec api python -m src.scripts.backfill_dive_profiles --parser-key suunto_xml
 ```
 
-It selects `dive_file` LEFT JOIN `dive_profile` where no profile exists, the extractor version is
-behind, or `source_sha256` differs - with **explicit columns, never `select(DiveFile)`**, or the
-`bytea` would ride along for every row in the corpus before a single profile was extracted. One file
-at a time via `load_dive_file`, committing in batches of 50, reporting
+It selects `dive_recording` LEFT JOIN `dive_profile` where no profile exists, the extractor version
+is behind, or `source_sha256` differs from what the recording's files now hash to - with **explicit
+columns, never `select(DiveRecording)`**, which is the discipline the older `select(DiveFile)` form
+kept because a `bytea` would otherwise have ridden along for every row in the corpus before a single
+profile was extracted. (It selected `dive_file` while a dive had one; see *"A dive has recordings,
+and a file belongs to one of them"*. The digest half of the criterion survived that move and is
+tested, the single-file case in SQL and the rest through `should_extract`.) One recording at a time
+via `load_recording_files`, committing in batches of 50, reporting
 `examined / extracted / skipped / no_samples / failed`. All five counts always, because a run that
 reports only successes hides the parser that stopped working.
 
