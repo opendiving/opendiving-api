@@ -16170,11 +16170,13 @@ this function at all. Read-then-write because expressing it in SQL means a `CASE
 and the rule is hard enough to state once; there is no race to lose, every caller being inside a
 transaction on a dive only its owner can reach.
 
-**The outright write survives, and which one runs is now structural.** A recording's *first* file
-writes the dive's tech scalars outright - `None` included, so a reading nothing yields is cleared -
-because there was nothing on the dive to lose. Every later file fills. `_rederive_recording` picks
-between them on whether the recording had files a moment ago, so the asymmetry cannot be reached by
-the wrong branch: it is a parameter, not a condition inside one write.
+**The outright write survives, and which one runs is now structural.** A file that *creates* a
+recording writes the dive's tech scalars outright — `None` included, so a reading nothing yields is
+cleared — because there was nothing on the dive to lose. Every other file fills.
+`_rederive_recording` takes that answer as its `fresh` parameter rather than deciding it inside a
+write, so the asymmetry cannot be reached by the wrong branch. What `fresh` means is worth knowing
+before relying on it, and it is **not** "the recording had files a moment ago" — the last paragraph
+of this section says what it is.
 
 **The dive's readings are the primary recording's and nothing else's.** A second computer's CNS
 clock is its own device's arithmetic, and writing it onto the dive would attribute one machine's

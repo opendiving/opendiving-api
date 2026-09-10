@@ -426,8 +426,9 @@ async def store_tech_scalars(
     Outright means every field of `DiveTechScalars`, `None` included - so a re-derivation
     that no longer yields a reading clears the one that is there rather than stranding a
     number nothing can re-derive. Used where the recording's whole set of files has just
-    been read: the first file of a primary recording, and every re-derivation after a
-    deletion or a promotion.
+    been read and the dive had nothing on it to lose: the file that *created* a primary
+    recording, and every re-derivation after a deletion or a promotion. Not a primary
+    recording's first file as such - see `_rederive_recording` on what `fresh` means.
 
     `commit=False` by default for the same reason as `store_profile`: the attach path writes
     the file, the profile and these in one transaction, so a dive can never end up
