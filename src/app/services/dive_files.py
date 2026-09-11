@@ -1015,14 +1015,16 @@ async def _rederive_recording(
     **`joined` and not `fresh` is what gates that, and the two are different questions.**
     `fresh` asks whether the dive has anything on this recording to lose; `joined` asks
     whether *new bytes* arrived on a recording that already existed, which is the only event
-    that can put a reading into a cylinder. They agree on the attach path and part company
-    everywhere else: `_repeat_upload` re-reads bytes the recording already had, so it fills
-    the scalars (a re-parse yielding less must not clear them) and must **not** touch the
-    cylinders - a diver who cleared a value the form pre-filled from that very file would have
-    it put back by re-uploading the file. `delete_dive_file` has no new bytes either. Two
-    parameters rather than one because conflating them is the bug: a caller reasoning only
-    about the scalars gets the cylinders wrong for free. Required rather than defaulted, so a
-    fourth caller has to answer it.
+    that can put a reading into a cylinder. **On the attach path each is the other's
+    negation**, which is why one parameter looked sufficient - and `_repeat_upload` is where
+    that breaks, being the one caller that answers *both* with `False`: it re-reads bytes the
+    recording already had, so it fills the scalars (a re-parse yielding less must not clear
+    them) while nothing has arrived that could fill a cylinder. Deriving the cylinders from
+    `fresh` there put back a value the diver had cleared, read straight off the very file they
+    were editing away from. `delete_dive_file` has no new bytes either, and answers
+    `(True, False)`. Two parameters rather than one because conflating them is the bug: a
+    caller reasoning only about the scalars gets the cylinders wrong for free. Required rather
+    than defaulted, so a fourth caller has to answer it.
     """
     from ..crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
     from ..schemas.dive_mixture import DiveMixtureCreate
