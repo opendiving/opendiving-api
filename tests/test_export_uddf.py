@@ -76,7 +76,11 @@ async def _render(bundle: Any, profiles: dict[int, dict[str, Any]] | None = None
 
     async def fake_load_profile(db: Any, *, recording_id: int) -> LoadedProfile | None:
         data = payloads.get(recording_id)
-        return None if data is None else LoadedProfile(duration=data.get("duration", 0), data=data)
+        return (
+            None
+            if data is None
+            else LoadedProfile(duration=data.get("duration", 0), data=data, parser_key="suunto_xml")
+        )
 
     monkeypatch.setattr("src.app.services.export.uddf.load_profile", fake_load_profile)
     chunks = [chunk async for chunk in write_uddf(AsyncMock(), bundle, exported_at=EXPORTED_AT)]

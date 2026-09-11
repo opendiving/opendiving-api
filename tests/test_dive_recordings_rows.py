@@ -28,6 +28,7 @@ from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_recording import DiveRecording
 from src.app.models.user import User
+from src.app.schemas.dive_profile import ProfileProvenance
 from src.app.services import blob_store
 from src.app.services.dive_files import delete_dive_file, store_recording_file
 from src.app.services.dive_parsers.suunto_xml import SuuntoXmlParser
@@ -112,6 +113,25 @@ async def _recordings(db: AsyncSession, dive: Dive) -> list[DiveRecording]:
         select(DiveRecording).where(DiveRecording.dive_id == dive.id).order_by(DiveRecording.ordinal)
     )
     return list(rows.scalars().all())
+
+
+async def _insert_profile(db: AsyncSession, dive: Dive, recording: DiveRecording, *, parser_key: str) -> None:
+    """Samples against a recording that never had a file, written straight in - which is what
+    logbook import does and what a merge leaves behind, neither of which this module owns."""
+    await db.execute(
+        insert(DiveProfile).values(
+            recording_id=recording.id,
+            dive_id=dive.id,
+            source_sha256="b" * 64,
+            parser_key=parser_key,
+            extractor_version=3,
+            duration=2940,
+            depth_sample_count=2,
+            data=NormalizedProfile(depth=ProfileSeries(t=[0, 10], v=[0, 1900])).to_data(),
+            uuid=recording.uuid,
+            created_at=datetime.now(UTC),
+        )
+    )
 
 
 class TestWhereAFileLands:
@@ -546,20 +566,7 @@ class TestTheDiveRead:
             .where(DiveRecording.id == recording.id)
             .values(device_brand="Shearwater Research, Inc", device_model="Perdix 3", device_serial="D9772626")
         )
-        await async_db.execute(
-            insert(DiveProfile).values(
-                recording_id=recording.id,
-                dive_id=dive.id,
-                source_sha256="b" * 64,
-                parser_key=IMPORT_PARSER_KEY,
-                extractor_version=3,
-                duration=2940,
-                depth_sample_count=2,
-                data=NormalizedProfile(depth=ProfileSeries(t=[0, 10], v=[0, 1900])).to_data(),
-                uuid=recording.uuid,
-                created_at=datetime.now(UTC),
-            )
-        )
+        await _insert_profile(async_db, dive, recording, parser_key=IMPORT_PARSER_KEY)
         await async_db.commit()
 
         read = (await get_recordings_for_dives(async_db, dive_ids=[dive.id]))[dive.id]
@@ -568,6 +575,43 @@ class TestTheDiveRead:
         assert read[0].files == []
         assert read[0].device is not None and read[0].device.serial == "D9772626"
         assert read[0].profile is not None and read[0].profile.duration == 2940
+
+    @pytest.mark.asyncio
+    async def test_the_two_file_less_recordings_are_told_apart_by_provenance(
+        self, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        """The dive read's only means of telling them apart, and the reason the member exists.
+        Both carry samples and an empty `files`, and the sentence a client shows differs:
+        *no file kept: imported through the converter* against *merged from two recordings*.
+        """
+        imported = create_dive_recording(db, diver, dive, ordinal=0)
+        merged = create_dive_recording(db, diver, dive, ordinal=1)
+        await _insert_profile(async_db, dive, imported, parser_key=IMPORT_PARSER_KEY)
+        await _insert_profile(async_db, dive, merged, parser_key=MERGE_PARSER_KEY)
+        await async_db.commit()
+
+        read = (await get_recordings_for_dives(async_db, dive_ids=[dive.id]))[dive.id]
+
+        assert [row.files for row in read] == [[], []]
+        assert [row.profile.provenance for row in read if row.profile is not None] == [
+            ProfileProvenance.DIVEJSON_IMPORT,
+            ProfileProvenance.MERGE,
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_profile_read_off_a_file_says_file_rather_than_which_parser(
+        self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
+    ) -> None:
+        """Which parser read which file is already on `files[].parser_key`, where it is a fact
+        about that file. The profile answers the three-way question and nothing else, so the
+        open, growing set of parser keys never reaches this member."""
+        await _attach(async_db, diver, dive, _export(samples=_samples((0, "0"), (10, "5"))))
+
+        read = (await get_recordings_for_dives(async_db, dive_ids=[dive.id]))[dive.id]
+
+        assert read[0].profile is not None
+        assert read[0].profile.provenance is ProfileProvenance.FILE
+        assert [row.parser_key for row in read[0].files] == [SuuntoXmlParser.key]
 
     @pytest.mark.asyncio
     async def test_a_recording_whose_source_named_no_computer_reports_no_device(

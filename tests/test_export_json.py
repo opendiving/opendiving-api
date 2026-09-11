@@ -29,7 +29,7 @@ import divejson
 import pytest
 
 from src.app.schemas.export import DIVEJSON_FORMAT, DIVEJSON_VERSION, ExportCourse, ExportEnvelope
-from src.app.services.dive_profiles import LoadedProfile
+from src.app.services.dive_profiles import MERGE_PARSER_KEY, LoadedProfile
 from src.app.services.export.envelope import write_divejson
 from src.app.services.export.paths import plan_archive_paths
 from src.app.services.logbook_import import parse_document
@@ -50,7 +50,7 @@ async def _stream(bundle: Any, monkeypatch: Any, profiles: dict[int, dict] | Non
 
     async def fake_load_profile(db: Any, *, recording_id: int) -> LoadedProfile | None:
         data = payloads.get(recording_id)
-        return None if data is None else LoadedProfile(duration=duration, data=data)
+        return None if data is None else LoadedProfile(duration=duration, data=data, parser_key="suunto_xml")
 
     monkeypatch.setattr("src.app.services.export.envelope.load_profile", fake_load_profile)
     return b"".join([chunk async for chunk in write_divejson(AsyncMock(), bundle, exported_at=EXPORTED_AT)])
@@ -62,12 +62,13 @@ async def _render(
     profiles: dict[int, dict] | None = None,
     paths: Any = None,
     duration: int = 90,
+    parser_key: str = "suunto_xml",
 ) -> dict:
     payloads = profiles or {}
 
     async def fake_load_profile(db: Any, *, recording_id: int) -> LoadedProfile | None:
         data = payloads.get(recording_id)
-        return None if data is None else LoadedProfile(duration=duration, data=data)
+        return None if data is None else LoadedProfile(duration=duration, data=data, parser_key=parser_key)
 
     monkeypatch.setattr("src.app.services.export.envelope.load_profile", fake_load_profile)
     chunks = [chunk async for chunk in write_divejson(AsyncMock(), bundle, exported_at=EXPORTED_AT, paths=paths)]
@@ -373,7 +374,13 @@ class TestWhatUddfCannotHold:
 
 class TestTheProfileVocabulary:
     """One profile vocabulary across the app: `GET /dive/{uuid}/recording/{rid}/profile` and this document
-    both serve `DiveProfileRead`, whose member names are the format's."""
+    both serve `DiveProfileRead`, whose member names are the format's.
+
+    The route serves a subclass of it carrying the profile's provenance, which is where the
+    one vocabulary stops: the schema's `profile` object is `additionalProperties: false`, so
+    a member DiveJSON has no slot for makes every document invalid rather than merely
+    verbose. The exact-set assertion below is what holds the line.
+    """
 
     @pytest.mark.asyncio
     async def test_the_channels_and_events_use_the_format_s_member_names(self, monkeypatch):
@@ -393,6 +400,21 @@ class TestTheProfileVocabulary:
         profile = document["dives"][1]["recordings"][0]["profile"]
         assert profile["depth"]["values"] == [0, 1800, 5200, 300]
         assert profile["temperature"] == {"times": [0, 60], "values": [249, 181]}
+
+    @pytest.mark.asyncio
+    async def test_a_merged_profile_exports_without_its_provenance(self, monkeypatch):
+        """The interesting half of the previous test's exact set, spelled out: a merge is the
+        provenance most worth carrying and the document still may not carry it. The value the
+        app publishes on its own routes has no core member here, and a writer may not invent
+        one - `extensions.opendiving` is the sanctioned slot if it ever earns a place.
+        """
+        document = await _render(
+            full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, parser_key=MERGE_PARSER_KEY
+        )
+
+        profile = document["dives"][1]["recordings"][0]["profile"]
+        assert "provenance" not in profile
+        _assert_conforms(document)
 
 
 class TestReferences:

@@ -14551,12 +14551,14 @@ from the column default.
 
 ## The profile speaks one vocabulary, storage included
 
-`ExportRecording.profile` is typed `DiveProfileRead` — the same class
-`GET /dive/{uuid}/recording/{rid}/profile` serves — so making the exported profile speak DiveJSON
-changed that endpoint's shape too. The rename was taken *through* rather than around:
-`duration_seconds` → `duration`, `t`/`v` → `times`/`values`, `pressure` → `pressures`, and an
-event's `t` → `time`, on `DiveProfileRead`, `DiveProfileSeries`, `DiveProfilePressureSeries` and
-`DiveProfileEvent`.
+`ExportRecording.profile` is typed `DiveProfileRead` — at the time, the same class
+`GET /dive/{uuid}/recording/{rid}/profile` served — so making the exported profile speak DiveJSON
+changed that endpoint's shape too. (That route now serves `RecordingProfileRead`, a subclass adding
+one member the format has no slot for; every member name below is still declared once and inherited.
+See *"The profile's provenance is published as a closed enum, not as `parser_key`"*.) The rename was
+taken *through* rather than around: `duration_seconds` → `duration`, `t`/`v` → `times`/`values`,
+`pressure` → `pressures`, and an event's `t` → `time`, on `DiveProfileRead`, `DiveProfileSeries`,
+`DiveProfilePressureSeries` and `DiveProfileEvent`.
 
 The alternative was export-local profile models, which would have left that route untouched and cost
 nothing today. It was rejected because the cost is permanent: the project would speak two profile
@@ -16292,7 +16294,8 @@ point is to stop claiming a reading the remaining ones no longer yield.
 the samples were read out of the recording's files in order and can be read again; `divejson_import`
 means a document supplied them; `merge` means two recordings' samples were folded onto one axis. The
 last two are `UNREPRODUCIBLE_PROVENANCES`, and nothing on this instance can produce them a second
-time.
+time. The column is a storage answer; what a client is told is the narrower `ProfileProvenance` -
+see *"The profile's provenance is published as a closed enum, not as `parser_key`"*.
 
 **A recording with no files at all is first-class rather than degenerate.** Logbook import stores no
 bytes for a converted or a bare document (see *"A bare document creates no file rows, and only the
@@ -16492,3 +16495,60 @@ list often fails. The scalars had no guard at all. So the match now carries `ord
 and the writer returns before both writes for anything but ordinal 0. Required rather than
 defaulted, on `PlannedRecordingMatch.mixtures`' lesson: defaulting to empty is what let the attach
 case ship once with the whole relabelling unreachable.
+
+## The profile's provenance is published as a closed enum, not as `parser_key`
+
+The dive read had no way to say *why* a recording kept no file, and the two reasons want different
+sentences: *no file kept: imported through the converter* against *no file kept: merged from two
+recordings*. The web shipped one sentence true of both, because `files` is empty either way and
+nothing else in the response told them apart. `dive_profile.parser_key` knew - it has answered
+"which of three things is this profile" since recordings landed (see *"A profile has one of three
+provenances, and a recording need not have a file"*) - and only the schemas were missing it.
+
+**What is published is `ProfileProvenance`, a closed `file` / `divejson_import` / `merge`, rather
+than the column.** The question a client asks is a three-way one, and `parser_key` answers it as an
+open set: two sentinel strings plus *every parser key there will ever be*. A client reading the raw
+column has to hard-code the two sentinels and treat the remainder as the third case, so adding a
+parser is fine and renaming a sentinel is a wire break - the wrong way round. The column's overload
+is right where it is: it is also the "can these samples be extracted again" flag, which is why the
+two sentinels share a column with parser keys at all. A wire member should not inherit a storage
+compromise. `ProfileEventType` and `GasRole` are the same shape and the same answer.
+
+*Rejected:* publishing `parser_key` verbatim - cheaper by a mapping function and an enum, and it
+would have put the growing parser registry on a contract that has no use for it. Nothing is lost by
+narrowing: which parser read which file is already on `files[].parser_key`, where it is a fact about
+that file rather than a second, disagreeable copy on the profile. *Also rejected:* a boolean
+`reproducible`, which collapses exactly the two cases this exists to separate.
+
+**`FILE` is not "this recording has files".** A merged recording keeps whatever files either half
+had, and its samples are still `merge`. The member says what produced the samples, which is why it
+is on the profile and not on the recording.
+
+**It rides two shapes, and the format is why.** `DiveProfileInfo` (the dive read's
+`recordings[].profile`) is an application response and simply gains the member.
+`GET /dive/{uuid}/recording/{rid}/profile` could not: it served `DiveProfileRead`, which is also
+`ExportRecording.profile` and therefore the DiveJSON `profile` object - and that object is
+`additionalProperties: false` in the published schema, so a member the format has no slot for makes
+every exported document fail `divejson validate` rather than merely growing it. So `DiveProfileRead`
+stays exactly the format's members and the route serves `RecordingProfileRead`, a subclass adding
+`provenance`.
+
+That is **not** the export-local profile models *"The profile speaks one vocabulary, storage
+included"* rejected, and the distinction is worth being precise about: that alternative would have
+declared the channels, the series and the events a second time, so every future profile change had
+to be made twice. Here every member name is still declared once and inherited; what the subclass
+adds is one member that was never the format's. `to_recording_read_schema` widens `to_read_schema`'s
+result rather than mapping the stored payload again, for the same reason.
+
+*The accepted cost:* the exported document cannot say a profile is a merge, so a logbook exported
+and re-imported loses that fact - the samples come back as an ordinary imported profile. The format
+has a sanctioned slot for it (`extensions.opendiving`, spec §5.5, which is where a stored file's
+`parser_key` already rides), and taking it is a format-side decision rather than a schema one.
+Nothing needs it yet.
+
+**The fallback is guarded by enumeration.** `provenance_of` maps the two sentinels and reads
+everything else as `FILE`, which is the only shape that does not need the parser registry written
+out. A third sentinel added to `UNREPRODUCIBLE_PROVENANCES` without a spelling would therefore
+publish "read off this recording's files" about samples no file can produce - a lie rather than an
+error - so `test_every_unreproducible_provenance_has_a_wire_value` asserts the mapping's keys *are*
+that set.

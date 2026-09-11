@@ -72,7 +72,7 @@ from ...schemas.dive import (
     validate_depth_pair,
 )
 from ...schemas.dive_mixture import DiveMixtureRead
-from ...schemas.dive_profile import DiveProfileRead
+from ...schemas.dive_profile import RecordingProfileRead
 from ...schemas.gear_item import GearItemInfo
 from ...schemas.parsed_dive import ParsedDevice, ParsedDiveMatch, ParsedDiveResponse, ParsedDiveSchema
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_gear_caches
@@ -100,7 +100,7 @@ from ...services.dive_profiles import (
     get_gas_attribution_for_dives,
     get_profile_version,
     load_profile,
-    to_read_schema,
+    to_recording_read_schema,
 )
 from ...services.dive_recordings import (
     DeviceIdentity,
@@ -1392,7 +1392,7 @@ async def read_dive_file(
     )
 
 
-@router.get("/dive/{uuid}/recording/{rid}/profile", response_model=DiveProfileRead)
+@router.get("/dive/{uuid}/recording/{rid}/profile", response_model=RecordingProfileRead)
 async def read_dive_profile(
     request: Request,
     uuid: uuid_pkg.UUID,
@@ -1403,7 +1403,7 @@ async def read_dive_profile(
         str | None,
         Query(description="Opaque cache-busting version token; ignored by the server"),
     ] = None,
-) -> Response | DiveProfileRead:
+) -> Response | RecordingProfileRead:
     """Serve one recording's per-sample depth/ceiling/temperature/tank-pressure curves and events.
 
     Per **recording**, not per dive: a diver on two computers has two profiles of one dive
@@ -1411,6 +1411,11 @@ async def read_dive_profile(
     `recordings[]`; the first of those is the primary one, which is what a client showing a
     single chart should draw. The `times` are elapsed seconds from that recording's own
     start, which is why a recording carries a start of its own.
+
+    `provenance` says where the samples came from - read off this recording's files,
+    supplied by an imported document, or folded from two recordings by a merge. The same
+    value rides `recordings[].profile` on `GET /dive/{uuid}`, so a client that has the dive
+    read already need not fetch the samples to ask.
 
     Deliberately *not* `@cache`d, and for a sharper reason than the file route above. A
     profile is **immutable** for a given (source digest, extractor version) pair, which makes
@@ -1448,7 +1453,7 @@ async def read_dive_profile(
 
     # Set here rather than left to `ClientCacheMiddleware`, which never overrides a
     # `Cache-Control` an endpoint set for itself.
-    response = JSONResponse(content=jsonable_encoder(to_read_schema(profile)))
+    response = JSONResponse(content=jsonable_encoder(to_recording_read_schema(profile)))
     response.headers["Cache-Control"] = "private, max-age=300"
     response.headers["ETag"] = etag
     return response

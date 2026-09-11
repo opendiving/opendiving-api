@@ -229,9 +229,11 @@ class ExportDive(PublicUUIDSchema):
 
     A recording's `profile` is the full per-sample payload in the same integer scales the
     API serves, so the document alone can redraw every curve without re-parsing the files.
-    It is `DiveProfileRead`, the very schema `GET /dive/{uuid}/recording/{rid}/profile`
+    It is `DiveProfileRead`, the base of what `GET /dive/{uuid}/recording/{rid}/profile`
     returns: one profile vocabulary on both surfaces, rather than a second set of models
-    that could drift.
+    that could drift. That route serves `RecordingProfileRead`, which adds a `provenance`
+    the format has no core member for and which therefore cannot ride the document's
+    `profile` object - the schema closes it.
     """
 
     dive_number: int
