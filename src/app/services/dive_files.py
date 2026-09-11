@@ -457,12 +457,21 @@ async def fill_tech_scalars(db: AsyncSession, *, dive_id: int, scalars: dict[str
         await db.execute(update(Dive).where(Dive.id == dive_id).values(**values))
 
 
-def relabel_gas_numbers(
-    parsed: Sequence[DiveMixtureSchema], stored: Sequence[DiveMixtureRead]
-) -> tuple[dict[int, int], list[DiveMixtureSchema]]:
+def relabel_gas_numbers[MixtureRow: (DiveMixtureSchema, DiveMixtureRead)](
+    parsed: Sequence[MixtureRow], stored: Sequence[DiveMixtureRead]
+) -> tuple[dict[int, int], list[MixtureRow]]:
     """Map a second computer's cylinder labels onto the dive's own list.
 
     Returns `(old gas_number -> the dive's gas_number, mixtures to append)`.
+
+    **Generic over the incoming row, and the appended rows come back as whatever went in.**
+    The two shapes this is asked about are a *file's* cylinders (`DiveMixtureSchema`, the
+    attach and import paths) and a *dive's* stored ones (`DiveMixtureRead`, which is what
+    the other half of a merge holds). Narrowing the parameter to the parsed shape would make
+    a merge convert its stored rows to it first, and that conversion silently drops `usage` -
+    a member no format records and only a diver can have typed, which is exactly the value
+    that must survive the cylinder being carried onto another dive. The join reads only
+    `oxygen`, `helium` and `gas_number`, which both shapes carry and mean the same thing by.
 
     **`gas_number` is dive-scoped, and that is the ruling this implements.** The app derives
     gas consumption from the diver's editable cylinders joined to a profile's pressure
@@ -486,14 +495,14 @@ def relabel_gas_numbers(
     """
     remaining = list(stored)
     mapping: dict[int, int] = {}
-    unmatched: list[DiveMixtureSchema] = []
+    unmatched: list[MixtureRow] = []
 
-    def claim(row: DiveMixtureRead, incoming: DiveMixtureSchema) -> None:
+    def claim(row: DiveMixtureRead, incoming: MixtureRow) -> None:
         remaining.remove(row)
         if incoming.gas_number is not None and row.gas_number is not None:
             mapping[incoming.gas_number] = row.gas_number
 
-    by_position: list[DiveMixtureSchema] = []
+    by_position: list[MixtureRow] = []
     for incoming in parsed:
         match = next(
             (
@@ -520,7 +529,7 @@ def relabel_gas_numbers(
     taken = {row.gas_number for row in stored if row.gas_number is not None}
     taken |= set(mapping.values())
     next_free = max(taken, default=0) + 1
-    appended: list[DiveMixtureSchema] = []
+    appended: list[MixtureRow] = []
     for incoming in unmatched:
         if incoming.gas_number is not None:
             mapping[incoming.gas_number] = next_free

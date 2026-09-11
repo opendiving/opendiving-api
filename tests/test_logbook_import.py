@@ -2137,6 +2137,54 @@ class TestTheImportGates:
         assert cylinder.gas_number == 0
 
     @pytest.mark.asyncio
+    async def test_a_fill_onto_a_secondary_recording_writes_nothing_of_the_dives(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """**The dive's own figures are the primary recording's, and a fill can match either.**
+
+        A technical diver wearing two computers logs the dive from the Shearwater and then
+        imports the Suunto's export: that document is a second reading of the *secondary*
+        recording, and it fills that recording's blanks like any other. What it must not do
+        is write the dive's oxygen-exposure readings or fill its cylinders - those are one
+        machine's arithmetic and one machine's labelling, and attributing them to the dive
+        would credit the Shearwater's record with the Suunto's numbers.
+
+        The attach route has drawn that line since recordings arrived (`_rederive_recording`
+        returns before both for `ordinal != 0`). This side could not until the match carried
+        an ordinal, so it wrote them for whichever recording the gate happened to pick.
+        """
+        user, dive = self._seed(db, device_brand="Shearwater", device_serial="D9772626")
+        secondary = create_dive_recording(db, user, dive, ordinal=1)
+        secondary.start_time = self.START
+        secondary.utc_offset_minutes = 180
+        secondary.duration = 3051
+        secondary.max_depth = 19.04
+        secondary.device_brand = "Suunto"
+        secondary.device_serial = "253810000400"
+        db.add(DiveMixture(dive_id=dive.id, gas_number=0, start_pressure=207.34, end_pressure=47.47))
+        db.commit()
+        document = self._document(
+            {
+                "device": {"brand": "suunto", "model": "Suunto Ocean"},
+                "started_at": "2026-09-08T15:17:38+03:00",
+                "profile": {"duration": 3473, "depth": {"times": [0, 3473], "values": [0, 1904]}},
+            },
+            cns_end=9.0,
+            cylinders=[{"gas_number": 1, "oxygen": 33.0, "helium": 0.0}],
+        )
+
+        plan = await _apply(async_db, user.id, document)
+
+        assert ImportNoteCode.RECORDING_FILLED in _codes(plan)
+        # The recording itself filled, which is the half that is still the fill's to write.
+        filled = (await async_db.execute(select(DiveRecording).where(DiveRecording.id == secondary.id))).scalar_one()
+        assert filled.device_model == "Suunto Ocean"
+        # The dive's did not.
+        assert (await async_db.execute(select(Dive.cns_end).where(Dive.id == dive.id))).scalar_one() is None
+        cylinder = (await async_db.execute(select(DiveMixture).where(DiveMixture.dive_id == dive.id))).scalar_one()
+        assert cylinder.oxygen is None
+
+    @pytest.mark.asyncio
     async def test_a_second_computer_is_attached_rather_than_logged_again(
         self, db: Session, async_db: AsyncSession
     ) -> None:

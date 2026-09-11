@@ -229,6 +229,29 @@ def delta_seconds(
     return abs((wall_clock(left_start, left_offset) - wall_clock(right_start, right_offset)).total_seconds())
 
 
+def starts_before(
+    left_start: datetime,
+    left_offset: int | None,
+    right_start: datetime,
+    right_offset: int | None,
+) -> bool:
+    """Whether the left start comes first, on whichever clock both sides can speak.
+
+    `delta_seconds` above answers *how far apart*; this answers *which way round*, under the
+    identical rule, because the two questions are asked of the same pair and an ordering
+    derived any other way would contradict the distance. A merge asks it twice: of the two
+    dives, to decide which of them survives, and of their two primary recordings, to decide
+    which record's samples are the axis and which are the ones offset onto it.
+
+    Strict, so two starts that are equal on the comparison clock are neither before the
+    other and the caller has to break the tie itself - which is what stops the answer
+    depending on the order the pair was passed in.
+    """
+    if left_offset is not None and right_offset is not None:
+        return left_start < right_start
+    return wall_clock(left_start, left_offset) < wall_clock(right_start, right_offset)
+
+
 @dataclass(frozen=True, slots=True)
 class RecordingFacts:
     """One side of a match: what it was recorded by, when, and the two figures the strict
