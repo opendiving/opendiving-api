@@ -1260,8 +1260,8 @@ async def merge_two_dives(
 # `POST` rather than `PUT` on the first, deliberately: attaching is no longer idempotent in
 # the HTTP sense - the same bytes twice are still a no-op, but two *different* files are two
 # additions rather than a replacement - and a `PUT` that appended would be a lie about the
-# method. There is no deployment but the local one and the web client moves in the same
-# change, so nothing is aliased: see *"There is no production"*.
+# method. Nothing was deployed anywhere when this was written and the web client moved in the
+# same change, so nothing is aliased.
 
 
 @router.post("/dive/{uuid}/recordings", response_model=RecordingRead, status_code=201)
