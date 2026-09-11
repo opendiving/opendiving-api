@@ -7380,6 +7380,12 @@ Invisible at a few hundred rows, an incident at ten million. A metadata test ass
 cascading FK has a *usable* index — not merely that an index exists, since a partial one on a
 cascade target counts as none — is deferred to before launch and is not in this change.
 
+**That test exists now**, and it was written to the specification in the sentence above:
+`tests/test_foreign_key_indexes.py` excludes a partial index from counting for exactly the reason
+measured here, and covers every foreign key rather than only the cascading ones — the lookup is the
+same one whatever the `ondelete` rule says to do once it finds a row. See *"Every foreign key column
+leads an index, and a test says so"*.
+
 ### The DDL
 
 Per *"Schema changes have no migration tool"*: `create_all` creates brand-new tables only, so all of
@@ -11607,7 +11613,8 @@ Checked here against the live schema rather than the models, and all ten already
 leading with `user_id`: eight from `index=True`, plus `ux_dive_file_user_id_sha256` and the unique
 `ix_user_dive_stats_user_id`. So this change adds no index, and the reason it needed none is a fact
 about the current schema rather than a property of the design — a new table joining the list has to
-be checked the same way.
+be checked the same way. Nothing checks it by hand any more: `tests/test_foreign_key_indexes.py`
+asks the same question of every foreign key in the schema, on every run.
 
 ### The test is in two halves because they fail on different things
 
@@ -16849,6 +16856,15 @@ a sequential scan nobody is watching for, on a table that was small on the day i
   with a real index, and neither appears in `Table.indexes`. Without that arm the association-table
   shape - `(parent_id, child_id)` as a composite primary key, no declared index at all - would fail
   a rule it obeys.
+- **A partial index counts as none**, however well it leads, and this is the arm the test is
+  actually for. *"The indexes are the part that needed care, not the deletes"* measured it: the
+  lookup a foreign key provokes carries no predicate for one to be implied by, so Postgres scans the
+  table past an index on the right column of the right table. That section asked for this test and
+  specified this arm, which is the reason the rule is *usable index* rather than *an index*. Drop
+  the `postgresql_where` check and the four tables that carry a partial index - `certification`,
+  `dive`, and `gear_service_record` twice - pass on the partial alone; delete
+  `ix_gear_service_record_gear_item_id` and `ix_gear_service_record_schedule_id`, the two plain
+  indexes that exist solely for this, and nothing anywhere goes red. Checked by deleting them.
 
 The trap in writing it is the functional index. `Index("ix", func.lower(label))` has a leading
 expression that carries a `.name` of its own - `"lower"` - so reading `.name` off whatever turns up

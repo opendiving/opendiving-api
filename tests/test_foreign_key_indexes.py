@@ -16,6 +16,14 @@ several columns here are covered only by a `ux_` one, and why a primary key or a
 `UniqueConstraint` counts too: Postgres implements both with a real index, and that index
 serves its leading column exactly like a declared one.
 
+**And usable**, which rules out a partial index however well it leads. The lookup a foreign key
+provokes carries no predicate for one to be implied by, so Postgres scans the table rather than
+using it - measured, not reasoned about, in `DECISIONS.md` under *"The indexes are the part that
+needed care, not the deletes"*, which is also where the two plain indexes on
+`gear_service_record` come from. That distinction is the whole reason this test asserts a usable
+index rather than any index: without it, deleting those two would leave the partial composites
+standing, this test green, and the seq scan back.
+
 This passes today and is expected to keep passing. Its job is the *next* model - the one whose
 `ForeignKey(...)` arrives without `index=True` beside it and without a composite that happens
 to start there. Nothing else in the suite would notice: the schema is valid, the migration
@@ -38,23 +46,44 @@ from tests.helpers.model_metadata import declared_models
 def _leading_column_name(index: Index) -> str | None:
     """The column an index sorts on first, or `None` when that is not a column at all.
 
-    `Index("ix", col.desc())` wraps the column in a `UnaryExpression`, and a functional index
-    (`func.lower(name)`) has no leading column in the sense that matters - `lower(label)` does
-    not serve a lookup on `label`. The `isinstance` check is what separates the two, and it
-    earns its place: a `Function` carries a `.name` of its own (`"lower"`), so reading `.name`
-    off whatever turns up would report a column called `lower` and silently cover nothing.
+    `Index("ix", col.desc())` wraps the column in a `UnaryExpression` and `col.desc().nullslast()`
+    - the shape `course.py` and `certification.py` use - wraps it twice, so the unwrapping runs
+    until it stops finding a wrapper rather than peeling one layer and hoping.
+
+    A functional index (`func.lower(name)`) has no leading column in the sense that matters:
+    `lower(label)` does not serve a lookup on `label`. The `isinstance` check is what separates
+    the two, and it earns its place - a `Function` carries a `.name` of its own (`"lower"`), so
+    reading `.name` off whatever turns up would report a column called `lower` and cover nothing.
     """
     expressions = list(index.expressions)
     if not expressions:
         return None
     leading = expressions[0]
-    leading = getattr(leading, "element", leading)
+    while (inner := getattr(leading, "element", None)) is not None:
+        leading = inner
     return leading.name if isinstance(leading, Column) else None
+
+
+def _is_partial(index: Index) -> bool:
+    """Whether the index carries a `WHERE` predicate, which disqualifies it here.
+
+    A referential-integrity lookup carries no predicate of its own - it is
+    `WHERE parent_id = $1` and nothing else - so Postgres cannot prove a partial index covers
+    the rows it needs and scans the table instead. Measured rather than assumed, and the
+    measurement is in `DECISIONS.md` under *"The indexes are the part that needed care, not the
+    deletes"*: two partial indexes leading with the column being looked up, right table, and a
+    `Seq Scan` all the same. It is why `gear_service_record` carries a plain index beside each of
+    its partial ones, and why `ux_gear_service_schedule_item_kind_label` may never gain a
+    predicate.
+    """
+    return index.dialect_kwargs.get("postgresql_where") is not None
 
 
 def _columns_an_index_leads_with(table: Table) -> set[str]:
     """Every column some index on this table can be looked up by on its own."""
-    leading = {name for index in table.indexes if (name := _leading_column_name(index)) is not None}
+    leading = {
+        name for index in table.indexes if not _is_partial(index) and (name := _leading_column_name(index)) is not None
+    }
 
     # A primary key and a unique constraint are each backed by an index Postgres creates and
     # `Table.indexes` does not list, so asking only that collection would fail a foreign key
@@ -127,9 +156,28 @@ class TestWhatCountsAsLeadingAnIndex:
         assert foreign_key_columns_without_a_leading_index(child.metadata) == []
 
     def test_a_descending_second_column_does_not_hide_the_first(self) -> None:
-        """How `ix_dive_user_id_start_time` is declared, so the unwrapping has to survive it."""
+        """The shape `ix_dive_user_id_start_time` is declared in. Nothing is unwrapped here -
+        the leading expression is a plain column - which is exactly why the two cases below
+        exist as well."""
         child = self._metadata().tables["child"]
         Index("ix_child_parent_id_sort_key_desc", child.c.parent_id, child.c.sort_key.desc())
+
+        assert foreign_key_columns_without_a_leading_index(child.metadata) == []
+
+    def test_a_descending_leading_column_still_counts(self) -> None:
+        """`.desc()` wraps the column in a `UnaryExpression`, and an index that sorts a foreign
+        key descending indexes it just as well as one that sorts it up."""
+        child = self._metadata().tables["child"]
+        Index("ix_child_parent_id_desc", child.c.parent_id.desc())
+
+        assert foreign_key_columns_without_a_leading_index(child.metadata) == []
+
+    def test_a_leading_column_wrapped_twice_still_counts(self) -> None:
+        """`.desc().nullslast()` is two `UnaryExpression`s deep - the shape `course.py:88` and
+        `certification.py:88` use for their sort columns. A single-level unwrap reports no
+        leading column here and fails a table that is fine."""
+        child = self._metadata().tables["child"]
+        Index("ix_child_parent_id_desc_nullslast", child.c.parent_id.desc().nullslast())
 
         assert foreign_key_columns_without_a_leading_index(child.metadata) == []
 
@@ -175,6 +223,34 @@ class TestWhatCountsAsLeadingAnIndex:
         )
 
         assert foreign_key_columns_without_a_leading_index(metadata) == []
+
+    def test_a_partial_index_covers_nothing_however_well_it_leads(self) -> None:
+        """`gear_service_record`'s shape before the two plain indexes were added: an index on
+        the right table, leading with the right column, that the lookup cannot use. Counting it
+        is the one way this whole file could pass while the scan it exists to prevent runs."""
+        child = self._metadata().tables["child"]
+        Index(
+            "ix_child_parent_id_sort_key_partial",
+            child.c.parent_id,
+            child.c.sort_key,
+            postgresql_where=child.c.sort_key.is_(None),
+        )
+
+        assert foreign_key_columns_without_a_leading_index(child.metadata) == ["child.parent_id"]
+
+    def test_a_plain_index_beside_a_partial_one_covers_it(self) -> None:
+        """`gear_service_record`'s shape today, and the reason those two indexes are not the
+        redundant pair they look like."""
+        child = self._metadata().tables["child"]
+        Index(
+            "ix_child_parent_id_sort_key_partial",
+            child.c.parent_id,
+            child.c.sort_key,
+            postgresql_where=child.c.sort_key.is_(None),
+        )
+        Index("ix_child_parent_id", child.c.parent_id)
+
+        assert foreign_key_columns_without_a_leading_index(child.metadata) == []
 
     def test_a_functional_index_covers_nothing(self) -> None:
         """`lower(label)` answers a lookup on `lower(label)`. The guard exists because the
