@@ -16616,4 +16616,5 @@ Pinned by `TestDeletingASecondComputersFile` and `TestDeletingARecording` in
 file-less primary's two document figures survive a secondary's last file and survive
 `DELETE /dive/{uuid}/recording/{rid}`, a figure the primary's own file does not yield survives too,
 and - the half that keeps the guard honest - the primary's own last file still promotes the next
-recording and takes the dive's reading off it.
+recording and takes the dive's reading off it. `TestPromotingARecording` holds the third route,
+which deletes nothing and so answers `True` unconditionally.

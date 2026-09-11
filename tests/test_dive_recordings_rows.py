@@ -678,15 +678,22 @@ class TestDeletingARecording:
         assert [row.id for row in await _recordings(async_db, dive)] == [second.recording_id]
         assert await _cns_end(async_db, dive) == 44.0
 
+
+class TestPromotingARecording:
+    """`PATCH /dive/{uuid}/recording/{rid}`, the third route the readings follow.
+
+    Its own class rather than a member of the two above, because it deletes nothing: a
+    promotion has touched the primary by definition - it is what it just did - so it is the
+    one caller that always re-derives, and the question the deletion routes answer does not
+    arise here.
+    """
+
     @pytest.mark.asyncio
     async def test_promoting_a_second_computer_re_derives_from_it(
         self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive, routed: None
     ) -> None:
-        """A promotion is the one caller that has touched the primary by definition - it is
-        what it just did - so it always re-derives. Here to keep that answer honest: the
-        readings follow the recording the diver made primary, nothing is deleted, and the
-        figures come off the newly promoted machine's own file.
-        """
+        """The readings follow the recording the diver made primary, and come off that
+        machine's own file rather than staying at the one the dive was showing."""
         await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="first.xml")
         other = _export(start="2026-09-08T15:19:38.67+03:00", cns_end=44.0).replace(b"253810000400", b"999999999999")
         stored = await _attach(async_db, diver, dive, other, filename="second.xml")
