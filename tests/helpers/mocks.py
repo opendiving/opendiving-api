@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, tzinfo
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
@@ -119,6 +119,21 @@ class FakeTokenBlacklist:
         caller passes and which this fake has no use for - it only ever holds one shape.
         """
         return self.entries.get(token)
+
+    def backdate_revocation(self, token: str, *, by: timedelta) -> None:
+        """Move one row's `revoked_at` back, so that a presentation of that token now reads
+        as having arrived `by` later than it really did.
+
+        How long after a revocation the token comes back is the only thing separating the
+        two-tab rotation race from a stolen cookie, and everything `api.v1.auth` does past
+        that line hangs off the gap. The far side of it is seconds away in wall-clock time,
+        so a test that reached it by waiting would pay those seconds to exercise a clock
+        nobody is testing. `FrozenSecurityClock` cannot serve here either: it freezes the
+        mint and the revocation together, which fixes the gap at whatever the suite's
+        import time happens to make it rather than at a value the test chose.
+        """
+        entry = self.entries[token]
+        entry.revoked_at = entry.revoked_at - by
 
 
 def get_current_user(user: models.User) -> dict[str, Any]:

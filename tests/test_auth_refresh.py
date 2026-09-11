@@ -3,8 +3,10 @@
 for why `/refresh`/`/logout` moved under `/auth`, and for why the presented refresh
 token is rotated rather than reused).
 
-Mostly unit tests over a mocked session; the last class is Postgres-backed, because the
-liveness check the endpoint makes is a real query and a fake cannot fail the way it can.
+Mostly unit tests over a mocked session; the Postgres-backed classes are the trailing ones,
+because the liveness check the endpoint makes is a real query and a fake cannot fail the
+way it can - which is as true of the session a replayed token gets revoked as it is of the
+account behind it.
 """
 
 import logging
@@ -16,15 +18,18 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi import Response
+from sqlalchemy import select
 
-from src.app.api.v1.auth import _elapsed, refresh_access_token
+from src.app.api.v1.auth import _REFRESH_REPLAY_THRESHOLD, _elapsed, refresh_access_token
 from src.app.core.exceptions.http_exceptions import UnauthorizedException
 from src.app.core.schemas import TokenData
+from src.app.core.security import blacklist_token, create_refresh_token, token_session_id
 from src.app.core.utils.request_context import RequestContext
+from src.app.models.user_session import UserSession
 from src.app.schemas.user_session import UserSessionReadInternal
 from src.app.services.auth_service import issue_tokens
 from tests.conftest import db_available
-from tests.helpers.mocks import FakeTokenBlacklist, FrozenSecurityClock
+from tests.helpers.mocks import FakeTokenBlacklist, FrozenSecurityClock, awaited_kwargs
 
 USER_UUID = uuid_pkg.uuid4()
 AUTH_LOGGER = "src.app.api.v1.auth"
@@ -66,6 +71,21 @@ USER_ID = 1
 # The `sid` a verified refresh token carries. A `TokenData` without one is a token minted
 # before sessions existed, which is its own case below.
 SESSION_UUID = uuid_pkg.uuid4()
+
+
+async def _spend_one_refresh_token(db: Any, *, user_uuid: uuid_pkg.UUID = USER_UUID, user_id: int = USER_ID) -> str:
+    """Sign in and refresh once, returning the cookie that was spent doing so.
+
+    Module-level rather than a method because two classes need it now: the reuse *logging*
+    below, and the session revocation that the same presentation triggers past the replay
+    threshold. They are two halves of one branch, and a second copy of the arrangement is
+    a second thing to keep in step with `issue_tokens`.
+    """
+    sign_in = Response()
+    await issue_tokens(sign_in, user_uuid, db=db, context=CONTEXT, user_id=user_id)
+    spent = _refresh_cookie(sign_in)
+    await refresh_access_token(_request({"refresh_token": spent}), Response(), db)
+    return spent
 
 
 class FakeUsers:
@@ -155,7 +175,7 @@ class TestRefreshAccessToken(SignedInAccount):
     async def test_invalid_refresh_token_raises_unauthorized(self, mock_db):
         with (
             # The failure path asks the blacklist whether this token was one we revoked
-            # (see `_warn_if_revoked`), so it needs somewhere to ask even when the answer
+            # (see `_handle_revoked_refresh`), so it needs somewhere to ask even when the answer
             # is "never seen it" - `mock_db` alone can't answer a real query.
             patch("src.app.core.security.crud_token_blacklist", FakeTokenBlacklist()),
             patch("src.app.api.v1.auth.verify_token", new_callable=AsyncMock) as mock_verify,
@@ -323,17 +343,9 @@ class TestRefreshTokenReuseLogging(SignedInAccount):
     garbage alike.
 
     Two things are load-bearing and both are asserted here: the level (`WARNING`, because
-    nothing configures logging below it - see `_warn_if_revoked`) and the silence on a
+    nothing configures logging below it - see `_handle_revoked_refresh`) and the silence on a
     malformed token, which is noise rather than a security event.
     """
-
-    async def _spent_token(self, mock_db) -> str:
-        """Sign in and refresh once, returning the cookie that was spent doing so."""
-        sign_in = Response()
-        await issue_tokens(sign_in, USER_UUID, db=mock_db, context=CONTEXT, user_id=USER_ID)
-        spent = _refresh_cookie(sign_in)
-        await refresh_access_token(_request({"refresh_token": spent}), Response(), mock_db)
-        return spent
 
     @pytest.mark.asyncio
     async def test_reuse_logs_a_warning_naming_the_account(self, mock_db, caplog):
@@ -343,7 +355,7 @@ class TestRefreshTokenReuseLogging(SignedInAccount):
             patch("src.app.core.security.crud_token_blacklist", blacklist),
             patch("src.app.core.security.datetime", FrozenSecurityClock),
         ):
-            spent = await self._spent_token(mock_db)
+            spent = await _spend_one_refresh_token(mock_db)
 
             # Captured from `DEBUG` up on purpose: capturing at `WARNING` would pass just
             # as well against an `info` call that a real deployment never prints.
@@ -385,7 +397,7 @@ class TestRefreshTokenReuseLogging(SignedInAccount):
             patch("src.app.core.security.crud_token_blacklist", blacklist),
             patch("src.app.core.security.datetime", FrozenSecurityClock),
         ):
-            spent = await self._spent_token(mock_db)
+            spent = await _spend_one_refresh_token(mock_db)
 
             with pytest.raises(UnauthorizedException) as reused:
                 await refresh_access_token(_request({"refresh_token": spent}), Response(), mock_db)
@@ -407,7 +419,7 @@ class TestRefreshTokenReuseLogging(SignedInAccount):
             patch("src.app.core.security.crud_token_blacklist", blacklist),
             patch("src.app.core.security.datetime", FrozenSecurityClock),
         ):
-            spent = await self._spent_token(mock_db)
+            spent = await _spend_one_refresh_token(mock_db)
 
         entry = blacklist.entries[spent]
         assert entry.revoked_at == FrozenSecurityClock.now(UTC)
@@ -423,6 +435,112 @@ class TestRefreshTokenReuseLogging(SignedInAccount):
         assert _elapsed(now - timedelta(milliseconds=12)).endswith("s")
         assert float(_elapsed(now - timedelta(milliseconds=12)).rstrip("s")) < 1
         assert "day" in _elapsed(now - timedelta(days=3))
+
+
+class TestAReusedRefreshTokenRevokesItsSession(SignedInAccount):
+    """Rotation spends the presented cookie, so replaying *that* value fails on its own.
+    What rotation cannot touch is the pair minted from it - and on a theft that pair is
+    what the thief walked off with, rotating happily for the rest of its window while the
+    replay the app noticed cost them nothing.
+
+    Revoking the session both halves carry is what ends it, and the threshold is what
+    keeps it off the documented two-tab race, where the only party signed out would be the
+    diver themselves.
+
+    The gap is set by backdating the blacklist row (`FakeTokenBlacklist.backdate_revocation`)
+    rather than by sleeping, and **the race cases deliberately do not freeze the clock**:
+    `FrozenSecurityClock` fixes the mint and the revocation together, leaving the gap to be
+    whatever real time has passed since the suite imported it - which is neither side of
+    the threshold reliably, and is the one thing these tests must choose.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_replay_inside_the_race_window_revokes_nothing(self, mock_db):
+        """The losing tab of two simultaneous refreshes lands on exactly this branch.
+        Signing a diver out for it would turn a harmless collision into a real logout,
+        which is the outcome recorded as the reason not to do this at all before there was
+        a threshold to tell the two cases apart.
+        """
+        blacklist = FakeTokenBlacklist()
+
+        with (
+            patch("src.app.core.security.crud_token_blacklist", blacklist),
+            patch("src.app.api.v1.auth.revoke_session", new_callable=AsyncMock) as revoke,
+        ):
+            spent = await _spend_one_refresh_token(mock_db)
+
+            with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
+                await refresh_access_token(_request({"refresh_token": spent}), Response(), mock_db)
+
+        revoke.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_replay_past_the_threshold_revokes_the_session_the_token_names(self, mock_db):
+        """`sid` is what survives rotation, so the session the *spent* token names is the
+        same one its replacement is riding - which is the whole reason revoking it reaches
+        a credential the thief still holds.
+        """
+        blacklist = FakeTokenBlacklist()
+
+        with (
+            patch("src.app.core.security.crud_token_blacklist", blacklist),
+            patch("src.app.api.v1.auth.revoke_session", new_callable=AsyncMock) as revoke,
+        ):
+            spent = await _spend_one_refresh_token(mock_db)
+            blacklist.backdate_revocation(spent, by=_REFRESH_REPLAY_THRESHOLD + timedelta(seconds=1))
+
+            with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
+                await refresh_access_token(_request({"refresh_token": spent}), Response(), mock_db)
+
+        revoke.assert_awaited_once()
+        assert awaited_kwargs(revoke)["session_uuid"] == token_session_id(spent)
+
+    @pytest.mark.asyncio
+    async def test_a_replayed_token_naming_no_session_revokes_nothing(self, mock_db):
+        """A refresh token minted before sessions existed carries no `sid`, so there is
+        nothing to revoke and the 401 is already the whole answer. Worth pinning because
+        the alternative failure is silent: a `None` handed to `revoke_session` matches no
+        row and would look exactly like this from the outside.
+        """
+        blacklist = FakeTokenBlacklist()
+
+        with (
+            patch("src.app.core.security.crud_token_blacklist", blacklist),
+            patch("src.app.api.v1.auth.revoke_session", new_callable=AsyncMock) as revoke,
+        ):
+            sessionless = await create_refresh_token(data={"sub": str(USER_UUID)})
+            await blacklist_token(sessionless, mock_db)
+            blacklist.backdate_revocation(sessionless, by=_REFRESH_REPLAY_THRESHOLD + timedelta(seconds=1))
+
+            with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
+                await refresh_access_token(_request({"refresh_token": sessionless}), Response(), mock_db)
+
+        assert token_session_id(sessionless) is None
+        revoke.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_response_still_says_nothing_about_any_of_it(self, mock_db):
+        """The revocation is a side effect, not a message. A replay that ends a session and
+        a cookie that was never a token answer the same 401 with the same body, or the
+        endpoint becomes an oracle for which is which.
+        """
+        blacklist = FakeTokenBlacklist()
+
+        with (
+            patch("src.app.core.security.crud_token_blacklist", blacklist),
+            patch("src.app.api.v1.auth.revoke_session", new_callable=AsyncMock),
+        ):
+            spent = await _spend_one_refresh_token(mock_db)
+            blacklist.backdate_revocation(spent, by=_REFRESH_REPLAY_THRESHOLD + timedelta(seconds=1))
+
+            with pytest.raises(UnauthorizedException) as replayed:
+                await refresh_access_token(_request({"refresh_token": spent}), Response(), mock_db)
+
+            with pytest.raises(UnauthorizedException) as garbage:
+                await refresh_access_token(_request({"refresh_token": "not-a-jwt"}), Response(), mock_db)
+
+        assert replayed.value.detail == garbage.value.detail
+        assert replayed.value.status_code == garbage.value.status_code
 
 
 class TestRefreshRequiresALiveAccount:
@@ -608,3 +726,104 @@ class TestRefreshLivenessAgainstPostgres:
                 await refresh_access_token(
                     _request({"refresh_token": _refresh_cookie(never_existed)}), Response(), async_db
                 )
+
+
+@pytest.mark.skipif(not db_available(), reason="Postgres is not reachable")
+class TestAReplayEndsTheRotatedPairAgainstPostgres:
+    """What the mocked cases cannot reach: the `UPDATE` really lands, it is really
+    committed on a request that raises, and the cookie rotated *out* of the replayed token
+    really stops working - which takes the live-session lookup running against a database
+    that can fail it, rather than the permissive `FakeSessions`.
+
+    Only the blacklist table is faked, and for one reason: the gap between a revocation and
+    the presentation that follows it is the input under test, and backdating a row is the
+    only way to choose it without spending real seconds.
+
+    A theft is staged the way it happens. The first cookie is the one that leaked; the app
+    rotates it for whoever presents it first, and the replay that arrives afterwards is
+    what tells the server the two are not the same party.
+    """
+
+    async def _live_session_count(self, async_db, diver) -> int:
+        rows = await async_db.execute(
+            select(UserSession).where(UserSession.user_id == diver.id, UserSession.revoked_at.is_(None))
+        )
+        return len(rows.scalars().all())
+
+    @pytest.mark.asyncio
+    async def test_the_pair_rotated_from_the_replayed_token_stops_working(self, async_db, diver):
+        blacklist = FakeTokenBlacklist()
+
+        with patch("src.app.core.security.crud_token_blacklist", blacklist):
+            sign_in = Response()
+            await issue_tokens(sign_in, diver.uuid, db=async_db, context=CONTEXT, user_id=diver.id)
+            leaked = _refresh_cookie(sign_in)
+
+            rotated = Response()
+            await refresh_access_token(_request({"refresh_token": leaked}), rotated, async_db)
+            replacement = _refresh_cookie(rotated)
+
+            blacklist.backdate_revocation(leaked, by=_REFRESH_REPLAY_THRESHOLD + timedelta(seconds=1))
+            with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
+                await refresh_access_token(_request({"refresh_token": leaked}), Response(), async_db)
+
+            # The point of the whole change: the replacement was never presented, is not on
+            # the blacklist, and is nowhere near its `exp` - the only thing that can refuse
+            # it is the session both halves name.
+            assert replacement not in blacklist.tokens
+            with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
+                await refresh_access_token(_request({"refresh_token": replacement}), Response(), async_db)
+
+    @pytest.mark.asyncio
+    async def test_the_row_is_stamped_even_though_the_request_401s(self, async_db, diver):
+        """`async_get_db` does not commit on unwind, so a revocation left to the caller's
+        `raise` would be rolled back and the whole thing would be a no-op that every
+        call-level assertion still passes. This reads the row back after the request has
+        failed.
+        """
+        blacklist = FakeTokenBlacklist()
+
+        with patch("src.app.core.security.crud_token_blacklist", blacklist):
+            sign_in = Response()
+            await issue_tokens(sign_in, diver.uuid, db=async_db, context=CONTEXT, user_id=diver.id)
+            leaked = _refresh_cookie(sign_in)
+            await refresh_access_token(_request({"refresh_token": leaked}), Response(), async_db)
+
+            assert await self._live_session_count(async_db, diver) == 1
+
+            blacklist.backdate_revocation(leaked, by=_REFRESH_REPLAY_THRESHOLD + timedelta(seconds=1))
+            with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
+                await refresh_access_token(_request({"refresh_token": leaked}), Response(), async_db)
+
+        async_db.expire_all()
+        assert await self._live_session_count(async_db, diver) == 0
+
+    @pytest.mark.asyncio
+    async def test_the_race_leaves_the_session_alone_and_the_replacement_working(self, async_db, diver):
+        """The control, and the case that makes the class mean anything: a check that
+        revoked on every presentation would pass both tests above. Here the second
+        presentation arrives immediately - the losing tab of a simultaneous refresh - and
+        the diver goes on working.
+        """
+        blacklist = FakeTokenBlacklist()
+
+        with patch("src.app.core.security.crud_token_blacklist", blacklist):
+            sign_in = Response()
+            await issue_tokens(sign_in, diver.uuid, db=async_db, context=CONTEXT, user_id=diver.id)
+            first = _refresh_cookie(sign_in)
+
+            rotated = Response()
+            await refresh_access_token(_request({"refresh_token": first}), rotated, async_db)
+            replacement = _refresh_cookie(rotated)
+
+            with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
+                await refresh_access_token(_request({"refresh_token": first}), Response(), async_db)
+
+            async_db.expire_all()
+            assert await self._live_session_count(async_db, diver) == 1
+
+            still_working = Response()
+            result = await refresh_access_token(_request({"refresh_token": replacement}), still_working, async_db)
+
+            assert result["token_type"] == "bearer"
+            assert _refresh_cookie(still_working) not in (first, replacement)

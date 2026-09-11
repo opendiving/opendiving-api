@@ -335,8 +335,10 @@ def _session_claim(session_uuid: uuid_pkg.UUID) -> dict[str, str]:
     `/auth/refresh` spending the cookie and minting an unrelated replacement.
 
     That identifier is what `DECISIONS.md` §"A reused refresh token is a `WARNING`" recorded
-    as the missing prerequisite for its *Tier 3 - family revocation*. Tier 3 is still not
-    implemented: a detected replay records an event and logs, and revokes nothing.
+    as the missing prerequisite for its *Tier 3 - family revocation*, and it is what that
+    revocation now runs on: `api.v1.auth._handle_revoked_refresh` revokes the session a
+    replayed refresh token names, which is the family, because rotation continues exactly
+    one session per issuance and every descendant of that token carries this claim.
     """
     return {"sid": str(session_uuid)}
 
@@ -749,7 +751,7 @@ async def _blacklist_one(token: str, db: AsyncSession) -> None:
     `revoked_at` is stamped here rather than left to the column's `server_default`, so that
     it comes from the same clock as everything else in this module and can be frozen in a
     test alongside them. It answers a question `expires_at` cannot - see the column's own
-    comment, and `api.v1.auth._warn_if_revoked`, which is its only reader.
+    comment, and `api.v1.auth._handle_revoked_refresh`, which is its only reader.
     """
     try:
         payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])

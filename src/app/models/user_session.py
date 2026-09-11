@@ -27,8 +27,8 @@ class UserSession(Base, PublicUUIDMixin):
     (see `core.security._new_jti`); `sid` identifies the *device*, and is deliberately
     carried unchanged across every rotation. That identifier is the prerequisite
     `DECISIONS.md` §"A reused refresh token is a `WARNING`" recorded as missing for its
-    *Tier 3 - family revocation*; this table supplies it, and Tier 3 itself is still not
-    implemented.
+    *Tier 3 - family revocation*; this table supplies it, and a row here is what that
+    revocation now stamps when a spent refresh token is replayed past the threshold.
 
     Hard-deleted rather than soft-deleted, but `revoked_at` is what a revoke stamps: the
     row has to outlive the revoke long enough for the refresh path to answer 401 on a

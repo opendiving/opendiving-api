@@ -78,6 +78,11 @@ class AuthEventType(StrEnum):
 
     # Left `NULL` when the account is already gone, which is the one row that satisfies
     # neither purge arm and is bounded by the user-less retention tier alone.
+    #
+    # One row for two things, deliberately: the detection and the session revocation it
+    # triggers are one act on one site, and the rule above is one event per site - so this
+    # reads as "a replay was detected and its session was ended" rather than earning a
+    # `SESSION_REVOKED` beside it. That one stays for the revoke a diver asks for.
     REFRESH_REPLAY_DETECTED = "refresh_replay_detected"
 
 

@@ -3215,18 +3215,24 @@ warning that fires on the documented race and cannot say which case it is leaves
 same "was this real?" question they started with. One column is a small price for a line that is
 actually actionable.
 
-**Tier 3 - family revocation.** The textbook response to reuse is to revoke the whole descendant
-chain of the reused token. That needs a lineage identifier propagated across rotations, and no such
-thing exists: `_new_jti` identifies one issuance at a time, deliberately, and every rotation mints
-an unrelated token. Building it means a second column, threading the family id through
-`create_refresh_token`/`issue_tokens`/`refresh_access_token`, and a revocation path that deletes by
-family rather than by value. It is the right direction if this ever matters; it is out of scope for
-making the event *visible*, which is what was actually missing. Recorded here rather than left
-unmentioned so the next person knows it was considered.
+**Tier 3 - family revocation. Done since, and not the way this paragraph expected.** What it said
+was: the textbook response to reuse is to revoke the whole descendant chain of the reused token,
+that needs a lineage identifier propagated across rotations, and no such thing exists - `_new_jti`
+identifies one issuance at a time, deliberately, and every rotation mints an unrelated token - so
+building it means a second column threaded through
+`create_refresh_token`/`issue_tokens`/`refresh_access_token`. All of that was true when it was
+written and the conclusion no longer is. The identifier arrived for an unrelated reason (*"Refresh
+tokens grew a session behind them, and `sid` is what survives rotation"*), the column it needed is
+`user_session.revoked_at`, and the revocation path is one `UPDATE` on one row. See *"A replayed
+refresh token takes its session with it"* below for what was built.
 
-**Automatic sign-out on reuse.** Not done for the same reason as the wording above: the tab race
-reaches this branch, and signing a user out because two of their tabs refreshed together would turn
-a harmless collision into a real logout. The 401 the replay already gets is the whole response.
+**Automatic sign-out on reuse. Also done since, and its objection is what the threshold answers.**
+The argument recorded here was that the tab race reaches this branch, so signing a user out because
+two of their tabs refreshed together would turn a harmless collision into a real logout. That is
+still exactly right, and it is the reason the revocation sits past `_REFRESH_REPLAY_THRESHOLD`
+rather than on the branch itself: inside five seconds nothing is revoked, and the 401 remains the
+whole response. What changed is that there is now a line to put it past - there was not when this
+was written, and without one the objection was decisive.
 
 **Anything visible in the response.** The 401 and its `detail` are byte-identical whether the token
 was revoked or was never a token at all. Diverging would make the response an oracle for whether a
@@ -13495,10 +13501,11 @@ nothing was written anywhere. Three questions therefore had no answer at all rat
   across every rotation, which is what gives a session continuity that spend-then-mint destroys.
 
 That second identifier is the prerequisite *"A reused refresh token is a `WARNING`"* recorded as
-missing for its **Tier 3 — family revocation**, and it has now arrived. **Tier 3 itself is still not
-implemented**, deliberately: a detected replay records an event and logs a line, exactly as before,
-and revokes nothing. Read that section's *What was deliberately not done* as still current except
-for the sentence saying no lineage identifier exists.
+missing for its **Tier 3 — family revocation**, and it has now arrived. **Tier 3 is implemented
+since**, on this claim and no new column: a replay past the threshold stamps `revoked_at` on the row
+the spent token names. When this paragraph was written it said Tier 3 was still not done and that a
+detected replay revoked nothing, which was true for as long as it stood; *"A replayed refresh token
+takes its session with it"* below is what replaced it.
 
 ### The row is created in `issue_tokens`, which is why "one session per mint" is not a checklist
 
@@ -13639,9 +13646,9 @@ would connect to the paragraph eleven thousand lines away that it contradicts.
 
 Everything downstream of a resolved identity carries the id it already had. Two sites work slightly
 harder for it and both are bounded: `POST /auth/logout` authenticates on `oauth2_scheme` alone and
-resolves its subject from the presented access token the way `_warn_if_revoked` already does, and
-the refresh-replay event resolves the token's subject with one indexed read — rare by construction,
-since it is only reached past the threshold below.
+resolves its subject from the presented access token the way `_handle_revoked_refresh` already does,
+and the refresh-replay event resolves the token's subject with one indexed read — rare by
+construction, since it is only reached past the threshold below.
 
 ### The replay event is conditioned on elapsed time; the log line still is not
 
@@ -13649,10 +13656,17 @@ The two-tab rotation race lands on the same branch a stolen cookie does, resolve
 and is benign, documented and not especially rare. An unconditioned audit row would have put the
 cry-wolf defect `token_blacklist.revoked_at` was added to fix straight into the audit table.
 
-So the **row** is written only past `_REFRESH_REPLAY_AUDIT_THRESHOLD` (five seconds — three orders
-of magnitude above the race, negligible against a theft replayed minutes or hours later), and a
-row's existence therefore means replay-not-race. The **`WARNING` still fires for every
-presentation**, gap attached, exactly as before: nothing that was visible has become invisible.
+So the **row** is written only past `_REFRESH_REPLAY_THRESHOLD` (five seconds — three orders of
+magnitude above the race, negligible against a theft replayed minutes or hours later), and a row's
+existence therefore means replay-not-race. The **`WARNING` still fires for every presentation**, gap
+attached, exactly as before: nothing that was visible has become invisible.
+
+The constant lost the word `AUDIT` from its name when the session revocation was put behind the same
+line (*"A replayed refresh token takes its session with it"*). One event still covers the site — the
+row now means "a replay was detected and its session was ended", rather than earning a second
+`SESSION_REVOKED` beside it, because the vocabulary's rule is one event per site and this is one
+act. What the sharing changes is the cost of the number being wrong: too low used to mean a spurious
+row, and now means a diver signed out for their own two tabs.
 
 ### Retention is two tiers, and the short one is not independently chosen
 
@@ -16815,3 +16829,85 @@ because a restart re-runs an applied revision (it does not; `apply_migrations` i
 subsequent boot), but because one that fails partway rolls back without advancing `alembic_version`
 and starts again from the top, which is the case the collision arm exists to keep this revision out
 of.
+
+## A replayed refresh token takes its session with it
+
+Rotation already made a replayed refresh token worthless: `/auth/refresh` spends the presented
+cookie before minting its replacement, so a second presentation of the same value fails closed. What
+it never touched was the **replacement**, and that is the credential a theft is actually about. The
+sequence is always the same shape - a cookie leaks, whoever gets to `/auth/refresh` first is handed
+a fresh pair, and the loser's presentation of the spent value is what tells the server the two are
+not the same party. Before this the server said so in a log line, wrote an audit row, answered 401,
+and left the winner's pair rotating for the rest of its window. The detection was complete and the
+response was nothing.
+
+It revokes the session now. The `sid` both halves of a pair carry is the same across every rotation,
+so one `UPDATE` on `user_session` ends the pair minted from the replayed token - the cookie at its
+next rotation, and the access token on its very next request, since `get_current_user` asks the same
+question of the same row (*"Revoking a session ends its access token too"*). Whoever is holding
+either half signs in again and gets a new session, which on the theft reading is both parties and on
+any other reading is one inconvenienced diver.
+
+### This is *"A reused refresh token is a `WARNING`"*'s Tier 3, arriving by a different route
+
+That section recorded family revocation as the textbook answer and ruled it out for want of a
+lineage identifier: `jti` is per-issuance by design, every rotation mints an unrelated token, and
+building a family id meant a column threaded through three functions. Every word of that was true.
+What made it obsolete was `user_session`, which was added for "list my devices" and "sign my other
+devices out" and happens to *be* the lineage - `issue_tokens` continues exactly one session per
+rotation, so the descendant chain of a token and the token's session are the same set. The feature
+that looked like it needed a new column needed a join it already had.
+
+The same section's *Automatic sign-out on reuse* bullet objected that the two-tab race reaches this
+branch and a sign-out would turn a harmless collision into a real logout. That objection was never
+answered - it was **sidestepped by putting the revocation past the threshold** the audit row already
+used. Inside five seconds nothing is revoked and the 401 is still the whole response, which is
+precisely what that bullet asked for.
+
+### The threshold is load-bearing twice now, and got more expensive to be wrong about
+
+`_REFRESH_REPLAY_THRESHOLD` (formerly `_REFRESH_REPLAY_AUDIT_THRESHOLD`, renamed because it stopped
+being only the audit's) sits at five seconds: three orders of magnitude above a tab race that
+resolves in milliseconds, and negligible against a replay that lands minutes or hours later. Set too
+low it used to cost a spurious audit row. It now costs a diver their session, which is a real logout
+for an event that is documented, benign and not especially rare - so the number is worth more care
+than it was, and `tests/test_auth_audit.py` still bounds it from both sides.
+
+The log line is deliberately **not** behind it. Every presentation of a revoked token still produces
+the `WARNING` with its elapsed gap, exactly as before, so nothing an operator could see has become
+invisible - what sits past the line is only the pair of consequences that assume replay-not-race.
+
+### One event, not two, and the write rides the audit commit
+
+The site emits `REFRESH_REPLAY_DETECTED` and nothing else. `AuthEventType`'s rule is one event per
+site, the detection and the revocation are one act, and a `SESSION_REVOKED` beside it would record
+that act twice; what changed is what the existing row *means* - a replay was detected and its
+session was ended.
+
+The `UPDATE` is left uncommitted for `record_auth_event` to carry, one line below, rather than
+committing on its own. `async_get_db` does not commit on unwind and the caller's next statement is
+`raise UnauthorizedException`, so a revocation that committed separately could survive an audit
+write that failed - a session ended with nothing on record saying why. Riding the same commit makes
+them land or roll back together. `tests/test_auth_refresh.py` reads the row back *after* the 401 for
+exactly this reason: a revocation rolled back by the raise passes every assertion made at the call.
+
+### What the revoke is scoped by, and why `sid` alone is enough
+
+`revoke_session` takes a session uuid and no `user_id`, the same way `POST /auth/logout` calls it.
+The `sid` here comes from `token_session_id`, which enforces the signature and the expiry, and the
+branch is only reached at all because the token was found in `token_blacklist` - so it is a token
+this server issued, and then spent, and a `sid` that reached a signed token was put there by
+`issue_tokens` for that token's own subject. There is no unsigned path to another account's session
+uuid, which is what makes the narrower query unnecessary rather than merely absent.
+
+A token carrying no `sid` revokes nothing and still 401s. Two things arrive that way: a cookie
+minted before sessions existed, and one whose `exp` passed while its blacklist row waits for the
+hourly purge (`token_subject` degrades the same way, for the same reason). Neither names a session
+that could still be rotating.
+
+### Unchanged, deliberately
+
+The refresh cookie, in every respect - name, flags, lifetime, and the `Set-Cookie` a successful
+rotation writes. And the response: a replay that has just ended a session answers the identical 401,
+with the identical `detail`, as a cookie that was never a token at all. The revocation is a side
+effect, never a message, or the endpoint becomes an oracle for which of the two it was looking at.
