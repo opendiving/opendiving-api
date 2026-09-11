@@ -27,7 +27,7 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # column, so a column rides along free where a table would cost a join on the hottest
     # dependency in the app.
     #
-    # `avatar_storage_key` is where the bytes are on the files volume,
+    # `avatar_storage_key` is where the bytes are in the configured blob store,
     # `user-avatars/{sha256[:2]}/{nonce}_{sha256}`, minted by `blob_store.new_key`. The
     # nonce is per write, deliberately not this row's uuid: the row survives replacement,
     # so a key derived from it could be re-minted after being retired and a post-commit

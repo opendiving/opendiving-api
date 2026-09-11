@@ -32,6 +32,7 @@ from src.app.models.dive_file import DiveFile
 from src.app.models.user import User
 from src.app.services import blob_store
 from tests.conftest import db_available
+from tests.helpers.fake_s3 import select_s3_backend
 from tests.helpers.generators import create_dive, create_dive_recording, create_user
 from tests.helpers.mocks import fake_request
 
@@ -391,11 +392,24 @@ class TestPurgeDeletedAccounts:
 @pytest.mark.skipif(not db_available(), reason="No database connection available")
 class TestPurgeDeletedAccountsAgainstPostgres:
     """The job against a real database, because what it has to get right is a `WHERE`
-    clause, a cascade and a filesystem - and a mocked session evaluates none of the three.
+    clause, a cascade and a blob store - and a mocked session evaluates none of the three.
 
     Unscoped, as the cron runs it: it purges every eligible account in the database, not
     only this test's, so the assertions only ever ask after rows the test seeded.
     """
+
+    @pytest.fixture(params=["local", "s3"], autouse=True)
+    def blob_backend(self, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Runs every test in this class against both backends.
+
+        The two file tests below are written entirely in `blob_store`'s own vocabulary -
+        `new_key`, `put`, `exists` - so the same body proves the same thing on a volume and
+        in a bucket without a line of it changing, which is the property the backend split
+        was shaped for. The S3 half is what stops "the purge deletes the diver's files" from
+        being true only of the deployment nobody hosts.
+        """
+        if request.param == "s3":
+            select_s3_backend(monkeypatch)
 
     @pytest_asyncio.fixture(autouse=True)
     async def _dispose_the_app_engine(self) -> AsyncGenerator[None]:
@@ -512,6 +526,7 @@ class TestPurgeDeletedAccountsAgainstPostgres:
         db.expunge_all()
 
         await purge_deleted_accounts({})
+        await blob_store._await_pending_removals()
 
         assert db.get(User, diver_id) is None
         assert not blob_store.exists(dive_key), "the dive-computer export outlived the account"
@@ -539,6 +554,7 @@ class TestPurgeDeletedAccountsAgainstPostgres:
         db.expunge_all()
 
         await purge_deleted_accounts({})
+        await blob_store._await_pending_removals()
 
         assert db.get(User, diver_id) is None
         assert not blob_store.exists(avatar_key), "the diver's portrait outlived the account"

@@ -3461,14 +3461,15 @@ brand-new tables. Only ever contended on a cold database.
 Note this was invisible on a warm database - the earlier multi-worker test passed simply because the
 tables already existed. It only reproduced against a freshly created one.
 
-**And a third, when the files volume arrived.** `ensure_root_writable` proves the volume is writable
+**And a third, when the files volume arrived.** The local backend's writability probe (today
+`LocalBackend.ensure_ready`, reached through `ensure_storage_ready`) proves the volume is writable
 by creating a probe file and unlinking it — and the first version used one fixed name,
 `{root}/tmp/.writable`, for all four workers. Two of them overlapping means the second one's
 `unlink` hits a file the first already took; `FileNotFoundError` is an `OSError`, so the handler
 turned it into a fatal "the files volume is not writable" against a volume that was perfectly
 healthy. Fixed with a per-pid probe name and `missing_ok=True` on the unlink — the same treatment
-`_write_atomically` in that module already gave its temp files, which is what makes the omission
-worth recording rather than just fixing.
+that backend's `write` already gave its temp files, which is what makes the omission worth recording
+rather than just fixing. The S3 backend's probe carries the pid for the same reason.
 
 Worth noting what makes this one nastier than the two above: they crash-loop a *cold* start and are
 therefore loud, while this is a race that fires intermittently on any start and accuses the wrong
@@ -10821,6 +10822,106 @@ The whole filesystem lives in `services/blob_store.py`, so the S3 backend is a r
 rather than an interface with a single implementor. Triggers to build it: a hosted offering, a
 multi-node deployment, or real self-hoster demand.
 
+**The first of those three fired.** There is a `FILE_STORAGE_BACKEND` setting now, and the paragraph
+above is kept for the same reason the `bytea` section it sits under is: it named the condition that
+ended it, and the shape it describes is what made the second backend cheap. See *"A second backend,
+because the disk stopped being shared"* below. `local` is still the default and still what every
+compose install gets.
+
+### A second backend, because the disk stopped being shared
+
+`FILE_STORAGE_BACKEND` selects between `local` (the default, unchanged) and `s3`, any S3-compatible
+object store. The section above said there would never be such a setting and named the conditions
+that would end that; the first of them — a hosted offering — is what happened.
+
+**What forced it is not scale, it is topology.** The project's own instance runs on a
+platform-as-a-service where a persistent disk attaches to exactly one service, and two services need
+the blobs: the API writes and reads them, and the worker deletes them during
+`purge_deleted_accounts`. There is no arrangement of one disk that gives both. A shared object store
+is the only thing that does, and it is also what keeps zero-downtime deploys — attaching a disk to a
+service on that platform disables them. None of this is true of a self-hosted install on one
+machine, which is precisely why the default did not move.
+
+**S3-compatible rather than a vendor SDK**, and not because the vendor might change. The six
+operations this app needs — put, get, delete, batch delete, head, list — are the intersection every
+store implements, so the same code serves Cloudflare R2 (what the hosted instance uses), MinIO,
+Garage, Ceph, Backblaze and AWS itself. A self-hoster who already runs an object store can point
+this at it; one who does not is not asked to start.
+
+`boto3` is the client, and the size is the price: botocore installs about 26 MB of service models
+into the image, which every install now carries whether it uses them or not. The alternative
+considered and rejected was signing the requests by hand over `httpx`, which is already a dependency
+and would have added nothing to the image. SigV4 is not hard, but it is exactly the kind of code
+whose bugs appear only against a real endpoint — and a wrong signature is indistinguishable from a
+wrong credential in the error it produces. A library whose signing has been exercised by everyone is
+worth 26 MB.
+
+**Three botocore knobs are set deliberately, in `blob_store.new_s3_client`**, and one of them is not
+obvious. From 1.36 botocore sends a CRC32 checksum trailer on every `PutObject` by default, and
+several S3-compatible stores rejected the request outright; `request_checksum_calculation` and
+`response_checksum_validation` are pinned to `when_required` for that reason. It costs nothing here,
+because every key already ends in the sha256 of its own content. The other two are
+`signature_version="s3v4"` (the legacy `s3` signature is what a store with a non-AWS region name can
+otherwise negotiate) and standard-mode retries.
+
+**Keys did not change, and that is the whole reason this is cheap.**
+`{kind}/{sha256[:2]}/{uuid7}_{sha256}` is a relative path and a valid object key at the same time,
+so no row is rewritten by a move in either direction and `src/scripts/migrate_blobs.py` is a copy
+loop rather than a migration. It is idempotent and resumable for a reason that is a property of the
+key rather than of the script: an object already present under a key cannot hold different bytes
+than the file that key names, so skipping it is the correct answer and not an optimisation. It never
+deletes from the source, so a switch that goes wrong is a restart away from working.
+
+**The post-commit delete is the one place the two backends behave differently**, and it had to be.
+`delete_after_commit` parks keys on the session and a `Session.after_commit` listener acts on them —
+synchronously, because SQLAlchemy's session events are sync even under `AsyncSession`, which runs
+the sync session in a greenlet *on the event-loop thread*. A handful of `unlink` syscalls there is
+free and the old note argued correctly that a thread hop would only buy an ordering problem. A
+`DeleteObjects` round trip is three orders of magnitude slower and would block the loop, so on the
+S3 backend those deletes are handed to a thread and not waited for. Nothing is lost by not waiting:
+the contract was already best-effort — the rows are gone, the transaction has committed, and a blob
+that outlives them is an orphan `sweep_orphaned_files.py` reclaims — and ordering is safe for the
+reason it always was, since a retired key can never be minted again. The suite has
+`blob_store._await_pending_removals()` because a *test* does need to wait; nothing in the app calls
+it.
+
+**The startup emptiness check is a network request now, so it is a bounded one.**
+`warn_if_files_volume_looks_empty` asks `blob_store.has_any_key()` rather than taking the first
+entry of `iter_keys()`. On the local backend those are the same lazy walk; on S3 the second would be
+a `list_objects_v2` pulling a thousand keys per page, on every boot of every container. The bounded
+version passes `MaxKeys=1`.
+
+**The worker probes the store at startup too**, which it never did when there was only a volume it
+was handed by compose. `purge_deleted_accounts` is the only writer outside the API and it is a GDPR
+erasure: a worker whose credentials cannot delete would log "Worker Started", run every hour, and
+report success while leaving the purged diver's c-card scans in the bucket. The probe is a
+put-and-delete under the `tmp/` prefix that `iter_keys` hides, carrying the pid, for the same reason
+the local one is named per-pid — four gunicorn workers reach it within milliseconds of each other.
+
+What the probe does **not** catch, and it looks like it would: a `local` volume that was never
+mounted. The image creates `/data/files` owned by uid 1000 before dropping to that user, so an
+unmounted container probes a writable directory in its own layer and passes. It catches a root-owned
+or read-only volume and, on `s3`, a credential that cannot write. The absent mount stays
+`docker-compose.yml`'s to prevent, which is what the comment on the worker's `files-data` line is
+for.
+
+**What the tests prove and what they do not.** `tests/test_blob_store_s3.py` drives the backend
+against an in-memory stub that answers the boto3 client's six methods and raises botocore's real
+`ClientError` with the codes a store returns. That is enough to pin the key mapping, the prefix
+handling, the missing-object translation to `BlobMissingError`, the bounded emptiness check and the
+post-commit delete — all of which are this repo's logic. It proves nothing about the wire protocol,
+which is boto3's, and nothing about any particular store's quirks. A live bucket is the only thing
+that can, and that check belongs to whoever configures one. The stub was chosen over `moto` because
+the suite must not skip and must not reach the network, and a dev dependency that emulates the whole
+of S3 is a large thing to carry for six calls.
+
+**One frozen thing to know about.** The revision that moved payloads out of `bytea` (`c3c2c4dd4c27`)
+writes files through its own frozen copy of the key logic, straight to `FILE_STORAGE_DIR`, and knows
+nothing about a backend setting. That is correct and deliberately not fixed: it has to keep
+producing what it produced on the day it ran. It is harmless on an S3 instance because such an
+instance is necessarily new — the rows it moves are `bytea` payloads, and a database migrated from
+empty has none.
+
 ### Every key carries a per-write nonce, and that is what makes the unlink safe
 
 Keys are `{kind}/{sha256[:2]}/{uuid7}_{sha256}` — `dive-files/…` and `certification-files/…` — and
@@ -10883,12 +10984,17 @@ The writability probe is per-pid (`{root}/tmp/.writable-{pid}`, unlinked with `m
 because this check runs in the lifespan and the lifespan runs once per worker — see *"Two things
 raced once the image ran four workers"*, which this became the third instance of.
 
-`ensure_root_writable` runs in the lifespan **before** `apply_migrations`, because the revision that
+`ensure_storage_ready` runs in the lifespan **before** `apply_migrations`, because the revision that
 moves the payloads writes files itself. Four gunicorn workers each discovering an unwritable volume
 on their first upload, hours later, one diver at a time, is the alternative. After the migrations a
-second check counts file rows against the tree and logs CRITICAL if there are rows and no files —
-not a refusal, because the documented restore order (database first, files second) has a legitimate
-window where that is true on purpose.
+second check counts file rows against what is stored and logs CRITICAL if there are rows and no
+blobs — not a refusal, because the documented restore order (database first, files second) has a
+legitimate window where that is true on purpose.
+
+Both halves became backend-aware when the object store arrived, and the second one changed shape
+doing so: it asks `blob_store.has_any_key()` rather than taking the first entry of a walk, because
+on a bucket a walk is an unbounded listing made on every boot. The worker runs the first half now
+too. See *"A second backend, because the disk stopped being shared"*.
 
 This check runs in the test suite and in CI too, because `TestClient` enters the real lifespan. That
 is why `tests/conftest.py` pins `FILE_STORAGE_DIR` to a temp directory **before** it imports

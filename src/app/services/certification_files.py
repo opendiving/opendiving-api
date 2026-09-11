@@ -5,12 +5,12 @@ through these functions and never see where those bytes are, which is what let t
 move out of a `bytea` column and onto the files volume without a single call site
 changing.
 
-`services/blob_store.py` is the layer below: it owns the filesystem, and this module owns
-what is stored, under which key, against which row. Deliberately no abstract `FileStorage`
-base class or runtime-selected backend at either level - there is exactly one
-implementation and no configuration that would choose between two. The module boundary is
-the seam; an interface with a single implementor would be scaffolding for a migration that
-hasn't happened yet.
+`services/blob_store.py` is the layer below: it owns *where and how*, and this module owns
+what is stored, under which key, against which row. That lower layer now does pick between
+two backends at runtime - a filesystem volume or an S3-compatible bucket, on
+`FILE_STORAGE_BACKEND` - which this file used to say it never would. What was right about
+that sentence is the half that survived: the choice is one module's business and no
+`FileStorage` interface reaches up to here. Nothing in this file knows there are two.
 """
 
 import hashlib
