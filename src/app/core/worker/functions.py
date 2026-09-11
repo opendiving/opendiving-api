@@ -714,9 +714,15 @@ async def startup(ctx: Worker) -> None:
     The same probe the API's lifespan makes, and it is here because the worker is not a
     read-only service: `purge_deleted_accounts` deletes every blob a purged diver owned,
     through `blob_store.delete_after_commit`. Without this, a worker whose credentials are
-    wrong or whose volume is unmounted starts cleanly, logs "Worker Started", and fails
-    silently at :30 past the first hour that has an account to purge - a GDPR erasure that
-    reports success while leaving the diver's c-card scans in the bucket.
+    wrong - or whose volume is mounted but root-owned - starts cleanly, logs "Worker
+    Started", and fails silently at :30 past the first hour that has an account to purge: a
+    GDPR erasure that reports success while leaving the diver's c-card scans behind.
+
+    **It does not catch a `local` volume that was never mounted**, and that is worth stating
+    because the probe looks like it would. The image creates `/data/files` owned by uid 1000
+    before dropping to that user, so an unmounted worker writes its probe into its own
+    container layer and passes. Only `docker-compose.yml` prevents that one, with the mount
+    on this service, and the comment there says so.
 
     Raising takes the worker down, which is the point: arq surfaces a failed startup rather
     than running the crons anyway, so the container restarts into the same loud error

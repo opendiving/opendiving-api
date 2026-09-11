@@ -10898,6 +10898,13 @@ report success while leaving the purged diver's c-card scans in the bucket. The 
 put-and-delete under the `tmp/` prefix that `iter_keys` hides, carrying the pid, for the same reason
 the local one is named per-pid — four gunicorn workers reach it within milliseconds of each other.
 
+What the probe does **not** catch, and it looks like it would: a `local` volume that was never
+mounted. The image creates `/data/files` owned by uid 1000 before dropping to that user, so an
+unmounted container probes a writable directory in its own layer and passes. It catches a root-owned
+or read-only volume and, on `s3`, a credential that cannot write. The absent mount stays
+`docker-compose.yml`'s to prevent, which is what the comment on the worker's `files-data` line is
+for.
+
 **What the tests prove and what they do not.** `tests/test_blob_store_s3.py` drives the backend
 against an in-memory stub that answers the boto3 client's six methods and raises botocore's real
 `ClientError` with the codes a store returns. That is enough to pin the key mapping, the prefix
