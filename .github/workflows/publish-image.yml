@@ -1,12 +1,19 @@
 name: Publish Image
 
-# Two ways in, and they mean different things.
+# Three ways in, and they mean different things.
 #
 # A `v*` tag push is the release path: it publishes the whole alias set for that version
 # and opens a draft release. Tags are cut deliberately - by hand, after bumping
-# `pyproject.toml`, which the guard below insists on - and that is why there is still no
-# `push: branches:` trigger: self-hosters consume releases as events, and a version per
-# merge trains people onto `:latest` instead of reading what changed.
+# `pyproject.toml`, which the guard below insists on - because self-hosters consume
+# releases as events, and a version per merge trains people onto `:latest` instead of
+# reading what changed.
+#
+# A push to `main` is the edge channel, and it exists for the project's own instance
+# rather than for anybody else's: it publishes `:edge` and `:sha-<12>` and nothing else -
+# never `:latest`, never a semver alias - so no tag a self-hoster can pin moves without a
+# release being cut. The `deploy` job at the bottom then hands Render the digest this run
+# built. That is the whole of what the branch trigger changed: the release path above is
+# untouched, and an `:edge` nobody is pinned to is not a version per merge.
 #
 # `workflow_dispatch` is everything else: a staging build off a branch, or rebuilding an
 # already-released version because its base image grew a CVE. That second case is why a
@@ -27,6 +34,7 @@ name: Publish Image
 # cost. Anything else that drifts apart is a port owed one way or the other.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
     inputs:
@@ -51,9 +59,11 @@ permissions:
   contents: read
   packages: write
 
-# Two runs pushing different commits can otherwise race over a shared tag (`:latest`, or
-# the same `tag` typed twice) and leave it pointing at whichever finished last. Queue
-# rather than cancel - a cancelled push can leave the tag on the older image.
+# Two runs pushing different commits can otherwise race over a shared tag - `:edge` on two
+# merges a few minutes apart, `:latest`, or the same `tag` typed twice - and leave it
+# pointing at whichever finished last. Queue rather than cancel: a cancelled push can leave
+# the tag on the older image, and it would also drop that commit's deploy on the floor,
+# since the `deploy` job only runs for the build it belongs to.
 concurrency:
   group: publish-image
   cancel-in-progress: false
@@ -112,11 +122,14 @@ jobs:
         env:
           # The ref as a human named it, which is what decides whether this is a release
           # build. `github.ref_name` on a tag push is the bare tag; on a dispatch it is
-          # the branch the workflow was launched from, so the input wins there.
+          # the branch the workflow was launched from, so the input wins there; on a main
+          # push it is `main`, which matches neither guard below - the edge channel gates
+          # on the event, not on this, and assembles no alias that needs checking.
           SOURCE_REF: ${{ inputs.ref || github.ref_name }}
           EXTRA_TAG: ${{ inputs.tag }}
           PUSH_LATEST: ${{ inputs.latest }}
           IS_TAG_PUSH: ${{ github.ref_type == 'tag' && github.event_name == 'push' }}
+          IS_MAIN_PUSH: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
         run: |
           set -euo pipefail
 
@@ -175,6 +188,15 @@ jobs:
             if [ "$IS_TAG_PUSH" = "true" ]; then
               PUSH_LATEST=true
             fi
+          fi
+
+          # The edge channel. `:edge` is the only moving name a main push publishes, and
+          # the deliberate absence is everything else: no `:latest`, no `X.Y.Z`, no `X.Y`.
+          # Those are what a self-hoster pins to, and they may only move when a human cuts
+          # a tag - which is also why this sits outside the version block above rather than
+          # beside it. `sha-<12>` is already on `TAGS` and is what the deploy pins to.
+          if [ "$IS_MAIN_PUSH" = "true" ]; then
+            TAGS="${TAGS}"$'\n'"${IMAGE}:edge"
           fi
 
           # The extra tag is for names like `staging`. A version typed into it would be
@@ -276,6 +298,15 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           labels: ${{ needs.prepare.outputs.labels }}
+          # What the running app reports as `commit` from `/api/v1/health`. On the edge
+          # channel `version` is the manifest's `0.1.0` for every deploy, so the commit is
+          # the only thing that identifies which build answered - which the AGPL source
+          # offer needs, and which a bug report needs for the same reason. The resolved
+          # SHA rather than `github.sha`: on a dispatch those differ (see `prepare`), and
+          # an image that names a commit it was not built from is worse than one that
+          # names none. It is the same value as the `image.revision` label, deliberately.
+          build-args: |
+            APP_COMMIT=${{ needs.prepare.outputs.sha }}
           # `push-by-digest` pushes the image with no tag at all and hands back its
           # digest. Tagging happens once, in `merge`, on the manifest list - tagging here
           # would leave each architecture briefly overwriting the other's tag.
@@ -315,6 +346,8 @@ jobs:
   merge:
     needs: [prepare, build]
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.summary.outputs.digest }}
 
     steps:
       - name: Download the digests
@@ -372,13 +405,19 @@ jobs:
 
           docker buildx imagetools create "${ARGS[@]}" "${SOURCES[@]}"
 
+      # Also where the deploy job gets the digest it pins to. Read back from the registry
+      # through the immutable `sha-<12>` tag rather than from `edge`, which the next merge
+      # moves - a deploy that resolved a moving tag could redeploy a commit that is not
+      # the one this run built.
       - name: Summarise what was pushed
+        id: summary
         env:
           TAGS: ${{ needs.prepare.outputs.tags }}
           SHA: ${{ needs.prepare.outputs.sha }}
         run: |
           set -euo pipefail
           DIGEST="$(docker buildx imagetools inspect "${IMAGE}:sha-${SHA:0:12}" --format '{{.Manifest.Digest}}')"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           {
             echo "## Pushed"
             echo
@@ -386,6 +425,96 @@ jobs:
             echo
             printf '%s\n' "$TAGS" | sed 's/^/- `/; s/$/`/'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # The other half of the edge channel. An image-backed Render service does not redeploy
+  # when a new image appears on the tag it follows, so publishing `:edge` changes nothing
+  # on its own; the deploy is this call.
+  #
+  # It names the **digest**, not `edge`. A hook that named the tag would be resolved by
+  # Render whenever it got round to it, so two merges a minute apart could deploy in either
+  # order - and the loser would roll the instance backwards onto code that had already been
+  # superseded.
+  #
+  # Main-push only. A `v*` build is a release for self-hosters, and the commit it tags is
+  # already on `main` and has already been deployed from here; a dispatch is a scratch or
+  # CVE-rebuild image. Neither has any business touching the instance.
+  deploy:
+    needs: merge
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Nothing here talks to GitHub's API - the hooks are the whole job - so it gets no
+    # token at all rather than inheriting the workflow's `packages: write`.
+    permissions: {}
+
+    steps:
+      - name: Deploy the digest this run built
+        env:
+          HOOKS: ${{ secrets.RENDER_DEPLOY_HOOKS }}
+          DIGEST: ${{ needs.merge.outputs.digest }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$DIGEST" ]; then
+            echo "::error::The merge job reported no digest, so there is nothing safe to deploy."
+            exit 1
+          fi
+
+          # The secret is absent on a fork, and was absent in this repository until the
+          # instance existed. Neither is a broken build: the image is published either way,
+          # and a red X on every outside contributor's merge is how a check stops being
+          # read. So this is a notice and a zero exit.
+          if [ -z "${HOOKS//[[:space:]]/}" ]; then
+            echo "::notice::No RENDER_DEPLOY_HOOKS secret is set - the image was published, nothing was deployed."
+            exit 0
+          fi
+
+          # One hook per service, comma-separated, because this image serves two of them
+          # (`api` and `worker`) and Render deploys one service per hook. Newlines are
+          # accepted as separators too - a secret pasted one URL per line is the likely
+          # mistake, and silently deploying only the first service would be a bad way to
+          # find out.
+          #
+          # Each hook carries its own key in its query string, so an individual hook is a
+          # credential that GitHub's masking does **not** cover: it masks the secret's whole
+          # value, not the substrings a split produces. Hence `add-mask` per hook before it
+          # is used anywhere - including by `curl`, whose own diagnostics quote the URL.
+          FAILED=0
+          INDEX=0
+          IFS=',' read -ra HOOK_LIST <<< "${HOOKS//$'\n'/,}"
+          for RAW in "${HOOK_LIST[@]}"; do
+            HOOK="${RAW//[[:space:]]/}"
+            [ -n "$HOOK" ] || continue
+            echo "::add-mask::$HOOK"
+            INDEX=$((INDEX + 1))
+
+            # `imgURL` is what pins the deploy to this manifest list. Appended with `&`
+            # because a deploy hook already carries a `key` query parameter, and unescaped
+            # because a digest reference is letters, digits and `/ . - _ : @` - every one
+            # of them legal unencoded in a query value (RFC 3986 `pchar`, plus `/`).
+            CODE="$(curl -sS -o /dev/null -w '%{http_code}' -X POST --max-time 30 \
+              "${HOOK}&imgURL=${IMAGE}@${DIGEST}")" || CODE=000
+            if [ "$CODE" -ge 200 ] && [ "$CODE" -lt 300 ]; then
+              echo "Hook ${INDEX}: HTTP ${CODE}"
+            else
+              echo "::error::Hook ${INDEX} returned HTTP ${CODE}. The image is published; that service was not redeployed."
+              FAILED=1
+            fi
+          done
+
+          if [ "$INDEX" -eq 0 ]; then
+            echo "::error::RENDER_DEPLOY_HOOKS is set but holds no hook URL."
+            exit 1
+          fi
+
+          # Red, because a service left on the previous digest while its sibling moved is
+          # exactly the state nobody notices. Re-running this job is the whole fix - the
+          # image is published either way, so nothing has to be rebuilt to retry.
+          if [ "$FAILED" -ne 0 ]; then
+            echo "::error::At least one service was not redeployed. Fix the hook and re-run this job."
+            exit 1
+          fi
+
+          echo "Deployed ${IMAGE}@${DIGEST} to ${INDEX} service(s)."
 
   # A release exists for the notes, not for the artifacts - the install bundle and its
   # assets are published by `opendiving/opendiving`, and this repository's release is the
