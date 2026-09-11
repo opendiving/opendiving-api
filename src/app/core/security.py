@@ -335,8 +335,10 @@ def _session_claim(session_uuid: uuid_pkg.UUID) -> dict[str, str]:
     `/auth/refresh` spending the cookie and minting an unrelated replacement.
 
     That identifier is what `DECISIONS.md` §"A reused refresh token is a `WARNING`" recorded
-    as the missing prerequisite for its *Tier 3 - family revocation*. Tier 3 is still not
-    implemented: a detected replay records an event and logs, and revokes nothing.
+    as the missing prerequisite for its *Tier 3 - family revocation*, and it is what that
+    revocation now runs on: `api.v1.auth._handle_revoked_refresh` revokes the session a
+    replayed refresh token names, which is the family, because rotation continues exactly
+    one session per issuance and every descendant of that token carries this claim.
     """
     return {"sid": str(session_uuid)}
 
@@ -438,10 +440,23 @@ def token_session_id(token: str) -> uuid_pkg.UUID | None:
 
     Signature and expiry are still enforced (`jwt.decode` does both), but the blacklist and
     `token_type` checks are not - so this must never be the basis of an authorization
-    decision, exactly as `token_subject` must not. The callers are routes whose sibling
-    dependency `get_current_user` has already run `verify_token` over this same string and
-    let the request through; all this adds is one more claim off it, without a second
-    blacklist round trip on a path that has already paid for one.
+    decision, exactly as `token_subject` must not.
+
+    **What "elsewhere" is differs by caller, and the third one is the opposite of the other
+    two.** `api.dependencies.current_session_uuid` runs beside `get_current_user`, which has
+    already put this same string through `verify_token` and let the request through - so all
+    it adds is one more claim, with no second blacklist round trip on a path that has
+    already paid for one. `POST /auth/logout` asks after `blacklist_tokens` has decoded the
+    token and raised a 401 if it could not.
+
+    `api.v1.auth._handle_revoked_refresh` asks **because `verify_token` failed**, on a
+    cookie no dependency vetted, and nothing above it is going to succeed. What stands in
+    for the vetting there is the `token_blacklist` row it has just read: only a token this
+    server issued and then spent has one, which is what makes the `sid` off it a row this
+    app minted for that token's own subject rather than a claim a caller chose. Read the
+    first sentence as the invariant and these as how each caller satisfies it - the
+    signature is the one thing all three have in common, and none of them may treat it as
+    permission to do anything but name the row.
     """
     try:
         payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
@@ -749,7 +764,7 @@ async def _blacklist_one(token: str, db: AsyncSession) -> None:
     `revoked_at` is stamped here rather than left to the column's `server_default`, so that
     it comes from the same clock as everything else in this module and can be frozen in a
     test alongside them. It answers a question `expires_at` cannot - see the column's own
-    comment, and `api.v1.auth._warn_if_revoked`, which is its only reader.
+    comment, and `api.v1.auth._handle_revoked_refresh`, which is its only reader.
     """
     try:
         payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])

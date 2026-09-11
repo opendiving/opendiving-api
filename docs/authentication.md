@@ -390,6 +390,18 @@ Every way that exchange can fail answers the same 401 with the same body — a r
 expired one, another account's, a deleted account and unparseable garbage are deliberately
 indistinguishable, so the endpoint is never an oracle for whether a given cookie was ever real.
 
+**Presenting a cookie that was already spent ends the session it belongs to.** Rotation makes the
+replayed value itself worthless, but not the pair minted from it — which, when the replay is a theft
+rather than an accident, is the pair somebody else is holding. Both halves carry the same `sid`, so
+stamping `revoked_at` on that row ends them together: the cookie at its next rotation and the access
+token on its very next request. Whoever holds either one signs in again and gets a new session.
+
+That fires only past the five-second line the audit event already used, because the same branch is
+where rotation's documented two-tab race lands — two tabs refreshing at the same instant, the loser
+presenting a cookie the winner has just spent, milliseconds apart. Inside that window nothing is
+revoked, since the only person who would be signed out is the diver whose own tabs collided. The
+`WARNING` is not conditioned either way.
+
 #### 8. Changing an account's email
 
 Shares the magic-link mechanics above, but requires an active session to start, and a precheck on
@@ -514,8 +526,9 @@ never signed out to make room for a dormant one.
 
 `sid` does **not** replace `jti`. The `jti` identifies one issuance and is what makes blacklisting a
 token by value a per-issuance revocation; `sid` identifies the device and is carried unchanged
-across every rotation. Detecting a replayed refresh token still revokes nothing - it records an
-event and logs a line, as before.
+across every rotation. That is also what a replayed refresh token is now revoked *by*: past the
+replay threshold the session the spent token names is stamped, which ends the pair rotated out of it
+as well - see *Session refresh & logout* above.
 
 **Upgrading signs everyone out once.** Neither half of a pair minted before this feature carries a
 `sid`, and both halves are now refused for want of one - the access token on its next request, the

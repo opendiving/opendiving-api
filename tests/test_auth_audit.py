@@ -26,7 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
-from src.app.api.v1.auth import _REFRESH_REPLAY_AUDIT_THRESHOLD, _warn_if_revoked
+from src.app.api.v1.auth import _REFRESH_REPLAY_THRESHOLD, _handle_revoked_refresh
 from src.app.core.db.database import async_engine
 from src.app.core.utils.request_context import RequestContext
 from src.app.core.worker.functions import (
@@ -614,9 +614,14 @@ class TestTheRefreshReplayThreshold:
     audit row would put the cry-wolf defect `token_blacklist.revoked_at` was added to fix
     straight into the audit table.
 
-    **Only the row is conditioned.** The `WARNING` still fires either way, gap attached, so
+    **The `WARNING` is not conditioned.** It still fires either way, gap attached, so
     nothing that was visible has become invisible - what the threshold buys is that a row's
     existence *means* replay-not-race.
+
+    The row is no longer the only thing hanging off it: the session revocation does too,
+    which is what raises the cost of getting this line wrong from a spurious row to a
+    signed-out diver. That half is pinned in `tests/test_auth_refresh.py`, beside the
+    rotation it ends; what is here is the threshold itself and the row.
     """
 
     @pytest.mark.asyncio
@@ -629,7 +634,7 @@ class TestTheRefreshReplayThreshold:
         ):
             revoked.return_value = just_now
 
-            await _warn_if_revoked("a-token", mock_db, CONTEXT)
+            await _handle_revoked_refresh("a-token", mock_db, CONTEXT)
 
         recorder.assert_not_called()
 
@@ -646,13 +651,13 @@ class TestTheRefreshReplayThreshold:
             revoked.return_value = datetime.now(UTC) - timedelta(milliseconds=4)
 
             with caplog.at_level(logging.DEBUG, logger="src.app.api.v1.auth"):
-                await _warn_if_revoked("a-token", mock_db, CONTEXT)
+                await _handle_revoked_refresh("a-token", mock_db, CONTEXT)
 
         assert [record.levelno for record in caplog.records] == [logging.WARNING]
 
     @pytest.mark.asyncio
     async def test_a_gap_past_the_threshold_writes_one(self, mock_db) -> None:
-        long_ago = datetime.now(UTC) - _REFRESH_REPLAY_AUDIT_THRESHOLD - timedelta(seconds=1)
+        long_ago = datetime.now(UTC) - _REFRESH_REPLAY_THRESHOLD - timedelta(seconds=1)
 
         with (
             patch("src.app.api.v1.auth.revocation_time", new_callable=AsyncMock) as revoked,
@@ -664,7 +669,7 @@ class TestTheRefreshReplayThreshold:
             subject.return_value = str(uuid7())
             users.get = AsyncMock(return_value={"id": 7})
 
-            await _warn_if_revoked("a-token", mock_db, CONTEXT)
+            await _handle_revoked_refresh("a-token", mock_db, CONTEXT)
 
         recorder.assert_awaited_once()
         assert awaited_kwargs(recorder)["event_type"] is AuthEventType.REFRESH_REPLAY_DETECTED
@@ -674,7 +679,7 @@ class TestTheRefreshReplayThreshold:
     async def test_a_replay_for_a_purged_account_still_writes_a_user_less_row(self, mock_db) -> None:
         """The one row that satisfies neither arm of the erasure - no user to cascade from
         and no email to match - and so is bounded by the user-less retention tier alone."""
-        long_ago = datetime.now(UTC) - _REFRESH_REPLAY_AUDIT_THRESHOLD - timedelta(hours=2)
+        long_ago = datetime.now(UTC) - _REFRESH_REPLAY_THRESHOLD - timedelta(hours=2)
 
         with (
             patch("src.app.api.v1.auth.revocation_time", new_callable=AsyncMock) as revoked,
@@ -686,7 +691,7 @@ class TestTheRefreshReplayThreshold:
             subject.return_value = str(uuid7())
             users.get = AsyncMock(return_value=None)
 
-            await _warn_if_revoked("a-token", mock_db, CONTEXT)
+            await _handle_revoked_refresh("a-token", mock_db, CONTEXT)
 
         assert awaited_kwargs(recorder)["user_id"] is None
 
@@ -700,7 +705,7 @@ class TestTheRefreshReplayThreshold:
         ):
             revoked.return_value = None
 
-            await _warn_if_revoked("garbage", mock_db, CONTEXT)
+            await _handle_revoked_refresh("garbage", mock_db, CONTEXT)
 
         recorder.assert_not_called()
         assert caplog.records == []
@@ -708,7 +713,7 @@ class TestTheRefreshReplayThreshold:
     def test_the_threshold_is_far_above_the_race_and_far_below_a_theft(self) -> None:
         """Three orders of magnitude above the millisecond-scale race, and negligible
         against a replay that lands minutes or hours later."""
-        assert timedelta(seconds=1) <= _REFRESH_REPLAY_AUDIT_THRESHOLD <= timedelta(minutes=1)
+        assert timedelta(seconds=1) <= _REFRESH_REPLAY_THRESHOLD <= timedelta(minutes=1)
 
 
 @needs_a_database

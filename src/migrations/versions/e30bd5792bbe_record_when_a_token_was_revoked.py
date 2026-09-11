@@ -4,7 +4,7 @@
 token was *issued*, never when it was revoked. That leaves the one question worth asking
 about a revoked refresh token being presented again unanswerable: how long after it was
 spent did the replay arrive? Milliseconds is rotation's documented two-tab race; minutes
-or hours is a stolen cookie. `api.v1.auth._warn_if_revoked` is the only reader.
+or hours is a stolen cookie. `api.v1.auth._handle_revoked_refresh` is the only reader.
 
 Existing rows are backfilled to the moment the migration runs, which is later than they
 were actually revoked. That is fine and not worth a smarter `USING`: the table only holds

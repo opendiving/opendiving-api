@@ -888,7 +888,7 @@ async def restore_account(
 
 def _elapsed(since: datetime) -> str:
     """How long ago `since` was, phrased to stay readable at both ends of the range
-    `_warn_if_revoked` has to cover.
+    `_handle_revoked_refresh` has to cover.
 
     Milliseconds are what separate a tab race from a replay, and a replay can arrive days
     after the theft - at which point `518400.000s` is a number nobody reads at a glance.
@@ -901,26 +901,29 @@ def _elapsed(since: datetime) -> str:
 
 
 # How long after a token was revoked a re-presentation stops being explicable as the
-# documented two-tab rotation race and starts being worth an audit row.
+# documented two-tab rotation race and starts being a replay worth acting on.
 #
 # The race resolves in **milliseconds** - two tabs refreshing at the same instant, the
 # loser landing on this exact branch - and is benign, documented and not especially rare
 # (`DECISIONS.md` §"A reused refresh token is a `WARNING`", *The hard part: telling theft
-# from the documented race*). An unconditioned audit row would therefore put that same
-# cry-wolf defect straight into the audit table, which is what `token_blacklist.revoked_at`
-# was added to fix in the log line.
+# from the documented race*). Treating it as a replay would put that same cry-wolf defect
+# straight into the audit table, which is what `token_blacklist.revoked_at` was added to
+# fix in the log line - and now costs more than a spurious row, since past this line the
+# session is revoked and a diver whose two tabs collided would be signed out for it.
 #
 # Five seconds is three orders of magnitude above the race and negligible against theft,
-# which is replayed minutes or hours later. **Only the audit row is conditioned**: the
-# `WARNING` still fires for every presentation, gap attached, exactly as before - so
-# nothing that was visible has become invisible, and a row's mere existence now means
-# replay-not-race.
-_REFRESH_REPLAY_AUDIT_THRESHOLD = timedelta(seconds=5)
+# which is replayed minutes or hours later. **The `WARNING` is not conditioned on it**:
+# that still fires for every presentation, gap attached, exactly as before, so nothing
+# that was visible has become invisible. What sits past the threshold is the pair of
+# consequences that assume replay-not-race - the revocation and the audit row.
+_REFRESH_REPLAY_THRESHOLD = timedelta(seconds=5)
 
 
-async def _warn_if_revoked(refresh_token: str, db: AsyncSession, context: RequestContext) -> None:
-    """Log a refresh token that failed verification *because it had been revoked*, which
-    is the strongest evidence available that a refresh cookie has been stolen.
+async def _handle_revoked_refresh(refresh_token: str, db: AsyncSession, context: RequestContext) -> None:
+    """Answer a refresh token that failed verification *because it had been revoked*,
+    which is the strongest evidence available that a refresh cookie has been stolen: log
+    every presentation, and past `_REFRESH_REPLAY_THRESHOLD` revoke the session the token
+    belongs to and record the replay.
 
     `verify_token` can't report that difference and shouldn't have to - see
     `core.security.revocation_time` for why - so the question is asked again here, on a
@@ -940,6 +943,21 @@ async def _warn_if_revoked(refresh_token: str, db: AsyncSession, context: Reques
     cookie is replayed minutes or hours later. The line therefore reports the gap and what
     it means, and leaves the reading to whoever is looking - both are live, and nothing
     the server can see distinguishes them beyond this.
+
+    **Past the threshold the session goes, and that is what actually stops the theft.**
+    Rotation already made the presented token worthless; what it could not touch is the
+    pair minted *from* it, which is what whichever party got there first is holding. Both
+    halves of that pair carry the same `sid`, so revoking the row ends them together - the
+    cookie at its next rotation, and the access token on its very next request, since
+    `api.dependencies.get_current_user` asks the same question of the same row. The other
+    party signs in again and gets a new session, which is the whole cost and the reason the
+    threshold is not optional: inside it, the only diver being signed out is one whose own
+    two tabs collided.
+
+    The revocation is left for the `record_auth_event` below to commit rather than
+    committing on its own. They are one event, `async_get_db` does not commit on unwind,
+    and the caller's 401 is next - so a row failing to be written must take the revocation
+    with it rather than leave a session ended with nothing saying why.
     """
     revoked_at = await revocation_time(refresh_token, db)
     if revoked_at is None:
@@ -954,9 +972,23 @@ async def _warn_if_revoked(refresh_token: str, db: AsyncSession, context: Reques
         _elapsed(revoked_at),
     )
 
-    if datetime.now(UTC) - revoked_at < _REFRESH_REPLAY_AUDIT_THRESHOLD:
-        # The race, not a replay. See `_REFRESH_REPLAY_AUDIT_THRESHOLD`.
+    if datetime.now(UTC) - revoked_at < _REFRESH_REPLAY_THRESHOLD:
+        # The race, not a replay. See `_REFRESH_REPLAY_THRESHOLD`.
         return
+
+    # `token_session_id` enforces the signature and the expiry and nothing else, which is
+    # exactly what is wanted here: the blacklist row read above already establishes that
+    # this server issued the token and then spent it, so the `sid` a valid signature
+    # carries names a row this app minted for that token's own subject. There is no
+    # unsigned path to another account's session, which is what lets the revoke be by
+    # `sid` alone - the same way `POST /auth/logout` revokes.
+    #
+    # `None` is a token minted before sessions existed, or one whose `exp` passed while
+    # its blacklist row waits for the hourly purge. Neither names a session that could
+    # still be rotating, so the 401 is already the whole answer.
+    session_uuid = token_session_id(refresh_token)
+    if session_uuid is not None:
+        await revoke_session(db, session_uuid=session_uuid)
 
     # The subject resolves to an account with one indexed read, and the cost of that read
     # is bounded by construction: it is only reached past the threshold, which the benign
@@ -977,7 +1009,10 @@ async def _warn_if_revoked(refresh_token: str, db: AsyncSession, context: Reques
             user_id = cast(dict[str, Any], user)["id"]
 
     # Committed before the caller raises its 401, since `async_get_db` does not commit on
-    # unwind and this is the row the whole conditioning exists to write.
+    # unwind and this is the row the whole conditioning exists to write. The revocation
+    # above rides that commit: one act, one transaction, and still one event - the
+    # vocabulary's rule is one event per site, so this row now means "replay detected and
+    # its session ended" rather than earning a second `SESSION_REVOKED` beside it.
     await record_auth_event(db, event_type=AuthEventType.REFRESH_REPLAY_DETECTED, context=context, user_id=user_id)
 
 
@@ -997,8 +1032,10 @@ async def refresh_access_token(
     moment will race, and the loser gets a 401 - see `DECISIONS.md`.
 
     That second use is also the loudest signal this app gets that a cookie has been
-    stolen, so it is logged: `_warn_if_revoked` separates "a token we revoked, presented
-    again" from "garbage", which the 401 deliberately does not. The *response* is
+    stolen, so it is acted on: `_handle_revoked_refresh` separates "a token we revoked,
+    presented again" from "garbage", which the 401 deliberately does not - and past the
+    race threshold it revokes the session that token names, so the pair rotated out of it
+    stops working too and whoever holds the cookie signs in again. The *response* is
     identical either way - it must never become an oracle for whether a token was ever
     real.
 
@@ -1033,7 +1070,7 @@ async def refresh_access_token(
     user_data = await verify_token(refresh_token, TokenType.REFRESH, db)
     if not user_data:
         # Only reached on a failure, so the extra lookup costs nothing on the happy path.
-        await _warn_if_revoked(refresh_token, db, context)
+        await _handle_revoked_refresh(refresh_token, db, context)
         raise UnauthorizedException("Invalid refresh token.")
 
     # Neither `verify_token` nor `issue_tokens` touches the `user` table, so without this
@@ -1090,8 +1127,8 @@ async def logout(
 
     This route authenticates on `oauth2_scheme` alone - no `get_current_user`, so there is
     no `current_user` dict to take an id from - and resolves its subject from the presented
-    access token the way `_warn_if_revoked` already does. One indexed read, on a route
-    nobody calls in a loop.
+    access token the way `_handle_revoked_refresh` already does. One indexed read, on a
+    route nobody calls in a loop.
     """
     try:
         if not refresh_token:
