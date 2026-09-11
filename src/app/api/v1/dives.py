@@ -21,7 +21,12 @@ from ...core.exceptions.http_exceptions import (
 )
 from ...core.security import create_dive_file_token
 from ...core.utils.cache import cache
-from ...core.utils.datetime_offset import combine_start_time, split_start_time, split_updated_start_time
+from ...core.utils.datetime_offset import (
+    combine_start_time,
+    split_local_start_time,
+    split_start_time,
+    split_updated_start_time,
+)
 from ...core.utils.pagination import clamp_pagination
 from ...core.utils.uploads import content_disposition_attachment, read_upload_within_limit
 from ...crud.crud_courses import get_course_uuids_by_ids, resolve_course_id_for_user
@@ -48,7 +53,6 @@ from ...crud.crud_trips import get_trip_uuids_by_ids, resolve_trip_id_for_user
 from ...schemas.dive import (
     DiveCreateInternal,
     DiveCreateRequest,
-    DiveFileInfo,
     DiveNeighbors,
     DiveNumberingSummary,
     DiveNumberSuggestion,
@@ -60,25 +64,29 @@ from ...schemas.dive import (
     DiveSiteInfo,
     DiveStartTime,
     DiveUpdateRequest,
+    RecordingRead,
+    RecordingUpdateRequest,
     SpeciesInfo,
     validate_depth_pair,
 )
 from ...schemas.dive_mixture import DiveMixtureRead
-from ...schemas.dive_profile import DiveProfileInfo, DiveProfileRead
+from ...schemas.dive_profile import DiveProfileRead
 from ...schemas.gear_item import GearItemInfo
-from ...schemas.parsed_dive import ParsedDiveResponse
+from ...schemas.parsed_dive import ParsedDevice, ParsedDiveMatch, ParsedDiveResponse, ParsedDiveSchema
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_gear_caches
 from ...services.dive_files import (
     MAX_DIVE_FILE_SIZE,
     DiveFileAlreadyLinkedError,
     DiveFileConflictError,
+    DiveFileNotFoundError,
     InvalidDiveFileTokenError,
     delete_dive_file,
     delete_files_for_dive,
     get_dive_file_sha256,
-    get_file_infos_for_dives,
     load_dive_file,
-    store_dive_file,
+    refresh_tech_scalars,
+    resolve_dive_file,
+    store_recording_file,
 )
 from ...services.dive_gas import resolve_gas_use
 from ...services.dive_neighbors import find_dive_neighbors
@@ -87,10 +95,23 @@ from ...services.dive_parsers import DiveParseError, UnsupportedDiveFileError, p
 from ...services.dive_profiles import (
     ProfileGasAttribution,
     get_gas_attribution_for_dives,
-    get_profile_infos_for_dives,
     get_profile_version,
     load_profile,
     to_read_schema,
+)
+from ...services.dive_recordings import (
+    DeviceIdentity,
+    RecordingFacts,
+    RecordingNotFoundError,
+    delete_recording,
+    delta_seconds,
+    device_of,
+    get_recordings_for_dives,
+    is_same_dive_loose,
+    is_same_recording,
+    load_candidates,
+    make_primary,
+    resolve_recording,
 )
 from ...services.dive_stats import recalculate_dive_stats
 from ...services.gear_stats import recalculate_gear_dive_counts
@@ -300,8 +321,7 @@ def _to_public_dive_with_mixtures(
     gear_items: list[GearItemInfo],
     mixtures: list[DiveMixtureRead],
     species: list[SpeciesInfo],
-    source_file: DiveFileInfo | None = None,
-    profile: DiveProfileInfo | None = None,
+    recordings: list[RecordingRead] | None = None,
     attribution: ProfileGasAttribution | None = None,
 ) -> DiveReadWithMixtures:
     """Assemble a dive's public shape from the row plus everything a read embeds.
@@ -311,9 +331,10 @@ def _to_public_dive_with_mixtures(
     rather than querying per dive.
 
     `attribution` is the one input here that never reaches the response as itself: it is
-    the profile's account of which cylinder was breathed when, and it exists solely so a
-    multi-cylinder dive can produce `gas_use`. `None` on the create path, where the dive
-    cannot yet have a file to have been extracted from.
+    the primary recording's account of which cylinder was breathed when, and it exists
+    solely so a multi-cylinder dive can produce `gas_use`. `None` on the create path, where
+    the dive cannot yet have a recording to have been extracted from - which is also why
+    `recordings` defaults to empty there rather than being queried for.
     """
     data = _to_public_start_time(db_dive if isinstance(db_dive, dict) else db_dive.model_dump())
     return DiveReadWithMixtures(
@@ -325,8 +346,7 @@ def _to_public_dive_with_mixtures(
         gear_items=gear_items,
         mixtures=mixtures,
         species=species,
-        source_file=source_file,
-        profile=profile,
+        recordings=recordings or [],
         # Both callers of this function (creating a dive, and the cached single-dive
         # read) go through here, so gas use is derived in exactly one place. Safe to
         # compute before caching, unlike gear service status: nothing about it depends
@@ -343,14 +363,22 @@ def _to_public_dive_with_mixtures(
 @router.post("/dive/parse", response_model=ParsedDiveResponse)
 async def parse_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
     file: Annotated[UploadFile, File(description="Dive-computer export file (Suunto XML or JSON, or a FIT file)")],
 ) -> ParsedDiveResponse:
     """Upload a dive-computer export file and receive the parsed dive data as JSON.
 
     Nothing is stored here - the bytes are parsed and dropped. What comes back alongside
     the dive is a `file_token` attesting that this parse happened: hand it to
-    `PUT /dive/{uuid}/file` with the same file, once the dive it pre-filled exists, and
-    the export is kept against that dive.
+    `POST /dive/{uuid}/recordings` with the same file, once the dive it pre-filled exists,
+    and the export is kept against that dive.
+
+    `matches` is the second thing that comes back: dives of the caller's whose recordings
+    started near this file's, so a form can offer *attach there* instead of logging a
+    second dive for a computer the diver was already wearing. It is the **loose** test -
+    the start window alone, nearest first - because a form is asking a question rather than
+    making a decision; the ones flagged `same_recording` passed the much narrower test that
+    says this file is a second export of a record that dive already has.
     """
     if not file.filename:
         raise BadRequestException("Missing filename")
@@ -378,6 +406,74 @@ async def parse_dive(
             sha256=hashlib.sha256(content).hexdigest(),
             parser_key=parser.key,
         ),
+        matches=await _parse_matches(db, user_id=current_user["id"], parsed=parsed),
+    )
+
+
+async def _parse_matches(db: AsyncSession, *, user_id: int, parsed: ParsedDiveSchema) -> list[ParsedDiveMatch]:
+    """The caller's dives this parsed file might belong to, nearest start first.
+
+    Scoped to the caller's own recordings by the query itself - `load_candidates` filters on
+    `user_id` - so there is no ownership decision here to get wrong, and no way for the
+    window to reach another diver's log.
+
+    A file with no start time matches nothing and the list is empty: every gate is anchored
+    on the clock, and a header-only export with no timestamp gives them nothing to compare.
+    """
+    if parsed.start_time is None:
+        return []
+    try:
+        start_time, offset_minutes = split_local_start_time(datetime.fromisoformat(parsed.start_time))
+    except ValueError:
+        # A parser that produced something `fromisoformat` cannot read. Not a reason to fail
+        # the parse - the form still gets its values - just one with no clock to match on.
+        return []
+
+    incoming = RecordingFacts(
+        device=device_of(parsed.device),
+        start_time=start_time,
+        utc_offset_minutes=offset_minutes,
+        duration=parsed.duration,
+        max_depth=parsed.max_depth,
+    )
+    # Nearest start first, so a form's default offer is the closest candidate rather than the
+    # oldest. Sorted through `delta_seconds` rather than by a plain subtraction, because that
+    # is the one function that knows whether a given pair is comparable as instants or only
+    # as wall clocks - and a sort that got it wrong would put an eleven-hour "difference"
+    # first for exactly the pair the *Clocks* rule exists for.
+    candidates = [
+        candidate
+        for candidate in await load_candidates(db, user_id=user_id, around=start_time)
+        if is_same_dive_loose(incoming, candidate.facts)
+    ]
+    candidates.sort(
+        key=lambda candidate: delta_seconds(
+            start_time, offset_minutes, candidate.facts.start_time, candidate.facts.utc_offset_minutes
+        )
+    )
+    return [
+        ParsedDiveMatch(
+            dive_uuid=candidate.dive_uuid,
+            dive_number=candidate.dive_number,
+            started_at=combine_start_time(candidate.facts.start_time, candidate.facts.utc_offset_minutes),
+            recording_uuid=candidate.uuid,
+            device=_match_device(candidate.facts.device),
+            same_recording=is_same_recording(incoming, candidate.facts),
+        )
+        for candidate in candidates
+    ]
+
+
+def _match_device(identity: DeviceIdentity) -> ParsedDevice | None:
+    """A candidate's device as the response's shape, or `None` when it named nothing.
+
+    Only the members the gates compare survive `DeviceIdentity`, which is deliberate: a form
+    naming the match says *which computer*, and firmware is not that.
+    """
+    if identity.is_empty and identity.dive_number is None:
+        return None
+    return ParsedDevice(
+        brand=identity.brand, model=identity.model, serial=identity.serial, dive_number=identity.dive_number
     )
 
 
@@ -791,17 +887,19 @@ async def _cached_read_dive(
     dive_sites = await get_dive_sites_for_dive(db=db, dive_id=db_dive["id"])
     gear_items = await get_gear_items_for_dive(db=db, dive_id=db_dive["id"])
     species = await get_species_for_dive(db=db, dive_id=db_dive["id"])
-    source_files = await get_file_infos_for_dives(db=db, dive_ids=[db_dive["id"]])
-    # Written batched though only ever called with one id, matching `get_file_infos_for_dives`.
-    profiles = await get_profile_infos_for_dives(db=db, dive_ids=[db_dive["id"]])
+    # Written batched though only ever called with one id - see `get_recordings_for_dives`.
+    # This is three queries rather than the two `source_file` and `profile` used to cost, and
+    # the third is what a dive with two computers needs: its recordings, their files and
+    # their profile summaries cannot be read as one row any more.
+    recordings = (await get_recordings_for_dives(db=db, dive_ids=[db_dive["id"]])).get(db_dive["id"], [])
     # A second narrow read of the same row, rather than a column on the summary above: this
     # one is never serialized, and it is the query `gas_use_history` needs on its own over
     # a whole log. See `get_gas_attribution_for_dives`.
     #
     # Only for a dive that can use it, which the mixtures just read already say. Anything
     # else - every single-cylinder dive, and every dive logged without a cylinder at all -
-    # would be paying a round trip against the row `get_profile_infos_for_dives` just read
-    # for a value `compute_multi_tank_gas_use` discards on its first line.
+    # would be paying a round trip against the row the recordings read just touched, for a
+    # value `compute_multi_tank_gas_use` discards on its first line.
     attribution = None
     if len(mixtures) >= 2:
         attribution = (await get_gas_attribution_for_dives(db=db, dive_ids=[db_dive["id"]]))[db_dive["id"]]
@@ -815,8 +913,7 @@ async def _cached_read_dive(
         gear_items=gear_items,
         mixtures=mixtures,
         species=species,
-        source_file=source_files.get(db_dive["id"]),
-        profile=profiles.get(db_dive["id"]),
+        recordings=recordings,
         attribution=attribution,
     )
 
@@ -828,12 +925,15 @@ async def read_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveReadWithMixtures:
-    """Return a single dive with its mixtures, sites, gear, source file and profile summary.
+    """Return a single dive with its mixtures, sites, gear, species and recordings.
 
     404 when no such dive exists - and the same 404 when it belongs to another user, so
-    someone else's uuid stays unprobeable. The profile's samples are not included -
-    `GET /dive/{uuid}/profile` serves those separately, since they are far larger than the
-    rest of the dive put together.
+    someone else's uuid stays unprobeable.
+
+    `recordings` is what recorded the dive, in order, the first primary. Each carries its
+    device, its own start, the files it was read from and a summary of its samples - the
+    samples themselves are not included, `GET /dive/{uuid}/recording/{rid}/profile` serving
+    those separately since they are far larger than the rest of the dive put together.
     """
     await _get_owned_dive(db, uuid, current_user)
 
@@ -1041,21 +1141,22 @@ async def erase_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Soft-delete a dive, and hard-delete the dive-computer export stored against it.
+    """Soft-delete a dive, and hard-delete every recording and export stored against it.
 
     404 unless the caller owns it, exactly as for a dive that doesn't exist. The dive row
-    is only flagged, but its source file is genuinely removed: leaving it would strand the
-    bytes behind a dive nobody can open and hold the file's slot in the unique indexes,
-    blocking a re-import of that same export into a fresh dive.
+    is only flagged, but its recordings and their files are genuinely removed: leaving them
+    would strand the bytes behind a dive nobody can open and hold each file's slot in the
+    per-diver digest index, blocking a re-import of that same export into a fresh dive.
     """
     db_dive = await _get_owned_dive(db, uuid, current_user)
     owner_id = db_dive.user_id
 
-    # The stored export goes with the dive. The FK's `ON DELETE CASCADE` can't do this:
-    # `crud_dives.delete` sets `is_deleted`, so no `DELETE FROM dive` ever runs. Leaving
-    # the row would strand its bytes behind a dive nobody can open, and would keep the
-    # file's slot in both unique indexes - blocking a re-import of the same export into
-    # a fresh dive. Same reasoning as `erase_certification`.
+    # The recordings go with the dive, and their files and profiles with them. The FK's
+    # `ON DELETE CASCADE` from `dive` can't do this: `crud_dives.delete` sets `is_deleted`,
+    # so no `DELETE FROM dive` ever runs. Leaving the rows would strand their bytes behind a
+    # dive nobody can open, and would keep each file's slot in the per-diver digest index -
+    # blocking a re-import of the same export into a fresh dive. Same reasoning as
+    # `erase_certification`.
     await delete_files_for_dive(db=db, dive_id=db_dive.id, commit=False)
     await crud_dives.delete(db=db, uuid=uuid)
     await recalculate_dive_stats(db=db, user_id=owner_id)
@@ -1067,33 +1168,60 @@ async def erase_dive(
     return {"message": "Dive deleted"}
 
 
-# -------------- source files --------------
-# The export a dive was imported from is attached in a second request rather than riding
-# along with `POST /dive`: that endpoint takes a JSON `DiveCreateRequest` (which is
-# `extra="forbid"`), and turning the one resource-creating route in the app into a
-# multipart one to carry an optional attachment is a poor trade. A separate `PUT` is
-# also idempotent, which is what makes re-importing the same file harmless.
+# -------------- recordings, and the files behind them --------------
+# A dive's files are attached in a second request rather than riding along with
+# `POST /dive`: that endpoint takes a JSON `DiveCreateRequest` (which is `extra="forbid"`),
+# and turning the one resource-creating route in the app into a multipart one to carry an
+# optional attachment is a poor trade.
+#
+# **`PUT /dive/{uuid}/file` is gone, and so are the three routes beside it.** They were
+# whole-slot replace over a slot that no longer exists: a dive holds an ordered list of
+# recordings and each holds a list of files, so there is nothing left for a `PUT` to
+# replace. What they became:
+#
+#   PUT    /dive/{uuid}/file            ->  POST   /dive/{uuid}/recordings
+#   GET    /dive/{uuid}/file            ->  GET    /dive/{uuid}/file/{fid}
+#   DELETE /dive/{uuid}/file            ->  DELETE /dive/{uuid}/file/{fid}
+#   GET    /dive/{uuid}/profile         ->  GET    /dive/{uuid}/recording/{rid}/profile
+#
+# `POST` rather than `PUT` on the first, deliberately: attaching is no longer idempotent in
+# the HTTP sense - the same bytes twice are still a no-op, but two *different* files are two
+# additions rather than a replacement - and a `PUT` that appended would be a lie about the
+# method. There is no deployment but the local one and the web client moves in the same
+# change, so nothing is aliased: see *"There is no production"*.
 
 
-@router.put("/dive/{uuid}/file", response_model=DiveFileInfo)
-async def write_dive_file(
+@router.post("/dive/{uuid}/recordings", response_model=RecordingRead, status_code=201)
+async def write_dive_recording(
     request: Request,
     uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
-    file: Annotated[UploadFile, File(description="The dive-computer export this dive was imported from")],
+    file: Annotated[UploadFile, File(description="A dive-computer export of this dive")],
     file_token: Annotated[str, Form(description="The `file_token` returned by `POST /dive/parse` for this file")],
-) -> DiveFileInfo:
-    """Attach or replace the export this dive was imported from.
+) -> RecordingRead:
+    """Attach a dive-computer export to this dive, in the recording it belongs to.
 
-    The token is what admits the file: it proves this server parsed these exact bytes
-    for this user, so the endpoint neither has to re-parse nor has to trust that an
-    arbitrary upload is a dive log at all.
+    The token is what admits the file: it proves this server parsed these exact bytes for
+    this user, so the endpoint neither has to re-parse nor has to trust that an arbitrary
+    upload is a dive log at all.
+
+    Returns the **recording** the file landed in, not just the file - because which of them
+    it landed in is the server's decision and the caller has to be told. A file whose device
+    and start match one of this dive's existing recordings is a second export of that same
+    record (the same computer's JSON and FIT, say) and fills its blanks without overwriting
+    anything; anything else is a second computer and gets a recording of its own, appended
+    after the last.
+
+    The same bytes twice is a no-op returning the recording they are already in. Bytes
+    already stored against *another* dive of this account are a 409 naming it: the realistic
+    cause is logging one export as two dives, and saying so is more use than either silent
+    fix.
     """
     db_dive = await _get_owned_dive(db, uuid, current_user)
 
     try:
-        info = await store_dive_file(
+        stored = await store_recording_file(
             db=db,
             user_id=current_user["id"],
             user_uuid=current_user["uuid"],
@@ -1108,16 +1236,23 @@ async def write_dive_file(
     except DiveFileConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    # Dive reads embed this file's metadata *and* the summary of the profile extracted
-    # from it (`store_dive_file` does that in the same transaction), so they're now stale.
+    # Dive reads embed every recording, its files' metadata *and* the summary of the profile
+    # extracted from them, so they're now stale.
     await invalidate_dive_caches(current_user["id"])
-    return info
+
+    # Read back after the write rather than returned from it: the response is the *recording*
+    # - its device, its files, its profile summary - and assembling that is this layer's job
+    # rather than the storage service's. A caller that got only the file back would have to
+    # issue this very query itself to render anything.
+    recordings = (await get_recordings_for_dives(db=db, dive_ids=[db_dive.id])).get(db_dive.id, [])
+    return next(recording for recording in recordings if any(file.uuid == stored.file_uuid for file in recording.files))
 
 
-@router.get("/dive/{uuid}/file")
+@router.get("/dive/{uuid}/file/{fid}")
 async def read_dive_file(
     request: Request,
     uuid: uuid_pkg.UUID,
+    fid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     v: Annotated[
@@ -1125,33 +1260,40 @@ async def read_dive_file(
         Query(description="Opaque cache-busting version token; ignored by the server"),
     ] = None,
 ) -> Response:
-    """Serve a dive's stored export back to its owner.
+    """Serve one of a dive's stored exports back to its owner.
 
-    Deliberately *not* `@cache`d, for the same reason as the certification card
-    download: Redis here holds serialized API responses, and parking multi-megabyte
-    binaries in it would evict everything else the cache exists for. The
-    `ETag`/`If-None-Match` pair does the equivalent job in the browser.
+    Deliberately *not* `@cache`d, for the same reason as the certification card download:
+    Redis here holds serialized API responses, and parking multi-megabyte binaries in it
+    would evict everything else the cache exists for. The `ETag`/`If-None-Match` pair does
+    the equivalent job in the browser.
 
-    `v` is read by nothing here; it is declared so the contract is visible. The response
-    is cacheable for five minutes and the file at this URL can be *replaced*, so the
-    client varies `v` to give each version its own cache entry.
+    `fid` is the file's own uuid, from the dive's `recordings[].files[]`. A uuid that is not
+    one of *this* dive's files is a 404 whether it exists elsewhere or not.
+
+    `v` is read by nothing here; it is declared so the contract is visible. The response is
+    cacheable for five minutes, so the client varies `v` to give each version its own cache
+    entry.
     """
     db_dive = await _get_owned_dive(db, uuid, current_user)
-    dive_id = db_dive.id
+
+    try:
+        file_id, _ = await resolve_dive_file(db=db, dive_id=db_dive.id, uuid=fid)
+    except DiveFileNotFoundError as exc:
+        raise NotFoundException(str(exc)) from exc
 
     # Check the hash before loading the bytes, so a conditional request costs one narrow
     # query rather than a full read that gets thrown away.
-    sha256 = await get_dive_file_sha256(db=db, dive_id=dive_id)
+    sha256 = await get_dive_file_sha256(db=db, file_id=file_id)
     if sha256 is None:
-        raise NotFoundException("This dive has no source file")
+        raise NotFoundException("This dive has no such file")
 
     etag = f'"{sha256}"'
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "private, max-age=300"})
 
-    file = await load_dive_file(db=db, dive_id=dive_id)
+    file = await load_dive_file(db=db, file_id=file_id)
     if file is None:
-        raise NotFoundException("This dive has no source file")
+        raise NotFoundException("This dive has no such file")
 
     return Response(
         content=file.data,
@@ -1178,10 +1320,11 @@ async def read_dive_file(
     )
 
 
-@router.get("/dive/{uuid}/profile", response_model=DiveProfileRead)
+@router.get("/dive/{uuid}/recording/{rid}/profile", response_model=DiveProfileRead)
 async def read_dive_profile(
     request: Request,
     uuid: uuid_pkg.UUID,
+    rid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     v: Annotated[
@@ -1189,27 +1332,37 @@ async def read_dive_profile(
         Query(description="Opaque cache-busting version token; ignored by the server"),
     ] = None,
 ) -> Response | DiveProfileRead:
-    """Serve a dive's per-sample depth/ceiling/temperature/tank-pressure curves and its events.
+    """Serve one recording's per-sample depth/ceiling/temperature/tank-pressure curves and events.
+
+    Per **recording**, not per dive: a diver on two computers has two profiles of one dive
+    and neither is a version of the other. `rid` is the recording's uuid, from the dive's
+    `recordings[]`; the first of those is the primary one, which is what a client showing a
+    single chart should draw. The `times` are elapsed seconds from that recording's own
+    start, which is why a recording carries a start of its own.
 
     Deliberately *not* `@cache`d, and for a sharper reason than the file route above. A
-    profile is **immutable** for a given (source file, extractor version) pair, which
-    makes it the ideal `ETag` case and the worst Redis case: every dive cache key lives
-    under `user_{id}_dive*` and `invalidate_dive_caches` sweeps the lot on every dive
-    edit and every dive-site or gear rename - none of which can change a profile. Caching
-    it would mean evicting and refetching tens of KB per dive for nothing.
+    profile is **immutable** for a given (source digest, extractor version) pair, which makes
+    it the ideal `ETag` case and the worst Redis case: every dive cache key lives under
+    `user_{id}_dive*` and `invalidate_dive_caches` sweeps the lot on every dive edit and
+    every dive-site or gear rename - none of which can change a profile. Caching it would
+    mean evicting and refetching tens of KB per dive for nothing.
 
-    `v` is read by nothing here; it is declared so the contract is visible. The client
-    varies it with the profile's `updated_at` so a re-extraction gets its own cache entry
-    rather than being masked by the previous one for five minutes.
+    `v` is read by nothing here; it is declared so the contract is visible. The client varies
+    it with the profile's `updated_at` so a re-extraction gets its own cache entry rather
+    than being masked by the previous one for five minutes.
     """
     db_dive = await _get_owned_dive(db, uuid, current_user)
-    dive_id = db_dive.id
+
+    try:
+        recording_id = await resolve_recording(db=db, dive_id=db_dive.id, uuid=rid)
+    except RecordingNotFoundError as exc:
+        raise NotFoundException(str(exc)) from exc
 
     # The version before the payload, so a conditional request costs one two-column query
     # rather than decoding tens of KB of JSONB only to throw it away.
-    version = await get_profile_version(db=db, dive_id=dive_id)
+    version = await get_profile_version(db=db, recording_id=recording_id)
     if version is None:
-        raise NotFoundException("This dive has no profile")
+        raise NotFoundException("This recording has no profile")
 
     etag = f'"{version}"'
     if request.headers.get("if-none-match") == etag:
@@ -1217,9 +1370,9 @@ async def read_dive_profile(
         # with no body would otherwise fail - the same thing `read_dive_file` relies on.
         return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "private, max-age=300"})
 
-    profile = await load_profile(db=db, dive_id=dive_id)
+    profile = await load_profile(db=db, recording_id=recording_id)
     if profile is None:
-        raise NotFoundException("This dive has no profile")
+        raise NotFoundException("This recording has no profile")
 
     # Set here rather than left to `ClientCacheMiddleware`, which never overrides a
     # `Cache-Control` an endpoint set for itself.
@@ -1229,29 +1382,105 @@ async def read_dive_profile(
     return response
 
 
-@router.delete("/dive/{uuid}/file")
+@router.delete("/dive/{uuid}/file/{fid}")
 async def erase_dive_file(
     request: Request,
     uuid: uuid_pkg.UUID,
+    fid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Delete the stored dive-computer export from a dive, leaving the dive itself.
+    """Delete one stored export, leaving the dive itself.
 
-    404 unless the caller owns it, exactly as for a dive that doesn't exist, and 404
-    again when the dive has no source file - so this is not idempotent: a repeat delete
-    reports the absence rather than succeeding quietly.
+    404 unless the caller owns the dive, exactly as for a dive that doesn't exist, and 404
+    again when the dive has no such file - so this is not idempotent: a repeat delete reports
+    the absence rather than succeeding quietly.
 
-    The dive keeps everything that went through the form, its cylinders included. What
-    goes with the file is what was only ever read *off* it: the extracted profile, and the
-    CNS, OTU and surface-pressure readings - none of which can be re-derived or checked
-    against anything once the export is gone.
+    **What goes with the file is what was only ever read off it**, and how much that is
+    depends on what is left. The recording's profile is re-derived from its remaining files,
+    and so are the dive's CNS, OTU and surface-pressure readings if this was the primary
+    recording. A recording whose last file goes normally goes with it. The exception is a
+    recording whose profile no file could re-yield - one a merge produced, or one a document
+    supplied - which survives its last file's deletion along with its samples.
+
+    The dive keeps everything that went through the form, its cylinders included.
     """
     db_dive = await _get_owned_dive(db, uuid, current_user)
 
-    deleted = await delete_dive_file(db=db, dive_id=db_dive.id)
-    if not deleted:
-        raise NotFoundException("This dive has no source file")
+    try:
+        file_id, _ = await resolve_dive_file(db=db, dive_id=db_dive.id, uuid=fid)
+        await delete_dive_file(db=db, file_id=file_id)
+    except DiveFileNotFoundError as exc:
+        raise NotFoundException(str(exc)) from exc
 
     await invalidate_dive_caches(current_user["id"])
     return {"message": "Dive file deleted"}
+
+
+@router.delete("/dive/{uuid}/recording/{rid}")
+async def erase_dive_recording(
+    request: Request,
+    uuid: uuid_pkg.UUID,
+    rid: uuid_pkg.UUID,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> dict[str, str]:
+    """Delete a whole recording - its files, its samples and what was derived from them.
+
+    The only way to remove a recording that holds no files, which is what a converted logbook
+    import creates and what a merge can leave behind: there is no file whose deletion would
+    take it.
+
+    Removing the primary recording promotes the next one, and the dive's oxygen-exposure
+    readings are re-derived from whatever becomes primary. 404 unless the caller owns the
+    dive, and 404 again when it has no such recording.
+    """
+    db_dive = await _get_owned_dive(db, uuid, current_user)
+
+    try:
+        recording_id = await resolve_recording(db=db, dive_id=db_dive.id, uuid=rid)
+    except RecordingNotFoundError as exc:
+        raise NotFoundException(str(exc)) from exc
+
+    await delete_recording(db=db, recording_id=recording_id, dive_id=db_dive.id, commit=False)
+    await refresh_tech_scalars(db=db, dive_id=db_dive.id)
+    await db.commit()
+
+    await invalidate_dive_caches(current_user["id"])
+    return {"message": "Dive recording deleted"}
+
+
+@router.patch("/dive/{uuid}/recording/{rid}", response_model=RecordingRead)
+async def patch_dive_recording(
+    request: Request,
+    uuid: uuid_pkg.UUID,
+    rid: uuid_pkg.UUID,
+    values: RecordingUpdateRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> RecordingRead:
+    """Make one of a dive's recordings the primary one.
+
+    `{"primary": true}` moves it to ordinal 0 and shifts the rest down, keeping their order.
+    That decides three things at once: which profile a single-chart client draws, which
+    recording's files write the dive's oxygen-exposure readings - re-derived here from the
+    new primary - and which one a one-profile-per-dive export writes.
+
+    `{"primary": false}` is refused with a 422 rather than silently ignored: there is no
+    "make this one *not* primary" operation, because something has to be, and the diver means
+    to promote a different one.
+    """
+    db_dive = await _get_owned_dive(db, uuid, current_user)
+
+    try:
+        recording_id = await resolve_recording(db=db, dive_id=db_dive.id, uuid=rid)
+        await make_primary(db=db, recording_id=recording_id, dive_id=db_dive.id)
+    except RecordingNotFoundError as exc:
+        raise NotFoundException(str(exc)) from exc
+
+    await refresh_tech_scalars(db=db, dive_id=db_dive.id)
+    await db.commit()
+    await invalidate_dive_caches(current_user["id"])
+
+    recordings = (await get_recordings_for_dives(db=db, dive_ids=[db_dive.id])).get(db_dive.id, [])
+    return next(recording for recording in recordings if recording.uuid == rid)

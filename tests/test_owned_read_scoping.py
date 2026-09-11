@@ -122,8 +122,7 @@ class TestTheDiveReadsScopeThatLookup:
             patch("src.app.api.v1.dives.get_mixtures_for_dive", AsyncMock(return_value=[])),
             patch("src.app.api.v1.dives.get_dive_sites_for_dive", AsyncMock(return_value=[])),
             patch("src.app.api.v1.dives.get_gear_items_for_dive", AsyncMock(return_value=[])),
-            patch("src.app.api.v1.dives.get_file_infos_for_dives", AsyncMock(return_value={})),
-            patch("src.app.api.v1.dives.get_profile_infos_for_dives", AsyncMock(return_value={})),
+            patch("src.app.api.v1.dives.get_recordings_for_dives", AsyncMock(return_value={})),
         ):
             await _read_dive_uncached(request=None, user_id=7, uuid=row["uuid"], owner_uuid=uuid7(), db=AsyncMock())
 

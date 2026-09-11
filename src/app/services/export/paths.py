@@ -65,10 +65,12 @@ def _slug(value: str, *, default: str) -> str:
 class ArchivePaths:
     """Every stored binary's path inside the archive, keyed the way it is addressed.
 
-    A dive has at most one export and a certification at most one image per side, so
-    these two maps between them name every member the archive carries beyond the
-    generated documents (`logbook.divejson`, `dives.uddf` and the nine files in
-    `tabular.CSV_WRITERS`).
+    `dive_files` is keyed by **file row id**, not by dive: a dive holds as many exports as
+    its recordings hold, and both readers of this map - the archive writer and the
+    `archive_path` member `logbook.divejson` records - address one file at a time. A
+    certification still has at most one image per side. Between them these two maps name
+    every member the archive carries beyond the generated documents
+    (`logbook.divejson`, `dives.uddf` and the nine files in `tabular.CSV_WRITERS`).
     """
 
     dive_files: dict[int, str] = field(default_factory=dict)
@@ -114,16 +116,29 @@ def plan_archive_paths(bundle: ExportBundle) -> ArchivePaths:
     taken: set[str] = set()
 
     for dive in bundle.dives:
-        info = bundle.file_by_dive[dive.id]
-        # The digest gate is the same one `envelope._dive` applies, and it is here so the
-        # two cannot disagree: a file whose row vanished between the metadata read and the
-        # digest read is left out of `logbook.divejson`, and without this the zip would still
-        # carry a member nothing in the manifest named.
-        if info is None or dive.id not in bundle.dive_file_sha256:
-            continue
-        name = archive_member_name(info.original_filename, default="dive-file")
-        stem, extension = posixpath.splitext(name)
-        paths.dive_files[dive.id] = _claim(taken, DIVE_FILE_DIRECTORY, f"{dive.dive_number:04d}-{stem}", extension)
+        for recording in bundle.recordings_by_dive.get(dive.id, []):
+            for file in recording.files:
+                # The digest gate is the same one `envelope._stored_file` applies, and it is
+                # here so the two cannot disagree: a file whose row vanished between the
+                # metadata read and the digest read is left out of `logbook.divejson`, and
+                # without this the zip would still carry a member nothing in the manifest
+                # named.
+                if file.id not in bundle.dive_file_sha256:
+                    continue
+                name = archive_member_name(file.info.original_filename, default="dive-file")
+                stem, extension = posixpath.splitext(name)
+                # `{dive number}-{recording ordinal}-{stem}`. The dive number alone stopped
+                # being enough when a dive gained several files: a diver on two computers
+                # extracts two members whose stems routinely collide (`dive.json` twice),
+                # and while `_claim`'s `-2` counter would still separate them it would say
+                # nothing about *which computer* each came off. The ordinal does, and it is
+                # the same number the document's `recordings[]` is ordered by, so a member
+                # can be matched to its recording by name alone. Two files of *one*
+                # recording still fall through to the counter, which is right: they are two
+                # spellings of one record and nothing distinguishes them but their names.
+                paths.dive_files[file.id] = _claim(
+                    taken, DIVE_FILE_DIRECTORY, f"{dive.dive_number:04d}-{recording.ordinal}-{stem}", extension
+                )
 
     for certification in bundle.certifications:
         for file_info in bundle.cert_files_by_cert.get(certification.id, []):

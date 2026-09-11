@@ -31,7 +31,9 @@ and those five tables are hard-deleted now, so a dangling reference cannot be cr
 the first place. See `_owned`.
 """
 
+import uuid as uuid_pkg
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -47,6 +49,8 @@ from ...models.dive_dive_site import DiveDiveSite
 from ...models.dive_file import DiveFile
 from ...models.dive_form_preset import DiveFormPreset
 from ...models.dive_gear_item import DiveGearItem
+from ...models.dive_profile import DiveProfile
+from ...models.dive_recording import DiveRecording
 from ...models.dive_site import DiveSite
 from ...models.dive_species import DiveSpecies
 from ...models.gear_item import GearItem
@@ -60,11 +64,40 @@ from ...models.user import User
 from ...schemas.certification import CertificationFileInfo
 from ...schemas.dive import DiveFileInfo
 from ...schemas.dive_mixture import DiveMixtureRead
-from ...schemas.dive_profile import DiveProfileInfo
 from ...schemas.trip import TripLocationRead
 from ..certification_files import get_file_infos_for_certifications
-from ..dive_files import get_file_infos_for_dives
-from ..dive_profiles import ProfileGasAttribution, get_gas_attribution_for_dives, get_profile_infos_for_dives
+from ..dive_profiles import ProfileGasAttribution, get_gas_attribution_for_dives
+from ..dive_recordings import DEVICE_COLUMNS, get_file_infos_for_recordings
+
+
+@dataclass(frozen=True, slots=True)
+class ExportFileRow:
+    """One stored export, as an export writer addresses it: the metadata plus the row id
+    the digest map and the archive's path plan are keyed on."""
+
+    id: int
+    info: DiveFileInfo
+
+
+@dataclass(frozen=True, slots=True)
+class ExportRecordingRow:
+    """One recording, with its files in attach order and its profile's summary.
+
+    Deliberately **not** `RecordingRead`, the API's shape. That one publishes a device as an
+    object and a start as a combined string, which is right for a response and wrong here:
+    the writers need the column pair (`start_time`, `utc_offset_minutes`) to decide whether
+    a recording's start differs from the dive's, and they need the file row ids the digest
+    map is keyed on. Sharing the response model would have meant a second query for both.
+    """
+
+    id: int
+    uuid: uuid_pkg.UUID
+    ordinal: int
+    device: dict[str, Any]
+    start_time: datetime | None
+    utc_offset_minutes: int | None
+    files: list[ExportFileRow]
+    has_profile: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,8 +119,11 @@ class ExportBundle:
     site_ids_by_dive: dict[int, list[int]]
     gear_ids_by_dive: dict[int, list[int]]
     species_ids_by_dive: dict[int, list[int]]
-    file_by_dive: dict[int, DiveFileInfo | None]
-    profile_by_dive: dict[int, DiveProfileInfo | None]
+    # **One entry per dive, holding an ordered list of recordings**, where there used to be
+    # one file and one profile per dive. Every writer in this package walks it: the DiveJSON
+    # envelope writes `recordings[]` per dive, the archive plans a member per file, `dives.csv`
+    # joins their filenames, and the UDDF writer takes the first recording's profile.
+    recordings_by_dive: dict[int, list[ExportRecordingRow]]
     attribution_by_dive: dict[int, ProfileGasAttribution]
     trips: list[Trip]
     # Keyed for every trip in `trips`, so a trip nobody named a place for reads as an empty
@@ -110,10 +146,10 @@ class ExportBundle:
     service_records: list[GearServiceRecord]
     certifications: list[Certification]
     cert_files_by_cert: dict[int, list[CertificationFileInfo]]
-    # Keyed the way each file is addressed elsewhere: a dive has at most one export, a
-    # certification at most one image per side. Held apart from the `*Info` schemas above
-    # because neither of those carries the digest - they are response shapes, and a
-    # response has the `ETag` for that.
+    # Keyed the way each file is addressed elsewhere: a dive-computer export by its own row
+    # id (a dive has as many as its recordings hold), a certification image by side. Held
+    # apart from the `*Info` schemas above because neither of those carries the digest -
+    # they are response shapes, and a response has the `ETag` for that.
     dive_file_sha256: dict[int, str]
     cert_file_sha256: dict[tuple[int, str], str]
 
@@ -335,8 +371,7 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
         site_ids_by_dive=site_ids_by_dive,
         gear_ids_by_dive=gear_ids_by_dive,
         species_ids_by_dive=species_ids_by_dive,
-        file_by_dive=await get_file_infos_for_dives(db=db, dive_ids=dive_ids),
-        profile_by_dive=await get_profile_infos_for_dives(db=db, dive_ids=dive_ids),
+        recordings_by_dive=await _recordings_by_dive(db, dive_ids),
         attribution_by_dive=await get_gas_attribution_for_dives(db=db, dive_ids=dive_ids),
         trips=trips,
         # After the `trips` read above, which is what supplies the ids.
@@ -363,10 +398,91 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
 
 
 async def _dive_file_digests(db: AsyncSession, dive_ids: list[int]) -> dict[int, str]:
+    """Every stored export's digest, keyed by **file row id** rather than by dive.
+
+    Keyed per file because a dive now has as many as its recordings hold, and both readers
+    of this map - the envelope's `sha256` member and the archive's path plan - address one
+    file at a time. Keyed by the row id rather than by the file's uuid because that is what
+    `ExportFileRow` already carries and what the two of them join on.
+    """
     if not dive_ids:
         return {}
-    rows = await db.execute(select(DiveFile.dive_id, DiveFile.sha256).where(DiveFile.dive_id.in_(dive_ids)))
-    return {row.dive_id: row.sha256 for row in rows}
+    rows = await db.execute(select(DiveFile.id, DiveFile.sha256).where(DiveFile.dive_id.in_(dive_ids)))
+    return {row.id: row.sha256 for row in rows}
+
+
+async def _recordings_by_dive(db: AsyncSession, dive_ids: list[int]) -> dict[int, list[ExportRecordingRow]]:
+    """Every dive's recordings, in order, with their files and whether they have samples.
+
+    Three queries for the whole logbook, matching this module's flat-read contract: the
+    recordings, their files, and the set of recording ids that have a profile row. The
+    profiles' *payloads* stay out of it deliberately - `envelope.py` and `uddf.py` load those
+    one at a time, which is what keeps peak memory to one profile rather than a logbook's.
+    """
+    if not dive_ids:
+        return {}
+
+    rows = (
+        (
+            await db.execute(
+                select(DiveRecording)
+                .where(DiveRecording.dive_id.in_(dive_ids))
+                .order_by(DiveRecording.dive_id, DiveRecording.ordinal)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    recording_ids = [row.id for row in rows]
+    files = await get_file_infos_for_recordings(db, recording_ids=recording_ids)
+    file_ids = await _file_ids_by_recording(db, recording_ids)
+    profiled = set(
+        (await db.execute(select(DiveProfile.recording_id).where(DiveProfile.recording_id.in_(recording_ids))))
+        .scalars()
+        .all()
+    )
+
+    by_dive: dict[int, list[ExportRecordingRow]] = {dive_id: [] for dive_id in dive_ids}
+    for row in rows:
+        infos = files.get(row.id, [])
+        ids = file_ids.get(row.id, [])
+        by_dive.setdefault(row.dive_id, []).append(
+            ExportRecordingRow(
+                id=row.id,
+                uuid=row.uuid,
+                ordinal=row.ordinal,
+                device={
+                    member: getattr(row, column)
+                    for member, column in DEVICE_COLUMNS.items()
+                    if getattr(row, column) is not None
+                },
+                start_time=row.start_time,
+                utc_offset_minutes=row.utc_offset_minutes,
+                # `zip` is safe rather than lossy here: both come from `dive_file` filtered
+                # on the same recording and ordered by `id`, so they are the same rows in the
+                # same order by construction.
+                files=[ExportFileRow(id=file_id, info=info) for file_id, info in zip(ids, infos, strict=True)],
+                has_profile=row.id in profiled,
+            )
+        )
+    return by_dive
+
+
+async def _file_ids_by_recording(db: AsyncSession, recording_ids: list[int]) -> dict[int, list[int]]:
+    """Each recording's file row ids, in attach order - the join key `get_file_infos_for_
+    recordings` deliberately does not publish, because a response has no business carrying
+    an internal id."""
+    if not recording_ids:
+        return {}
+    rows = await db.execute(
+        select(DiveFile.recording_id, DiveFile.id)
+        .where(DiveFile.recording_id.in_(recording_ids))
+        .order_by(DiveFile.recording_id, DiveFile.id)
+    )
+    ids: dict[int, list[int]] = {}
+    for row in rows:
+        ids.setdefault(row.recording_id, []).append(row.id)
+    return ids
 
 
 async def _certification_file_digests(db: AsyncSession, certification_ids: list[int]) -> dict[tuple[int, str], str]:

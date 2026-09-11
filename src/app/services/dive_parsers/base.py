@@ -60,7 +60,7 @@ class DiveParser(ABC):
         default here is the honest answer for a parser that hasn't got one yet.
 
         Never called on the `/dive/parse` path - only server-side from
-        `PUT /dive/{uuid}/file`, which is the only place that has both the bytes and
+        `POST /dive/{uuid}/recordings`, which is the only place that has both the bytes and
         proof of where they came from. See `models/dive_profile.py`.
 
         Raises:
@@ -73,7 +73,7 @@ class DiveParser(ABC):
     def parse_all(cls, content: bytes) -> tuple[ParsedDiveSchema, ParsedProfileSchema | None]:
         """Both extractions over one set of bytes, for a caller that wants both.
 
-        Exists because `PUT /dive/{uuid}/file` always wants both, and for a format whose
+        Exists because `POST /dive/{uuid}/recordings` always wants both, and for a format whose
         two entry points each decode the whole file that costs two decodes. Overriding it
         is how a parser says "I can do these together for less than the sum of the parts";
         this default says the opposite, which is the right answer for a format cheap

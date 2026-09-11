@@ -54,6 +54,7 @@ from tests.helpers.generators import (
     create_course,
     create_dive,
     create_dive_form_preset,
+    create_dive_recording,
     create_dive_site,
     create_gear_item,
     create_gear_service_record,
@@ -155,6 +156,7 @@ class TestDeletingAUserTakesEverythingWithIt:
             [
                 DiveFile(
                     user_id=diver.id,
+                    recording_id=create_dive_recording(db, diver, dive).id,
                     dive_id=dive.id,
                     sha256="a" * 64,
                     content_type="application/octet-stream",

@@ -9,8 +9,8 @@ here rather than in the service layer because each is an HTTP concern:
   authorization decision to get wrong. The document's own `diver` member is read, reported
   and never applied.
 - **Any format the converter reads, and the app's own two.** A DiveJSON document, the
-  full-export archive, a UDDF file, a Subsurface `.ssrf`, a FIT, a Suunto app export, or a
-  zip whose members are all one of those - a watch writes one file per dive, and one file
+  full-export archive, a UDDF file, a Subsurface `.ssrf`, a FIT, a Suunto app export, a
+  Suunto DM5 XML export, or a zip whose members are all one of those - a watch writes one file per dive, and one file
   per import would cap a diver at ten dives an hour against the rate limit below. Which
   formats exactly is `divejson.read_formats()` and never a list written out here.
 - **Two phases, mirroring the parse-then-attach flow.** `POST /import/logbook/preview`

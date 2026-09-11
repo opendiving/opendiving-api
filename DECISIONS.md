@@ -1963,7 +1963,7 @@ admin form that could meaningfully accept a file upload.
 ## Dive source files are stored only once a dive exists
 
 `POST /dive/parse` stays exactly what it was: it reads the upload, parses it, and drops the bytes.
-Storage happens in a second request, `PUT /dive/{uuid}/file`, which the web app sends after
+Storage happens in a second request, `POST /dive/{uuid}/recordings`, which the web app sends after
 `POST /dive` (or `PATCH /dive/{uuid}`) has succeeded.
 
 Two reasons it isn't folded into the create call. `DiveCreateRequest` is `extra="forbid"` JSON, so a
@@ -1982,8 +1982,8 @@ preserve it would be much worse than losing it.
 
 ## A signed parse token, not `can_parse`, decides what may be stored
 
-`PUT /dive/{uuid}/file` requires a `file_token` - a short-lived JWT (`create_dive_file_token`,
-`TokenType.DIVE_FILE`) minted by `/dive/parse` binding
+`POST /dive/{uuid}/recordings` requires a `file_token` - a short-lived JWT
+(`create_dive_file_token`, `TokenType.DIVE_FILE`) minted by `/dive/parse` binding
 `(user uuid, sha256 of the bytes, the parser that succeeded)`. The store path re-hashes the body it
 receives and refuses anything whose digest doesn't match.
 
@@ -2017,6 +2017,13 @@ not for cards: a successful parse is a strictly stronger guarantee than magic by
 
 ## A dive has at most one source file, and identical bytes are stored once per diver
 
+**Superseded**, and only in its cardinality: see *"A dive has recordings, and a file belongs to one
+of them"* below. `ux_dive_file_dive_id` is gone, because a dive holds as many exports as its
+recordings hold. Everything else here still holds, `ux_dive_file_user_id_sha256` and the
+three-outcome `reconcile()` included, and the section is kept as written because the reasoning is
+what survives: why a 409 rather than a silent re-point, why no fourth "unlinked row you could
+re-claim" case, and why the write wraps `IntegrityError` rather than taking a lock.
+
 Two unique indexes on `dive_file`: `ux_dive_file_dive_id` and `ux_dive_file_user_id_sha256`.
 Together they reduce every upload to three cases, which `reconcile()` in `services/dive_files.py`
 returns as a `Literal` so the decision is testable without a database:
@@ -2045,17 +2052,28 @@ and the UI disables the button in flight, so a retry beats `SELECT ... FOR UPDAT
 
 ## Deleting a dive hard-deletes its source file
 
+**Still true, one level up**: `delete_files_for_dive` removes the dive's *recordings*, and the FK
+cascade from `dive_recording` takes their files and profiles with them. The sentence below about
+keeping "the file's slot in *both* unique indexes" now names one index only,
+`ux_dive_file_user_id_sha256`, per *"A dive has recordings, and a file belongs to one of them"*.
+
 `erase_dive` calls `delete_files_for_dive` before `crud_dives.delete`, for the same reason
 `erase_certification` does: deletion is application-level (`is_deleted`), so no `DELETE FROM dive`
 ever runs and the FK's `ON DELETE CASCADE` never fires.
 
 Leaving the row would do more than strand bytes. It would keep the file's slot in *both* unique
 indexes, so re-importing the same export into a fresh dive would 409 against a dive the diver can no
-longer see. `DELETE /dive/{uuid}/file` likewise hard-deletes rather than unlinking - a "delete"
-button that only hides the file would be a worse trade than losing it from the corpus, and it's a
-raw device export, which is more identifying than a card scan.
+longer see. `DELETE /dive/{uuid}/file/{fid}` likewise hard-deletes rather than unlinking - a
+"delete" button that only hides the file would be a worse trade than losing it from the corpus, and
+it's a raw device export, which is more identifying than a card scan.
 
 ## `source_file` is on the dive detail response only
+
+**Superseded by *"A dive has recordings, and a file belongs to one of them"*.** The member is
+`recordings` now and it carries the files and the profile summaries inside it - but it hangs off
+exactly the same schema for exactly the reason below, and the inheritance trap it names is why: a
+list response that gained recordings would cost `_cached_read_dives` three queries per page for
+something only the detail page renders.
 
 `DiveFileInfo` hangs off `DiveReadWithMixtures`, not `DiveRead`. Note the inheritance trap:
 `DiveReadWithMixtures` *extends* `DiveRead`, so putting the field on the parent would put it on the
@@ -2265,8 +2283,8 @@ that route converts a UDDF file or a `.ssrf` on the way in; the sentence above i
 `/dive/parse`, which still neither returns nor accepts a profile. See *"Importing a logbook is the
 one client-supplied profile"* below for why the two are different questions. The
 "`ParsedDiveSchema`/`DiveMixtureSchema` trimmed..." decision already deleted `DiveSampleSchema` for
-this reason; this is its complement. It is called server-side from `PUT /dive/{uuid}/file`, the only
-place with both the bytes and proof of where they came from.
+this reason; this is its complement. It is called server-side from `POST /dive/{uuid}/recordings`,
+the only place with both the bytes and proof of where they came from.
 
 Non-abstract so a new format can ship header-only and grow a profile extraction later without a flag
 day. `None` means "this file carries no samples"; malformed samples raise `DiveParseError`. Dispatch
@@ -2334,7 +2352,7 @@ table of cases is testable without a database. A profile is a pure function of t
 from and the extractor that read them, so `dive_profile.source_sha256` + `extractor_version` is both
 the idempotency key and the `ETag` the read route serves.
 
-In `store_dive_file`:
+In `store_recording_file`:
 
 - **The `insert` branch** deletes any existing profile alongside the `DiveFile` delete and stores
   the new one in the *same transaction*: a dive must never end up with a stored file and a profile
@@ -2361,6 +2379,12 @@ samples, not `dive.duration`; a computer keeps logging for ~20 s after the dive 
 
 ## The profile's `ON DELETE CASCADE` never fires, so two explicit deletes do the work
 
+**Half of this changed with recordings**, and the half that changed is the useful half. A profile
+now carries *two* cascades: the one to `dive` below, still decoration, and one to `dive_recording`
+that really fires - because recordings are hard-deleted, so removing one takes its profile and its
+files with it in the database rather than in application code. See *"A dive has recordings, and a
+file belongs to one of them"*.
+
 `dive_profile.dive_id` carries `ON DELETE CASCADE`, and it is decoration: dive deletion is
 application-level (`is_deleted`), so no `DELETE FROM dive` ever runs - the same trap
 `delete_files_for_dive` and `delete_files_for_certification` already exist to work around. Said so
@@ -2373,19 +2397,23 @@ the one place where that is not obviously right - a dive is the record the whole
 and folding these two blob paths into the cascade is the work that would have to come with it. See
 *"The row goes, and so does everything pointing at it"*.
 
-What actually removes them is `delete_profile_for_dive`, called from `delete_dive_file`. That covers
-**both** paths for free: the explicit `DELETE /dive/{uuid}/file`, and `delete_files_for_dive`, which
-`erase_dive` calls when a dive is deleted. Verified by reading `delete_files_for_dive` rather than
-assumed.
+What actually removes them is `delete_profile_for_recording` on the file path and
+`delete_profiles_for_dive` on the dive path - the two names the functions carry now that a profile
+hangs off a recording. They used to be one function covering both, which was true while a dive had
+exactly one of each; the paths diverged with recordings, because deleting a *file* re-derives what
+is left of its recording while deleting a *dive* takes every one of them. Verified by reading
+`delete_files_for_dive` rather than assumed.
 
 A profile goes with its file rather than outliving it: nothing cascades from removing the export,
 and a profile whose source is gone can never be re-derived or checked against anything.
 
-## `GET /dive/{uuid}/profile` uses an ETag, not `@cache`
+## `GET /dive/{uuid}/recording/{rid}/profile` uses an ETag, not `@cache`
 
-Modelled on `read_dive_file`, and for a sharper reason than that route's.
+The route is per *recording* now (it was `GET /dive/{uuid}/profile`), and every word below survives
+that unchanged: a diver on two computers has two profiles of one dive, each immutable on the same
+terms. Modelled on `read_dive_file`, and for a sharper reason than that route's.
 
-A profile is **immutable** for a given (source file, extractor version) pair, which makes it the
+A profile is **immutable** for a given (source digest, extractor version) pair, which makes it the
 ideal `ETag` case and the worst Redis case. Every dive cache key lives under `user_{id}_dive*`, and
 `invalidate_dive_caches` sweeps the lot on every dive edit and every dive-site or gear rename - none
 of which can change a profile. Caching it would mean evicting and refetching tens of KB per dive for
@@ -2418,10 +2446,14 @@ done.
 docker compose exec api python -m src.scripts.backfill_dive_profiles --parser-key suunto_xml
 ```
 
-It selects `dive_file` LEFT JOIN `dive_profile` where no profile exists, the extractor version is
-behind, or `source_sha256` differs - with **explicit columns, never `select(DiveFile)`**, or the
-`bytea` would ride along for every row in the corpus before a single profile was extracted. One file
-at a time via `load_dive_file`, committing in batches of 50, reporting
+It selects `dive_recording` LEFT JOIN `dive_profile` where no profile exists, the extractor version
+is behind, or `source_sha256` differs from what the recording's files now hash to - with **explicit
+columns, never `select(DiveRecording)`**, which is the discipline the older `select(DiveFile)` form
+kept because a `bytea` would otherwise have ridden along for every row in the corpus before a single
+profile was extracted. (It selected `dive_file` while a dive had one; see *"A dive has recordings,
+and a file belongs to one of them"*. The digest half of the criterion survived that move and is
+tested, the single-file case in SQL and the rest through `should_extract`.) One recording at a time
+via `load_recording_files`, committing in batches of 50, reporting
 `examined / extracted / skipped / no_samples / failed`. All five counts always, because a run that
 reports only successes hides the parser that stopped working.
 
@@ -2541,7 +2573,7 @@ produces and which would be a sign bug rather than a numbering convention.
 ## CNS, OTU and surface pressure are written by the import, never by the form
 
 `dive.cns_start`/`cns_end`/`otu_start`/`otu_end`/`surface_pressure_bar` are filled server-side in
-`services/dive_files.py::store_dive_file`, inside the same `run_in_threadpool` hop and the same
+`services/dive_files.py::store_recording_file`, inside the same `run_in_threadpool` hop and the same
 transaction as the profile extraction, and they are **not** on `DiveCreate`/`DiveUpdate` at all -
 `DiveTechScalars` (`schemas/dive.py`) is mixed into the read shapes only, so `DiveCreate`'s
 `extra="forbid"` turns an attempt to set one into a 422 rather than a silently accepted fiction.
@@ -2616,10 +2648,17 @@ docker compose exec api python -m src.scripts.backfill_dive_tech_fields
 ```
 
 Separate from `backfill_dive_profiles` because the two select on different things.
-`PROFILE_EXTRACTOR_VERSION` lets that one skip a dive whose profile is already current; these
-columns have no version of their own, so every dive with a stored export is a candidate on every run
-\- which is cheap (a header parse, not a sample stream) and is what makes it correct to re-run after
-a parser fix with no version to bump. Both halves are idempotent.
+`PROFILE_EXTRACTOR_VERSION` lets that one skip a recording whose profile is already current; these
+columns have no version of their own, so every **primary recording** with a stored file is a
+candidate on every run - which is cheap (a header parse, not a sample stream) and is what makes it
+correct to re-run after a parser fix with no version to bump. Both halves are idempotent.
+
+**It no longer clears, and it walks primary recordings.** Both are consequences of recordings and
+both are written up under *"A profile has one of three provenances, and a recording need not have a
+file"*: a logbook-import match can fill a reading with no bytes behind it, so an outright rewrite
+here would delete it; and the dive's readings are the primary recording's, because a second
+computer's CNS clock is its own device's arithmetic. The device columns ride the same run, which is
+what fills them on an instance upgraded through the recordings migration.
 
 The two halves are backfilled on **different terms**, which is why the report counts them
 separately:
@@ -2802,8 +2841,8 @@ number.** Every channel is bounded by `MAX_POINTS_PER_CHANNEL`, and every other 
 `label` is text copied straight off an uploaded file, so without a bound of its own the payload's
 real ceiling is `MAX_DIVE_FILE_SIZE` - a 2.4 MB export of long alert strings measured at 2.4 MB
 stored, essentially 1:1, on a table whose whole design assumes tens of KB and serves them whole on
-every `GET /dive/{uuid}/profile`. `MAX_LABEL_CHARS = 120` closes it, and the same file now stores 10
-KB. Self-inflicted and per-user rather than cross-tenant, but the row outlives the upload.
+every profile read. `MAX_LABEL_CHARS = 120` closes it, and the same file now stores 10 KB.
+Self-inflicted and per-user rather than cross-tenant, but the row outlives the upload.
 
 Truncated in `_rebase_events` rather than bounded by a `Field(max_length=...)`, which would raise:
 `extract_profile` must never fail the upload it rode in on, and a file whose one long alert took its
@@ -3796,7 +3835,7 @@ interpolate that stored name straight into the header:
 Starlette encodes every header value as latin-1 while building the response, so anything above
 U+00FF raises `UnicodeEncodeError` *before* a single byte is sent. That is not a garbled filename,
 it is a 500 - and a permanent one, on every subsequent `GET /certification/{uuid}/file/{side}` or
-`GET /dive/{uuid}/file` for that row, because the name causing it is stored. The upload, the
+`GET /dive/{uuid}/file/{fid}` for that row, because the name causing it is stored. The upload, the
 metadata reads and the card thumbnail all keep working; only the download breaks.
 
 Three things conspire to hide it:
@@ -4157,9 +4196,9 @@ format we do not control, while the header fields are what the diver actually ca
 
 ## Uploaded files are parsed in a thread, not on the event loop
 
-`POST /dive/parse` and `PUT /dive/{uuid}/file` both hand their bytes to `run_in_threadpool`. Parsing
-is pure CPU with nothing awaited inside it, and the FIT decoder is pure Python: ~2 s per MB of
-densely-encoded FIT, against ~0.07 s for a 2.8 MB Suunto JSON export through the C-accelerated
+`POST /dive/parse` and `POST /dive/{uuid}/recordings` both hand their bytes to `run_in_threadpool`.
+Parsing is pure CPU with nothing awaited inside it, and the FIT decoder is pure Python: ~2 s per MB
+of densely-encoded FIT, against ~0.07 s for a 2.8 MB Suunto JSON export through the C-accelerated
 `json` module - two orders of magnitude more CPU per byte. Inline in an `async def`, a single large
 upload would stall every other request on that worker. The XML and JSON parsers went the same way
 rather than being special-cased: they are the same shape of work, just faster today.
@@ -4178,10 +4217,10 @@ originally sized the worst case from a 500 KB file at ~0.6 s, extrapolating to ~
 `MAX_DIVE_FILE_SIZE`. That was measured on a sparsely-encoded file and under-counted: a device
 writes *one* definition record followed by a long run of bare 10-byte `record` messages, so a 5 MB
 file holds ~524 000 of them and takes **~10 s** to decode - and the two-step import pays it twice,
-once at `/dive/parse` and once at `PUT /dive/{uuid}/file`. `run_in_threadpool` keeps the event loop
-free but AnyIO's default limiter is 40 threads, so 40 such uploads saturate the pool and everything
-else queues behind them. It needs authentication, so it is not an open DoS - but one diver with a
-long, high-rate log could do it by accident.
+once at `/dive/parse` and once at `POST /dive/{uuid}/recordings`. `run_in_threadpool` keeps the
+event loop free but AnyIO's default limiter is 40 threads, so 40 such uploads saturate the pool and
+everything else queues behind them. It needs authentication, so it is not an open DoS - but one
+diver with a long, high-rate log could do it by accident.
 
 `_MAX_FRAMES` (100 000) is the actual bound, and it is on **frames decoded**, not samples collected.
 That distinction is the whole fix: of the ~10 s, bare decoding is ~8 s and collecting the samples is
@@ -4392,10 +4431,20 @@ free.
 
 ## A parser reports what recorded the file
 
-`ParsedDiveSchema.device` is a `ParsedDevice` (`schemas/parsed_dive.py`): `manufacturer`, `model`,
+`ParsedDiveSchema.device` is a `ParsedDevice` (`schemas/parsed_dive.py`): `brand`, `model`,
 `serial`, `firmware`, `name` and `dive_number`, all nullable, and every parser fills what its format
-carries. Nothing stores it. `POST /dive/parse` returns it, `DiveCreate` is `extra="forbid"` so a
-prefilled form cannot hand it back, and there is no column behind any of the six.
+carries. `POST /dive/parse` returns it and `DiveCreate` is `extra="forbid"`, so a prefilled form
+cannot hand it back.
+
+**Two things this section said when it was written are no longer true, and both are corrections
+rather than changes of mind.** The maker's member was `manufacturer` for one PR and is `brand`: the
+published format uses one word for that concept on a device (§6.4b) and on a gear item (§6.12), and
+a member spelled differently here than in the document it is written to is a translation nobody
+asked for. FIT's own field is still `file_id.manufacturer` and is read under that name — a format's
+field name is not this schema's. And **the six do have columns behind them now**: `dive_recording`
+carries `device_brand`, `device_model`, `device_serial`, `device_firmware`, `device_name` and
+`device_dive_number`. The paragraph below arguing that a serial is worth reading with no column
+behind it is what led to those columns existing, so it is kept as written.
 
 **Why read a serial at all.** A dive has had at most one source file (see *"A dive has at most one
 source file, and identical bytes are stored once per diver"*), which is the assumption that made the
@@ -4420,14 +4469,15 @@ thing that recorded the file, grouped into an object that means something on its
 answer to "what downstream can use it?" is a caller comparing two parses, which needs no column to
 do.
 
-**Where each member comes from.** FIT: `file_id.manufacturer`; `file_id.product_name` and nothing
-behind it; the serial off the `device_info` whose `device_index` is 0, else `file_id.serial_number`;
-the `software_version` of the first `device_info` naming the file's own manufacturer; and
-`session.dive_number`. Suunto JSON: `Header.Device` (with the top-level `DeviceLog.Device` behind
-it) for `SerialNumber`, `Info.SW` and `Name`, plus `Header.Diving.NumberInSeries`. Suunto XML:
-`<Source>` as the model, `<SerialNumber>`, `<Software>` and `<DiveNumberInSerie>`. Both Suunto
-parsers fix the manufacturer as the literal `Suunto` rather than reading it, because neither format
-has an element for it and `can_parse` has already decided the question.
+**Where each member comes from.** FIT: `file_id.manufacturer` into `brand`; `file_id.product_name`
+and nothing behind it; the serial off the `device_info` whose `device_index` is 0, else
+`file_id.serial_number`; the `software_version` of the first `device_info` naming the file's own
+manufacturer; and `session.dive_number`. Suunto JSON: `Header.Device` (with the top-level
+`DeviceLog.Device` behind it) for `SerialNumber`, `Info.SW` and `Name`, plus
+`Header.Diving.NumberInSeries`. Suunto XML: `<Source>` as the model, `<SerialNumber>`, `<Software>`
+and `<DiveNumberInSerie>`. Both Suunto parsers fix the brand as the literal `Suunto` rather than
+reading it (`_BRAND` in each), because neither format has an element for it and `can_parse` has
+already decided the question.
 
 Several things in that mapping are not obvious and each cost something to find:
 
@@ -4439,8 +4489,8 @@ Several things in that mapping are not obvious and each cost something to find:
   back is a profile constant (`descent_mk2s`) rather than the vendor's own string, which would make
   the member two different kinds of thing depending on who wrote the file. `divejson`'s reference
   FIT reader declines it on the same grounds - `product_name` else the manufacturer, never
-  `product`. Its own fallback is not one here either: the manufacturer is a member of its own, so
-  falling back to it would report `suunto` twice and lose the fact that the file named no model.
+  `product`. Its own fallback is not one here either: the brand is a member of its own, so falling
+  back to it would report `suunto` twice and lose the fact that the file named no model.
 - **`device_index` has to be read raw.** The FIT profile keeps an enum in that slot
   (`{0: 'creator'}`), so `fitdecode` renders the 0 as the string `creator` and a parser comparing
   the decoded value to `0` matches nothing at all. `_native_raw` exists for exactly this shape - see
@@ -4453,7 +4503,7 @@ Several things in that mapping are not obvious and each cost something to find:
   what its owner called it - while the same computer's FIT names the model `Suunto Ocean` in
   `product_name`. The JSON export carries no model at all and the FIT no name, so the two shapes
   fill different members and neither is back-derived from the other.
-- **The manufacturer's case differs by format and is kept as read.** A FIT decodes to the profile's
+- **The brand's case differs by format and is kept as read.** A FIT decodes to the profile's
   lowercase `suunto`; the Suunto parsers write the literal `Suunto`. Neither is normalised here - a
   parser reports what the file said - so any comparison of two devices has to fold case itself.
 
@@ -4766,6 +4816,11 @@ from either end: nothing in `merge_mixture_fields` reveals that it depends on a 
 module, and nothing in the crud module reveals that dropping the clause corrupts data rather than
 shuffling a list.
 
+`fill_mixture_fields` is a second caller of that same join and inherits the same dependency — see
+*"The cylinder half is a second function, not `merge_mixture_fields`"*. It is why the crud docstring
+names both rather than the backfill alone: a precondition attached to one named caller reads as that
+caller's problem, and the next one to arrive is the one that breaks it.
+
 **The mixture half is fill-only, and the dive's own scalars are not.** `merge_mixture_fields`
 originally spread all three fields into every update, `None`s included:
 
@@ -4813,12 +4868,12 @@ new in this phase, and so is the gap.
 **This is about where the failure lands, not about a file that was caught misbehaving.** Both
 corpora sit well inside the band — 384 XML exports across 103 100–106 700 Pa, 531 JSON readings
 across 99 693–106 700 Pa, not one outside 0.5–1.2 bar. The band itself was chosen from that corpus.
-What makes it worth guarding anyway is that `store_tech_scalars` runs *inside* `store_dive_file`'s
-transaction, under the `try` whose only handler is:
+What makes it worth guarding anyway is that `store_tech_scalars` runs *inside*
+`store_recording_file`'s transaction, under the `try` whose only handler is:
 
 ```python
 except IntegrityError as exc:
-    raise DiveFileConflictError("The source file for this dive changed while this upload was in flight. Please try again.")
+    raise DiveFileConflictError("This dive's recordings changed while this upload was in flight. Please try again.")
 ```
 
 That message is about a concurrent upload winning a race on a unique index. A `CHECK` violation from
@@ -4868,11 +4923,12 @@ other five — `cns_start`, `cns_end`, `otu_start`, `otu_end` (`>= 0` each) and 
 
 The CNS/OTU gap was the live one, and it is the exact failure the surface-pressure validator was
 written to prevent, on the columns right beside it: a `<CnsStart>-4</CnsStart>` in an export makes
-`store_tech_scalars` violate `ck_dive_cns_start_non_negative` inside `store_dive_file`'s
-transaction, so `PUT /dive/{uuid}/file` rolls back and answers **409 "The source file for this dive
-changed while this upload was in flight. Please try again."** The file is never stored and every
-retry fails identically — flatly contradicting `extract_tech_scalars`' own stated priority that a
-header this build can't read must not fail the upload that would have preserved it.
+`store_tech_scalars` violate `ck_dive_cns_start_non_negative` inside `store_recording_file`'s
+transaction, so `POST /dive/{uuid}/recordings` rolls back and answers **409 "This dive's recordings
+changed while this upload was in flight. Please try again."** (the message was worded for the
+one-file-per-dive era and is quoted here as it now reads). The file is never stored and every retry
+fails identically — flatly contradicting `extract_tech_scalars`' own stated priority that a header
+this build can't read must not fail the upload that would have preserved it.
 
 `gas_number` lands differently but is the same bug as `po2_limit`'s: only `_mixtures_from_cylinders`
 reads a number a *file* chose (`int(cylinder["GasNumber"])` out of the Ocean's sample data) — the
@@ -4995,6 +5051,12 @@ why this sits on the base class rather than on five validators.
 
 ## Replacing an export clears its readings even when the new one can't be read
 
+**The replace path is gone with recordings** - attaching appends rather than replaces - and the rule
+survives translated: the write is outright for a recording's *first* file and filling for every
+later one, and which of the two runs is a parameter rather than a condition inside one write. See
+*"A second file of one recording fills, and never overwrites"*. What follows is why the distinction
+was drawn at all, which is still the argument.
+
 `store_dive_file`'s replace path wrote the tech scalars under `if scalars is not None`, so an
 extraction that *failed* left the previous export's CNS and OTU on the dive — after the `DELETE`
 that removed the file they came from. The comment defended this as "couldn't read" ≠ "says nothing",
@@ -5052,7 +5114,7 @@ the download route get it from the one place that knows a blob was loaded at all
 
 ## The tech scalars re-extract on the profile's version gate, not one of their own
 
-`store_dive_file`'s `noop` branch re-reads a file the dive already has when
+`store_recording_file`'s `noop` branch re-reads the files a recording already has when
 `PROFILE_EXTRACTOR_VERSION` says the stored profile is stale, and the scalars were folded into that
 same condition rather than given a version of their own. Two columns' worth of extra state to bump,
 review and get wrong, for a re-upload path that is already opportunistic.
@@ -5721,8 +5783,8 @@ wildcard there either. `expose_headers` gets neither treatment - it is emitted v
 exactly why this one had to be spelled out.
 
 The `/export/*` endpoints are the reason it came up, but the fix is not export-specific:
-`GET /dive/{uuid}/file` and `GET /certification/{uuid}/file/{side}` build a `Content-Disposition`
-through `content_disposition_attachment` and were equally unreadable.
+`GET /dive/{uuid}/file/{fid}` and `GET /certification/{uuid}/file/{side}` build a
+`Content-Disposition` through `content_disposition_attachment` and were equally unreadable.
 
 `tests/test_cors.py` asserts it on a real (401) `GET` rather than on the preflight, because
 `Access-Control-Expose-Headers` is only sent on actual responses - a preflight would pass whatever
@@ -14489,30 +14551,31 @@ from the column default.
 
 ## The profile speaks one vocabulary, storage included
 
-`ExportDive.profile` is typed `DiveProfileRead` — the same class `GET /dive/{uuid}/profile` serves —
-so making the exported profile speak DiveJSON changed that endpoint's shape too. The rename was
-taken *through* rather than around: `duration_seconds` → `duration`, `t`/`v` → `times`/`values`,
-`pressure` → `pressures`, and an event's `t` → `time`, on `DiveProfileRead`, `DiveProfileSeries`,
-`DiveProfilePressureSeries` and `DiveProfileEvent`.
+`ExportRecording.profile` is typed `DiveProfileRead` — the same class
+`GET /dive/{uuid}/recording/{rid}/profile` serves — so making the exported profile speak DiveJSON
+changed that endpoint's shape too. The rename was taken *through* rather than around:
+`duration_seconds` → `duration`, `t`/`v` → `times`/`values`, `pressure` → `pressures`, and an
+event's `t` → `time`, on `DiveProfileRead`, `DiveProfileSeries`, `DiveProfilePressureSeries` and
+`DiveProfileEvent`.
 
-The alternative was export-local profile models, which would have left `GET /dive/{uuid}/profile`
-untouched and cost nothing today. It was rejected because the cost is permanent: the project would
-speak two profile vocabularies on two surfaces, forever, and every future profile change would have
-to be made twice. A rename is paid once, and there is nowhere this is deployed.
+The alternative was export-local profile models, which would have left that route untouched and cost
+nothing today. It was rejected because the cost is permanent: the project would speak two profile
+vocabularies on two surfaces, forever, and every future profile change would have to be made twice.
+A rename is paid once, and there is nowhere this is deployed.
 
 **The web half is a separate, sequenced change, and nothing automated will tell you it is missing.**
-`GET /dive/{uuid}/profile` and the `profile`/`gas_use` members of `GET /dive/{uuid}` change shape
-here, and `opendiving-web` declares and reads every renamed member: `duration` and `pressures` on
-the profile, `times`/`values` on a channel, an event's `time`, `DiveProfileInfo.duration` and
-`DiveGasUse.duration`. Enumerated rather than counted, because this paragraph is the checklist for
-the web change and a reader working from a figure stops wherever the figure is wrong — the chart's x
-domain, every `.t` it plots, and `gasAttributionNote`'s coverage fraction are all on that list. No
-CI job runs the two repos together (`CONTRIBUTING.md`, *Changes that span both repos*), so between
-this merging and the web change merging the chart and the gas-use card render nothing, with both
-suites green. That is the accepted shape of every breaking API change here — api first, web second,
-the two PRs linked — and it is written down because the failure is silent in both directions: a
-reviewer looking only at this repo cannot see it, and a reviewer looking only at web sees a client
-that matches nothing.
+`GET /dive/{uuid}/recording/{rid}/profile` and the `recordings`/`gas_use` members of
+`GET /dive/{uuid}` change shape here, and `opendiving-web` declares and reads every renamed member:
+`duration` and `pressures` on the profile, `times`/`values` on a channel, an event's `time`,
+`DiveProfileInfo.duration` and `DiveGasUse.duration`. Enumerated rather than counted, because this
+paragraph is the checklist for the web change and a reader working from a figure stops wherever the
+figure is wrong — the chart's x domain, every `.t` it plots, and `gasAttributionNote`'s coverage
+fraction are all on that list. No CI job runs the two repos together (`CONTRIBUTING.md`, *Changes
+that span both repos*), so between this merging and the web change merging the chart and the gas-use
+card render nothing, with both suites green. That is the accepted shape of every breaking API change
+here — api first, web second, the two PRs linked — and it is written down because the failure is
+silent in both directions: a reviewer looking only at this repo cannot see it, and a reviewer
+looking only at web sees a client that matches nothing.
 
 **It reaches storage.** `dive_profile.duration_seconds` is now `dive_profile.duration` (revision
 `b1c7f0e4a2d9`, an `ALTER TABLE ... RENAME COLUMN` — autogenerate renders a rename as a drop plus an
@@ -14747,10 +14810,13 @@ three shapes. Review found this twice running, once per spelling; the second was
 introduced by the fix for the first.
 
 **`ux_dive_file_user_id_sha256` is the one collision with no link available**, and it is skip-and-
-report. Link-to-existing is impossible there: `dive_id` is `NOT NULL` under the full-unique
-`ux_dive_file_dive_id`, and `ux_dive_file_storage_key` forbids sharing a key, so one row cannot
-serve two dives. The collision means this diver already stores identical bytes against another dive;
-the restored dive simply has no source file and the preview says so. Still not an error.
+report. Link-to-existing is impossible there: one `dive_file` row names one `recording_id`, and
+`ux_dive_file_storage_key` forbids sharing a key, so one row cannot serve two recordings. (This
+argument used to run through `ux_dive_file_dive_id`, which no longer exists — see *"A dive has
+recordings, and a file belongs to one of them"*. The rule it supported survives its index: what
+stops a row serving two is now that it belongs to one recording rather than that it belongs to one
+dive.) The collision means this diver already stores identical bytes against another recording; the
+restored recording simply has that file missing and the preview says so. Still not an error.
 
 ## Where the format is optional and this app is not, the record goes rather than a value being invented
 
@@ -14875,14 +14941,14 @@ say where the row came from: `parser_key` is `divejson_import` on a bare import,
 file's own key on the archive path, where a real file exists for a backfill to re-read.
 
 **This used to be argued from "it is the caller's own backup", and that premise is no longer true.**
-The route converts a UDDF file, a `.ssrf`, a FIT or a Suunto export on the way in, so the document a
-diver imports may have been written by Subsurface or by a watch and converted minutes ago — never by
-this app, and never by that diver's own export. The argument that survives is the one that was doing
-the work all along, and it is about *authority*, not provenance: a profile imported here lands in
-the importer's own logbook, changes nothing anyone else can see, and is never claimed by this
-instance to have been extracted from bytes it holds. A diver free to type a dive in by hand is not
-being given a new power by being allowed to bring one in from the computer that recorded it — which
-is the whole point of the feature, stated without the assumption that the app wrote the file.
+The route converts a UDDF file, a `.ssrf`, a FIT or one of Suunto's two exports on the way in, so
+the document a diver imports may have been written by Subsurface or by a watch and converted minutes
+ago — never by this app, and never by that diver's own export. The argument that survives is the one
+that was doing the work all along, and it is about *authority*, not provenance: a profile imported
+here lands in the importer's own logbook, changes nothing anyone else can see, and is never claimed
+by this instance to have been extracted from bytes it holds. A diver free to type a dive in by hand
+is not being given a new power by being allowed to bring one in from the computer that recorded it —
+which is the whole point of the feature, stated without the assumption that the app wrote the file.
 `parser_key` stays literally accurate on the converted path: the document the planner sees *is*
 DiveJSON, whatever it arrived as, and `divejson_import` names the shape rather than the source.
 
@@ -14920,7 +14986,7 @@ bare document is a legitimate logbook. It is also why a round-trip comparison le
 re-export missing those members.
 
 The archive path writes blob and row together, in that order: **the file lands on the volume before
-the transaction that references it**, the same ordering `store_dive_file` and
+the transaction that references it**, the same ordering `store_recording_file` and
 `store_certification_file` use. Every database-visible state therefore names bytes that exist, and
 the only thing a failure can leave is an unreferenced file — the recorded and accepted orphan case,
 reclaimed by `sweep_orphaned_files.py`. There is no compensating unlink, which is the
@@ -15091,10 +15157,13 @@ calls**.
 
 `POST /import/divejson/preview` and `POST /import/divejson` are now `POST /import/logbook/preview`
 and `POST /import/logbook`, and they accept a DiveJSON document, the full-export archive, or any
-format the `divejson` registry sniffs — UDDF, Subsurface `.ssrf`, FIT and the Suunto app's JSON at
-the pin this repository carries, plus a `.zip` whose files are all one of those. The old paths are
-**gone rather than aliased**: there is no deployment but the local one, the web app moves in the
-same change, and a `deprecated=True` alias would be a hedge against a rollout that does not exist.
+format the `divejson` registry sniffs — UDDF, Subsurface `.ssrf`, FIT and Suunto's two, the app's
+JSON and DM5's XML, at the pin this repository carries, plus a `.zip` whose files are all one of
+those. **The set is `divejson.read_formats()` and never a list**, but the *labels* are a table here
+(`reader.py`'s `_FORMAT_LABELS`) and a test now fails when the pin outgrows it — see *"A version
+bump can add a reader, and only a test notices"* below. The old paths are **gone rather than
+aliased**: there is no deployment but the local one, the web app moves in the same change, and a
+`deprecated=True` alias would be a hedge against a rollout that does not exist.
 
 **The converter is asked once, on a bounded head of the spool, before the JSON parse** — not at the
 reader's refusal sites. An `.ssrf` and a UDDF file are valid UTF-8 that is not JSON, so they died in
@@ -15932,3 +16001,351 @@ is positioned — Postgres-backed, tokens minted by `issue_tokens` rather than h
 dependency directly. Five of its six cases fail without the check. The sixth asserts that a *live*
 session's token still authenticates, and it is there because a check that refused everything would
 otherwise pass the whole class.
+
+## A dive has recordings, and a file belongs to one of them
+
+**Supersedes *"A dive has at most one source file, and identical bytes are stored once per diver"*,
+*"`source_file` is on the dive detail response only"* and the paragraph in *"Deleting a dive
+hard-deletes its source file"* about `ux_dive_file_dive_id`.** Those sections describe the model
+this one replaced; they are kept because the reasoning in them - why a 409 rather than a silent
+re-point, why hard delete rather than soft - survives the change intact, and only the cardinality
+they assume has moved.
+
+`dive_recording` sits between `dive` and its files and profiles. One row is **one device's record of
+one dive**: the six device columns as some file named them, that device's own start (split into an
+instant and an offset exactly as a dive's is), and the two figures the match gates compare. A dive
+holds an ordered list of them and **ordinal 0 is primary**; a recording holds a list of `dive_file`
+rows and at most one `dive_profile`.
+
+**Three ordinary things a diver does broke the old model, and each of them is a real file in this
+repository's corpus.** Wearing two computers, which is what a technical diver does every dive.
+Exporting one computer twice - the same Suunto Ocean writes an app JSON carrying a serial and no
+model, and a FIT carrying a model and no serial, of the same dive. And surfacing mid-dive, which
+makes a Perdix log two records of what the diver logs as one. The one-file-per-dive schema could
+represent none of the three, and the failure mode was not an error: it was the second file silently
+replacing the first.
+
+**What did *not* change is as load-bearing as what did.** `ux_dive_file_user_id_sha256` stays, so
+one set of bytes is still one row per diver, and `reconcile()` still asks about the *dive* rather
+than the recording - asking about the recording would answer "insert" for bytes already stored
+against a second recording of the same dive, and the insert would then die on that index.
+`dive_file.dive_id` and `dive_profile.dive_id` stay as denormalized read keys, because `erase_dive`,
+the export loader and the archive writer all want "this dive's files" and none of them wants
+anything else off `dive_recording`. `dive_file.storage_key` is untouched, so the orphan sweeper and
+the account purge job needed no change at all.
+
+**The two `ON DELETE CASCADE`s from `dive_recording` really fire**, unlike the ones from `dive`.
+Dive deletion is application-level (`is_deleted`), so no `DELETE FROM dive` ever runs and those
+cascades are decoration; recordings are hard-deleted, so removing one takes its files and its
+profile with it in the database. The blobs still need `delete_after_commit`, which is why
+`services/dive_recordings.py` reads the storage keys *before* issuing the delete.
+
+**The routes changed shape rather than gaining a parameter.** `PUT /dive/{uuid}/file` was whole-slot
+replace over a slot that no longer exists, so it is `POST /dive/{uuid}/recordings` - `POST` because
+attaching is no longer idempotent in the HTTP sense: the same bytes twice are still a no-op, but two
+*different* files are two additions rather than a replacement, and a `PUT` that appended would be a
+lie about the method. `GET`/`DELETE /dive/{uuid}/file` became `/file/{fid}` and
+`GET /dive/{uuid}/profile` became `/recording/{rid}/profile`. Nothing is aliased: there is no
+deployment but the local one and the web client moves in the same change.
+
+**The migration moves rows rather than dropping them.** Local data is disposable; this revision is
+what a self-hoster runs on an instance holding their whole logbook. Every dive carrying a file or a
+profile gets exactly one recording - one, not two, for a dive carrying both - and it inherits the
+dive's `start_time`, offset, `duration` and `max_depth`. That is the one exception to "no profile,
+no gate figures", and a deliberate one: the dive being migrated had exactly one recording, so those
+numbers *are* that recording's. The device columns stay NULL, because nothing in the old schema
+recorded what wrote a file; `backfill_tech_fields` re-parses every stored file already, so one run
+fills them for every file-backed recording.
+
+## Recording identity is device plus start, and three gates use it
+
+`services/dive_recordings.py` is the only module that decides whether two records are the same
+recording, the same dive, or neither. Every match is within one account, and the candidate query is
+one indexed read on `(user_id, start_time)`.
+
+**The device test is defined once and has two halves that are deliberately not complements.**
+`same_device` and `devices_differ` share one rule - *a member absent on either side never makes two
+devices differ* - and a pair may be **neither**. That is not hedging: reading "not the same" as
+"different" would let the strict gate, whose entry condition is *a different device*, fire on a pair
+it knows nothing about. The absent rule is forced by the formats rather than chosen: the `.ssrf`
+reader reports no brand at all and UDDF's `<manufacturer>` is optional, so without it an `.ssrf`
+`{model: "Suunto Ocean"}` and that same computer's FIT `{brand: "suunto", model: "Suunto Ocean"}`
+would be neither same nor different, and the gate would either never fire or mint a second recording
+for one computer.
+
+**The "at most one serial in play" qualifier on the model branch is not defensive.** Without it,
+equal serials with differing model strings satisfy *same* and *different* at once - and a real pair
+produces exactly that: a Shearwater UDDF's `<model>Perdix 3</model>` beside the same computer's
+`.ssrf` `Shearwater Perdix 3`, both serial `D9772626`. A serial both sides carry settles the
+question either way.
+
+**Every string is compared trimmed and case-folded, and stored as read.** A FIT's
+`file_id.manufacturer` decodes to the profile's lowercase `suunto` while the app's JSON writes the
+literal `Suunto`. Normalising at write time would have been the other option and is worse: a parser
+reports what the file said, and folding at comparison time keeps that true.
+
+**The three gates.** *Same recording* - the same device, starts within 2 s, device counters equal
+where both carry one, sampled spans within 2 s where both have samples. *Same dive, strict* -
+Subsurface's `likely_same`, with its numbers rather than invented ones: a different device (or the
+same one reporting a different counter), starts within `max(60 s, half the longer duration)`, depths
+within 10 % or 1 m, durations within five minutes, and never a pair where either duration is zero.
+*Same dive, loose* - the start window alone, which is what a form offers and a diver decides.
+
+**The strict gate's absent rule is Subsurface's and differs from the device test's**, and the
+difference is worth stating because a reader meeting both in one file reads them as contradicting. A
+figure *neither* side carries does not stop a match; a figure one side carries alone does - a
+recording claiming 45 m against one claiming nothing is not evidence of agreement. The device test
+is symmetric because there an absent member means "this format has no such field"; a figure is a
+reading, and its absence means something else.
+
+**Clocks: Δ is measured between instants when both sides carry an offset, and between wall clocks
+when either does not.** This is the single most consequential line in the module and it is not a
+fallback. Shearwater Cloud Desktop writes a local wall clock with a `Z` suffix, so a Perdix
+recording converted from its UDDF carries no offset and its `start_time` holds `15:18:10` labelled
+UTC - while the Suunto on the same diver's other wrist stamps `15:17:38+03:00`, an instant of
+`12:17:38Z`. Comparing the two columns naively gives 11 055 s and no gate ever fires; comparing the
+clock faces gives 255 s, which is what the two watches read. *Rejected:* converting a wall clock to
+an instant using the account's or the dive's offset - that fabricates the offset DiveJSON §5.2
+forbids inventing, and writes it into a comparison where it would be invisible. See *"A dive's UTC
+offset may be unknown, and only import can make it so"* for where the NULL comes from.
+
+**The candidate window is 26 hours and deliberately far wider than any gate can reach**: twelve of
+fuzz plus the fourteen an offset can move a wall clock from its instant. It has to be compared
+against the stored column, because it is an index scan and the wall clock is not a column - so the
+query is generous and the gates compute the right delta per pair in Python. Being tight there would
+buy a few rows and cost a match that silently never fires for a diver whose computer is set to the
+wrong side of the date line.
+
+**Where each gate runs.** `POST /dive/parse` returns the loose matches for the forms, with the
+same-recording hits flagged; the attach route applies the same-recording test within the target dive
+only; logbook import applies same-recording then same-dive-strict, in that order, to every incoming
+recording whose dive uuid is new. Import never uses the loose gate: attaching on a start window
+alone would silently fold a repetitive dive into the one before it. The forms never attach by
+themselves: a wrong match on a form is a dive the diver did not ask for, with nothing on screen to
+refuse it.
+
+## A second file of one recording fills, and never overwrites
+
+The rule is written once per thing it applies to, and it applies to everything a file says about a
+recording: the device columns (`fill_device_fields`), the two figures the match gates compare
+(`fill_gate_figures`), the recording's own start (`fill_start`), the dive's oxygen-exposure readings
+(`fill_tech_scalars`), the profile's channels (`fill_channels`) and the dive's cylinders
+(`fill_dive_mixtures`). **No count is written here on purpose**, and the omission is not
+fastidiousness: this paragraph said "three times" from the day it was written, while the code
+already had more, and a later sentence then counted `fill_start` as "a fourth" off that wrong base.
+A figure restated away from the thing it counts is a second place to be wrong;
+`git grep -n "def fill_" -- src/app/services` is where the list is derived from, and it returns
+every one of them.
+
+**It returns more than them, and that is now worth saying rather than leaving to be rediscovered.**
+The grep matched the named set exactly until the cylinders arrived; `fill_dive_mixtures` brought two
+pure helpers with it, `fill_mixture_fields` (which decides and writes nothing) and
+`fill_parsed_mixtures` (the same rule across one recording's own files rather than against the
+dive's rows). Neither is a *thing the rule applies to* — they are how the cylinder one is
+implemented. So read the grep as a superset and the parenthesised names above as the set: the point
+of the derivation is that nobody has to maintain a count, not that the two coincide.
+
+Each takes every value from the **first file that recorded it** - the serial from the JSON and the
+model from the FIT, `cns_end` from the FIT beside the JSON's positions, the JSON's depth and
+temperature beside a ceiling only the FIT carries.
+
+*Rejected:* the later file wins. A diver who corrected a value between two uploads loses the
+correction, which is the objection this repository already records against profile-derived
+pressures.
+
+**The unit of the profile fill is the channel, never the sample.** Two files' readings of one sensor
+are two readings at different rounding, and interleaving them would invent a curve neither device
+recorded. Events go whole too, from the first file that recorded any: mixing two marker streams
+would double every gas switch the pair agree on. `gas_attribution` is not filled at all and is
+recomputed after the fill, because it is derived from the merged events and depth together -
+`finalize_profile`'s ordering rule, one level up.
+
+**Most of the fills are a `COALESCE` per column rather than a read-then-write.** One statement,
+nothing to race, and the rule stated once in SQL instead of once in SQL and once in Python. Two are
+not, for two unrelated reasons, and neither is "the column is awkward": `fill_start`'s is below, and
+`fill_dive_mixtures`' is that its join is positional and the alignment exists only in Python, so the
+statement would have to name a row the SQL cannot pick out — see *"The cylinder half is a second
+function, not `merge_mixture_fields`"* at the end of this section.
+
+**`fill_start` is one of the two that is not a `COALESCE`, because a recording's start is two
+columns holding one value.** A NULL `utc_offset_minutes` means `start_time` holds a wall clock
+labelled UTC rather than an instant, so a `COALESCE` that filled the offset alone would reinterpret
+a column nobody rewrote and read the recording back `offset` minutes late. The two are therefore
+filled together: where the row has a start and no offset, filling the offset also converts the
+stored clock face to the instant it names. That is **not** the fabrication *Clocks* rejects, and the
+difference is whose offset it is — that rejected alternative borrows the *account's or the dive's*,
+while this one comes from another export of the same device, which is the only match that reaches
+this function at all. Read-then-write because expressing it in SQL means a `CASE` over both columns
+and the rule is hard enough to state once; there is no race to lose, every caller being inside a
+transaction on a dive only its owner can reach.
+
+**The outright write survives, and which one runs is now structural.** A file that *creates* a
+recording writes the dive's tech scalars outright — `None` included, so a reading nothing yields is
+cleared — because there was nothing on the dive to lose. Every other file fills.
+`_rederive_recording` takes that answer as its `fresh` parameter rather than deciding it inside a
+write, so the asymmetry cannot be reached by the wrong branch. What `fresh` means is worth knowing
+before relying on it, and it is **not** "the recording had no files a moment ago" — the last
+paragraph of this section says what it is.
+
+**The dive's readings are the primary recording's and nothing else's.** A second computer's CNS
+clock is its own device's arithmetic, and writing it onto the dive would attribute one machine's
+numbers to another's record. What a secondary recording *does* touch is the dive's cylinder labels:
+`gas_number` is dive-scoped (see *"The cylinder pressures come from the mixtures, not from the
+profile's pressure curve"*), so a second computer's own numbering is mapped onto the dive's list -
+by mix first, then by order, unmatched appended with the next free label - and its profile's
+pressure channels and gas-switch events are rewritten through that map. Subsurface renumbers a
+second computer's sensors onto the dive's cylinder list for the same reason.
+
+### The cylinder half is a second function, not `merge_mixture_fields`
+
+The dive's cylinders fill like everything else, and the corpus pair is the whole argument for it: a
+2026 Suunto Ocean's JSON export reconstructs its one cylinder from sample data — pressures and a gas
+number, no `Gases` block and so no fraction anywhere — while the same computer's FIT export of the
+same dive carries `oxygen` 33 and no pressures at all. Neither file describes that cylinder on its
+own. Without a fill the dive keeps whichever arrived first and the other reading is simply lost,
+which for the JSON-then-FIT order a diver actually uses means a cylinder with pressures and no mix.
+
+The obvious move was to reuse `merge_mixture_fields`, and it does not work — it answers a different
+question and gets this one wrong twice over. It writes `po2_limit`, `gas_number` and `role`, so it
+lands **no** `oxygen` and the cylinder above stays blank; and it *overwrites* the three it does
+write, which is the one thing this rule forbids. That second half is worse than doing nothing on the
+logbook-import path, where a document that carries a `gas_number` at all would have had it written
+over the stored row's — and `gas_number` is the join key to
+`dive_profile.data.pressure[].gas_number`, so a FIT numbering from 1 renames the cylinder a stored
+Ocean profile's curves are attributed under and the chart then reads that tank's pressure off
+nothing. Silently, because a `gas_number` that names *a* cylinder is indistinguishable from one that
+names the right one.
+
+So `fill_mixture_fields` is a second function and `merge_mixture_fields` stays the backfill's. It
+writes `oxygen`, `helium`, `volume`, `start_pressure` and `end_pressure`, and only where the stored
+row has none. The four it never writes are excluded deliberately, which is why the list is a
+constant (`FILLABLE_MIXTURE_FIELDS`) rather than a subtraction: `usage` is a distinction no format
+this app parses records at all; `po2_limit` and `role` are how the diver planned to breathe the
+cylinder rather than what was in it; and `gas_number` is the join key above, which a second file's
+own labelling must never rename.
+
+**The join is `merge_mixture_fields`', and so are its preconditions.** Counts must match, every pair
+must still agree on the `(oxygen, helium)` both sides recorded, and `stored` must be in saved order
+— `get_mixtures_for_dive`'s `ORDER BY id`, for the reason the section above this one gives. Sharing
+the join is what makes two functions the right shape rather than three: the disagreement they can
+detect is the same disagreement, and only the write differs.
+
+**A fill the table would reject is dropped, per row.** Four of the five columns are half of a pair
+`dive_mixture` constrains — `end_pressure <= start_pressure`, `oxygen + helium <= 100`; `volume` is
+the only one that stands alone — and this is the one write path that composes a row out of two
+sources, so a stored half and a filled half can make a row Postgres refuses even though both sides
+were individually valid. `CHECK` is not deferrable, so that arrives as an `IntegrityError` from the
+`execute` in the middle of an attach's transaction or a logbook import's, neither of which can
+recover there. `_fill_is_storable` therefore checks the composed row against those constraints first
+and drops the fill where it fails: the file and the stored row cannot both be describing that
+cylinder, and the stored row is the diver's. **Per row rather than per dive**, unlike
+`merge_mixture_fields`' all-or-nothing refusal, and the difference is that nothing here is being
+overwritten — a filled cylinder beside an unfilled one is two rows each still carrying exactly what
+it carried before, not two rows sourced from different places with nothing recording which is which.
+
+**It applies at two levels, and they are the same rule at different grain.** `fill_parsed_mixtures`
+runs inside `extract_recording`, across a recording's own files in attach order, and is why
+`RecordingExtraction.mixtures` is a per-*member* answer rather than the first file's list taken
+whole — the whole-list reading is precisely what drops the FIT's `oxygen`. `fill_dive_mixtures` then
+writes that answer onto the dive's rows, and is shared by the attach route and the import writer so
+the two cannot disagree about what a fill *writes*. They do still differ about *when* one runs: the
+attach path returns before it for a secondary recording (`ordinal != 0`), while the import writer's
+`_fill_recording` has no ordinal to hand and calls it for any matched recording, exactly as it
+already calls `fill_tech_scalars` there. The join's own guard is what keeps that from doing damage —
+a second computer's cylinder list has to agree on every recorded fraction and on the count before
+anything is written — but it is a guard rather than the rule, and closing the gap means carrying the
+ordinal on `PlannedRecordingMatch`. Read-then-write rather than a `COALESCE` per column, unlike
+every single-column fill: the join is positional and the alignment exists only in Python, so the
+statement would have to name a row the SQL cannot pick out.
+
+**The cylinders get their own gate — `joined`, not `fresh` — and the two are different questions.**
+`fresh` asks whether the dive has anything on this recording to lose, and decides the
+outright-versus-fill choice for the scalars. `joined` asks whether **new bytes arrived on a
+recording that already existed**, which is the only event that can put a reading into a cylinder. On
+the attach path they are each other's negation, which is exactly why one parameter looked sufficient
+and was not: the other two callers of `_rederive_recording` have no new bytes at all, and one of
+them answers `fresh` the same way the attach path does when it fills.
+
+That one is `_repeat_upload`, and gating the cylinders on `fresh` made it undo an edit. Re-uploading
+a file the dive already holds is a no-op that opportunistically re-derives, so it passes
+`fresh=False` — a re-parse yielding less must not clear the dive's readings. With the cylinders on
+that branch, the sequence is: the diver attaches an export, clears the `oxygen` the form pre-filled
+from it, uploads the same file again, and the fill reads that 33 straight back off the very bytes
+they were editing away from. Not a rare path either: `should_extract` answers "extract"
+unconditionally where there is no stored profile, so a sample-less export re-derives on *every*
+repeat upload rather than only after a `PROFILE_EXTRACTOR_VERSION` bump. `delete_dive_file` is the
+third caller and has no new bytes either. Both now pass `joined=False`, and the parameter is
+required rather than defaulted so a fourth caller has to answer it.
+
+**`fresh` itself is still not "this recording had no files"**, and that is worth keeping straight
+because the wrong reading of it is what the paragraph above is about. The attach path sets it from
+`matched is None`, so it is true of a recording *this upload created* and of nothing else. The first
+file ever to reach a **file-less recording a logbook import created earlier** is therefore not fresh
+and does fill — not a contradiction but the case the same-recording gate exists for: the recording
+predates the upload, so the bytes are a second reading of a record the dive already describes. And
+`delete_dive_file` passes `fresh=True` for a recording that plainly did have files, since there the
+point is to stop claiming a reading the remaining ones no longer yield.
+
+## A profile has one of three provenances, and a recording need not have a file
+
+`dive_profile.parser_key` answers "which of three things is this profile": a `DiveParser.key` means
+the samples were read out of the recording's files in order and can be read again; `divejson_import`
+means a document supplied them; `merge` means two recordings' samples were folded onto one axis. The
+last two are `UNREPRODUCIBLE_PROVENANCES`, and nothing on this instance can produce them a second
+time.
+
+**A recording with no files at all is first-class rather than degenerate.** Logbook import stores no
+bytes for a converted or a bare document (see *"A bare document creates no file rows, and only the
+archive restores bytes"*), so every UDDF and `.ssrf` dive in the app arrives as a recording carrying
+a device, a start and a profile and nothing else. It is deleted only through the recording route:
+there is no file whose deletion would take it.
+
+**`merge` names a route that does not exist yet, and that is deliberate.** There is no
+`POST /dives/merge` in this repository: folding two dives into one is the next change, and it
+arrives on top of this one. The constant, the `UNREPRODUCIBLE_PROVENANCES` set and the deletion rule
+that reads them ship *ahead* of it because they are not the merge feature - they are the property
+the rest of this module has to hold for the merge to be safe to add, and adding them afterwards
+would mean revisiting the backfills, `should_extract` and `delete_dive_file` in a change that is
+about something else. A reader who greps for the endpoint and finds nothing has found the right
+answer: `MERGE_PARSER_KEY` is written by nothing but a test until that change lands, and the test
+says so where it sets it by hand. This note exists because the absence reads as a defect twice out
+of two independent readings, which is once more than a comment in one file was going to survive.
+
+**`should_extract` refuses an unreproducible profile whatever its digest says**, and both backfills
+select on the *profile's* provenance rather than on a *file's*. That distinction is the correction
+this change carries. The old candidate query tested `dive_file.parser_key`, which would let a merged
+recording that kept its files be selected and its folded samples overwritten by one half of
+themselves - and `POST /dives/merge` is exactly what makes that reachable, because a merged
+recording keeps whatever files either part had. The same principle governs deletion: a recording
+whose last file goes normally goes with it, and one whose profile no file can re-yield survives it.
+
+**`source_sha256` is the file's own digest for a recording holding one file, and the SHA-256 over
+its files' digests concatenated in attach order for a recording holding more.** The single-file case
+giving back the digest unchanged is not an optimisation: it is what keeps `should_extract` and the
+profile ETag identical for every row that existed before recordings did, so no migrated profile
+becomes a backfill candidate and no client's cached profile is invalidated by this change alone.
+
+**`backfill_tech_fields` stopped clearing.** It used to overwrite the dive's scalars outright on the
+ground that "no other path writes them"; recordings add one. A logbook import that matches an
+existing recording and stores no bytes fills a blank `cns_end` from the document, and an outright
+rewrite would delete that reading on the next run with nothing on the volume to recover it from. It
+now overwrites a scalar only with a value a stored file actually yields. *Rejected:* a per-scalar
+provenance column - nine columns of bookkeeping to protect nine values. The accepted cost: a parser
+fix that decides a stored file's reading was bogus can no longer null it through the backfill.
+
+## A version bump can add a reader, and only a test notices
+
+`divejson` 0.4.0 added Suunto's DM5 XML as a fifth reader, and the api's pin crossed it. The
+accepted set is `divejson.read_formats()` computed per call and never a list written out - which is
+the right design and is exactly why nothing saw the fifth format arrive. Every guard on both sides
+of the seam is written to *tolerate* an unknown format: `formats_this_build_reads` falls back to the
+raw id, so the API accepted `.xml` logbooks while the sentence describing what it reads rendered the
+bare string `suunto_xml`, and the web app's picker - whose extension list is its own - greyed the
+extension out. No CI job, no route test and no exception could see any of it.
+
+So `_FORMAT_LABELS` is a table, and `test_every_read_format_has_a_label` fails the build when the
+pin outgrows it. The mirror case is checked too: a label for a format the library has dropped is a
+format this build advertises and refuses. The prose that writes the set out for a reader -
+`README.md`, `api/v1/logbook_import.py`, `schemas/logbook_import.py` and the two sections above - is
+not derived and cannot be, so the test's message names those files: it is the one moment anybody is
+looking.

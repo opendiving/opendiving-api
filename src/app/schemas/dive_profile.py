@@ -202,7 +202,7 @@ class GasAttribution(BaseModel):
 
 
 class DiveProfileSeries(BaseModel):
-    """One channel as `GET /dive/{uuid}/profile` returns it: integer seconds, integer values.
+    """One channel as `GET /dive/{uuid}/recording/{rid}/profile` returns it: integer seconds, integer values.
 
     `times`/`values` rather than the `t`/`v` this served until DiveJSON 1.0: these are the
     format's member names (spec §6.5), and the export embeds this very schema, so the two
@@ -326,7 +326,7 @@ class DiveProfileInfo(BaseModel):
     max_temperature: Annotated[float | None, Field(default=None, description="Warmest recorded sample, in Celsius")]
     min_pressure: Annotated[float | None, Field(default=None, description="Lowest recorded tank pressure, in bar")]
     max_pressure: Annotated[float | None, Field(default=None, description="Highest recorded tank pressure, in bar")]
-    # The `v` cache-buster the client sends to `GET /dive/{uuid}/profile`, so a
+    # The `v` cache-buster the client sends to `GET /dive/{uuid}/recording/{rid}/profile`, so a
     # re-extraction gets its own cache entry rather than being masked for five minutes by
     # the previous one.
     updated_at: datetime | None = None

@@ -7,13 +7,19 @@ from ..core.db.models import PublicUUIDMixin, TimestampMixin
 
 
 class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
-    """A dive's per-sample depth / temperature / tank-pressure curves.
+    """One recording's per-sample depth / temperature / tank-pressure curves.
 
-    Derived from the dive's stored export (`DiveFile`) on every path but one: the samples
-    are extracted server-side by `DiveParser.parse_profile` during
-    `PUT /dive/{uuid}/file`, which is the only place that has both the bytes and the parse
-    token proving where they came from. That is still the whole reason `/dive/parse`
+    Derived from the recording's stored exports (`DiveFile`) on every path but one: the
+    samples are extracted server-side by `DiveParser.parse_profile` during
+    `POST /dive/{uuid}/recordings`, which is the only place that has both the bytes and the
+    parse token proving where they came from. That is still the whole reason `/dive/parse`
     doesn't return a profile - see `services/dive_profiles.py`.
+
+    **One row per recording, not per dive.** A diver on two computers has two profiles of
+    one dive, drawn from two devices' samples, and neither is a version of the other. The
+    `t` axis is elapsed seconds from the *recording's* start, which is why the recording
+    carries a `start_time` of its own: a second computer that entered the water 223 seconds
+    later has a profile whose zero is 223 seconds after the dive's.
 
     **The exception is logbook import**, which does write samples the client supplied. It
     is the one sanctioned path, on the terms `DECISIONS.md` records under *"Importing a
@@ -48,32 +54,49 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     decompression obligation. See `services/dive_profiles.py` for the shape's full
     rationale.
 
-    Mirrors `DiveFile` deliberately: a `deferred` payload, one unique index on `dive_id`,
-    and no `SoftDeleteMixin` (a soft-deleted blob occupies its bytes forever with nothing
-    able to read it). No `user_id` either - unlike `dive_file` there is no per-user
-    uniqueness to enforce in this table, and every read resolves through
-    `_get_owned_dive`.
+    Mirrors `DiveFile` deliberately: a `deferred` payload and no `SoftDeleteMixin` (a
+    soft-deleted blob occupies its bytes forever with nothing able to read it). No
+    `user_id` either - unlike `dive_file` there is no per-user uniqueness to enforce in
+    this table, and every read resolves through `_get_owned_dive`.
 
-    **The `ON DELETE CASCADE` below never fires.** Dive deletion is application-level
+    **The `ON DELETE CASCADE` to `dive` never fires.** Dive deletion is application-level
     (`is_deleted`), so no `DELETE FROM dive` ever runs - the same trap `delete_files_for_dive`
     and `delete_files_for_certification` exist to work around, and the one the gear tables
-    got out of by going hard-delete. `delete_profile_for_dive` in `services/dive_profiles.py`
-    is what actually removes these rows, and it is called from both the file-delete and the
-    dive-delete paths.
+    got out of by going hard-delete. `delete_profiles_for_dive` in `services/dive_profiles.py`
+    is what actually removes these rows on that path.
+
+    The cascade to `dive_recording` **does** fire, because recordings are hard-deleted:
+    removing a recording takes its profile and its files with it in the database rather
+    than in application code. The blobs still need `delete_after_commit`, which is why
+    `services/dive_recordings.py` collects the storage keys before issuing the delete.
     """
 
     __tablename__ = "dive_profile"
 
     id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
-    dive_id: Mapped[int] = mapped_column(ForeignKey("dive.id", ondelete="CASCADE"))
+    # The recording these samples are of. Unique below, so a recording has at most one
+    # profile - which is what "a recording is one device's record" means, and what the
+    # fill rule depends on: a second file of one recording contributes the *channels* the
+    # first did not carry, into this one row, and never a second row beside it.
+    recording_id: Mapped[int] = mapped_column(ForeignKey("dive_recording.id", ondelete="CASCADE"))
+    # Denormalized off the recording, exactly as on `dive_file`: `erase_dive` and the
+    # export loader both want "this dive's profiles" without joining.
+    dive_id: Mapped[int] = mapped_column(ForeignKey("dive.id", ondelete="CASCADE"), index=True)
 
-    # Idempotency key for extraction. `source_sha256` is the `dive_file.sha256` these
-    # samples came out of; together with `extractor_version` it is the whole test for
-    # "is this profile still current" (`should_extract`), and the pair is also the ETag
-    # the read endpoint serves.
+    # Idempotency key for extraction. `source_sha256` is what these samples came out of;
+    # together with `extractor_version` it is the whole test for "is this profile still
+    # current" (`should_extract`), and the pair is also the ETag the read endpoint serves.
+    # For a recording holding one file it is that file's own `sha256`, exactly as before;
+    # for one holding several it is the SHA-256 over their digests concatenated in attach
+    # order, so a second file arriving invalidates the profile the first produced.
     source_sha256: Mapped[str] = mapped_column(String(64))
-    # `DiveParser.key` of the parser that produced these samples, here for the same
-    # reason it is on `dive_file`: a backfill selects the subset it knows how to re-read.
+    # **Which of three things this profile is**, which is more than "which parser read it":
+    # a `DiveParser.key` means the samples were extracted from the recording's files in
+    # order and can be extracted again; `divejson_import` means a document supplied them and
+    # no file here can re-yield them; `merge` means two recordings' samples were folded on
+    # one axis. The two non-parser values are what both backfills refuse to overwrite, and
+    # the distinction is on the *profile* rather than on a file precisely because a merged
+    # recording may still hold the files either part had.
     parser_key: Mapped[str] = mapped_column(String(32))
     extractor_version: Mapped[int] = mapped_column(Integer)
 
@@ -133,7 +156,8 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     gas_attribution: Mapped[list | None] = mapped_column(JSONB, default=None)
 
     __table_args__ = (
-        # One profile per dive. Re-importing a different export for the same dive
-        # replaces it, exactly as it replaces the `dive_file` row it was derived from.
-        Index("ux_dive_profile_dive_id", "dive_id", unique=True),
+        # One profile per recording. `ux_dive_profile_dive_id` - one per *dive* - is gone:
+        # two computers on one dive are two recordings and two profiles, and the app's own
+        # UDDF export takes the primary one rather than pretending there is only ever one.
+        Index("ux_dive_profile_recording_id", "recording_id", unique=True),
     )

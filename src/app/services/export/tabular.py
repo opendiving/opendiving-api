@@ -87,7 +87,11 @@ DIVES_HEADER = (
     "entry_longitude",
     "exit_latitude",
     "exit_longitude",
-    "source_file",
+    # Plural, and every file of every recording: a dive is recorded by as many computers as
+    # the diver wore and each of them may have been exported more than once. Joined with
+    # `; `, in recording then attach order, so the column reads as one cell in a spreadsheet
+    # and its order matches the document's `recordings[]`.
+    "source_files",
     "notes",
     "dive_uuid",
 )
@@ -160,7 +164,11 @@ def _dive_row(bundle: ExportBundle, dive: Dive) -> tuple[Any, ...]:
     )
     trip = bundle.trip_for(dive)
     course = bundle.course_for(dive)
-    source_file = bundle.file_by_dive[dive.id]
+    source_files = "; ".join(
+        file.info.original_filename
+        for recording in bundle.recordings_by_dive.get(dive.id, [])
+        for file in recording.files
+    )
     return (
         dive.dive_number,
         local.date().isoformat(),
@@ -193,7 +201,7 @@ def _dive_row(bundle: ExportBundle, dive: Dive) -> tuple[Any, ...]:
         dive.entry_longitude,
         dive.exit_latitude,
         dive.exit_longitude,
-        None if source_file is None else source_file.original_filename,
+        source_files or None,
         dive.notes,
         str(dive.uuid),
     )

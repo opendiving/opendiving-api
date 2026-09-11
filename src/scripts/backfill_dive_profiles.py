@@ -1,4 +1,4 @@
-"""Extract dive profiles from exports that are already stored against dives.
+"""Extract dive profiles from the exports already stored against a dive's recordings.
 
 Run once per extractor version, from the API container:
 
@@ -11,9 +11,15 @@ one real thing" records that the API-side queue plumbing was removed and the wor
 crons only; a backfill finishes once per extractor version, so scheduling it as a cron
 would mean rescanning the whole corpus forever for a job that is already done.
 
-Selects the dives whose profile is missing, was produced by an older extractor, or came
-out of different bytes than the file currently on the dive, and re-reads each stored
-export one at a time. Safe to run repeatedly: the second run reports 0 extracted.
+Selects the **recordings** whose profile is missing, was produced by an older extractor, or
+came out of different bytes than the files now on the recording, and re-reads each one's
+stored exports - all of them, in attach order, under the same fill rule the attach path
+applies. Safe to run repeatedly: the second run reports 0 extracted.
+
+**A recording whose profile no file can re-yield is never a candidate**, `--force` included:
+a document supplied those samples (`divejson_import`) or a merge produced them (`merge`), and
+nothing here can derive them a second time. A recording that holds no files at all - what a
+converted logbook import creates - is reported as skipped rather than as a failure.
 """
 
 import argparse
@@ -33,10 +39,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--parser-key",
         default=None,
-        help="Only re-read files recorded under this parser (e.g. `suunto_xml`). "
-        "This is what `dive_file.parser_key` is for.",
+        help="Only re-read recordings holding a file recorded under this parser (e.g. `suunto_xml`). "
+        "This is what `dive_file.parser_key` is for; a recording holding two files is a candidate "
+        "when either of them names it.",
     )
-    parser.add_argument("--limit", type=int, default=None, help="Stop after this many candidate files.")
+    parser.add_argument("--limit", type=int, default=None, help="Stop after this many candidate recordings.")
     parser.add_argument(
         "--force",
         action="store_true",

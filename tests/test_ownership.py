@@ -283,7 +283,19 @@ class OwnedRoute:
         return f"{self.method} {self.path}"
 
     def url(self, uuid: uuid_pkg.UUID) -> str:
-        return self.path.replace("{uuid}", str(uuid)).replace("{side}", "front")
+        """The path with every placeholder filled in.
+
+        `{rid}` and `{fid}` get a uuid of their own rather than the dive's - a real client
+        would send an unrelated one - and it need not name anything, because every route
+        carrying one resolves the dive first and answers 404 before looking at it. That
+        ordering is the property this whole class exists to pin, one identifier deeper.
+        """
+        return (
+            self.path.replace("{uuid}", str(uuid))
+            .replace("{side}", "front")
+            .replace("{rid}", str(uuid_pkg.uuid4()))
+            .replace("{fid}", str(uuid_pkg.uuid4()))
+        )
 
     def crud_singleton(self) -> Any:
         module, _, name = self.crud.partition(":")
@@ -306,16 +318,30 @@ FETCH_OWNED_ROUTES = [
         for method, extra in _CRUD_METHODS
     ),
     OwnedRoute("GET", "/api/v1/dive/{uuid}/neighbors", "src.app.api.v1.dives:crud_dives", "Dive not found"),
-    OwnedRoute("GET", "/api/v1/dive/{uuid}/profile", "src.app.api.v1.dives:crud_dives", "Dive not found"),
-    OwnedRoute("GET", "/api/v1/dive/{uuid}/file", "src.app.api.v1.dives:crud_dives", "Dive not found"),
+    # The recordings and their files. Every one of them resolves the *dive* first and the
+    # recording or file second, so someone else's dive uuid is a 404 before the `{rid}`/
+    # `{fid}` in the path is looked at - which is what makes a second identifier here no
+    # wider a surface than the dive uuid already was.
     OwnedRoute(
-        "PUT",
-        "/api/v1/dive/{uuid}/file",
+        "GET", "/api/v1/dive/{uuid}/recording/{rid}/profile", "src.app.api.v1.dives:crud_dives", "Dive not found"
+    ),
+    OwnedRoute("GET", "/api/v1/dive/{uuid}/file/{fid}", "src.app.api.v1.dives:crud_dives", "Dive not found"),
+    OwnedRoute(
+        "POST",
+        "/api/v1/dive/{uuid}/recordings",
         "src.app.api.v1.dives:crud_dives",
         "Dive not found",
         {"files": _A_FILE, "data": {"file_token": "not-looked-at"}},
     ),
-    OwnedRoute("DELETE", "/api/v1/dive/{uuid}/file", "src.app.api.v1.dives:crud_dives", "Dive not found"),
+    OwnedRoute("DELETE", "/api/v1/dive/{uuid}/file/{fid}", "src.app.api.v1.dives:crud_dives", "Dive not found"),
+    OwnedRoute("DELETE", "/api/v1/dive/{uuid}/recording/{rid}", "src.app.api.v1.dives:crud_dives", "Dive not found"),
+    OwnedRoute(
+        "PATCH",
+        "/api/v1/dive/{uuid}/recording/{rid}",
+        "src.app.api.v1.dives:crud_dives",
+        "Dive not found",
+        {"json": {"primary": True}},
+    ),
     *(
         OwnedRoute(
             method,

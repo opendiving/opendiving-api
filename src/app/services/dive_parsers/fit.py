@@ -62,7 +62,7 @@ _MAX_UTC_OFFSET_MINUTES = 14 * 60
 # like a denial-of-service. Decoding is linear in frames and is *the* cost here: a 5 MB
 # file (`MAX_DIVE_FILE_SIZE`) of bare 10-byte `record` messages, which is how a device
 # actually encodes a long log, holds ~524 000 of them and takes ~10 s to decode - paid
-# twice per import, since `POST /dive/parse` and `PUT /dive/{uuid}/file` each read the
+# twice per import, since `POST /dive/parse` and `POST /dive/{uuid}/recordings` each read the
 # file. Stopping at this cap holds that to ~1.5 s.
 #
 # The largest real file in the corpus is a 72-minute multi-channel Suunto Ocean dive at
@@ -739,7 +739,9 @@ class FitParser(DiveParser):
         """
         file_id = scan.file_id
         return ParsedDevice(
-            manufacturer=_maybe_value(file_id, "manufacturer"),
+            # The FIT field is `file_id.manufacturer`; the member it fills is `brand`, which
+            # is the published format's word (DiveJSON §6.4b) and the one this schema uses.
+            brand=_maybe_value(file_id, "manufacturer"),
             # `product_name` and nothing behind it: a file that does not write one has
             # not named its model, and the device says so rather than substituting
             # something. The obvious fallback, `file_id.product`, is a *vendor id* and not
@@ -751,9 +753,9 @@ class FitParser(DiveParser):
             # vendor's own string, so taking it would make the member two different kinds
             # of thing depending on who wrote the file. `divejson`'s reference FIT reader
             # declines it on the same grounds - `product_name` else the manufacturer,
-            # never `product` - and its fallback is not one here because the manufacturer
-            # is a member of its own above: falling back to it would report `suunto`
-            # twice and lose the fact that the file named no model.
+            # never `product` - and its fallback is not one here because the brand is a
+            # member of its own above: falling back to it would report `suunto` twice and
+            # lose the fact that the file named no model.
             model=_maybe_value(file_id, "product_name"),
             serial=cls._serial(scan),
             firmware=cls._firmware(scan),

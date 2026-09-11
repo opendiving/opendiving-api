@@ -3,11 +3,11 @@
 **The backend component of [OpenDiving](https://github.com/opendiving/opendiving) — an open-source,
 self-hostable dive log.** FastAPI + PostgreSQL + Redis.
 
-Your dive history should outlive any app. This API keeps the original dive-computer export alongside
-every imported dive, serves the lot over a clean, documented REST API, and takes the whole log back
-out in open formats in a single request — and back **in** again, so your data is never more than one
-`curl` away in either direction. Run your own copy and the Postgres database underneath it is yours
-too.
+Your dive history should outlive any app. This API keeps every original dive-computer export
+alongside the dive it recorded, serves the lot over a clean, documented REST API, and takes the
+whole log back out in open formats in a single request — and back **in** again, so your data is
+never more than one `curl` away in either direction. Run your own copy and the Postgres database
+underneath it is yours too.
 
 ## Looking to run OpenDiving?
 
@@ -31,6 +31,11 @@ else; what is here is the source, and the notes for working on it.
   XML/JSON export to `POST /dive/parse` and get structured dive data back to pre-fill a form. Attach
   the file to the dive afterwards and the **per-sample profile** (depth, temperature, tank pressure,
   **deco ceiling, dive events**) is extracted server-side and served with ETag caching.
+- **Recordings** — a dive holds what recorded it, in order, and each of those holds its own files
+  and its own profile. So a diver on two computers keeps both accounts of the dive, the same
+  computer exported twice fills one record rather than making two, and every device the file named —
+  brand, model, serial, firmware, its own name and its own dive counter — is kept beside the
+  samples.
 - **Air consumption** — SAC and RMV derived automatically, per tank on multi-tank dives, plus a
   gas-use history endpoint powering the dashboard trend chart.
 - **Species log** — record what you saw on a dive, from a catalog searched live against
@@ -66,10 +71,10 @@ else; what is here is the source, and the notes for working on it.
   exactly what would be created, linked to something you already have, restored from your deleted
   records or skipped, and then an apply that writes the lot in one transaction. A DiveJSON document
   or a full-export archive goes in as it is; a UDDF file, a Subsurface `.ssrf`, a FIT file, a Suunto
-  app export, or a `.zip` whose files are all one of those is converted on the way in by the
-  [`divejson`](https://pypi.org/project/divejson/) package, and the report says what the conversion
-  could not carry. Restore a backup, migrate between instances, or bring a logbook across from
-  whatever you were keeping it in.
+  app export, a Suunto DM5 XML export, or a `.zip` whose files are all one of those is converted on
+  the way in by the [`divejson`](https://pypi.org/project/divejson/) package, and the report says
+  what the conversion could not carry. Restore a backup, migrate between instances, or bring a
+  logbook across from whatever you were keeping it in.
 - **Passwordless auth** — email sign-in (over SMTP, so any relay or provider works), Google Sign-In,
   and passkeys, with automatic account linking, short-lived access tokens, and httpOnly refresh
   cookies. The sign-in email carries a magic link *and* a six-digit code, so reading your mail on a
@@ -182,22 +187,22 @@ than as a list here last remembered it.
 
 The families: **auth** (email link or six-digit code, Google, passkeys, refresh, sign-out, account
 restore) and **user** (profile, avatar, email change, dive statistics, gas-use history, the species
-life list, account deletion); **dives**, the bulk of it, with their **files** — upload an export,
-read the per-sample profile back — alongside **trips**, **dive sites**, the shared **species**
-catalog a dive can reference, and a **geocoding** helper for naming a site pinned on a map; **gear**
-as items, sets, service schedules and service records; **certifications** with their card images and
-the **courses** that issued them; **export** in DiveJSON, UDDF, CSV or full-archive form and
-**import** back from either of the first and the last, or from any format the converter reads;
-**invitations**, which exist only where the operator has closed registration (`REGISTRATION_MODE`,
-documented with the rest of the settings in `src/.env.example`) — a member sends and revokes their
-own, and the routes answer 404 on an open instance; and **admin**, the operator's own — the queue of
-people who have asked to be let in, and inviting or removing them in a batch — which is the one
-family gated on `is_superuser` rather than merely on having a token. All of those want a bearer
-token. The ones that don't are **contact**, the auth routes themselves, the two health checks —
-`/health` says the process is up, `/health/ready` says Postgres and Redis answered, and 503s when
-they didn't — `POST /invite-requests`, which is how somebody with no account asks a closed instance
-for an invitation, `GET /config`, which tells the web app whether registration is open - and whether
-the project itself operates the instance - before anyone has signed in, and
+life list, account deletion); **dives**, the bulk of it, with their **recordings** — attach an
+export, read one recording's per-sample profile back — alongside **trips**, **dive sites**, the
+shared **species** catalog a dive can reference, and a **geocoding** helper for naming a site pinned
+on a map; **gear** as items, sets, service schedules and service records; **certifications** with
+their card images and the **courses** that issued them; **export** in DiveJSON, UDDF, CSV or
+full-archive form and **import** back from either of the first and the last, or from any format the
+converter reads; **invitations**, which exist only where the operator has closed registration
+(`REGISTRATION_MODE`, documented with the rest of the settings in `src/.env.example`) — a member
+sends and revokes their own, and the routes answer 404 on an open instance; and **admin**, the
+operator's own — the queue of people who have asked to be let in, and inviting or removing them in a
+batch — which is the one family gated on `is_superuser` rather than merely on having a token. All of
+those want a bearer token. The ones that don't are **contact**, the auth routes themselves, the two
+health checks — `/health` says the process is up, `/health/ready` says Postgres and Redis answered,
+and 503s when they didn't — `POST /invite-requests`, which is how somebody with no account asks a
+closed instance for an invitation, `GET /config`, which tells the web app whether registration is
+open - and whether the project itself operates the instance - before anyone has signed in, and
 `GET /species/{uuid}/photo`, which serves a public Commons image to an `<img>` tag that has no way
 to send a token. `tests/test_route_authentication.py` is the guard that keeps the *anonymous* half
 of that list honest — it compares the app's real route table against its own allowlist and holds the
@@ -211,13 +216,16 @@ curl -X POST http://localhost:8000/api/v1/dive/parse \
   -H "Authorization: Bearer $TOKEN" \
   -F "file=@Dive_2026-04-17.json"
 
-# 2. Create the dive, then attach the original file to it (extracts the profile)
-curl -X PUT http://localhost:8000/api/v1/dive/{uuid}/file \
+# 2. Create the dive, then attach the original file to it. The response says which
+#    *recording* it landed in: a second export of a computer the dive already has
+#    fills that record, and a different computer becomes a recording of its own.
+curl -X POST http://localhost:8000/api/v1/dive/{uuid}/recordings \
   -H "Authorization: Bearer $TOKEN" \
   -F "file=@Dive_2026-04-17.json" -F "file_token=$FILE_TOKEN"
 
-# 3. The per-sample profile, served with an ETag
-curl http://localhost:8000/api/v1/dive/{uuid}/profile -H "Authorization: Bearer $TOKEN"
+# 3. One recording's per-sample profile, served with an ETag. A diver on two computers
+#    has two of them; `GET /dive/{uuid}` lists the recordings and their uuids.
+curl http://localhost:8000/api/v1/dive/{uuid}/recording/{rid}/profile -H "Authorization: Bearer $TOKEN"
 ```
 
 And a whole logbook, in and out:

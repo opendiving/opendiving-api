@@ -48,6 +48,7 @@ from src.app.models.dive_file import DiveFile
 from src.app.models.dive_gear_item import DiveGearItem
 from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_profile import DiveProfile
+from src.app.models.dive_recording import DiveRecording
 from src.app.models.dive_site import DiveSite
 from src.app.models.dive_species import DiveSpecies
 from src.app.models.gear_item import GearItem
@@ -79,6 +80,7 @@ from tests.helpers.generators import (
     create_certification,
     create_course,
     create_dive,
+    create_dive_recording,
     create_dive_site,
     create_gear_item,
     create_gear_service_record,
@@ -528,6 +530,7 @@ class TestFilesFollowTheirBytes:
         db.add(
             DiveFile(
                 user_id=user.id,
+                recording_id=create_dive_recording(db, user, dive).id,
                 dive_id=dive.id,
                 sha256="a" * 64,
                 content_type="application/json",
@@ -567,6 +570,7 @@ class TestFilesFollowTheirBytes:
         db.add(
             DiveFile(
                 user_id=user.id,
+                recording_id=create_dive_recording(db, user, dive).id,
                 dive_id=dive.id,
                 sha256=digest,
                 content_type="application/json",
@@ -579,7 +583,7 @@ class TestFilesFollowTheirBytes:
         db.commit()
 
         archive = _zip_of(await _export(async_db, user.id, archive_paths=True), {})
-        member = parse_document(_document_of(archive))["dives"][0]["source_file"]["archive_path"]
+        member = parse_document(_document_of(archive))["dives"][0]["recordings"][0]["source_files"][0]["archive_path"]
         archive = _zip_of(await _export(async_db, user.id, archive_paths=True), {member: payload})
         destination = create_user(db)
 
@@ -606,6 +610,7 @@ class TestFilesFollowTheirBytes:
         db.add(
             DiveFile(
                 user_id=user.id,
+                recording_id=create_dive_recording(db, user, dive).id,
                 dive_id=dive.id,
                 sha256=digest,
                 content_type="application/json",
@@ -617,7 +622,7 @@ class TestFilesFollowTheirBytes:
         )
         db.commit()
         document = await _export(async_db, user.id, archive_paths=True)
-        member = parse_document(document)["dives"][0]["source_file"]["archive_path"]
+        member = parse_document(document)["dives"][0]["recordings"][0]["source_files"][0]["archive_path"]
         archive = _zip_of(document, {member: b"not the bytes the manifest names"})
         destination = create_user(db)
 
@@ -654,6 +659,7 @@ class TestProfiles:
         dive = db.query(Dive).filter(Dive.user_id == user.id).one()
         db.add(
             DiveProfile(
+                recording_id=create_dive_recording(db, user, dive).id,
                 dive_id=dive.id,
                 source_sha256="b" * 64,
                 parser_key="suunto_json",
@@ -689,10 +695,9 @@ class TestProfiles:
     ) -> None:
         _, document = seeded
         parsed = json.loads(document)
-        parsed["dives"][0]["profile"] = {
-            "duration": 30,
-            "depth": {"times": [0, 20, 10], "values": [1, 2, 3]},
-        }
+        parsed["dives"][0]["recordings"] = [
+            {"profile": {"duration": 30, "depth": {"times": [0, 20, 10], "values": [1, 2, 3]}}}
+        ]
         destination = create_user(db)
 
         plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
@@ -1650,6 +1655,7 @@ class TestAnArchiveThatWillNotInflate:
         db.add(
             DiveFile(
                 user_id=user.id,
+                recording_id=create_dive_recording(db, user, dive).id,
                 dive_id=dive.id,
                 sha256=digest,
                 content_type="application/json",
@@ -1661,7 +1667,7 @@ class TestAnArchiveThatWillNotInflate:
         )
         db.commit()
         document = await _export(async_db, user.id, archive_paths=True)
-        member = parse_document(document)["dives"][0]["source_file"]["archive_path"]
+        member = parse_document(document)["dives"][0]["recordings"][0]["source_files"][0]["archive_path"]
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
             archive.writestr(DIVEJSON_NAME, document)
@@ -1729,10 +1735,9 @@ class TestNumbersWiderThanTheColumn:
     ) -> None:
         _, document = seeded
         parsed = json.loads(document)
-        parsed["dives"][0]["profile"] = {
-            "duration": 30,
-            "depth": {"times": [0, 10, 20], "values": [100, self.HUGE, 300]},
-        }
+        parsed["dives"][0]["recordings"] = [
+            {"profile": {"duration": 30, "depth": {"times": [0, 10, 20], "values": [100, self.HUGE, 300]}}}
+        ]
         destination = create_user(db)
 
         plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
@@ -1866,6 +1871,7 @@ class TestTheIntegerColumnCensus:
         ("dive_mixture", "dive_id"): "resolved from a row this import wrote",
         ("dive_mixture", "gas_number"): "bounded in `_MIXTURE_BOUNDS`",
         ("dive_profile", "id"): "the sequence's",
+        ("dive_profile", "recording_id"): "resolved from a row this import wrote",
         ("dive_profile", "dive_id"): "resolved from a row this import wrote",
         ("dive_profile", "extractor_version"): "this build's own constant",
         ("dive_profile", "duration"): "bounded in `_plan_profile`, against the samples and the declared span",
@@ -1916,7 +1922,15 @@ class TestTheIntegerColumnCensus:
         ("trip_location", "position"): "the list index, not the document's",
         ("dive_file", "id"): "the sequence's",
         ("dive_file", "user_id"): "the caller's",
+        ("dive_file", "recording_id"): "resolved from a row this import wrote",
         ("dive_file", "dive_id"): "resolved from a row this import wrote",
+        ("dive_recording", "id"): "the sequence's",
+        ("dive_recording", "user_id"): "the caller's",
+        ("dive_recording", "dive_id"): "resolved from a row this import wrote",
+        ("dive_recording", "ordinal"): "the list index, not the document's",
+        ("dive_recording", "device_dive_number"): "bounded in `_plan_recordings`",
+        ("dive_recording", "utc_offset_minutes"): "derived from a parsed UTC offset, which Python bounds at a day",
+        ("dive_recording", "duration"): "the samples' own span, capped by `_plan_profile`",
         ("dive_file", "byte_size"): "the restored bytes' own length, capped by `MAX_DIVE_FILE_SIZE`",
         ("certification_file", "id"): "the sequence's",
         ("certification_file", "certification_id"): "resolved from a row this import wrote",
@@ -1940,6 +1954,7 @@ class TestTheIntegerColumnCensus:
         written: tuple[Any, ...] = (
             Dive,
             DiveMixture,
+            DiveRecording,
             DiveProfile,
             Trip,
             TripLocation,
@@ -1979,3 +1994,333 @@ class TestTheAgencyVocabulary:
         published = schema["$defs"]["certification"]["properties"]["agency"]["enum"]
 
         assert [member.value for member in CertificationAgency] == published
+
+
+class TestTheFormatLabelTable:
+    """`_FORMAT_LABELS` names every id `divejson.read_formats()` returns.
+
+    The one guard in this repository that can see a **new reader** arrive. Everything else
+    on both sides of the seam is written to tolerate an unknown format - the accepted set is
+    computed per call and never listed, `formats_this_build_reads` falls back to the raw id,
+    and the picker's extension list is the web app's - so a version bump that adds a reader
+    changes what the API accepts with nothing anywhere reporting it. That is not
+    hypothetical: `suunto_xml` shipped in `divejson` 0.4.0, and the pin crossed it into a
+    build whose "formats this build reads" sentence rendered the bare string `suunto_xml`
+    while the web app's picker refused the extension. Nobody saw it for ten review rounds.
+    """
+
+    def test_every_read_format_has_a_label(self) -> None:
+        unlabelled = [fmt for fmt in divejson.read_formats() if fmt not in import_reader._FORMAT_LABELS]
+
+        assert not unlabelled, (
+            "`divejson` reads a format this build has no name for, so the API accepts it while every message "
+            f"about it renders the raw id: {unlabelled}. Add it to `_FORMAT_LABELS`, and to the prose in "
+            "`README.md`, `api/v1/logbook_import.py` and `schemas/logbook_import.py` that lists the set."
+        )
+
+    def test_no_label_outlives_its_format(self) -> None:
+        """The mirror, and it is not symmetry for its own sake: a label for a format the
+        library has dropped is a format this build advertises and refuses."""
+        stale = [fmt for fmt in import_reader._FORMAT_LABELS if fmt not in divejson.read_formats()]
+
+        assert not stale, f"`_FORMAT_LABELS` names a format `divejson` no longer reads: {stale}"
+
+
+class TestTheImportGates:
+    """A dive whose uuid is new is still matched against the logbook, recording by recording.
+
+    Uuid matching has nothing to work with here and that is the point: another instance's
+    export carries identifiers that mean nothing on this one, so the device and the clock are
+    all there is. Without these gates a diver who imports their second computer's file after
+    logging the dive from their first gets a second dive.
+    """
+
+    START = datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC)
+
+    @staticmethod
+    def _document(recording: dict[str, Any], **dive: Any) -> bytes:
+        body = {
+            "format": "divejson",
+            "version": "1.0",
+            "exported_at": "2026-09-09T10:00:00+00:00",
+            "dives": [
+                {
+                    "uuid": str(uuid7()),
+                    "dive_number": 1,
+                    "started_at": "2026-09-08T15:17:38+03:00",
+                    "duration": 3051,
+                    "max_depth": 19.04,
+                    "recordings": [recording],
+                    "created_at": "2026-09-09T10:00:00+00:00",
+                    **dive,
+                }
+            ],
+        }
+        return json.dumps(body).encode()
+
+    def _seed(self, db: Session, **device: Any) -> tuple[Any, Dive]:
+        """A dive with one recording carrying a device, a start and the two gate figures -
+        which is what an attach through the create form leaves behind."""
+        user = create_user(db)
+        dive = create_dive(db, user)
+        dive.start_time = self.START
+        dive.utc_offset_minutes = 180
+        dive.duration = 3051
+        dive.max_depth = 19.04
+        recording = create_dive_recording(db, user, dive)
+        recording.start_time = self.START
+        recording.utc_offset_minutes = 180
+        recording.duration = 3051
+        recording.max_depth = 19.04
+        for column, value in device.items():
+            setattr(recording, column, value)
+        db.commit()
+        return user, dive
+
+    @pytest.mark.asyncio
+    async def test_the_same_computers_second_export_fills_and_creates_no_dive(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The FIT arriving after the JSON was logged through the form. Nothing is created:
+        every recording of the incoming dive is already in the logbook."""
+        user, dive = self._seed(db, device_brand="Suunto", device_serial="253810000400")
+        document = self._document(
+            {
+                "device": {"brand": "suunto", "model": "Suunto Ocean"},
+                "started_at": "2026-09-08T15:17:38+03:00",
+                "profile": {"duration": 3473, "depth": {"times": [0, 3473], "values": [0, 1904]}},
+            },
+            cns_end=9.0,
+        )
+
+        plan = await _apply(async_db, user.id, document)
+
+        assert ImportNoteCode.RECORDING_FILLED in _codes(plan)
+        assert _counts(plan)["dives"] == (0, 0, 0, 1)
+        assert len((await async_db.execute(select(Dive.id).where(Dive.user_id == user.id))).scalars().all()) == 1
+        # The stored recording keeps its serial and gains the model the incoming one had.
+        recording = (await async_db.execute(select(DiveRecording).where(DiveRecording.dive_id == dive.id))).scalar_one()
+        assert (recording.device_serial, recording.device_model) == ("253810000400", "Suunto Ocean")
+        # And the dive's blank exposure reading fills from the document.
+        assert (await async_db.execute(select(Dive.cns_end).where(Dive.id == dive.id))).scalar_one() == 9.0
+
+    @pytest.mark.asyncio
+    async def test_a_fill_puts_the_documents_mix_into_a_blank_cylinder(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The other half of what a fill writes onto the dive itself.
+
+        The stored cylinder came off the Suunto's JSON, which records pressures and no gas
+        fraction anywhere; the document arriving is the same computer's FIT, whose one
+        cylinder carries `oxygen` 33. The mix lands, the pressures stand - and so does
+        `gas_number`, which is the label the dive's own pressure channels are attributed
+        under and which the incoming document numbers its own way.
+        """
+        user, dive = self._seed(db, device_brand="Suunto", device_serial="253810000400")
+        db.add(DiveMixture(dive_id=dive.id, gas_number=0, start_pressure=207.34, end_pressure=47.47))
+        db.commit()
+        document = self._document(
+            {
+                "device": {"brand": "suunto", "model": "Suunto Ocean"},
+                "started_at": "2026-09-08T15:17:38+03:00",
+                "profile": {"duration": 3473, "depth": {"times": [0, 3473], "values": [0, 1904]}},
+            },
+            cylinders=[{"gas_number": 1, "oxygen": 33.0, "helium": 0.0}],
+        )
+
+        plan = await _apply(async_db, user.id, document)
+
+        assert ImportNoteCode.RECORDING_FILLED in _codes(plan)
+        cylinder = (await async_db.execute(select(DiveMixture).where(DiveMixture.dive_id == dive.id))).scalar_one()
+        assert (cylinder.oxygen, cylinder.helium) == (33.0, 0.0)
+        assert (cylinder.start_pressure, cylinder.end_pressure) == (207.34, 47.47)
+        assert cylinder.gas_number == 0
+
+    @pytest.mark.asyncio
+    async def test_a_second_computer_is_attached_rather_than_logged_again(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The strict gate: a *different* device, well inside the window, agreeing on depth
+        and duration. It joins the dive the caller already has."""
+        user, dive = self._seed(db, device_brand="Suunto", device_serial="253810000400")
+        document = self._document(
+            {
+                "device": {"brand": "Shearwater Research, Inc", "model": "Perdix 3", "serial": "D9772626"},
+                "started_at": "2026-09-08T15:19:38+03:00",
+                # The samples span 2940 s, which is what the gate compares. **Not the
+                # declared `duration`**: a document may legitimately declare a span longer
+                # than its own samples (a computer that stops sampling at the surface), and
+                # what an imported recording's figures mean is "the samples' own".
+                "profile": {"duration": 2940, "depth": {"times": [0, 2940], "values": [0, 1900]}},
+            }
+        )
+
+        plan = await _apply(async_db, user.id, document)
+
+        assert ImportNoteCode.RECORDING_ATTACHED in _codes(plan)
+        assert len((await async_db.execute(select(Dive.id).where(Dive.user_id == user.id))).scalars().all()) == 1
+        recordings = (
+            (
+                await async_db.execute(
+                    select(DiveRecording).where(DiveRecording.dive_id == dive.id).order_by(DiveRecording.ordinal)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert [row.ordinal for row in recordings] == [0, 1]
+        assert recordings[1].device_serial == "D9772626"
+        # **The samples' own span and deepest reading**, which is what an imported recording
+        # has: a Recording carries no scalars of its own, so the document offers nowhere else
+        # to read the two figures the strict gate compares from.
+        assert (recordings[1].duration, recordings[1].max_depth) == (2940, 19.0)
+
+    @pytest.mark.asyncio
+    async def test_an_attached_recordings_cylinder_labels_are_mapped_onto_the_dives(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """`gas_number` is dive-scoped, so a second computer's own numbering has to move.
+
+        This dive has EAN32 on cylinder 1 and a 50 % deco bottle on 2; the incoming computer
+        numbers them the other way round. Without the mapping its pressure channel lands on
+        the dive's back gas and the whole multi-tank figure is computed off the wrong tank -
+        which nothing downstream can detect, because a `gas_number` that names *a* cylinder
+        is indistinguishable from one that names the right one.
+        """
+        user, dive = self._seed(db, device_brand="Suunto", device_serial="253810000400")
+        db.add_all(
+            [
+                DiveMixture(dive_id=dive.id, gas_number=1, oxygen=32.0, helium=0.0),
+                DiveMixture(dive_id=dive.id, gas_number=2, oxygen=50.0, helium=0.0),
+            ]
+        )
+        db.commit()
+        document = self._document(
+            {
+                "device": {"brand": "Shearwater Research, Inc", "model": "Perdix 3", "serial": "D9772626"},
+                "started_at": "2026-09-08T15:19:38+03:00",
+                "profile": {
+                    "duration": 2940,
+                    "depth": {"times": [0, 2940], "values": [0, 1900]},
+                    "pressures": [{"gas_number": 1, "times": [0], "values": [2000]}],
+                    "events": [{"time": 0, "type": "gas_switch", "gas_number": 1}],
+                },
+            },
+            # The incoming document's own cylinders, in its own labelling: its 1 is the deco
+            # bottle the dive calls 2.
+            cylinders=[
+                {"gas_number": 1, "oxygen": 50.0, "helium": 0.0},
+                {"gas_number": 2, "oxygen": 32.0, "helium": 0.0},
+            ],
+        )
+
+        plan = await _apply(async_db, user.id, document)
+
+        assert ImportNoteCode.RECORDING_ATTACHED in _codes(plan)
+        attached = (
+            (
+                await async_db.execute(
+                    select(DiveRecording.id).where(DiveRecording.dive_id == dive.id, DiveRecording.ordinal == 1)
+                )
+            )
+            .scalars()
+            .one()
+        )
+        # `DiveProfile.data` is `deferred`, so it has to be named in the select rather than
+        # touched off an instance - a lazy load here is IO outside the greenlet.
+        data = (
+            await async_db.execute(select(DiveProfile.data).where(DiveProfile.recording_id == attached))
+        ).scalar_one()
+        assert [series["gas_number"] for series in data["pressure"]] == [2]
+        assert [event["gas_number"] for event in data["events"]] == [2]
+
+    @pytest.mark.asyncio
+    async def test_a_fills_archived_bytes_are_stored_against_the_recording_it_filled(
+        self, db: Session, async_db: AsyncSession, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """A fill writes no dive row, but a file is not a value that can already be there.
+
+        The archive is carrying this recording's other export, the planner has already
+        counted it as restored and claimed its digest, and the only place it can go is the
+        recording it matched. Dropping it reported `files.restored` for bytes that were never
+        written and discarded them silently - the one failure mode an import has no way to
+        report, because the count says the opposite.
+        """
+        from src.app.services import blob_store
+
+        monkeypatch.setattr(blob_store, "storage_root", lambda: tmp_path)
+        user, dive = self._seed(db, device_brand="Suunto", device_serial="253810000400")
+        recording = (
+            await async_db.execute(select(DiveRecording.id).where(DiveRecording.dive_id == dive.id))
+        ).scalar_one()
+        payload = b'{"DeviceLog": {"Header": {}}}'
+        digest = hashlib.sha256(payload).hexdigest()
+        document = self._document(
+            {
+                "device": {"brand": "suunto", "model": "Suunto Ocean"},
+                "started_at": "2026-09-08T15:17:38+03:00",
+                "profile": {"duration": 3473, "depth": {"times": [0, 3473], "values": [0, 1904]}},
+                "source_files": [
+                    {
+                        "uuid": str(uuid7()),
+                        "original_filename": "Suunto Ocean.json",
+                        "content_type": "application/json",
+                        "byte_size": len(payload),
+                        "sha256": digest,
+                        "archive_path": "files/0001-0-ocean.json",
+                    }
+                ],
+            }
+        )
+
+        plan = await _apply(
+            async_db,
+            user.id,
+            _zip_of(document, {"files/0001-0-ocean.json": payload}),
+            filename="logbook.zip",
+        )
+
+        assert ImportNoteCode.RECORDING_FILLED in _codes(plan)
+        assert plan.files_restored == 1
+        stored = (await async_db.execute(select(DiveFile).where(DiveFile.recording_id == recording))).scalars().all()
+        assert [row.sha256 for row in stored] == [digest], (
+            "the report said one file was restored, so one file has to be on the recording it filled"
+        )
+        assert await blob_store.get(stored[0].storage_key) == payload
+
+    @pytest.mark.asyncio
+    async def test_an_unrelated_dive_is_still_a_dive(self, db: Session, async_db: AsyncSession) -> None:
+        """The gate has to refuse as well as fire. A dive the next morning is nobody's second
+        computer, and importing it must create a dive rather than fold it into yesterday's."""
+        user, _ = self._seed(db, device_brand="Suunto", device_serial="253810000400")
+        document = self._document(
+            {
+                # Everything but the clock agrees with the seeded dive, so the start window
+                # is the clause doing the refusing here rather than a depth or a duration.
+                "device": {"brand": "Garmin", "serial": "3542000001"},
+                "started_at": "2026-09-09T09:00:00+03:00",
+                "profile": {"duration": 2940, "depth": {"times": [0, 2940], "values": [0, 1904]}},
+            },
+            started_at="2026-09-09T09:00:00+03:00",
+        )
+
+        plan = await _apply(async_db, user.id, document)
+
+        assert ImportNoteCode.RECORDING_ATTACHED not in _codes(plan)
+        assert ImportNoteCode.RECORDING_FILLED not in _codes(plan)
+        assert _counts(plan)["dives"] == (1, 0, 0, 0)
+
+    @pytest.mark.asyncio
+    async def test_an_empty_account_asks_no_gate_anything(self, db: Session, async_db: AsyncSession) -> None:
+        """The guard that keeps the gates off the hot path: an account with no recordings has
+        nothing to match against, and a whole-archive restore is exactly that. The dive is
+        created and no note is raised."""
+        user = create_user(db)
+        document = self._document(
+            {"device": {"brand": "Suunto"}, "profile": {"duration": 60, "depth": {"times": [0], "values": [0]}}}
+        )
+
+        plan = await _apply(async_db, user.id, document)
+
+        assert _counts(plan)["dives"] == (1, 0, 0, 0)
+        assert not {ImportNoteCode.RECORDING_ATTACHED, ImportNoteCode.RECORDING_FILLED} & _codes(plan)

@@ -146,6 +146,7 @@ def signed_in(import_app: Any, monkeypatch: Any) -> Any:
         return ImportPlan(
             is_archive=loaded.is_archive,
             records={},
+            recording_matches=[],
             notes=[],
             notes_dropped=0,
             files_referenced=0,

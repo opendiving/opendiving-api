@@ -138,7 +138,7 @@ class OnboardingTokenData(BaseModel):
 class DiveFileTokenData(BaseModel):
     """Decoded payload of a dive-file token (see `create_dive_file_token`/
     `verify_dive_file_token` in `core.security`), minted by `POST /dive/parse` and
-    presented again by `PUT /dive/{uuid}/file`.
+    presented again by `POST /dive/{uuid}/recordings`.
 
     It attests one thing: this server successfully parsed *these exact bytes* for
     *this user*, recently. That is what lets the upload endpoint store a file without

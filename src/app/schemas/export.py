@@ -27,7 +27,7 @@ Where it differs from the API's own read shapes, and why:
 - **Nothing is re-scaled or re-unitised.** Depths meters, pressures bar, temperatures
   Celsius, durations seconds - which is the format's own canonical system (spec §5.1), so
   the app's wire values travel unchanged. The embedded profile keeps the integer scales
-  `GET /dive/{uuid}/profile` uses, which the spec fixes too. The diver's `units`
+  `GET /dive/{uuid}/recording/{rid}/profile` uses, which the spec fixes too. The diver's `units`
   preference is account data, says which system they read in, and changes none of it
   (DECISIONS.md, *"Measurements are metric in the database and on the wire; `units` is
   who's looking"*).
@@ -147,6 +147,11 @@ class ExportStoredFile(PublicUUIDSchema):
     point into, and the format has one spelling of "not applicable" (spec §6.7). Which
     parser read a dive-computer file rides `extensions.opendiving.parser_key` - parser
     registries are application-specific and have no core member.
+
+    A dive-computer file hangs off a **recording** rather than off the dive, and a recording
+    may carry several: the same computer exported twice in two formats is one record in two
+    spellings. Each keeps its own `uuid`, which is what makes them addressable across a
+    round trip and what §3's uuid-uniqueness rule is checked against.
     """
 
     original_filename: str
@@ -157,6 +162,58 @@ class ExportStoredFile(PublicUUIDSchema):
     extensions: ExportExtensions = None
 
 
+class ExportDevice(BaseModel):
+    """What recorded one recording, as its own export named it (spec §6.4b).
+
+    Every member OPTIONAL and every string non-empty: a member the source never wrote is
+    absent, never `""` and never `null`. An object with no member at all is not written -
+    `envelope._recording` drops it rather than emitting `{}`, which the schema would accept
+    and which would claim the file named a computer it did not.
+
+    `brand` is the maker, and it is the same word §6.12 uses for a gear item's - one word for
+    one concept across the format.
+    """
+
+    brand: str | None = None
+    model: str | None = None
+    serial: Annotated[str | None, Field(default=None, description="Opaque, as the source wrote it; never parsed")]
+    firmware: str | None = None
+    name: Annotated[str | None, Field(default=None, description="What the device calls itself, as its owner set it")]
+    dive_number: Annotated[
+        int | None,
+        Field(default=None, ge=0, description="The device's own counter - not the diver's numbering, which is §6.2's"),
+    ]
+
+
+class ExportRecording(BaseModel):
+    """One device's record of one dive (spec §6.4a).
+
+    **In order, and the first is primary** - the one a reader shows by default and the one a
+    single-profile consumer takes. Order rather than a flag, matching the format: a flag
+    every writer has to set is a value every reader has to default.
+
+    `started_at` is written **only when it differs from the dive's**, because §6.4a says an
+    absent one means the dive's. A second computer that entered the water later has its own;
+    the ordinary single-computer dive does not, and writing a copy of the dive's start on
+    every recording would be noise a reader has to compare rather than read.
+
+    A recording carries at least one of `device`, `profile` and `source_files` - §3's
+    beyond-schema rule 4 - which this writer satisfies by construction: it only emits a
+    recording for a row that has one.
+    """
+
+    device: ExportDevice | None = None
+    started_at: Annotated[
+        DiveLocalStartTime | None,
+        Field(
+            default=None,
+            description="This device's own start, when it differs from the dive's. Absent means the dive's (§6.4a).",
+        ),
+    ]
+    source_files: Annotated[list[ExportStoredFile], Field(default_factory=list, description="In attach order")]
+    profile: DiveProfileRead | None = None
+
+
 class ExportDive(PublicUUIDSchema):
     """One dive, with everything that hangs off it embedded rather than referenced.
 
@@ -164,10 +221,17 @@ class ExportDive(PublicUUIDSchema):
     UDDF cannot express and the reason this list exists at all. `gear_uuids` and
     `species_uuids` are the diver's own order in the same way.
 
-    `profile` is the full per-sample payload in the same integer scales the API serves, so
-    the document alone can redraw every curve without re-parsing `source_file`. It is
-    `DiveProfileRead`, the very schema `GET /dive/{uuid}/profile` returns: one profile
-    vocabulary on both surfaces, rather than a second set of models that could drift.
+    **`source_file` and `profile` are not members of a dive**, and that is the format's
+    change rather than this app's preference: both moved onto `recordings[]` with nothing
+    left behind, because a dive can be recorded by more than one computer and a copy on the
+    dive would be one more invariant for a writer to break. A reader wanting "the" profile
+    takes `recordings[0].profile`.
+
+    A recording's `profile` is the full per-sample payload in the same integer scales the
+    API serves, so the document alone can redraw every curve without re-parsing the files.
+    It is `DiveProfileRead`, the very schema `GET /dive/{uuid}/recording/{rid}/profile`
+    returns: one profile vocabulary on both surfaces, rather than a second set of models
+    that could drift.
     """
 
     dive_number: int
@@ -215,8 +279,10 @@ class ExportDive(PublicUUIDSchema):
     # integer key in the document. Its member names are the spec's Cylinder members
     # already, `gas_number` included.
     cylinders: Annotated[list[DiveMixtureBase], Field(default_factory=list)]
-    source_file: ExportStoredFile | None = None
-    profile: DiveProfileRead | None = None
+    recordings: Annotated[
+        list[ExportRecording],
+        Field(default_factory=list, description="What recorded this dive, in order; the first is primary"),
+    ]
     created_at: datetime
 
 

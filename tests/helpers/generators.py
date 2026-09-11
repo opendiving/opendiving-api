@@ -264,6 +264,19 @@ def create_dive(
     )
 
 
+def create_dive_recording(db: Session, user: models.User, dive: models.Dive, *, ordinal: int = 0) -> Any:
+    """One recording of a dive, to hang a file or a profile off.
+
+    Exists because `dive_file.recording_id` and `dive_profile.recording_id` are `NOT NULL`:
+    a test seeding either has to seed one of these first, and doing it by hand at every such
+    site is how the ordinal and the owner drift apart.
+    """
+    return _persist(
+        db,
+        models.DiveRecording(dive_id=dive.id, user_id=user.id, ordinal=ordinal, start_time=dive.start_time),
+    )
+
+
 # Every dive seeded by `create_dive_log` hangs off this instant, so a test reads as "day 3
 # of the log" rather than as a date. Fixed rather than `now()`-relative: the services these
 # tests exercise slice a log by time, and a suite that quietly means something different

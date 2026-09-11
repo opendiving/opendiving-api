@@ -49,6 +49,7 @@ from tests.helpers.export import (
     CREATED_AT,
     EXPORTED_AT,
     OFF_GRID_PROFILE,
+    PRIMARY_RECORDING_ID,
     TRIMIX_PROFILE,
     UUIDS,
     build_bundle,
@@ -73,8 +74,8 @@ def schema() -> xmlschema.XMLSchema:
 async def _render(bundle: Any, profiles: dict[int, dict[str, Any]] | None = None, monkeypatch: Any = None) -> bytes:
     payloads = profiles or {}
 
-    async def fake_load_profile(db: Any, *, dive_id: int) -> LoadedProfile | None:
-        data = payloads.get(dive_id)
+    async def fake_load_profile(db: Any, *, recording_id: int) -> LoadedProfile | None:
+        data = payloads.get(recording_id)
         return None if data is None else LoadedProfile(duration=data.get("duration", 0), data=data)
 
     monkeypatch.setattr("src.app.services.export.uddf.load_profile", fake_load_profile)
@@ -108,7 +109,7 @@ def _gear(name: str, gear_type: GearType) -> GearItem:
 class TestSchemaValidity:
     @pytest.mark.asyncio
     async def test_the_full_logbook_validates(self, schema, monkeypatch):
-        document = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
         schema.validate(document)
 
     @pytest.mark.asyncio
@@ -154,7 +155,7 @@ class TestSchemaValidity:
         """Attributes go through the same scrub - a `<setmarker>` is element text, but a
         device label could as easily land in one."""
         profile = {**TRIMIX_PROFILE, "events": [{"t": 60, "type": "other", "label": "Ceiling\x00Broken"}]}
-        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)
         assert b"\x00" not in document
 
@@ -198,7 +199,7 @@ class TestUnitConversions:
 
     @pytest.mark.asyncio
     async def test_temperatures_are_kelvin(self, monkeypatch):
-        document = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
         # 24.9 C stored on the dive -> 24.9 + 273.15
         assert _text(_dive(_tree(document), 0), f"{UDDF}informationafterdive/{UDDF}lowesttemperature") == "298.05"
         # 181 tenths of a degree in the profile = 18.1 C -> 291.25 K
@@ -207,7 +208,7 @@ class TestUnitConversions:
 
     @pytest.mark.asyncio
     async def test_pressures_are_pascal(self, monkeypatch):
-        document = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
         trimix = _dive(_tree(document), 1)
         tanks = trimix.findall(f"{UDDF}tankdata")
         # 232 bar -> 23 200 000 Pa; 90 bar -> 9 000 000 Pa.
@@ -231,7 +232,7 @@ class TestUnitConversions:
 
     @pytest.mark.asyncio
     async def test_depths_are_metres(self, monkeypatch):
-        document = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
         # 5200 cm in the profile -> 52 m; the dive's own scalars are already metres.
         assert [e.text for e in _dive(_tree(document), 1).iter(f"{UDDF}depth")] == ["0", "18", "52", "3"]
         assert _text(_dive(_tree(document), 0), f"{UDDF}informationafterdive/{UDDF}greatestdepth") == "28.4"
@@ -356,11 +357,17 @@ class TestDiveContent:
         assert _text(_dive(_tree(document), 2), f"{UDDF}informationafterdive/{UDDF}greatestdepth") == "0"
 
     @pytest.mark.asyncio
-    async def test_the_profile_s_max_depth_stands_in_before_zero_does(self, monkeypatch):
-        """The trimix dive has no `max_depth` of its own here - only a profile summary."""
+    async def test_the_profile_s_deepest_sample_stands_in_before_zero_does(self, monkeypatch):
+        """The trimix dive has no `max_depth` of its own here - only samples.
+
+        **Off the samples in the document rather than off a stored summary**, which matters
+        now that a dive can have several recordings: each has its own deepest reading, and
+        `<greatestdepth>` takes one number. It takes the one belonging to the waypoints
+        written beside it, so the two cannot disagree.
+        """
         bundle = full_bundle()
         bundle.dives[1].max_depth = None
-        document = await _render(bundle, monkeypatch=monkeypatch)
+        document = await _render(bundle, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
         assert _text(_dive(_tree(document), 1), f"{UDDF}informationafterdive/{UDDF}greatestdepth") == "52"
 
     @pytest.mark.asyncio
@@ -610,7 +617,7 @@ class TestWaypoints:
 
     @pytest.mark.asyncio
     async def test_the_depth_channel_sets_the_time_axis(self, monkeypatch):
-        document = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
         waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
         assert [_text(w, f"{UDDF}divetime") for w in waypoints] == ["0", "30", "60", "90"]
         assert all(_text(w, f"{UDDF}depth") is not None for w in waypoints)
@@ -621,7 +628,7 @@ class TestWaypoints:
 
     @pytest.mark.asyncio
     async def test_readings_between_depth_samples_snap_to_the_nearest(self, schema, monkeypatch):
-        document = await _render(full_bundle(), {2: OFF_GRID_PROFILE}, monkeypatch)
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: OFF_GRID_PROFILE}, monkeypatch)
         schema.validate(document)
         waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
         assert [_text(w, f"{UDDF}divetime") for w in waypoints] == ["0", "10", "20", "30"]
@@ -637,7 +644,7 @@ class TestWaypoints:
         Either would be defensible; what matters is that it is decided rather than left to
         dict ordering, because two exports of one dive have to be byte-identical.
         """
-        document = await _render(full_bundle(), {2: OFF_GRID_PROFILE}, monkeypatch)
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: OFF_GRID_PROFILE}, monkeypatch)
         waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
         assert [_text(w, f"{UDDF}tankpressure") for w in waypoints] == [None, "20000000", None, None]
 
@@ -645,7 +652,7 @@ class TestWaypoints:
     async def test_events_snap_too_and_still_join_on_arrival(self, monkeypatch):
         """The 7 s and 8 s markers are not simultaneous in the profile; they become so
         here, which is the case `waypointType`'s single `<setmarker>` cannot hold."""
-        document = await _render(full_bundle(), {2: OFF_GRID_PROFILE}, monkeypatch)
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: OFF_GRID_PROFILE}, monkeypatch)
         waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
         assert [_text(w, f"{UDDF}setmarker") for w in waypoints] == [None, "safety_stop; Deco", None, None]
         # The 24 s switch lands on 30, not on the nearer 20: a state change is never shown
@@ -669,7 +676,7 @@ class TestWaypoints:
                 {"t": 23, "type": "gas_switch", "gas_number": 2},
             ],
         }
-        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)
         tree = _tree(document)
         waypoints = _dive(tree, 1).findall(f"{UDDF}samples/{UDDF}waypoint")
@@ -697,7 +704,7 @@ class TestWaypoints:
                 {"t": 23, "type": "gas_switch", "gas_number": 9},
             ],
         }
-        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)
         waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
         assert [w.find(f"{UDDF}switchmix") for w in waypoints] == [None, None, None, None]
@@ -716,7 +723,7 @@ class TestWaypoints:
             "depth": {"t": [0, 10, 20, 1820, 1830], "v": [0, 1000, 2000, 800, 0]},
             "events": [{"t": 900, "type": "gas_switch", "gas_number": 2}],
         }
-        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)
         waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
         switches = [w.find(f"{UDDF}switchmix") for w in waypoints]
@@ -729,7 +736,7 @@ class TestWaypoints:
         """The one case where dropping a switch is right: nothing follows it in the
         profile, so no importer can compute anything on the wrong gas."""
         profile = {**OFF_GRID_PROFILE, "events": [{"t": 40, "type": "gas_switch", "gas_number": 2}]}
-        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)
         waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
         assert [w.find(f"{UDDF}switchmix") for w in waypoints] == [None, None, None, None]
@@ -744,7 +751,7 @@ class TestWaypoints:
             "depth": {"t": [0, 10, 20], "v": [0, 1000, 2000]},
             "temperature": {"t": [6, 9], "v": [999, 220]},
         }
-        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)
         waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
         assert [_text(w, f"{UDDF}temperature") for w in waypoints] == [None, "295.15", None]
@@ -759,7 +766,7 @@ class TestWaypoints:
         application of it.
         """
         profile = {"depth": {"t": [0, 1800], "v": [0, 3000]}, "temperature": {"t": [890], "v": [220]}}
-        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)
         waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
         assert [_text(w, f"{UDDF}temperature") for w in waypoints] == [None, None]
@@ -771,7 +778,7 @@ class TestWaypoints:
         waypoint, as if it had been taken there - the one way snapping could invent data
         rather than merely move it. Both ends clamp, so both ends are checked."""
         profile = {**OFF_GRID_PROFILE, "temperature": {"t": [second], "v": [300]}}
-        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)
         waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
         assert [_text(w, f"{UDDF}temperature") for w in waypoints] == [None, None, None, None]
@@ -791,7 +798,7 @@ class TestWaypoints:
             "depth": {"t": [0, 10, 20, 1820, 1830], "v": [0, 1000, 2000, 800, 0]},
             "temperature": {"t": [12, 900, 1825], "v": [240, 999, 220]},
         }
-        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)
         waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
         # The 900 s reading has no waypoint within tolerance and is gone; the two either
@@ -808,13 +815,13 @@ class TestWaypoints:
         `logbook.divejson` either way.
         """
         profile = {"temperature": {"t": [0, 60], "v": [249, 181]}, "events": [{"t": 30, "type": "safety_stop"}]}
-        document = await _render(full_bundle(), {2: profile}, monkeypatch)
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)
         assert _dive(_tree(document), 1).find(f"{UDDF}samples") is None
 
     @pytest.mark.asyncio
     async def test_gas_switches_become_switchmix_links(self, monkeypatch):
-        document = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
         waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
         mixes = {m.get("id") for m in _tree(document).findall(f"{UDDF}gasdefinitions/{UDDF}mix")}
         switches = [w.find(f"{UDDF}switchmix") for w in waypoints]
@@ -824,7 +831,7 @@ class TestWaypoints:
     @pytest.mark.asyncio
     async def test_simultaneous_markers_are_joined_rather_than_dropped(self, monkeypatch):
         """`waypointType` allows one `<setmarker>`, and the fixture puts two events at 60s."""
-        document = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
         waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
         assert _text(waypoints[2], f"{UDDF}setmarker") == "safety_stop; Ceiling Broken"
 
@@ -835,7 +842,7 @@ class TestWaypoints:
         The fixture's `gas_number: 9` channel has no mixture, which is what a device that
         reports five cylinder slots for a two-cylinder dive produces.
         """
-        document = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
         schema.validate(document)
         assert [e.text for e in _dive(_tree(document), 1).iter(f"{UDDF}tankpressure")] == [
             "23200000",
@@ -851,7 +858,7 @@ class TestWhatUddfCannotHold:
     async def test_the_deco_ceiling_is_not_emitted(self, monkeypatch):
         """`<decostop>` requires a `duration` attribute, and a ceiling sample says how
         deep the obligation was, never how long the stop should last."""
-        document = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
         assert list(_tree(document).iter(f"{UDDF}decostop")) == []
 
     @pytest.mark.asyncio
@@ -872,8 +879,8 @@ class TestWhatUddfCannotHold:
 class TestDeterminism:
     @pytest.mark.asyncio
     async def test_two_exports_of_an_unchanged_logbook_are_byte_identical(self, monkeypatch):
-        first = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
-        second = await _render(full_bundle(), {2: TRIMIX_PROFILE}, monkeypatch)
+        first = await _render(full_bundle(), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
+        second = await _render(full_bundle(), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
         assert first == second
 
 
