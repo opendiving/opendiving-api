@@ -5,7 +5,7 @@ from typing import Annotated, ClassVar, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls
+from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
 
 
 class CertificationAgency(StrEnum):
@@ -98,6 +98,12 @@ class CertificationFileInfo(PublicUUIDSchema):
     themselves come from `GET /certification/{uuid}/file/{side}`.
     """
 
+    # The enum stays here, unlike every other stored vocabulary on a read shape (see
+    # *"A stored vocabulary is read back as a string"* in DECISIONS.md). `side` is
+    # structural rather than descriptive: it selects which of two slots a file occupies,
+    # and the export uses it as a dict key, a filename stem and the blob lookup's
+    # argument. It is also the only one no client ever supplies - the server writes it
+    # from a path parameter FastAPI has already validated against this enum.
     side: CertificationSide
     content_type: str
     byte_size: int
@@ -143,6 +149,10 @@ class CertificationRead(CertificationBase, PublicUUIDSchema):
     the sequential internal `id` (which is never exposed over the API).
     """
 
+    # Overrides `CertificationBase.agency`, which stays `CertificationAgency` for the
+    # writes that base validates. See *"A stored vocabulary is read back as a string"* in DECISIONS.md.
+    agency: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+
     user_uuid: uuid_pkg.UUID
     # The training course this card came out of, if the diver recorded one. Filled in by
     # all three producers - both cached readers resolve it in a batched lookup, and
@@ -166,6 +176,8 @@ class CertificationReadInternal(CertificationBase, PublicUUIDSchema):
     public shape, which additionally resolves `user_id`/`course_id` to the owning user's
     and the course's `uuid`).
     """
+
+    agency: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
 
     id: int
     user_id: int
@@ -269,7 +281,7 @@ class CertificationExpiringItem(BaseModel):
     """
 
     uuid: uuid_pkg.UUID
-    agency: CertificationAgency
+    agency: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
     agency_other: str | None = None
     name: str
     expires_on: date

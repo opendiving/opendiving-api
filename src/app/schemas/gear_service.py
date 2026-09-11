@@ -5,7 +5,7 @@ from typing import Annotated, ClassVar, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls
+from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
 
 
 class ServiceKind(StrEnum):
@@ -90,7 +90,11 @@ class GearServiceScheduleInfo(PublicUUIDSchema):
     isn't one of them.
     """
 
-    kind: ServiceKind
+    # `StoredVocabulary`, not `ServiceKind`, on this and every other read shape below.
+    # This is the one embedded in `GearItemRead`, so an unrecognized stored `kind` used to
+    # fail the whole gear list rather than the one schedule carrying it. See
+    # *"A stored vocabulary is read back as a string"* in DECISIONS.md.
+    kind: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
     label: str | None = None
     interval_months: int | None = None
     interval_dives: int | None = None
@@ -104,6 +108,10 @@ class GearServiceScheduleRead(GearServiceScheduleBase, PublicUUIDSchema):
     """Public representation of a schedule, keyed by its opaque `uuid` rather than the
     sequential internal `id` (which is never exposed over the API).
     """
+
+    # Overrides `GearServiceScheduleBase.kind`, which stays `ServiceKind` for the writes
+    # that base actually validates.
+    kind: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
 
     user_uuid: uuid_pkg.UUID
     gear_item_uuid: uuid_pkg.UUID
@@ -119,6 +127,8 @@ class GearServiceScheduleReadInternal(GearServiceScheduleBase, PublicUUIDSchema)
     """Mirrors the actual `gear_service_schedule` columns (integer PK/FKs), for
     server-side lookups only - never returned directly over the API.
     """
+
+    kind: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
 
     id: int
     user_id: int
@@ -209,6 +219,8 @@ class GearServiceRecordBase(BaseModel):
 
 
 class GearServiceRecordRead(GearServiceRecordBase, PublicUUIDSchema):
+    kind: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+
     user_uuid: uuid_pkg.UUID
     gear_item_uuid: uuid_pkg.UUID
     # NULL in three cases, and the third is much the most common: the record was never
@@ -223,6 +235,8 @@ class GearServiceRecordRead(GearServiceRecordBase, PublicUUIDSchema):
 
 
 class GearServiceRecordReadInternal(GearServiceRecordBase, PublicUUIDSchema):
+    kind: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+
     id: int
     user_id: int
     gear_item_id: int
@@ -300,7 +314,7 @@ class GearServiceDueItem(BaseModel):
     """
 
     schedule_uuid: uuid_pkg.UUID
-    kind: ServiceKind
+    kind: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
     label: str | None = None
     last_service_on: date | None = None
     next_due_on: date | None = None

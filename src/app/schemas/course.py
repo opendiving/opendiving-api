@@ -5,7 +5,13 @@ from typing import Annotated, ClassVar, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls, validate_date_range
+from ..core.schemas import (
+    NOTES_MAX_LENGTH,
+    PublicUUIDSchema,
+    RejectsExplicitNulls,
+    StoredVocabulary,
+    validate_date_range,
+)
 from .certification import CertificationAgency, validate_agency_pairing
 
 
@@ -75,6 +81,11 @@ class CourseRead(CourseBase, PublicUUIDSchema):
     sequential internal `id` (which is never exposed over the API).
     """
 
+    # Override `CourseBase`'s enums, which stay enums for the writes that base validates.
+    # See *"A stored vocabulary is read back as a string"* in DECISIONS.md.
+    agency: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+    status: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+
     user_uuid: uuid_pkg.UUID
     created_at: datetime
 
@@ -84,6 +95,9 @@ class CourseReadInternal(CourseBase, PublicUUIDSchema):
     only - never returned directly over the API (use `CourseRead` for the public shape,
     which additionally resolves `user_id` to the owning user's `uuid`).
     """
+
+    agency: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+    status: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
 
     id: int
     user_id: int

@@ -419,7 +419,11 @@ def compute_parallel_gas_use(
     """
     if len(mixtures) < 2:
         return None
-    if any(mixture.usage is not TankUsage.PARALLEL for mixture in mixtures):
+    # `!=`, not `is not`. `DiveMixtureRead.usage` carries the stored string rather than a
+    # `TankUsage` member (see *"A stored vocabulary is read back as a string"* in
+    # DECISIONS.md), and an identity test against a `StrEnum` member is False for an equal
+    # string - which silently turned every flagged sidemount pair back into "not parallel".
+    if any(mixture.usage != TankUsage.PARALLEL for mixture in mixtures):
         return None
     if avg_depth is None or avg_depth <= 0 or duration <= 0:
         return None

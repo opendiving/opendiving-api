@@ -47,7 +47,6 @@ from typing import Any
 from ...core.utils.datetime_offset import combine_start_time
 from ...models.dive import Dive
 from ...schemas.dive_mixture import DiveMixtureRead
-from ...schemas.gear_service import ServiceKind
 from ..dive_gas import resolve_gas_use
 from .loader import ExportBundle
 from .naming import gas_name, trip_location_names
@@ -132,9 +131,9 @@ def _cylinder_summary(mixture: DiveMixtureRead) -> str:
     elif mixture.start_pressure is not None:
         parts.append(f"{mixture.start_pressure:g}bar")
     if mixture.role is not None:
-        parts.append(f"({mixture.role.value})")
+        parts.append(f"({mixture.role})")
     if mixture.usage is not None:
-        parts.append(f"({mixture.usage.value})")
+        parts.append(f"({mixture.usage})")
     return " ".join(parts)
 
 
@@ -245,8 +244,8 @@ def write_mixtures_csv(bundle: ExportBundle) -> Iterator[str]:
                     mixture.end_pressure,
                     mixture.po2_limit,
                     mixture.gas_number,
-                    None if mixture.role is None else mixture.role.value,
-                    None if mixture.usage is None else mixture.usage.value,
+                    mixture.role,
+                    mixture.usage,
                 )
 
     return _rows_to_csv(MIXTURES_HEADER, rows())
@@ -465,7 +464,12 @@ def write_gear_service_csv(bundle: ExportBundle) -> Iterator[str]:
             yield (
                 *item_columns(schedule.gear_item_id),
                 "schedule",
-                ServiceKind(schedule.kind).value,
+                # The stored string, not `ServiceKind(...)`. A CSV column has no closed
+                # vocabulary to keep - unlike the DiveJSON envelope, whose `type` is the
+                # format's enum - so round-tripping through the enum only bought a
+                # `ValueError` on a row outside it, which took the whole archive down. See
+                # *"A stored vocabulary is read back as a string"* in DECISIONS.md.
+                schedule.kind,
                 schedule.label,
                 None,
                 None,
@@ -482,7 +486,7 @@ def write_gear_service_csv(bundle: ExportBundle) -> Iterator[str]:
             yield (
                 *item_columns(record.gear_item_id),
                 "record",
-                ServiceKind(record.kind).value,
+                record.kind,
                 record.label,
                 record.serviced_on.isoformat(),
                 record.performed_by,

@@ -3,6 +3,8 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..core.schemas import StoredVocabulary
+
 
 class GasRole(StrEnum):
     """What a cylinder was carried for on the dive.
@@ -202,6 +204,11 @@ class DiveMixtureCreateInternal(DiveMixtureCreate):
 
 class DiveMixtureRead(DiveMixtureBase):
     model_config = ConfigDict(from_attributes=True)
+
+    # Override `DiveMixtureBase`'s enums, which stay enums for the writes that base
+    # validates. See *"A stored vocabulary is read back as a string"* in DECISIONS.md.
+    role: StoredVocabulary | None = None  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+    usage: StoredVocabulary | None = None  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
 
     id: int
 

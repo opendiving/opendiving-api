@@ -33,7 +33,8 @@ class GearServiceSchedule(Base, PublicUUIDMixin, TimestampMixin):
     # Stored as a plain string with no DB `CHECK`, exactly like `gear_item.type`: the
     # Pydantic field already rejects unknown values on every write (including through
     # the admin panel), so a DB-level copy would buy nothing and would need a DDL change
-    # every time a kind is added.
+    # every time a kind is added. The read schemas do not assume that holds - see the
+    # corollary on `gear_item.type`, which this column's own 500 is what produced.
     kind: Mapped[str] = mapped_column(String(32))
     # The baseline the first due date is measured from, used until the item has its
     # first `GearServiceRecord` of this kind - "in service since". For a used cylinder

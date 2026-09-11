@@ -20,11 +20,15 @@ from uuid6 import uuid7
 from src.app.api.v1 import gear_service as gear_service_module
 from src.app.core.exceptions.http_exceptions import NotFoundException
 from src.app.crud.crud_gear_service_schedules import get_due_overview_for_user
+from src.app.schemas.gear_item import GearItemCreate, GearItemInfo, GearItemRead
 from src.app.schemas.gear_service import (
+    GearServiceDueItem,
     GearServiceDueResponse,
     GearServiceRecordCreate,
     GearServiceScheduleBase,
     GearServiceScheduleCreate,
+    GearServiceScheduleInfo,
+    GearServiceScheduleUpdate,
     ServiceKind,
     ServiceStatus,
 )
@@ -375,6 +379,76 @@ class TestGearServiceSchemas:
             gear_item_uuid=uuid7(), kind=ServiceKind.HYDROSTATIC_TEST, serviced_on=date(2026, 3, 14)
         )
         assert record.gear_service_schedule_uuid is None
+
+
+class TestAnUnrecognizedKindDoesNotFiveHundred:
+    """A `kind` outside `ServiceKind` is readable, and takes nothing else down with it.
+
+    The column is deliberately unconstrained (see `models/gear_item.py` and DECISIONS.md),
+    so a direct SQLAlchemy write - a fixture, a script, a hand-run UPDATE - puts whatever
+    it likes there. While the read schemas typed the enum, one such row failed validation
+    of the *whole* response: `GET /gear-items` and `GET /gear-service-due` 500'd for every
+    account owning one, so the dashboard card and the entire gear list rendered nothing.
+
+    These are the two halves that have to hold together: reads carry the value through,
+    writes still refuse it.
+    """
+
+    ODD = "inspection"
+
+    def test_the_embedded_summary_carries_the_stored_value(self) -> None:
+        summary = GearServiceScheduleInfo(uuid=uuid7(), kind=self.ODD)
+        assert summary.kind == self.ODD
+        assert summary.model_dump(mode="json")["kind"] == self.ODD
+
+    def test_a_known_kind_still_serializes_to_its_own_string(self) -> None:
+        """The wire format must not have moved for the values that were always valid."""
+        summary = GearServiceScheduleInfo(uuid=uuid7(), kind=ServiceKind.VISUAL_INSPECTION)
+        assert summary.model_dump(mode="json")["kind"] == "visual_inspection"
+
+    def test_a_sibling_schedule_survives_the_odd_one(self) -> None:
+        """The blast radius, which is the actual defect: one row used to fail the response
+        that carried it *and* every other row in the same list."""
+        item = GearItemRead(
+            uuid=uuid7(),
+            user_uuid=uuid7(),
+            name="MK25 EVO",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            service=[
+                GearServiceScheduleInfo(uuid=uuid7(), kind=self.ODD),
+                GearServiceScheduleInfo(uuid=uuid7(), kind=ServiceKind.SERVICE),
+            ],
+        )
+        assert [schedule.kind for schedule in item.service] == [self.ODD, "service"]
+
+    def test_the_due_overview_row_carries_it_too(self) -> None:
+        """`GET /gear-service-due` builds these, and it is the dashboard's safety-adjacent
+        card - under-reporting there is the wrong direction to fail in (see
+        `GearServiceDueResponse.truncated`), and 500ing is worse still."""
+        row = GearServiceDueItem(schedule_uuid=uuid7(), kind=self.ODD, gear_item_uuid=uuid7(), gear_item_name="AL80")
+        assert GearServiceDueResponse(data=[row]).data[0].kind == self.ODD
+
+    def test_creating_one_is_still_a_422(self) -> None:
+        """The enum stays the write boundary - nothing about this makes the vocabulary
+        open. `ServiceKind` is what the route body is typed with, so the API cannot be the
+        thing that produces a row like the one above."""
+        with pytest.raises(ValidationError):
+            GearServiceScheduleCreate(
+                gear_item_uuid=uuid7(), kind=self.ODD, starts_on=date(2026, 1, 1), interval_months=12
+            )
+        with pytest.raises(ValidationError):
+            GearServiceRecordCreate(gear_item_uuid=uuid7(), kind=self.ODD, serviced_on=date(2026, 3, 14))
+
+    def test_patching_a_schedule_to_one_is_still_a_422(self) -> None:
+        with pytest.raises(ValidationError):
+            GearServiceScheduleUpdate(kind=self.ODD)
+
+    def test_a_gear_type_outside_the_vocabulary_reads_back_the_same_way(self) -> None:
+        """`GearItemInfo` is embedded in every dive and gear set, so `gear_item.type` has
+        the same blast radius as `kind` - one row, every dive in the list."""
+        assert GearItemInfo(uuid=uuid7(), name="Fins", type="frobnicator").type == "frobnicator"
+        with pytest.raises(ValidationError):
+            GearItemCreate(user_uuid=uuid7(), name="Fins", type="frobnicator")
 
 
 class TestRecalculateServiceSchedule:
