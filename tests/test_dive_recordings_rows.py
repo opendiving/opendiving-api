@@ -11,8 +11,10 @@ Same skip-if-unreachable guard and same write-real-rows-and-leave-them conventio
 
 import hashlib
 import io
+import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import UploadFile
@@ -20,6 +22,8 @@ from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
+from src.app.api.v1 import dives as dives_module
+from src.app.api.v1.dives import erase_dive_recording, patch_dive_recording
 from src.app.core.security import create_dive_file_token
 from src.app.core.utils.datetime_offset import combine_start_time
 from src.app.models.dive import Dive
@@ -28,6 +32,7 @@ from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_recording import DiveRecording
 from src.app.models.user import User
+from src.app.schemas.dive import RecordingUpdateRequest
 from src.app.schemas.dive_profile import ProfileProvenance
 from src.app.services import blob_store
 from src.app.services.dive_files import delete_dive_file, store_recording_file
@@ -79,6 +84,15 @@ async def _cns_end(db: AsyncSession, dive: Dive) -> float | None:
     return (await db.execute(select(Dive.cns_end).where(Dive.id == dive.id))).scalar_one()
 
 
+async def _readings(db: AsyncSession, dive: Dive) -> tuple[float | None, float | None]:
+    """`(cns_end, otu_end)`. The pair rather than the one reading, because the two answer
+    different halves of the same question: `cns_end` is a figure a file can also yield and
+    `otu_end` one nothing here parses, so a rewrite that replaced the first and cleared the
+    second is visible as two different wrong numbers rather than as one."""
+    row = (await db.execute(select(Dive.cns_end, Dive.otu_end).where(Dive.id == dive.id))).one()
+    return row.cns_end, row.otu_end
+
+
 @pytest.fixture
 def volume(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(blob_store.settings, "FILE_STORAGE_DIR", str(tmp_path))
@@ -93,6 +107,13 @@ def diver(db: Session) -> User:
 @pytest.fixture
 def dive(db: Session, diver: User) -> Dive:
     return create_dive(db, diver)
+
+
+@pytest.fixture
+def routed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drive the real recording handlers with Redis out of the way. Both end by dropping the
+    caches, and there is no Redis here to drop them in."""
+    monkeypatch.setattr(dives_module, "invalidate_dive_caches", AsyncMock())
 
 
 async def _attach(db: AsyncSession, diver: User, dive: Dive, content: bytes, *, filename: str = "export.xml") -> Any:
@@ -115,6 +136,16 @@ async def _recordings(db: AsyncSession, dive: Dive) -> list[DiveRecording]:
     return list(rows.scalars().all())
 
 
+async def _erase_recording(db: AsyncSession, diver: User, dive: Dive, rid: uuid_pkg.UUID) -> None:
+    await erase_dive_recording(
+        request=Mock(),
+        uuid=dive.uuid,
+        rid=rid,
+        current_user={"id": diver.id, "uuid": diver.uuid, "is_superuser": False},
+        db=db,
+    )
+
+
 async def _insert_profile(db: AsyncSession, dive: Dive, recording: DiveRecording, *, parser_key: str) -> None:
     """Samples against a recording that never had a file, written straight in - which is what
     logbook import does and what a merge leaves behind, neither of which this module owns."""
@@ -132,6 +163,32 @@ async def _insert_profile(db: AsyncSession, dive: Dive, recording: DiveRecording
             created_at=datetime.now(UTC),
         )
     )
+
+
+async def _import_recording(
+    db: AsyncSession,
+    sync_db: Session,
+    diver: User,
+    dive: Dive,
+    *,
+    cns_end: float,
+    otu_end: float,
+    start: datetime | None = None,
+) -> Any:
+    """A converted logbook import, as `services/logbook_import/writer.py` leaves it: the
+    document's figures on the dive row, beside a primary recording that holds samples and no
+    bytes. Nothing on this instance can re-derive either number."""
+    recording = create_dive_recording(sync_db, diver, dive, ordinal=0)
+    if start is not None:
+        await db.execute(
+            update(DiveRecording)
+            .where(DiveRecording.id == recording.id)
+            .values(start_time=start, utc_offset_minutes=180)
+        )
+    await _insert_profile(db, dive, recording, parser_key=IMPORT_PARSER_KEY)
+    await db.execute(update(Dive).where(Dive.id == dive.id).values(cns_end=cns_end, otu_end=otu_end))
+    await db.commit()
+    return recording
 
 
 class TestWhereAFileLands:
@@ -495,6 +552,164 @@ class TestDeletingAFile:
         assert (
             await async_db.execute(select(DiveProfile.id).where(DiveProfile.recording_id == stored.recording_id))
         ).scalar_one_or_none() is not None
+
+
+class TestDeletingASecondComputersFile:
+    """Emptying a recording the dive's readings never came off must not touch them.
+
+    The single-recording cases above are the ones the deletion path was written for, and on
+    those the outright rewrite is the point. These are the multi-recording ones, where the
+    same rewrite has nothing to re-derive *from* and everything to lose: the recording being
+    emptied is a second computer's, the figures on the dive belong to the primary, and
+    `refresh_tech_scalars` would have rewritten them from a recording this deletion did not
+    touch.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_file_less_primarys_document_figures_survive_it(
+        self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        """The shape a converted logbook import creates: a primary holding samples and no
+        bytes, with the document's figures on the dive. An outright rewrite here reads an
+        empty extraction off that primary and writes every field `None`, so deleting the
+        second computer's export would clear two numbers the document supplied and nothing on
+        this instance can produce again.
+        """
+        imported = await _import_recording(async_db, db, diver, dive, cns_end=12.5, otu_end=31.0)
+        # Months from the imported recording's start, so it lands beside it rather than in it.
+        stored = await _attach(async_db, diver, dive, _export(cns_end=44.0, samples=_samples((0, "0"))))
+        assert [row.ordinal for row in await _recordings(async_db, dive)] == [0, 1]
+        file_id = (
+            await async_db.execute(select(DiveFile.id).where(DiveFile.recording_id == stored.recording_id))
+        ).scalar_one()
+
+        await delete_dive_file(async_db, file_id=file_id)
+
+        assert [row.id for row in await _recordings(async_db, dive)] == [imported.id]
+        assert await _readings(async_db, dive) == (12.5, 31.0)
+
+    @pytest.mark.asyncio
+    async def test_a_figure_the_primarys_own_file_does_not_yield_survives_it(
+        self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        """A primary with files is no protection either, and this is the sharper case.
+
+        The diver imported a document, then attached the export it was converted from - the
+        primary's *first* file, which fills and cannot overwrite, so the dive keeps the
+        document's `cns_end` and the `otu_end` no parser here reads at all. Rewriting outright
+        off that file would replace the first with the file's own 9.0 and clear the second,
+        on the strength of deleting an unrelated recording's export.
+        """
+        await _import_recording(
+            async_db,
+            db,
+            diver,
+            dive,
+            cns_end=12.5,
+            otu_end=31.0,
+            start=datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC),
+        )
+        await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="primary.xml")
+        other = _export(start="2026-09-08T15:19:38.67+03:00", cns_end=44.0).replace(b"253810000400", b"999999999999")
+        stored = await _attach(async_db, diver, dive, other, filename="second.xml")
+        assert [row.ordinal for row in await _recordings(async_db, dive)] == [0, 1]
+        file_id = (
+            await async_db.execute(select(DiveFile.id).where(DiveFile.recording_id == stored.recording_id))
+        ).scalar_one()
+
+        await delete_dive_file(async_db, file_id=file_id)
+
+        assert await _readings(async_db, dive) == (12.5, 31.0)
+
+    @pytest.mark.asyncio
+    async def test_the_primarys_own_last_file_still_re_derives_from_the_promotion(
+        self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
+    ) -> None:
+        """The other half of the guard: where the deletion *does* reach the primary, the
+        rewrite is owed and still runs. The primary goes with its last file, the second
+        computer's recording is promoted into ordinal 0, and the dive's reading becomes that
+        machine's rather than being left at a number no recording of this dive claims.
+        """
+        first = await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="first.xml")
+        other = _export(start="2026-09-08T15:19:38.67+03:00", cns_end=44.0).replace(b"253810000400", b"999999999999")
+        second = await _attach(async_db, diver, dive, other, filename="second.xml")
+        file_id = (
+            await async_db.execute(select(DiveFile.id).where(DiveFile.recording_id == first.recording_id))
+        ).scalar_one()
+
+        await delete_dive_file(async_db, file_id=file_id)
+
+        assert [(row.id, row.ordinal) for row in await _recordings(async_db, dive)] == [(second.recording_id, 0)]
+        assert await _cns_end(async_db, dive) == 44.0
+
+
+class TestDeletingARecording:
+    """`DELETE /dive/{uuid}/recording/{rid}`, which is the only way to remove a file-less one.
+
+    Through the real handler rather than a service: the question these pin is *which*
+    recording was removed, and that is decided in the route - before the delete renumbers the
+    ordinals and takes the answer with it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_erasing_a_second_computer_leaves_the_dives_readings_alone(
+        self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive, routed: None
+    ) -> None:
+        imported = await _import_recording(async_db, db, diver, dive, cns_end=12.5, otu_end=31.0)
+        stored = await _attach(async_db, diver, dive, _export(cns_end=44.0, samples=_samples((0, "0"))))
+        second = next(row for row in await _recordings(async_db, dive) if row.id == stored.recording_id)
+
+        await _erase_recording(async_db, diver, dive, second.uuid)
+
+        assert [row.id for row in await _recordings(async_db, dive)] == [imported.id]
+        assert await _readings(async_db, dive) == (12.5, 31.0)
+
+    @pytest.mark.asyncio
+    async def test_erasing_the_primary_re_derives_from_whatever_is_promoted(
+        self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive, routed: None
+    ) -> None:
+        first = await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="first.xml")
+        other = _export(start="2026-09-08T15:19:38.67+03:00", cns_end=44.0).replace(b"253810000400", b"999999999999")
+        second = await _attach(async_db, diver, dive, other, filename="second.xml")
+        primary = next(row for row in await _recordings(async_db, dive) if row.id == first.recording_id)
+
+        await _erase_recording(async_db, diver, dive, primary.uuid)
+
+        assert [row.id for row in await _recordings(async_db, dive)] == [second.recording_id]
+        assert await _cns_end(async_db, dive) == 44.0
+
+
+class TestPromotingARecording:
+    """`PATCH /dive/{uuid}/recording/{rid}`, the third route the readings follow.
+
+    Its own class rather than a member of the two above, because it deletes nothing: a
+    promotion has touched the primary by definition - it is what it just did - so it is the
+    one caller that always re-derives, and the question the deletion routes answer does not
+    arise here.
+    """
+
+    @pytest.mark.asyncio
+    async def test_promoting_a_second_computer_re_derives_from_it(
+        self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive, routed: None
+    ) -> None:
+        """The readings follow the recording the diver made primary, and come off that
+        machine's own file rather than staying at the one the dive was showing."""
+        await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="first.xml")
+        other = _export(start="2026-09-08T15:19:38.67+03:00", cns_end=44.0).replace(b"253810000400", b"999999999999")
+        stored = await _attach(async_db, diver, dive, other, filename="second.xml")
+        second = next(row for row in await _recordings(async_db, dive) if row.id == stored.recording_id)
+
+        await patch_dive_recording(
+            request=Mock(),
+            uuid=dive.uuid,
+            rid=second.uuid,
+            values=RecordingUpdateRequest(primary=True),
+            current_user={"id": diver.id, "uuid": diver.uuid, "is_superuser": False},
+            db=async_db,
+        )
+
+        assert [(row.id, row.ordinal) for row in await _recordings(async_db, dive)][0] == (stored.recording_id, 0)
+        assert await _cns_end(async_db, dive) == 44.0
 
 
 class TestOrdinals:
