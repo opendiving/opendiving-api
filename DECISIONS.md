@@ -3957,11 +3957,15 @@ which is a smaller cost than a version suffix that every future shape change has
 bump, and that goes stale the moment someone forgets. A longer-lived cache, or a deployed API, would
 flip that trade.
 
-**The second of those two arrived on 2026-09-12.** There is a deployed API now, so the stale window
-belongs to whoever is signed in when a shape change reaches it rather than to the developer who made
-it. The trade is not re-decided here - still no version suffix, still one 60-second TTL that
-self-heals - but the sentence above no longer describes who pays. See *"`PROJECT_OPERATED` is the
-first setting that knows who runs the instance, and it selects copy only"*.
+**The second of those two arrived on 2026-09-12**, so the paragraph above records a trade that has
+expired rather than one still in force. There is a deployed API: the stale window belongs to whoever
+is signed in when a shape change reaches it rather than to the developer who made it, and the remedy
+above - `docker compose exec` into the local stack's Redis - has no counterpart on an instance whose
+Redis is managed. Neither half of that is settled here. Whoever next changes the shape of a cached
+response owes the call the flip condition asks for - version the key, or write down how that
+instance's Redis is flushed - and must not read the paragraph above as having made it for them. See
+*"`PROJECT_OPERATED` is the first setting that knows who runs the instance, and it selects copy
+only"*.
 
 ## FIT is one parser for both vendors, and its one real trap is developer fields
 
