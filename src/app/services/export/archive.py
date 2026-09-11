@@ -36,8 +36,9 @@ two members is not possible (`ZipFile` allows one open member at a time). So it 
 accepted rather than solved, and named here so nobody rediscovers it as a mystery.
 
 The blobs are the reason the bound matters, and they are read **one file at a time** -
-they live on the files volume rather than in the database now, and the loop below never
-holds more than the file it is currently writing. `ZIP_STORED`, not `ZIP_DEFLATED`, for
+they live in the blob store rather than in the database now, wherever
+`FILE_STORAGE_BACKEND` puts it, and the loop below never holds more than the file it is
+currently writing. `ZIP_STORED`, not `ZIP_DEFLATED`, for
 those two directories: the stored exports are already-compressed FIT binaries and the
 c-cards are JPEG/PNG/PDF, so deflating them burns CPU proportional to the whole archive
 to save nothing. The generated documents *do* deflate, and XML and CSV compress about
@@ -211,10 +212,11 @@ async def _write_blobs(
 
     Two ways to vanish now, and both are skipped on the same terms. A missing *row* is a
     concurrent delete from another session. A missing *file* - `BlobMissingError` - is data
-    loss or a half-mounted files volume, which is logged at error level because it is an
-    operational problem rather than a race; the export is precisely the tool someone
-    reaches for when their volume is half-dead, so failing the whole archive over it would
-    take away the one thing still working.
+    loss, or a store the instance is only half-connected to (a volume mounted over, a
+    bucket that is not the one these keys were written to), which is logged at error level
+    because it is an operational problem rather than a race; the export is precisely the
+    tool someone reaches for when their storage is half-dead, so failing the whole archive
+    over it would take away the one thing still working.
 
     The avatar comes off the `user` row already in the bundle rather than out of a query
     of its own, and it is `ZIP_STORED` like the rest: it is a WebP, and deflating an

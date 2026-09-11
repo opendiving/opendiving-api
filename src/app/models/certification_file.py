@@ -8,8 +8,9 @@ from ..core.db.models import PublicUUIDMixin, TimestampMixin
 class CertificationFile(Base, PublicUUIDMixin, TimestampMixin):
     """One stored image or PDF of a certification card - its front or its back.
 
-    The bytes live on the files volume, not in this table: the row carries a
-    `storage_key` and `services/blob_store.py` holds the file. Every read and write still
+    The bytes live in the blob store, not in this table: the row carries a `storage_key`
+    and `services/blob_store.py` holds the file, on a filesystem volume or in an
+    S3-compatible bucket depending on `FILE_STORAGE_BACKEND`. Every read and write still
     goes through `services/certification_files.py`, which is the module that knows a card
     has a file at all - see *"File payloads live on the files volume, not in Postgres"* in
     `DECISIONS.md` for why they left Postgres, and the superseded section it names for the

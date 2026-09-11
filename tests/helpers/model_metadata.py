@@ -84,11 +84,13 @@ NOT_A_DIVERS_OWN_RESOURCE: dict[str, str] = {
     ),
     "CertificationFile": (
         "A card image reached through its certification: `DELETE /certification/{uuid}/file/{side}` "
-        "owns its lifecycle, along with the files volume it writes to."
+        "owns its lifecycle, along with the blob it writes to whichever store "
+        "`FILE_STORAGE_BACKEND` selects."
     ),
     "DiveFile": (
         "One of a recording's stored exports, reached through the dive: "
-        "`DELETE /dive/{uuid}/file/{fid}` owns its lifecycle, along with the files volume it writes to."
+        "`DELETE /dive/{uuid}/file/{fid}` owns its lifecycle, along with the blob it writes to "
+        "whichever store `FILE_STORAGE_BACKEND` selects."
     ),
     "DiveProfile": (
         "A recording's depth samples. `GET /dive/{uuid}/recording/{rid}/profile` is the only route it "

@@ -9,7 +9,7 @@ less
 than the round trips a lazier shape would need - and the archive walks all of it anyway.
 
 **The two things this does not load are the binary payloads**: uploaded exports and card
-images live on the files volume rather than in the database at all now (this reads only
+images live in the blob store rather than in the database at all now (this reads only
 their `storage_key`-bearing rows' scalar columns), and `dive_profile.data` stays
 `deferred`. Those are fetched one row at a time by whoever actually needs them
 (`archive.py` for the blobs, `uddf.py`/`envelope.py` for the profile series), so peak

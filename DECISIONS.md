@@ -10952,6 +10952,28 @@ producing what it produced on the day it ran. It is harmless on an S3 instance b
 instance is necessarily new — the rows it moves are `bytea` payloads, and a database migrated from
 empty has none.
 
+**The prose the setting falsified has been undercounted at every pass over it**, which is worth
+recording because each pass believed it had the whole set. A backend setting makes every sentence
+saying the bytes are *on the files volume* false on `s3`, which is what the instance this project
+runs uses. `git grep -n 'files volume'` over `src`, `tests` and the repository root is the
+derivation, and it comes back with three kinds of line of which only one is wrong, so a count is
+never the answer here and reading each hit is. **Wrong, and now naming the blob store and the
+setting that picks it:** any present-tense claim about where stored bytes are or which store an
+operation touches — class docstrings, route banners, module headers, the config template's prose, a
+test helper's descriptions, and a quotation of the `AGENTS.md` rule that itself moved. **Right as it
+stands:** anything scoped to `LocalBackend` — its `describe`, its writability error, and
+`tests/test_blob_store.py`, whose first line names the backend it drives. **History, and kept:** the
+section titles above, the migration filenames, and every past-tense sentence about payloads having
+left Postgres.
+
+Two things were left alone on purpose. `warn_if_files_volume_looks_empty` keeps its name: it is an
+identifier, so renaming it is a change to code rather than to a claim, and the operator message it
+emits already names the store through `describe_location()`. And the much larger family of sentences
+that say "the volume" without "files" is untouched — most of them are ordering notes ("the file
+lands on the volume *before* the transaction that references it") where which backend holds the
+bytes is beside the point. They are narrow rather than false, and rewriting all of them would bury
+the ones that were not.
+
 ### Every key carries a per-write nonce, and that is what makes the unlink safe
 
 Keys are `{kind}/{sha256[:2]}/{uuid7}_{sha256}` — `dive-files/…` and `certification-files/…` — and
@@ -12844,6 +12866,14 @@ reliably the person who knows it is the API's parser. So the link above leaves t
 the switch behind it is thrown on the product repository rather than on this one — which does not
 change the paragraph above: it still 404s until that repository is public, for the same reason and
 written ahead of the same flip.
+
+**The install link points at the chooser rather than at a blank issue.** A `contact_links` entry
+carries a whole URL, so `…/opendiving/issues/new` and `…/opendiving/issues/new/choose` are both
+valid and only the second reaches a form. The bare one was harmless while the product repository
+carried no templates — there was nothing to choose — and turned into a silent bypass the day it
+gained an install form, which is the one form whose entire purpose is collecting a version and a
+host from exactly the reporters this link sends there. The web-app link has carried `/choose` from
+the start. Nothing warns about the difference, because both spellings open a working page.
 
 **A form applies labels but does not create them.** Anything named under `labels:` has to exist in
 the repository already, so the forms name only `bug` and `enhancement` — the stock set plus the

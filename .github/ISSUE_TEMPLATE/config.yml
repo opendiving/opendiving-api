@@ -11,7 +11,7 @@ contact_links:
       it takes to cut a release. No GitHub account? security@opendiving.app.
 
   - name: Installing, upgrading, backing up or configuring
-    url: https://github.com/opendiving/opendiving/issues/new
+    url: https://github.com/opendiving/opendiving/issues/new/choose
     about: >-
       The install bundle and the self-hosting docs live in opendiving/opendiving, and issues about
       running an instance belong there with them. Troubleshooting docs first if you haven't read

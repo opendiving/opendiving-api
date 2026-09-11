@@ -150,8 +150,9 @@ async def patch_user(
 # -------------- avatar --------------
 #
 # Three routes rather than a field on `PATCH /user`, for the reason every stored payload
-# here gets its own: the bytes live on the files volume and the row carries a key, so the
-# write has an ordering rule (file first, row second) and the delete has the mirror of it.
+# here gets its own: the bytes live in the blob store - a volume or a bucket, on
+# `FILE_STORAGE_BACKEND` - and the row carries a key, so the write has an ordering rule
+# (file first, row second) and the delete has the mirror of it.
 # A JSON PATCH that could null the key would leave the file behind.
 #
 # Self-scoped like the rest of `/user` - no uuid anywhere, so there is no ownership check
