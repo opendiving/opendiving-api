@@ -18,13 +18,15 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi import Response
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from src.app.api.v1.auth import _REFRESH_REPLAY_THRESHOLD, _elapsed, refresh_access_token
 from src.app.core.exceptions.http_exceptions import UnauthorizedException
 from src.app.core.schemas import TokenData
 from src.app.core.security import blacklist_token, create_refresh_token, token_session_id
 from src.app.core.utils.request_context import RequestContext
+from src.app.models.user import User
 from src.app.models.user_session import UserSession
 from src.app.schemas.user_session import UserSessionReadInternal
 from src.app.services.auth_service import issue_tokens
@@ -731,7 +733,7 @@ class TestRefreshLivenessAgainstPostgres:
 @pytest.mark.skipif(not db_available(), reason="Postgres is not reachable")
 class TestAReplayEndsTheRotatedPairAgainstPostgres:
     """What the mocked cases cannot reach: the `UPDATE` really lands, it is really
-    committed on a request that raises, and the cookie rotated *out* of the replayed token
+    committed before the request raises, and the cookie rotated *out* of the replayed token
     really stops working - which takes the live-session lookup running against a database
     that can fail it, rather than the permissive `FakeSessions`.
 
@@ -744,11 +746,28 @@ class TestAReplayEndsTheRotatedPairAgainstPostgres:
     what tells the server the two are not the same party.
     """
 
-    async def _live_session_count(self, async_db, diver) -> int:
-        rows = await async_db.execute(
-            select(UserSession).where(UserSession.user_id == diver.id, UserSession.revoked_at.is_(None))
+    @staticmethod
+    def _live_session_count(db: Session, diver: User) -> int:
+        """How many live sessions the account has **on a second connection**.
+
+        The sync `db` session and not `async_db`, and that is the whole point of the
+        helper: `revoke_session` issues its `UPDATE` inside `async_db`'s transaction, where
+        an uncommitted write is visible to that same session and indistinguishable from a
+        committed one. Counted there, the assertion these tests exist for would hold with
+        the commit deleted. Counted here it does not, because nothing uncommitted crosses
+        between two connections.
+
+        `expire_all()` is not the fix and was tried as one: it clears the identity map,
+        which is a question about stale ORM attributes rather than about what the
+        transaction can see.
+        """
+        return int(
+            db.execute(
+                select(func.count())
+                .select_from(UserSession)
+                .where(UserSession.user_id == diver.id, UserSession.revoked_at.is_(None))
+            ).scalar_one()
         )
-        return len(rows.scalars().all())
 
     @pytest.mark.asyncio
     async def test_the_pair_rotated_from_the_replayed_token_stops_working(self, async_db, diver):
@@ -767,6 +786,14 @@ class TestAReplayEndsTheRotatedPairAgainstPostgres:
             with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
                 await refresh_access_token(_request({"refresh_token": leaked}), Response(), async_db)
 
+            # What `async_get_db` does to a session the route raised out of, done by hand
+            # because these tests call the route function rather than go through the
+            # dependency. It is not tidying: it puts a real transaction boundary between
+            # the replay and the presentation below, so the refusal that follows has to
+            # rest on a revocation that was committed rather than on one this session can
+            # still see in its own open transaction.
+            await async_db.rollback()
+
             # The point of the whole change: the replacement was never presented, is not on
             # the blacklist, and is nowhere near its `exp` - the only thing that can refuse
             # it is the session both halves name.
@@ -775,11 +802,15 @@ class TestAReplayEndsTheRotatedPairAgainstPostgres:
                 await refresh_access_token(_request({"refresh_token": replacement}), Response(), async_db)
 
     @pytest.mark.asyncio
-    async def test_the_row_is_stamped_even_though_the_request_401s(self, async_db, diver):
-        """`async_get_db` does not commit on unwind, so a revocation left to the caller's
-        `raise` would be rolled back and the whole thing would be a no-op that every
-        call-level assertion still passes. This reads the row back after the request has
-        failed.
+    async def test_the_revocation_is_committed_and_not_left_to_the_401(self, db, async_db, diver):
+        """The `UPDATE` is left for `record_auth_event` to commit, so the thing to prove is
+        that a commit really happened before the endpoint raised - `async_get_db` does not
+        commit on unwind, and a revocation nobody committed is a no-op that every assertion
+        made on the writing session still passes.
+
+        Which is why both counts here are taken on the sync `db` session: a second
+        connection can only see what was committed. Delete the `commit=True` from that call
+        and this is the test that fails.
         """
         blacklist = FakeTokenBlacklist()
 
@@ -789,17 +820,16 @@ class TestAReplayEndsTheRotatedPairAgainstPostgres:
             leaked = _refresh_cookie(sign_in)
             await refresh_access_token(_request({"refresh_token": leaked}), Response(), async_db)
 
-            assert await self._live_session_count(async_db, diver) == 1
+            assert self._live_session_count(db, diver) == 1
 
             blacklist.backdate_revocation(leaked, by=_REFRESH_REPLAY_THRESHOLD + timedelta(seconds=1))
             with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
                 await refresh_access_token(_request({"refresh_token": leaked}), Response(), async_db)
 
-        async_db.expire_all()
-        assert await self._live_session_count(async_db, diver) == 0
+        assert self._live_session_count(db, diver) == 0
 
     @pytest.mark.asyncio
-    async def test_the_race_leaves_the_session_alone_and_the_replacement_working(self, async_db, diver):
+    async def test_the_race_leaves_the_session_alone_and_the_replacement_working(self, db, async_db, diver):
         """The control, and the case that makes the class mean anything: a check that
         revoked on every presentation would pass both tests above. Here the second
         presentation arrives immediately - the losing tab of a simultaneous refresh - and
@@ -819,8 +849,7 @@ class TestAReplayEndsTheRotatedPairAgainstPostgres:
             with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
                 await refresh_access_token(_request({"refresh_token": first}), Response(), async_db)
 
-            async_db.expire_all()
-            assert await self._live_session_count(async_db, diver) == 1
+            assert self._live_session_count(db, diver) == 1
 
             still_working = Response()
             result = await refresh_access_token(_request({"refresh_token": replacement}), still_working, async_db)

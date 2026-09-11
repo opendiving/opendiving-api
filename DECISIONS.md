@@ -16888,8 +16888,16 @@ The `UPDATE` is left uncommitted for `record_auth_event` to carry, one line belo
 committing on its own. `async_get_db` does not commit on unwind and the caller's next statement is
 `raise UnauthorizedException`, so a revocation that committed separately could survive an audit
 write that failed - a session ended with nothing on record saying why. Riding the same commit makes
-them land or roll back together. `tests/test_auth_refresh.py` reads the row back *after* the 401 for
-exactly this reason: a revocation rolled back by the raise passes every assertion made at the call.
+them land or roll back together.
+
+`tests/test_auth_refresh.py` pins the commit **on a second connection**, and the first attempt did
+not — it read the row back through the same `AsyncSession` that had issued the `UPDATE`, where a
+write is visible to its own transaction whether or not anything committed. That assertion held with
+the commit deleted, which is the one thing it existed to catch. Anything asserting that a write
+survived the request it was made in has to ask a connection that was not part of it; within the
+writing session there is no observable difference between "committed" and "still open", and
+`Session.expire_all()` does not create one — it clears the identity map, which is a question about
+stale attributes rather than about visibility.
 
 ### What the revoke is scoped by, and why `sid` alone is enough
 
