@@ -16861,8 +16861,10 @@ a sequential scan nobody is watching for, on a table that was small on the day i
   lookup a foreign key provokes carries no predicate for one to be implied by, so Postgres scans the
   table past an index on the right column of the right table. That section asked for this test and
   specified this arm, which is the reason the rule is *usable index* rather than *an index*. Drop
-  the `postgresql_where` check and the four tables that carry a partial index - `certification`,
-  `dive`, and `gear_service_record` twice - pass on the partial alone; delete
+  the `postgresql_where` check and the four foreign key columns led by a partial index -
+  `certification.user_id`, `dive.user_id`, and `gear_service_record`'s two - satisfy the rule on
+  that partial alone. Two of them would be covered anyway, being `index=True` besides;
+  `gear_service_record`'s are the pair that genuinely depends on the distinction, so delete
   `ix_gear_service_record_gear_item_id` and `ix_gear_service_record_schedule_id`, the two plain
   indexes that exist solely for this, and nothing anywhere goes red. Checked by deleting them.
 
