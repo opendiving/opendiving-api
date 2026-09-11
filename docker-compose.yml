@@ -105,11 +105,17 @@ services:
     volumes:
       - ./src/app:/code/app
       - ./src/.env:/code/.env
-      # The worker touches no stored file today - the export archive is built inline in
-      # the API, and the gear-service digest reads none. Mounted anyway, because the day a
-      # thumbnail or re-parse job lands here a worker without the mount writes into its own
-      # container layer and loses the lot on the next `up`. One line against a silent-loss
-      # foot-gun.
+      # The worker deletes stored files: `purge_deleted_accounts` hard-deletes an account
+      # past its grace period and every blob it owned goes with it. Without this mount it
+      # would be deleting from an empty directory in its own container layer while the real
+      # files sat on the volume, and the purge would report success - a privacy hole inside
+      # an erasure feature. The worker also probes the store at startup now, so a missing
+      # mount fails loudly instead.
+      #
+      # On the `s3` backend there is nothing to mount: both services reach the same bucket,
+      # which is the topology this whole arrangement exists to avoid needing a shared disk
+      # for. The mount is harmless there and stays, because this file is the development
+      # one and development runs on `local`.
       - files-data:/data/files
 
   db:

@@ -52,7 +52,7 @@ class TestTheFilesVolumeWarning:
     async def test_the_critical_sends_the_operator_to_a_url(self, caplog):
         with (
             patch.object(setup, "engine", self._engine_counting(3)),
-            patch.object(setup, "_volume_has_any_file", return_value=False),
+            patch.object(setup.blob_store, "has_any_key", return_value=False),
             caplog.at_level(logging.CRITICAL, logger="src.app.core.setup"),
         ):
             await setup.warn_if_files_volume_looks_empty()
@@ -65,7 +65,7 @@ class TestTheFilesVolumeWarning:
         """The other half: a check that shouted unconditionally would pass the test above."""
         with (
             patch.object(setup, "engine", self._engine_counting(3)),
-            patch.object(setup, "_volume_has_any_file", return_value=True),
+            patch.object(setup.blob_store, "has_any_key", return_value=True),
             caplog.at_level(logging.CRITICAL, logger="src.app.core.setup"),
         ):
             await setup.warn_if_files_volume_looks_empty()

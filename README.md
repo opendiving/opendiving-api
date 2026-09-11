@@ -48,10 +48,10 @@ else; what is here is the source, and the notes for working on it.
   statistics, and `GET /user/species` is the whole life list: every species you have logged, with
   how many dives saw it and when.
 - **Species photos** — a freely licensed photograph per species, chosen from
-  [Wikimedia Commons](https://commons.wikimedia.org/), fetched **once** and stored on this
-  instance's own files volume, so no visitor's browser ever contacts Wikimedia. A species whose
-  candidates cannot be told apart gets no photo rather than a picture of a different animal, and the
-  author, licence and source travel with it so a credit line can be rendered.
+  [Wikimedia Commons](https://commons.wikimedia.org/), fetched **once** and stored by this instance
+  itself, so no visitor's browser ever contacts Wikimedia. A species whose candidates cannot be told
+  apart gets no photo rather than a picture of a different animal, and the author, licence and
+  source travel with it so a credit line can be rendered.
 - **Dive-site suggestions** — `GET /dive-sites/suggest` answers from a catalog of real dive sites
   bundled in the image, so the site form can offer "SS Thistlegorm" rather than only the town it is
   near. A geocoder knows where Dahab is, not where the Blue Hole's north entry is. No account, no

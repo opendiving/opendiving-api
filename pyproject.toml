@@ -45,6 +45,13 @@ dependencies = [
     # support; 11.3.0's cp314 wheels were built against the beta and say so. The manylinux
     # wheels bundle libwebp, so the WebP output needs no system library in the image.
     "pillow>=12.0.0",
+    # The client behind `FILE_STORAGE_BACKEND=s3` (`services/blob_store.py`). A main
+    # dependency rather than an extra, even though most installs never select that backend:
+    # the shipped image is built with `uv sync --locked` and no extras, so an s3-only extra
+    # would be absent from the one place the hosted instance runs. Its cost is botocore's
+    # ~26 MB of service models in every image; `DECISIONS.md`, *"A second backend, because
+    # the disk stopped being shared"*, weighs that against signing the requests by hand.
+    "boto3>=1.43.93",
 ]
 
 [project.optional-dependencies]

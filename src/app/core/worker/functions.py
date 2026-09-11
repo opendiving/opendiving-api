@@ -709,6 +709,20 @@ async def send_gear_service_digests(ctx: dict[Any, Any]) -> str:
 
 # -------- base functions --------
 async def startup(ctx: Worker) -> None:
+    """Prove the blob store is reachable and writable before any cron runs.
+
+    The same probe the API's lifespan makes, and it is here because the worker is not a
+    read-only service: `purge_deleted_accounts` deletes every blob a purged diver owned,
+    through `blob_store.delete_after_commit`. Without this, a worker whose credentials are
+    wrong or whose volume is unmounted starts cleanly, logs "Worker Started", and fails
+    silently at :30 past the first hour that has an account to purge - a GDPR erasure that
+    reports success while leaving the diver's c-card scans in the bucket.
+
+    Raising takes the worker down, which is the point: arq surfaces a failed startup rather
+    than running the crons anyway, so the container restarts into the same loud error
+    instead of quietly doing half its job.
+    """
+    await asyncio.to_thread(blob_store.ensure_storage_ready)
     logging.info("Worker Started")
 
 
