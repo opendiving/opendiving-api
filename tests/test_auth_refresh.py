@@ -754,7 +754,7 @@ class TestAReplayEndsTheRotatedPairAgainstPostgres:
         helper: `revoke_session` issues its `UPDATE` inside `async_db`'s transaction, where
         an uncommitted write is visible to that same session and indistinguishable from a
         committed one. Counted there, the assertion these tests exist for would hold with
-        the commit deleted. Counted here it does not, because nothing uncommitted crosses
+        that commit suppressed. Counted here it does not, because nothing uncommitted crosses
         between two connections.
 
         `expire_all()` is not the fix and was tried as one: it clears the identity map,
@@ -809,8 +809,9 @@ class TestAReplayEndsTheRotatedPairAgainstPostgres:
         made on the writing session still passes.
 
         Which is why both counts here are taken on the sync `db` session: a second
-        connection can only see what was committed. Delete the `commit=True` from that call
-        and this is the test that fails.
+        connection can only see what was committed. Pass that call `commit=False` - it
+        takes the commit from `record_auth_event`'s default rather than an argument of its
+        own - and this is the test that fails.
         """
         blacklist = FakeTokenBlacklist()
 

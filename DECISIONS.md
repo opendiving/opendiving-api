@@ -16893,7 +16893,7 @@ them land or roll back together.
 `tests/test_auth_refresh.py` pins the commit **on a second connection**, and the first attempt did
 not — it read the row back through the same `AsyncSession` that had issued the `UPDATE`, where a
 write is visible to its own transaction whether or not anything committed. That assertion held with
-the commit deleted, which is the one thing it existed to catch. Anything asserting that a write
+the commit suppressed, which is the one thing it existed to catch. Anything asserting that a write
 survived the request it was made in has to ask a connection that was not part of it; within the
 writing session there is no observable difference between "committed" and "still open", and
 `Session.expire_all()` does not create one — it clears the identity map, which is a question about
@@ -16919,3 +16919,36 @@ The refresh cookie, in every respect - name, flags, lifetime, and the `Set-Cooki
 rotation writes. And the response: a replay that has just ended a session answers the identical 401,
 with the identical `detail`, as a cookie that was never a token at all. The revocation is a side
 effect, never a message, or the endpoint becomes an oracle for which of the two it was looking at.
+
+## Two checkouts running the suite at once share one database, and one of them drops it
+
+`tests/conftest.py` derives the test database's name from `POSTGRES_DB` with `_test` appended, and
+nothing else - not the checkout, not the branch, not the process. So every worktree of this repo
+pointed at the same Postgres runs against the *same* `opendive_test`, and `CONTRIBUTING.md`'s
+host-run recipe is what points them all there.
+
+Concurrent runs then interfere, and the symptom does not look like interference. Tests fail one or
+two at a time, in a different unrelated module on each run, and pass when re-run or run in isolation
+\- which reads exactly like flakiness in whatever you happen to have changed. It is not:
+`TestTheBootstrapExemption` asserts the `user` table is empty after deleting it inside its own
+transaction, and a row another process commits mid-test is enough to fail it; the import gates count
+rows they seeded. Anything counting or emptying a shared table is a candidate.
+
+**The tests that assert a race has exactly one winner are the most sensitive of the lot**, and worth
+knowing by name because they are the ones that keep coming back:
+`TestTheBootstrapExemption::test_two_concurrent_first_completions_produce_exactly_one_superuser` and
+`TestRecordAssertion::test_exactly_one_of_two_concurrent_recordings_wins`. Each stages two racers
+and asserts that the advisory lock or the unique index admitted one of them - which a *third* racer,
+arriving from another checkout's run, falsifies without appearing anywhere in the test.
+
+The sharp edge is that a second run may **drop the database out from under the first**. A run whose
+database is in a state it cannot upgrade from is told to `DROP DATABASE opendive_test` and let the
+next run rebuild it (*"The suite has its own database, and builds it with the migrations"*), so a
+checkout that has just switched branches does exactly that - and if another checkout is mid-run when
+it happens, that run loses its tables rather than a row.
+
+There is no lock and no per-checkout database. What settles it in practice is looking: `ps` for
+another `pytest`, or `select datname, count(*) from pg_stat_activity group by datname` for a second
+set of connections to `opendive_test`. Diagnosed the slow way first - five green full runs either
+side of failures in four different modules, none of them in the code under change, before a `ps`
+showed a sibling worktree's suite running with a `DROP DATABASE` ahead of it.
