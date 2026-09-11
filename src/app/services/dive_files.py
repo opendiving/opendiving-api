@@ -4,7 +4,8 @@ The **only** module that knows a recording has stored bytes at all. Routes go th
 functions and never see where the bytes are, which is what let the payload move out of a
 `bytea` column and onto the files volume without a single call site changing - the same
 seam, for the same reasons, as `services/certification_files.py`.
-`services/blob_store.py` is the layer below, and the only one that touches a filesystem.
+`services/blob_store.py` is the layer below, and the only one that knows where the bytes
+actually are - a filesystem volume or an S3-compatible bucket, on `FILE_STORAGE_BACKEND`.
 
 **A file belongs to a recording, and a recording may hold several.** Which recording an
 incoming file lands in is `services/dive_recordings.py`'s decision; what this module owns is

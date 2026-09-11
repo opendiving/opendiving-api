@@ -9,6 +9,7 @@ the database is simply wrong.
 """
 
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -20,6 +21,7 @@ from uuid6 import uuid7
 from src.app.services import blob_store
 from src.scripts import sweep_orphaned_files as sweeper
 from tests.conftest import db_available
+from tests.helpers.fake_s3 import FakeS3Client, select_s3_backend
 from tests.helpers.generators import create_species, create_user
 
 REFERENCED = "dive-files/aa/referenced"
@@ -278,3 +280,69 @@ class TestReferencedKeys:
         assert (volume / key).is_file()
         assert not (volume / ORPHAN).exists()
         assert report.deleted == 1
+
+
+class TestTheObjectStoreBackend:
+    """The same diff, against a bucket instead of a volume.
+
+    Everything the sweeper does is written in `blob_store`'s vocabulary, so the interesting
+    question is not whether the diff still works - it is the one half that cannot: the
+    stale-temp-file pass, which has nothing to reclaim on a store where `PutObject` is
+    atomic.
+    """
+
+    @staticmethod
+    def _store(client: FakeS3Client, key: str, *, age_hours: float = 0.0) -> None:
+        client.seed(key, modified=datetime.fromtimestamp(time.time() - age_hours * 3600, UTC))
+
+    @pytest.fixture
+    def bucket(self, monkeypatch: pytest.MonkeyPatch) -> FakeS3Client:
+        return select_s3_backend(monkeypatch)
+
+    @pytest.mark.asyncio
+    async def test_it_finds_and_deletes_the_unreferenced_object(self, bucket: FakeS3Client) -> None:
+        self._store(bucket, REFERENCED, age_hours=48)
+        self._store(bucket, ORPHAN, age_hours=48)
+
+        with _with_referenced({REFERENCED}):
+            report = await sweeper.sweep(delete=True)
+
+        assert (report.on_disk, report.orphaned, report.deleted) == (2, 1, 1)
+        assert list(bucket.objects) == [REFERENCED]
+
+    @pytest.mark.asyncio
+    async def test_an_object_inside_the_grace_window_is_left_alone(self, bucket: FakeS3Client) -> None:
+        """`LastModified` is what stands in for the mtime, and an upload in flight is exactly
+        as possible here as on the volume: the object is written before the row commits."""
+        self._store(bucket, ORPHAN)
+
+        with _with_referenced(set()):
+            report = await sweeper.sweep(delete=True)
+
+        assert (report.orphaned, report.within_grace, report.deleted) == (0, 1, 0)
+        assert list(bucket.objects) == [ORPHAN]
+
+    @pytest.mark.asyncio
+    async def test_the_wrong_database_guard_still_refuses(self, bucket: FakeS3Client) -> None:
+        """The refusal is the whole point of this script and is backend-independent, so it
+        has to be shown to fire here rather than assumed to."""
+        self._store(bucket, ORPHAN, age_hours=48)
+
+        with _with_referenced(set()):
+            report = await sweeper.sweep(delete=True)
+
+        assert report.refused is not None
+        assert list(bucket.objects) == [ORPHAN]
+
+    @pytest.mark.asyncio
+    async def test_the_temp_pass_does_nothing_and_reads_no_path(self, bucket: FakeS3Client) -> None:
+        """There is no temp prefix to age out on an object store, and `storage_root()` would
+        hand back a `Path` that has nothing to do with the bucket - so the pass skips itself
+        rather than reporting a count from a directory nobody writes to."""
+        self._store(bucket, f"{blob_store.TMP_DIRNAME}/.dead.part", age_hours=48)
+
+        with _with_referenced(set()):
+            report = await sweeper.sweep()
+
+        assert report.stale_temp_files == 0
+        assert report.on_disk == 0, "the temp prefix is not part of the store the sweeper diffs"

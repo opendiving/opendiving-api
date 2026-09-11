@@ -1,4 +1,5 @@
-"""Tests for `services/blob_store.py` - the files volume, and the only filesystem in here.
+"""Tests for `services/blob_store.py` on its default `local` backend - the files volume, and
+the only filesystem in here. `tests/test_blob_store_s3.py` is the same module's other half.
 
 Three things are worth pinning and the rest is plumbing:
 
@@ -141,17 +142,17 @@ class TestMissingFiles:
         assert await blob_store.has(KEY) is True
 
 
-class TestEnsureRootWritable:
+class TestEnsureStorageReady:
     def test_it_creates_the_root_and_its_temp_directory(self, tmp_path: Path, monkeypatch) -> None:
         root = tmp_path / "nested" / "files"
         monkeypatch.setattr(blob_store.settings, "FILE_STORAGE_DIR", str(root))
 
-        blob_store.ensure_root_writable()
+        blob_store.ensure_storage_ready()
 
         assert (root / blob_store.TMP_DIRNAME).is_dir()
 
     def test_it_leaves_no_probe_file_behind(self, volume: Path) -> None:
-        blob_store.ensure_root_writable()
+        blob_store.ensure_storage_ready()
         assert list((volume / blob_store.TMP_DIRNAME).iterdir()) == []
 
     def test_concurrent_workers_do_not_fail_each_other(self, volume: Path) -> None:
@@ -169,7 +170,7 @@ class TestEnsureRootWritable:
         def probe() -> None:
             try:
                 for _ in range(40):
-                    blob_store.ensure_root_writable()
+                    blob_store.ensure_storage_ready()
             except BaseException as exc:  # noqa: BLE001 - recorded, then re-raised by the assert
                 errors.append(exc)
 
@@ -192,7 +193,7 @@ class TestEnsureRootWritable:
             return real_write_bytes(self, data)
 
         monkeypatch.setattr(Path, "write_bytes", spy)
-        blob_store.ensure_root_writable()
+        blob_store.ensure_storage_ready()
 
         assert written == [f".writable-{os.getpid()}"]
 
@@ -207,7 +208,7 @@ class TestEnsureRootWritable:
 
         try:
             with pytest.raises(RuntimeError, match="FILE_STORAGE_DIR"):
-                blob_store.ensure_root_writable()
+                blob_store.ensure_storage_ready()
         finally:
             (tmp_path / "readonly").chmod(0o700)
 
@@ -230,6 +231,23 @@ class TestIterKeys:
     def test_an_absent_root_yields_nothing_rather_than_raising(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setattr(blob_store.settings, "FILE_STORAGE_DIR", str(tmp_path / "never-created"))
         assert list(blob_store.iter_keys()) == []
+
+    @pytest.mark.asyncio
+    async def test_has_any_key_answers_the_startup_check(self, volume: Path) -> None:
+        """`core/setup.py` asks this on every boot, and asks it rather than walking because
+        on the object store a walk is an unbounded listing."""
+        assert blob_store.has_any_key() is False
+        await blob_store.put(KEY, DATA)
+        assert blob_store.has_any_key() is True
+
+    @pytest.mark.asyncio
+    async def test_has_any_key_ignores_the_temp_directory(self, volume: Path) -> None:
+        """Otherwise a leftover `.part` makes a store that has lost its files look populated,
+        and the "your volume looks unmounted" warning never fires."""
+        (volume / blob_store.TMP_DIRNAME).mkdir(parents=True, exist_ok=True)
+        (volume / blob_store.TMP_DIRNAME / ".leftover.part").write_bytes(b"x")
+
+        assert blob_store.has_any_key() is False
 
     @pytest.mark.asyncio
     async def test_stat_mtime_reports_the_file_and_none_for_a_missing_one(self, volume: Path) -> None:

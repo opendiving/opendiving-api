@@ -75,10 +75,12 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
     # the file at import time - not a promise the same parser would still claim it - so
     # that a later backfill can select the subset it knows how to re-read.
     parser_key: Mapped[str] = mapped_column(String(32))
-    # Where the bytes are, on the files volume: `dive-files/{sha256[:2]}/{nonce}_{sha256}`,
-    # minted by `blob_store.new_key`. Opaque to everything but that module - a valid S3
-    # object key as much as a relative path. The nonce is per *write*, not the row's uuid:
-    # that is what stops a retired key ever being minted again.
+    # Where the bytes are, in whichever store `blob_store` is configured for:
+    # `dive-files/{sha256[:2]}/{nonce}_{sha256}`, minted by `blob_store.new_key`. Opaque to
+    # everything but that module, and spelled so that it is a valid S3 object key and a
+    # relative path at once - which is what lets an instance move between the two backends
+    # without rewriting a single row. The nonce is per *write*, not the row's uuid: that is
+    # what stops a retired key ever being minted again.
     #
     # The key is *data*, not a rule: a future kind (dive photos, species images) can pick a
     # different layout without moving anything already stored.
