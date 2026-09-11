@@ -57,7 +57,7 @@ AGENCY_OTHER_REQUIRED_MESSAGE = "agency_other is required when agency is 'other'
 AGENCY_OTHER_NOT_ALLOWED_MESSAGE = "agency_other may only be set when agency is 'other'"
 
 
-def validate_agency_pairing(agency: CertificationAgency, agency_other: str | None) -> None:
+def validate_agency_pairing(agency: str, agency_other: str | None) -> None:
     """The one place the `agency`/`agency_other` pairing is decided.
 
     Public because four callers need the same rule and must not spell it four ways:
@@ -66,6 +66,13 @@ def validate_agency_pairing(agency: CertificationAgency, agency_other: str | Non
     values, which is the case neither schema can see. Only the reporting differs - a
     `ValueError` here is a per-field 422 from the schema, and the flat `{"detail": ...}`
     from a route.
+
+    `agency` is typed `str`, not `CertificationAgency`. The schemas pass the enum and the
+    two PATCH routes pass the stored column, which since the read widening is a plain string
+    that may be outside the vocabulary - and reconstructing the enum to satisfy this
+    signature is what made `PATCH /certification/{uuid}` a 500 on exactly the rows the
+    widening exists to make readable, including the PATCH that would have repaired one. The
+    rule below is a value comparison, which `StrEnum` answers correctly either way.
 
     Rejecting `agency_other` alongside a *named* agency (rather than quietly ignoring it)
     keeps the stored row unambiguous: a row with `agency="padi"` can never also carry a

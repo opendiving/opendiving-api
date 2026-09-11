@@ -19,7 +19,6 @@ from ...crud.crud_certifications import (
 )
 from ...crud.crud_courses import get_course_uuids_by_ids, resolve_course_id_for_user
 from ...schemas.certification import (
-    CertificationAgency,
     CertificationCreate,
     CertificationCreateInternal,
     CertificationExpiringResponse,
@@ -106,7 +105,7 @@ def _to_public_certification(
     )
 
 
-def _validate_agency_pairing(agency: CertificationAgency, agency_other: str | None) -> None:
+def _validate_agency_pairing(agency: str, agency_other: str | None) -> None:
     """Enforce the `agency`/`agency_other` pairing on a PATCH's merged result.
 
     `CertificationBase` already does this for whole-object writes, but a PATCH may carry
@@ -354,7 +353,7 @@ async def patch_certification(
     update_data = values.model_dump(exclude={"course_uuid"}, exclude_unset=True)
     if "agency" in update_data or "agency_other" in update_data:
         _validate_agency_pairing(
-            update_data.get("agency", CertificationAgency(db_certification.agency)),
+            update_data.get("agency", db_certification.agency),
             update_data.get("agency_other", db_certification.agency_other),
         )
 

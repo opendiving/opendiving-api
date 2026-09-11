@@ -213,6 +213,30 @@ class DiveMixtureRead(DiveMixtureBase):
     id: int
 
 
+def as_create(row: DiveMixtureRead) -> DiveMixtureCreate:
+    """A stored cylinder re-expressed as the shape a write takes.
+
+    Four callers copy cylinders from one dive's rows onto another - a merge, a recording
+    attach on either of two paths, and the logbook importer - and all four used to rebuild
+    `DiveMixtureCreate(**row.model_dump(...))` by hand. That stopped being safe when the read
+    shape widened: `role`/`usage` carry the stored string now (see *"A stored vocabulary is
+    read back as a string"* in DECISIONS.md) while this schema still types the enums, so a
+    value outside one raised `ValidationError` out of a merge, an attach or an import.
+
+    The unrepresentable value is dropped rather than carried, which is the same answer the
+    DiveJSON writer gives (`services/export/envelope.py::_sayable`) and for the same reason:
+    the field is optional, the row is not, and no write path could have produced the value in
+    the first place. One function rather than four rebuilds, so the next caller inherits the
+    rule instead of rediscovering it.
+    """
+    fields = row.model_dump(exclude={"id", "role", "usage"})
+    return DiveMixtureCreate(
+        **fields,
+        role=row.role if row.role in set(GasRole) else None,
+        usage=row.usage if row.usage in set(TankUsage) else None,
+    )
+
+
 class DiveMixtureUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

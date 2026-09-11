@@ -18,7 +18,7 @@ from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
 from ...crud.crud_courses import COURSE_SEARCH_COLUMNS, crud_courses, get_courses_page
-from ...schemas.certification import CertificationAgency, validate_agency_pairing
+from ...schemas.certification import validate_agency_pairing
 from ...schemas.course import CourseCreate, CourseCreateInternal, CourseRead, CourseReadInternal, CourseUpdate
 from ...services.cache_invalidation import (
     invalidate_certification_caches,
@@ -56,7 +56,7 @@ _course_cache: OwnedResourceCache[CourseReadInternal, CourseRead] = OwnedResourc
 )
 
 
-def _validate_merged_agency_pairing(agency: CertificationAgency, agency_other: str | None) -> None:
+def _validate_merged_agency_pairing(agency: str, agency_other: str | None) -> None:
     """Enforce the `agency`/`agency_other` pairing on a PATCH's merged result.
 
     `CourseBase` already does this for whole-object writes, but a PATCH may carry either
@@ -263,7 +263,7 @@ async def patch_course(
     update_data = values.model_dump(exclude_unset=True)
     if "agency" in update_data or "agency_other" in update_data:
         _validate_merged_agency_pairing(
-            update_data.get("agency", CertificationAgency(db_course.agency)),
+            update_data.get("agency", db_course.agency),
             update_data.get("agency_other", db_course.agency_other),
         )
     if "start_date" in update_data or "end_date" in update_data:

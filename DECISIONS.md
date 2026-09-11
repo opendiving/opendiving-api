@@ -16733,8 +16733,19 @@ member and is not (`$defs/course` requires only uuid/name/agency; spec §6.17 ma
 readers must not assume `completed`), and classifying it by eye dropped the diver's whole course.
 `dive_mixture.role`/`usage` were missed a different way: `_mixture` rebuilds each cylinder as
 `DiveMixtureBase`, a *write* base that is still enum-typed, so a value the read shape carried
-through raised on the rebuild - the widening has to be repeated wherever a read shape is
-re-validated as a write one.
+through raised on the rebuild.
+
+**Wherever a read shape is re-validated as a write one, the widening has to be repeated**, and the
+export was not the only place doing it: a dive merge, a recording attach on either of two paths and
+the logbook importer each rebuilt `DiveMixtureCreate(**row.model_dump(...))` by hand. All four now
+go through one `as_create` (`schemas/dive_mixture.py`), so the next caller inherits the rule instead
+of rediscovering it. The same shape caught `validate_agency_pairing`, whose `agency` parameter was
+typed `CertificationAgency`: the two PATCH routes reconstructed the enum from the stored column to
+satisfy it, which turned `PATCH /certification/{uuid}` and `PATCH /course/{uuid}` into a 500 on
+exactly the rows the widening makes readable - and, because the reconstruction sat in a `dict.get()`
+default and so was evaluated eagerly, on the PATCH that supplied a *valid* agency to repair one. The
+parameter is `str` now; the rule underneath it was always a value comparison, which `StrEnum`
+answers correctly either way.
 
 **An omitted record is a record nothing may reference.** DiveJSON checks referential closure, so
 dropping a course or a schedule while something still names it produces a document the validator

@@ -199,6 +199,22 @@ class TestPatchAgencyPairing:
         with pytest.raises(UnprocessableEntityException):
             _validate_agency_pairing(CertificationAgency.PADI, "FFESSM")
 
+    def test_a_stored_agency_outside_the_vocabulary_does_not_five_hundred(self) -> None:
+        """The merged check receives the *stored* column, which since the read widening is a
+        plain string that may be outside the enum (DECISIONS.md, *"A stored vocabulary is read
+        back as a string"*). Reconstructing `CertificationAgency(...)` to call this made
+        `PATCH /certification/{uuid}` a 500 on exactly those rows - and, because the
+        reconstruction sat in a `dict.get()` default, on the PATCH that would have repaired
+        one too.
+        """
+        _validate_agency_pairing("frobnicator", None)
+
+    def test_such_a_row_still_refuses_a_stray_agency_other(self) -> None:
+        """The rule is unchanged by the widening: anything that is not `other` may not carry
+        a free-text agency name."""
+        with pytest.raises(UnprocessableEntityException):
+            _validate_agency_pairing("frobnicator", "FFESSM")
+
     def test_valid_merges_pass(self) -> None:
         _validate_agency_pairing(CertificationAgency.OTHER, "FFESSM")
         _validate_agency_pairing(CertificationAgency.PADI, None)
