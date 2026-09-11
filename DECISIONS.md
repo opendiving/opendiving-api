@@ -16815,3 +16815,58 @@ because a restart re-runs an applied revision (it does not; `apply_migrations` i
 subsequent boot), but because one that fails partway rolls back without advancing `alembic_version`
 and starts again from the top, which is the case the collision arm exists to keep this revision out
 of.
+
+## The WoRMS credit became a link, and the cache prefix had to move with it
+
+`_WORMS_ATTRIBUTION` (`services/species_service.py`) was
+`World Register of Marine Species (marinespecies.org)`, and is now
+`[World Register of Marine Species](https://www.marinespecies.org) (CC BY)`.
+
+The old string named the origin and printed a domain. *"The attribution string is a wire format, so
+its shape is part of the API contract"* above states what a credit owes in three parts — name the
+origin, name the licence, and offer a way to *reach* the licence text — and the old one discharged
+one and a half of them: no licence at all, and a domain a reader has to retype. WoRMS puts the terms
+on that site, and its text content is CC BY, so both missing halves are on the other end of the link
+this now carries.
+
+**It is written already linked rather than folded on the way out**, exactly as the geocoder's
+`_DEFAULT_ATTRIBUTION` and `_MARINE_ATTRIBUTION` are, and for the same reason: those two are *ours*,
+and folding exists for a string a provider wrote. WoRMS sends no licence field for any of this to be
+derived from — the credit is a statement this project makes about where the taxonomy came from, so
+there is nothing to transform.
+
+**The trailing `(CC BY)` sits outside the link deliberately.** The label is the register's name,
+which is what a reader should click; the licence is a fact about the data rather than a destination.
+That is only safe because `parseAttribution` on the client splits a credit into runs and links
+instead of matching one whole string, so `[…](…) (CC BY)` renders as a link followed by a plain run
+— links and plain runs interleaved, which is what the basemap credit has been shipping all along. A
+parser anchored on the whole string would have shown a diver the literal brackets, which is the
+exact regression the wire-format section describes.
+
+**The ordering constraint that section states was already satisfied**, which is why this could be an
+API-side change on its own. It runs client-then-API in only one direction: the client must learn to
+parse the shape *before* the API emits it, because the parser degrades and the renderer does not. It
+had — the species picker routes its credits through `Attribution` today, the component built when
+the geocoder's credit became a link — so there was no window in which a diver saw the brackets.
+
+**`_CACHE_VERSION` went `v6` → `v7`, and that is the step this change could most easily have shipped
+without.** A cached search answer is the *normalized* result list, `attribution` included, held for
+a month. Without a new prefix every query already in Redis would have gone on serving the bare-text
+credit well into the next month, on an instance whose code says otherwise — and nothing fails when
+the bump is skipped, locally or in CI, because the client renders plain text perfectly happily. Same
+trap as the geocoder's `v2` → `v3`, recorded there and hit again here, which is probably the
+strongest argument that it is a trap rather than an oversight: **any edit to a string the normalizer
+writes into a cached row is a cache-version change.**
+
+`README.md` gained WoRMS's full citation template at the same time, because the webservice is free
+to use *with citation* and the citation appeared nowhere. The template carries an `Accessed <date>`
+element, which a README cannot keep current — so the date is the day the line was written and the
+sentence beside it says what actually matters: this app queries the register live rather than
+holding a snapshot, so an instance holds whatever WoRMS answered on the days its divers went
+looking. That is not decoration. *Why the catalog cannot be bulk-imported* above is the whole reason
+the on-demand catalog exists, and "we do not hold a copy" is the sentence that makes the stale
+`Accessed` date harmless rather than a claim about data nobody refreshed.
+
+Pinned by `TestTheWormsCreditIsALink` in `tests/test_species.py`: the literal's shape, the licence
+outside the link, the 255-character field it has to fit, the constant reaching a real search result,
+and the cache prefix.

@@ -172,7 +172,13 @@ _MISS_TTL_SECONDS = 60 * 60
 # Bumped whenever the cached shape or the way it is composed changes. What is cached is the
 # *normalized, merged* remote list rather than raw provider payloads, so a change to the
 # normalizer has to invalidate the old entries - a new prefix does that without a flush.
-_CACHE_VERSION = "v6"
+#
+# `v7` is the one that is easiest to forget, and it is here for the reason the geocoder's
+# `v2` -> `v3` was: a cached entry carries the `attribution` string the normalizer wrote, for
+# a month. Changing `_WORMS_ATTRIBUTION` without this prefix would leave every query already
+# in the cache serving the old bare-text credit well into next month, at a client that now
+# renders the linked form - and nothing fails, locally or in CI, when the bump is skipped.
+_CACHE_VERSION = "v7"
 
 # Wikidata's "WoRMS AphiaID" property. The single hinge the whole two-source design turns
 # on: without a shared key there would be nothing to merge two registers *on*.
@@ -258,7 +264,20 @@ _WIKIDATA_RANK_BY_QID = {
 # WoRMS, whatever else enriched it. Constants rather than a column - the string is a
 # property of the source, not of the row, and storing it would mean a migration to correct
 # a typo.
-_WORMS_ATTRIBUTION = "World Register of Marine Species (marinespecies.org)"
+#
+# The WoRMS credit is written in the `[label](href)` shape the clients parse, for the reason
+# *"The attribution string is a wire format"* in `DECISIONS.md` gives: naming the source is
+# half of what a credit owes, and offering a way to *reach* it is the other half - a printed
+# domain is not a link, and WoRMS's own terms put the licence text on that site. Ours rather
+# than a provider's, so it is written already linked instead of being folded on the way out,
+# exactly as the geocoder's two built-in credits are. The licence is CC BY, which is what the
+# text content of the register travels under.
+#
+# Two properties the shape depends on, both asserted in `tests/test_species.py`: the trailing
+# `(CC BY)` is a plain run *after* the link, which the client's parser handles because it
+# splits a string into runs and links rather than matching one whole; and the result fits
+# `SpeciesSearchResult.attribution`'s 255 characters.
+_WORMS_ATTRIBUTION = "[World Register of Marine Species](https://www.marinespecies.org) (CC BY)"
 _WIKIDATA_ATTRIBUTION = "Wikidata (CC0)"
 
 # Mirror the bounds on `schemas.species` and the column widths behind them. Applied by

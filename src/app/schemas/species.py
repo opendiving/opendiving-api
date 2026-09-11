@@ -147,9 +147,13 @@ class SpeciesSearchResult(BaseModel):
     # Carried per-result rather than in an envelope, for the reason `GeocodeResult` does it:
     # attribution is a licence condition of the data itself, so it travels with the row it
     # describes. A wire format, not display copy - the clients dedupe these strings and
-    # render them as one credit line. See DECISIONS.md.
+    # render them as one credit line, reading `[label](href)` as a link. See DECISIONS.md.
     attribution: Annotated[
-        str, Field(max_length=255, examples=["World Register of Marine Species (marinespecies.org)"])
+        str,
+        Field(
+            max_length=255,
+            examples=["[World Register of Marine Species](https://www.marinespecies.org) (CC BY)"],
+        ),
     ]
 
 
