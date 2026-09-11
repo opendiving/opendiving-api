@@ -281,7 +281,7 @@ class CertificationExpiringItem(BaseModel):
     """
 
     uuid: uuid_pkg.UUID
-    agency: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+    agency: StoredVocabulary
     agency_other: str | None = None
     name: str
     expires_on: date

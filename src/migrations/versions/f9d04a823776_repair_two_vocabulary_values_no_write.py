@@ -40,9 +40,14 @@ in it.
 is unique over (item, kind, lower(label)), so renaming an `'inspection'` schedule onto an
 item that already has a `'visual_inspection'` one with the same label would abort the
 upgrade - inside the API's startup `alembic upgrade head`, on a container that then never
-comes up. Such a row is left as it is, which is safe because it is no longer a 500: the
-read schemas carry an unrecognized value through. The read change is what lets this one be
-conservative.
+comes up. Such a row is left as it is.
+
+That is safe only because every reader of the column tolerates it: the read schemas carry
+an unrecognized value through, and the three export writers either carry it (CSV), map it
+to their catch-all (UDDF) or omit the record (DiveJSON, whose schema closes the
+vocabulary). A skipping repair is one whose leftovers something has to be able to read -
+see *"A stored vocabulary is read back as a string"* in DECISIONS.md, where that is
+written down as the rule it is.
 
 `downgrade()` is a no-op. Re-introducing `'inspection'` would restore the defect, the
 cleared `'soda'` is not recoverable (nothing records what it was), and a database stepped

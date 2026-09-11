@@ -79,7 +79,7 @@ class GearItemInfo(PublicUUIDSchema):
     # `StoredVocabulary`, not `GearType`: this shape is embedded in every dive and gear
     # set, so an unrecognized stored `type` would fail those whole responses. See
     # *"A stored vocabulary is read back as a string"* in DECISIONS.md.
-    type: StoredVocabulary | None = None  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+    type: StoredVocabulary | None = None
     rented: bool = False
     is_archived: bool = False
 

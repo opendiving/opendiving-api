@@ -23,6 +23,7 @@ import json
 import uuid as uuid_pkg
 from collections.abc import AsyncIterator
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
 from fastapi.encoders import jsonable_encoder
@@ -33,6 +34,7 @@ from ...core.utils.datetime_offset import combine_start_time
 from ...models.dive import Dive
 from ...schemas.certification import CertificationAgency, CertificationSide
 from ...schemas.course import CourseStatus
+from ...schemas.dive import WaterType
 from ...schemas.dive_mixture import DiveMixtureBase, DiveMixtureRead
 from ...schemas.export import (
     DIVEJSON_FORMAT,
@@ -57,6 +59,8 @@ from ...schemas.export import (
     ExportTrip,
     ExportTripLocation,
 )
+from ...schemas.gear_item import GearType
+from ...schemas.gear_service import ServiceKind
 from ...schemas.trip import TripLocationRead
 from ..dive_profiles import LoadedProfile, load_profile, to_read_schema
 from .loader import ExportBundle, ExportFileRow, ExportRecordingRow
@@ -77,6 +81,40 @@ def _encode(value: Any) -> bytes:
     for no reader's benefit.
     """
     return json.dumps(jsonable_encoder(value, exclude_none=True), ensure_ascii=False).encode("utf-8")
+
+
+def _speakable(value: str | None, vocabulary: type[StrEnum]) -> bool:
+    """Whether a stored value can be written into a DiveJSON document at all.
+
+    Unlike the read schemas, the export shapes in `schemas/export.py` cannot widen: their
+    enums are the format's own, on objects the schema closes
+    (`additionalProperties: false`), so a value outside one would make the document
+    invalid - which is the one thing a writer must not produce. But raising is not the
+    alternative: these columns carry no DB `CHECK` on purpose and revision `f9d04a823776`
+    deliberately leaves one unrepaired value behind, so a stored value outside a vocabulary
+    is data the writer has to have an answer for. See *"A stored vocabulary is read back as
+    a string"* in DECISIONS.md.
+
+    The answer is the format's own, split by whether the member is REQUIRED:
+
+    - REQUIRED (`gear_service_schedule.type`, `course.agency`/`status`,
+      `certification.agency`) - the record is uninterpretable and is omitted, which is the
+      writer's side of the rule the reader already follows (spec §5.6, and
+      `logbook_import/planner.py::_agency`, which skips for that reason).
+    - OPTIONAL (`gear_item.type`, `dive.water_type`) - `_sayable` below drops the *field*
+      and keeps the record. A diver's cylinder must not vanish from their export over how
+      its category is spelt.
+
+    Nothing is lost from an archive either way: the CSVs carry every row with its stored
+    value, having no vocabulary to keep.
+    """
+    return value in set(vocabulary)
+
+
+def _sayable[T: StrEnum](value: str | None, vocabulary: type[T]) -> T | None:
+    """An OPTIONAL member's value, or `None` when the format has no word for it - see
+    `_speakable` for why that is a different answer from skipping the record."""
+    return vocabulary(value) if value is not None and _speakable(value, vocabulary) else None
 
 
 def _text(value: str | None) -> str | None:
@@ -248,7 +286,7 @@ def _dive(
         bottom_temperature=dive.bottom_temperature,
         visibility=dive.visibility,
         weight=dive.weight,
-        water_type=dive.water_type,
+        water_type=_sayable(dive.water_type, WaterType),
         altitude=dive.altitude,
         cns_start=dive.cns_start,
         cns_end=dive.cns_end,
@@ -291,6 +329,9 @@ def _certifications(bundle: ExportBundle, paths: ArchivePaths | None) -> list[Ex
             # Same race as a dive's export - see `_dive`.
             if (digest := bundle.cert_file_sha256.get((certification.id, info.side.value))) is not None
         }
+        # REQUIRED, and the certification carries nothing that survives without it.
+        if not _speakable(certification.agency, CertificationAgency):
+            continue
         course = bundle.course_for(certification)
         exported.append(
             ExportCertification(
@@ -354,6 +395,10 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     created_at=course.created_at,
                 )
                 for course in bundle.courses
+                # Both are REQUIRED members of vocabularies the format freezes, so a course
+                # outside either is uninterpretable rather than partly writable - see
+                # `_speakable`.
+                if _speakable(course.agency, CertificationAgency) and _speakable(course.status, CourseStatus)
             ],
         ),
         (
@@ -392,7 +437,7 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     uuid=item.uuid,
                     name=item.name,
                     brand=item.brand,
-                    type=item.type,
+                    type=_sayable(item.type, GearType),
                     notes=_text(item.notes),
                     rented=item.rented,
                     archived=item.is_archived,
@@ -443,6 +488,7 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                 # `ExportBundle.gear_for`: a miss here can only be hand-edited data, and a
                 # 500 on the export is the worst answer to a row nobody can see.
                 if (item := bundle.gear_item_by_id.get(schedule.gear_item_id))
+                and _speakable(schedule.kind, ServiceKind)
             ],
         ),
         (
@@ -465,7 +511,7 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     created_at=record.created_at,
                 )
                 for record in bundle.service_records
-                if (item := bundle.gear_item_by_id.get(record.gear_item_id))
+                if (item := bundle.gear_item_by_id.get(record.gear_item_id)) and _speakable(record.kind, ServiceKind)
             ],
         ),
         ("certifications", _certifications(bundle, paths)),

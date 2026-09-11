@@ -26,10 +26,18 @@ DATE_RANGE_MESSAGE = "end_date must be on or after start_date"
 #
 # Several read shapes inherit from a write base (`GearItemRead` from `GearItemBase`, and
 # so on) and override its field with this, which mypy reads as a Liskov violation - an
-# attribute widened in a subclass. Hence the `type: ignore[assignment]` at each of those
-# declarations. Nothing in `src/` or `tests/` is annotated to take one of those bases, so
-# the substitution mypy is guarding against has nowhere to happen; splitting every base in
-# two to say so would duplicate twenty fields on `DiveBase` alone.
+# attribute widened in a subclass. Hence the `type: ignore[assignment]` on exactly those
+# declarations, and only those: a read shape that inherits from `PublicUUIDSchema` or
+# `BaseModel` overrides nothing and needs none.
+#
+# Two annotations do name a write base - `ExportDive.cylinders` is `list[DiveMixtureBase]`
+# and `tests/test_dive_mixture_absence.py` parametrizes a `type[DiveMixtureBase]` with
+# `DiveMixtureRead` - so the substitution is not hypothetical, and the ignores are a
+# judgement rather than a formality. Neither reaches a widened field with a widened value:
+# the export rebuilds its cylinders through `_mixture()`, which re-validates against
+# `DiveMixtureBase` and so still refuses a value outside the enum, and the test only ever
+# passes the class object around. Splitting every base in two to say so statically would
+# duplicate twenty fields on `DiveBase` alone.
 StoredVocabulary = str
 
 

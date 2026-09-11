@@ -16665,9 +16665,19 @@ response model is to fail the entire response.
 So the read shapes carry `StoredVocabulary` (`core/schemas.py`), an alias for `str`, and the enums
 stay on the create/update schemas where they are a promise the server actually keeps. Applied to
 every stored vocabulary rather than to `ServiceKind` alone, because the reasoning does not
-distinguish them: `gear_item.type`, `dive.water_type`, `dive_mixture.role`/`usage`,
-`course.agency`/`status`, `certification.agency`, `certification_file.side`. `GearItemInfo` and
-`DiveMixtureRead` matter as much as the gear list - both are embedded in every dive.
+distinguish them - `gear_item.type`, `dive.water_type`, `dive_mixture.role`/`usage`,
+`course.agency`/`status`, `certification.agency`, `user.units` and `user.dive_form_hidden_fields`.
+Derive that list rather than trusting this sentence: it was written a pair short, and `user.units`
+is the one a sweep of the resource schemas misses, because `get_current_user` validates the whole
+row through `UserRead` on **every authenticated request**. `GearItemInfo` and `DiveMixtureRead`
+matter as much as the gear list - both are embedded in every dive.
+
+`certification_file.side` is the one deliberate exception, and it is exempt on a property rather
+than by being overlooked: `side` is *structural*, not descriptive. It selects which of two slots a
+card image occupies, and the export uses it as a dict key, a filename stem and the blob lookup's
+argument - a wrong value there is wrong regardless of what Pydantic says about it. It is also the
+only one in the set no client ever supplies; the server writes it from a path parameter FastAPI has
+already validated against the enum.
 
 The codebase had already taken this line three times without the read schemas following:
 `services.gear_service.service_kind_label` falls back for the digest email ("a database that has
@@ -16700,13 +16710,35 @@ was stored, which is now what the document says.
 
 ### Where the enum stays
 
-`schemas/export.py` keeps it. `ExportGearServiceSchedule.type` is DiveJSON's own enum on an object
-the format closes, so a value outside it cannot be written into a document that claims to be
-DiveJSON - failing is correct there, and after the migration below no database has a row that trips
-it. The CSV export is the opposite case and was changed: `services/export/tabular.py` built its cell
-as `ServiceKind(schedule.kind).value`, a round-trip through the enum that changed no output and only
-raised `ValueError` on a row outside it, taking the whole archive down. A CSV column has no
-vocabulary to keep, so it carries the stored string.
+`schemas/export.py` keeps it, and is the only place that does. Those enums are DiveJSON's own, on
+objects the format closes (`additionalProperties: false`), so widening one would let an export emit
+a document that is not DiveJSON - the one thing a writer must not do. **But it must not 500
+either**, and "the migration repairs every such row" is not an argument available to it: the
+migration below deliberately leaves a colliding row unrepaired, so a database can hold one
+afterwards. Each writer therefore needs an answer, and the three give different ones because they
+are bound differently.
+
+**The DiveJSON envelope takes the format's own answer, split on whether the member is REQUIRED**
+(`_speakable`/`_sayable` in `services/export/envelope.py`). A REQUIRED member outside the vocabulary
+\- `gear_service_schedule.type`, `gear_service_record.type`, `course.agency`/`status`,
+`certification.agency` - makes the record uninterpretable, and the record is omitted: the writer's
+side of the rule the reader already follows (spec §5.6, and `logbook_import/planner.py::_agency`,
+which skips for that reason). An OPTIONAL one - `gear_item.type`, `dive.water_type` - costs only the
+*field*, because a diver's cylinder must not vanish from their export over how its category is
+spelt. Both were found by writing the test rather than by reading the code: the first draft guarded
+the two gear-service arms alone, and `ExportGearItem.type` raised on the very next line.
+
+**The CSV and UDDF writers had no vocabulary to keep and were changed rather than guarded.**
+`services/export/tabular.py` built its cell as `ServiceKind(schedule.kind).value` - a round-trip
+that changed no output and only raised `ValueError` on a row outside the enum, taking the whole
+archive down - and now carries the stored string. `services/export/uddf.py` did the same with
+`GearType(item.type)` to pick an element, and now goes through `_gear_type`, which falls back to the
+`<variouspieces>` catch-all `OTHER` already maps to: the gear still appears in the document, named
+and branded, under the element that means "something else".
+
+Nothing is lost from an archive by any of it. The CSVs carry every row with its stored value, so
+what DiveJSON omits is a re-encoding rather than a deletion - which is the property that makes
+omitting the right call there instead of inventing a member.
 
 ### The migration names two literals, and is not a vocabulary sweep
 
@@ -16723,9 +16755,14 @@ schema. The two literals are known fixture artifacts with known histories; nothi
 The schedule arm skips a row whose rename would collide with
 `ux_gear_service_schedule_item_kind_label` (an item that already has a `visual_inspection` schedule
 under the same label). A migration that aborts does so inside the API's startup
-`alembic upgrade head`, leaving a container that never comes up - and the skip is only safe because
-of the read change above, which is what makes a leftover value harmless rather than a 500. That is
-the dependency between the two halves, and it runs in that direction.
+`alembic upgrade head`, leaving a container that never comes up.
+
+The skip is safe only because *every* reader of that column tolerates the leftover value - which is
+the read change above, and, for the three export writers, the paragraph before this one. That
+dependency runs in one direction and is worth stating as a rule: **a repair allowed to skip is a
+repair whose leftovers something has to be able to read.** The first draft of this change skipped
+without the DiveJSON writer having been widened or guarded, which left the collision case exporting
+a 500 for good, and it was code review that noticed.
 
 **No self-hoster has either value**, and the revision is a no-op everywhere except a developer's own
 database from before #136. It ships as a revision rather than as a `psql` line in `CONTRIBUTING.md`
@@ -16733,7 +16770,9 @@ because a revision is the only repair mechanism a database has; the local altern
 `docker compose down -v`, which costs everything else in it.
 
 Pinned by `TestAnUnrecognizedKindDoesNotFiveHundred` in `tests/test_gear_service.py` (the read
-halves, including that a sibling row survives and that the write schemas still answer 422) and by
+halves, including that a sibling row survives and that the write schemas still answer 422), by
+`TestAnUnrecognizedVocabularyValueDoesNotFiveHundredTheExport` in `tests/test_export_json.py` (the
+three writers: the DiveJSON omission, the UDDF catch-all and the CSV's stored string), and by
 `tests/test_vocabulary_repair.py`, which runs the revision's own statements against Postgres for the
 collision skip, the differently-labelled sibling it must *not* swallow, and idempotence across the
 restarts that re-run it.

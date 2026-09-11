@@ -94,7 +94,7 @@ class GearServiceScheduleInfo(PublicUUIDSchema):
     # This is the one embedded in `GearItemRead`, so an unrecognized stored `kind` used to
     # fail the whole gear list rather than the one schedule carrying it. See
     # *"A stored vocabulary is read back as a string"* in DECISIONS.md.
-    kind: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+    kind: StoredVocabulary
     label: str | None = None
     interval_months: int | None = None
     interval_dives: int | None = None
@@ -314,7 +314,7 @@ class GearServiceDueItem(BaseModel):
     """
 
     schedule_uuid: uuid_pkg.UUID
-    kind: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+    kind: StoredVocabulary
     label: str | None = None
     last_service_on: date | None = None
     next_due_on: date | None = None

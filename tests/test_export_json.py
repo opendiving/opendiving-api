@@ -22,22 +22,30 @@ outside this database.
 """
 
 import json
+import uuid as uuid_pkg
+from datetime import date
 from typing import Any
 from unittest.mock import AsyncMock
 
 import divejson
 import pytest
 
+from src.app.models.gear_item import GearItem
+from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.schemas.export import DIVEJSON_FORMAT, DIVEJSON_VERSION, ExportCourse, ExportEnvelope
 from src.app.services.dive_profiles import MERGE_PARSER_KEY, LoadedProfile
 from src.app.services.export.envelope import write_divejson
 from src.app.services.export.paths import plan_archive_paths
+from src.app.services.export.tabular import CSV_WRITERS
+from src.app.services.export.uddf import write_uddf
 from src.app.services.logbook_import import parse_document
 from tests.helpers.export import (
+    CREATED_AT,
     EXPORTED_AT,
     PRIMARY_RECORDING_ID,
     TRIMIX_PROFILE,
     UUIDS,
+    _with_id,
     build_bundle,
     full_bundle,
     make_dive,
@@ -564,6 +572,100 @@ class TestAbsence:
             "recordings",
             "created_at",
         }
+
+
+class TestAnUnrecognizedVocabularyValueDoesNotFiveHundredTheExport:
+    """The three writers, and each answers differently because each is bound differently.
+
+    A stored `kind`/`type` outside its enum is legal data - the columns carry no DB `CHECK`
+    on purpose (DECISIONS.md, *"A stored vocabulary is read back as a string"*), and revision
+    `f9d04a823776` deliberately leaves one behind when repairing it would collide with
+    `ux_gear_service_schedule_item_kind_label`. So every reader of those columns has to have
+    an answer, and "raise" is not one: the export streams inside the request handler, so a
+    `ValueError` or a `ValidationError` there is a 500 on `GET /export/divejson`,
+    `GET /export/uddf` and `GET /export/archive` alike.
+    """
+
+    @staticmethod
+    def _bundle() -> Any:
+        """One legal schedule and one carrying the value the migration can strand, on gear
+        whose `type` is outside `GearType` the same way."""
+        item = _with_id(
+            GearItem(
+                user_id=1,
+                name="AL80",
+                brand="Luxfer",
+                type="frobnicator",
+                uuid=UUIDS["gear-other"],
+                created_at=CREATED_AT,
+            ),
+            1,
+        )
+
+        def schedule(row_id: int, kind: str) -> GearServiceSchedule:
+            return _with_id(
+                GearServiceSchedule(
+                    user_id=1,
+                    gear_item_id=1,
+                    kind=kind,
+                    starts_on=date(2026, 1, 1),
+                    interval_months=12,
+                    # Distinct labels: `ux_gear_service_schedule_item_kind_label` is over
+                    # (item, kind, label), so these two coexist on one item in a real
+                    # database - which is the collision case the migration declines to
+                    # rename, and so the state this whole class is about.
+                    label=kind,
+                    uuid=uuid_pkg.UUID(f"019f0000-0000-7000-8000-{900 + row_id:012d}"),
+                    created_at=CREATED_AT,
+                ),
+                row_id,
+            )
+
+        return build_bundle(
+            gear_items=[item],
+            schedules=[schedule(1, "service"), schedule(2, "inspection")],
+        )
+
+    @pytest.mark.asyncio
+    async def test_divejson_omits_the_record_it_cannot_express_and_keeps_the_rest(self, monkeypatch) -> None:
+        """`ExportGearServiceSchedule.type` is the format's own enum on an object the schema
+        closes, so the value cannot go into the document - but the *other* schedule can, and
+        a writer that raised would have taken it with it.
+        """
+        document = await _render(self._bundle(), monkeypatch)
+
+        assert [s["type"] for s in document["gear_service_schedules"]] == ["service"]
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_the_gear_item_itself_still_exports(self, monkeypatch) -> None:
+        """`gear_item.type` is optional in the format, so an unrepresentable one costs the
+        field, never the item - a diver's cylinder does not disappear from their export
+        because of how its category is spelt."""
+        document = await _render(self._bundle(), monkeypatch)
+
+        assert [g["name"] for g in document["gear"]] == ["AL80"]
+        assert "type" not in document["gear"][0]
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_uddf_files_it_under_the_catch_all_element(self) -> None:
+        """UDDF has no vocabulary of ours to keep: the value only picks which typed element
+        the piece is written into, and `<variouspieces>` is where `OTHER` already goes."""
+        xml = b"".join([chunk async for chunk in write_uddf(AsyncMock(), self._bundle(), exported_at=EXPORTED_AT)])
+
+        assert b"frobnicator" not in xml
+        assert b"<variouspieces" in xml
+        assert b"AL80" in xml
+
+    def test_the_csv_carries_the_stored_value_verbatim(self) -> None:
+        """A CSV column has no vocabulary to keep, so this is where the value survives - which
+        is what makes the DiveJSON omission above a re-encoding rather than a loss."""
+        writer = dict(CSV_WRITERS)["gear-service.csv"]
+        rows = "".join(writer(self._bundle()))
+
+        assert "inspection" in rows
+        assert "service" in rows
 
 
 class TestUnresolvableReferences:
