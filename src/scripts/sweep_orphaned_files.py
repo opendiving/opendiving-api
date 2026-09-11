@@ -1,4 +1,10 @@
-"""Report - and, if asked, delete - files on the volume that no row references.
+"""Report - and, if asked, delete - blobs the store holds that no row references.
+
+Backend-agnostic: it diffs `blob_store.iter_keys()` against the database, and that walk is
+a filesystem tree or a bucket listing depending on `FILE_STORAGE_BACKEND`. The one half
+that is not backend-agnostic is the stale-temp-file pass, which has nothing to sweep on an
+object store - a `PutObject` is atomic, so there are no `.part` leftovers to age out - and
+skips itself there.
 
 Run from the API container:
 
@@ -53,7 +59,7 @@ logger = logging.getLogger(__name__)
 _GRACE_SECONDS = 24 * 60 * 60
 
 # Above this share of the tree unreferenced, `--delete` refuses without `--force`. A real
-# orphan population is a handful of files; a quarter of the volume unreferenced means the
+# orphan population is a handful of files; a quarter of the store unreferenced means the
 # database being compared against is probably not the one these files belong to.
 _SUSPICIOUS_FRACTION = 0.25
 
@@ -82,8 +88,8 @@ async def _referenced_keys(session: AsyncSession) -> set[str]:
     """Every key any row names, across every column a blob key is stored in.
 
     **Every new kind of blob has to be added here, and forgetting is destructive rather than
-    merely blind.** `blob_store.iter_keys()` walks the whole volume, so a kind missing from
-    this set counts as on-disk and referenced by nothing - which classifies every file of it
+    merely blind.** `blob_store.iter_keys()` walks the whole store, so a kind missing from
+    this set counts as stored and referenced by nothing - which classifies every file of it
     past the grace window as an orphan for `--delete` to unlink. The suspicious-fraction
     refusal is the only brake, `--force` overrides it, and it does not engage at all below
     `_SUSPICIOUS_MIN_FILES`, so the smallest instances have no brake at all.
@@ -110,7 +116,7 @@ async def _referenced_keys(session: AsyncSession) -> set[str]:
 
 
 def _classify(referenced: set[str], *, now: float) -> tuple[list[str], int, int]:
-    """Split the tree into (orphans past the grace window, within grace, total on disk)."""
+    """Split what the store holds into (orphans past the grace window, within grace, total)."""
     orphans: list[str] = []
     within_grace = 0
     on_disk = 0
@@ -134,7 +140,17 @@ def _sweep_temp_dir(*, now: float, delete: bool) -> int:
 
     A `.part` file is only ever live for the moment between `os.write` and `os.replace`, so
     anything a day old is the remains of a process that died in between.
+
+    **The local backend's alone**, and the one place in this script that has to ask which
+    backend is configured. The object store has no temp prefix to sweep because it needs no
+    temp write: `PutObject` either lands whole or does not land, so the failure mode this
+    reclaims after cannot occur. It is also the only caller left that builds a `Path`
+    outside `blob_store.py`, which is why that rule has always been written with this
+    exemption in it.
     """
+    if not blob_store.is_local():
+        return 0
+
     tmp_dir = blob_store.storage_root() / blob_store.TMP_DIRNAME
     if not tmp_dir.is_dir():
         return 0
@@ -158,13 +174,13 @@ def _refusal(referenced: set[str], orphans: list[str], on_disk: int) -> str | No
     """Why `--delete` should not proceed, or `None` if it should. See the module docstring."""
     if on_disk and not referenced:
         return (
-            f"the database references no stored files at all while the volume holds {on_disk}. "
+            f"the database references no stored files at all while the store holds {on_disk}. "
             "That is what a wrong POSTGRES_* target or a half-finished restore looks like, not "
             "an orphan population."
         )
     if on_disk >= _SUSPICIOUS_MIN_FILES and len(orphans) / on_disk > _SUSPICIOUS_FRACTION:
         return (
-            f"{len(orphans)} of {on_disk} files on the volume are unreferenced "
+            f"{len(orphans)} of {on_disk} stored files are unreferenced "
             f"({len(orphans) / on_disk:.0%}), which is far more than the rare cases that produce "
             "orphans. Check that this is the right database before continuing."
         )
@@ -172,12 +188,15 @@ def _refusal(referenced: set[str], orphans: list[str], on_disk: int) -> str | No
 
 
 async def sweep(*, delete: bool = False, force: bool = False) -> SweepReport:
-    """Diff the volume against every `storage_key` column - see `_referenced_keys`, which is
+    """Diff the store against every `storage_key` column - see `_referenced_keys`, which is
     the list that has to grow with every new kind of blob."""
     async with local_session() as session:
         referenced = await _referenced_keys(session)
 
     now = time.time()
+    # Blocking, and deliberately not hopped to a thread: on the object store this is a
+    # paginated listing plus a `HeadObject` per unreferenced key, but this is a one-shot
+    # script whose event loop has nothing else on it to protect.
     orphans, within_grace, on_disk = _classify(referenced, now=now)
 
     refused = None if force else _refusal(referenced, orphans, on_disk)

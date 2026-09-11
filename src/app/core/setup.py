@@ -18,7 +18,7 @@ from ..middleware.client_cache_middleware import ClientCacheMiddleware
 from ..middleware.security_headers_middleware import SecurityHeadersMiddleware
 from ..models import *  # noqa: F403
 from ..services import blob_store
-from ..services.blob_store import ensure_root_writable
+from ..services.blob_store import ensure_storage_ready
 from .config import (
     AppSettings,
     ClientSideCacheSettings,
@@ -85,20 +85,21 @@ async def apply_migrations() -> None:
         await asyncio.to_thread(upgrade_to_head)
 
 
-def _volume_has_any_file() -> bool:
-    return next(blob_store.iter_keys(), None) is not None
-
-
 async def warn_if_files_volume_looks_empty() -> None:
-    """Shout if the database has file rows and the volume has no files.
+    """Shout if the database has file rows and the store has no blobs.
 
     The state this catches is a restore that brought the dump back and forgot the files
-    archive, or a compose file that lost its `files-data` mount - both of which otherwise
-    surface one 500 at a time, days later, as a diver tries to open a card.
+    archive, a compose file that lost its `files-data` mount, or a bucket switched under a
+    running instance - all of which otherwise surface one 500 at a time, days later, as a
+    diver tries to open a card.
 
     CRITICAL and keep serving, rather than a refusal: the documented restore order is
     database first, files second, so there is a legitimate window where this is true on
     purpose. Runs after the migrations because `storage_key` has to exist to be counted.
+
+    `blob_store.has_any_key` rather than a walk, because on the S3 backend this is a
+    network request made on every boot and a full listing would be an unbounded one. It
+    asks for a single key.
     """
     try:
         async with engine.begin() as conn:
@@ -113,13 +114,14 @@ async def warn_if_files_volume_looks_empty() -> None:
         logger.debug("Could not count stored file rows for the files-volume check", exc_info=True)
         return
 
-    if rows and not await asyncio.to_thread(_volume_has_any_file):
+    if rows and not await asyncio.to_thread(blob_store.has_any_key):
         logger.critical(
-            "The database has %d stored file row(s) but the files volume at %s is empty - it looks "
-            "unmounted or not yet restored, and file downloads will fail until it is. See "
+            "The database has %d stored file row(s) but %s is empty - it looks unmounted, not yet "
+            "restored, or not the store these rows were written to, and file downloads will fail "
+            "until it is. See "
             "https://github.com/opendiving/opendiving/blob/main/docs/backup-restore.md",
             rows,
-            settings.FILE_STORAGE_DIR,
+            blob_store.describe_location(),
         )
 
 
@@ -165,9 +167,9 @@ def lifespan_factory(
                 await create_redis_cache_pool()
 
             # Before the migrations, not after: the revision that moved the payloads out
-            # of `bytea` writes files itself, so an unwritable volume has to fail here
-            # rather than halfway through a data move.
-            await asyncio.to_thread(ensure_root_writable)
+            # of `bytea` writes files itself, so a store that cannot be written to has to
+            # fail here rather than halfway through a data move.
+            await asyncio.to_thread(ensure_storage_ready)
 
             if apply_migrations_on_start:
                 await apply_migrations()

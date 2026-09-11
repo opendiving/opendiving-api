@@ -18,7 +18,9 @@ import starlette.config
 
 from src.app.core.config import (
     PLACEHOLDER_SECRET_KEYS,
+    S3_REQUIRED_SETTINGS,
     EnvironmentOption,
+    FileStorageBackendOption,
     Settings,
     _installed_version,
     postgres_uri,
@@ -372,6 +374,70 @@ class TestRegistrationSettings:
         # a decision, and a template that restated the default would make it a no-op.
         assert '# REGISTRATION_MODE="open"' in template
         assert "# PROJECT_OPERATED=true" in template
+
+
+class TestTheObjectStoreBackendNeedsItsCredentials:
+    """`FILE_STORAGE_BACKEND=s3` with a variable missing is the configuration that starts
+    cleanly and then loses a diver's c-card, so it does not start.
+    """
+
+    _S3 = {
+        "FILE_STORAGE_BACKEND": FileStorageBackendOption.S3,
+        "S3_ENDPOINT_URL": "https://example.invalid",
+        "S3_BUCKET": "opendiving-files",
+        "S3_ACCESS_KEY_ID": "an-access-key",
+        "S3_SECRET_ACCESS_KEY": "a-secret",
+    }
+
+    def test_a_fully_configured_bucket_boots(self):
+        assert _settings(**self._S3).FILE_STORAGE_BACKEND is FileStorageBackendOption.S3
+
+    @pytest.mark.parametrize("missing", S3_REQUIRED_SETTINGS)
+    def test_any_one_of_the_four_missing_fails_startup_and_is_named(self, missing: str):
+        """Named, because the operator's next action is to go and set that one variable -
+        and because botocore's own failure for an unset endpoint mentions none of them."""
+        with pytest.raises(ValueError, match=missing):
+            _settings(**{**self._S3, missing: None})
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_a_blank_value_is_not_a_value(self, blank: str):
+        with pytest.raises(ValueError, match="S3_BUCKET"):
+            _settings(**{**self._S3, "S3_BUCKET": blank})
+
+    def test_the_error_says_how_to_get_back_to_a_working_instance(self):
+        with pytest.raises(ValueError, match="FILE_STORAGE_BACKEND=local"):
+            _settings(**{**self._S3, "S3_BUCKET": None})
+
+    def test_the_local_backend_never_looks_at_the_group(self):
+        """The property that keeps this validator off everyone's back, and the reason
+        `local` is the default: a cross-field check that fired on an untouched configuration
+        would take out `docker compose up` and pytest collection together."""
+        assert _settings().FILE_STORAGE_BACKEND is FileStorageBackendOption.LOCAL
+        assert _settings(S3_BUCKET=None).S3_ENDPOINT_URL is None
+
+    def test_an_unknown_backend_fails_at_import(self):
+        """`FILE_STORAGE_BACKEND=minio` reading as `local` would write a hosted instance's
+        uploads into a container layer, silently."""
+        with pytest.raises(ValueError):
+            _settings(FILE_STORAGE_BACKEND="minio")
+
+    def test_the_defaults_are_the_local_ones(self, tmp_path, monkeypatch):
+        for name in ("FILE_STORAGE_BACKEND", *S3_REQUIRED_SETTINGS, "S3_REGION", "S3_PREFIX"):
+            monkeypatch.delenv(name, raising=False)
+        module = _config_loaded_without_an_env_file(tmp_path, monkeypatch)
+
+        # `FILE_STORAGE_DIR` is deliberately absent from these assertions: `conftest.py` sets
+        # it in the environment before the app is importable at all, so no copy of this
+        # module can report the declared default.
+        assert module.settings.FILE_STORAGE_BACKEND is module.FileStorageBackendOption.LOCAL
+        assert module.settings.S3_REGION == "auto"
+        assert module.settings.S3_PREFIX is None
+
+    def test_the_group_is_in_the_template(self):
+        template = (Path(__file__).resolve().parents[1] / "src" / ".env.example").read_text()
+
+        for name in ("FILE_STORAGE_BACKEND", "FILE_STORAGE_DIR", "S3_REGION", "S3_PREFIX", *S3_REQUIRED_SETTINGS):
+            assert name in template, name
 
 
 class TestLogLevel:
