@@ -114,6 +114,7 @@ from ...services.dive_recordings import (
     is_same_recording,
     load_candidates,
     make_primary,
+    primary_recording_ids,
     resolve_recording,
 )
 from ...services.dive_stats import recalculate_dive_stats
@@ -1509,8 +1510,11 @@ async def erase_dive_recording(
     take it.
 
     Removing the primary recording promotes the next one, and the dive's oxygen-exposure
-    readings are re-derived from whatever becomes primary. 404 unless the caller owns the
-    dive, and 404 again when it has no such recording.
+    readings are re-derived from whatever becomes primary. Removing a **secondary** one
+    leaves them exactly as they are: they were never read off that recording, and rewriting
+    them from a primary this deletion did not touch is a loss rather than a repair - see
+    `refresh_tech_scalars`. 404 unless the caller owns the dive, and 404 again when it has no
+    such recording.
     """
     db_dive = await _get_owned_dive(db, uuid, current_user)
 
@@ -1519,8 +1523,11 @@ async def erase_dive_recording(
     except RecordingNotFoundError as exc:
         raise NotFoundException(str(exc)) from exc
 
+    # Asked before the delete, which renumbers the ordinals and takes the answer with it.
+    touched_primary = (await primary_recording_ids(db=db, dive_ids=[db_dive.id])).get(db_dive.id) == recording_id
+
     await delete_recording(db=db, recording_id=recording_id, dive_id=db_dive.id, commit=False)
-    await refresh_tech_scalars(db=db, dive_id=db_dive.id)
+    await refresh_tech_scalars(db=db, dive_id=db_dive.id, touched_primary=touched_primary)
     await db.commit()
 
     await invalidate_dive_caches(current_user["id"])
@@ -1555,7 +1562,8 @@ async def patch_dive_recording(
     except RecordingNotFoundError as exc:
         raise NotFoundException(str(exc)) from exc
 
-    await refresh_tech_scalars(db=db, dive_id=db_dive.id)
+    # A promotion is the one caller that always touched the primary: that is what it did.
+    await refresh_tech_scalars(db=db, dive_id=db_dive.id, touched_primary=True)
     await db.commit()
     await invalidate_dive_caches(current_user["id"])
 

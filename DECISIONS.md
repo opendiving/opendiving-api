@@ -16552,3 +16552,68 @@ out. A third sentinel added to `UNREPRODUCIBLE_PROVENANCES` without a spelling w
 publish "read off this recording's files" about samples no file can produce - a lie rather than an
 error - so `test_every_unreproducible_provenance_has_a_wire_value` asserts the mapping's keys *are*
 that set.
+
+## A deletion re-derives the dive's readings only where it touched the primary recording
+
+`refresh_tech_scalars` rewrites every field of `DiveTechScalars` **outright** from whatever sits at
+ordinal 0 - the CNS and OTU pairs, the surface pressure and the entry/exit coordinates - and three
+callers reached it: a file deleted, a recording deleted, a recording promoted. Only the third could
+answer for what it had just done. The other two ran it after deleting *anything*, on a dive that may
+hold several recordings, and the question the rewrite asks is about the primary.
+
+**On a multi-recording dive that is not a slow no-op, it is a loss**, and the sharper of the two
+shapes is not the obvious one:
+
+- The primary is a **file-less converted logbook import** - a recording holding samples and no
+  bytes, beside the document's figures on the dive row, which is exactly what
+  `services/logbook_import/writer.py` creates. `read_recording` returns an empty extraction, and
+  every field is written `None`. Deleting the second computer's export clears figures the document
+  supplied and nothing on this instance can re-derive.
+- The primary **has** files, and the dive carries figures those files do not yield. A diver who
+  imported a document and then attached the export it was converted from gets the fill, not the
+  outright write (*"A second file of one recording fills, and never overwrites"*), so the dive keeps
+  the document's `cns_end` over the file's own and an `otu_end` no parser here reads at all. The
+  rewrite replaces the first with the file's number and clears the second.
+
+Either way the recording the diver deleted had no bearing on any of it. `POST /dives/merge` already
+declined to call this for the same reason - see *"The dive's own `start_time` is not touched, and
+neither are its oxygen-exposure readings"* - so the hazard was written down in one place while two
+routes walked into it.
+
+**The fix is a required `touched_primary`, answered by the caller, and `False` makes the call a
+no-op.** It cannot be read inside the function: by the time it runs the delete has been issued and
+`renumber_ordinals` has closed the gap, so the row that would answer it is gone. `delete_dive_file`
+answers from the ordinal it already reads, captured before the branch that can delete the recording;
+`erase_dive_recording` asks `primary_recording_ids` before `delete_recording`; a promotion answers
+`True`, that being what it just did. Required rather than defaulted on `_rederive_recording`'s
+lesson about `fresh` and `joined` - a fourth caller has to answer it rather than inherit a guess.
+
+*Rejected:* **filling rather than clearing when the primary holds no files.** It reads like the
+stance `backfill_tech_fields` took, and it is not: that one stopped clearing because a *re-parse*
+yielding less is no evidence the reading was wrong, where this is a dive that has genuinely lost the
+file its readings came off. It would break the single-recording case on purpose - deleting the only
+file of the only recording leaves a dive claiming a CNS figure with nothing left that ever recorded
+it, which `test_the_last_file_takes_its_recording_and_the_dives_readings` has pinned since
+recordings landed.
+
+*Rejected:* **gating on the primary having files to read from**, which is the same idea one level
+down and fixes only the first of the two shapes above. The second one has a primary with files, and
+loses two numbers anyway.
+
+*Not changed:* **a promotion onto a file-less recording still clears.** Promoting is the diver
+saying which recording the dive's figures should come from, and the honest answer when they pick one
+with no files is that it has none - unlike a deletion, nothing here is guessing at their intent. It
+is the remaining case where the outright write can take a document's figures with it, and it takes
+them on request.
+
+`erase_dive_file`'s docstring had described the fixed behaviour all along - *"and so are the dive's
+CNS, OTU and surface-pressure readings if this was the primary recording"* - which was true of the
+branch where files remain (`_rederive_recording` returns before the scalars for `ordinal != 0`) and
+false of the branch where none do. The same sentence now covers both.
+
+Pinned by `TestDeletingASecondComputersFile` and `TestDeletingARecording` in
+`tests/test_dive_recordings_rows.py`, whose deletion tests were all single-recording before this: a
+file-less primary's two document figures survive a secondary's last file and survive
+`DELETE /dive/{uuid}/recording/{rid}`, a figure the primary's own file does not yield survives too,
+and - the half that keeps the guard honest - the primary's own last file still promotes the next
+recording and takes the dive's reading off it.

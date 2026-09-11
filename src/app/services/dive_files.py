@@ -1091,7 +1091,7 @@ async def _rederive_recording(
         await fill_dive_mixtures(db, dive_id=dive_id, parsed=extraction.mixtures)
 
 
-async def refresh_tech_scalars(db: AsyncSession, *, dive_id: int) -> None:
+async def refresh_tech_scalars(db: AsyncSession, *, dive_id: int, touched_primary: bool) -> None:
     """Rewrite a dive's tech scalars from its primary recording's files, outright.
 
     The repair after anything that changes *which* recording is primary or which files it
@@ -1102,7 +1102,24 @@ async def refresh_tech_scalars(db: AsyncSession, *, dive_id: int) -> None:
 
     A dive whose primary recording has no files - or which has no recordings at all - has its
     readings cleared, which is what "nothing here can re-derive them" means.
+
+    **`touched_primary` says the change reached the primary recording, and it is the caller's
+    answer rather than anything readable here.** By the time this runs the delete has been
+    issued and the ordinals renumbered, so the row that would answer it is gone. False makes
+    this a no-op, and that is the whole of the guard: an outright rewrite is only ever owed
+    where the primary's identity or its files just moved. Run against a dive whose primary was
+    untouched it is not a slow no-op but a loss - on a **file-less** primary, the shape a
+    converted logbook import creates, the extraction is empty and every field is written
+    `None`, clearing figures a document supplied that nothing on this instance can re-derive;
+    and on a primary that *has* files, clearing any field the document supplied and the files
+    do not yield. Either way the recording the diver actually deleted had no bearing on them.
+    `POST /dives/merge` skips this call outright for the same reason - see *"The dive's own
+    `start_time` is not touched, and neither are its oxygen-exposure readings"* in
+    `DECISIONS.md`. Required rather than defaulted, so a fourth caller has to answer it.
     """
+    if not touched_primary:
+        return
+
     # Never `release=True`: every caller reaches this after a delete or a promotion has been
     # issued, and rolling the transaction back to free the connection would discard them.
     primary = (await dive_recordings.primary_recording_ids(db, dive_ids=[dive_id])).get(dive_id)
@@ -1300,6 +1317,11 @@ async def delete_dive_file(db: AsyncSession, *, file_id: int, commit: bool = Tru
 
     The *mixtures* are pointedly not touched: those went through the form, the diver may have
     edited them since, and they are the dive's own record rather than the file's.
+
+    **The dive's readings are re-derived only where the file came off the primary recording.**
+    A secondary recording is a second computer's account of the same dive and the dive's
+    oxygen-exposure figures were never read off it, so emptying one has nothing to say about
+    them - see `refresh_tech_scalars` on what running it anyway costs.
     """
     row = (
         await db.execute(
@@ -1316,6 +1338,11 @@ async def delete_dive_file(db: AsyncSession, *, file_id: int, commit: bool = Tru
     ordinal = (
         await db.execute(select(DiveRecording.ordinal).where(DiveRecording.id == row.recording_id))
     ).scalar_one_or_none()
+    # Read before the branch below can delete the recording, which is the only moment the
+    # question is still answerable. `None` cannot happen - the file row named a live
+    # recording a statement ago - and is read as the primary so that a row that somehow
+    # vanished still gets the repair rather than silently skipping it.
+    touched_primary = (ordinal or 0) == 0
 
     if remaining:
         await _rederive_recording(
@@ -1337,7 +1364,7 @@ async def delete_dive_file(db: AsyncSession, *, file_id: int, commit: bool = Tru
             pass
         else:
             await dive_recordings.delete_recording(db, recording_id=row.recording_id, dive_id=row.dive_id, commit=False)
-        await refresh_tech_scalars(db, dive_id=row.dive_id)
+        await refresh_tech_scalars(db, dive_id=row.dive_id, touched_primary=touched_primary)
 
     if commit:
         await db.commit()
