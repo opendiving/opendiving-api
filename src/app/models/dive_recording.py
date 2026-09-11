@@ -41,6 +41,12 @@ class DiveRecording(Base, PublicUUIDMixin, TimestampMixin):
     Deletion is `services/dive_recordings.py`'s, because the FK's `ON DELETE CASCADE` never
     fires - dive deletion is application-level (`is_deleted`), so no `DELETE FROM dive` ever
     runs. The same trap `delete_files_for_dive` exists to work around.
+
+    **One row deletion is deliberately elsewhere**, and it is the exception that says what
+    `delete_recording` is for: `services/dive_merge.py` folds two records of one dive into
+    one recording and deletes the absorbed row directly, having first moved its files onto
+    the survivor. `delete_recording` would read those files' storage keys and unlink the
+    blobs after the commit, which is exactly wrong for bytes that just moved.
     """
 
     __tablename__ = "dive_recording"
@@ -48,8 +54,12 @@ class DiveRecording(Base, PublicUUIDMixin, TimestampMixin):
     id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
     dive_id: Mapped[int] = mapped_column(ForeignKey("dive.id", ondelete="CASCADE"), index=True)
     # Denormalized off `dive` - see the class docstring. Not a redundant copy that could
-    # drift: nothing moves a recording between dives, and the two writes that create one
-    # both take the owner from the dive they resolved.
+    # drift: the two writes that create one both take the owner from the dive they resolved,
+    # and the one write that moves a recording between dives (`services/dive_merge.py`) is
+    # within one account by construction, both dives having been resolved through
+    # `fetch_owned_or_raise` against the same caller. That is the invariant, and it is
+    # narrower than the one stated here until the merge landed: "nothing moves a recording
+    # between dives" was true then and is not now.
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"))
     # Position among this dive's recordings; 0 is primary. Unique with `dive_id`, so two
     # recordings can never claim the same slot even momentarily - which is what makes the
