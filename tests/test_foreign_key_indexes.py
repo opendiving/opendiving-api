@@ -173,9 +173,9 @@ class TestWhatCountsAsLeadingAnIndex:
         assert foreign_key_columns_without_a_leading_index(child.metadata) == []
 
     def test_a_leading_column_wrapped_twice_still_counts(self) -> None:
-        """`.desc().nullslast()` is two `UnaryExpression`s deep - the shape `course.py:88` and
-        `certification.py:88` use for their sort columns. A single-level unwrap reports no
-        leading column here and fails a table that is fine."""
+        """`.desc().nullslast()` is two `UnaryExpression`s deep - the shape `course.py` and
+        `certification.py` use for their sort columns. A single-level unwrap reports no leading
+        column here and fails a table that is fine."""
         child = self._metadata().tables["child"]
         Index("ix_child_parent_id_desc_nullslast", child.c.parent_id.desc().nullslast())
 
