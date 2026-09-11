@@ -88,8 +88,10 @@ else; what is here is the source, and the notes for working on it.
 ## Planned
 
 - **More formats in** — a reader is a contribution to the `divejson` package rather than a change
-  here, and this app reads whatever the release it pins registers. Suunto DM5 XML is next;
-  Shearwater Cloud exports after it.
+  here, and this app reads whatever the release it pins registers. Shearwater Cloud's whole-database
+  export is the one still outstanding, and it is not an adapter's worth of work: the sample data
+  sits in the computer's own binary log rather than in readable rows, so getting at it takes a
+  dive-computer parser. Shearwater Cloud's UDDF export of the same dives already imports.
 - **Public share links** — read-only dive/trip pages.
 - **Statistics endpoints** — records, per-year aggregates, site maps, a life list.
 
