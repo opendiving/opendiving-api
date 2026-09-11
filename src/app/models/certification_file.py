@@ -8,8 +8,9 @@ from ..core.db.models import PublicUUIDMixin, TimestampMixin
 class CertificationFile(Base, PublicUUIDMixin, TimestampMixin):
     """One stored image or PDF of a certification card - its front or its back.
 
-    The bytes live on the files volume, not in this table: the row carries a
-    `storage_key` and `services/blob_store.py` holds the file. Every read and write still
+    The bytes live in the blob store, not in this table: the row carries a `storage_key`
+    and `services/blob_store.py` holds the file, on a filesystem volume or in an
+    S3-compatible bucket depending on `FILE_STORAGE_BACKEND`. Every read and write still
     goes through `services/certification_files.py`, which is the module that knows a card
     has a file at all - see *"File payloads live on the files volume, not in Postgres"* in
     `DECISIONS.md` for why they left Postgres, and the superseded section it names for the
@@ -47,10 +48,11 @@ class CertificationFile(Base, PublicUUIDMixin, TimestampMixin):
     # megabytes), as an integrity check against the stored file, and as half of
     # `storage_key`.
     sha256: Mapped[str] = mapped_column(String(64))
-    # Where the bytes are, on the files volume:
+    # Where the bytes are, in whichever store `blob_store` is configured for:
     # `certification-files/{sha256[:2]}/{nonce}_{sha256}`, minted by `blob_store.new_key`.
-    # Opaque to everything but that module - a valid S3 object key as much as a relative
-    # path.
+    # Opaque to everything but that module, and deliberately spelled so that it is a valid
+    # S3 object key and a relative path at once - which is what lets an instance move
+    # between the two backends without rewriting a single row.
     #
     # **The nonce is per write, deliberately not this row's uuid.** This row survives
     # replacement (the upsert preserves its uuid), so a key derived from it would be keyed

@@ -416,6 +416,26 @@ before they pull, and a stream of releases whose notes are one PR title each tra
 story, until a fix somebody is waiting on lands, or until anything needs a pinnable reference:
 pre-launch that means "whenever useful", after launch expect every one to four weeks.
 
+**A merge to `main` is not a release, but it is a deploy.** Every one publishes `:edge` and
+`:sha-<12>` and then calls the project's own instance's deploy hooks with that build's digest, so
+the hosted instance runs `main` continuously — the ordinary meaning of "merged". Nothing a
+self-hoster pins moves: no `:latest`, no `X.Y.Z`, no `X.Y`, and no release. Two consequences worth
+knowing before you merge. **Migrations are fix-forward from here on**: `main` reaches a database
+holding real data within minutes, so a revision that turns out to be wrong is corrected by a
+follow-up revision, never by a rewrite of the one that shipped. And an `:edge` image reports the
+same `version` as every other `:edge` image, since the manifest only moves at step 1 below — which
+is why `/api/v1/health` also reports `commit`, baked into the image by the build. That field is what
+identifies a running build; `version` on its own no longer does.
+
+> **The deploy half needs a repository secret set once, by hand, and until it is, every merge
+> publishes and deploys nothing.** `RENDER_DEPLOY_HOOKS` holds this image's Render Deploy Hook URLs,
+> comma-separated — one per service, so `api` and `worker` are two — with newlines accepted as
+> separators too. Copy each from that service's *Settings → Deploy Hook* in the Render dashboard.
+> Unset, the `deploy` job prints a notice and exits **zero**, because the secret is absent on every
+> fork and a red X on an outside contributor's merge is how a check stops being read — so nothing
+> tells you it has not been done, which is why it is written here. A hook that is present and fails
+> *is* red, and re-running that job alone is the whole fix: the image is already published.
+
 Versions move in lockstep across all three repositories — this one,
 [opendiving-web](https://github.com/opendiving/opendiving-web) and the product repository: one
 product version, so `opendiving-api:0.4.0`, `opendiving-web:0.4.0` and release `v0.4.0` over there
@@ -477,17 +497,12 @@ Then, in the two code repos:
    that replaced the by-eye "is the web image there?" step this section used to carry, and the one
    no per-repo workflow can make. The steps are in that repository's `CONTRIBUTING.md`.
 
-The first release cut this way is `v0.2.0`. Both manifests already read `0.1.0`, and `v0.1.0` is
-spoken for: it is the clock-starter for
-[awesome-selfhosted](https://github.com/awesome-selfhosted/awesome-selfhosted-data)'s
-first-released-more-than-four-months-ago rule, not something anyone is meant to install. With no
-earlier *release* to generate notes against, that first draft enumerates the whole history — throw
-it away and recreate it with an explicit floor:
-
-```bash
-gh release delete v0.2.0 --yes
-gh release create v0.2.0 --draft --generate-notes --notes-start-tag v0.1.0
-```
+The first release cut this way is `v0.1.0`, which is what both manifests already read. No `v` tag
+exists in any of the three repositories, so nothing is spoken for and nothing is being skipped over.
+It has one quirk, and only the first one does: with no earlier release to generate notes against,
+the draft the workflow opens enumerates the entire history, and there is no floor to hand
+`--generate-notes` instead. Trim it by hand. Every release after it has a predecessor and needs none
+of this.
 
 **A published version is never repointed.** A bad release gets a successor, not a rewrite.
 Immutability starts at *publish*, so a tag whose build failed before pushing anything published
@@ -502,24 +517,32 @@ the vulnerable digest. What tells you there is a CVE to rebuild for is the next 
 The rebuild above is the *response*. Two things are wired up to raise the alarm in the first place,
 and they watch different objects — neither substitutes for the other.
 
-**The published images.** `.github/workflows/vulnerability-scan.yml` scans the newest release every
-morning with Trivy — its `X.Y.Z`, `X.Y`, bare major and `latest`, which are one image under four
-names, resolved to a digest so it is scanned once. It reports HIGH and CRITICAL findings in both
-halves of that image: the Debian packages that come from `python:3.14-slim-bookworm`, and the Python
-distributions `uv` installed. This is the job that closes the loop with the paragraph above, because
-the case it catches is a release that was clean the day it shipped and grew a CVE three weeks later,
-with no PR in flight and nobody looking.
+**The published images.** `.github/workflows/vulnerability-scan.yml` scans two things every morning
+with Trivy. `edge`, which is what the project's own instance is running; and the newest release —
+its `X.Y.Z`, `X.Y`, bare major and `latest`, which are one image under four names, resolved to a
+digest so it is scanned once. Both are in the set unconditionally, which is why `edge` is reached
+before the "nothing released yet" skip rather than after it: until the first tag is cut, `edge` is
+the only image that exists. It reports HIGH and CRITICAL findings in both halves of each image: the
+Debian packages that come from `python:3.14-slim-bookworm`, and the Python distributions `uv`
+installed. This is the job that closes the loop with the paragraph above, because the case it
+catches is a release that was clean the day it shipped and grew a CVE three weeks later, with no PR
+in flight and nobody looking.
 
 **The alert is a GitHub issue** labelled `image-cve`, and you are the one who acts on it. The body
-names the exact `v` tag to dispatch at and splits the findings by what actually fixes them, because
-the two are not the same remedy:
+splits the findings by what actually fixes them, because that differs by image as well as by
+package:
 
-- **OS package** — the rebuild above. One dispatch recomputes every alias the scan covers, which is
-  why the scan covers exactly those and no more.
-- **Python package** — *not* fixable by a rebuild at any tag. That version comes from the `uv.lock`
-  committed at the tag, and the rebuild checks that tag out and runs `uv sync --locked` against it,
-  so it reinstalls the identical version no matter how many bumps have since landed on `main`. Merge
-  the bump and **cut a new patch release** — the ordinary flow above, not the in-place rebuild.
+- **Anything on `edge`** — merge the bump. That is the whole remedy: the next build on `main`
+  republishes `edge` from the current base image and against the current `uv.lock`, and redeploys
+  it. No release is involved.
+- **OS package on a released alias** — the rebuild above, dispatched at the `v` tag the issue names.
+  One dispatch recomputes every release alias the scan covers, which is why the scan covers exactly
+  those and no more. It does not touch `edge`, which a merge has already dealt with.
+- **Python package on a released alias** — *not* fixable by a rebuild at any tag. That version comes
+  from the `uv.lock` committed at the tag, and the rebuild checks that tag out and runs
+  `uv sync --locked` against it, so it reinstalls the identical version no matter how many bumps
+  have since landed on `main`. Merge the bump and **cut a new patch release** — the ordinary flow
+  above, not the in-place rebuild.
 
 One issue, edited in place for as long as the finding persists, so a CVE that takes upstream a
 fortnight to patch does not generate a fortnight of notifications. The workflow closes it once a
@@ -538,11 +561,15 @@ vulnerability-driven one ignores the schedule and is titled `fix(deps):`, so it 
 section of the release notes rather than among the chores. The install bundle's own digests are
 renewed by the product repository's Renovate config, not by this one.
 
-> **Renovate has to be enabled once, by hand, and until it is that file does nothing.** Install the
-> [Renovate GitHub App](https://github.com/apps/renovate) on the `opendiving` org — it reads
-> `.github/renovate.json5` on its next run and needs no further setup — or run it self-hosted on a
-> schedule with a PAT. Nothing in this repository can do it, and nothing warns you it hasn't been
-> done, which is why it is written here.
+> **Renovate is running, and getting it there took a one-time step by hand that nothing in this
+> repository could have done.** The Mend-hosted
+> [Renovate GitHub App](https://github.com/apps/renovate) is installed on the `opendiving` org; it
+> reads `.github/renovate.json5` on its next run and needs no further setup, and the **Dependency
+> Dashboard** issue it keeps open here is where it reports — every update it is holding back, and
+> every one you have told it to ignore. The installation names its repositories one at a time rather
+> than covering the whole org, so a **repository added later has to be added to it**; nothing warns
+> you that a new repository's config file is being read by nobody, which is why this is written
+> down.
 
 One thing Renovate will not do on its own is move Python. `requires-python` in `pyproject.toml`,
 ruff's `target-version`, `.python-version` and the two `Dockerfile` base tags all have to move
@@ -556,10 +583,12 @@ issue: it tells you 3.15 exists and waits for a person.
   [SECURITY.md](SECURITY.md), whose supported-versions table is "the most recent release: yes;
   anything older: no — upgrade to the newest". A dispatch only ever repoints the aliases of the
   version it names, so scanning `0.2` would produce an alert with no supported move attached,
-  recurring forever. The four aliases that *are* scanned — `X.Y.Z`, `X.Y`, the bare major and
-  `latest` — are every form in which someone can be pinned to the supported release, which is why
-  SECURITY.md can promise that `docker compose pull` is the whole fix for a base-image CVE even with
-  a version pinned. If an old minor ever does have to be rebuilt, it is a dispatch at its own tag.
+  recurring forever. The four release aliases that *are* scanned — `X.Y.Z`, `X.Y`, the bare major
+  and `latest` — are every form in which someone can be pinned to the supported release, which is
+  why SECURITY.md can promise that `docker compose pull` is the whole fix for a base-image CVE even
+  with a version pinned. If an old minor ever does have to be rebuilt, it is a dispatch at its own
+  tag. `edge` is scanned alongside them and is not one of these forms: nobody is meant to be pinned
+  to it, and it exists in the set because the project's own instance runs it.
 - **The `linux/arm64` image**, on the assumption that it installs the same Debian packages as
   `linux/amd64`. If that ever stops holding, the scan step is where a `--platform` pass goes.
 - **Vulnerabilities with no fix published upstream.** They are counted in the issue but drive

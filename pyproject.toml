@@ -9,7 +9,10 @@ dependencies = [
     "uvicorn>=0.27.0",
     "uvloop>=0.19.0",
     "httptools>=0.6.1",
-    "uuid>=1.30",
+    # There is no `uuid` requirement, deliberately: the PyPI project of that name is a 2006
+    # backport of a module that has been in the standard library since 2.5. It was listed here
+    # and nothing ever imported it - `import uuid` resolves to the stdlib, which precedes
+    # site-packages on `sys.path`. `uuid6` is the real dependency; it supplies `uuid7()`.
     "uuid6>=2024.1.12",
     # 1.16 for the `path_separator` config option, which replaced `version_path_separator`
     # and is what silences the legacy-splitting warning on `prepend_sys_path`.
@@ -45,6 +48,13 @@ dependencies = [
     # support; 11.3.0's cp314 wheels were built against the beta and say so. The manylinux
     # wheels bundle libwebp, so the WebP output needs no system library in the image.
     "pillow>=12.0.0",
+    # The client behind `FILE_STORAGE_BACKEND=s3` (`services/blob_store.py`). A main
+    # dependency rather than an extra, even though most installs never select that backend:
+    # the shipped image is built with `uv sync --locked` and no extras, so an s3-only extra
+    # would be absent from the one place the hosted instance runs. Its cost is botocore's
+    # ~26 MB of service models in every image; `DECISIONS.md`, *"A second backend, because
+    # the disk stopped being shared"*, weighs that against signing the requests by hand.
+    "boto3>=1.43.93",
 ]
 
 [project.optional-dependencies]

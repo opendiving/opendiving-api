@@ -39,7 +39,7 @@ class WebauthnCredential(Base, PublicUUIDMixin):
     # a sign-in ceremony names no account, so this column alone has to identify one.
     #
     # `LargeBinary` here (and on `public_key`) does not contradict "uploaded payloads go
-    # on the files volume, never in a column": these are a few hundred bytes of protocol
+    # in the blob store, never in a column": these are a few hundred bytes of protocol
     # material this server verified itself, not a payload anyone uploaded, and every read
     # of the row needs them.
     credential_id: Mapped[bytes] = mapped_column(LargeBinary, unique=True, index=True)

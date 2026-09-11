@@ -11,7 +11,7 @@ contact_links:
       it takes to cut a release. No GitHub account? security@opendiving.app.
 
   - name: Installing, upgrading, backing up or configuring
-    url: https://github.com/opendiving/opendiving/issues/new
+    url: https://github.com/opendiving/opendiving/issues/new/choose
     about: >-
       The install bundle and the self-hosting docs live in opendiving/opendiving, and issues about
       running an instance belong there with them. Troubleshooting docs first if you haven't read
@@ -19,10 +19,11 @@ contact_links:
       looks right and it will be moved.
 
   - name: Question about the API itself
-    url: https://github.com/opendiving/opendiving-api/discussions
+    url: https://github.com/opendiving/opendiving/discussions
     about: >-
       Endpoints, parsers, the schema, running it from source — anything about this codebase rather
-      than about an instance. Ask in Discussions; it gets answered faster there than in the tracker.
+      than about an instance. The project keeps one Discussions space, in opendiving/opendiving, and
+      it covers this repository too; it gets answered faster there than in the tracker.
 
   - name: Something in the web app
     url: https://github.com/opendiving/opendiving-web/issues/new/choose

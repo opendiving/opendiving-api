@@ -4,7 +4,8 @@ The **only** module that knows a recording has stored bytes at all. Routes go th
 functions and never see where the bytes are, which is what let the payload move out of a
 `bytea` column and onto the files volume without a single call site changing - the same
 seam, for the same reasons, as `services/certification_files.py`.
-`services/blob_store.py` is the layer below, and the only one that touches a filesystem.
+`services/blob_store.py` is the layer below, and the only one that knows where the bytes
+actually are - a filesystem volume or an S3-compatible bucket, on `FILE_STORAGE_BACKEND`.
 
 **A file belongs to a recording, and a recording may hold several.** Which recording an
 incoming file lands in is `services/dive_recordings.py`'s decision; what this module owns is
@@ -1144,13 +1145,13 @@ async def _repeat_upload(
     of their own, which makes a scalar-only parser fix invisible here - `backfill_tech_fields`
     is what picks those up.
 
-    And re-uploading is the natural repair after a partial loss of the files volume: without
-    the `has`/`put` below the row says "already stored", the download 500s forever, and the
-    server refuses the very bytes that would fix it. The write re-`put`s the key the row
-    already carries rather than minting one, and a `put` of a key whose name ends in these
-    bytes' hash is byte-identical to what was there.
+    And re-uploading is the natural repair after a partial loss of the blob store, on
+    either backend: without the `has`/`put` below the row says "already stored", the
+    download 500s forever, and the server refuses the very bytes that would fix it. The
+    write re-`put`s the key the row already carries rather than minting one, and a `put` of
+    a key whose name ends in these bytes' hash is byte-identical to what was there.
 
-    **The volume repair runs first, before anything reads the recording's files.** It has to:
+    **The blob repair runs first, before anything reads the recording's files.** It has to:
     re-deriving a recording loads every file it holds, and `load_recording_files` raises
     `BlobMissingError` on bytes that are gone - so repairing second would make this path fail
     on exactly the condition it exists to fix. That ordering did not matter while a dive had

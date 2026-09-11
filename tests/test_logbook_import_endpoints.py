@@ -81,7 +81,8 @@ def _uddf(dive_id: str = "dive-1", when: str = "2026-04-17T09:30:00") -> bytes:
 
     Enough of the format to convert: a site, a repetition group, a dive that links the
     site, and a three-waypoint profile. The captured exports that exercise the readers
-    properly are the library's own fixtures and the umbrella's manual walk.
+    properly are the library's own fixtures and a by-hand walk over real dive-computer
+    files.
     """
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <uddf xmlns="http://www.streit.cc/uddf/3.2/" version="3.2.2">
