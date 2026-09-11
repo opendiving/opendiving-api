@@ -7381,6 +7381,12 @@ Invisible at a few hundred rows, an incident at ten million. A metadata test ass
 cascading FK has a *usable* index — not merely that an index exists, since a partial one on a
 cascade target counts as none — is deferred to before launch and is not in this change.
 
+**That test exists now**, and it was written to the specification in the sentence above:
+`tests/test_foreign_key_indexes.py` excludes a partial index from counting for exactly the reason
+measured here, and covers every foreign key rather than only the cascading ones — the lookup is the
+same one whatever the `ondelete` rule says to do once it finds a row. See *"Every foreign key column
+leads an index, and a test says so"*.
+
 ### The DDL
 
 Per *"Schema changes have no migration tool"*: `create_all` creates brand-new tables only, so all of
@@ -11730,7 +11736,8 @@ Checked here against the live schema rather than the models, and all ten already
 leading with `user_id`: eight from `index=True`, plus `ux_dive_file_user_id_sha256` and the unique
 `ix_user_dive_stats_user_id`. So this change adds no index, and the reason it needed none is a fact
 about the current schema rather than a property of the design — a new table joining the list has to
-be checked the same way.
+be checked the same way. Nothing checks it by hand any more: `tests/test_foreign_key_indexes.py`
+asks the same question of every foreign key in the schema, on every run.
 
 ### The test is in two halves because they fail on different things
 
@@ -13308,6 +13315,11 @@ The first kind asks the code itself and fails by name on anything it does not re
 
 - `test_user_cascade.py::TestEveryForeignKeyIntoUserCascades` walks `Base.metadata` for foreign keys
   into `user.id` left without `ondelete="CASCADE"`.
+
+- `test_foreign_key_indexes.py::TestEveryForeignKeyColumnLeadsAnIndex` walks the same metadata and
+  names every foreign key column no usable index leads with - a partial one not counting, for the
+  reason measured in *"The indexes are the part that needed care, not the deletes"*. The sibling of
+  the entry above, asking about the index rather than the delete rule.
 
 - `test_ownership.py::TestEveryUuidRouteIsAccountedFor` enumerates the app's real route table and
   fails on a `{uuid}` route not listed there; `TestEveryOwnedRouteUsesIt` greps the route files for
@@ -17115,3 +17127,92 @@ deliberate:
 - **It is not in `src/.env.example`.** This is a property of the image, not of the operator's
   configuration, and `APP_VERSION` already taught this lesson the expensive way: a build identity in
   the template is a build identity frozen at whenever somebody copied it.
+
+## Every foreign key column leads an index, and a test says so
+
+Postgres indexes the *referenced* side of a foreign key whether you ask or not - the target has to
+be a primary key or a unique constraint - and the *referencing* side never. So a child table whose
+`parent_id` carries no index of its own is scanned in full every time anything touches the parent
+row: `ON DELETE CASCADE` has to find the rows to take with it, a plain `DELETE` has to prove there
+are none, and the app's own "everything belonging to this parent" reads go the same way. Every
+foreign key into `user.id` is `CASCADE` (see *"The ten cascades that were never declared"*), so the
+account purge is exactly that scan, once per table, per account.
+
+Nothing was wrong when this was written - the sweep found no uncovered column, and the columns that
+are covered only by a composite or a unique index were all covered deliberately. What there was no
+guard for is the *next* model: a `ForeignKey(...)` that arrives without `index=True` beside it and
+without a composite that happens to start there. Nothing else in the suite would notice. The schema
+is valid, the revision autogenerates cleanly, `alembic check` is satisfied, and the only symptom is
+a sequential scan nobody is watching for, on a table that was small on the day it was added.
+
+`tests/test_foreign_key_indexes.py` walks `Base.metadata` and needs no database, in the shape of
+`TestEveryForeignKeyIntoUserCascades`. What that walk will and will not accept as coverage is where
+it is less obvious than it looks (no count here on purpose - this list said "two" and grew a third
+bullet in the next commit, which is what *"The counts in the prose go stale too"* is about):
+
+- **Leading, not merely present.** A composite index serves a lookup on its first column and not on
+  its later ones. `(dive_id, position)` covers `dive_id`; `(sort_key, parent_id)` covers nothing
+  this rule is about, while looking from a distance exactly like an index on `parent_id`. Several
+  columns in this schema have no coverage other than a composite that starts with them -
+  `trip_location.trip_id` and `dive_recording.user_id` among them - so the rule cannot be "has an
+  index of its own" without failing rows that are fine.
+- **A unique index counts, and so does a constraint.** Uniqueness is irrelevant to the question -
+  `dive_file.user_id` is covered by `ux_dive_file_user_id_sha256` and by nothing else, and
+  `gear_service_schedule.gear_item_id` by `ux_gear_service_schedule_item_kind_label`. A primary key
+  and a `UniqueConstraint` count too, and they need asking about separately: Postgres backs both
+  with a real index, and neither appears in `Table.indexes`. Without that arm the association-table
+  shape - `(parent_id, child_id)` as a composite primary key, no declared index at all - would fail
+  a rule it obeys.
+- **A partial index counts as none**, however well it leads, and this is the arm the test is
+  actually for. *"The indexes are the part that needed care, not the deletes"* measured it: the
+  lookup a foreign key provokes carries no predicate for one to be implied by, so Postgres scans the
+  table past an index on the right column of the right table. That section asked for this test and
+  specified this arm, which is the reason the rule is *usable index* rather than *an index*. Drop
+  the `postgresql_where` check and the four foreign key columns led by a partial index -
+  `certification.user_id`, `dive.user_id`, and `gear_service_record`'s two - satisfy the rule on
+  that partial alone. Two of them would be covered anyway, being `index=True` besides;
+  `gear_service_record`'s are the pair that genuinely depends on the distinction, so delete
+  `ix_gear_service_record_gear_item_id` and `ix_gear_service_record_schedule_id`, the two plain
+  indexes that exist solely for this, and nothing anywhere goes red. Checked by deleting them.
+
+The trap in writing it is the functional index. `Index("ix", func.lower(label))` has a leading
+expression that carries a `.name` of its own - `"lower"` - so reading `.name` off whatever turns up
+reports a column called `lower`, covers nothing, and never says so. `_leading_column_name` unwraps
+the `UnaryExpression` a `.desc()` produces and then requires a `Column`; anything else is no leading
+column, which is also the right answer, since `lower(label)` does not serve a lookup on `label`.
+
+Unlike the cascade rules this has no second half against Postgres, and deliberately so. An index
+reaches a database only by being declared in the models or in a revision, and CI's `alembic check`
+is what pins those two to each other - so the models' account is the whole fact, and a test that
+re-read `pg_indexes` would be asking `alembic check` a question it has already answered.
+
+## Autovacuum is left at its defaults, and a storage parameter is never a revision
+
+Nothing in this repository sets an autovacuum parameter - not the compose file, not a migration, not
+a model - and that is a decision rather than an omission.
+
+The tables that churn hardest are the ones the hourly sweeps in `core/worker/settings.py` empty:
+expired tokens, authentication requests, sessions, audit rows, invitations. Each sweep is a `DELETE`
+whose dead tuples are collected long before the default trigger could matter - Postgres fires
+autovacuum at `autovacuum_vacuum_threshold` (50) plus `autovacuum_vacuum_scale_factor` (0.2) of the
+table, so on tables holding tens to hundreds of rows the threshold term alone is reached every time.
+The tables a diver edits, `dive` above all, churn at human speed. There is nothing here for tuning
+to improve, and a parameter set now would be set against a guess about volume rather than a
+measurement of it.
+
+If it ever does need attention, the reading that says so is `n_dead_tup` on `dive` climbing and
+staying up (`pg_stat_user_tables`), and the remedy is a per-table storage parameter the operator
+applies to their own database:
+
+```sql
+ALTER TABLE dive SET (autovacuum_vacuum_scale_factor = 0.05);
+```
+
+**Never as an Alembic revision**, and this is the part worth writing down. A revision runs
+unattended on every install's startup, and a vacuum threshold is a property of one database's write
+volume rather than of the schema - so a number chosen against a busy instance is applied verbatim to
+a self-hoster whose logbook has one diver in it and will never have the churn. Autogenerate does not
+see storage parameters at all, so a hand-written one drifts from the models with nothing comparing
+them, and `alembic check` - the thing that makes every other piece of DDL in here trustworthy - has
+no opinion on it. The `ALTER TABLE` above is one statement, reversible with `RESET`, and belongs to
+whoever is watching the database it runs against.
