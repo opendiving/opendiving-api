@@ -16260,7 +16260,7 @@ statement would have to name a row the SQL cannot pick out.
 
 **The cylinders get their own gate — `joined`, not `fresh` — and the two are different questions.**
 `fresh` asks whether the dive has anything on this recording to lose, and decides the
-outright-versus -fill choice for the scalars. `joined` asks whether **new bytes arrived on a
+outright-versus-fill choice for the scalars. `joined` asks whether **new bytes arrived on a
 recording that already existed**, which is the only event that can put a reading into a cylinder. On
 the attach path they are each other's negation, which is exactly why one parameter looked sufficient
 and was not: the other two callers of `_rederive_recording` have no new bytes at all, and one of
