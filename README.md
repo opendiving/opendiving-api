@@ -46,7 +46,13 @@ else; what is here is the source, and the notes for working on it.
   not. Catalog rows are shared across the instance, and search falls back to what is already stored
   rather than failing when a register is unreachable. Distinct species seen is part of the dive
   statistics, and `GET /user/species` is the whole life list: every species you have logged, with
-  how many dives saw it and when.
+  how many dives saw it and when. The taxonomy is WoRMS's, whose text content is available under
+  [CC BY](https://creativecommons.org/licenses/by/4.0/) and which asks to be cited in full: *WoRMS
+  Editorial Board (2026). World Register of Marine Species. Available from
+  https://www.marinespecies.org at VLIZ. Accessed 2026-09-11. doi:10.14284/170* — an accessed date a
+  README cannot keep current, and does not need to, because it stands for no copy of anything:
+  **this app queries the register live rather than holding a snapshot of it**, so an instance holds
+  whatever WoRMS answered on the days its divers went looking.
 - **Species photos** — a freely licensed photograph per species, chosen from
   [Wikimedia Commons](https://commons.wikimedia.org/), fetched **once** and stored on this
   instance's own files volume, so no visitor's browser ever contacts Wikimedia. A species whose

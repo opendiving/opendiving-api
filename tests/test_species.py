@@ -23,6 +23,7 @@ exists to catch.
 """
 
 import json
+import re
 import uuid as uuid_pkg
 from collections.abc import Callable, Generator
 from typing import Any, cast
@@ -306,7 +307,7 @@ def _result(
         status="accepted",
         matched_name=matched_name,
         source="worms",
-        attribution="World Register of Marine Species (marinespecies.org)",
+        attribution="[World Register of Marine Species](https://www.marinespecies.org) (CC BY)",
     )
 
 
@@ -2467,6 +2468,62 @@ class TestVettingTheStoredName:
 
 
 # -------------- routes --------------
+
+
+class TestTheWormsCreditIsALink:
+    """The credit is a wire format, so its *shape* is the thing to pin.
+
+    `DECISIONS.md`'s *"The attribution string is a wire format"* is the rule these assert
+    against: the clients read `[label](href)` and render a link, so a credit that only
+    prints a domain discharges half of what it owes - naming the source but not offering a
+    way to reach the licence. `_WORMS_ATTRIBUTION` is ours rather than a provider's, so it
+    is written already linked; nothing folds it on the way out, and nothing would notice if
+    it silently stopped being a link.
+    """
+
+    def test_the_worms_credit_is_written_already_linked(self):
+        """The same guarantee `test_the_built_in_credits_are_already_folded` gives the
+        geocoder's two literals, for the one literal this module owns."""
+        match = re.fullmatch(r"\[([^\]]+)\]\((https://[^)\s]+)\)(.*)", species_service._WORMS_ATTRIBUTION)
+
+        assert match is not None, species_service._WORMS_ATTRIBUTION
+        label, href, rest = match.groups()
+        # Name the origin, offer a way to reach it, name the licence - the three things
+        # `DECISIONS.md` says a credit may never be shortened past.
+        assert label == "World Register of Marine Species"
+        assert href == "https://www.marinespecies.org"
+        assert "CC BY" in rest
+
+    def test_the_trailing_licence_is_a_plain_run_the_client_can_render(self):
+        """`(CC BY)` sits *after* the link rather than inside the label, which is only safe
+        because the client parses a credit into runs and links instead of matching the whole
+        string as one link. Pinned here because the API is the half that decides the shape:
+        a parser that matched `^\\[…\\]\\(…\\)$` would show a diver the literal brackets."""
+        parts = re.split(r"\[[^\]]+\]\([^)\s]+\)", species_service._WORMS_ATTRIBUTION)
+
+        assert parts[0] == ""
+        assert parts[-1].strip() == "(CC BY)"
+
+    def test_the_credit_fits_the_field_that_carries_it(self):
+        """Growing the credit past `SpeciesSearchResult.attribution` would turn a search into
+        a 500 from inside the normalizer rather than a long string."""
+        assert len(species_service._WORMS_ATTRIBUTION) <= 255
+        assert len(species_service._WIKIDATA_ATTRIBUTION) <= 255
+
+    @pytest.mark.asyncio
+    async def test_a_worms_row_carries_it_to_the_client(self, no_redis: None):
+        """The constant reaching an actual result, rather than merely being well-formed."""
+        db = _empty_db()
+        with _registers(by_name=[CLOWNFISH_RECORD]):
+            response = await species_service.search_species(db, "amphiprion ocellaris")
+
+        assert response.results[0].attribution == species_service._WORMS_ATTRIBUTION
+
+    def test_the_cache_prefix_moved_with_the_credit(self):
+        """A cached search answer holds the credit the normalizer wrote, for a month. Without
+        a new prefix every query already in Redis would keep serving the old one - and the
+        clients degrade gracefully rather than failing, so nothing on screen would say so."""
+        assert species_service._cache_key("search", "clownfish").startswith("species:v7:")
 
 
 class TestSearchRoute:
