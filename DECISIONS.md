@@ -16666,11 +16666,12 @@ So the read shapes carry `StoredVocabulary` (`core/schemas.py`), an alias for `s
 stay on the create/update schemas where they are a promise the server actually keeps. Applied to
 every stored vocabulary rather than to `ServiceKind` alone, because the reasoning does not
 distinguish them - `gear_item.type`, `dive.water_type`, `dive_mixture.role`/`usage`,
-`course.agency`/`status`, `certification.agency`, `user.units` and `user.dive_form_hidden_fields`.
-Derive that list rather than trusting this sentence: it was written a pair short, and `user.units`
-is the one a sweep of the resource schemas misses, because `get_current_user` validates the whole
-row through `UserRead` on **every authenticated request**. `GearItemInfo` and `DiveMixtureRead`
-matter as much as the gear list - both are embedded in every dive.
+`course.agency`/`status`, `certification.agency`, `user.units`, `user.dive_form_hidden_fields` and
+`dive_form_preset.hidden_fields`. Derive that list rather than trusting this sentence: it has been
+written short twice now, and `user.units` is the one a sweep of the resource schemas misses, because
+`get_current_user` validates the whole row through `UserRead` on **every authenticated request**.
+`GearItemInfo` and `DiveMixtureRead` matter as much as the gear list - both are embedded in every
+dive.
 
 `certification_file.side` is the one deliberate exception, and it is exempt on a property rather
 than by being overlooked: `side` is *structural*, not descriptive. It selects which of two slots a
@@ -16720,13 +16721,34 @@ are bound differently.
 
 **The DiveJSON envelope takes the format's own answer, split on whether the member is REQUIRED**
 (`_speakable`/`_sayable` in `services/export/envelope.py`). A REQUIRED member outside the vocabulary
-\- `gear_service_schedule.type`, `gear_service_record.type`, `course.agency`/`status`,
-`certification.agency` - makes the record uninterpretable, and the record is omitted: the writer's
-side of the rule the reader already follows (spec §5.6, and `logbook_import/planner.py::_agency`,
-which skips for that reason). An OPTIONAL one - `gear_item.type`, `dive.water_type` - costs only the
-*field*, because a diver's cylinder must not vanish from their export over how its category is
-spelt. Both were found by writing the test rather than by reading the code: the first draft guarded
-the two gear-service arms alone, and `ExportGearItem.type` raised on the very next line.
+\- `gear_service_schedule.type`, `gear_service_record.type`, `course.agency`, `certification.agency`
+\- makes the record uninterpretable, and the record is omitted: the writer's side of the rule the
+reader already follows (spec §5.6, and `logbook_import/planner.py::_agency`, which skips for that
+reason). An OPTIONAL one - `gear_item.type`, `dive.water_type`, `dive_mixture.role`/`usage`,
+`course.status` - costs only the *field*, because a diver's cylinder must not vanish from their
+export over how its category is spelt.
+
+**Read that split off the schema, not off intuition.** `course.status` reads exactly like a REQUIRED
+member and is not (`$defs/course` requires only uuid/name/agency; spec §6.17 marks it O and says
+readers must not assume `completed`), and classifying it by eye dropped the diver's whole course.
+`dive_mixture.role`/`usage` were missed a different way: `_mixture` rebuilds each cylinder as
+`DiveMixtureBase`, a *write* base that is still enum-typed, so a value the read shape carried
+through raised on the rebuild - the widening has to be repeated wherever a read shape is
+re-validated as a write one.
+
+**An omitted record is a record nothing may reference.** DiveJSON checks referential closure, so
+dropping a course or a schedule while something still names it produces a document the validator
+rejects - a worse failure than the 500 it replaced, because it lands at the far end, in someone
+else's importer, long after the export looked fine. Three references can reach an omittable
+collection - `dive.course_uuid`, `certification.course_uuid` and
+`gear_service_record.gear_service_schedule_uuid` - and all three are OPTIONAL, so they resolve
+through `_course`/`_schedule_uuid` and go absent, which is a state each already has a meaning for (a
+deleted course, a deleted rule). Losing a *dive* from an export over the spelling of its course's
+agency would have been the worst answer on offer.
+
+None of those four was found by reading the code. The first draft guarded the two gear-service arms
+alone; `ExportGearItem.type` raised on the very next line once the test existed, and review found
+the other three.
 
 **The CSV and UDDF writers had no vocabulary to keep and were changed rather than guarded.**
 `services/export/tabular.py` built its cell as `ServiceKind(schedule.kind).value` - a round-trip
@@ -16772,7 +16794,10 @@ because a revision is the only repair mechanism a database has; the local altern
 Pinned by `TestAnUnrecognizedKindDoesNotFiveHundred` in `tests/test_gear_service.py` (the read
 halves, including that a sibling row survives and that the write schemas still answer 422), by
 `TestAnUnrecognizedVocabularyValueDoesNotFiveHundredTheExport` in `tests/test_export_json.py` (the
-three writers: the DiveJSON omission, the UDDF catch-all and the CSV's stored string), and by
+three writers, the two reference kinds an omission can strand, and the OPTIONAL members that cost a
+field rather than a record), by `TestAStoredFieldNameOutsideTheVocabulary` in
+`tests/test_dive_form_presets.py` (the one vocabulary whose read shape also inherits a *validator*
+that would have dropped the value instead of failing on it), and by
 `tests/test_vocabulary_repair.py`, which runs the revision's own statements against Postgres for the
 collision skip, the differently-labelled sibling it must *not* swallow, and idempotence across the
 restarts that re-run it.
