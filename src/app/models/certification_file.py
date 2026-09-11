@@ -47,10 +47,11 @@ class CertificationFile(Base, PublicUUIDMixin, TimestampMixin):
     # megabytes), as an integrity check against the stored file, and as half of
     # `storage_key`.
     sha256: Mapped[str] = mapped_column(String(64))
-    # Where the bytes are, on the files volume:
+    # Where the bytes are, in whichever store `blob_store` is configured for:
     # `certification-files/{sha256[:2]}/{nonce}_{sha256}`, minted by `blob_store.new_key`.
-    # Opaque to everything but that module - a valid S3 object key as much as a relative
-    # path.
+    # Opaque to everything but that module, and deliberately spelled so that it is a valid
+    # S3 object key and a relative path at once - which is what lets an instance move
+    # between the two backends without rewriting a single row.
     #
     # **The nonce is per write, deliberately not this row's uuid.** This row survives
     # replacement (the upsert preserves its uuid), so a key derived from it would be keyed

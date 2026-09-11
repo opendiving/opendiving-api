@@ -52,6 +52,16 @@ class AppSettings(BaseSettings):
     APP_NAME: str = config("APP_NAME", default="FastAPI app")
     APP_DESCRIPTION: str | None = config("APP_DESCRIPTION", default=None)
     APP_VERSION: str | None = config("APP_VERSION", default=_installed_version())
+    # The commit the running image was built from, baked in by the `Dockerfile`'s
+    # `APP_COMMIT` build arg. `None` everywhere else - a source checkout, a locally built
+    # image - and `/api/v1/health` is the only consumer. It exists because `APP_VERSION`
+    # stops identifying a build the moment images are published per merge rather than per
+    # release: on that channel every one of them reports the manifest's version, and the
+    # AGPL source offer has to name something an operator can check out. Deliberately not
+    # in `src/.env.example`: it is a property of the image, not of the operator's config,
+    # and the one thing `APP_VERSION` proved is that a build identity in a template is a
+    # build identity frozen at whenever somebody copied it.
+    APP_COMMIT: str | None = config("APP_COMMIT", default=None)
     LICENSE_NAME: str | None = config("LICENSE", default=None)
     # OpenAPI document metadata only ("who maintains this API", shown in `/docs`) -
     # *not* where the frontend's contact form delivers to. That's
@@ -238,10 +248,12 @@ class RegistrationSettings(BaseSettings):
     # the generic wording, true of any instance, by default; the project's own waitlist
     # wording ("join the waitlist", "we'll notify you when your spot is ready") when true.
     #
-    # This API's own invitation email does not branch on it yet. "X invited you to their
-    # log book" reads wrongly on a waitlist instance, and this field is where that branch
-    # would hang when it comes. Keep every use to copy selection and route each one through
-    # this field, so a single grep for it lists every place the app knows who runs it.
+    # This API branches on it in exactly one place, and that branch now exists: the opening
+    # sentence of the invitation email (`services.email_service.send_invitation_email`). "X
+    # invited you to their log book" is true of a self-hosted instance and wrong on the one
+    # the project runs, where the invitee is invited to OpenDiving itself. Keep every use to
+    # copy selection and route each one through this field, so a single grep for it lists
+    # every place the app knows who runs it.
     PROJECT_OPERATED: bool = config("PROJECT_OPERATED", default=False)
 
     # A *rate*, not a lifetime allotment: a member who invites five friends today can
@@ -538,15 +550,94 @@ class LogbookImportSettings(BaseSettings):
     IMPORT_SPECIES_BUDGET_SECONDS: float = config("IMPORT_SPECIES_BUDGET_SECONDS", default=120.0)
 
 
+class FileStorageBackendOption(Enum):
+    """Where `services/blob_store.py` keeps uploaded payloads.
+
+    Declared as an `Enum` for the reason `EnvironmentOption` and `RegistrationMode` are:
+    pydantic rejects a value that is not one of these at `Settings()`, which is import
+    time, so `FILE_STORAGE_BACKEND=S3` or `=minio` names itself at startup rather than
+    silently falling back to the local volume and writing a hosted instance's uploads into
+    a container layer.
+    """
+
+    LOCAL = "local"
+    S3 = "s3"
+
+
 class FileStorageSettings(BaseSettings):
-    # Where uploaded dive-computer exports and c-card images are stored. Everything under
-    # it is written and read by `services/blob_store.py` and by nothing else.
+    # Which of the two stores `services/blob_store.py` writes to. `local` is the default
+    # and stays it: every compose install mounts a named volume at `FILE_STORAGE_DIR`, and
+    # a self-hoster on one machine gains nothing from an object store but a credential pair
+    # to manage. The default is also what keeps the validator below off everyone's back -
+    # it cannot fire on a configuration nobody edited.
+    FILE_STORAGE_BACKEND: FileStorageBackendOption = config(
+        "FILE_STORAGE_BACKEND", default=FileStorageBackendOption.LOCAL
+    )
+
+    # Where uploaded dive-computer exports and c-card images are stored on the `local`
+    # backend. Everything under it is written and read by `services/blob_store.py` and by
+    # nothing else.
     #
     # No new required `.env` value, on purpose: both compose files mount a named volume at
     # this default, so a correct install needs nothing typed. It is a setting at all
     # because a bind-mount install wants to point it at a real directory - and because the
     # test suite and CI have to repoint it away from a path they cannot create.
     FILE_STORAGE_DIR: str = config("FILE_STORAGE_DIR", default="/data/files")
+
+    # The `s3` backend's group. Ignored entirely while the backend is `local`, and all four
+    # of the required ones are refused-if-missing by `Settings._require_s3_credentials` the
+    # moment it is not - a half-configured object store must not start and then 500 on the
+    # first upload.
+    #
+    # The full endpoint origin, including the scheme: R2's
+    # `https://<account>.eu.r2.cloudflarestorage.com`, MinIO's `http://minio:9000`. There
+    # is no default, because every store's is different and a guess would be a wrong one.
+    S3_ENDPOINT_URL: str | None = config("S3_ENDPOINT_URL", default=None)
+    S3_BUCKET: str | None = config("S3_BUCKET", default=None)
+    S3_ACCESS_KEY_ID: str | None = config("S3_ACCESS_KEY_ID", default=None)
+
+    # `SecretStr` for the reason `GOOGLE_CLIENT_SECRET` above is one: a value that must not
+    # reach a log line is better served by a type whose `repr` cannot spill it into a
+    # traceback than by everyone remembering.
+    S3_SECRET_ACCESS_KEY: SecretStr | None = config("S3_SECRET_ACCESS_KEY", default=None, cast=SecretStr)
+
+    # `auto` is what Cloudflare R2 documents and what every other S3-compatible store
+    # ignores, so it is the default that needs no thought. Point this at a real AWS bucket
+    # and it has to name that bucket's region instead.
+    S3_REGION: str = config("S3_REGION", default="auto")
+
+    # An optional key prefix, for sharing one bucket between instances. Prepended to every
+    # object name and stripped back off by `blob_store.iter_keys`, so the keys the database
+    # holds are identical on both backends and an install can move either way.
+    S3_PREFIX: str | None = config("S3_PREFIX", default=None)
+
+
+#: The four `S3_*` settings that have no sensible default and no safe absence.
+#: `S3_REGION` and `S3_PREFIX` are not here: both have defaults that work.
+S3_REQUIRED_SETTINGS: tuple[str, ...] = (
+    "S3_ENDPOINT_URL",
+    "S3_BUCKET",
+    "S3_ACCESS_KEY_ID",
+    "S3_SECRET_ACCESS_KEY",
+)
+
+
+def missing_s3_settings(values: FileStorageSettings) -> list[str]:
+    """Which of `S3_REQUIRED_SETTINGS` are unset or blank, in declaration order.
+
+    Shared by the startup validator below and by `blob_store.backend_for`, which can be
+    asked for an S3 backend while `FILE_STORAGE_BACKEND` is still `local` - that is exactly
+    what `src/scripts/migrate_blobs.py` does, and it has to fail with the same message
+    rather than a `NoneType` deep inside botocore.
+    """
+    missing: list[str] = []
+    for name in S3_REQUIRED_SETTINGS:
+        value = getattr(values, name, None)
+        if isinstance(value, SecretStr):
+            value = value.get_secret_value()
+        if not (value or "").strip():
+            missing.append(name)
+    return missing
 
 
 class ProxySettings(BaseSettings):
@@ -949,6 +1040,37 @@ class Settings(
                 "halves of the OAuth client. Copy the client secret from the same Google Cloud "
                 "Console credential the id came from, or unset GOOGLE_CLIENT_ID to turn Google "
                 "sign-in off."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_s3_credentials(self) -> Self:
+        """Refuses to boot an instance told to keep uploads in a bucket it cannot name.
+
+        The failure this replaces is the quiet one: with a backend of `s3` and no endpoint,
+        the first upload reaches botocore, which builds a request against `None` and raises
+        something about a parameter validation deep in a library the operator has never
+        heard of - on a diver's request, hours after the deploy, with the c-card they just
+        photographed lost. Naming the missing variable at startup puts the error where the
+        mistake was made, which is the argument every validator around this one makes.
+
+        Scoped to the `s3` backend, and that is what keeps it harmless. `local` is the
+        default, so nothing that has not opted in can trip it - including `src/.env.example`
+        copied verbatim, which is the configuration this whole class is most easily broken
+        against: a cross-field validator that fires on the template's own values takes out
+        `docker compose up` and pytest collection together.
+        """
+        if self.FILE_STORAGE_BACKEND is not FileStorageBackendOption.S3:
+            return self
+
+        missing = missing_s3_settings(self)
+        if missing:
+            raise ValueError(
+                f"FILE_STORAGE_BACKEND is s3 but {', '.join(missing)} "
+                f"{'is' if len(missing) == 1 else 'are'} not set. Uploaded dive-computer exports "
+                "and c-card images have nowhere to go without them. Set the S3_* group (see "
+                "src/.env.example), or set FILE_STORAGE_BACKEND=local to keep using a filesystem "
+                "volume."
             )
         return self
 

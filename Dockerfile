@@ -85,6 +85,19 @@ COPY --from=builder --chown=app:app /app/src/app /code/app
 COPY --from=builder --chown=app:app /app/src/migrations /code/migrations
 COPY --from=builder --chown=app:app /app/src/alembic.ini /code/alembic.ini
 
+# The commit this image was built from, reported as `commit` by `/api/v1/health`. The
+# version alone cannot answer "what is running": on the edge channel every build carries
+# the same manifest version until someone cuts a release, and the AGPL source offer has to
+# name something an operator can actually check out.
+#
+# Empty by default, so a local `docker compose up --build` needs to pass nothing and the
+# endpoint reports `unknown` - the same shape an uninstalled `APP_VERSION` already has.
+# Declared here at the bottom of the stage rather than at the top because a build arg
+# invalidates every layer after the `ARG` that reads it, and above the `COPY`s that would
+# be the whole runtime image on every commit.
+ARG APP_COMMIT=""
+ENV APP_COMMIT=${APP_COMMIT}
+
 EXPOSE 8000
 
 # `python -c` rather than curl/wget: neither is installed in the slim base, and adding

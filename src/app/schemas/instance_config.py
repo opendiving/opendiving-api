@@ -23,8 +23,11 @@ class InstanceConfigRead(BaseModel):
     config for the life of the process), and would be a compose change that an existing
     install's `docker compose pull` does not deliver.
 
-    `project_operated` has a second reason to be API truth: this API will want the same fact
-    for its own invitation email one day, and a web-side variable could never reach it.
+    `project_operated` has a second reason to be API truth, and it is no longer a prospective
+    one: this API reads the same field for its own invitation email, whose opening sentence
+    invites you to OpenDiving rather than to somebody's log book where the project runs the
+    instance (`services.email_service.send_invitation_email`). A web-side variable could
+    never have reached that template.
     """
 
     registration_mode: RegistrationMode

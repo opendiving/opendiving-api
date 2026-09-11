@@ -3461,14 +3461,15 @@ brand-new tables. Only ever contended on a cold database.
 Note this was invisible on a warm database - the earlier multi-worker test passed simply because the
 tables already existed. It only reproduced against a freshly created one.
 
-**And a third, when the files volume arrived.** `ensure_root_writable` proves the volume is writable
+**And a third, when the files volume arrived.** The local backend's writability probe (today
+`LocalBackend.ensure_ready`, reached through `ensure_storage_ready`) proves the volume is writable
 by creating a probe file and unlinking it — and the first version used one fixed name,
 `{root}/tmp/.writable`, for all four workers. Two of them overlapping means the second one's
 `unlink` hits a file the first already took; `FileNotFoundError` is an `OSError`, so the handler
 turned it into a fatal "the files volume is not writable" against a volume that was perfectly
 healthy. Fixed with a per-pid probe name and `missing_ok=True` on the unlink — the same treatment
-`_write_atomically` in that module already gave its temp files, which is what makes the omission
-worth recording rather than just fixing.
+that backend's `write` already gave its temp files, which is what makes the omission worth recording
+rather than just fixing. The S3 backend's probe carries the pid for the same reason.
 
 Worth noting what makes this one nastier than the two above: they crash-loop a *cold* start and are
 therefore loud, while this is a race that fires intermittently on any start and accuses the wrong
@@ -9686,9 +9687,13 @@ being asked for an HTTP status.
 born with, and the two paths publish different things on purpose. A tag push is a *release*: it puts
 the whole alias set for that version behind one build - `X.Y.Z`, `X.Y`, `latest`, and a bare major
 only from 1.0.0 on. A dispatch is everything else: a scratch build off a branch, a `staging` tag, or
-a rebuild of an already-released version because its base image grew a CVE. There is still no
-`push: branches:` trigger, and the reason is unchanged - images are cut when someone decides to cut
-one.
+a rebuild of an already-released version because its base image grew a CVE. A third trigger,
+`push: branches: [main]`, came later and is the project's own hosted instance's: it publishes
+`:edge` and `:sha-<12>`, deploys them, and touches nothing a self-hoster can pin — see *"The edge
+channel publishes on every merge, and deploys what it publishes"* below. This paragraph used to end
+"there is still no `push: branches:` trigger, and the reason is unchanged - images are cut when
+someone decides to cut one". That reading survives the change with one word added: a *release* is
+cut when someone decides to cut one, and that is what the sentence was always about.
 
 **The whole thing is modelled on `opendiving-web`'s workflow of the same name, deliberately.** The
 two repos release in lockstep on one version, so a policy change (a new alias rule, a new guard) has
@@ -10368,9 +10373,20 @@ remedy beside it. Without Renovate actually running, that check is a standing ob
 remedy attached — which is one more reason the enablement step is written down in `CONTRIBUTING.md`
 rather than assumed.
 
-**It skips cleanly when nothing has been published.** There are no `v*` tags yet and no package on
+**It skips cleanly when nothing has been published.** There were no `v*` tags and no package on
 GHCR, so a scheduled job that assumed either would have been red from the day it merged, and a check
-that is red from day one is a check somebody turns off. No `vX.Y.Z` tags means a logged skip.
+that is red from day one is a check somebody turns off. As written, no `vX.Y.Z` tags meant a logged
+skip and an immediate exit.
+
+**That early exit later became a way to scan nothing at all**, and the fix is where `edge` enters
+the set rather than what it is. The edge channel below publishes an image on every merge to `main`
+while this repository still has no `v*` tag — it had none through the whole of the launch work — so
+an `edge` appended to `ALIASES` *after* the zero-tag check would never once have been evaluated, and
+the one image that actually existed would have been the only one never scanned. So `ALIASES` now
+starts as `(edge)` above the check, the check no longer exits, and the skip moved to the honest
+condition: nothing resolved **and** no release tags, which is a fork or a repository before its
+first merge. The old shape was not wrong when it was written; it was a conditional that stopped
+holding, and it is the kind that stays green while it does.
 
 **Only the newest release is scanned, and widening that would make the workflow worse.** The first
 draft scanned `latest` plus every live `X.Y` alias — every minor ever released — on the reasoning
@@ -10385,12 +10401,14 @@ that cycles forever on something structurally unaddressable.
 
 `SECURITY.md` settles what would otherwise be a judgement call here. Its supported-versions table is
 "the most recent release: yes; anything older: no — upgrade to the newest", so the scan set is not a
-pragmatic truncation of a wider ideal — it *is* the supported surface, and the four aliases it
-covers (`X.Y.Z`, `X.Y`, the bare major, `latest`, one image under four names) are every form in
-which someone can be pinned to that release. That is also what makes SECURITY.md's own promise hold:
-"in that case `docker compose pull` is the whole fix even with a version pinned" is only true for a
-version whose base-image CVEs something is watching for. Widening the scan back means first widening
-the support policy, and that is a decision in `SECURITY.md`, not a line in a workflow.
+pragmatic truncation of a wider ideal — it *is* the supported surface, and the four release aliases
+it covers (`X.Y.Z`, `X.Y`, the bare major, `latest`, one image under four names) are every form in
+which someone can be pinned to that release. `edge` is scanned beside them and is not one of those
+forms: nobody is meant to pin it, and it is in the set because the project's own instance runs it.
+That is also what makes SECURITY.md's own promise hold: "in that case `docker compose pull` is the
+whole fix even with a version pinned" is only true for a version whose base-image CVEs something is
+watching for. Widening the scan back means first widening the support policy, and that is a decision
+in `SECURITY.md`, not a line in a workflow.
 
 **The tracking issue is public, and `SECURITY.md` says not to open public issues for
 vulnerabilities. Both are right, and the line between them is worth stating** — because the next
@@ -10414,7 +10432,7 @@ finding a committed credential, say — has crossed the line and needs a differe
 **The two remedies in the report are genuinely different, and conflating them was a real bug in the
 first draft.** It told the reader that a *Python* package finding "needs a merged bump first",
 implying merge-then-rebuild. That cannot work, and the mechanism is worth stating because it is
-non-obvious: a dispatch checks out `ref` (`inputs.ref || github.ref`), the `Dockerfile` installs
+non-obvious: a dispatch checks out `ref` (`inputs.ref || github.sha`), the `Dockerfile` installs
 with `uv sync --locked` from the `uv.lock` bind-mounted out of *that* tree, and the tag/manifest
 guard refuses to publish `main` under an already-used version. So a rebuild at `v0.4.0` reinstalls
 `v0.4.0`'s exact dependency set however many bumps have landed since, publishes a fresh digest,
@@ -10827,6 +10845,106 @@ The whole filesystem lives in `services/blob_store.py`, so the S3 backend is a r
 rather than an interface with a single implementor. Triggers to build it: a hosted offering, a
 multi-node deployment, or real self-hoster demand.
 
+**The first of those three fired.** There is a `FILE_STORAGE_BACKEND` setting now, and the paragraph
+above is kept for the same reason the `bytea` section it sits under is: it named the condition that
+ended it, and the shape it describes is what made the second backend cheap. See *"A second backend,
+because the disk stopped being shared"* below. `local` is still the default and still what every
+compose install gets.
+
+### A second backend, because the disk stopped being shared
+
+`FILE_STORAGE_BACKEND` selects between `local` (the default, unchanged) and `s3`, any S3-compatible
+object store. The section above said there would never be such a setting and named the conditions
+that would end that; the first of them — a hosted offering — is what happened.
+
+**What forced it is not scale, it is topology.** The project's own instance runs on a
+platform-as-a-service where a persistent disk attaches to exactly one service, and two services need
+the blobs: the API writes and reads them, and the worker deletes them during
+`purge_deleted_accounts`. There is no arrangement of one disk that gives both. A shared object store
+is the only thing that does, and it is also what keeps zero-downtime deploys — attaching a disk to a
+service on that platform disables them. None of this is true of a self-hosted install on one
+machine, which is precisely why the default did not move.
+
+**S3-compatible rather than a vendor SDK**, and not because the vendor might change. The six
+operations this app needs — put, get, delete, batch delete, head, list — are the intersection every
+store implements, so the same code serves Cloudflare R2 (what the hosted instance uses), MinIO,
+Garage, Ceph, Backblaze and AWS itself. A self-hoster who already runs an object store can point
+this at it; one who does not is not asked to start.
+
+`boto3` is the client, and the size is the price: botocore installs about 26 MB of service models
+into the image, which every install now carries whether it uses them or not. The alternative
+considered and rejected was signing the requests by hand over `httpx`, which is already a dependency
+and would have added nothing to the image. SigV4 is not hard, but it is exactly the kind of code
+whose bugs appear only against a real endpoint — and a wrong signature is indistinguishable from a
+wrong credential in the error it produces. A library whose signing has been exercised by everyone is
+worth 26 MB.
+
+**Three botocore knobs are set deliberately, in `blob_store.new_s3_client`**, and one of them is not
+obvious. From 1.36 botocore sends a CRC32 checksum trailer on every `PutObject` by default, and
+several S3-compatible stores rejected the request outright; `request_checksum_calculation` and
+`response_checksum_validation` are pinned to `when_required` for that reason. It costs nothing here,
+because every key already ends in the sha256 of its own content. The other two are
+`signature_version="s3v4"` (the legacy `s3` signature is what a store with a non-AWS region name can
+otherwise negotiate) and standard-mode retries.
+
+**Keys did not change, and that is the whole reason this is cheap.**
+`{kind}/{sha256[:2]}/{uuid7}_{sha256}` is a relative path and a valid object key at the same time,
+so no row is rewritten by a move in either direction and `src/scripts/migrate_blobs.py` is a copy
+loop rather than a migration. It is idempotent and resumable for a reason that is a property of the
+key rather than of the script: an object already present under a key cannot hold different bytes
+than the file that key names, so skipping it is the correct answer and not an optimisation. It never
+deletes from the source, so a switch that goes wrong is a restart away from working.
+
+**The post-commit delete is the one place the two backends behave differently**, and it had to be.
+`delete_after_commit` parks keys on the session and a `Session.after_commit` listener acts on them —
+synchronously, because SQLAlchemy's session events are sync even under `AsyncSession`, which runs
+the sync session in a greenlet *on the event-loop thread*. A handful of `unlink` syscalls there is
+free and the old note argued correctly that a thread hop would only buy an ordering problem. A
+`DeleteObjects` round trip is three orders of magnitude slower and would block the loop, so on the
+S3 backend those deletes are handed to a thread and not waited for. Nothing is lost by not waiting:
+the contract was already best-effort — the rows are gone, the transaction has committed, and a blob
+that outlives them is an orphan `sweep_orphaned_files.py` reclaims — and ordering is safe for the
+reason it always was, since a retired key can never be minted again. The suite has
+`blob_store._await_pending_removals()` because a *test* does need to wait; nothing in the app calls
+it.
+
+**The startup emptiness check is a network request now, so it is a bounded one.**
+`warn_if_files_volume_looks_empty` asks `blob_store.has_any_key()` rather than taking the first
+entry of `iter_keys()`. On the local backend those are the same lazy walk; on S3 the second would be
+a `list_objects_v2` pulling a thousand keys per page, on every boot of every container. The bounded
+version passes `MaxKeys=1`.
+
+**The worker probes the store at startup too**, which it never did when there was only a volume it
+was handed by compose. `purge_deleted_accounts` is the only writer outside the API and it is a GDPR
+erasure: a worker whose credentials cannot delete would log "Worker Started", run every hour, and
+report success while leaving the purged diver's c-card scans in the bucket. The probe is a
+put-and-delete under the `tmp/` prefix that `iter_keys` hides, carrying the pid, for the same reason
+the local one is named per-pid — four gunicorn workers reach it within milliseconds of each other.
+
+What the probe does **not** catch, and it looks like it would: a `local` volume that was never
+mounted. The image creates `/data/files` owned by uid 1000 before dropping to that user, so an
+unmounted container probes a writable directory in its own layer and passes. It catches a root-owned
+or read-only volume and, on `s3`, a credential that cannot write. The absent mount stays
+`docker-compose.yml`'s to prevent, which is what the comment on the worker's `files-data` line is
+for.
+
+**What the tests prove and what they do not.** `tests/test_blob_store_s3.py` drives the backend
+against an in-memory stub that answers the boto3 client's six methods and raises botocore's real
+`ClientError` with the codes a store returns. That is enough to pin the key mapping, the prefix
+handling, the missing-object translation to `BlobMissingError`, the bounded emptiness check and the
+post-commit delete — all of which are this repo's logic. It proves nothing about the wire protocol,
+which is boto3's, and nothing about any particular store's quirks. A live bucket is the only thing
+that can, and that check belongs to whoever configures one. The stub was chosen over `moto` because
+the suite must not skip and must not reach the network, and a dev dependency that emulates the whole
+of S3 is a large thing to carry for six calls.
+
+**One frozen thing to know about.** The revision that moved payloads out of `bytea` (`c3c2c4dd4c27`)
+writes files through its own frozen copy of the key logic, straight to `FILE_STORAGE_DIR`, and knows
+nothing about a backend setting. That is correct and deliberately not fixed: it has to keep
+producing what it produced on the day it ran. It is harmless on an S3 instance because such an
+instance is necessarily new — the rows it moves are `bytea` payloads, and a database migrated from
+empty has none.
+
 ### Every key carries a per-write nonce, and that is what makes the unlink safe
 
 Keys are `{kind}/{sha256[:2]}/{uuid7}_{sha256}` — `dive-files/…` and `certification-files/…` — and
@@ -10889,12 +11007,17 @@ The writability probe is per-pid (`{root}/tmp/.writable-{pid}`, unlinked with `m
 because this check runs in the lifespan and the lifespan runs once per worker — see *"Two things
 raced once the image ran four workers"*, which this became the third instance of.
 
-`ensure_root_writable` runs in the lifespan **before** `apply_migrations`, because the revision that
+`ensure_storage_ready` runs in the lifespan **before** `apply_migrations`, because the revision that
 moves the payloads writes files itself. Four gunicorn workers each discovering an unwritable volume
 on their first upload, hours later, one diver at a time, is the alternative. After the migrations a
-second check counts file rows against the tree and logs CRITICAL if there are rows and no files —
-not a refusal, because the documented restore order (database first, files second) has a legitimate
-window where that is true on purpose.
+second check counts file rows against what is stored and logs CRITICAL if there are rows and no
+blobs — not a refusal, because the documented restore order (database first, files second) has a
+legitimate window where that is true on purpose.
+
+Both halves became backend-aware when the object store arrived, and the second one changed shape
+doing so: it asks `blob_store.has_any_key()` rather than taking the first entry of a walk, because
+on a bucket a walk is an unbounded listing made on every boot. The worker runs the first half now
+too. See *"A second backend, because the disk stopped being shared"*.
 
 This check runs in the test suite and in CI too, because `TestClient` enters the real lifespan. That
 is why `tests/conftest.py` pins `FILE_STORAGE_DIR` to a temp directory **before** it imports
@@ -15901,9 +16024,10 @@ early access", "join the waitlist", "we'll notify you when your spot is ready, n
 of those sentences is false on a self-hosted instance, where the same form has to stay true of a
 household install whose operator decides by hand who gets in. So `RegistrationSettings` grew a
 boolean, `PROJECT_OPERATED`, default `false`, and `GET /config` grew its second field,
-`project_operated`, beside `registration_mode`. The web app selects the form's copy on it, and
-nothing else reads it. Anonymous, and still not a leak: the landing page discloses the value anyway
-by which copy it shows, exactly as it discloses the mode by which form.
+`project_operated`, beside `registration_mode`. The web app selects the form's copy on it, and this
+API selects one sentence of the invitation email on it (below). Anonymous, and still not a leak: the
+landing page discloses the value anyway by which copy it shows, exactly as it discloses the mode by
+which form.
 
 It is named for the fact it asserts rather than for a nickname like "flagship": an operator who sets
 it is claiming to *be* the project, and the default is what every install gets without touching
@@ -15926,19 +16050,39 @@ ever turn.
 this shape of fact - one the web has to know before its first paint and has no other channel for -
 and its schema said from the start that it expected a second field before a second route. The web
 already waits for that response before painting the hero, so the second field costs no flicker and
-no extra request. And this API is going to want the same fact for itself: its invitation email says
-"X invited you to their log book", which reads wrongly on a waitlist instance, and a web variable
-can never reach that template. The email does not branch yet, and when it does the branch hangs off
-this same field. Hostname sniffing was the other candidate, and it is magic that breaks the day the
-host moves.
+no extra request. And this API wanted the same fact for itself: its invitation email said "X invited
+you to their log book", which reads wrongly on a waitlist instance, and a web variable can never
+reach that template. That branch now exists, and it hangs off this same field (below). Hostname
+sniffing was the other candidate, and it is magic that breaks the day the host moves.
 
 **What it is not.** This is the first piece of code that knows the project runs one particular copy
 of the app; everything else in it is written to be true everywhere. That is a line worth holding, so
 its uses stay confined to copy selection, and every one routes through this one field rather than
 through a derived flag or a second setting - `git grep PROJECT_OPERATED` and
 `git grep project_operated` list every branch it has created, here and in the web app. An operator
-who sets it on an instance that is not the project's gets a landing page that claims to be the
-project's, and nothing else changes: it gates no feature, unlocks no route and reaches no row.
+who sets it on an instance that is not the project's gets a landing page and an invitation email
+that claim to be the project's, and nothing else changes: it gates no feature, unlocks no route and
+reaches no row.
+
+**The second branch is one sentence of the invitation email**, and it is the branch this section
+said was coming. `send_invitation_email` opened with "X has invited you to their OpenDiving log book
+at `<url>`", which is exactly right on a self-hosted instance, where the inviter is the diver who
+runs it, and casts whoever pressed the button as the invitee's personal host on the instance the
+project operates, where the inviter is just another diver on the same service. With
+`PROJECT_OPERATED` set the mail says they were invited to OpenDiving at that address instead. With
+it unset the message is byte for byte the one that shipped before, which
+`tests/test_email_service.py` asserts as a whole-message comparison against a literal rather than
+with the `in` checks the rest of that class uses: an expected value assembled from the sender's own
+f-strings would have agreed with any edit to either.
+
+**The subject is not branched**, which is an answer rather than an omission. "X invited you to
+OpenDiving" names the inviter and the app and asserts nothing about who runs either, so both
+instances want that line and a branch there would write one sentence twice. Nor does the
+project-operated copy borrow the landing page's waitlist wording: "your spot is ready" asserts a
+waitlist the invitee may never have joined, since a member invitation (`POST /user/invitations`)
+reaches the same sender, and that is the reasoning that already keeps the mail from mentioning the
+registration mode. The branch is therefore the smallest one that makes the sentence true, which is
+also what keeps the byte-identity claim above cheap to hold.
 
 ## Revoking a session ends its access token too, and the read it costs was miscounted
 
@@ -16882,6 +17026,107 @@ the on-demand catalog exists, and "we do not hold a copy" is the sentence that m
 Pinned by `TestTheWormsCreditIsALink` in `tests/test_species.py`: the literal's shape, the licence
 outside the link, the 255-character field it has to fit, the constant reaching a real search result,
 and the cache prefix.
+
+## The edge channel publishes on every merge, and deploys what it publishes
+
+`publish-image.yml` gained a third trigger, `push: branches: [main]`, and it is not a softening of
+the release policy above — it is a second channel with a different audience. A release is for
+self-hosters and only a human cuts one. The edge channel is for the one instance the project itself
+runs: every merge to `main` publishes `:edge` and `:sha-<12>`, and the new `deploy` job hands that
+build's digest to Render, so the hosted instance runs `main` continuously.
+
+**The absent tags are the design.** No `:latest`, no `X.Y.Z`, no `X.Y`, no draft release. Those are
+the names someone can be pinned to, and the whole objection to building per merge was that it trains
+people onto a moving `latest`. A channel nobody is pinned to does not have that problem, so the rule
+is mechanical: the version block in `prepare` is the only place a semver alias is ever assembled,
+and the edge block sits outside it rather than beside it.
+
+**The two channels queue separately, and that is what protects the release path.** A concurrency
+group holds one running run and one *pending* one; a third arrival cancels the pending one. A single
+group named `publish-image` was enough while a `v*` tag was the only trigger that could collide with
+itself, and it stopped being enough the moment `main` was a trigger too — silently, which is the
+problem. A tag is pushed straight after the version bump merges, so under one shared group the tag
+run queues behind that merge's own edge build and the next merge to land cancels it outright: no
+`X.Y.Z`, no `X.Y`, no `:latest`, no draft release, and a check that reads as cancelled rather than
+failed. So the group is `publish-image-edge` on a push to `main` and `publish-image-release` on
+everything else, which puts a `workflow_dispatch` with the releases — it can be told to push
+`:latest` and it can be pointed at a `v*` tag. Losing a pending run *is* acceptable on the edge
+side: a burst of merges leaves the middle ones unbuilt, every commit that does build keeps its own
+`:sha-<12>`, and the last merge of the burst is the one deployed.
+
+**The `prepare` checkout takes `github.sha`, not `github.ref`.** The same cause, the opposite
+symptom. `github.ref` on a tag push names a tag and resolves to one commit forever; on a push to
+`main` it names a *branch*, and `actions/checkout` resolves a branch to its tip when the job runs.
+Every SHA in the workflow is then read out of that working tree, so a run triggered by one commit
+but started behind another's build would put the `:sha-<12>` tag, the OCI labels, the `APP_COMMIT`
+build arg and the Render deploy on the commit that arrived while it waited, while reporting against
+the one that triggered it — and that commit would get no image at all. With the queue above, waiting
+behind a whole build is the normal case, not a narrow window. `github.sha` is the event's own commit
+and cannot move. Note it is right *there* and wrong one step later: on a `workflow_dispatch`
+`github.sha` is the tip of the launching branch, `inputs.ref` is what names the commit, and
+everything downstream takes `needs.prepare.outputs.sha` for exactly that reason.
+
+**The deploy names a digest, never `edge`.** Two things force this. Render's image-backed services
+do not redeploy when a new image lands on the tag they follow — the hook call is the deploy, and it
+takes an `imgURL` — and a hook that named `edge` would be resolved by Render whenever it got round
+to it. Two merges a few minutes apart could then deploy in either order, and the loser would roll
+the instance backwards onto code that had already been superseded. The digest is read back out of
+the registry through the immutable `sha-<12>` tag in the `merge` job, which is the one name in the
+run that cannot have moved.
+
+**The hooks come from a repository secret and their absence is not a failure.**
+`RENDER_DEPLOY_HOOKS` is comma-separated because this image serves two services (`api` and `worker`)
+and Render deploys one service per hook; newlines are accepted as separators too, since a secret
+pasted one URL per line is the likely mistake and silently deploying half the instance is a bad way
+to discover it. With the secret unset the job prints a notice and exits **zero**. That is not
+leniency: the secret is absent on every fork, and was absent in this repository until the instance
+existed, and a workflow that goes red on an outside contributor's merge for a deployment they cannot
+see is a workflow people learn to ignore. A hook that is present and *fails* is red, because a
+service left on the previous digest while its sibling moved is exactly the state nobody notices.
+
+**Each hook is masked individually, and no URL is ever printed.** A deploy hook carries its own key
+in its query string, so every element of that list is a credential. GitHub masks a secret's whole
+value and not the substrings a split produces, so the pieces would otherwise appear in the log the
+first time `curl` quoted a URL in an error — hence the `::add-mask::` per hook before it is used at
+all, and hence the status code is captured with `-w '%{http_code}'` rather than left to `--fail` to
+complain about.
+
+**Migrations are fix-forward from this change onwards.** Until now the local stack was the only
+place this app had ever run, and a revision that went wrong was fixed by rewriting it and recreating
+the database. That stops being true the moment `main` reaches an instance holding real data within
+minutes of a merge: a revision that turns out to be wrong is corrected by a *follow-up* revision,
+and the one that shipped is never edited. Nothing enforces this and nothing can —
+`alembic upgrade head` cannot tell an amended revision from a new one — so it is written here, where
+someone reads it before they amend one.
+
+## `/api/v1/health` reports the commit, because the version stopped identifying a build
+
+On the edge channel every image reports the same `APP_VERSION`: it comes from the installed
+distribution's metadata, which only moves when a human bumps `pyproject.toml` for a release, and a
+fortnight of merges are all `0.1.0`. So `version` answers "which release line is this" and nothing
+answers "which build is this" — which matters twice over. A bug report against the hosted instance
+is unanchored without it, and the AGPL §13 source offer has to name something a user can actually
+check out.
+
+So `publish-image.yml` passes the resolved commit as an `APP_COMMIT` build arg, the `Dockerfile`'s
+runtime stage turns it into an environment variable, `AppSettings.APP_COMMIT` reads it, and
+`GET /api/v1/health` returns it as `commit` beside `version`. Four things about that path are
+deliberate:
+
+- **The resolved SHA, not `github.sha`.** They differ on a `workflow_dispatch`, where `github.sha`
+  is the tip of whatever branch the workflow file was launched from rather than the commit being
+  built — the same trap the `prepare` job's own comment documents for the image labels. An image
+  naming a commit it was not built from is worse than one naming none. It is the same value as the
+  `org.opencontainers.image.revision` label, by construction.
+- **`ARG` at the bottom of the runtime stage.** A build arg invalidates every layer after the `ARG`
+  that consumes it, and the commit changes on every build by definition. Below the `COPY`s, it costs
+  one metadata layer; above them, it would rebuild the runtime image's contents every time.
+- **It defaults to empty and surfaces as `"unknown"`**, which is what a source checkout and a local
+  `docker compose up --build` both produce. That mirrors `version`'s existing handling exactly, so
+  neither field ever comes back `null` or `""` to a reader looking for an identifier.
+- **It is not in `src/.env.example`.** This is a property of the image, not of the operator's
+  configuration, and `APP_VERSION` already taught this lesson the expensive way: a build identity in
+  the template is a build identity frozen at whenever somebody copied it.
 
 ## Every foreign key column leads an index, and a test says so
 

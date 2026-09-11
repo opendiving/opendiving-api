@@ -19,6 +19,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from sqlalchemy.exc import OperationalError
 
 from src.app.api.v1.health import router as health_router
+from src.app.core.config import settings
 from src.app.core.db.database import async_get_db
 from src.app.middleware.client_cache_middleware import ClientCacheMiddleware
 
@@ -101,6 +102,37 @@ class TestLiveness:
         assert body["status"] == "healthy"
         assert body["message"] == "API is running"
         assert "version" in body
+        assert "commit" in body
+
+    def test_reports_the_commit_the_image_was_built_from(
+        self, reachable_redis: AsyncMock, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The field the AGPL source offer points at, and a bug report's only real anchor.
+
+        `version` cannot do this job: images are published on every merge to `main` as
+        well as on a release tag, and every one on that channel reports the manifest's
+        version until a tag is cut.
+        """
+        monkeypatch.setattr(settings, "APP_COMMIT", "0123456789abcdef0123456789abcdef01234567")
+        client = _make_health_client()
+
+        body = client.get("/health").json()
+
+        assert body["commit"] == "0123456789abcdef0123456789abcdef01234567"
+
+    @pytest.mark.parametrize("absent", [None, ""])
+    def test_an_unbuilt_commit_reads_unknown(
+        self, reachable_redis: AsyncMock, monkeypatch: pytest.MonkeyPatch, absent: str | None
+    ):
+        """A source checkout leaves it unset; an image built without the build arg leaves
+        it empty, because the `Dockerfile`'s `ARG` defaults to the empty string. Neither
+        may surface as `null` or `""` where a reader is looking for a commit."""
+        monkeypatch.setattr(settings, "APP_COMMIT", absent)
+        client = _make_health_client()
+
+        body = client.get("/health").json()
+
+        assert body["commit"] == "unknown"
 
     def test_does_not_touch_the_database(self):
         """The whole point of the split: liveness must not fail on a datastore outage."""

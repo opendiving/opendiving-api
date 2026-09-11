@@ -3,11 +3,12 @@
 from collections.abc import AsyncGenerator
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
+from botocore.exceptions import ClientError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
@@ -25,6 +26,7 @@ from src.app.core.worker.functions import (
     purge_expired_invite_requests,
     purge_expired_tokens,
     send_gear_service_digests,
+    startup,
 )
 from src.app.models.authentication_request import AuthenticationRequest
 from src.app.models.invitation import Invitation
@@ -32,6 +34,7 @@ from src.app.models.invite_request import InviteRequest
 from src.app.models.user import User
 from src.app.schemas.gear_service import ServiceKind, ServiceStatus
 from tests.conftest import db_available, unique_email
+from tests.helpers.fake_s3 import select_s3_backend
 from tests.helpers.generators import create_gear_item, create_gear_service_schedule
 
 
@@ -672,3 +675,32 @@ class TestSendGearServiceDigestsAgainstPostgres:
             await send_gear_service_digests({})
 
         assert diver.email not in {call.args[0] for call in send.await_args_list}
+
+
+class TestWorkerStartup:
+    """The worker probes the blob store before any cron runs.
+
+    It is the second writer - `purge_deleted_accounts` deletes every blob a purged diver
+    owned - and unlike the API it serves no request that would surface a broken store. A
+    worker that started anyway would report a successful GDPR erasure every hour while
+    leaving the diver's c-card scans in the bucket.
+    """
+
+    @pytest.mark.asyncio
+    async def test_it_probes_the_store_before_reporting_started(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = select_s3_backend(monkeypatch)
+
+        await startup(cast(Any, SimpleNamespace()))
+
+        assert client.operations() == ["put_object", "delete_object"]
+
+    @pytest.mark.asyncio
+    async def test_a_store_it_cannot_write_to_takes_the_worker_down(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Raising rather than warning: arq surfaces a failed startup instead of running the
+        crons anyway, so the container restarts into the same loud error rather than quietly
+        doing half its job."""
+        client = select_s3_backend(monkeypatch)
+        client.explode_on["put_object"] = ClientError({"Error": {"Code": "AccessDenied"}}, "PutObject")
+
+        with pytest.raises(RuntimeError, match="S3_BUCKET"):
+            await startup(cast(Any, SimpleNamespace()))

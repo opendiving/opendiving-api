@@ -111,11 +111,14 @@ something to look up, not to restate it.
   comes back as a 500. → *"Update schemas refuse an explicit null for a `NOT NULL` column"*
 - **List endpoints clamp pagination.** → `clamp_pagination`
 - **Binary reads use `ETag`/`If-None-Match` → 304.**
-- **Uploaded payloads go on the files volume, never in a column.** `services/blob_store.py` is the
-  only module that touches a filesystem; keys come from `new_key` (a fresh nonce per write, never
-  derived from the row) and are stored on the row. The ordering rule is not optional: write the
-  file, *then* commit the row; delete the row, *then* unlink after the commit
-  (`delete_after_commit`). → *"File payloads live on the files volume, not in Postgres"*
+- **Uploaded payloads go in the blob store, never in a column.** `services/blob_store.py` is the
+  only module that knows where they are - a filesystem volume or an S3-compatible bucket, on
+  `FILE_STORAGE_BACKEND` - and no caller of it ever holds a `Path` (the one exemption is
+  `src/scripts/sweep_orphaned_files.py`'s temp-file pass, which is the local backend's alone). Keys
+  come from `new_key` (a fresh nonce per write, never derived from the row) and are stored on the
+  row. The ordering rule is not optional: write the file, *then* commit the row; delete the row,
+  *then* delete the blob after the commit (`delete_after_commit`). → *"File payloads live on the
+  files volume, not in Postgres"* and *"A second backend, because the disk stopped being shared"*
 
 ## Code Style — Python
 
