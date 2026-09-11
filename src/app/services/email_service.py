@@ -218,6 +218,18 @@ async def send_invitation_email(email: str, inviter_name: str) -> None:
     use, and both are true in either mode. A mode-conditional clause was considered and
     rejected as disproportionate to what it would restore.
 
+    **The opening sentence is the one thing here that branches on `PROJECT_OPERATED`**, and
+    it is the only branch in this module. "Invited you to *their* OpenDiving log book" is
+    exactly right on a self-hosted instance, where the inviter is the diver who runs it; on
+    the instance the project operates it casts whoever pressed the button as the invitee's
+    personal host, which is not what somebody who signed up on the project's own landing
+    page was promised. So there the mail says they were invited to OpenDiving itself, at the
+    same address. The subject is deliberately *not* branched - it names the inviter and the
+    app and asserts nothing about who runs either, so both instances want the same line and
+    a branch would write one sentence twice. Nothing else about the mail moves, and nothing
+    here reads a second setting: `core.config` promises that one grep for this field lists
+    every place the app knows who runs it.
+
     The credential-carrying shape (log on `local`, raise elsewhere) rather than the notice
     shape, even though nothing here is a credential. The reasoning is the *consequence* of
     a silent failure rather than the sensitivity of the payload: a notice that fails to send
@@ -233,11 +245,18 @@ async def send_invitation_email(email: str, inviter_name: str) -> None:
         logger.warning("SMTP_HOST not configured; invitation for %s from %s: %s", email, inviter_name, sign_in_url)
         return
 
+    inviter = html.escape(inviter_name)
+    opening = (
+        f"{inviter} has invited you to OpenDiving at "
+        if settings.PROJECT_OPERATED
+        else f"{inviter} has invited you to their OpenDiving log book at "
+    )
+
     message = _build_message(
         to=email,
         subject=f"{inviter_name} invited you to OpenDiving",
         html_body=(
-            f"<p>{html.escape(inviter_name)} has invited you to their OpenDiving log book at "
+            f"<p>{opening}"
             f'<a href="{settings.FRONTEND_URL}">{settings.FRONTEND_URL}</a>.</p>'
             f"<p>Sign in with <strong>{html.escape(email)}</strong> - "
             "the address this was sent to - and your account will be created:</p>"

@@ -3,6 +3,7 @@
 import logging
 import smtplib
 import ssl
+from email.message import EmailMessage
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -34,6 +35,11 @@ def _configured(mock_settings, **overrides) -> None:
     mock_settings.SMTP_PASSWORD = None
     mock_settings.SMTP_TLS_MODE = SMTPTLSMode.STARTTLS
     mock_settings.EMAIL_FROM_ADDRESS = "noreply@opendiving.example"
+    # Not transport, but the same trap: `send_invitation_email` branches its opening
+    # sentence on this, and an unset attribute on a `MagicMock` is truthy - so every test
+    # here would silently exercise the project-operated copy. The default is the one an
+    # install gets without touching anything; the tests that want the other side pass it.
+    mock_settings.PROJECT_OPERATED = False
     for key, value in overrides.items():
         setattr(mock_settings, key, value)
 
@@ -250,6 +256,85 @@ class TestSendMagicLinkEmail:
 class TestSendInvitationEmail:
     """The ninth sender, and the one that carries somebody else's name into a stranger's
     inbox."""
+
+    # What `get_content()` returns for the self-hosted mail, verbatim - trailing newline
+    # included, since `EmailMessage` adds one. Written out rather than assembled from the
+    # sender's own f-strings on purpose: an expected value built the way the code builds it
+    # agrees with any edit to either, which is the one thing this assertion exists to catch.
+    SELF_HOSTED_SUBJECT = "Ada Reef invited you to OpenDiving"
+    SELF_HOSTED_BODY = (
+        '<p>Ada Reef has invited you to their OpenDiving log book at <a href="https://dive.example.com">'
+        "https://dive.example.com</a>.</p>"
+        "<p>Sign in with <strong>invitee@example.com</strong> - the address this was sent to - "
+        "and your account will be created:</p>"
+        '<p><a href="https://dive.example.com/signin">https://dive.example.com/signin</a></p>'
+        "<p>There is no password to choose: you enter your address, and a sign-in link and code arrive in "
+        "this mailbox. If you weren't expecting this, you can safely ignore it - nothing has been created "
+        "in your name.</p>\n"
+    )
+
+    @staticmethod
+    async def _invitation(*, project_operated: bool) -> EmailMessage:
+        """One invitation, handed back as the message that would have been posted."""
+        with (
+            patch("src.app.services.email_service.settings") as mock_settings,
+            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+        ):
+            _configured(mock_settings, PROJECT_OPERATED=project_operated)
+            mock_settings.FRONTEND_URL = "https://dive.example.com"
+
+            await send_invitation_email("invitee@example.com", "Ada Reef")
+
+        # The sender hands `_send` the message as a positional argument; naming the type
+        # here is what keeps mypy from reading the rest of this class as `Any`.
+        message: EmailMessage = mock_run_sync.call_args.args[1]
+        return message
+
+    @pytest.mark.asyncio
+    async def test_a_self_hosted_instance_sends_what_it_always_sent(self):
+        """`PROJECT_OPERATED` is off on every install but the project's own, so the branch
+        below must not cost those instances a single character - not a word reordered, not a
+        hyphen turned into a dash. Hence a whole-message comparison rather than a handful of
+        `in` checks, which is what the rest of this class uses and what would have let a
+        rewrite of the shared paragraphs through."""
+        message = await self._invitation(project_operated=False)
+
+        assert message["Subject"] == self.SELF_HOSTED_SUBJECT
+        assert message.get_content() == self.SELF_HOSTED_BODY
+
+    @pytest.mark.asyncio
+    async def test_the_project_s_own_instance_invites_you_to_opendiving_itself(self):
+        """ "Invited you to *their* log book" describes the inviter as the invitee's host,
+        which is what a self-hosted instance is and what the instance the project runs is
+        not: there the inviter is another diver on the same service, and somebody who was
+        told they would be notified when their spot was ready would be reading a sentence
+        about a personal logbook nobody offered them. The inviter is still named - it is what
+        makes the mail legible rather than a cold one from a domain they may not know."""
+        message = await self._invitation(project_operated=True)
+        body = message.get_content()
+
+        assert "Ada Reef has invited you to OpenDiving at " in body
+        assert '<a href="https://dive.example.com">https://dive.example.com</a>' in body
+        assert "their OpenDiving log book" not in body
+        # Stronger than the sentence above, and deliberately so: no phrasing of "log book"
+        # belongs in this mail on the instance the project operates.
+        assert "log book" not in body
+        # The subject names the inviter and the app and asserts nothing about who runs
+        # either, so it is the same line on both instances rather than a branch writing one
+        # sentence twice.
+        assert message["Subject"] == self.SELF_HOSTED_SUBJECT
+
+    @pytest.mark.asyncio
+    async def test_the_two_instances_differ_in_one_sentence_and_no_more(self):
+        """Copy selection, not two emails free to drift apart. Which address to sign in with,
+        that there is no password to choose and that an unexpected invitation can be ignored
+        are facts about the app, true wherever it runs, and a second copy of them is a second
+        place for them to go stale."""
+        self_hosted = (await self._invitation(project_operated=False)).get_content()
+        project_operated = (await self._invitation(project_operated=True)).get_content()
+
+        assert self_hosted != project_operated
+        assert self_hosted.split("</p>", 1)[1] == project_operated.split("</p>", 1)[1]
 
     @pytest.mark.asyncio
     async def test_it_carries_no_token_and_links_to_signin(self):

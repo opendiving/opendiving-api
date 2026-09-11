@@ -16012,9 +16012,10 @@ early access", "join the waitlist", "we'll notify you when your spot is ready, n
 of those sentences is false on a self-hosted instance, where the same form has to stay true of a
 household install whose operator decides by hand who gets in. So `RegistrationSettings` grew a
 boolean, `PROJECT_OPERATED`, default `false`, and `GET /config` grew its second field,
-`project_operated`, beside `registration_mode`. The web app selects the form's copy on it, and
-nothing else reads it. Anonymous, and still not a leak: the landing page discloses the value anyway
-by which copy it shows, exactly as it discloses the mode by which form.
+`project_operated`, beside `registration_mode`. The web app selects the form's copy on it, and this
+API selects one sentence of the invitation email on it (below). Anonymous, and still not a leak: the
+landing page discloses the value anyway by which copy it shows, exactly as it discloses the mode by
+which form.
 
 It is named for the fact it asserts rather than for a nickname like "flagship": an operator who sets
 it is claiming to *be* the project, and the default is what every install gets without touching
@@ -16037,19 +16038,39 @@ ever turn.
 this shape of fact - one the web has to know before its first paint and has no other channel for -
 and its schema said from the start that it expected a second field before a second route. The web
 already waits for that response before painting the hero, so the second field costs no flicker and
-no extra request. And this API is going to want the same fact for itself: its invitation email says
-"X invited you to their log book", which reads wrongly on a waitlist instance, and a web variable
-can never reach that template. The email does not branch yet, and when it does the branch hangs off
-this same field. Hostname sniffing was the other candidate, and it is magic that breaks the day the
-host moves.
+no extra request. And this API wanted the same fact for itself: its invitation email said "X invited
+you to their log book", which reads wrongly on a waitlist instance, and a web variable can never
+reach that template. That branch now exists, and it hangs off this same field (below). Hostname
+sniffing was the other candidate, and it is magic that breaks the day the host moves.
 
 **What it is not.** This is the first piece of code that knows the project runs one particular copy
 of the app; everything else in it is written to be true everywhere. That is a line worth holding, so
 its uses stay confined to copy selection, and every one routes through this one field rather than
 through a derived flag or a second setting - `git grep PROJECT_OPERATED` and
 `git grep project_operated` list every branch it has created, here and in the web app. An operator
-who sets it on an instance that is not the project's gets a landing page that claims to be the
-project's, and nothing else changes: it gates no feature, unlocks no route and reaches no row.
+who sets it on an instance that is not the project's gets a landing page and an invitation email
+that claim to be the project's, and nothing else changes: it gates no feature, unlocks no route and
+reaches no row.
+
+**The second branch is one sentence of the invitation email**, and it is the branch this section
+said was coming. `send_invitation_email` opened with "X has invited you to their OpenDiving log book
+at `<url>`", which is exactly right on a self-hosted instance, where the inviter is the diver who
+runs it, and casts whoever pressed the button as the invitee's personal host on the instance the
+project operates, where the inviter is just another diver on the same service. With
+`PROJECT_OPERATED` set the mail says they were invited to OpenDiving at that address instead. With
+it unset the message is byte for byte the one that shipped before, which
+`tests/test_email_service.py` asserts as a whole-message comparison against a literal rather than
+with the `in` checks the rest of that class uses: an expected value assembled from the sender's own
+f-strings would have agreed with any edit to either.
+
+**The subject is not branched**, which is an answer rather than an omission. "X invited you to
+OpenDiving" names the inviter and the app and asserts nothing about who runs either, so both
+instances want that line and a branch there would write one sentence twice. Nor does the
+project-operated copy borrow the landing page's waitlist wording: "your spot is ready" asserts a
+waitlist the invitee may never have joined, since a member invitation (`POST /user/invitations`)
+reaches the same sender, and that is the reasoning that already keeps the mail from mentioning the
+registration mode. The branch is therefore the smallest one that makes the sentence true, which is
+also what keeps the byte-identity claim above cheap to hold.
 
 ## Revoking a session ends its access token too, and the read it costs was miscounted
 

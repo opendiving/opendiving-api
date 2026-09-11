@@ -248,10 +248,12 @@ class RegistrationSettings(BaseSettings):
     # the generic wording, true of any instance, by default; the project's own waitlist
     # wording ("join the waitlist", "we'll notify you when your spot is ready") when true.
     #
-    # This API's own invitation email does not branch on it yet. "X invited you to their
-    # log book" reads wrongly on a waitlist instance, and this field is where that branch
-    # would hang when it comes. Keep every use to copy selection and route each one through
-    # this field, so a single grep for it lists every place the app knows who runs it.
+    # This API branches on it in exactly one place, and that branch now exists: the opening
+    # sentence of the invitation email (`services.email_service.send_invitation_email`). "X
+    # invited you to their log book" is true of a self-hosted instance and wrong on the one
+    # the project runs, where the invitee is invited to OpenDiving itself. Keep every use to
+    # copy selection and route each one through this field, so a single grep for it lists
+    # every place the app knows who runs it.
     PROJECT_OPERATED: bool = config("PROJECT_OPERATED", default=False)
 
     # A *rate*, not a lifetime allotment: a member who invites five friends today can
