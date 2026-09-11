@@ -253,9 +253,17 @@ class TestWhatCountsAsLeadingAnIndex:
         assert foreign_key_columns_without_a_leading_index(child.metadata) == []
 
     def test_a_functional_index_covers_nothing(self) -> None:
-        """`lower(label)` answers a lookup on `lower(label)`. The guard exists because the
-        expression has a `.name` - `"lower"` - that reads like a column's if nothing checks."""
+        """`lower(label)` answers a lookup on `lower(label)` and nothing else.
+
+        Asserted on `_leading_column_name` rather than only on the sweep, because the sweep
+        cannot tell this case from an uncovered one: drop the `isinstance` guard and the
+        expression's own `.name` - `"lower"` - joins the leading set, where it covers a column
+        called `lower` that no table here has, and the sweep still reports `child.parent_id`.
+        The two assertions below fail differently, which is the point: the first on a schema
+        that lost its index, the second on a guard that stopped discriminating.
+        """
         child = self._metadata().tables["child"]
-        Index("ix_child_label_lower", func.lower(child.c.label))
+        index = Index("ix_child_label_lower", func.lower(child.c.label))
 
         assert foreign_key_columns_without_a_leading_index(child.metadata) == ["child.parent_id"]
+        assert _leading_column_name(index) is None

@@ -13193,6 +13193,11 @@ The first kind asks the code itself and fails by name on anything it does not re
 - `test_user_cascade.py::TestEveryForeignKeyIntoUserCascades` walks `Base.metadata` for foreign keys
   into `user.id` left without `ondelete="CASCADE"`.
 
+- `test_foreign_key_indexes.py::TestEveryForeignKeyColumnLeadsAnIndex` walks the same metadata and
+  names every foreign key column no usable index leads with - a partial one not counting, for the
+  reason measured in *"The indexes are the part that needed care, not the deletes"*. The sibling of
+  the entry above, asking about the index rather than the delete rule.
+
 - `test_ownership.py::TestEveryUuidRouteIsAccountedFor` enumerates the app's real route table and
   fails on a `{uuid}` route not listed there; `TestEveryOwnedRouteUsesIt` greps the route files for
   the hand-rolled ownership block that `fetch_owned_or_raise` replaced.
@@ -16841,7 +16846,9 @@ is valid, the revision autogenerates cleanly, `alembic check` is satisfied, and 
 a sequential scan nobody is watching for, on a table that was small on the day it was added.
 
 `tests/test_foreign_key_indexes.py` walks `Base.metadata` and needs no database, in the shape of
-`TestEveryForeignKeyIntoUserCascades`. Two things in that walk are less obvious than they look:
+`TestEveryForeignKeyIntoUserCascades`. What that walk will and will not accept as coverage is where
+it is less obvious than it looks (no count here on purpose - this list said "two" and grew a third
+bullet in the next commit, which is what *"The counts in the prose go stale too"* is about):
 
 - **Leading, not merely present.** A composite index serves a lookup on its first column and not on
   its later ones. `(dive_id, position)` covers `dive_id`; `(sort_key, parent_id)` covers nothing
