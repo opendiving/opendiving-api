@@ -64,8 +64,26 @@ permissions:
 # pointing at whichever finished last. Queue rather than cancel: a cancelled push can leave
 # the tag on the older image, and it would also drop that commit's deploy on the floor,
 # since the `deploy` job only runs for the build it belongs to.
+#
+# **Two groups, split by channel**, because a group holds one running run and one *pending*
+# run, and a third arrival cancels the pending one. On the edge channel that loss is
+# acceptable: a burst of merges leaves the ones in the middle unbuilt, which is the right
+# trade for a channel whose only consumer wants the tip - every commit that does build still
+# carries its own `:sha-<12>`, and the last merge of the burst is the one deployed. It is not
+# acceptable on the release path, and one shared group would have imposed it there: a `v*` tag
+# is pushed straight after the version bump merges, so the tag run queues behind that merge's
+# own edge build and any merge landing meanwhile cancels it outright - no `X.Y.Z`, no `X.Y`,
+# no `:latest`, no draft release, and a cancelled check that looks exactly like the
+# dropped-merge case above.
+#
+# A `workflow_dispatch` sits with the releases even when it is launched from `main`, because
+# it can be told to push `:latest` and it can be pointed at a `v*` tag. The two groups overlap
+# on exactly one name, `:sha-<12>`, and only when a release is cut at a commit `main` has
+# already built: both runs build the same commit from the same tree, so the tag lands on one
+# of two images of one source and a digest read back through it may be the other run's. That
+# is a tie, not a race.
 concurrency:
-  group: publish-image
+  group: publish-image-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'edge' || 'release' }}
   cancel-in-progress: false
 
 env:
@@ -109,14 +127,29 @@ jobs:
 
       - uses: actions/checkout@v7
         with:
-          # On a tag push `inputs.ref` is empty and this falls through to the tag itself.
-          ref: ${{ inputs.ref || github.ref }}
+          # On any push - a `v*` tag or `main` - `inputs.ref` is empty and this falls through
+          # to `github.sha`, which is the commit that event carried.
+          #
+          # Deliberately not `github.ref`, which stood here until `main` became a trigger and
+          # was harmless only because it wasn't one. On a tag push `github.ref` names the tag,
+          # which resolves to one commit forever; on a push to `main` it names a *branch*, and
+          # `actions/checkout` resolves a branch to its tip when the job runs rather than to
+          # the commit that queued the run. Every SHA below is read out of the working tree,
+          # so a run triggered by c1 that starts after c2 has merged would build, tag, label
+          # and deploy c2 while reporting against c1 - and c1 would get no `:sha-` image at
+          # all. The queue above makes that window a whole preceding build long, so it is the
+          # ordinary case rather than a narrow race.
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
 
-      # `github.sha` is NOT the commit being built: on a manual run it is the tip of
-      # whichever branch the workflow file was launched from. Every SHA below therefore
-      # comes from the working tree after checkout, which also pins a moving `ref` (a
-      # branch name) to the exact commit this image was built from.
+      # On a `workflow_dispatch` `github.sha` is NOT the commit being built: it is the tip of
+      # whichever branch the workflow file was launched from, and `inputs.ref` - which wins on
+      # that path - is what names the commit. Every SHA below therefore comes from the working
+      # tree after checkout, which also pins a moving `ref` (a branch name typed into the
+      # input) to the exact commit this image was built from. That is the same distinction
+      # from the other side: `github.sha` is right for the checkout above, where it is the
+      # only fixed point a push offers, and wrong for the labels and the `APP_COMMIT` build
+      # arg, which take `needs.prepare.outputs.sha`.
       - name: Work out tags and labels
         id: meta
         env:

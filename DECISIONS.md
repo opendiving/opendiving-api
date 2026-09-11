@@ -10425,7 +10425,7 @@ finding a committed credential, say — has crossed the line and needs a differe
 **The two remedies in the report are genuinely different, and conflating them was a real bug in the
 first draft.** It told the reader that a *Python* package finding "needs a merged bump first",
 implying merge-then-rebuild. That cannot work, and the mechanism is worth stating because it is
-non-obvious: a dispatch checks out `ref` (`inputs.ref || github.ref`), the `Dockerfile` installs
+non-obvious: a dispatch checks out `ref` (`inputs.ref || github.sha`), the `Dockerfile` installs
 with `uv sync --locked` from the `uv.lock` bind-mounted out of *that* tree, and the tag/manifest
 guard refuses to publish `main` under an already-used version. So a rebuild at `v0.4.0` reinstalls
 `v0.4.0`'s exact dependency set however many bumps have landed since, publishes a fresh digest,
@@ -16846,6 +16846,31 @@ the names someone can be pinned to, and the whole objection to building per merg
 people onto a moving `latest`. A channel nobody is pinned to does not have that problem, so the rule
 is mechanical: the version block in `prepare` is the only place a semver alias is ever assembled,
 and the edge block sits outside it rather than beside it.
+
+**The two channels queue separately, and that is what protects the release path.** A concurrency
+group holds one running run and one *pending* one; a third arrival cancels the pending one. A single
+group named `publish-image` was enough while a `v*` tag was the only trigger that could collide with
+itself, and it stopped being enough the moment `main` was a trigger too — silently, which is the
+problem. A tag is pushed straight after the version bump merges, so under one shared group the tag
+run queues behind that merge's own edge build and the next merge to land cancels it outright: no
+`X.Y.Z`, no `X.Y`, no `:latest`, no draft release, and a check that reads as cancelled rather than
+failed. So the group is `publish-image-edge` on a push to `main` and `publish-image-release` on
+everything else, which puts a `workflow_dispatch` with the releases — it can be told to push
+`:latest` and it can be pointed at a `v*` tag. Losing a pending run *is* acceptable on the edge
+side: a burst of merges leaves the middle ones unbuilt, every commit that does build keeps its own
+`:sha-<12>`, and the last merge of the burst is the one deployed.
+
+**The `prepare` checkout takes `github.sha`, not `github.ref`.** The same cause, the opposite
+symptom. `github.ref` on a tag push names a tag and resolves to one commit forever; on a push to
+`main` it names a *branch*, and `actions/checkout` resolves a branch to its tip when the job runs.
+Every SHA in the workflow is then read out of that working tree, so a run triggered by one commit
+but started behind another's build would put the `:sha-<12>` tag, the OCI labels, the `APP_COMMIT`
+build arg and the Render deploy on the commit that arrived while it waited, while reporting against
+the one that triggered it — and that commit would get no image at all. With the queue above, waiting
+behind a whole build is the normal case, not a narrow window. `github.sha` is the event's own commit
+and cannot move. Note it is right *there* and wrong one step later: on a `workflow_dispatch`
+`github.sha` is the tip of the launching branch, `inputs.ref` is what names the commit, and
+everything downstream takes `needs.prepare.outputs.sha` for exactly that reason.
 
 **The deploy names a digest, never `edge`.** Two things force this. Render's image-backed services
 do not redeploy when a new image lands on the tag they follow — the hook call is the deploy, and it
