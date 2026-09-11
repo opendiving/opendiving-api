@@ -427,6 +427,15 @@ same `version` as every other `:edge` image, since the manifest only moves at st
 is why `/api/v1/health` also reports `commit`, baked into the image by the build. That field is what
 identifies a running build; `version` on its own no longer does.
 
+> **The deploy half needs a repository secret set once, by hand, and until it is, every merge
+> publishes and deploys nothing.** `RENDER_DEPLOY_HOOKS` holds this image's Render Deploy Hook URLs,
+> comma-separated — one per service, so `api` and `worker` are two — with newlines accepted as
+> separators too. Copy each from that service's *Settings → Deploy Hook* in the Render dashboard.
+> Unset, the `deploy` job prints a notice and exits **zero**, because the secret is absent on every
+> fork and a red X on an outside contributor's merge is how a check stops being read — so nothing
+> tells you it has not been done, which is why it is written here. A hook that is present and fails
+> *is* red, and re-running that job alone is the whole fix: the image is already published.
+
 Versions move in lockstep across all three repositories — this one,
 [opendiving-web](https://github.com/opendiving/opendiving-web) and the product repository: one
 product version, so `opendiving-api:0.4.0`, `opendiving-web:0.4.0` and release `v0.4.0` over there
