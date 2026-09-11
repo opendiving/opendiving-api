@@ -52,6 +52,16 @@ class AppSettings(BaseSettings):
     APP_NAME: str = config("APP_NAME", default="FastAPI app")
     APP_DESCRIPTION: str | None = config("APP_DESCRIPTION", default=None)
     APP_VERSION: str | None = config("APP_VERSION", default=_installed_version())
+    # The commit the running image was built from, baked in by the `Dockerfile`'s
+    # `APP_COMMIT` build arg. `None` everywhere else - a source checkout, a locally built
+    # image - and `/api/v1/health` is the only consumer. It exists because `APP_VERSION`
+    # stops identifying a build the moment images are published per merge rather than per
+    # release: on that channel every one of them reports the manifest's version, and the
+    # AGPL source offer has to name something an operator can check out. Deliberately not
+    # in `src/.env.example`: it is a property of the image, not of the operator's config,
+    # and the one thing `APP_VERSION` proved is that a build identity in a template is a
+    # build identity frozen at whenever somebody copied it.
+    APP_COMMIT: str | None = config("APP_COMMIT", default=None)
     LICENSE_NAME: str | None = config("LICENSE", default=None)
     # OpenAPI document metadata only ("who maintains this API", shown in `/docs`) -
     # *not* where the frontend's contact form delivers to. That's

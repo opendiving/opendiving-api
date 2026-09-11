@@ -9681,9 +9681,13 @@ being asked for an HTTP status.
 born with, and the two paths publish different things on purpose. A tag push is a *release*: it puts
 the whole alias set for that version behind one build - `X.Y.Z`, `X.Y`, `latest`, and a bare major
 only from 1.0.0 on. A dispatch is everything else: a scratch build off a branch, a `staging` tag, or
-a rebuild of an already-released version because its base image grew a CVE. There is still no
-`push: branches:` trigger, and the reason is unchanged - images are cut when someone decides to cut
-one.
+a rebuild of an already-released version because its base image grew a CVE. A third trigger,
+`push: branches: [main]`, came later and is the project's own hosted instance's: it publishes
+`:edge` and `:sha-<12>`, deploys them, and touches nothing a self-hoster can pin — see *"The edge
+channel publishes on every merge, and deploys what it publishes"* below. This paragraph used to end
+"there is still no `push: branches:` trigger, and the reason is unchanged - images are cut when
+someone decides to cut one". That reading survives the change with one word added: a *release* is
+cut when someone decides to cut one, and that is what the sentence was always about.
 
 **The whole thing is modelled on `opendiving-web`'s workflow of the same name, deliberately.** The
 two repos release in lockstep on one version, so a policy change (a new alias rule, a new guard) has
@@ -10363,9 +10367,20 @@ remedy beside it. Without Renovate actually running, that check is a standing ob
 remedy attached — which is one more reason the enablement step is written down in `CONTRIBUTING.md`
 rather than assumed.
 
-**It skips cleanly when nothing has been published.** There are no `v*` tags yet and no package on
+**It skips cleanly when nothing has been published.** There were no `v*` tags and no package on
 GHCR, so a scheduled job that assumed either would have been red from the day it merged, and a check
-that is red from day one is a check somebody turns off. No `vX.Y.Z` tags means a logged skip.
+that is red from day one is a check somebody turns off. As written, no `vX.Y.Z` tags meant a logged
+skip and an immediate exit.
+
+**That early exit later became a way to scan nothing at all**, and the fix is where `edge` enters
+the set rather than what it is. The edge channel below publishes an image on every merge to `main`
+while this repository still has no `v*` tag — it had none through the whole of the launch work — so
+an `edge` appended to `ALIASES` *after* the zero-tag check would never once have been evaluated, and
+the one image that actually existed would have been the only one never scanned. So `ALIASES` now
+starts as `(edge)` above the check, the check no longer exits, and the skip moved to the honest
+condition: nothing resolved **and** no release tags, which is a fork or a repository before its
+first merge. The old shape was not wrong when it was written; it was a conditional that stopped
+holding, and it is the kind that stays green while it does.
 
 **Only the newest release is scanned, and widening that would make the workflow worse.** The first
 draft scanned `latest` plus every live `X.Y` alias — every minor ever released — on the reasoning
@@ -10380,12 +10395,14 @@ that cycles forever on something structurally unaddressable.
 
 `SECURITY.md` settles what would otherwise be a judgement call here. Its supported-versions table is
 "the most recent release: yes; anything older: no — upgrade to the newest", so the scan set is not a
-pragmatic truncation of a wider ideal — it *is* the supported surface, and the four aliases it
-covers (`X.Y.Z`, `X.Y`, the bare major, `latest`, one image under four names) are every form in
-which someone can be pinned to that release. That is also what makes SECURITY.md's own promise hold:
-"in that case `docker compose pull` is the whole fix even with a version pinned" is only true for a
-version whose base-image CVEs something is watching for. Widening the scan back means first widening
-the support policy, and that is a decision in `SECURITY.md`, not a line in a workflow.
+pragmatic truncation of a wider ideal — it *is* the supported surface, and the four release aliases
+it covers (`X.Y.Z`, `X.Y`, the bare major, `latest`, one image under four names) are every form in
+which someone can be pinned to that release. `edge` is scanned beside them and is not one of those
+forms: nobody is meant to pin it, and it is in the set because the project's own instance runs it.
+That is also what makes SECURITY.md's own promise hold: "in that case `docker compose pull` is the
+whole fix even with a version pinned" is only true for a version whose base-image CVEs something is
+watching for. Widening the scan back means first widening the support policy, and that is a decision
+in `SECURITY.md`, not a line in a workflow.
 
 **The tracking issue is public, and `SECURITY.md` says not to open public issues for
 vulnerabilities. Both are right, and the line between them is worth stating** — because the next
@@ -10409,7 +10426,7 @@ finding a committed credential, say — has crossed the line and needs a differe
 **The two remedies in the report are genuinely different, and conflating them was a real bug in the
 first draft.** It told the reader that a *Python* package finding "needs a merged bump first",
 implying merge-then-rebuild. That cannot work, and the mechanism is worth stating because it is
-non-obvious: a dispatch checks out `ref` (`inputs.ref || github.ref`), the `Dockerfile` installs
+non-obvious: a dispatch checks out `ref` (`inputs.ref || github.sha`), the `Dockerfile` installs
 with `uv sync --locked` from the `uv.lock` bind-mounted out of *that* tree, and the tag/manifest
 guard refuses to publish `main` under an already-used version. So a rebuild at `v0.4.0` reinstalls
 `v0.4.0`'s exact dependency set however many bumps have landed since, publishes a fresh digest,
@@ -16976,3 +16993,104 @@ the on-demand catalog exists, and "we do not hold a copy" is the sentence that m
 Pinned by `TestTheWormsCreditIsALink` in `tests/test_species.py`: the literal's shape, the licence
 outside the link, the 255-character field it has to fit, the constant reaching a real search result,
 and the cache prefix.
+
+## The edge channel publishes on every merge, and deploys what it publishes
+
+`publish-image.yml` gained a third trigger, `push: branches: [main]`, and it is not a softening of
+the release policy above — it is a second channel with a different audience. A release is for
+self-hosters and only a human cuts one. The edge channel is for the one instance the project itself
+runs: every merge to `main` publishes `:edge` and `:sha-<12>`, and the new `deploy` job hands that
+build's digest to Render, so the hosted instance runs `main` continuously.
+
+**The absent tags are the design.** No `:latest`, no `X.Y.Z`, no `X.Y`, no draft release. Those are
+the names someone can be pinned to, and the whole objection to building per merge was that it trains
+people onto a moving `latest`. A channel nobody is pinned to does not have that problem, so the rule
+is mechanical: the version block in `prepare` is the only place a semver alias is ever assembled,
+and the edge block sits outside it rather than beside it.
+
+**The two channels queue separately, and that is what protects the release path.** A concurrency
+group holds one running run and one *pending* one; a third arrival cancels the pending one. A single
+group named `publish-image` was enough while a `v*` tag was the only trigger that could collide with
+itself, and it stopped being enough the moment `main` was a trigger too — silently, which is the
+problem. A tag is pushed straight after the version bump merges, so under one shared group the tag
+run queues behind that merge's own edge build and the next merge to land cancels it outright: no
+`X.Y.Z`, no `X.Y`, no `:latest`, no draft release, and a check that reads as cancelled rather than
+failed. So the group is `publish-image-edge` on a push to `main` and `publish-image-release` on
+everything else, which puts a `workflow_dispatch` with the releases — it can be told to push
+`:latest` and it can be pointed at a `v*` tag. Losing a pending run *is* acceptable on the edge
+side: a burst of merges leaves the middle ones unbuilt, every commit that does build keeps its own
+`:sha-<12>`, and the last merge of the burst is the one deployed.
+
+**The `prepare` checkout takes `github.sha`, not `github.ref`.** The same cause, the opposite
+symptom. `github.ref` on a tag push names a tag and resolves to one commit forever; on a push to
+`main` it names a *branch*, and `actions/checkout` resolves a branch to its tip when the job runs.
+Every SHA in the workflow is then read out of that working tree, so a run triggered by one commit
+but started behind another's build would put the `:sha-<12>` tag, the OCI labels, the `APP_COMMIT`
+build arg and the Render deploy on the commit that arrived while it waited, while reporting against
+the one that triggered it — and that commit would get no image at all. With the queue above, waiting
+behind a whole build is the normal case, not a narrow window. `github.sha` is the event's own commit
+and cannot move. Note it is right *there* and wrong one step later: on a `workflow_dispatch`
+`github.sha` is the tip of the launching branch, `inputs.ref` is what names the commit, and
+everything downstream takes `needs.prepare.outputs.sha` for exactly that reason.
+
+**The deploy names a digest, never `edge`.** Two things force this. Render's image-backed services
+do not redeploy when a new image lands on the tag they follow — the hook call is the deploy, and it
+takes an `imgURL` — and a hook that named `edge` would be resolved by Render whenever it got round
+to it. Two merges a few minutes apart could then deploy in either order, and the loser would roll
+the instance backwards onto code that had already been superseded. The digest is read back out of
+the registry through the immutable `sha-<12>` tag in the `merge` job, which is the one name in the
+run that cannot have moved.
+
+**The hooks come from a repository secret and their absence is not a failure.**
+`RENDER_DEPLOY_HOOKS` is comma-separated because this image serves two services (`api` and `worker`)
+and Render deploys one service per hook; newlines are accepted as separators too, since a secret
+pasted one URL per line is the likely mistake and silently deploying half the instance is a bad way
+to discover it. With the secret unset the job prints a notice and exits **zero**. That is not
+leniency: the secret is absent on every fork, and was absent in this repository until the instance
+existed, and a workflow that goes red on an outside contributor's merge for a deployment they cannot
+see is a workflow people learn to ignore. A hook that is present and *fails* is red, because a
+service left on the previous digest while its sibling moved is exactly the state nobody notices.
+
+**Each hook is masked individually, and no URL is ever printed.** A deploy hook carries its own key
+in its query string, so every element of that list is a credential. GitHub masks a secret's whole
+value and not the substrings a split produces, so the pieces would otherwise appear in the log the
+first time `curl` quoted a URL in an error — hence the `::add-mask::` per hook before it is used at
+all, and hence the status code is captured with `-w '%{http_code}'` rather than left to `--fail` to
+complain about.
+
+**Migrations are fix-forward from this change onwards.** Until now the local stack was the only
+place this app had ever run, and a revision that went wrong was fixed by rewriting it and recreating
+the database. That stops being true the moment `main` reaches an instance holding real data within
+minutes of a merge: a revision that turns out to be wrong is corrected by a *follow-up* revision,
+and the one that shipped is never edited. Nothing enforces this and nothing can —
+`alembic upgrade head` cannot tell an amended revision from a new one — so it is written here, where
+someone reads it before they amend one.
+
+## `/api/v1/health` reports the commit, because the version stopped identifying a build
+
+On the edge channel every image reports the same `APP_VERSION`: it comes from the installed
+distribution's metadata, which only moves when a human bumps `pyproject.toml` for a release, and a
+fortnight of merges are all `0.1.0`. So `version` answers "which release line is this" and nothing
+answers "which build is this" — which matters twice over. A bug report against the hosted instance
+is unanchored without it, and the AGPL §13 source offer has to name something a user can actually
+check out.
+
+So `publish-image.yml` passes the resolved commit as an `APP_COMMIT` build arg, the `Dockerfile`'s
+runtime stage turns it into an environment variable, `AppSettings.APP_COMMIT` reads it, and
+`GET /api/v1/health` returns it as `commit` beside `version`. Four things about that path are
+deliberate:
+
+- **The resolved SHA, not `github.sha`.** They differ on a `workflow_dispatch`, where `github.sha`
+  is the tip of whatever branch the workflow file was launched from rather than the commit being
+  built — the same trap the `prepare` job's own comment documents for the image labels. An image
+  naming a commit it was not built from is worse than one naming none. It is the same value as the
+  `org.opencontainers.image.revision` label, by construction.
+- **`ARG` at the bottom of the runtime stage.** A build arg invalidates every layer after the `ARG`
+  that consumes it, and the commit changes on every build by definition. Below the `COPY`s, it costs
+  one metadata layer; above them, it would rebuild the runtime image's contents every time.
+- **It defaults to empty and surfaces as `"unknown"`**, which is what a source checkout and a local
+  `docker compose up --build` both produce. That mirrors `version`'s existing handling exactly, so
+  neither field ever comes back `null` or `""` to a reader looking for an identifier.
+- **It is not in `src/.env.example`.** This is a property of the image, not of the operator's
+  configuration, and `APP_VERSION` already taught this lesson the expensive way: a build identity in
+  the template is a build identity frozen at whenever somebody copied it.

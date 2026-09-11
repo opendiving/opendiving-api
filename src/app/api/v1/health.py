@@ -52,9 +52,21 @@ async def health_check(response: Response) -> dict[str, str]:
     This is what the image's `HEALTHCHECK` used to run and what an orchestrator should
     point a restart-on-failure probe at, so it must not fail for a reason restarting the
     container cannot fix. Use `/health/ready` to find out whether it can serve.
+
+    `commit` is what identifies the build, and `version` on its own no longer does:
+    images are published on every merge to `main` as well as on a release tag, and every
+    one on that channel reports the same manifest version until somebody cuts a tag.
+    `commit` reads `"unknown"` anywhere but an image built by `publish-image.yml`, which
+    is the only thing that bakes it in - unlike `version`, which any installed checkout
+    has from its own distribution metadata.
     """
     response.headers.update(_NO_STORE)
-    return {"status": "healthy", "version": settings.APP_VERSION or "unknown", "message": "API is running"}
+    return {
+        "status": "healthy",
+        "version": settings.APP_VERSION or "unknown",
+        "commit": settings.APP_COMMIT or "unknown",
+        "message": "API is running",
+    }
 
 
 @router.get("/health/ready")
