@@ -56,6 +56,8 @@ from ..schemas.dive_profile import (
     GasAttribution,
     ParsedProfileSchema,
     ProfileEventType,
+    ProfileProvenance,
+    RecordingProfileRead,
 )
 from .blob_store import BlobMissingError
 from .dive_parsers import DiveParseError, DiveParser
@@ -87,6 +89,23 @@ PROFILE_EXTRACTOR_VERSION = 3
 IMPORT_PARSER_KEY = "divejson_import"
 MERGE_PARSER_KEY = "merge"
 UNREPRODUCIBLE_PROVENANCES = frozenset({IMPORT_PARSER_KEY, MERGE_PARSER_KEY})
+
+# The published spelling of each sentinel. Everything *not* in here is a `DiveParser.key`
+# and reads as `FILE` - which is why this maps the closed side rather than listing the open
+# one. `test_every_unreproducible_provenance_has_a_wire_value` fails the build if a third
+# sentinel is added to the set above without a spelling here, because the fallback would
+# otherwise publish it as "read from the files" - the one answer that is never true of a
+# value in that set.
+_PROVENANCE_BY_PARSER_KEY: Mapping[str, ProfileProvenance] = {
+    IMPORT_PARSER_KEY: ProfileProvenance.DIVEJSON_IMPORT,
+    MERGE_PARSER_KEY: ProfileProvenance.MERGE,
+}
+
+
+def provenance_of(parser_key: str) -> ProfileProvenance:
+    """The stored `parser_key` as the wire's closed three-way answer."""
+    return _PROVENANCE_BY_PARSER_KEY.get(parser_key, ProfileProvenance.FILE)
+
 
 # Per channel, applied server-side at extraction. A 2026 Suunto Ocean export carries
 # 3 933 temperature samples on one dive, which is already past this; depth (395) never
@@ -228,10 +247,17 @@ class NormalizedProfile:
 
 @dataclass(frozen=True, slots=True)
 class LoadedProfile:
-    """A stored profile's series plus the span the chart's x axis has to cover."""
+    """A stored profile's series plus the span the chart's x axis has to cover.
+
+    `parser_key` rides along because the recording profile route publishes its provenance
+    and `load_profile` has the whole row in hand anyway - asking for it separately would be
+    a second query for a column already fetched. The export, which embeds the format's
+    profile object and nothing else, simply ignores it.
+    """
 
     duration: int
     data: dict[str, Any]
+    parser_key: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -1169,7 +1195,7 @@ async def load_profile(db: AsyncSession, *, recording_id: int) -> LoadedProfile 
         return None
 
     db.expunge(profile)
-    return LoadedProfile(duration=profile.duration, data=profile.data)
+    return LoadedProfile(duration=profile.duration, data=profile.data, parser_key=profile.parser_key)
 
 
 def to_read_schema(loaded: LoadedProfile) -> DiveProfileRead:
@@ -1207,6 +1233,17 @@ def to_read_schema(loaded: LoadedProfile) -> DiveProfileRead:
             for event in data.get("events") or []
         ],
     )
+
+
+def to_recording_read_schema(loaded: LoadedProfile) -> RecordingProfileRead:
+    """The recording profile route's shape: the format's object plus where it came from.
+
+    Widens `to_read_schema`'s result rather than mapping the payload a second time, so the
+    stored-to-wire mapping above stays the only one. `vars()` on a Pydantic model is exactly
+    its field values - these models declare no extras - which is what keeps a channel added
+    to `DiveProfileRead` from needing an edit here as well.
+    """
+    return RecordingProfileRead(**vars(to_read_schema(loaded)), provenance=provenance_of(loaded.parser_key))
 
 
 async def delete_profile_for_recording(db: AsyncSession, *, recording_id: int, commit: bool = True) -> bool:
@@ -1258,6 +1295,7 @@ async def get_profile_infos_for_recordings(
         DiveProfile.uuid,
         DiveProfile.duration,
         DiveProfile.depth_sample_count,
+        DiveProfile.parser_key,
         DiveProfile.event_count,
         DiveProfile.max_depth_cm,
         DiveProfile.max_ceiling_cm,
@@ -1287,6 +1325,7 @@ async def get_profile_infos_for_recordings(
             uuid=row.uuid,
             duration=row.duration,
             depth_sample_count=row.depth_sample_count,
+            provenance=provenance_of(row.parser_key),
             # Deliberately not folded into `channels`: events aren't a curve, and a client
             # deciding whether to offer a "markers" toggle wants the count, not membership
             # of a list of axes.

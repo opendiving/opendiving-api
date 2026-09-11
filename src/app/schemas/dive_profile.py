@@ -60,6 +60,28 @@ class ProfileEventType(StrEnum):
     OTHER = "other"
 
 
+class ProfileProvenance(StrEnum):
+    """Where a stored profile's samples came from - a closed three-way question.
+
+    Not `dive_profile.parser_key` itself, which is the storage spelling of the same fact and
+    a deliberately overloaded column: it holds a `DiveParser.key` when the samples were read
+    off the recording's files, and one of two sentinels otherwise (see
+    `UNREPRODUCIBLE_PROVENANCES` in `services/dive_profiles.py`). That overload is right for
+    a column that also has to answer "can this be extracted again"; it is wrong for a wire
+    member, because publishing it would make a client hard-code the two sentinel strings and
+    treat *every other value* - the open, growing set of parser keys - as the third case.
+    The question is closed, so the vocabulary is, like `ProfileEventType` and `GasRole`.
+
+    `FILE` is not "this recording has files": a merged recording keeps whatever files either
+    half had (`POST /dives/merge`), and its samples are still `MERGE`. This says what
+    produced the samples, which is why it lives on the profile rather than on the recording.
+    """
+
+    FILE = "file"
+    DIVEJSON_IMPORT = "divejson_import"
+    MERGE = "merge"
+
+
 def _validate_series(t: list[float] | list[int], v: list[int], label: str) -> None:
     if len(t) != len(v):
         raise ValueError(f"{label}: series has {len(t)} timestamps but {len(v)} values")
@@ -247,13 +269,19 @@ class DiveProfileEvent(BaseModel):
 
 
 class DiveProfileRead(BaseModel):
-    """A dive's full profile.
+    """A dive's full profile, and exactly the DiveJSON `profile` object (spec §§6.4-6.6).
 
     Values stay in their stored integer scales rather than being divided into meters and
     degrees here: the client is going to map every point through a scale function anyway
     while drawing, so it divides once per point there instead of the API inflating the
     payload with `12.34`-shaped floats. The scales are fixed by the format (see the
     module constants) and mirrored by the frontend's `PROFILE_CHANNELS`.
+
+    **Its member list is the format's, and the format closes it.** `ExportRecording.profile`
+    embeds this class, and the schema's `profile` object is `additionalProperties: false` -
+    so a member DiveJSON has no slot for cannot be added here without making every exported
+    document invalid. That is why the provenance lives on `RecordingProfileRead` below
+    rather than on this class: an application fact goes on the application's own shape.
     """
 
     duration: Annotated[
@@ -293,6 +321,28 @@ class DiveProfileRead(BaseModel):
     ]
 
 
+class RecordingProfileRead(DiveProfileRead):
+    """What `GET /dive/{uuid}/recording/{rid}/profile` serves: the format's profile object
+    plus the one thing about it that is this application's fact rather than the format's.
+
+    A subclass rather than a member on `DiveProfileRead`, and rather than a second set of
+    profile models: every member name is still declared once, so a future channel or a
+    renamed series reaches both surfaces from one edit - which is the whole point of
+    *"The profile speaks one vocabulary, storage included"* in `DECISIONS.md`. What the
+    subclass buys is that the exported document keeps exactly the members DiveJSON defines,
+    on an object the schema closes.
+    """
+
+    provenance: Annotated[
+        ProfileProvenance,
+        Field(
+            description="Where these samples came from: `file` (read from this recording's files, and "
+            "re-readable from them), `divejson_import` (supplied by an imported document) or `merge` "
+            "(two recordings' samples folded onto one axis)."
+        ),
+    ]
+
+
 class DiveProfileInfo(BaseModel):
     """The dive detail response's answer to "does this dive have a profile, and which
     curves would a chart draw" - without decoding the series themselves.
@@ -304,6 +354,16 @@ class DiveProfileInfo(BaseModel):
     uuid: uuid_pkg.UUID
     duration: int
     depth_sample_count: int
+    # Always present: `dive_profile.parser_key` is NOT NULL, so every stored profile is one
+    # of the three. It is here because a file-less recording is first-class rather than
+    # degenerate, and the two ways of being file-less are different things a client has to
+    # say differently - "imported through the converter" against "merged from two
+    # recordings". Nothing else in the dive read distinguishes them: `files` is empty for
+    # both.
+    provenance: Annotated[
+        ProfileProvenance,
+        Field(description="Where these samples came from - see `RecordingProfileRead.provenance`"),
+    ]
     channels: Annotated[
         list[str],
         Field(

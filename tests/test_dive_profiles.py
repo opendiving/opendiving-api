@@ -19,15 +19,20 @@ from src.app.schemas.dive_profile import (
     ParsedProfileSchema,
     ParsedSeries,
     ProfileEventType,
+    ProfileProvenance,
 )
 from src.app.services.dive_parsers import _PARSERS, DiveParseError
 from src.app.services.dive_parsers.fit import FitParser
 from src.app.services.dive_parsers.suunto_json import SuuntoJsonParser
 from src.app.services.dive_parsers.suunto_xml import SuuntoXmlParser
 from src.app.services.dive_profiles import (
+    _PROVENANCE_BY_PARSER_KEY,
+    IMPORT_PARSER_KEY,
     MAX_EVENTS,
     MAX_LABEL_CHARS,
     MAX_POINTS_PER_CHANNEL,
+    MERGE_PARSER_KEY,
+    UNREPRODUCIBLE_PROVENANCES,
     ExistingProfileRow,
     LoadedProfile,
     NormalizedProfile,
@@ -41,8 +46,10 @@ from src.app.services.dive_profiles import (
     finalize_profile,
     get_gas_attribution_for_dives,
     normalize,
+    provenance_of,
     should_extract,
     to_read_schema,
+    to_recording_read_schema,
 )
 from tests.helpers.fit import dive_fit_file
 from tests.helpers.fit import message as fit_message
@@ -1440,7 +1447,7 @@ class TestToReadSchema:
             ],
         )
 
-        read = to_read_schema(LoadedProfile(duration=10, data=profile.to_data()))
+        read = to_read_schema(LoadedProfile(duration=10, data=profile.to_data(), parser_key="suunto_xml"))
 
         assert read.ceiling.values == [300]
         assert [(event.time, event.type, event.gas_number, event.label) for event in read.events] == [
@@ -1452,11 +1459,52 @@ class TestToReadSchema:
         """Extractor version 1's rows, which a backfill has not reached yet. The optional
         keys are read with `.get` for exactly this: a `KeyError` here would 500 the profile
         endpoint for every dive imported before the bump."""
-        read = to_read_schema(LoadedProfile(duration=10, data={"depth": {"t": [0], "v": [3000]}}))
+        read = to_read_schema(
+            LoadedProfile(duration=10, data={"depth": {"t": [0], "v": [3000]}}, parser_key="suunto_xml")
+        )
 
         assert read.depth.values == [3000]
         assert read.ceiling is None
         assert read.events == []
+
+
+class TestProvenance:
+    """The stored `parser_key` as the wire's closed three-way answer.
+
+    `parser_key` is overloaded on purpose - a parser's key, or one of two sentinels - which
+    is right for a column that also has to answer "can this be extracted again" and wrong
+    for a member a client switches on.
+    """
+
+    def test_a_parsers_key_reads_as_file(self):
+        """Every parser, rather than the one this suite happens to write: the wire member
+        must not grow a value when a parser is added."""
+        assert {provenance_of(parser.key) for parser in _PARSERS} == {ProfileProvenance.FILE}
+
+    def test_each_sentinel_reads_as_itself(self):
+        assert provenance_of(IMPORT_PARSER_KEY) is ProfileProvenance.DIVEJSON_IMPORT
+        assert provenance_of(MERGE_PARSER_KEY) is ProfileProvenance.MERGE
+
+    def test_every_unreproducible_provenance_has_a_wire_value(self):
+        """The guard on the fallback. Anything not named in the mapping reads as `FILE` -
+        "read off this recording's files, and re-readable from them" - which is the one
+        answer that is never true of a member of this set, so a third sentinel added without
+        a spelling would publish a lie rather than raise.
+        """
+        assert set(_PROVENANCE_BY_PARSER_KEY) == UNREPRODUCIBLE_PROVENANCES
+
+    def test_the_recording_route_carries_it_and_the_formats_object_does_not(self):
+        """Two shapes off one payload. `DiveProfileRead` is the DiveJSON `profile` object,
+        whose schema is `additionalProperties: false`, so the member rides the subclass the
+        route serves and the exported document keeps exactly the format's members.
+        """
+        loaded = LoadedProfile(duration=10, data={"depth": {"t": [0], "v": [3000]}}, parser_key=MERGE_PARSER_KEY)
+
+        read = to_recording_read_schema(loaded)
+
+        assert read.provenance is ProfileProvenance.MERGE
+        assert read.depth.values == [3000]
+        assert "provenance" not in to_read_schema(loaded).model_dump()
 
 
 class TestParsedProfileValidation:
