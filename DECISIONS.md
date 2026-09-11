@@ -16810,5 +16810,8 @@ field rather than a record), by `TestAStoredFieldNameOutsideTheVocabulary` in
 `tests/test_dive_form_presets.py` (the one vocabulary whose read shape also inherits a *validator*
 that would have dropped the value instead of failing on it), and by
 `tests/test_vocabulary_repair.py`, which runs the revision's own statements against Postgres for the
-collision skip, the differently-labelled sibling it must *not* swallow, and idempotence across the
-restarts that re-run it.
+collision skip, the differently-labelled sibling it must *not* swallow, and idempotence - not
+because a restart re-runs an applied revision (it does not; `apply_migrations` is a no-op on every
+subsequent boot), but because one that fails partway rolls back without advancing `alembic_version`
+and starts again from the top, which is the case the collision arm exists to keep this revision out
+of.

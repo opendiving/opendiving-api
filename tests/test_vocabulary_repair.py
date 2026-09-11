@@ -133,8 +133,16 @@ class TestTheInspectionRepair:
         assert free.kind == "visual_inspection"
 
     def test_running_it_twice_changes_nothing_further(self, db: Session, owner: User) -> None:
-        """`alembic upgrade head` runs on every container start; a repair that is not
-        idempotent would be a different database after every restart."""
+        """Not because a restart re-runs it - `alembic upgrade head` skips a revision the
+        database has already recorded, and `apply_migrations` says so ("on every subsequent
+        boot the upgrade is a no-op").
+
+        Because a revision that *fails* partway rolls back without advancing
+        `alembic_version`, and the next boot starts it again from the top - which is the
+        case this revision is one guard away from, its collision arm existing precisely
+        because the alternative was an abort inside the API's startup. A repair that had to
+        run cleanly the first time would turn that retry into a second failure.
+        """
         item = create_gear_item(db, owner)
         schedule = _schedule(db, owner, item.id, kind="inspection")
 
