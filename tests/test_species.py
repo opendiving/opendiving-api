@@ -2467,7 +2467,7 @@ class TestVettingTheStoredName:
         assert stored.common_name == "Orca whale"
 
 
-# -------------- routes --------------
+# -------------- the credit every row carries --------------
 
 
 class TestTheWormsCreditIsALink:
@@ -2524,6 +2524,9 @@ class TestTheWormsCreditIsALink:
         a new prefix every query already in Redis would keep serving the old one - and the
         clients degrade gracefully rather than failing, so nothing on screen would say so."""
         assert species_service._cache_key("search", "clownfish").startswith("species:v7:")
+
+
+# -------------- routes --------------
 
 
 class TestSearchRoute:

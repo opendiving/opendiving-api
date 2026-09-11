@@ -16838,10 +16838,10 @@ there is nothing to transform.
 **The trailing `(CC BY)` sits outside the link deliberately.** The label is the register's name,
 which is what a reader should click; the licence is a fact about the data rather than a destination.
 That is only safe because `parseAttribution` on the client splits a credit into runs and links
-instead of matching one whole string, so `[…](…) (CC BY)` renders as a link followed by three
-characters of text — the same structure the basemap credit has already been shipping. A parser
-anchored on the whole string would have shown a diver the literal brackets, which is the exact
-regression the wire-format section describes.
+instead of matching one whole string, so `[…](…) (CC BY)` renders as a link followed by a plain run
+— links and plain runs interleaved, which is what the basemap credit has been shipping all along. A
+parser anchored on the whole string would have shown a diver the literal brackets, which is the
+exact regression the wire-format section describes.
 
 **The ordering constraint that section states was already satisfied**, which is why this could be an
 API-side change on its own. It runs client-then-API in only one direction: the client must learn to
