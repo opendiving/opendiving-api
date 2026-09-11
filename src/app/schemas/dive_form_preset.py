@@ -6,7 +6,7 @@ from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls
+from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
 
 
 class DiveFormField(StrEnum):
@@ -118,6 +118,20 @@ class DiveFormPresetRead(DiveFormPresetBase, PublicUUIDSchema):
     the sequential internal `id` (which is never exposed over the API).
     """
 
+    # `StoredVocabulary`, and the inherited `_canonicalize` turned off with it. Widening the
+    # annotation alone would be worse than leaving it: `canonical_hidden_fields` rebuilds the
+    # list from `DiveFormField`'s members, so an unrecognized stored name would be *dropped*
+    # from the response instead of failing it - a quieter version of the same wrong answer.
+    # Nothing needs canonicalizing on the way out anyway; every write already went through it.
+    # See *"A stored vocabulary is read back as a string"* in DECISIONS.md.
+    hidden_fields: Annotated[list[StoredVocabulary], Field(default_factory=list)]  # type: ignore[assignment]
+
+    @field_validator("hidden_fields")  # type: ignore[misc]
+    @classmethod
+    def _canonicalize(cls, value: list[str]) -> list[str]:  # type: ignore[override]
+        """Overrides `DiveFormPresetBase._canonicalize` with a passthrough - see above."""
+        return value
+
     user_uuid: uuid_pkg.UUID
     created_at: datetime
 
@@ -127,6 +141,20 @@ class DiveFormPresetReadInternal(DiveFormPresetBase, PublicUUIDSchema):
     lookups only - never returned directly over the API (use `DiveFormPresetRead`, which
     additionally resolves `user_id` to the owning user's `uuid`).
     """
+
+    # `StoredVocabulary`, and the inherited `_canonicalize` turned off with it. Widening the
+    # annotation alone would be worse than leaving it: `canonical_hidden_fields` rebuilds the
+    # list from `DiveFormField`'s members, so an unrecognized stored name would be *dropped*
+    # from the response instead of failing it - a quieter version of the same wrong answer.
+    # Nothing needs canonicalizing on the way out anyway; every write already went through it.
+    # See *"A stored vocabulary is read back as a string"* in DECISIONS.md.
+    hidden_fields: Annotated[list[StoredVocabulary], Field(default_factory=list)]  # type: ignore[assignment]
+
+    @field_validator("hidden_fields")  # type: ignore[misc]
+    @classmethod
+    def _canonicalize(cls, value: list[str]) -> list[str]:  # type: ignore[override]
+        """Overrides `DiveFormPresetBase._canonicalize` with a passthrough - see above."""
+        return value
 
     id: int
     user_id: int

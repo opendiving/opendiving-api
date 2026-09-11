@@ -22,7 +22,14 @@ Postgres, `test_logbook_import.py` the import path that produces such a row, and
 
 import pytest
 
-from src.app.schemas.dive_mixture import DiveMixtureBase, DiveMixtureCreate, DiveMixtureRead
+from src.app.schemas.dive_mixture import (
+    DiveMixtureBase,
+    DiveMixtureCreate,
+    DiveMixtureRead,
+    GasRole,
+    TankUsage,
+    as_create,
+)
 
 _ABSENT = ("volume", "oxygen", "helium")
 
@@ -95,3 +102,32 @@ class TestTheReadSchemaAdmitsTheStoredRow:
 
         assert mixture.volume is None
         assert (mixture.oxygen, mixture.start_pressure, mixture.end_pressure) == (32.0, 200.0, 80.0)
+
+
+class TestCopyingAStoredCylinderOntoAnotherDive:
+    """`as_create` is what a merge, a recording attach and the logbook importer use to copy
+    a stored cylinder onto another dive.
+
+    It exists because those four call sites each rebuilt `DiveMixtureCreate(**row.model_dump())`
+    by hand, which stopped being safe when `DiveMixtureRead.role`/`usage` widened to the stored
+    string: the write schema still types the enums, so a value outside one raised out of a
+    merge, an attach or an import. See *"A stored vocabulary is read back as a string"* in
+    DECISIONS.md.
+    """
+
+    def test_the_numbers_survive_a_role_this_build_cannot_name(self) -> None:
+        copy = as_create(DiveMixtureRead(id=1, volume=12.0, oxygen=32.0, start_pressure=200.0, role="frobnicator"))
+
+        assert (copy.volume, copy.oxygen, copy.start_pressure) == (12.0, 32.0, 200.0)
+        assert copy.role is None
+
+    def test_usage_is_dropped_on_the_same_terms(self) -> None:
+        copy = as_create(DiveMixtureRead(id=1, volume=12.0, usage="frobnicator"))
+
+        assert copy.usage is None
+
+    def test_a_recognized_pair_is_carried_across_unchanged(self) -> None:
+        """The other half, so the test above cannot pass by dropping everything."""
+        copy = as_create(DiveMixtureRead(id=1, volume=12.0, role=GasRole.DECO, usage=TankUsage.STAGED))
+
+        assert (copy.role, copy.usage) == (GasRole.DECO, TankUsage.STAGED)

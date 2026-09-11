@@ -31,6 +31,13 @@ class GearItem(Base, PublicUUIDMixin, TimestampMixin):
     # would buy nothing and would need a DDL change every time a category is added.
     # 32 chars is generous headroom over the longest current member ("line_cutter"),
     # so a new category never needs the column widened.
+    #
+    # What that argument does *not* license is a read schema typed with the enum. "Every
+    # write" means every write through the API; a direct SQLAlchemy write (a fixture, a
+    # script, a hand-run UPDATE) reaches the column untouched, and the column is
+    # deliberately willing to hold what it puts there. So the read shapes carry
+    # `StoredVocabulary` instead - see *"A stored vocabulary is read back as a string"*
+    # in DECISIONS.md for the 500 that taught this.
     type: Mapped[str | None] = mapped_column(String(32), default=None)
     notes: Mapped[str] = mapped_column(Text, default="")
     # Rented gear is a property of the item itself rather than of a dive: a diver

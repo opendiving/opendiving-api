@@ -38,7 +38,7 @@ from ..models.dive_profile import DiveProfile
 from ..models.dive_recording import DiveRecording
 from ..models.dive_species import DiveSpecies
 from ..schemas.dive import DiveReadInternal
-from ..schemas.dive_mixture import DiveMixtureCreate
+from ..schemas.dive_mixture import as_create
 from ..schemas.dive_profile import DEPTH_SCALE
 from .dive_files import apply_gas_mapping, relabel_gas_numbers
 from .dive_profiles import (
@@ -236,8 +236,8 @@ async def merge_dives(db: AsyncSession, *, first: DiveReadInternal, second: Dive
             db=db,
             dive_id=survivor.id,
             mixtures=[
-                *(DiveMixtureCreate(**row.model_dump(exclude={"id"})) for row in survivor_mixtures),
-                *(DiveMixtureCreate(**row.model_dump(exclude={"id"})) for row in appended),
+                *(as_create(row) for row in survivor_mixtures),
+                *(as_create(row) for row in appended),
             ],
             commit=False,
         )

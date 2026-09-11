@@ -22,22 +22,33 @@ outside this database.
 """
 
 import json
+import uuid as uuid_pkg
+from datetime import date
 from typing import Any
 from unittest.mock import AsyncMock
 
 import divejson
 import pytest
 
+from src.app.models.certification import Certification
+from src.app.models.course import Course
+from src.app.models.gear_item import GearItem
+from src.app.models.gear_service_record import GearServiceRecord
+from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.schemas.export import DIVEJSON_FORMAT, DIVEJSON_VERSION, ExportCourse, ExportEnvelope
 from src.app.services.dive_profiles import MERGE_PARSER_KEY, LoadedProfile
 from src.app.services.export.envelope import write_divejson
 from src.app.services.export.paths import plan_archive_paths
+from src.app.services.export.tabular import CSV_WRITERS
+from src.app.services.export.uddf import write_uddf
 from src.app.services.logbook_import import parse_document
 from tests.helpers.export import (
+    CREATED_AT,
     EXPORTED_AT,
     PRIMARY_RECORDING_ID,
     TRIMIX_PROFILE,
     UUIDS,
+    _with_id,
     build_bundle,
     full_bundle,
     make_dive,
@@ -564,6 +575,223 @@ class TestAbsence:
             "recordings",
             "created_at",
         }
+
+
+class TestAnUnrecognizedVocabularyValueDoesNotFiveHundredTheExport:
+    """The three writers, and each answers differently because each is bound differently.
+
+    A stored `kind`/`type` outside its enum is legal data - the columns carry no DB `CHECK`
+    on purpose (DECISIONS.md, *"A stored vocabulary is read back as a string"*), and revision
+    `f9d04a823776` deliberately leaves one behind when repairing it would collide with
+    `ux_gear_service_schedule_item_kind_label`. So every reader of those columns has to have
+    an answer, and "raise" is not one: the export streams inside the request handler, so a
+    `ValueError` or a `ValidationError` there is a 500 on `GET /export/divejson`,
+    `GET /export/uddf` and `GET /export/archive` alike.
+    """
+
+    @staticmethod
+    def _bundle() -> Any:
+        """One legal schedule and one carrying the value the migration can strand, on gear
+        whose `type` is outside `GearType` the same way."""
+        item = _with_id(
+            GearItem(
+                user_id=1,
+                name="AL80",
+                brand="Luxfer",
+                type="frobnicator",
+                uuid=UUIDS["gear-other"],
+                created_at=CREATED_AT,
+            ),
+            1,
+        )
+
+        def schedule(row_id: int, kind: str) -> GearServiceSchedule:
+            return _with_id(
+                GearServiceSchedule(
+                    user_id=1,
+                    gear_item_id=1,
+                    kind=kind,
+                    starts_on=date(2026, 1, 1),
+                    interval_months=12,
+                    # Distinct labels: `ux_gear_service_schedule_item_kind_label` is over
+                    # (item, kind, label), so these two coexist on one item in a real
+                    # database - which is the collision case the migration declines to
+                    # rename, and so the state this whole class is about.
+                    label=kind,
+                    uuid=uuid_pkg.UUID(f"019f0000-0000-7000-8000-{900 + row_id:012d}"),
+                    created_at=CREATED_AT,
+                ),
+                row_id,
+            )
+
+        return build_bundle(
+            gear_items=[item],
+            schedules=[schedule(1, "service"), schedule(2, "inspection")],
+        )
+
+    @pytest.mark.asyncio
+    async def test_divejson_omits_the_record_it_cannot_express_and_keeps_the_rest(self, monkeypatch) -> None:
+        """`ExportGearServiceSchedule.type` is the format's own enum on an object the schema
+        closes, so the value cannot go into the document - but the *other* schedule can, and
+        a writer that raised would have taken it with it.
+        """
+        document = await _render(self._bundle(), monkeypatch)
+
+        assert [s["type"] for s in document["gear_service_schedules"]] == ["service"]
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_the_gear_item_itself_still_exports(self, monkeypatch) -> None:
+        """`gear_item.type` is optional in the format, so an unrepresentable one costs the
+        field, never the item - a diver's cylinder does not disappear from their export
+        because of how its category is spelt."""
+        document = await _render(self._bundle(), monkeypatch)
+
+        assert [g["name"] for g in document["gear"]] == ["AL80"]
+        assert "type" not in document["gear"][0]
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_uddf_files_it_under_the_catch_all_element(self) -> None:
+        """UDDF has no vocabulary of ours to keep: the value only picks which typed element
+        the piece is written into, and `<variouspieces>` is where `OTHER` already goes."""
+        xml = b"".join([chunk async for chunk in write_uddf(AsyncMock(), self._bundle(), exported_at=EXPORTED_AT)])
+
+        assert b"frobnicator" not in xml
+        assert b"<variouspieces" in xml
+        assert b"AL80" in xml
+
+    @pytest.mark.asyncio
+    async def test_a_cylinder_keeps_its_pressures_when_its_role_is_unspeakable(self, monkeypatch) -> None:
+        """`role`/`usage` are OPTIONAL, and the cylinder is rebuilt as `DiveMixtureBase` on
+        the way out - a *write* base, still enum-typed - so the value the read schema carried
+        through has to be dropped here rather than handed over."""
+        dive = make_dive(1, UUIDS["dive-air"])
+        bundle = build_bundle(
+            dives=[dive],
+            mixtures_by_dive={1: [mixture(role="frobnicator", usage="frobnicator", start_pressure=200.0)]},
+        )
+
+        document = await _render(bundle, monkeypatch)
+
+        cylinder = document["dives"][0]["cylinders"][0]
+        assert cylinder["start_pressure"] == 200.0
+        assert "role" not in cylinder and "usage" not in cylinder
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_a_record_pointing_at_an_omitted_schedule_loses_the_link_not_itself(self, monkeypatch) -> None:
+        """The state revision `f9d04a823776` actually produces: it renames a record's `kind`
+        unconditionally while leaving a colliding schedule at the old value. DiveJSON checks
+        referential closure, so a record still naming the omitted schedule would make the
+        whole document non-conforming - which fails at the far end, in someone else's
+        importer, rather than here.
+        """
+        bundle = self._bundle()
+        bundle.service_records.append(
+            _with_id(
+                GearServiceRecord(
+                    user_id=1,
+                    gear_item_id=1,
+                    kind="visual_inspection",
+                    serviced_on=date(2026, 1, 1),
+                    dive_count_at_service=0,
+                    # The schedule that `_speakable` drops.
+                    gear_service_schedule_id=2,
+                    notes="",
+                    uuid=UUIDS["record"],
+                    created_at=CREATED_AT,
+                ),
+                1,
+            )
+        )
+
+        document = await _render(bundle, monkeypatch)
+
+        record = document["gear_service_records"][0]
+        assert record["type"] == "visual_inspection"
+        assert "gear_service_schedule_uuid" not in record
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_a_dive_and_a_card_pointing_at_an_omitted_course_lose_the_link(self, monkeypatch) -> None:
+        """`course.agency` is REQUIRED, so an unspeakable one omits the course - and both
+        things that can point at one are OPTIONAL references, so they go absent rather than
+        going with it. Losing a dive from an export over the spelling of its course's agency
+        would be the worst answer available."""
+        course = _with_id(
+            Course(
+                user_id=1,
+                name="Deco Procedures",
+                agency="frobnicator",
+                status="completed",
+                uuid=UUIDS["course"],
+                notes="",
+                created_at=CREATED_AT,
+            ),
+            1,
+        )
+        certification = _with_id(
+            Certification(
+                user_id=1,
+                agency="padi",
+                name="Open Water Diver",
+                course_id=1,
+                notes="",
+                uuid=UUIDS["certification"],
+                created_at=CREATED_AT,
+            ),
+            1,
+        )
+        bundle = build_bundle(
+            dives=[make_dive(1, UUIDS["dive-air"], course_id=1)],
+            courses=[course],
+            certifications=[certification],
+        )
+
+        document = await _render(bundle, monkeypatch)
+
+        assert document["courses"] == []
+        assert "course_uuid" not in document["dives"][0]
+        assert "course_uuid" not in document["certifications"][0]
+        assert document["certifications"][0]["name"] == "Open Water Diver"
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_an_unspeakable_status_costs_the_field_not_the_course(self, monkeypatch) -> None:
+        """`status` reads like a REQUIRED member and is not - `$defs/course` requires only
+        uuid/name/agency, and spec §6.17 marks it O. Classifying it by intuition dropped the
+        diver's whole course."""
+        course = _with_id(
+            Course(
+                user_id=1,
+                name="Deco Procedures",
+                agency="tdi",
+                status="frobnicator",
+                uuid=UUIDS["course"],
+                notes="",
+                created_at=CREATED_AT,
+            ),
+            1,
+        )
+        bundle = build_bundle(dives=[make_dive(1, UUIDS["dive-air"], course_id=1)], courses=[course])
+
+        document = await _render(bundle, monkeypatch)
+
+        assert [c["name"] for c in document["courses"]] == ["Deco Procedures"]
+        assert "status" not in document["courses"][0]
+        # The reference survives too, because the course did.
+        assert document["dives"][0]["course_uuid"] == str(UUIDS["course"])
+        _assert_conforms(document)
+
+    def test_the_csv_carries_the_stored_value_verbatim(self) -> None:
+        """A CSV column has no vocabulary to keep, so this is where the value survives - which
+        is what makes the DiveJSON omission above a re-encoding rather than a loss."""
+        writer = dict(CSV_WRITERS)["gear-service.csv"]
+        rows = "".join(writer(self._bundle()))
+
+        assert "inspection" in rows
+        assert "service" in rows
 
 
 class TestUnresolvableReferences:

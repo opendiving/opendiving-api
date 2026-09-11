@@ -46,7 +46,7 @@ from ..models.dive_file import DiveFile
 from ..models.dive_mixture import DiveMixture
 from ..models.dive_recording import DiveRecording
 from ..schemas.dive import DiveFileInfo, DiveTechScalars
-from ..schemas.dive_mixture import DiveMixtureRead
+from ..schemas.dive_mixture import DiveMixtureCreate, DiveMixtureRead, as_create
 from ..schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from . import blob_store, dive_recordings
 from .dive_parsers import PARSER_BY_KEY, DiveParseError, DiveParser, UnsupportedDiveFileError
@@ -1036,7 +1036,6 @@ async def _rederive_recording(
     than defaulted, so a fourth caller has to answer it.
     """
     from ..crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
-    from ..schemas.dive_mixture import DiveMixtureCreate
 
     if not files:
         await delete_profile_for_recording(db, recording_id=recording_id, commit=False)
@@ -1053,7 +1052,9 @@ async def _rederive_recording(
                 db=db,
                 dive_id=dive_id,
                 mixtures=[
-                    *(DiveMixtureCreate(**row.model_dump(exclude={"id"})) for row in stored),
+                    *(as_create(row) for row in stored),
+                    # `appended` is the parser's own shape, not a stored row - its `role`/
+                    # `usage` are enums already, so it needs no `as_create`.
                     *(DiveMixtureCreate(**row.model_dump()) for row in appended),
                 ],
                 commit=False,

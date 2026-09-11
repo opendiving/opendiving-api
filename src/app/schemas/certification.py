@@ -5,7 +5,7 @@ from typing import Annotated, ClassVar, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls
+from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
 
 
 class CertificationAgency(StrEnum):
@@ -57,7 +57,7 @@ AGENCY_OTHER_REQUIRED_MESSAGE = "agency_other is required when agency is 'other'
 AGENCY_OTHER_NOT_ALLOWED_MESSAGE = "agency_other may only be set when agency is 'other'"
 
 
-def validate_agency_pairing(agency: CertificationAgency, agency_other: str | None) -> None:
+def validate_agency_pairing(agency: str, agency_other: str | None) -> None:
     """The one place the `agency`/`agency_other` pairing is decided.
 
     Public because four callers need the same rule and must not spell it four ways:
@@ -66,6 +66,13 @@ def validate_agency_pairing(agency: CertificationAgency, agency_other: str | Non
     values, which is the case neither schema can see. Only the reporting differs - a
     `ValueError` here is a per-field 422 from the schema, and the flat `{"detail": ...}`
     from a route.
+
+    `agency` is typed `str`, not `CertificationAgency`. The schemas pass the enum and the
+    two PATCH routes pass the stored column, which since the read widening is a plain string
+    that may be outside the vocabulary - and reconstructing the enum to satisfy this
+    signature is what made `PATCH /certification/{uuid}` a 500 on exactly the rows the
+    widening exists to make readable, including the PATCH that would have repaired one. The
+    rule below is a value comparison, which `StrEnum` answers correctly either way.
 
     Rejecting `agency_other` alongside a *named* agency (rather than quietly ignoring it)
     keeps the stored row unambiguous: a row with `agency="padi"` can never also carry a
@@ -98,6 +105,12 @@ class CertificationFileInfo(PublicUUIDSchema):
     themselves come from `GET /certification/{uuid}/file/{side}`.
     """
 
+    # The enum stays here, unlike every other stored vocabulary on a read shape (see
+    # *"A stored vocabulary is read back as a string"* in DECISIONS.md). `side` is
+    # structural rather than descriptive: it selects which of two slots a file occupies,
+    # and the export uses it as a dict key, a filename stem and the blob lookup's
+    # argument. It is also the only one no client ever supplies - the server writes it
+    # from a path parameter FastAPI has already validated against this enum.
     side: CertificationSide
     content_type: str
     byte_size: int
@@ -143,6 +156,10 @@ class CertificationRead(CertificationBase, PublicUUIDSchema):
     the sequential internal `id` (which is never exposed over the API).
     """
 
+    # Overrides `CertificationBase.agency`, which stays `CertificationAgency` for the
+    # writes that base validates. See *"A stored vocabulary is read back as a string"* in DECISIONS.md.
+    agency: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+
     user_uuid: uuid_pkg.UUID
     # The training course this card came out of, if the diver recorded one. Filled in by
     # all three producers - both cached readers resolve it in a batched lookup, and
@@ -166,6 +183,8 @@ class CertificationReadInternal(CertificationBase, PublicUUIDSchema):
     public shape, which additionally resolves `user_id`/`course_id` to the owning user's
     and the course's `uuid`).
     """
+
+    agency: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
 
     id: int
     user_id: int
@@ -269,7 +288,7 @@ class CertificationExpiringItem(BaseModel):
     """
 
     uuid: uuid_pkg.UUID
-    agency: CertificationAgency
+    agency: StoredVocabulary
     agency_other: str | None = None
     name: str
     expires_on: date

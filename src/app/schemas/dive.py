@@ -5,7 +5,7 @@ from typing import Annotated, ClassVar, Literal, Self
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
-from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls
+from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
 from ..core.utils.datetime_offset import require_utc_offset
 from .dive_mixture import DiveMixtureCreate, DiveMixtureRead
 from .dive_profile import DiveProfileInfo
@@ -269,6 +269,10 @@ class DiveRead(DiveBase, DiveTechScalars, PublicUUIDSchema):
     references (owning user, trip, training course) are likewise exposed via their `uuid`.
     """
 
+    # Overrides `DiveBase.water_type`, which stays `WaterType` for the writes that base
+    # validates. See *"A stored vocabulary is read back as a string"* in DECISIONS.md.
+    water_type: StoredVocabulary | None = None  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+
     user_uuid: uuid_pkg.UUID
     trip_uuid: Annotated[
         uuid_pkg.UUID | None, Field(default=None, description="Public id of the trip this dive belongs to")
@@ -298,6 +302,8 @@ class DiveReadInternal(DiveBase, DiveTechScalars, PublicUUIDSchema):
     `utc_offset_minutes` - see `combine_start_time()`), since that recombination only
     makes sense once converting to the public `DiveRead` shape.
     """
+
+    water_type: StoredVocabulary | None = None  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
 
     id: int
     user_id: int

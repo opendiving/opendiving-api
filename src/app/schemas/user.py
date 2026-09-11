@@ -4,7 +4,7 @@ from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
-from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls
+from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
 from .dive_form_preset import DiveFormField, canonical_hidden_fields
 
 
@@ -53,12 +53,16 @@ class UserRead(PublicUUIDSchema):
     gear_service_emails: bool = True
     # Feeds the settings page's units toggle, and every measurement the web app renders.
     # Same note as its neighbour above on what the default is and isn't for.
-    units: UnitSystem = UnitSystem.METRIC
+    # `StoredVocabulary`, not `UnitSystem` - `user.units` is a plain `VARCHAR(16)` with
+    # no DB `CHECK`, like every other vocabulary column, and `get_current_user` validates
+    # the whole row through this schema on every authenticated request. See *"A stored
+    # vocabulary is read back as a string"* in DECISIONS.md. `UserUpdate` keeps the enum.
+    units: StoredVocabulary = UnitSystem.METRIC
     # Which dive-form fields this diver keeps hidden. Read on `GET /user` and carried by
     # `get_current_user`, so the form's first paint already omits them - which is the whole
     # reason this lives on the account rather than on the device. Same note as its two
     # neighbours above on what the default is and isn't for.
-    dive_form_hidden_fields: Annotated[list[DiveFormField], Field(default_factory=list)]
+    dive_form_hidden_fields: Annotated[list[StoredVocabulary], Field(default_factory=list)]
     # The caller's own record of whether they are this instance's operator, so a client can
     # decide whether to offer the operator's surface at all. Not a disclosure about anybody
     # else: `GET /user` returns the caller's row and no route returns another account's.

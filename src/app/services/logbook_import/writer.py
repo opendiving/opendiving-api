@@ -51,7 +51,7 @@ from ...models.gear_set import GearSet
 from ...models.trip import Trip
 from ...models.trip_location import TripLocation
 from ...schemas.certification import CertificationSide
-from ...schemas.dive_mixture import DiveMixtureCreate
+from ...schemas.dive_mixture import DiveMixtureCreate, as_create
 from ...schemas.logbook_import import ImportNote, ImportNoteCode
 from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDevice
 from ..blob_store import new_key
@@ -522,7 +522,9 @@ class _Writer:
                     db=self._db,
                     dive_id=match.dive_id,
                     mixtures=[
-                        *(DiveMixtureCreate(**row.model_dump(exclude={"id"})) for row in stored_mixtures),
+                        *(as_create(row) for row in stored_mixtures),
+                        # `appended` is the parser's own shape, not a stored row - its `role`/
+                        # `usage` are enums already, so it needs no `as_create`.
                         *(DiveMixtureCreate(**row.model_dump()) for row in appended),
                     ],
                     commit=False,

@@ -296,6 +296,21 @@ def _uddf_id(prefix: str, uuid: uuid_pkg.UUID) -> str:
     return f"{prefix}-{uuid}"
 
 
+def _gear_type(stored: str | None) -> GearType:
+    """The `GearType` a stored `gear_item.type` maps to, for choosing a UDDF element.
+
+    Unlike DiveJSON, UDDF has no vocabulary of ours to keep here: the value only selects
+    which typed element the piece is written into, and `<variouspieces>` is already the
+    catch-all `OTHER` lands in. So a stored value outside the enum takes the same route as
+    no value at all - the diver's gear still appears in the document, named and branded,
+    under the element that means "something else".
+    """
+    try:
+        return GearType(stored) if stored else GearType.OTHER
+    except ValueError:
+        return GearType.OTHER
+
+
 def _equipment_element(bundle: ExportBundle) -> ET.Element | None:
     """The owner's whole gear list, grouped into UDDF's typed equipment elements."""
     if not bundle.gear_items:
@@ -303,7 +318,11 @@ def _equipment_element(bundle: ExportBundle) -> ET.Element | None:
 
     by_element: dict[str, list[tuple[GearType, GearItem]]] = {}
     for item in bundle.gear_items:
-        gear_type = GearType(item.type) if item.type else GearType.OTHER
+        # `_gear_type`, not `GearType(item.type)`: the column is deliberately
+        # unconstrained (see *"A stored vocabulary is read back as a string"* in
+        # DECISIONS.md), and the bare conversion raised `ValueError` on a row outside the
+        # enum - a 500 on `GET /export/uddf` and on the whole archive with it.
+        gear_type = _gear_type(item.type)
         by_element.setdefault(_EQUIPMENT_ELEMENT[gear_type], []).append((gear_type, item))
 
     equipment = ET.Element("equipment")

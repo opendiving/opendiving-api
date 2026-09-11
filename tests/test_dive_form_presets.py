@@ -49,6 +49,7 @@ from src.app.schemas.dive_form_preset import (
     MIXTURE_FIELD_PREFIX,
     DiveFormField,
     DiveFormPresetCreate,
+    DiveFormPresetRead,
     DiveFormPresetReadInternal,
     DiveFormPresetUpdate,
     canonical_hidden_fields,
@@ -231,6 +232,67 @@ class TestTheCanonicalForm:
             DiveFormPresetUpdate.model_validate({"hidden_fields": None})
 
         assert "cannot be null" in str(exc_info.value)
+
+
+class TestAStoredFieldNameOutsideTheVocabulary:
+    """The column is unconstrained `JSON` and the vocabulary is enforced in Pydantic alone,
+    so a direct write can leave a name this build does not know - and the read shapes must
+    not answer that with a 500 across the whole preset list. See *"A stored vocabulary is
+    read back as a string"* in DECISIONS.md.
+
+    The trap here is not the annotation but the *validator*: `DiveFormPresetBase` canonicalizes
+    by rebuilding the list from `DiveFormField`'s members, so widening the type alone would
+    have made an unrecognized name vanish from the response instead of failing it - the same
+    wrong answer, told quietly.
+    """
+
+    ODD = "frobnicator"
+
+    def test_a_read_carries_it_through_beside_the_names_it_knows(self) -> None:
+        preset = DiveFormPresetReadInternal(
+            id=1,
+            uuid=uuid7(),
+            user_id=1,
+            name="Warm water",
+            hidden_fields=[DiveFormField.ALTITUDE, self.ODD],
+            created_at=datetime.now(UTC),
+        )
+
+        assert preset.hidden_fields == ["altitude", self.ODD]
+
+    def test_the_public_shape_does_the_same(self) -> None:
+        preset = DiveFormPresetRead(
+            uuid=uuid7(),
+            user_uuid=uuid7(),
+            name="Warm water",
+            hidden_fields=[self.ODD],
+            created_at=datetime.now(UTC),
+        )
+
+        assert preset.hidden_fields == [self.ODD]
+
+    def test_the_user_column_carries_it_too(self) -> None:
+        """`UserRead` is the same vocabulary over the same kind of column, and
+        `get_current_user` validates that row on every authenticated request - so a stray
+        name there would have been a 500 on everything, not just on the presets list."""
+        user = UserRead(
+            uuid=uuid7(),
+            name="User Userson",
+            username="userson",
+            email="user.userson@example.com",
+            dive_form_hidden_fields=[self.ODD],
+        )
+
+        assert user.dive_form_hidden_fields == [self.ODD]
+
+    def test_writing_one_is_still_a_422(self) -> None:
+        """The vocabulary is unchanged: the enum is still what every write is typed with."""
+        with pytest.raises(ValidationError):
+            DiveFormPresetCreate(user_uuid=uuid7(), name="Warm water", hidden_fields=[self.ODD])
+        with pytest.raises(ValidationError):
+            DiveFormPresetUpdate(hidden_fields=[self.ODD])
+        with pytest.raises(ValidationError):
+            UserUpdate(dive_form_hidden_fields=[self.ODD])
 
 
 class TestTheUserColumn:

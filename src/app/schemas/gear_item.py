@@ -5,7 +5,7 @@ from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls
+from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
 from .gear_service import GearServiceScheduleInfo
 
 
@@ -76,7 +76,10 @@ class GearItemInfo(PublicUUIDSchema):
 
     name: str
     brand: str | None = None
-    type: GearType | None = None
+    # `StoredVocabulary`, not `GearType`: this shape is embedded in every dive and gear
+    # set, so an unrecognized stored `type` would fail those whole responses. See
+    # *"A stored vocabulary is read back as a string"* in DECISIONS.md.
+    type: StoredVocabulary | None = None
     rented: bool = False
     is_archived: bool = False
 
@@ -85,6 +88,10 @@ class GearItemRead(GearItemBase, PublicUUIDSchema):
     """Public representation of a gear item, keyed by its opaque `uuid` rather than the
     sequential internal `id` (which is never exposed over the API).
     """
+
+    # Overrides `GearItemBase.type`, which stays `GearType` for the writes that base
+    # actually validates.
+    type: StoredVocabulary | None = None  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
 
     user_uuid: uuid_pkg.UUID
     is_archived: bool = False
@@ -105,6 +112,8 @@ class GearItemReadInternal(GearItemBase, PublicUUIDSchema):
     lookups only - never returned directly over the API (use `GearItemRead` for the
     public shape, which additionally resolves `user_id` to the owning user's `uuid`).
     """
+
+    type: StoredVocabulary | None = None  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
 
     id: int
     user_id: int

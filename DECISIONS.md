@@ -1414,6 +1414,11 @@ which uses the same schemas) is already rejected server-side. A DB-level copy of
 nothing and would need a `DROP`/`ADD CONSTRAINT` every time a category is added. The column is a
 plain `VARCHAR(32)`.
 
+Read "every write" literally: it is every write *through the API*. A direct SQLAlchemy write - a
+fixture, a script, a hand-run `UPDATE` - reaches the column untouched, and this decision is what
+permits that. The corollary is that a **read** schema may not type the enum, which cost a 500 across
+two endpoints before it was noticed; see *"A stored vocabulary is read back as a string"* below.
+
 `type` is nullable and optional throughout. Gear logged before the column existed has none, and
 requiring a diver to categorize a one-off piece of kit before they can save it would be friction for
 no gain - so the UI shows "No type" rather than forcing a choice.
@@ -16618,3 +16623,195 @@ file-less primary's two document figures survive a secondary's last file and sur
 and - the half that keeps the guard honest - the primary's own last file still promotes the next
 recording and takes the dive's reading off it. `TestPromotingARecording` holds the third route,
 which deletes nothing and so answers `True` unconditionally.
+
+## A stored vocabulary is read back as a string
+
+`GET /gear-service-due` and `GET /gear-items` answered **500** for any account owning a
+`gear_service_schedule` row whose `kind` was outside `ServiceKind`. Not the one row - the whole
+response:
+
+```
+pydantic_core._pydantic_core.ValidationError: 1 validation error for GearServiceScheduleInfo
+kind
+  Input should be 'service', 'visual_inspection', ... [type=enum, input_value='inspection', ...]
+```
+
+`GearServiceScheduleInfo` is embedded in `GearItemRead`, so one unrecognized row took out that
+diver's entire gear list and the dashboard's "Service due" card together. On the machine it was
+found on, the dev database held 598 such schedules across 598 accounts, 304 service records, and -
+found while confirming the first - 214 dives with a `water_type` of `'soda'`, which would have done
+the same to `GET /dives`.
+
+**Where the values came from, since it is not what it looks like.** `'inspection'` reads like a
+pre-rename spelling, and it is not one: `ServiceKind` has said
+`VISUAL_INSPECTION = "visual_inspection"` since the enum was introduced (#13), no migration ever
+renamed anything, and no API request could ever have stored it. It came from
+`tests/helpers/generators.py`, which wrote `kind="inspection"` by constructing the SQLAlchemy model
+directly, and reached a real database only because the suite used the dev database rather than its
+own until #136. `'soda'` is the same story from
+`test_dive_check_constraints.py::test_any_water_type_string_is_accepted_by_the_database` - a test
+that exists *to record* that the column is deliberately unconstrained.
+
+### The enum is the write boundary. It was never the storage boundary, so it cannot be the read one
+
+*"`GearItem.type` is a closed vocabulary, but has no DB `CHECK` constraint"* above is not being
+reversed here; it is being taken seriously. Its argument is that a DB-level copy of the vocabulary
+buys nothing *because the Pydantic field rejects unknown values on every write* - and that is true
+of every write **through the API**. What the column then holds is whatever a direct SQLAlchemy write
+put there, which the decision knowingly permits. A read schema typed with the enum asserts an
+invariant the schema declined to enforce, and Pydantic's failure mode for a wrong assertion in a
+response model is to fail the entire response.
+
+So the read shapes carry `StoredVocabulary` (`core/schemas.py`), an alias for `str`, and the enums
+stay on the create/update schemas where they are a promise the server actually keeps. Applied to
+every stored vocabulary rather than to `ServiceKind` alone, because the reasoning does not
+distinguish them - `gear_item.type`, `dive.water_type`, `dive_mixture.role`/`usage`,
+`course.agency`/`status`, `certification.agency`, `user.units`, `user.dive_form_hidden_fields` and
+`dive_form_preset.hidden_fields`. Derive that list rather than trusting this sentence: it has been
+written short twice now, and `user.units` is the one a sweep of the resource schemas misses, because
+`get_current_user` validates the whole row through `UserRead` on **every authenticated request**.
+`GearItemInfo` and `DiveMixtureRead` matter as much as the gear list - both are embedded in every
+dive.
+
+`certification_file.side` is the one deliberate exception, and it is exempt on a property rather
+than by being overlooked: `side` is *structural*, not descriptive. It selects which of two slots a
+card image occupies, and the export uses it as a dict key, a filename stem and the blob lookup's
+argument - a wrong value there is wrong regardless of what Pydantic says about it. It is also the
+only one in the set no client ever supplies; the server writes it from a path parameter FastAPI has
+already validated against the enum.
+
+The codebase had already taken this line three times without the read schemas following:
+`services.gear_service.service_kind_label` falls back for the digest email ("a database that has
+grown a new kind shouldn't render as a blank line"), `opendiving-web`'s `serviceKindLabel` does the
+same in the browser, `services.dive_profiles.provenance_of` maps through `.get(..., FILE)`, and
+`AuthAuditEventRead.event_type` was already plain `str` where its create schema is the enum. The API
+read schemas were the outlier.
+
+*Rejected:* **a DB `CHECK` constraint**, which is the other way to make the read schemas honest. It
+reverses a decision recorded in five places, it makes every vocabulary addition a schema change
+(`GearType` has grown by four members for DiveJSON parity and would have needed a
+`DROP`/`ADD CONSTRAINT` each time), and it contradicts the test that exists to state the current
+rule. It would also not have helped: the rows predate any constraint, so the migration adding it
+would have had to repair them first - which is this change's migration, without the read fix.
+
+*Rejected:* **dropping the offending row from the response.** `GearServiceDueResponse.truncated`
+exists because a dashboard card that silently under-reports overdue kit is the wrong direction for a
+safety-adjacent surface to fail in; a row vanishing because its `kind` was unfamiliar is that same
+failure with no flag on it.
+
+*Rejected:* **coercing an unknown value to `OTHER`/`NULL` on read**, which answers a question about
+the diver's gear with a value no one stored.
+
+*Rejected:* **`ServiceKind | str`**, which keeps the enum in the published OpenAPI as an `anyOf`. In
+Pydantic's smart mode a plain string is not an instance of a `StrEnum` member, so the union
+collapses to the `str` arm for *every* value - identical JSON, a union in the type checker, and
+documentation that reads as a promise the server does not make. What a client needs pinned is what
+it may **send**, and the create/update schemas still carry the enum; what it may receive is whatever
+was stored, which is now what the document says.
+
+### Where the enum stays
+
+`schemas/export.py` keeps it, and is the only place that does. Those enums are DiveJSON's own, on
+objects the format closes (`additionalProperties: false`), so widening one would let an export emit
+a document that is not DiveJSON - the one thing a writer must not do. **But it must not 500
+either**, and "the migration repairs every such row" is not an argument available to it: the
+migration below deliberately leaves a colliding row unrepaired, so a database can hold one
+afterwards. Each writer therefore needs an answer, and the three give different ones because they
+are bound differently.
+
+**The DiveJSON envelope takes the format's own answer, split on whether the member is REQUIRED**
+(`_speakable`/`_sayable` in `services/export/envelope.py`). A REQUIRED member outside the vocabulary
+\- `gear_service_schedule.type`, `gear_service_record.type`, `course.agency`, `certification.agency`
+\- makes the record uninterpretable, and the record is omitted: the writer's side of the rule the
+reader already follows (spec §5.6, and `logbook_import/planner.py::_agency`, which skips for that
+reason). An OPTIONAL one - `gear_item.type`, `dive.water_type`, `dive_mixture.role`/`usage`,
+`course.status` - costs only the *field*, because a diver's cylinder must not vanish from their
+export over how its category is spelt.
+
+**Read that split off the schema, not off intuition.** `course.status` reads exactly like a REQUIRED
+member and is not (`$defs/course` requires only uuid/name/agency; spec §6.17 marks it O and says
+readers must not assume `completed`), and classifying it by eye dropped the diver's whole course.
+`dive_mixture.role`/`usage` were missed a different way: `_mixture` rebuilds each cylinder as
+`DiveMixtureBase`, a *write* base that is still enum-typed, so a value the read shape carried
+through raised on the rebuild.
+
+**Wherever a read shape is re-validated as a write one, the widening has to be repeated**, and the
+export was not the only place doing it: a dive merge, a recording attach on either of two paths and
+the logbook importer each rebuilt `DiveMixtureCreate(**row.model_dump(...))` by hand. All four now
+go through one `as_create` (`schemas/dive_mixture.py`), so the next caller inherits the rule instead
+of rediscovering it. The same shape caught `validate_agency_pairing`, whose `agency` parameter was
+typed `CertificationAgency`: the two PATCH routes reconstructed the enum from the stored column to
+satisfy it, which turned `PATCH /certification/{uuid}` and `PATCH /course/{uuid}` into a 500 on
+exactly the rows the widening makes readable - and, because the reconstruction sat in a `dict.get()`
+default and so was evaluated eagerly, on the PATCH that supplied a *valid* agency to repair one. The
+parameter is `str` now; the rule underneath it was always a value comparison, which `StrEnum`
+answers correctly either way.
+
+**An omitted record is a record nothing may reference.** DiveJSON checks referential closure, so
+dropping a course or a schedule while something still names it produces a document the validator
+rejects - a worse failure than the 500 it replaced, because it lands at the far end, in someone
+else's importer, long after the export looked fine. Three references can reach an omittable
+collection - `dive.course_uuid`, `certification.course_uuid` and
+`gear_service_record.gear_service_schedule_uuid` - and all three are OPTIONAL, so they resolve
+through `_course`/`_schedule_uuid` and go absent, which is a state each already has a meaning for (a
+deleted course, a deleted rule). Losing a *dive* from an export over the spelling of its course's
+agency would have been the worst answer on offer.
+
+None of those four was found by reading the code. The first draft guarded the two gear-service arms
+alone; `ExportGearItem.type` raised on the very next line once the test existed, and review found
+the other three.
+
+**The CSV and UDDF writers had no vocabulary to keep and were changed rather than guarded.**
+`services/export/tabular.py` built its cell as `ServiceKind(schedule.kind).value` - a round-trip
+that changed no output and only raised `ValueError` on a row outside the enum, taking the whole
+archive down - and now carries the stored string. `services/export/uddf.py` did the same with
+`GearType(item.type)` to pick an element, and now goes through `_gear_type`, which falls back to the
+`<variouspieces>` catch-all `OTHER` already maps to: the gear still appears in the document, named
+and branded, under the element that means "something else".
+
+Nothing is lost from an archive by any of it. The CSVs carry every row with its stored value, so
+what DiveJSON omits is a re-encoding rather than a deletion - which is the property that makes
+omitting the right call there instead of inventing a member.
+
+### The migration names two literals, and is not a vocabulary sweep
+
+Revision `f9d04a823776` rewrites `kind = 'inspection'` to `'visual_inspection'` on both gear service
+tables and clears `water_type = 'soda'` to NULL - `NULL` because it is already what that column
+means by "not recorded" and nothing suggests what `'soda'` should have been, the same
+least-inventive repair as `c4d81e6b3f57`'s `avg_depth`.
+
+A `WHERE kind NOT IN (...)` would have been shorter and is wrong: it is the `CHECK` constraint by
+another name, applied retroactively with no DDL to make it visible, and it would rewrite precisely
+the value the unconstrained column exists to admit - one written by a newer build against an older
+schema. The two literals are known fixture artifacts with known histories; nothing else is.
+
+The schedule arm skips a row whose rename would collide with
+`ux_gear_service_schedule_item_kind_label` (an item that already has a `visual_inspection` schedule
+under the same label). A migration that aborts does so inside the API's startup
+`alembic upgrade head`, leaving a container that never comes up.
+
+The skip is safe only because *every* reader of that column tolerates the leftover value - which is
+the read change above, and, for the three export writers, the paragraph before this one. That
+dependency runs in one direction and is worth stating as a rule: **a repair allowed to skip is a
+repair whose leftovers something has to be able to read.** The first draft of this change skipped
+without the DiveJSON writer having been widened or guarded, which left the collision case exporting
+a 500 for good, and it was code review that noticed.
+
+**No self-hoster has either value**, and the revision is a no-op everywhere except a developer's own
+database from before #136. It ships as a revision rather than as a `psql` line in `CONTRIBUTING.md`
+because a revision is the only repair mechanism a database has; the local alternative is
+`docker compose down -v`, which costs everything else in it.
+
+Pinned by `TestAnUnrecognizedKindDoesNotFiveHundred` in `tests/test_gear_service.py` (the read
+halves, including that a sibling row survives and that the write schemas still answer 422), by
+`TestAnUnrecognizedVocabularyValueDoesNotFiveHundredTheExport` in `tests/test_export_json.py` (the
+three writers, the two reference kinds an omission can strand, and the OPTIONAL members that cost a
+field rather than a record), by `TestAStoredFieldNameOutsideTheVocabulary` in
+`tests/test_dive_form_presets.py` (the one vocabulary whose read shape also inherits a *validator*
+that would have dropped the value instead of failing on it), and by
+`tests/test_vocabulary_repair.py`, which runs the revision's own statements against Postgres for the
+collision skip, the differently-labelled sibling it must *not* swallow, and idempotence - not
+because a restart re-runs an applied revision (it does not; `apply_migrations` is a no-op on every
+subsequent boot), but because one that fails partway rolls back without advancing `alembic_version`
+and starts again from the top, which is the case the collision arm exists to keep this revision out
+of.

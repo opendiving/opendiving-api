@@ -11,6 +11,35 @@ NOTES_MAX_LENGTH = 10_000
 
 DATE_RANGE_MESSAGE = "end_date must be on or after start_date"
 
+# The read-side type for a column that stores one of a closed vocabulary - `ServiceKind`,
+# `GearType`, `WaterType` and the rest. Those enums are the *write* boundary: every route
+# body is typed with one, so nothing the API accepts is outside them. They are deliberately
+# not a *storage* boundary - see "`GearItem.type` is a closed vocabulary, but has no DB
+# `CHECK` constraint" in DECISIONS.md - so the column really can hold anything a direct
+# write put there, and a read schema that types the enum is asserting an invariant the
+# schema declined to enforce. When the assertion fails, Pydantic raises on the whole
+# response, so one unrecognized row takes out every sibling row with it.
+#
+# Aliased to `str` rather than widened field by field so the intent is greppable and the
+# reasoning has one home. Values are carried through verbatim; the enum stays on the
+# create/update schemas, where it is a promise the server actually keeps.
+#
+# Several read shapes inherit from a write base (`GearItemRead` from `GearItemBase`, and
+# so on) and override its field with this, which mypy reads as a Liskov violation - an
+# attribute widened in a subclass. Hence the `type: ignore[assignment]` on exactly those
+# declarations, and only those: a read shape that inherits from `PublicUUIDSchema` or
+# `BaseModel` overrides nothing and needs none.
+#
+# Two annotations do name a write base - `ExportDive.cylinders` is `list[DiveMixtureBase]`
+# and `tests/test_dive_mixture_absence.py` parametrizes a `type[DiveMixtureBase]` with
+# `DiveMixtureRead` - so the substitution is not hypothetical, and the ignores are a
+# judgement rather than a formality. Neither reaches a widened field with a widened value:
+# the export rebuilds its cylinders through `_mixture()`, which re-validates against
+# `DiveMixtureBase` and so still refuses a value outside the enum, and the test only ever
+# passes the class object around. Splitting every base in two to say so statically would
+# duplicate twenty fields on `DiveBase` alone.
+StoredVocabulary = str
+
 
 def validate_date_range(start_date: date | None, end_date: date | None) -> None:
     """The one place a `start_date`/`end_date` pair's ordering is decided.
