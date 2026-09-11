@@ -7282,6 +7282,13 @@ affected database is the developer's own, and the backfill is one `DELETE FROM .
 per table with the cascades doing the rest. It ran as step 1 of this change's DDL. The argument was
 a real cost when it was made and stopped being one when the deployment shape did.
 
+**The deployment shape moved again on 2026-09-12**, so that last sentence is settled only about this
+change. The project has operated an instance since then, and the affected database is no longer the
+developer's own: a leg dismissed here for being cheap to backfill by hand would have to be costed
+against rows somebody else owns. What was decided stays decided - the cascade is right for the
+reasons above, not for this one. See *"`PROJECT_OPERATED` is the first setting that knows who runs
+the instance, and it selects copy only"*.
+
 **The renumbering leg.** Clearing was said to turn `erase_dive_site` into another multi-statement
 write over `dive_dive_site`, with the position-contiguity hazards `replace_dive_site_on_dives`
 needed three careful statements and a wipe-guard test to get right. **It turns out not to apply at
@@ -10881,12 +10888,14 @@ no instance anywhere held data.** After the first release a move like this becom
 migration for strangers; at the time it was one revision against a dev database that was disposable
 anyway.
 
-**That stopped being true on 2026-09-12, and no release was needed to end it.** The reason above was
-stated in terms of the release count - no tag, therefore no data anywhere - and the inference broke
-before the tag did: the project's own instance runs `main` continuously (*"The edge channel
-publishes on every merge, and deploys what it publishes"*), so it held data while the release count
-was still zero. A blob move of this shape is a real data migration now. See *"`PROJECT_OPERATED` is
-the first setting that knows who runs the instance, and it selects copy only"*.
+**That stopped being true on 2026-09-12, and no release was needed to end it.** This is the one
+section whose sentence is corrected rather than annotated, because it asserted the present rather
+than explaining a past call: it read that no release had been tagged, *therefore* no instance
+anywhere held data, and the inference broke before the tag did. The project's own instance runs
+`main` continuously (*"The edge channel publishes on every merge, and deploys what it publishes"*),
+so it held data while the release count was still zero. A blob move of this shape is a real data
+migration now. See *"`PROJECT_OPERATED` is the first setting that knows who runs the instance, and
+it selects copy only"*.
 
 A third kind has since arrived on the same volume, and nothing at this layer changed to take it: see
 *"Avatars are the third kind on the files volume, and Pillow re-encodes every one"*.
@@ -16224,8 +16233,10 @@ every merge, and deploys what it publishes"*).
 That date is load-bearing well outside this section. Until it, nothing anywhere ran this code but a
 developer's machine, and decisions recorded all over this file - a Postgres major, an email
 transport, several renames shipped without aliases - were taken on the strength of that and say so
-in as many words. Each of those sections keeps the sentence it was written with and carries a note
-pointing back here: the reasoning was right when it was made, and it is not available again.
+in as many words. Each of those sections carries a note pointing back here and keeps the sentence it
+was written with: the reasoning was right when it was made, and it is not available again. The one
+exception is *"File payloads live on the files volume, not in Postgres"*, whose sentence asserted
+the present state of the world rather than explaining a past call, and is corrected there instead.
 
 ## Revoking a session ends its access token too, and the read it costs was miscounted
 
