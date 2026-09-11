@@ -16815,3 +16815,79 @@ because a restart re-runs an applied revision (it does not; `apply_migrations` i
 subsequent boot), but because one that fails partway rolls back without advancing `alembic_version`
 and starts again from the top, which is the case the collision arm exists to keep this revision out
 of.
+
+## Every foreign key column leads an index, and a test says so
+
+Postgres indexes the *referenced* side of a foreign key whether you ask or not - the target has to
+be a primary key or a unique constraint - and the *referencing* side never. So a child table whose
+`parent_id` carries no index of its own is scanned in full every time anything touches the parent
+row: `ON DELETE CASCADE` has to find the rows to take with it, a plain `DELETE` has to prove there
+are none, and the app's own "everything belonging to this parent" reads go the same way. Every
+foreign key into `user.id` is `CASCADE` (see *"The ten cascades that were never declared"*), so the
+account purge is exactly that scan, once per table, per account.
+
+Nothing was wrong when this was written - the sweep found no uncovered column, and the columns that
+are covered only by a composite or a unique index were all covered deliberately. What there was no
+guard for is the *next* model: a `ForeignKey(...)` that arrives without `index=True` beside it and
+without a composite that happens to start there. Nothing else in the suite would notice. The schema
+is valid, the revision autogenerates cleanly, `alembic check` is satisfied, and the only symptom is
+a sequential scan nobody is watching for, on a table that was small on the day it was added.
+
+`tests/test_foreign_key_indexes.py` walks `Base.metadata` and needs no database, in the shape of
+`TestEveryForeignKeyIntoUserCascades`. Two things in that walk are less obvious than they look:
+
+- **Leading, not merely present.** A composite index serves a lookup on its first column and not on
+  its later ones. `(dive_id, position)` covers `dive_id`; `(sort_key, parent_id)` covers nothing
+  this rule is about, while looking from a distance exactly like an index on `parent_id`. Several
+  columns in this schema have no coverage other than a composite that starts with them -
+  `trip_location.trip_id` and `dive_recording.user_id` among them - so the rule cannot be "has an
+  index of its own" without failing rows that are fine.
+- **A unique index counts, and so does a constraint.** Uniqueness is irrelevant to the question -
+  `dive_file.user_id` is covered by `ux_dive_file_user_id_sha256` and by nothing else, and
+  `gear_service_schedule.gear_item_id` by `ux_gear_service_schedule_item_kind_label`. A primary key
+  and a `UniqueConstraint` count too, and they need asking about separately: Postgres backs both
+  with a real index, and neither appears in `Table.indexes`. Without that arm the association-table
+  shape - `(parent_id, child_id)` as a composite primary key, no declared index at all - would fail
+  a rule it obeys.
+
+The trap in writing it is the functional index. `Index("ix", func.lower(label))` has a leading
+expression that carries a `.name` of its own - `"lower"` - so reading `.name` off whatever turns up
+reports a column called `lower`, covers nothing, and never says so. `_leading_column_name` unwraps
+the `UnaryExpression` a `.desc()` produces and then requires a `Column`; anything else is no leading
+column, which is also the right answer, since `lower(label)` does not serve a lookup on `label`.
+
+Unlike the cascade rules this has no second half against Postgres, and deliberately so. An index
+reaches a database only by being declared in the models or in a revision, and CI's `alembic check`
+is what pins those two to each other - so the models' account is the whole fact, and a test that
+re-read `pg_indexes` would be asking `alembic check` a question it has already answered.
+
+## Autovacuum is left at its defaults, and a storage parameter is never a revision
+
+Nothing in this repository sets an autovacuum parameter - not the compose file, not a migration, not
+a model - and that is a decision rather than an omission.
+
+The tables that churn hardest are the ones the hourly sweeps in `core/worker/settings.py` empty:
+expired tokens, authentication requests, sessions, audit rows, invitations. Each sweep is a `DELETE`
+whose dead tuples are collected long before the default trigger could matter - Postgres fires
+autovacuum at `autovacuum_vacuum_threshold` (50) plus `autovacuum_vacuum_scale_factor` (0.2) of the
+table, so on tables holding tens to hundreds of rows the threshold term alone is reached every time.
+The tables a diver edits, `dive` above all, churn at human speed. There is nothing here for tuning
+to improve, and a parameter set now would be set against a guess about volume rather than a
+measurement of it.
+
+If it ever does need attention, the reading that says so is `n_dead_tup` on `dive` climbing and
+staying up (`pg_stat_user_tables`), and the remedy is a per-table storage parameter the operator
+applies to their own database:
+
+```sql
+ALTER TABLE dive SET (autovacuum_vacuum_scale_factor = 0.05);
+```
+
+**Never as an Alembic revision**, and this is the part worth writing down. A revision runs
+unattended on every install's startup, and a vacuum threshold is a property of one database's write
+volume rather than of the schema - so a number chosen against a busy instance is applied verbatim to
+a self-hoster whose logbook has one diver in it and will never have the churn. Autogenerate does not
+see storage parameters at all, so a hand-written one drifts from the models with nothing comparing
+them, and `alembic check` - the thing that makes every other piece of DDL in here trustworthy - has
+no opinion on it. The `ALTER TABLE` above is one statement, reversible with `RESET`, and belongs to
+whoever is watching the database it runs against.
