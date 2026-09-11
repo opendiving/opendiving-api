@@ -3957,6 +3957,16 @@ which is a smaller cost than a version suffix that every future shape change has
 bump, and that goes stale the moment someone forgets. A longer-lived cache, or a deployed API, would
 flip that trade.
 
+**The second of those two arrived on 2026-09-12**, so the paragraph above records a trade that has
+expired rather than one still in force. There is a deployed API: the stale window belongs to whoever
+is signed in when a shape change reaches it rather than to the developer who made it, and the remedy
+above - `docker compose exec` into the local stack's Redis - has no counterpart on an instance whose
+Redis is managed. Neither half of that is settled here. Whoever next changes the shape of a cached
+response owes the call the flip condition asks for - version the key, or write down how that
+instance's Redis is flushed - and must not read the paragraph above as having made it for them. See
+*"`PROJECT_OPERATED` is the first setting that knows who runs the instance, and it selects copy
+only"*.
+
 ## FIT is one parser for both vendors, and its one real trap is developer fields
 
 `FitParser` (`services/dive_parsers/fit.py`) reads ANT/Garmin FIT activity files - what a Garmin
@@ -5546,6 +5556,12 @@ runs it, so: **size `/tmp` for the largest account you expect to host.** A hard 
 next step if that stops being enough, but a limit that refuses a legitimate export is worse than a
 documented requirement on a pre-launch product with no shared hosting yet.
 
+**That last clause expired on 2026-09-12.** The project has operated an instance since that date, so
+sizing a temp directory against the largest account on it is the project's own job rather than a
+requirement documented for some future operator. The decision is unchanged - no hard ceiling, for
+the reason above. See *"`PROJECT_OPERATED` is the first setting that knows who runs the instance,
+and it selects copy only"*.
+
 The writers are still generators, and that is not redundant. The spool bounds what is *resident*;
 the generators bound what is *constructed*. A thousand-dive logbook is a few million UDDF waypoints,
 and one `ElementTree` holding them all would be hundreds of megabytes before a single byte reached
@@ -7012,6 +7028,13 @@ not of this change. The next removal, made after anything is deployed, does not 
 way — and the tell that the reasoning has expired is the same either way: someone is running a
 client you cannot redeploy in the same commit.
 
+**It expired on 2026-09-12.** Something is deployed: the project operates an instance that every
+merge to `main` reaches within minutes, and a browser that loaded the web app before the merge is
+exactly the client you cannot redeploy with it. The paragraphs above keep their reasoning because it
+was the whole argument for this change; they are not a template for the next one. See
+*"`PROJECT_OPERATED` is the first setting that knows who runs the instance, and it selects copy
+only"*.
+
 Nothing was deferred to a follow-up, which was a deliberate call rather than an oversight. The web
 app keeps a hand-written mirror of this schema (no client codegen there, so nothing regenerates when
 a type here goes), and the tidy-up of that mirror shipped with the paired web change instead of
@@ -7262,6 +7285,13 @@ facts rather than on the reasoning: the project is pre-launch with no public hos
 affected database is the developer's own, and the backfill is one `DELETE FROM ... WHERE is_deleted`
 per table with the cascades doing the rest. It ran as step 1 of this change's DDL. The argument was
 a real cost when it was made and stopped being one when the deployment shape did.
+
+**The deployment shape moved again on 2026-09-12**, so that last sentence is settled only about this
+change. The project has operated an instance since then, and the affected database is no longer the
+developer's own: a leg dismissed here for being cheap to backfill by hand would have to be costed
+against rows somebody else owns. What was decided stays decided - the cascade is right for the
+reasons above, not for this one. See *"`PROJECT_OPERATED` is the first setting that knows who runs
+the instance, and it selects copy only"*.
 
 **The renumbering leg.** Clearing was said to turn `erase_dive_site` into another multi-statement
 write over `dive_dive_site`, with the position-contiguity hazards `replace_dive_site_on_dives`
@@ -7973,6 +8003,12 @@ something a diver typed. The consequences are accepted rather than worked around
 `backfill_tech_fields` will never backfill `water_type` out of already-stored FIT files (pre-launch,
 the corpus is test data, and a one-off script is cheap if anyone ever wants it), and re-attaching an
 export can never clobber a correction.
+
+**The "pre-launch" in that parenthesis expired on 2026-09-12.** The project has operated an instance
+since then, so already-stored FIT files are no longer all test data and that one-off script, if
+anyone writes it, has somebody's real exports to run against. The decision does not move -
+`water_type` stays off `DiveTechScalars` for the reason above. See *"`PROJECT_OPERATED` is the first
+setting that knows who runs the instance, and it selects copy only"*.
 
 **FIT seeds `water_type` through the parse-prefill path, never through a server-side write.**
 `_FitScan` keeps the first `dive_settings` message and `_water_type` maps its native
@@ -9261,6 +9297,12 @@ migration to sequence - worth saying because the reasoning above reads like it w
 live sending reputation, and it wasn't. What it was weighed against is the *next* deployment, which
 now has one transport to configure instead of a choice between two.
 
+**That premise expired on 2026-09-12.** The paragraph keeps its tense because it records what the
+switch was weighed against at the time, and the "*next* deployment" it names turned out to be the
+project's own instance, which has been serving since that date with one transport to configure. See
+*"`PROJECT_OPERATED` is the first setting that knows who runs the instance, and it selects copy
+only"*.
+
 ### `smtplib` in a thread, not `aiosmtplib`
 
 `aiosmtplib` would be a new dependency to avoid a pattern this codebase already standardizes on.
@@ -9357,6 +9399,12 @@ the repo, `services/marine_areas.py`), no pgvector, no extensions at all, and th
 upload columns are plain `bytea`. The locked `asyncpg 0.31.0` tests against Postgres 18 in its own
 CI matrix, and PG18's incompatibility list (COPY `\.`, VACUUM inheritance, AFTER-trigger roles, FTS
 collation) touches nothing here — no triggers, no full-text search, no `COPY`.
+
+**The free moment closed on 2026-09-12**, when the project's own instance started serving: there is
+data to carry forward now, on a managed Postgres rather than the compose image. The pin is not
+re-decided here and 18 is still what ships; what has gone is the property that made choosing it cost
+nothing. See *"`PROJECT_OPERATED` is the first setting that knows who runs the instance, and it
+selects copy only"*.
 
 ### The volume moved because 18 changed the image layout, and a wrong mount fails loudly
 
@@ -9988,6 +10036,13 @@ An existing staging instance with no relay stops booting. Nothing is deployed an
 (`AGENTS.md`), so there is no instance to migrate today — but the install bundle ships to
 self-hosters, so it is worth being explicit that the fix is to configure `SMTP_*` or to set
 `ENVIRONMENT=local`, and that a startup failure is the intended outcome rather than a regression.
+
+**An instance has existed since 2026-09-12**, three weeks after this landed: the project's own.
+Nothing here had to be migrated into it, because it was configured against a `main` that already
+carried these guards - but the sentence above has stopped being a general fact about the project,
+and the next guard of this shape is a change that can stop a running instance from booting and has
+to be sequenced as one. See *"`PROJECT_OPERATED` is the first setting that knows who runs the
+instance, and it selects copy only"*.
 
 `tests/test_config_safety.py` and `tests/test_email_service.py` parametrise both guards over
 `production` *and* `staging`, so the scoping cannot quietly narrow again. The email-service side
@@ -10832,9 +10887,19 @@ Uploaded dive-computer exports (`dive_file`) and c-card images (`certification_f
 volume), named by a `storage_key` the row carries. This reverses *"Certification card files live in
 Postgres, not object storage"*, which recorded its own expiry condition — "when photo galleries
 arrive … blobs in Postgres become a real problem for backup size and restore time" — and the move
-happened *before* photos rather than with them, for one reason above all others: **no release has
-been tagged, so no instance anywhere holds data.** After the first release this becomes a real data
-migration for strangers; today it is one revision against a dev database that is disposable anyway.
+happened *before* photos rather than with them, for one reason above all others: **when it was made,
+no instance anywhere held data.** After the first release a move like this becomes a real data
+migration for strangers; at the time it was one revision against a dev database that was disposable
+anyway.
+
+**That stopped being true on 2026-09-12, and no release was needed to end it.** This is the one
+section whose sentence is corrected rather than annotated, because it asserted the present rather
+than explaining a past call: it read that no release had been tagged, *therefore* no instance
+anywhere held data, and the inference broke before the tag did. The project's own instance runs
+`main` continuously (*"The edge channel publishes on every merge, and deploys what it publishes"*),
+so it held data while the release count was still zero. A blob move of this shape is a real data
+migration now. See *"`PROJECT_OPERATED` is the first setting that knows who runs the instance, and
+it selects copy only"*.
 
 A third kind has since arrived on the same volume, and nothing at this layer changed to take it: see
 *"Avatars are the third kind on the files volume, and Pillow re-encodes every one"*.
@@ -14742,6 +14807,12 @@ trip location's `position`, and a location's four `bbox_*` into one `bbox`); a c
 → `archived`/`active`; and a dive file's `parser_key` moved to `extensions.opendiving` on the
 stored-file object, parser registries being application-specific.
 
+**There has been somewhere to break since 2026-09-12.** The project operates an instance that every
+merge to `main` reaches, so the next rename of this kind meets a running client and documents
+already exported in the old shape. This one met neither, and the list above is kept as written. See
+*"`PROJECT_OPERATED` is the first setting that knows who runs the instance, and it selects copy
+only"*.
+
 **And the writer emits no nulls at all.** The old one serialized an explicit `null` for every unset
 member; absence is now the only spelling of "not recorded" (spec §5.4), enforced by
 `exclude_none=True` in `envelope._encode` and by the schema, which rejects a null everywhere. An
@@ -14766,6 +14837,12 @@ The alternative was export-local profile models, which would have left that rout
 nothing today. It was rejected because the cost is permanent: the project would speak two profile
 vocabularies on two surfaces, forever, and every future profile change would have to be made twice.
 A rename is paid once, and there is nowhere this is deployed.
+
+**As of 2026-09-12 there is.** The project operates an instance and `main` reaches it within minutes
+of a merge, so the next rename on these models is a deployed one and the api and web halves have to
+land in an order that keeps it serving. The reasoning above is kept as written; it is not available
+again. See *"`PROJECT_OPERATED` is the first setting that knows who runs the instance, and it
+selects copy only"*.
 
 **The web half is a separate, sequenced change, and nothing automated will tell you it is missing.**
 `GET /dive/{uuid}/recording/{rid}/profile` and the `recordings`/`gas_use` members of
@@ -15368,6 +15445,12 @@ those. **The set is `divejson.read_formats()` and never a list**, but the *label
 bump can add a reader, and only a test notices"* below. The old paths are **gone rather than
 aliased**: there is no deployment but the local one, the web app moves in the same change, and a
 `deprecated=True` alias would be a hedge against a rollout that does not exist.
+
+**The rollout has existed since 2026-09-12.** The project's own instance takes every merge to
+`main`, so a paired api/web rename is a rollout with an order rather than one commit, and the alias
+this paragraph declined is the hedge the next one has to weigh. Kept as written: it was right while
+the only deployment was the local one. See *"`PROJECT_OPERATED` is the first setting that knows who
+runs the instance, and it selects copy only"*.
 
 **The converter is asked once, on a bounded head of the spool, before the JSON parse** — not at the
 reader's refusal sites. An `.ssrf` and a UDDF file are valid UTF-8 that is not JSON, so they died in
@@ -16146,6 +16229,19 @@ reaches the same sender, and that is the reasoning that already keeps the mail f
 registration mode. The branch is therefore the smallest one that makes the sentence true, which is
 also what keeps the byte-identity claim above cheap to hold.
 
+**The instance this was built for has been serving since 2026-09-12.** `GET /config` on it answers
+`project_operated: true`, it holds accounts, and every merge to `main` publishes `:edge` and hands
+that digest to the deploy job, so `main` reaches it within minutes (*"The edge channel publishes on
+every merge, and deploys what it publishes"*).
+
+That date is load-bearing well outside this section. Until it, nothing anywhere ran this code but a
+developer's machine, and decisions recorded all over this file - a Postgres major, an email
+transport, several renames shipped without aliases - were taken on the strength of that and say so
+in as many words. Each of those sections carries a note pointing back here and keeps the sentence it
+was written with: the reasoning was right when it was made, and it is not available again. The one
+exception is *"File payloads live on the files volume, not in Postgres"*, whose sentence asserted
+the present state of the world rather than explaining a past call, and is corrected there instead.
+
 ## Revoking a session ends its access token too, and the read it costs was miscounted
 
 `DELETE /user/session/{uuid}` stamped `revoked_at`, which killed the row's refresh — and nothing
@@ -16272,6 +16368,12 @@ attaching is no longer idempotent in the HTTP sense: the same bytes twice are st
 lie about the method. `GET`/`DELETE /dive/{uuid}/file` became `/file/{fid}` and
 `GET /dive/{uuid}/profile` became `/recording/{rid}/profile`. Nothing is aliased: there is no
 deployment but the local one and the web client moves in the same change.
+
+**There has been one besides the local one since 2026-09-12** - the project's own instance, which
+every merge to `main` reaches. These route changes shipped while that sentence was true and cost
+nothing; the same move made now is a rollout the web half has to be sequenced against. See
+*"`PROJECT_OPERATED` is the first setting that knows who runs the instance, and it selects copy
+only"*.
 
 **The migration moves rows rather than dropping them.** Local data is disposable; this revision is
 what a self-hoster runs on an instance holding their whole logbook. Every dive carrying a file or a
