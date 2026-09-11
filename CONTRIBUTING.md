@@ -561,11 +561,15 @@ vulnerability-driven one ignores the schedule and is titled `fix(deps):`, so it 
 section of the release notes rather than among the chores. The install bundle's own digests are
 renewed by the product repository's Renovate config, not by this one.
 
-> **Renovate has to be enabled once, by hand, and until it is that file does nothing.** Install the
-> [Renovate GitHub App](https://github.com/apps/renovate) on the `opendiving` org — it reads
-> `.github/renovate.json5` on its next run and needs no further setup — or run it self-hosted on a
-> schedule with a PAT. Nothing in this repository can do it, and nothing warns you it hasn't been
-> done, which is why it is written here.
+> **Renovate is running, and getting it there took a one-time step by hand that nothing in this
+> repository could have done.** The Mend-hosted
+> [Renovate GitHub App](https://github.com/apps/renovate) is installed on the `opendiving` org; it
+> reads `.github/renovate.json5` on its next run and needs no further setup, and the **Dependency
+> Dashboard** issue it keeps open here is where it reports — every update it is holding back, and
+> every one you have told it to ignore. The installation names its repositories one at a time rather
+> than covering the whole org, so a **repository added later has to be added to it**; nothing warns
+> you that a new repository's config file is being read by nobody, which is why this is written
+> down.
 
 One thing Renovate will not do on its own is move Python. `requires-python` in `pyproject.toml`,
 ruff's `target-version`, `.python-version` and the two `Dockerfile` base tags all have to move

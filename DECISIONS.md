@@ -10373,6 +10373,13 @@ remedy beside it. Without Renovate actually running, that check is a standing ob
 remedy attached — which is one more reason the enablement step is written down in `CONTRIBUTING.md`
 rather than assumed.
 
+**Renovate has been running since 2026-09-11**, when the Mend-hosted app was installed on the
+`opendiving` org, so the conditional above is history rather than a live risk: the fixing PR does
+arrive, and the Dependency Dashboard issue the app keeps open is where anything it is holding back
+appears. The installation is scoped to named repositories rather than the whole org, so the
+condition can return for a repository added later and never added to the installation — which is why
+the sentence stays rather than being struck.
+
 **It skips cleanly when nothing has been published.** There were no `v*` tags and no package on
 GHCR, so a scheduled job that assumed either would have been red from the day it merged, and a check
 that is red from day one is a check somebody turns off. As written, no `vX.Y.Z` tags meant a logged
@@ -10944,6 +10951,28 @@ nothing about a backend setting. That is correct and deliberately not fixed: it 
 producing what it produced on the day it ran. It is harmless on an S3 instance because such an
 instance is necessarily new — the rows it moves are `bytea` payloads, and a database migrated from
 empty has none.
+
+**The prose the setting falsified has been undercounted at every pass over it**, which is worth
+recording because each pass believed it had the whole set. A backend setting makes every sentence
+saying the bytes are *on the files volume* false on `s3`, which is what the instance this project
+runs uses. `git grep -n 'files volume'` over `src`, `tests` and the repository root is the
+derivation, and it comes back with three kinds of line of which only one is wrong, so a count is
+never the answer here and reading each hit is. **Wrong, and now naming the blob store and the
+setting that picks it:** any present-tense claim about where stored bytes are or which store an
+operation touches — class docstrings, route banners, module headers, the config template's prose, a
+test helper's descriptions, and a quotation of the `AGENTS.md` rule that itself moved. **Right as it
+stands:** anything scoped to `LocalBackend` — its `describe`, its writability error, and
+`tests/test_blob_store.py`, whose first line names the backend it drives. **History, and kept:** the
+section titles above, the migration filenames, and every past-tense sentence about payloads having
+left Postgres.
+
+Two things were left alone on purpose. `warn_if_files_volume_looks_empty` keeps its name: it is an
+identifier, so renaming it is a change to code rather than to a claim, and the operator message it
+emits already names the store through `describe_location()`. And the much larger family of sentences
+that say "the volume" without "files" is untouched — most of them are ordering notes ("the file
+lands on the volume *before* the transaction that references it") where which backend holds the
+bytes is beside the point. They are narrow rather than false, and rewriting all of them would bury
+the ones that were not.
 
 ### Every key carries a per-write nonce, and that is what makes the unlink safe
 
@@ -12827,6 +12856,25 @@ The same file's other two links route questions to Discussions and browser-side 
 thrown when this goes public, so both URLs 404 until then — written ahead of the flip on purpose,
 since the alternative is a security link that appears the day *after* the file describing it does.
 
+**The Discussions link points at `opendiving/opendiving`, not here, and there is one space for the
+whole project.** The product repository is the front door — it carries the install bundle and the
+self-hosting docs, it is what the README sends people to, and the questions an operator asks already
+route there — so the one space belongs beside them. Hosting it here instead was the alternative, and
+was planned that way for a while; it was rejected because a second space splits every thread by
+which half of the app the asker guessed at, and someone who has a question about a parser is not
+reliably the person who knows it is the API's parser. So the link above leaves this repository, and
+the switch behind it is thrown on the product repository rather than on this one — which does not
+change the paragraph above: it still 404s until that repository is public, for the same reason and
+written ahead of the same flip.
+
+**The install link points at the chooser rather than at a blank issue.** A `contact_links` entry
+carries a whole URL, so `…/opendiving/issues/new` and `…/opendiving/issues/new/choose` are both
+valid and only the second reaches a form. The bare one was harmless while the product repository
+carried no templates — there was nothing to choose — and turned into a silent bypass the day it
+gained an install form, which is the one form whose entire purpose is collecting a version and a
+host from exactly the reporters this link sends there. The web-app link has carried `/choose` from
+the start. Nothing warns about the difference, because both spellings open a working page.
+
 **A form applies labels but does not create them.** Anything named under `labels:` has to exist in
 the repository already, so the forms name only `bug` and `enhancement` — the stock set plus the
 conventional-commit type labels `pr-title.yml` manages is everything there is, and an area label
@@ -13682,9 +13730,9 @@ costs was miscounted"* below.
 ### Everyone is signed out once, and that is the whole compatibility story
 
 A refresh cookie minted before this carries no `sid`, so its next refresh 401s and the diver signs
-in again. No shim. *There is no production* (umbrella `CLAUDE.md`), and for a future self-hoster a
-one-time sign-out on upgrade is a clean event rather than corruption — which is what the `!` in the
-PR title names.
+in again. No shim. Nothing was deployed anywhere when this was written, and for a future self-hoster
+a one-time sign-out on upgrade is a clean event rather than corruption — which is what the `!` in
+the PR title names.
 
 **The access half of such a pair is refused too, since the change below.** When this section was
 written it survived up to `ACCESS_TOKEN_EXPIRE_MINUTES` past the cookie's refusal;
@@ -14587,7 +14635,7 @@ carries no cost member and its `additionalProperties: false` forbids adding one,
 course the same way.
 
 **No data preservation, and no backfill into `notes`.** Folding stored values in first was
-considered and rejected: *There is no production* (umbrella `CLAUDE.md`), so the only rows this
+considered and rejected: nothing was deployed anywhere when this was written, so the only rows this
 meets are local development data. `ALTER TABLE ... DROP COLUMN` is content-independent, so there is
 no "courses with a cost" case that behaves differently from any other.
 
@@ -16128,8 +16176,8 @@ either started a row or continued one. Every sign-in path funnels through it (se
 created in `issue_tokens`"* above). So a `sid`-less access token is one this build cannot have
 issued, and refusing it costs nothing that was not already owed — *"Everyone is signed out once"*
 described precisely this for the refresh cookie, and the access half now answers the same way on its
-next request instead of outliving it by half an hour. *There is no production* (umbrella
-`CLAUDE.md`), so there is nothing to be compatible with.
+next request instead of outliving it by half an hour. Nothing was deployed anywhere when this was
+written, so there is nothing to be compatible with.
 
 **The `| None` did not leave the code, deliberately.** Four functions still return or accept one:
 `core.security._session_id` reports an absent `sid`, `current_session_uuid` passes it on,

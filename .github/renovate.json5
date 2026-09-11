@@ -4,11 +4,14 @@
   // published* - a base image grows a CVE weeks after it shipped, with no PR in flight, and
   // no bot that reads this repository's files can see that. The two are not substitutes.
   //
-  // **This file is inert until Renovate is enabled on the repository**: it is configuration
-  // for a bot that has to be running somewhere. Install the Mend-hosted Renovate GitHub App
-  // on the `opendiving` org (the one-time step, and free), or run it self-hosted. Until then
-  // the pins below are frozen and nothing says so - which is the failure this file exists to
-  // end. CONTRIBUTING.md, "Staying on top of CVEs", is where that step is written down.
+  // **This file is configuration for a bot that has to be running somewhere, and one is.** The
+  // Mend-hosted Renovate GitHub App is installed on the `opendiving` org; it reads this file on
+  // its next run and reports through the **Dependency Dashboard** issue it opens and keeps
+  // updated in this repository, which is where anything it is holding back shows up. The
+  // installation names its repositories one at a time rather than covering the whole org, so a
+  // repository added later has to be added to the installation before its own copy of this file
+  // is read by anybody - until then its pins are frozen and nothing says so, which is the
+  // failure this file exists to end. CONTRIBUTING.md, "Staying on top of CVEs", has the detail.
   //
   // Renovate rather than Dependabot, and not for the reason usually given. Dependabot has had
   // a `docker-compose` ecosystem since February 2025, so the development compose file's

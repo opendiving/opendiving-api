@@ -29,8 +29,9 @@ copy) is recorded in DECISIONS.md as the escalation, not taken here.
 **A third provider, and it is not a third source of names.** Wikimedia Commons is asked for
 one thing only - the credit and the scaled bytes of the photograph a Wikidata item already
 named - and it is asked once per *new* species rather than per keystroke. It never sees
-anything a diver typed. The bytes it returns go on this instance's files volume and are served
-from this instance's own API, so no browser ever contacts Wikimedia; see
+anything a diver typed. The bytes it returns go into this instance's own blob store - a
+volume or a bucket, on `FILE_STORAGE_BACKEND` - and are served from this instance's own
+API, so no browser ever contacts Wikimedia; see
 `services/species_photos.py`, which owns everything done with the answer.
 
 Every provider here is throttled instance-wide and every answer is cached, for the reason

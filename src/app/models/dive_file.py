@@ -30,11 +30,13 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
     stays as a denormalized read key so a dive's files are one indexed query rather than a
     join through the recordings; nothing writes it independently of `recording_id`.
 
-    Bytes live on the files volume, not in this table: the row carries a `storage_key`
-    and `services/blob_store.py` holds the file. `services/dive_files.py` is still the
-    only module that knows an export is stored at all, and is the seam that would be
-    rewritten for a different backend - see *"File payloads live on the files volume, not
-    in Postgres"* in `DECISIONS.md` for why they left Postgres.
+    Bytes live in the blob store, not in this table: the row carries a `storage_key` and
+    `services/blob_store.py` holds the file, on a filesystem volume or in an S3-compatible
+    bucket depending on `FILE_STORAGE_BACKEND`. `services/dive_files.py` is still the only
+    module that knows an export is stored at all, and the second backend arrived without
+    it changing - see *"File payloads live on the files volume, not in Postgres"* in
+    `DECISIONS.md` for why they left Postgres, and *"A second backend, because the disk
+    stopped being shared"* for why there are now two places they can land.
 
     A separate table rather than columns on `dive`: `dive` is read by `get_multi` on the
     hot list path, and the file's metadata has no business riding along with every page of
