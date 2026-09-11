@@ -278,6 +278,15 @@ class PlannedRecordingMatch:
     source_uuid: uuid_pkg.UUID
     recording_id: int | None
     recording: PlannedRecording
+    # **The matched recording's position on its dive, and it decides what the writer may
+    # touch beyond the recording itself.** A fill writes the dive's oxygen-exposure readings
+    # and fills its cylinders, and both of those are the *primary* recording's to write - a
+    # second computer's CNS clock is its own device's arithmetic, and its cylinder labelling
+    # is its own. The attach path has enforced that since recordings arrived
+    # (`_rederive_recording` returns before both for `ordinal != 0`); this side could not,
+    # having no ordinal to hand, so it wrote them for whichever recording matched. `None`
+    # on an `attach`, where no stored recording is named and the writer computes the slot.
+    ordinal: int | None
     # The incoming *dive's* values, carried for a `fill` only: a match that writes no dive
     # row can still supply readings the existing dive has none of. Ignored on `attach`, where
     # the recording is a second computer's and the dive's figures are the primary's.
@@ -1490,6 +1499,7 @@ class _Planner:
                         source_uuid=dive.uuid,
                         recording_id=filled.id,
                         recording=recording,
+                        ordinal=filled.ordinal,
                         dive_values=values,
                         mixtures=mixtures,
                     )
@@ -1517,6 +1527,9 @@ class _Planner:
                         source_uuid=dive.uuid,
                         recording_id=None,
                         recording=recording,
+                        # No stored recording to have a position: the writer appends this one
+                        # and computes the slot with `next_ordinal`.
+                        ordinal=None,
                         # **Carried on an attach as well as on a fill**, and for a different
                         # job: not to fill the dive's cylinders but to *read* the incoming
                         # dive's, so the writer can map this second computer's `gas_number`s

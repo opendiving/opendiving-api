@@ -53,6 +53,8 @@ from ...crud.crud_trips import get_trip_uuids_by_ids, resolve_trip_id_for_user
 from ...schemas.dive import (
     DiveCreateInternal,
     DiveCreateRequest,
+    DiveMergeRequest,
+    DiveMergeResult,
     DiveNeighbors,
     DiveNumberingSummary,
     DiveNumberSuggestion,
@@ -89,6 +91,7 @@ from ...services.dive_files import (
     store_recording_file,
 )
 from ...services.dive_gas import resolve_gas_use
+from ...services.dive_merge import DiveNotMergeableError, merge_dives
 from ...services.dive_neighbors import find_dive_neighbors
 from ...services.dive_numbering import renumber_dives, suggest_dive_number, summarize_numbering
 from ...services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file_with_parser
@@ -1166,6 +1169,75 @@ async def erase_dive(
     await invalidate_gear_caches(owner_id)
 
     return {"message": "Dive deleted"}
+
+
+@router.post("/dives/merge", response_model=DiveMergeResult)
+async def merge_two_dives(
+    request: Request,
+    values: DiveMergeRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> DiveMergeResult:
+    """Fold two of your dives into one. **Not reversible.**
+
+    For a computer that shut down mid-dive and logged the dive twice. The two records come
+    into the app as two dives - no automatic match will ever fold them, one device's two
+    records of one dive being exactly the pair the import gates refuse - so merging them is
+    the diver's call.
+
+    **The earlier dive survives**, by the same clock rule the match gates use: by instant
+    where both dives record a UTC offset, by wall clock where either does not. The other
+    dive's recordings, files, cylinders, sites, gear, species and notes move onto it and the
+    dive itself is soft-deleted; its uuid stops resolving and nothing here can be undone.
+
+    **What happens to the recordings depends on whether one computer or two recorded the
+    dive.** The same computer's two records fold into a single recording: the later record's
+    samples are offset onto the earlier record's clock by the delta between the two
+    *recordings'* starts - never the two dives' - and the stretch where the computer was off
+    stays an empty stretch, with no surface samples invented to bridge it. Whatever files
+    either record kept stay downloadable on the one recording, and the folded samples are
+    marked as a merge: nothing on this server can produce them again from those files.
+    Two *different* computers were both recording throughout, so their recordings are simply
+    appended side by side, the surviving dive's first.
+
+    Either way the surviving dive's duration and maximum depth are re-seeded from what its
+    recordings now carry, and a second computer's cylinder numbering is mapped onto this
+    dive's own list.
+
+    404 when either uuid is not a live dive of yours, exactly as for a dive that does not
+    exist. 422 when the two are the same dive, when either was entered by hand and has no
+    recording to fold, or when the surviving dive's average depth is deeper than anything
+    the merged recordings actually reached.
+    """
+    first = await _get_owned_dive(db, values.dive_uuids[0], current_user)
+    second = await _get_owned_dive(db, values.dive_uuids[1], current_user)
+
+    try:
+        merged = await merge_dives(db, first=first, second=second)
+    except DiveNotMergeableError as exc:
+        await db.rollback()
+        raise UnprocessableEntityException(str(exc)) from exc
+    except IntegrityError as exc:
+        await db.rollback()
+        raise UnprocessableEntityException(_fk_error_detail(exc)) from exc
+
+    await db.commit()
+
+    owner_id = first.user_id
+    await recalculate_dive_stats(db=db, user_id=owner_id)
+    # One dive fewer, and its gear items' `dive_count` with it - the same pair `erase_dive`
+    # recalculates, for the same reason.
+    await recalculate_gear_dive_counts(db=db, user_id=owner_id)
+    await invalidate_dive_caches(owner_id)
+    await invalidate_gear_caches(owner_id)
+
+    return DiveMergeResult(
+        dive=await _cached_read_dive(
+            request, user_id=owner_id, uuid=merged.survivor_uuid, owner_uuid=current_user["uuid"], db=db
+        ),
+        removed_dive_uuid=merged.removed_uuid,
+        folded=merged.folded,
+    )
 
 
 # -------------- recordings, and the files behind them --------------

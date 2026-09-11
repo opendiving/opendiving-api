@@ -634,6 +634,62 @@ class DiveReadWithMixtures(DiveRead):
     ]
 
 
+class DiveMergeRequest(BaseModel):
+    """The two dives to fold into one.
+
+    **A list rather than two named fields, because the two are symmetric inputs.** Which one
+    survives is the server's answer, not the caller's - the earlier dive by the clock rule
+    the match gates already use - and naming one of them `uuid` and the other `other_uuid`
+    would imply an asymmetry the operation does not have. The response says which survived.
+
+    Exactly two, because merging three is three decisions about which pair folds first and a
+    diver who wants that can merge twice.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    dive_uuids: Annotated[
+        list[uuid_pkg.UUID],
+        Field(
+            min_length=2,
+            max_length=2,
+            description="The two dives to merge, in any order. Both must be the caller's own and both must have a "
+            "dive-computer recording.",
+        ),
+    ]
+
+    @model_validator(mode="after")
+    def _two_different_dives(self) -> Self:
+        """One uuid twice is a request that would soft-delete the dive it just merged into."""
+        if self.dive_uuids[0] == self.dive_uuids[1]:
+            raise ValueError("A dive cannot be merged with itself.")
+        return self
+
+
+class DiveMergeResult(BaseModel):
+    """What the merge produced: the dive that survived, and the uuid that no longer resolves."""
+
+    dive: Annotated[
+        DiveReadWithMixtures,
+        Field(description="The surviving dive, read back whole - its recordings, cylinders and figures as merged"),
+    ]
+    removed_dive_uuid: Annotated[
+        uuid_pkg.UUID,
+        Field(
+            description="The dive that was merged away. It is soft-deleted and **not recoverable through the API**: "
+            "its recordings, files, cylinders, sites, gear, species and notes are now the surviving dive's."
+        ),
+    ]
+    folded: Annotated[
+        bool,
+        Field(
+            description="True when the two dives turned out to be one computer's two records of one dive and were "
+            "folded into a single recording, samples and all. False when they were two different computers - or a "
+            "pair with no start to place on one axis - and the recordings were appended side by side instead.",
+        ),
+    ]
+
+
 class DiveNeighbor(PublicUUIDSchema):
     """The bare minimum to link to an adjacent dive: its uuid, and enough to label the
     link. Not a `DiveRead` - the caller renders a prev/next control, not a dive, and the

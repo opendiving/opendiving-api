@@ -29,13 +29,13 @@ on the box, is worth more than the bytes. This is the codebase's first JSONB col
 import hashlib
 import logging
 from bisect import bisect_right
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from pydantic import ValidationError
-from sqlalchemy import CursorResult, delete, func, insert, select
+from sqlalchemy import CursorResult, delete, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import undefer
 from uuid6 import uuid7
@@ -252,6 +252,22 @@ class ProfileGasAttribution:
 
     duration: int = 0
     entries: list[GasAttribution] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class StoredProfile:
+    """A stored profile read back whole: its samples, its span and where it came from.
+
+    `LoadedProfile` above is the serialization shape - the raw payload, for the two callers
+    that hand it straight to a client. This is the reasoning shape, for the caller that has
+    to fold two of them together, and it carries the provenance columns because rewriting
+    the row means putting them back unchanged.
+    """
+
+    profile: NormalizedProfile
+    duration: int
+    parser_key: str
+    source_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -752,6 +768,180 @@ def fill_channels(base: NormalizedProfile | None, addition: NormalizedProfile | 
     )
 
 
+def profile_from_data(data: Mapping[str, Any]) -> NormalizedProfile:
+    """The stored JSONB payload back as a `NormalizedProfile`, the inverse of `to_data`.
+
+    The one way anything reads samples that are already stored rather than extracting them
+    from bytes, and it exists for the merge: folding two records of one dive onto one axis
+    means reading back what each of them stored, because one of the two halves may have no
+    file behind it at all.
+
+    **`gas_attribution` comes back empty, always**, and that is the same rule `fill_channels`
+    follows: it is derived from the events and the depth channel together, so a value carried
+    across from one input would describe the wrong profile the moment the two are joined. Run
+    `attribute_and_cap` over the result, as every other producer of a `NormalizedProfile`
+    does.
+    """
+    depth = data.get("depth")
+    ceiling = data.get("ceiling")
+    temperature = data.get("temperature")
+    return NormalizedProfile(
+        depth=None if depth is None else ProfileSeries(t=list(depth["t"]), v=list(depth["v"])),
+        ceiling=None if ceiling is None else ProfileSeries(t=list(ceiling["t"]), v=list(ceiling["v"])),
+        temperature=(
+            None if temperature is None else ProfileSeries(t=list(temperature["t"]), v=list(temperature["v"]))
+        ),
+        pressure=[
+            ProfilePressureSeries(gas_number=cylinder["gas_number"], t=list(cylinder["t"]), v=list(cylinder["v"]))
+            for cylinder in data.get("pressure") or []
+        ],
+        events=[
+            # `.get` for the two optional keys, matching `to_read_schema`: `to_data` omits
+            # them rather than writing nulls.
+            ProfileEvent(
+                t=event["t"],
+                type=ProfileEventType(event["type"]),
+                gas_number=event.get("gas_number"),
+                label=event.get("label"),
+            )
+            for event in data.get("events") or []
+        ],
+    )
+
+
+def shift_profile(profile: NormalizedProfile, seconds: int) -> NormalizedProfile:
+    """Move every sample and marker `seconds` later on the axis.
+
+    What puts a second record of one dive onto the first one's clock: its `times` are
+    elapsed from *its own* recording's start, so re-expressing them as elapsed from the
+    earlier recording's start is an addition and nothing else. No sample is invented,
+    dropped or resampled - the gap between the two records stays a gap, which is what
+    DiveJSON §5.4 requires and what the chart's break-at-gaps rule already draws.
+
+    `gas_attribution` is left behind for `profile_from_data`'s reason: its entries are
+    durations rather than instants, but they are about to be recomputed over the joined
+    profile anyway, and carrying half of an answer forward is how the two come to disagree.
+    """
+    if seconds == 0:
+        return replace(profile, gas_attribution=[])
+
+    def moved(series: ProfileSeries | None) -> ProfileSeries | None:
+        return None if series is None else ProfileSeries(t=[t + seconds for t in series.t], v=series.v)
+
+    return NormalizedProfile(
+        depth=moved(profile.depth),
+        ceiling=moved(profile.ceiling),
+        temperature=moved(profile.temperature),
+        pressure=[
+            ProfilePressureSeries(gas_number=cylinder.gas_number, t=[t + seconds for t in cylinder.t], v=cylinder.v)
+            for cylinder in profile.pressure
+        ],
+        events=[replace(event, t=event.t + seconds) for event in profile.events],
+    )
+
+
+def join_profiles(earlier: NormalizedProfile | None, later: NormalizedProfile | None) -> NormalizedProfile | None:
+    """Two records of one dive, already on one axis, as a single profile.
+
+    **Not `fill_channels`, and the difference is the unit.** That one takes each *channel*
+    whole from the first file that carried it, because two files of one recording are two
+    readings of the same sensor over the same seconds and interleaving them would invent a
+    curve neither device recorded. These two are the same device's readings of *different*
+    seconds - it surfaced, shut down and started again - so the samples belong end to end on
+    one axis and taking one channel whole would throw away half the dive.
+
+    **Nothing is synthesised between them.** The gap where the computer was off stays a gap:
+    no surface samples, no interpolation, no marker saying the dive paused. A channel one
+    side carries alone is carried whole, which is the same answer as joining it to nothing.
+
+    Where the two do overlap on a second - which a real pair cannot produce, the second
+    record starting after the first ended, but nothing in the data enforces - the earlier
+    reading stands. Arbitrary but deterministic, and it keeps the invariant every consumer
+    relies on: one value per second, strictly increasing.
+    """
+    if earlier is None:
+        return None if later is None else replace(later, gas_attribution=[])
+    if later is None:
+        return replace(earlier, gas_attribution=[])
+
+    return NormalizedProfile(
+        depth=_join_series(earlier.depth, later.depth),
+        ceiling=_join_series(earlier.ceiling, later.ceiling),
+        temperature=_join_series(earlier.temperature, later.temperature),
+        pressure=_join_pressure(earlier.pressure, later.pressure),
+        events=_join_events(earlier.events, later.events),
+    )
+
+
+def _join_series(earlier: ProfileSeries | None, later: ProfileSeries | None) -> ProfileSeries | None:
+    if earlier is None:
+        return later
+    if later is None:
+        return earlier
+    # `later` first so that `earlier` overwrites it on a shared second - see `join_profiles`.
+    by_second = dict(zip(later.t, later.v, strict=True)) | dict(zip(earlier.t, earlier.v, strict=True))
+    ordered = sorted(by_second)
+    return ProfileSeries(t=ordered, v=[by_second[second] for second in ordered])
+
+
+def _join_pressure(
+    earlier: Sequence[ProfilePressureSeries], later: Sequence[ProfilePressureSeries]
+) -> list[ProfilePressureSeries]:
+    """Per cylinder, joined by the label it reports as.
+
+    `gas_number` is the join key, not position: the two halves are one computer's two records
+    of one dive, so a cylinder it numbered 1 in the first is the same tank it numbered 1 in
+    the second - while a deco bottle first breathed after the restart appears in only one of
+    the two lists and would land on the wrong cylinder if the lists were zipped.
+
+    The earlier half's cylinders keep their order and any the later half adds follow, so a
+    tank that only the second record saw is appended rather than interleaved.
+    """
+    later_by_gas = {cylinder.gas_number: cylinder for cylinder in later}
+    joined: list[ProfilePressureSeries] = []
+    for cylinder in earlier:
+        other = later_by_gas.pop(cylinder.gas_number, None)
+        series = cylinder if other is None else _join_series(cylinder, other)
+        if series is not None:
+            joined.append(ProfilePressureSeries(gas_number=cylinder.gas_number, t=series.t, v=series.v))
+    joined.extend(later_by_gas.values())
+    return joined
+
+
+def _join_events(earlier: Sequence[ProfileEvent], later: Sequence[ProfileEvent]) -> list[ProfileEvent]:
+    """Both marker streams on one axis, sorted, deduped on the whole event.
+
+    Concatenated rather than taken whole from one side, unlike `fill_channels`' rule: these
+    are the same device's markers from two stretches of one dive, not two devices' accounts
+    of the same stretch, so dropping either half would lose every gas switch it recorded.
+
+    A stable sort with the earlier half first, so two markers on one second keep the order
+    the records were written in, and the dedupe keeps the first - the same shape
+    `_rebase_events` uses within one file.
+    """
+    seen: set[tuple[int, ProfileEventType, int | None, str | None]] = set()
+    ordered: list[ProfileEvent] = []
+    for event in sorted([*earlier, *later], key=lambda event: event.t):
+        key = (event.t, event.type, event.gas_number, event.label)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(event)
+    return ordered
+
+
+def profile_payload_digest(profile: NormalizedProfile) -> str:
+    """A provenance digest for a profile that no file on this instance produced.
+
+    Hashes the stored payload itself, which is the only thing there is to hash: a document
+    supplied these samples, or a merge folded them out of two records. It can never equal a
+    `dive_file.sha256` - the digest is over the payload, not over any bytes a file holds - so
+    it cannot accidentally satisfy `should_extract`, which refuses an unreproducible
+    provenance outright in any case.
+    """
+    return hashlib.sha256(repr(profile.to_data()).encode("utf-8")).hexdigest()
+
+
 def should_extract(
     existing: ExistingProfileRow | None, *, sha256: str, version: int = PROFILE_EXTRACTOR_VERSION
 ) -> Literal["extract", "skip"]:
@@ -862,6 +1052,74 @@ async def store_profile(
     )
     if commit:
         await db.commit()
+
+
+async def load_stored_profile(db: AsyncSession, *, recording_id: int) -> StoredProfile | None:
+    """A stored profile decoded back into a `NormalizedProfile`, with what it came from.
+
+    `load_profile` hands back the raw payload for the two callers that serialize it - the
+    read route and the UDDF writer - and this is for the one that has to *reason* about the
+    samples: `services/dive_merge.py`, folding two records of one dive onto one axis. Going
+    through here rather than through `load_profile(...).data` is what keeps the payload's
+    encoding inside this module, which is the seam the module docstring claims.
+
+    `duration` and the two provenance columns ride along because a caller rewriting the row
+    has to put them back: the span may be the document's rather than the samples' (see
+    `store_profile`), and a merge that reset either provenance column would make a profile
+    nothing can reproduce look reproducible.
+    """
+    stmt = select(DiveProfile.duration, DiveProfile.parser_key, DiveProfile.source_sha256, DiveProfile.data).where(
+        DiveProfile.recording_id == recording_id
+    )
+    row = (await db.execute(stmt)).one_or_none()
+    if row is None:
+        return None
+    return StoredProfile(
+        profile=profile_from_data(row.data or {}),
+        duration=row.duration,
+        parser_key=row.parser_key,
+        source_sha256=row.source_sha256,
+    )
+
+
+async def replace_profile_samples(db: AsyncSession, *, recording_id: int, profile: NormalizedProfile) -> None:
+    """Rewrite one stored profile's samples, keeping every column that says where it came from.
+
+    Written for the one change that alters a profile's *contents* without altering its
+    provenance: relabelling a second computer's cylinders onto the dive's own list when its
+    recording moves to another dive (`services/dive_merge.py`). Going through `store_profile`
+    there would be wrong in a way nothing would notice - that one stamps
+    `PROFILE_EXTRACTOR_VERSION` on every write, so a profile extracted by an older build and
+    merely renumbered here would come back claiming this build produced it, and
+    `should_extract` would then skip the re-extraction it is owed.
+
+    `duration` is left alone for the same reason: a relabel moves no sample in time, and the
+    stored span may be a document's declared one rather than the samples' own.
+    `gas_attribution` is re-derived rather than carried - its entries are keyed by
+    `gas_number`, which is precisely what just moved.
+    """
+    attributed = replace(profile, gas_attribution=derive_gas_attribution(profile))
+    depth_values = attributed.depth.v if attributed.depth else []
+    ceiling_values = attributed.ceiling.v if attributed.ceiling else []
+    temperature_values = attributed.temperature.v if attributed.temperature else []
+    pressure_values = [value for cylinder in attributed.pressure for value in cylinder.v]
+
+    await db.execute(
+        update(DiveProfile)
+        .where(DiveProfile.recording_id == recording_id)
+        .values(
+            depth_sample_count=attributed.depth_sample_count,
+            event_count=len(attributed.events),
+            max_depth_cm=max(depth_values) if depth_values else None,
+            max_ceiling_cm=max(ceiling_values) if ceiling_values else None,
+            min_temperature_c10=min(temperature_values) if temperature_values else None,
+            max_temperature_c10=max(temperature_values) if temperature_values else None,
+            min_pressure_bar10=min(pressure_values) if pressure_values else None,
+            max_pressure_bar10=max(pressure_values) if pressure_values else None,
+            gas_attribution=[entry.model_dump() for entry in attributed.gas_attribution],
+            data=attributed.to_data(),
+        )
+    )
 
 
 async def get_existing_profile(db: AsyncSession, *, recording_id: int) -> ExistingProfileRow | None:

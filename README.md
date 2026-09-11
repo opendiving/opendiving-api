@@ -35,7 +35,9 @@ else; what is here is the source, and the notes for working on it.
   and its own profile. So a diver on two computers keeps both accounts of the dive, the same
   computer exported twice fills one record rather than making two, and every device the file named —
   brand, model, serial, firmware, its own name and its own dive counter — is kept beside the
-  samples.
+  samples. A computer that shut down mid-water logs the dive twice, so two dives can be **merged**
+  into one: the two records land on a single axis with the stretch the computer was off left empty,
+  and nothing is invented to bridge it.
 - **Air consumption** — SAC and RMV derived automatically, per tank on multi-tank dives, plus a
   gas-use history endpoint powering the dashboard trend chart.
 - **Species log** — record what you saw on a dive, from a catalog searched live against
@@ -188,25 +190,26 @@ than as a list here last remembered it.
 The families: **auth** (email link or six-digit code, Google, passkeys, refresh, sign-out, account
 restore) and **user** (profile, avatar, email change, dive statistics, gas-use history, the species
 life list, account deletion); **dives**, the bulk of it, with their **recordings** — attach an
-export, read one recording's per-sample profile back — alongside **trips**, **dive sites**, the
-shared **species** catalog a dive can reference, and a **geocoding** helper for naming a site pinned
-on a map; **gear** as items, sets, service schedules and service records; **certifications** with
-their card images and the **courses** that issued them; **export** in DiveJSON, UDDF, CSV or
-full-archive form and **import** back from either of the first and the last, or from any format the
-converter reads; **invitations**, which exist only where the operator has closed registration
-(`REGISTRATION_MODE`, documented with the rest of the settings in `src/.env.example`) — a member
-sends and revokes their own, and the routes answer 404 on an open instance; and **admin**, the
-operator's own — the queue of people who have asked to be let in, and inviting or removing them in a
-batch — which is the one family gated on `is_superuser` rather than merely on having a token. All of
-those want a bearer token. The ones that don't are **contact**, the auth routes themselves, the two
-health checks — `/health` says the process is up, `/health/ready` says Postgres and Redis answered,
-and 503s when they didn't — `POST /invite-requests`, which is how somebody with no account asks a
-closed instance for an invitation, `GET /config`, which tells the web app whether registration is
-open - and whether the project itself operates the instance - before anyone has signed in, and
-`GET /species/{uuid}/photo`, which serves a public Commons image to an `<img>` tag that has no way
-to send a token. `tests/test_route_authentication.py` is the guard that keeps the *anonymous* half
-of that list honest — it compares the app's real route table against its own allowlist and holds the
-reason for each — but nothing checks this paragraph, so a new route family belongs here by hand.
+export, read one recording's per-sample profile back, fold two dives into one — alongside **trips**,
+**dive sites**, the shared **species** catalog a dive can reference, and a **geocoding** helper for
+naming a site pinned on a map; **gear** as items, sets, service schedules and service records;
+**certifications** with their card images and the **courses** that issued them; **export** in
+DiveJSON, UDDF, CSV or full-archive form and **import** back from either of the first and the last,
+or from any format the converter reads; **invitations**, which exist only where the operator has
+closed registration (`REGISTRATION_MODE`, documented with the rest of the settings in
+`src/.env.example`) — a member sends and revokes their own, and the routes answer 404 on an open
+instance; and **admin**, the operator's own — the queue of people who have asked to be let in, and
+inviting or removing them in a batch — which is the one family gated on `is_superuser` rather than
+merely on having a token. All of those want a bearer token. The ones that don't are **contact**, the
+auth routes themselves, the two health checks — `/health` says the process is up, `/health/ready`
+says Postgres and Redis answered, and 503s when they didn't — `POST /invite-requests`, which is how
+somebody with no account asks a closed instance for an invitation, `GET /config`, which tells the
+web app whether registration is open - and whether the project itself operates the instance - before
+anyone has signed in, and `GET /species/{uuid}/photo`, which serves a public Commons image to an
+`<img>` tag that has no way to send a token. `tests/test_route_authentication.py` is the guard that
+keeps the *anonymous* half of that list honest — it compares the app's real route table against its
+own allowlist and holds the reason for each — but nothing checks this paragraph, so a new route
+family belongs here by hand.
 
 A typical import flow:
 

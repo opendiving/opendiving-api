@@ -67,7 +67,13 @@ from ..dive_files import (
     fill_tech_scalars,
     relabel_gas_numbers,
 )
-from ..dive_profiles import IMPORT_PARSER_KEY, get_existing_profile, recording_source_digest, store_profile
+from ..dive_profiles import (
+    IMPORT_PARSER_KEY,
+    get_existing_profile,
+    profile_payload_digest,
+    recording_source_digest,
+    store_profile,
+)
 from ..dive_recordings import (
     DEVICE_COLUMNS,
     create_recording,
@@ -581,6 +587,18 @@ class _Writer:
                 duration=planned.profile.duration,
             )
 
+        # **Everything below this line is the dive's rather than the recording's, and only
+        # the primary recording may write it.** A secondary recording is a second computer's
+        # account of the same dive: its CNS clock is its own device's arithmetic, and its
+        # cylinder labelling is its own numbering rather than the dive's. `_rederive_recording`
+        # has returned here for `ordinal != 0` since recordings arrived; this side could not,
+        # carrying no ordinal, and so filled the dive off whichever recording matched. The
+        # join's own guard kept that from doing damage to the cylinders - a second computer's
+        # list has to agree on every recorded fraction and on the count before anything is
+        # written - but a guard is not the rule, and the scalars had no guard at all.
+        if match.ordinal != 0:
+            return
+
         # `dive_values` is `PlannedRecord.values`, which is already keyed by column name -
         # the same dict the dive insert would have taken - so `TECH_SCALAR_FIELDS` indexes it
         # directly. A member the document did not carry is `None` and `fill_tech_scalars`
@@ -626,12 +644,12 @@ class _Writer:
 def _payload_digest(planned: PlannedProfile) -> str:
     """A provenance digest for a profile that arrived with no file behind it.
 
-    Hashes the stored payload itself, which is the only thing this instance actually
-    received. It can never equal a `dive_file.sha256` - there is no file - so it cannot
-    accidentally satisfy `should_extract`, and a bare-imported dive is not a backfill
-    candidate in any case.
+    Unwraps the `PlannedProfile` and defers to `profile_payload_digest`, which the merge
+    writes its own folded samples under: the two are the same question - what does a profile
+    no file produced record as its source? - and two hashes of one payload would be two
+    things to keep in step.
     """
-    return hashlib.sha256(repr(planned.profile.to_data()).encode("utf-8")).hexdigest()
+    return profile_payload_digest(planned.profile)
 
 
 async def write_import(db: AsyncSession, *, user_id: int, loaded: LoadedImport, plan: ImportPlan) -> None:

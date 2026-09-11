@@ -16300,16 +16300,15 @@ archive restores bytes"*), so every UDDF and `.ssrf` dive in the app arrives as 
 a device, a start and a profile and nothing else. It is deleted only through the recording route:
 there is no file whose deletion would take it.
 
-**`merge` names a route that does not exist yet, and that is deliberate.** There is no
-`POST /dives/merge` in this repository: folding two dives into one is the next change, and it
-arrives on top of this one. The constant, the `UNREPRODUCIBLE_PROVENANCES` set and the deletion rule
-that reads them ship *ahead* of it because they are not the merge feature - they are the property
-the rest of this module has to hold for the merge to be safe to add, and adding them afterwards
-would mean revisiting the backfills, `should_extract` and `delete_dive_file` in a change that is
-about something else. A reader who greps for the endpoint and finds nothing has found the right
-answer: `MERGE_PARSER_KEY` is written by nothing but a test until that change lands, and the test
-says so where it sets it by hand. This note exists because the absence reads as a defect twice out
-of two independent readings, which is once more than a comment in one file was going to survive.
+**`merge` named a route that did not exist yet, and now it does.** `POST /dives/merge` landed in the
+change after this one, and the paragraph that used to stand here said - correctly, at the time -
+that the constant was written by nothing but a test. The rest of what it said is the part worth
+keeping: the constant, the `UNREPRODUCIBLE_PROVENANCES` set and the deletion rule that reads them
+shipped *ahead* of the feature deliberately, because they are not the merge - they are the property
+the rest of this module has to hold for a merge to be safe to add, and adding them afterwards would
+have meant revisiting the backfills, `should_extract` and `delete_dive_file` in a change that was
+about something else. See *"Merging two dives keeps the gap and synthesises nothing"* for what
+writes it now.
 
 **`should_extract` refuses an unreproducible profile whatever its digest says**, and both backfills
 select on the *profile's* provenance rather than on a *file's*. That distinction is the correction
@@ -16349,3 +16348,147 @@ format this build advertises and refuses. The prose that writes the set out for 
 `README.md`, `api/v1/logbook_import.py`, `schemas/logbook_import.py` and the two sections above - is
 not derived and cannot be, so the test's message names those files: it is the one moment anybody is
 looking.
+
+## Merging two dives keeps the gap and synthesises nothing
+
+`POST /dives/merge` folds two of one diver's dives into one. It exists for a case every path into
+the app otherwise gets wrong: a computer that shuts down mid-water logs the dive as two records, and
+nothing can fold them automatically - one device's two records of one dive is precisely the pair the
+strict gate refuses (see *"Recording identity is device plus start, and the gates that use it"*), so
+the two arrive as two dives and only the diver can say they are one.
+
+**The earlier dive survives, by the *Clocks* rule rather than by `id` or by `dive_number`.**
+`starts_before` in `services/dive_recordings.py` is `delta_seconds`' sibling and shares its rule
+exactly - instants where both sides carry an offset, clock faces where either does not - because the
+two are asked of the same pair and an ordering derived any other way would contradict the distance
+the gates measured. It is strict, and `_orders_first` breaks the tie on the row id, so the same two
+uuids merge the same way round whichever order the request named them in. The loser is soft-deleted
+after everything on it moves; its uuid stops resolving and nothing here can be undone, which is the
+bargain `DELETE /dive/{uuid}` already offers.
+
+**Two branches, and the device test picks between them.** The same computer's two records fold into
+one recording. Two different computers were both recording throughout, so their recordings are
+appended side by side - Subsurface's *join* rather than its merge. A third case takes the appended
+branch too and is worth naming: a same-device pair where either primary recording has a NULL start.
+There is no delta to fold them by, and appending loses nothing - both records keep their samples and
+the diver can delete whichever they do not want - where refusing would block a merge whose sites,
+gear, species and notes are perfectly mergeable over a clock reading nobody can supply.
+
+**The offset applied is the two recordings' start delta, never the two dives'.** A dive's
+`start_time` is the diver's logbook entry and a recording's is the device's own stamp; the corpus
+pair is 223 s apart by their computers and would be whatever the diver typed by their dives. The
+axis origin is the earlier of the two *records*, which need not be the surviving dive's: a diver who
+logged the two halves in either order still gets samples that run forwards, because where the
+survivor holds the later record it is that record's samples that move and the surviving recording's
+own start that goes back.
+
+**The gap is left as a gap.** 223 s of restart delta over 180 s of first record is 43 seconds where
+the computer was off, and the merged profile has nothing in it. No surface samples, no
+interpolation, no marker: DiveJSON §5.4 forbids inventing them, the chart's break-at-gaps rule
+already draws the hole, and Subsurface's `merge_one_sample` habit of filling it would put a depth on
+screen that nobody measured. `join_profiles` is therefore *not* `fill_channels`, and the difference
+is the unit. That one takes each channel whole from the first file of a recording, because two files
+of one recording are two readings of the same sensor over the same seconds. These are one device's
+readings of *different* seconds, so the samples go end to end and taking one channel whole would
+throw away half the dive. Pressure joins by `gas_number` rather than by position - a deco bottle
+first breathed after the restart is in one list only - and both marker streams are kept, since
+dropping either would lose every gas switch it recorded.
+
+**The folded profile is stored under `merge`, and that is what protects it.** Nothing on this
+instance can produce those samples again: `should_extract` refuses an unreproducible provenance
+whatever the digest says, and both backfills select on the *profile's* provenance rather than on a
+file's - which matters here because the merge **keeps whatever files either record had**, on the one
+recording, for download. They are the only evidence left of what the computer wrote. The one case
+with no protection is a fold where neither record carried a sample: there is nothing folded to
+guard, the recording's samples are once again whatever its files yield, and any stored profile is
+deleted rather than left describing one of the two records.
+
+**The surviving recording's own `duration` and `max_depth` are recomputed from the merged profile.**
+They are the columns the match gates compare (see *"A dive has recordings, and a file belongs to one
+of them"*), and after a fold the recording describes both records - so leaving them at the surviving
+half's figures would have every later gate comparing an incoming file against half a dive. The
+*dive's* duration and maximum depth are re-seeded too, from every recording it now holds:
+`dive_figures` places each one at its own start and takes the last sample any of them recorded. That
+is deliberately the **sampled** figure rather than the later dive's logged end - 223 + 2 940 = 3 163
+rather than 223 + 2 921 = 3 144 - because the samples are what the merged profile contains, and a
+dive claiming 3 144 would be claiming a span its own chart runs past. Either figure comes back
+`None` when nothing carries it, and `None` means *leave the diver's number alone* rather than clear
+it: `ck_dive_duration_positive` would refuse a zero, and a merge that learned nothing has nothing to
+say.
+
+**The dive's own `start_time` is not touched, and neither are its oxygen-exposure readings.** What
+stays on the dive is the diver's logbook entry; the devices' stamps live on the recordings and those
+are what move. The readings are a sharper call and the answer is *nothing*, deliberately:
+`refresh_tech_scalars` rewrites them **outright** from the primary recording's files, so calling it
+here would clear a `cns_end` a logbook import had filled onto a file-less recording - exactly the
+loss that made `backfill_tech_fields` stop clearing. Filling them from the other dive instead is a
+defensible feature and is not this one: the second half's `cns_end` genuinely is the merged dive's
+end value, and nothing here writes it. A diver who wants it types it, and the day that becomes
+annoying enough the fill belongs here rather than in the outright rewrite.
+
+**A fill the surviving dive would contradict is refused rather than forced.** The only pair that can
+disagree is an `avg_depth` typed deeper than anything either recording reached, and
+`ck_dive_avg_depth_within_max` would refuse that write from inside the transaction - an
+`IntegrityError` there is a 500 rather than anything a diver can act on. So the figures are computed
+and checked before the first write, and the 422 names both numbers. The number to change is the
+average, which is the diver's and on a form they can reach; silently dropping it or silently keeping
+a stale maximum are both worse.
+
+**The other dive's cylinders are relabelled, not copied.** `gas_number` is dive-scoped, so
+`relabel_gas_numbers` maps the absorbed dive's list onto the survivor's - by mix first, then by
+order, unmatched appended with the next free label - and every profile arriving from that dive is
+rewritten through the map. In the folded case that has to happen **before** the join, because
+afterwards the absorbed half's pressure channels are indistinguishable from the survivor's own.
+`relabel_gas_numbers` became generic over its incoming row for this: narrowing it to the parsed
+shape would make a merge convert its stored rows first, and that conversion drops `usage` - a member
+no format records and only a diver can have typed, which is exactly the value that must survive a
+cylinder being carried onto another dive.
+
+**A moved recording's profile is relabelled in place and never through `store_profile`.** That one
+stamps `PROFILE_EXTRACTOR_VERSION` on every write, so a profile extracted by an older build and
+merely renumbered would come back claiming this build produced it, and `should_extract` would skip
+the re-extraction it is owed. `replace_profile_samples` rewrites the samples and everything derived
+from them, leaves `parser_key`, `source_sha256`, `extractor_version` and `duration` alone, and
+re-derives `gas_attribution` - whose entries are keyed by the `gas_number` that just moved.
+
+**Sites, gear and species move by re-pointing the join rows, and the collisions stay behind.** Each
+carries a `(dive_id, x_id)` uniqueness constraint and two halves of one dive name the same site and
+the same wing by construction, so a row the survivor already has is left where it is and goes down
+with the dive. Deleting it instead would buy nothing - the dive it belongs to is about to stop
+resolving. The absorbed dive's notes are appended under a heading naming it, truncated to
+`NOTES_MAX_LENGTH`: two dives each inside the limit are not, and the merged dive has to survive its
+own read schema, which validates the length.
+
+**A merge is not a dive write, and `_rederive_recording` is deliberately not reused.** That function
+derives everything from a recording's *files*, which is the one thing the fold cannot do - the
+folded samples are not in any file, and re-deriving would replace them with one half of themselves.
+The same reasoning keeps `delete_recording` out of the fold: it reads the storage keys first and
+unlinks the blobs after the commit, which is exactly wrong for bytes that just moved to another row.
+
+*Rejected:* a generic "merge any two dives" that also folds hand-entered ones. Subsurface refuses
+those in `likely_same` and this route refuses them at the door with a 422 naming which of the two
+had no recording - there is nothing to fold, and a merge that silently discarded one of the two
+dives' figures is not what the diver asked for.
+
+## `PlannedRecordingMatch` carries an ordinal, because a fill can land on a secondary recording
+
+The import writer's `_fill_recording` writes two things that belong to the *dive* rather than to the
+recording it matched: the oxygen-exposure readings (`fill_tech_scalars`) and the cylinders
+(`fill_dive_mixtures`). Both are the **primary** recording's to write, for the reason *"A second
+file of one recording fills, and never overwrites"* gives - a second computer's CNS clock is its own
+device's arithmetic, and its cylinder labelling is its own numbering.
+
+The attach path has drawn that line since recordings arrived: `_rederive_recording` returns before
+both for `ordinal != 0`. This side could not, because `PlannedRecordingMatch` carried no ordinal, so
+it wrote them for whichever recording the same-recording gate happened to pick. It is reachable by
+an ordinary sequence - a technical diver logs the dive from their Shearwater, then imports the
+Suunto's export, which is a second reading of the *secondary* recording - and the fill then credits
+the Shearwater's record with the Suunto's numbers.
+
+The cylinder half was guarded by accident rather than by rule: `fill_mixture_fields`' join refuses
+unless the counts match and every recorded `(oxygen, helium)` pair agrees, which a second computer's
+list often fails. The scalars had no guard at all. So the match now carries `ordinal` - `None` on an
+`attach`, where no stored recording is named and the writer computes the slot with `next_ordinal` -
+and the writer returns before both writes for anything but ordinal 0. Required rather than
+defaulted, on `PlannedRecordingMatch.mixtures`' lesson: defaulting to empty is what let the attach
+case ship once with the whole relabelling unreachable.
