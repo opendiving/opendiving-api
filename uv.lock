@@ -989,7 +989,6 @@ dependencies = [
     { name = "redis" },
     { name = "sqlalchemy" },
     { name = "sqlalchemy-utils" },
-    { name = "uuid" },
     { name = "uuid6" },
     { name = "uvicorn" },
     { name = "uvloop" },
@@ -1052,7 +1051,6 @@ requires-dist = [
     { name = "sqlalchemy", specifier = ">=2.0.25" },
     { name = "sqlalchemy-utils", specifier = ">=0.41.1" },
     { name = "types-redis", marker = "extra == 'dev'", specifier = ">=4.6.0" },
-    { name = "uuid", specifier = ">=1.30" },
     { name = "uuid6", specifier = ">=2024.1.12" },
     { name = "uvicorn", specifier = ">=0.27.0" },
     { name = "uvloop", specifier = ">=0.19.0" },
@@ -1668,12 +1666,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/e3/e1/63c5bfb485a945010
 wheels = [
     { url = "https://files.pythonhosted.org/packages/8f/1c/20bb3d7b2bad56d881e3704131ddedbb16eb787101306887dff349064662/user_agents-2.2.0-py3-none-any.whl", hash = "sha256:a98c4dc72ecbc64812c4534108806fb0a0b3a11ec3fd1eafe807cee5b0a942e7", size = 9614, upload-time = "2020-08-23T06:01:54.047Z" },
 ]
-
-[[package]]
-name = "uuid"
-version = "1.30"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/ce/63/f42f5aa951ebf2c8dac81f77a8edcc1c218640a2a35a03b9ff2d4aa64c3d/uuid-1.30.tar.gz", hash = "sha256:1f87cc004ac5120466f36c5beae48b4c48cc411968eed0eaecd3da82aa96193f", size = 5811, upload-time = "2007-05-26T11:13:24Z" }
 
 [[package]]
 name = "uuid6"
