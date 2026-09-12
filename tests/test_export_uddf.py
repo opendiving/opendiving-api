@@ -1030,8 +1030,9 @@ class TestDecoReadouts:
         half its typical interval is dropped rather than relocated - and a no-decompression
         clock moved 800 s onto a waypoint it was not computed anywhere near would be as
         wrong as a temperature moved the same distance. Here 4 s snaps back to 0 s and 27 s
-        forward to 30 s, and the reading at 55 s is inside the profile's dropout and has
-        nowhere honest to go.
+        forward to 30 s, and the reading at 55 s is 25 s past the last depth sample - the
+        second of the two cases `_snap_tolerance` names, a reading taken after the diver
+        surfaced rather than one inside a dropout, and the depth axis here is uniform.
         """
         profile = {
             "depth": {"t": [0, 10, 20, 30], "v": [0, 1000, 2000, 1500]},

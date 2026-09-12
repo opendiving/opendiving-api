@@ -5505,9 +5505,15 @@ stored profiles never referenced it.
 
 ## The export endpoints are never cached, and say `no-store`
 
-`GET /api/v1/export/{uddf,csv,archive}` carry no `@cache` decorator and answer with
-`Cache-Control: no-store`. Every other read in this API is Redis-cached; these three are the
-deliberate exception, for three separate reasons that happen to point the same way.
+Every `GET /api/v1/export/…` route carries no `@cache` decorator and answers with
+`Cache-Control: no-store`, which `_download` in `api/v1/export.py` is the single place that sets.
+Every other read in this API is Redis-cached; the export routes are the deliberate exception, for
+three separate reasons that happen to point the same way.
+
+This named `{uddf,csv,archive}` until `/export/divejson` joined them and left the brace list a
+member short. It is a route *prefix* now rather than an enumeration, because the list is one that
+grows and the rule has never been about which shapes exist — anything `_download` answers gets this
+treatment by construction.
 
 **Redis holds serialized API responses.** An archive of a real logbook is megabytes — the dev
 account's is 3.5 MB with two stored files, and an account that has imported every dive would be
@@ -17853,10 +17859,10 @@ beside the primary keeps its answer in `logbook.divejson`, which carries every r
   surface figure may as well ride in `<gradientfactor>` beside the leading tissue's.
 
 **Nothing here needed a cache change**, which is worth saying out loud now that an instance holds
-data: the three export endpoints carry no `@cache` and answer `no-store` (*"The export endpoints are
-never cached, and say `no-store`"*), so a shape change to the document reaches the next download
-with nothing to invalidate. The read shapes this depends on were already versioned by the change
-that stored the channels.
+data: the export routes carry no `@cache` and answer `no-store` (*"The export endpoints are never
+cached, and say `no-store`"*), so a shape change to the document reaches the next download with
+nothing to invalidate. The read shapes this depends on were already versioned by the change that
+stored the channels.
 
 **The two writers do not share code, deliberately.** `divejson`'s `uddf_write.py` emits from a
 DiveJSON document and this one from the app's models, and the app's is the reference writer of the
