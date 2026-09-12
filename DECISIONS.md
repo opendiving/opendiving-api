@@ -10451,11 +10451,13 @@ it is, and a repository that has one is easy to mistake for a repository that is
 
 **Trivy for both, not `pip-audit`.** `pip-audit` reads Python packages, and the CVEs that force a
 rebuild are Debian packages inside `python:3.14-slim-bookworm`. Trivy reports the OS layer and the
-installed Python distributions in one pass and labels which is which, which is what lets the issue
-body hand each row the remedy that actually applies to it — a rebuild for an OS finding, a whole new
-patch release for a Python one. Those two are further apart than they look; *"The two remedies in
-the report are genuinely different"* below is why. Using it for the PR job too means one third-party
-action pinned instead of two.
+installed Python distributions in one pass and labels which is which, which is what lets the report
+hand each row the remedy that actually applies to it — a rebuild for an OS finding, a whole new
+patch release for a Python one. That labelling is also why the markdown report outlived the tracking
+issue: code scanning carries a finding and its severity, not which of two remedies applies to it.
+Those two are further apart than they look; *"The two remedies in the report are genuinely
+different"* below is why. Using it for the PR job too means one third-party action pinned instead of
+two.
 
 **Trivy itself floats on `latest`, deliberately**, and it is the one pin in this repository that is
 meant not to exist. A scanner is worth what its release knows about; a version frozen here would
