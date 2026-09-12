@@ -5639,6 +5639,26 @@ raised to a figure that would go stale again the next time a member arrives.
   `logbook.divejson` and `species.csv`; the species feature leaves `services/export/uddf.py`
   untouched.
 
+**Neither of the first two corrections reached the docstrings that restated the proposal, and one of
+them never escaped the commit that made it.** `services/export/__init__.py` was created by the same
+commit as the two bullets above and as the tests pinning them, and it shipped multi-site visit order
+in its list of what only the JSON copy carries: the claim and its refutation written the same day,
+in the same change, by the same hand. It then survived a rewrite of that very bullet during the
+DiveJSON 1.0 rename three weeks later. `tests/test_export_json.py` is the ordinary case rather than
+that one - it called `po2_limit` one of "the three fields UDDF has no slot for" on 2026-08-28, a
+fortnight after both the bullet above and `test_the_planned_ppo2_lands_in_maximumpo2` had said
+otherwise.
+
+Nothing validates a docstring, so a mapping correction recorded here reaches only the file it was
+made in, and finding the rest is a `git grep` over the claim's own nouns rather than anything CI
+will do for you. Grep the nouns and not the phrasing: the third restatement was
+`test_multi_site_visit_order_is_a_list_not_a_primary_site` sitting in a class called
+`TestWhatUddfCannotHold`, where the claim is made by membership and the words "visit order" never
+appear. The package docstring stopped enumerating rather than being corrected a second time, and
+points at this section - not at `services/export/uddf.py`, whose docstring is that writer's own
+account of the XSD and is narrower than this list: it carries no gear sets and no c-cards, those
+having never been a UDDF mapping question.
+
 **And two the format forces a choice on:**
 
 - **`<greatestdepth>` is mandatory (`minOccurs` defaults to 1) and `Dive.max_depth` is not.** A dive

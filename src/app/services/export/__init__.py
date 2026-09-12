@@ -2,10 +2,15 @@
 
 - `envelope.py` writes **`logbook.divejson`**, a DiveJSON 1.0 document: the complete
   structured copy, including everything UDDF has no slot for - gear sets, service history,
-  c-cards, training courses, per-cylinder role and usage, multi-site visit order - so
-  nothing is reachable only through the lossy file. DiveJSON is the open interchange
-  format this project maintains (<https://divejson.org>), and this is its reference
-  writer, which is what makes the claim checkable rather than a slogan.
+  c-cards, training courses, per-cylinder role and usage among them - so nothing is
+  reachable only through the lossy file. Those are examples and not the list: DECISIONS.md,
+  *"What UDDF 3.2.2 has no slot for, and what the plan got wrong about it"*, enumerates the
+  members against the XSD and is what moves when one arrives. Restating that census here
+  only made a second place to be wrong, and it was from the start - this bullet counted a
+  dive's multi-site visit order as lost in the very commit that taught `uddf.py` to link
+  every site in visit order. DiveJSON is the open interchange format this project
+  maintains (<https://divejson.org>), and this is its reference writer, which is what
+  makes the claim checkable rather than a slogan.
 - `uddf.py` writes a **UDDF 3.2.2** document - the older interchange format Subsurface,
   divelogs.de and MacDive read. It is what makes "take my dives anywhere" true for the
   apps that predate DiveJSON.
