@@ -11,9 +11,12 @@ Three kinds of assertion, and they are not interchangeable:
    constant it is testing - `24.9 C` is asserted to be `298.05 K`, not
    `24.9 + KELVIN_OFFSET`. A test that reuses the implementation's arithmetic proves
    nothing about the arithmetic.
-3. **What is deliberately absent.** The ceiling, CNS and OTU have no honest slot in this
-   format (see the module docstring in `uddf.py`), so their absence is asserted rather
-   than left to be quietly reintroduced by someone reading the mapping table.
+3. **What is deliberately absent.** The ceiling, OTU, the deco model, `tts` and
+   `surface_gradient_factor` have no honest slot in this format (see the module docstring
+   in `uddf.py`), so their absence is asserted rather than left to be quietly reintroduced
+   by someone reading the mapping table. The four deco readouts that *do* have a slot are
+   asserted the other way round, in `TestDecoReadouts` - an element the format holds and
+   this writer skips is the same defect seen from the other side.
 
 The bundle under test is `tests/helpers/export.py::full_bundle`, hand-built precisely
 because the dev corpus has no trimix, no gas switches and one profile between five
@@ -25,6 +28,7 @@ say anything about the writer.
 """
 
 import xml.etree.ElementTree as ET
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -34,9 +38,11 @@ import xmlschema
 from uuid6 import uuid7
 
 from src.app.models.gear_item import GearItem
+from src.app.schemas.dive import DiveMode
 from src.app.schemas.gear_item import GearType
 from src.app.services.dive_profiles import LoadedProfile
 from src.app.services.export.uddf import (
+    _DIVE_MODE_TYPE,
     _EQUIPMENT_ELEMENT,
     _EQUIPMENT_ORDER,
     UDDF_NAMESPACE,
@@ -866,18 +872,270 @@ class TestWhatUddfCannotHold:
         assert list(_tree(document).iter(f"{UDDF}decostop")) == []
 
     @pytest.mark.asyncio
-    async def test_cns_and_otu_are_not_emitted(self, monkeypatch):
-        """`informationafterdiveType` has no oxygen-exposure element; the only `<cns>`/
-        `<otu>` in the schema are per-waypoint, and we store end-of-dive scalars."""
-        document = await _render(full_bundle(), monkeypatch=monkeypatch)
-        assert list(_tree(document).iter(f"{UDDF}cns")) == []
+    async def test_otu_is_not_emitted_and_the_dive_s_own_totals_are_not_either(self, monkeypatch):
+        """The half of the old CNS/OTU refusal that survived the deco channels.
+
+        `<otu>` is a `<waypoint>` child exactly like `<cns>`, and it stays empty for the
+        one reason `<cns>` no longer does: there is no `otu` channel to put in it. The
+        dive's own `cns_start`/`cns_end`/`otu_start`/`otu_end` are a different quantity
+        again - the device's figures for the whole dive - and `informationafterdiveType`
+        has no oxygen-exposure element to carry them.
+        """
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
         assert list(_tree(document).iter(f"{UDDF}otu")) == []
+        # 8.0 and 21.0 are `full_bundle`'s `cns_end` and `otu_end`, asserted from the other
+        # direction by `test_export_json.py` - the document that does carry them.
+        after = _dive(_tree(document), 1).find(f"{UDDF}informationafterdive")
+        assert {child.text for child in after}.isdisjoint({"8", "21"})
+
+    @pytest.mark.asyncio
+    async def test_the_deco_model_is_not_emitted(self, monkeypatch):
+        """`<decomodel>` is an `xs:all` whose three branches are each `minOccurs` 1 and each
+        require a `<tissue>` table, which a recording does not hold.
+
+        `<gradientfactorlow>`/`<gradientfactorhigh>` live inside `<buehlmann>`, so the
+        recording's gradient-factor pair goes with it - the per-waypoint `<gradientfactor>`
+        is a reading and not the setting.
+        """
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
+        tree = _tree(document)
+        for tag in ("decomodel", "buehlmann", "gradientfactorlow", "gradientfactorhigh"):
+            assert list(tree.iter(f"{UDDF}{tag}")) == [], tag
+        # `full_bundle`'s recording runs ZHL-16C at 50/85 with a conservatism of -1.
+        assert b"ZHL-16C" not in document
+
+    @pytest.mark.asyncio
+    async def test_a_waypoint_carries_no_child_this_writer_did_not_choose(self, monkeypatch):
+        """The closed set, which is how `tts` and `surface_gradient_factor` get asserted.
+
+        3.2.2 has no time-to-surface element and no surface gradient factor, so unlike the
+        ceiling and the deco model there is no tag to look for and prove absent. What can
+        be pinned is that the waypoints carry *exactly* the eleven children this writer
+        chose - so a later hand that decides `tts` is close enough to `<remainingbottom
+        time>`, or that the surface figure may as well ride in `<gradientfactor>` beside
+        the leading tissue's, breaks this rather than shipping a number the file did not
+        record.
+
+        `TRIMIX_PROFILE` carries every channel the format defines, which is what makes the
+        set meaningful: a channel missing here would be a channel with nowhere to go.
+        """
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        written = {child.tag.removeprefix(UDDF) for waypoint in waypoints for child in waypoint}
+        assert written == {
+            "cns",
+            "calculatedpo2",
+            "depth",
+            "divetime",
+            "setmarker",
+            "switchmix",
+            "tankpressure",
+            "temperature",
+            "divemode",
+            "gradientfactor",
+            "nodecotime",
+        }
 
     @pytest.mark.asyncio
     async def test_the_owner_s_email_is_not_in_the_file(self, monkeypatch):
         """The schema has a slot. A UDDF file is what a diver hands to a dive shop."""
         document = await _render(full_bundle(), monkeypatch=monkeypatch)
         assert b"ada@example.com" not in document
+
+
+class TestDecoReadouts:
+    """The four channels UDDF has a `<waypoint>` child for, and the units they go out in.
+
+    The refusals in `TestWhatUddfCannotHold` are the same rule pointed the other way: an
+    element the format holds and this writer skips is data lost for no reason, which is
+    what the module docstring's census exists to keep honest in both directions.
+    """
+
+    @staticmethod
+    def _waypoints(document: bytes) -> list[ET.Element]:
+        return _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+
+    @pytest.mark.asyncio
+    async def test_the_no_decompression_clock_is_seconds_in_both(self, monkeypatch):
+        """The one channel with no factor, and 5940 is why the absence is worth a test:
+        a Shearwater's display maximum means *at least this*, not "unrecorded"."""
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
+        waypoints = self._waypoints(document)
+        assert [_text(w, f"{UDDF}nodecotime") for w in waypoints] == ["5940", "1260", "0", None]
+
+    @pytest.mark.asyncio
+    async def test_the_calculated_ppo2_is_bar_where_we_store_hundredths(self, monkeypatch):
+        """0.34 bar and 0.96 bar, hand-computed from the stored 34 and 96.
+
+        The second pressure in this writer that is not Pascal, `<mix><maximumpo2>` being
+        the first - which is exactly why it gets its own assertion.
+        """
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
+        waypoints = self._waypoints(document)
+        assert [_text(w, f"{UDDF}calculatedpo2") for w in waypoints] == ["0.34", None, "0.96", None]
+
+    @pytest.mark.asyncio
+    async def test_the_cns_clock_is_percent_where_we_store_tenths(self, monkeypatch):
+        """10 % and 80 %, from the stored 100 and 800."""
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
+        waypoints = self._waypoints(document)
+        assert [_text(w, f"{UDDF}cns") for w in waypoints] == ["10", None, None, "80"]
+
+    @pytest.mark.asyncio
+    async def test_the_gradient_factor_goes_out_as_the_documented_fraction(self, monkeypatch):
+        """17 % is `0.17` and not `17`, and 398 % is `3.98` and not `1`.
+
+        The percent spelling is only read back correctly by a consumer that recognizes the
+        generator that wrote the file, and nothing recognizes this app's - including this
+        app's own logbook import, which is the reader most likely to meet its own export.
+        A written `17` would come back as 1700.
+
+        398 is the second half of the same assertion: the channel is uncapped above (a real
+        Suunto ascent reaches five figures), so a writer that clamped to the 0-1 the *pair*
+        is documented with would flatten a reading the diver actually saw.
+        """
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
+        waypoints = self._waypoints(document)
+        assert [_text(w, f"{UDDF}gradientfactor") for w in waypoints] == [None, None, "0.17", "3.98"]
+
+    @pytest.mark.asyncio
+    async def test_the_readouts_are_ordered_by_the_schema_and_not_by_the_channel_list(self, monkeypatch):
+        """`waypointType` is an `xs:sequence`, and its order is nothing like ours.
+
+        `<cns>` is third in the type and therefore *first* in a waypoint carrying no alarm
+        or battery reading - ahead of the `<depth>` it was computed at - while
+        `<nodecotime>` is last of all. The XSD tests catch a violation; this one says what
+        the order is, so a reader of the writer does not have to reconstruct it from a
+        schema failure.
+        """
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
+        first = self._waypoints(document)[0]
+        assert [child.tag.removeprefix(UDDF) for child in first] == [
+            "cns",
+            "calculatedpo2",
+            "depth",
+            "divetime",
+            "switchmix",
+            "tankpressure",
+            "temperature",
+            "divemode",
+            "nodecotime",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_readout_snaps_to_the_depth_axis_like_every_other_channel(self, schema, monkeypatch):
+        """No exemption for being a computed reading rather than a measured one.
+
+        The rule is the depth channel's - a reading that cannot reach a waypoint within
+        half its typical interval is dropped rather than relocated - and a no-decompression
+        clock moved 800 s onto a waypoint it was not computed anywhere near would be as
+        wrong as a temperature moved the same distance. Here 4 s snaps back to 0 s and 27 s
+        forward to 30 s, and the reading at 55 s is 25 s past the last depth sample - the
+        second of the two cases `_snap_tolerance` names, a reading taken after the diver
+        surfaced rather than one inside a dropout, and the depth axis here is uniform.
+        """
+        profile = {
+            "depth": {"t": [0, 10, 20, 30], "v": [0, 1000, 2000, 1500]},
+            "ndl": {"t": [4, 27, 55], "v": [900, 0, 600]},
+        }
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
+        schema.validate(document)
+        waypoints = self._waypoints(document)
+        assert [_text(w, f"{UDDF}nodecotime") for w in waypoints] == ["900", None, None, "0"]
+
+
+class TestDiveMode:
+    """`<divemode type>`, which is the recording's setting rather than a reading.
+
+    It rides on the first waypoint because that is the only place UDDF has for it, and it
+    comes from the recording whose samples are in the document - the primary one - for the
+    same reason the samples do.
+    """
+
+    @staticmethod
+    def _with_mode(mode: str | None) -> Any:
+        """`full_bundle` with its one recording's mode replaced.
+
+        `full_bundle`'s own value is `open_circuit`, which the conformance tests depend on,
+        so these vary it here rather than in the shared helper.
+        """
+        bundle = full_bundle()
+        bundle.recordings_by_dive[2] = [replace(bundle.recordings_by_dive[2][0], mode=mode)]
+        return bundle
+
+    @pytest.mark.asyncio
+    async def test_the_mode_lands_on_the_first_waypoint_and_no_other(self, schema, monkeypatch):
+        """One setting for the whole recording, so once per profile.
+
+        Repeating it would be the same fact written several thousand times, and a reader
+        takes the mode from the first waypoint that states one either way.
+        """
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
+        schema.validate(document)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        modes = [w.find(f"{UDDF}divemode") for w in waypoints]
+        assert [None if m is None else m.get("type") for m in modes] == ["opencircuit", None, None, None]
+
+    @pytest.mark.parametrize(
+        ("stored", "expected"),
+        [
+            ("open_circuit", "opencircuit"),
+            ("closed_circuit", "closedcircuit"),
+            ("semi_closed", "semiclosedcircuit"),
+            # `apnoe` rather than the `apnea` added beside it in 2017: both are current in
+            # 3.2.x and the older word is the one every reader knows.
+            ("freedive", "apnoe"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_each_mode_uddf_can_name_is_written_in_uddf_s_spelling(self, stored, expected, schema, monkeypatch):
+        document = await _render(self._with_mode(stored), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
+        schema.validate(document)
+        first = _dive(_tree(document), 1).find(f"{UDDF}samples/{UDDF}waypoint")
+        assert first.find(f"{UDDF}divemode").get("type") == expected
+
+    @pytest.mark.parametrize(
+        "stored",
+        [
+            # `divemodeType`'s five values have no bottom-timer among them, so the nearest
+            # would tell an importer the diver was on a circuit they were not.
+            pytest.param("gauge", id="gauge-has-no-uddf-value"),
+            # The column is a stored vocabulary with no DB `CHECK`, so a row outside
+            # `DiveMode` is a real row and not a defensive hypothetical.
+            pytest.param("rebreather", id="outside-the-vocabulary"),
+            pytest.param(None, id="the-file-recorded-no-mode"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_a_mode_uddf_cannot_name_gets_no_element_rather_than_the_nearest(self, stored, schema, monkeypatch):
+        """Three different facts, one answer, and the answer is silence.
+
+        UDDF reads an absent `<divemode>` as open circuit, which is the format's claim
+        about its own default rather than ours about the dive - and it is the only spelling
+        available, `divemodeType` having no way to say "not one of these".
+        """
+        document = await _render(self._with_mode(stored), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
+        schema.validate(document)
+        assert list(_tree(document).iter(f"{UDDF}divemode")) == []
+
+    def test_every_dive_mode_has_an_answer_here(self):
+        """`_DIVE_MODE_TYPE` is looked up unguarded once `DiveMode(stored)` has succeeded,
+        so a mode added to the enum without a row here would be a `KeyError` on a diver's
+        download. The `None` for `gauge` is what lets this be an equality rather than a
+        subset - "no UDDF value" is answered in the table instead of being absent from it.
+        """
+        assert set(_DIVE_MODE_TYPE) == set(DiveMode)
+
+    @pytest.mark.asyncio
+    async def test_a_recording_with_no_samples_has_nowhere_to_put_its_mode(self, monkeypatch):
+        """`informationbeforedive` has no slot of its own, so a profile with no depth
+        channel - which emits no `<samples>` at all - loses the mode with it. It survives
+        in `logbook.divejson`, which carries the recording rather than the waypoints."""
+        document = await _render(
+            full_bundle(), {PRIMARY_RECORDING_ID: {"temperature": {"t": [0], "v": [250]}}}, monkeypatch
+        )
+        assert list(_tree(document).iter(f"{UDDF}samples")) == []
+        assert list(_tree(document).iter(f"{UDDF}divemode")) == []
 
 
 class TestDeterminism:
