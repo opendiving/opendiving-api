@@ -3953,22 +3953,19 @@ docker compose exec -T redis redis-cli --scan --pattern 'resp:*:user_*_dives:div
 
 **This was deliberately not fixed by versioning the key (`dive_activity_v2`)**, and the paragraph
 that said so named the condition that would flip the trade: "a longer-lived cache, **or a deployed
-API**". One appeared on 2026-09-12. What it bought is not a suffix on this key - the objection to
-that only got stronger once the exposure was swept, because this endpoint is neither the only cached
-response nor the worst-exposed one - but a namespace under every key the response cache writes,
-which is what the `resp:*:` in the pattern above is. See *"A deploy cannot serve the previous
-build's response cache"*, which carries the sweep, the alternatives and the remedies for an instance
-you cannot `docker compose exec` into.
+API**". The second of those arrived on 2026-09-12, and it changes who pays: the stale window belongs
+to whoever is signed in when a shape change reaches them rather than to the developer who made it,
+and the remedy above - `docker compose exec` into the local stack's Redis - has no counterpart on an
+instance whose Redis is managed. See *"`PROJECT_OPERATED` is the first setting that knows who runs
+the instance, and it selects copy only"*.
 
-**The second of those two arrived on 2026-09-12**, so the paragraph above records a trade that has
-expired rather than one still in force. There is a deployed API: the stale window belongs to whoever
-is signed in when a shape change reaches it rather than to the developer who made it, and the remedy
-above - `docker compose exec` into the local stack's Redis - has no counterpart on an instance whose
-Redis is managed. Neither half of that is settled here. Whoever next changes the shape of a cached
-response owes the call the flip condition asks for - version the key, or write down how that
-instance's Redis is flushed - and must not read the paragraph above as having made it for them. See
-*"`PROJECT_OPERATED` is the first setting that knows who runs the instance, and it selects copy
-only"*.
+**Both halves of that call are now settled, and not on this key.** What the flip bought is not a
+suffix here - the objection to per-key suffixes only got stronger once the exposure was swept,
+because this endpoint is neither the only cached response nor the worst-exposed one - but a
+namespace under every key the response cache writes, which is what the `resp:*:` in the pattern
+above is, plus a written-down flush for the managed instance. So the next person to reshape a cached
+response owes neither: see *"A deploy cannot serve the previous build's response cache"*, which
+carries the sweep, the alternatives and both remedies.
 
 ## FIT is one parser for both vendors, and its one real trap is developer fields
 
@@ -17746,10 +17743,10 @@ half of the call this took — writing down how a deployed instance's Redis is f
 a day later by namespacing the whole response cache per build, and a namespace that moves on every
 deploy makes a per-key suffix inert on any instance that ships: `resp:{build}:user_7_dive:v2` and
 `resp:{build}:user_7_dive` are equally cold behind a new build. What the suffix still reaches is the
-one place the namespace cannot, a source checkout where the build identity is the constant `dev` and
-a branch switch leaves a warm Redis — which is also the one place the person reshaping the response
-can run the flush themselves. So `:v2` stays because moving it would cost more than leaving it, not
-because it is load-bearing, and the obligation the paragraph above hands the next reader is
+one place the namespace cannot, a source checkout whose namespace is the installed `APP_VERSION` and
+so does not move when the branch does — which is also the one place the person reshaping the
+response can run the flush themselves. So `:v2` stays because moving it would cost more than leaving
+it, not because it is load-bearing, and the obligation the paragraph above hands the next reader is
 discharged by *"A deploy cannot serve the previous build's response cache"* rather than by them.
 
 ## `other` is storage's spelling of an absent event type, and it never reaches the wire
@@ -17862,11 +17859,15 @@ cache key is versioned"* above on the grounds that a suffix "cannot be forgotten
 The namespace is that property, for every cached response and without anyone deciding to have it, so
 the suffix is inert behind a new build and the next reshape owes no `:v3`. It is left where it is
 because it costs a key segment and removing it would cost a behaviour change, and because it does
-still reach the case below.
+still reach the case below - the one place a namespace that only moves per build cannot.
 
-**A source checkout still has no build identity**, and `dev` is honest about that rather than
-clever: nothing available in-process distinguishes one working tree from the same tree a commit
-later, and a value that changed per process would split the cache across gunicorn's four workers for
+**A source checkout's namespace is constant, and that is the case the chain cannot help with.**
+`uv sync` installs this project, so `_installed_version` answers and a local run lands on
+`APP_VERSION` - `resp:0.1.0:` today, not `resp:dev:`, which is worth knowing before going looking
+for the latter by hand. (`dev` is the tail of the chain, reached only by a tree that was never
+installed.) That value moves on a release and on nothing else, so switching branches does not move
+it: nothing available in-process distinguishes one working tree from the same tree a commit later,
+and a value that changed per process would split the cache across gunicorn's four workers for
 everyone. So a branch switch with a warm Redis behaves exactly as it did, and the flush above
 remains its remedy - with `resp:*:` in front of the pattern now, and worth widening past
 `dive_activity` since the hour-long keys are the ones that hurt:

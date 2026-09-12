@@ -31,10 +31,14 @@ _NAMESPACE_ROOT = "resp"
 
 # What identifies a build, most specific first. `APP_COMMIT` is baked into the image and so
 # moves on every merge to the edge channel; `APP_VERSION` comes from the installed package
-# metadata and moves on every release, which is what an image built without the build arg
-# has. A source checkout has neither, and gets a constant - a branch switch there is the case
-# `DECISIONS.md` documents a flush for, because no value available in-process distinguishes
-# one working tree from the same tree a commit later.
+# metadata and moves on every release, which is what an image built without the build arg has
+# - and, because `uv sync` installs this project, what a source checkout has too (`0.1.0`
+# today, so the namespace there is `resp:0.1.0:`). The `dev` tail is reached only by a tree
+# that was never installed, where `_installed_version` raises `PackageNotFoundError`.
+#
+# So a local checkout's namespace is constant across branches, which is why a branch switch
+# with a warm Redis is still the case `DECISIONS.md` documents a flush for: nothing available
+# in-process distinguishes one working tree from the same tree a commit later.
 _BUILD = (settings.APP_COMMIT or "")[:12] or settings.APP_VERSION or "dev"
 _NAMESPACE = f"{_NAMESPACE_ROOT}:{_BUILD}"
 
