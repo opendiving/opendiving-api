@@ -528,31 +528,37 @@ installed. This is the job that closes the loop with the paragraph above, becaus
 catches is a release that was clean the day it shipped and grew a CVE three weeks later, with no PR
 in flight and nobody looking.
 
-**The alert is a GitHub issue** labelled `image-cve`, and you are the one who acts on it. The body
-splits the findings by what actually fixes them, because that differs by image as well as by
-package:
+**The alert is a code-scanning alert** on the repository's **Security** tab, and you are the one who
+acts on it. The run also writes a summary to the workflow run itself, and that is the half worth
+reading: it splits the findings by what actually fixes them, because that differs by image as well
+as by package:
 
 - **Anything on `edge`** — merge the bump. That is the whole remedy: the next build on `main`
   republishes `edge` from the current base image and against the current `uv.lock`, and redeploys
   it. No release is involved.
-- **OS package on a released alias** — the rebuild above, dispatched at the `v` tag the issue names.
-  One dispatch recomputes every release alias the scan covers, which is why the scan covers exactly
-  those and no more. It does not touch `edge`, which a merge has already dealt with.
+- **OS package on a released alias** — the rebuild above, dispatched at the `v` tag the summary
+  names. One dispatch recomputes every release alias the scan covers, which is why the scan covers
+  exactly those and no more. It does not touch `edge`, which a merge has already dealt with.
 - **Python package on a released alias** — *not* fixable by a rebuild at any tag. That version comes
   from the `uv.lock` committed at the tag, and the rebuild checks that tag out and runs
   `uv sync --locked` against it, so it reinstalls the identical version no matter how many bumps
   have since landed on `main`. Merge the bump and **cut a new patch release** — the ordinary flow
   above, not the in-place rebuild.
 
-One issue, edited in place for as long as the finding persists, so a CVE that takes upstream a
-fortnight to patch does not generate a fortnight of notifications. The workflow closes it once a
-scan comes back clean, and will not reopen it for a set of CVEs you already read and closed; a
-*different* CVE opens a fresh one.
+Every scan replaces the whole alert set, so a CVE that takes upstream a fortnight to patch is one
+alert for a fortnight rather than fourteen notifications, and an alert closes itself on the first
+scan that no longer finds it — you never close one by hand to say it is fixed. Only findings with a
+published fix become alerts; the ones upstream has not fixed are a count in the run summary, because
+no rebuild collects them and an alert you cannot act on is noise.
+
+Until 2026-09-12 this alert was a GitHub issue labelled `image-cve` instead, because SARIF upload
+was a paid feature on a private repository. If one of those issues is still open, it is a leftover:
+nothing updates or closes it any more, and its findings are in the Security tab.
 
 **Proposed changes.** The same workflow runs a second, much cheaper job on every PR — Trivy over
 `uv.lock`, no image built — which *fails the check* on a HIGH or CRITICAL that has a fix available.
 That is about a change you are proposing rather than about what is deployed, so it stays out of the
-issue. It ignores findings with no fix published, because there is no move to make on those.
+alerts above. It ignores findings with no fix published, because there is no move to make on those.
 
 **Version bumps.** `.github/renovate.json5` is the other half: it watches `uv.lock` and
 `pyproject.toml`, both `Dockerfile` base images, the development compose file's third-party images,
@@ -591,8 +597,8 @@ issue: it tells you 3.15 exists and waits for a person.
   to it, and it exists in the set because the project's own instance runs it.
 - **The `linux/arm64` image**, on the assumption that it installs the same Debian packages as
   `linux/amd64`. If that ever stops holding, the scan step is where a `--platform` pass goes.
-- **Vulnerabilities with no fix published upstream.** They are counted in the issue but drive
-  nothing, since no rebuild collects a package that does not exist.
+- **Vulnerabilities with no fix published upstream.** They are counted in the run summary but drive
+  nothing and never become an alert, since no rebuild collects a package that does not exist.
 
 ## License
 

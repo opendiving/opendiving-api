@@ -8339,6 +8339,50 @@ Checked before designing around it, because "just import the register" is the ob
   picks it is the opposite of harvesting, which is what makes the on-demand catalog the licensed
   option rather than merely the cheap one.
 
+### What this project has told WoRMS it does
+
+On **2026-09-12** a message went to `info@marinespecies.org` from `contact@opendiving.app`, subject
+*WoRMS REST webservice user: OpenDiving*, followed by an empty mail to
+`webservice-subscribe@marinespecies.org` to join the change-notice list. **No reply has come, and
+nothing in this codebase waits for one.** The reason to record it here rather than in a mailbox is
+that it is a set of claims this project now has to keep true: a change that falsifies one of them is
+a change that owes this register a second message, and the list below is what to check a change
+against.
+
+What was claimed:
+
+- **Six endpoints, and only six** — `AphiaRecordsByName` (`like=true`, `marine_only=false`),
+  `AphiaRecordsByVernacular` (`like=true`), `AjaxAphiaRecordsByNamePart`, `AphiaRecordByAphiaID`,
+  `AphiaVernacularsByAphiaID` and `AphiaSynonymsByAphiaID` (paged by `offset`). The live set is the
+  `_worms()` call sites in `services/species_service.py` and nothing else. **`AphiaTaxonRanksByID`
+  is not one of them**, though a text search for endpoint names finds it: every occurrence is prose
+  citing it as the *source* of a rank vocabulary transcribed into a constant once, by hand, and it
+  is never fetched at runtime. Derive this list from the call sites, not from a grep.
+- **A search costs at most three requests**: one `AphiaRecordsByName`, and — only when that returns
+  nothing — `AphiaRecordsByVernacular` alongside `AjaxAphiaRecordsByNamePart`. The three
+  `…ByAphiaID` endpoints fire once each when a diver actually adds a species to a dive, never during
+  typing.
+- **Nothing is harvested.** No copy of the register is held, one taxon is fetched per species a
+  diver chooses to log, and a search that cannot reach the register falls back to what the instance
+  has already stored rather than retrying.
+- **Two cache TTLs, not one** — thirty days for a hit and **one hour for a miss or a partial
+  answer** (`_HIT_TTL_SECONDS`, `_MISS_TTL_SECONDS`). The message states both, and the hour is the
+  half that matters to WoRMS: it is the one that decides how often a failing search comes back.
+- **A self-imposed cap of 120 requests a minute per instance** (`SPECIES_WORMS_RATE_LIMIT_REQUESTS`
+  / `_WINDOW_SECONDS`), described as ours rather than as something WoRMS publishes — it publishes
+  none.
+- **Credit and citation.** "World Register of Marine Species" links to `marinespecies.org` beside
+  the CC BY licence on every search result and species page, served by the API alongside the data
+  rather than hard-coded in a client, so it cannot be dropped by one. The full citation with its DOI
+  is in this repository's `README.md`.
+- **Self-hosted copies call the webservice themselves**, under their own `User-Agent`
+  (`SPECIES_USER_AGENT`, defaulting to `OpenDiving (+https://github.com/opendiving/opendiving-api)`)
+  and their own rate limit — nothing is proxied through the hosted instance.
+
+Two things were asked: to be added to the applications list if one is kept, and whether the WoRMS
+logo may be displayed beside the credit. **The logo is not used and must not be until that second
+question is answered**, which is the one live constraint this exchange leaves behind.
+
 ### Two registers, because WoRMS alone cannot answer "clownfish"
 
 This is the forcing fact, and it is worth keeping the datum: `AphiaVernacularsByAphiaID/278400`
@@ -10285,17 +10329,18 @@ GitHub keys the "Report a vulnerability" button off this file's existence. What 
 per-repository toggle — Settings → Advanced Security → Private vulnerability reporting — which
 committing a `SECURITY.md` does *not* flip.
 
-**The toggle is public-repositories-only**, so while `opendiving-api` is private it is not merely
-off, it does not render at all. That is worth writing down because the absence looks like a
-permissions or plan problem and is neither: the org is on the free plan and the maintainer is an org
-admin, and both are irrelevant. The account-level "private vulnerability reporting" switch in
-personal settings is a different thing — a default for repositories owned by *that user*, not by the
-`opendiving` org — so finding that one and not this one is the expected experience, not a
-misconfiguration to debug. The setting appears the moment the repository goes public, which is the
-sitting to enable it in: that is the only window where the policy is readable and the button it
-names is missing. The org-wide equivalent is a custom security configuration under the
-organization's Code security settings, which is worth it once three repos want the same answer and
-not before.
+**The toggle is public-repositories-only**, so while `opendiving-api` was private it was not merely
+off, it did not render at all. That is worth keeping because the absence looks like a permissions or
+plan problem and is neither: the org is on the free plan and the maintainer is an org admin, and
+both are irrelevant. The account-level "private vulnerability reporting" switch in personal settings
+is a different thing — a default for repositories owned by *that user*, not by the `opendiving` org
+— so finding that one and not this one was the expected experience, not a misconfiguration to debug.
+The setting appears the moment the repository goes public, which is the sitting to enable it in:
+that is the only window where the policy is readable and the button it names is missing. **That
+sitting was 2026-09-12** — the repository went public and the toggle was thrown the same day, which
+is the rule this paragraph existed to get right, run once and worth reusing for the next public-only
+switch. The org-wide equivalent is a custom security configuration under the organization's Code
+security settings, which is worth it once three repos want the same answer and not before.
 
 **`security@opendiving.app` is second, and had to be checked before it could be trusted.** The
 mailbox was created on 2026-08-20, when this policy landed. It needed checking because
@@ -10309,10 +10354,11 @@ list, so the domain having one role address is not evidence it has this one.
 
 Hence the ordering rather than a hedge in the prose. A policy that qualifies its own address ("if
 this bounces…") is not a policy, so the file states both channels plainly and this section carries
-whatever caveat is outstanding instead. One thing still has to happen, and it is not a code change:
-**enable private vulnerability reporting once the repository is public.** Until then the mailbox is
-the only live route, which is the right way round for it to fail — mail that arrives beats a button
-that isn't there.
+whatever caveat is outstanding instead. One thing had to happen that was not a code change — enable
+private vulnerability reporting once the repository is public — and it is **done, 2026-09-12**, in
+the same sitting as the flip. Both channels are live and nothing here is outstanding. Until then the
+mailbox was the only live route, which was the right way round for it to fail: mail that arrives
+beats a button that isn't there.
 
 Anyone adding a role address to a document here should read that web section first. The rule it
 implies is that a published address is a claim about infrastructure, and the only way to keep the
@@ -10405,22 +10451,29 @@ it is, and a repository that has one is easy to mistake for a repository that is
 
 **Trivy for both, not `pip-audit`.** `pip-audit` reads Python packages, and the CVEs that force a
 rebuild are Debian packages inside `python:3.14-slim-bookworm`. Trivy reports the OS layer and the
-installed Python distributions in one pass and labels which is which, which is what lets the issue
-body hand each row the remedy that actually applies to it — a rebuild for an OS finding, a whole new
-patch release for a Python one. Those two are further apart than they look; *"The two remedies in
-the report are genuinely different"* below is why. Using it for the PR job too means one third-party
-action pinned instead of two.
+installed Python distributions in one pass and labels which is which, which is what lets the report
+hand each row the remedy that actually applies to it — a rebuild for an OS finding, a whole new
+patch release for a Python one. That labelling is also why the markdown report outlived the tracking
+issue: code scanning carries a finding and its severity, not which of two remedies applies to it.
+Those two are further apart than they look; *"The two remedies in the report are genuinely
+different"* below is why. Using it for the PR job too means one third-party action pinned instead of
+two.
 
 **Trivy itself floats on `latest`, deliberately**, and it is the one pin in this repository that is
 meant not to exist. A scanner is worth what its release knows about; a version frozen here would
 quietly stop recognising new advisory formats while continuing to report zero findings, which is the
 one failure mode a security check must not have — indistinguishable from good news.
 
-**The alert is an issue, not a code-scanning alert.** SARIF plus `github/codeql-action/upload-sarif`
-is the better surface and produces a real alert list, but it needs GitHub Advanced Security on a
-private repository, and this one is private until it isn't. A detection mechanism that only starts
-working after a settings change nobody has made is not detection. When the repository goes public,
-`upload-sarif` becomes free and that step is what to replace.
+**The alert was an issue, not a code-scanning alert — and the instruction in this paragraph is now
+done, 2026-09-12.** SARIF plus `github/codeql-action/upload-sarif` is the better surface and
+produces a real alert list, but it needed GitHub Advanced Security on a private repository, and this
+one was private until it wasn't. A detection mechanism that only starts working after a settings
+change nobody has made is not detection. The instruction this paragraph carried — when the
+repository goes public, `upload-sarif` becomes free and that step is what to replace — was carried
+out on the day of the flip. *"The alert arrives where it can be acted on, and the scan replaces the
+whole set"* below is the record of the replacement and of what it cost; the three paragraphs that
+follow here describe the issue machinery it retired, and are kept because they are the reasoning any
+later hand-rolled alert surface would have to redo.
 
 **One issue, edited in place, with a fingerprint.** A fresh issue per run would be a daily
 notification for a fact that has not changed, and the second one would be muted. So the workflow
@@ -10463,7 +10516,7 @@ what was fixed while silently dropping the rest, whereas the body carries its ow
 caveat along with the table.
 
 **Findings fail the PR check but never the scheduled job.** Different jobs, different answers, both
-on purpose. The scheduled job's output is an issue, so a red X would add nothing and would train
+on purpose. The scheduled job's output is an alert, so a red X would add nothing and would train
 someone to ignore a red X on a security workflow; genuine errors still fail it, and it fails loudly
 in the one case that would otherwise look identical to good news — release tags exist but not one
 image alias resolves, which is a broken login or a missing package rather than an absence of
@@ -10503,9 +10556,10 @@ built on: an alert nobody can act on is not detection, it is training people to 
 A Publish Image dispatch recomputes the aliases of *the one version it names* and no others (see
 `prepare` in `publish-image.yml`). So a finding on `0.2` would survive every rebuild the
 documentation describes, return on the next morning's scan, and — because an image nobody rebuilds
-keeps accruing *new* advisories — open a brand-new issue each time the previous one was closed,
-since the fingerprint is a set of CVE ids and a new id is legitimately new. The result is a channel
-that cycles forever on something structurally unaddressable.
+keeps accruing *new* advisories — grow the alert set again each time it was cleared. (While the
+alert was an issue this was sharper still: a brand-new issue each time the previous one was closed,
+since the fingerprint was a set of CVE ids and a new id is legitimately new.) The result is a
+channel that cycles forever on something structurally unaddressable.
 
 `SECURITY.md` settles what would otherwise be a judgement call here. Its supported-versions table is
 "the most recent release: yes; anything older: no — upgrade to the newest", so the scan set is not a
@@ -10518,24 +10572,27 @@ whole fix even with a version pinned" is only true for a version whose base-imag
 watching for. Widening the scan back means first widening the support policy, and that is a decision
 in `SECURITY.md`, not a line in a workflow.
 
-**The tracking issue is public, and `SECURITY.md` says not to open public issues for
+**The scanner's findings are not private, and `SECURITY.md` says not to open public issues for
 vulnerabilities. Both are right, and the line between them is worth stating** — because the next
 person to notice will otherwise either delete the workflow or quietly loosen the policy. That rule
-protects an *undisclosed defect in code this project ships*: opening an issue for one starts the
-exposure clock before a fix exists, which is exactly the harm it names. A base-image finding is the
-other thing entirely. It carries a CVE id because Debian and NVD published it first — Trivy has no
-way to report a vulnerability that has not already been disclosed upstream, since matching an
-installed version against a public advisory database is the whole of what it does. The issue
-therefore discloses nothing a reader could not get by running `trivy image` against the same public
-tag themselves, and the clock it is accused of starting started upstream, days earlier, without us.
-What the issue adds is not disclosure but *notification* — the maintainer learning that a
-published-and-supported image now needs the rebuild `CONTRIBUTING.md` documents. Route that through
-private vulnerability reporting instead and it lands in a channel designed for a human finder
-awaiting a human reply, on a daily cron, for facts that are already public: noise in the one inbox
-that must not be noisy. The distinction to preserve, if this is ever revisited: **already-public
-advisory about shipped bytes → issue; undisclosed defect in our own code → the private channel in
-`SECURITY.md`.** A scan that ever starts reporting the second kind — a `--scanners secret` pass
-finding a committed credential, say — has crossed the line and needs a different destination.
+protects an *undisclosed defect in code this project ships*: disclosing one before a fix exists
+starts the exposure clock, which is exactly the harm it names. A base-image finding is the other
+thing entirely. It carries a CVE id because Debian and NVD published it first — Trivy has no way to
+report a vulnerability that has not already been disclosed upstream, since matching an installed
+version against a public advisory database is the whole of what it does. It therefore discloses
+nothing a reader could not get by running `trivy image` against the same public tag themselves, and
+the clock it is accused of starting started upstream, days earlier, without us. What it adds is not
+disclosure but *notification* — the maintainer learning that a published-and-supported image now
+needs the rebuild `CONTRIBUTING.md` documents. Route that through private vulnerability reporting
+instead and it lands in a channel designed for a human finder awaiting a human reply, on a daily
+cron, for facts that are already public: noise in the one inbox that must not be noisy. **This
+argument was written when the destination was a public issue and it did not move when the
+destination did** — which is the point of stating it about the finding rather than about where the
+finding lands. The distinction to preserve, if this is ever revisited: **already-public advisory
+about shipped bytes → the scanner's own surface; undisclosed defect in our own code → the private
+channel in `SECURITY.md`.** A scan that ever starts reporting the second kind — a
+`--scanners secret` pass finding a committed credential, say — has crossed the line and needs a
+different destination.
 
 **The two remedies in the report are genuinely different, and conflating them was a real bug in the
 first draft.** It told the reader that a *Python* package finding "needs a merged bump first",
@@ -10546,7 +10603,77 @@ guard refuses to publish `main` under an already-used version. So a rebuild at `
 `v0.4.0`'s exact dependency set however many bumps have landed since, publishes a fresh digest,
 moves every alias, and reports success while fixing nothing — the same shape of silent failure as
 digest-pinning the base image, arrived at from the other direction. The only remedy for a Python
-finding is a new patch release, and the issue body now says so per row rather than in a footnote.
+finding is a new patch release, and the report says so per row rather than in a footnote.
+
+## The alert arrives where it can be acted on, and the scan replaces the whole set
+
+On 2026-09-12 this repository went public and the scheduled scan stopped filing issues. It uploads
+SARIF to code scanning instead, which is what the section above always said to do on this day. The
+substance of the workflow did not change: the same targets, the same two halves of each image, the
+same remedy prose. What changed is the destination, and with it a page of bookkeeping.
+
+**The gain is that "is it fixed yet" stops being something the workflow has to answer.** The issue
+needed a fingerprint over the fixable CVE ids, a rewrite of its own body before closing, and a "same
+set, leave it closed" suppression, and every one of those existed to tell *this problem, still
+there* from *something new*. An upload replaces the whole alert set for its category, so a finding a
+scan no longer returns closes itself and a recurrence opens fresh. That machinery is deleted rather
+than ported, and the section above keeps its reasoning because a hand-rolled surface would have to
+rediscover all of it — including the `grep`-in-a-command-substitution post-mortem, which is about
+bash under `set -euo pipefail` and outlives the step it was learned in.
+
+**One upload, one category, and each half is load-bearing.** `upload-sarif`'s `sarif_file` takes a
+directory and combines every `.sarif` under it into one analysis, which is why the images in the
+scan set are written to `sarif/` and uploaded together instead of one call per image — separate
+uploads under one category overwrite each other, and the last image scanned would be the only one
+with alerts. The category is the key GitHub matches an upload against the previous one, so it is a
+constant (`published-images`). A category per image reads as the tidier design and is the trap:
+every `X.Y.Z` alias leaves the scan set one release later, and a category never uploaded to again
+keeps its alerts open forever — the same never-cleared-alert failure the older-minors decision above
+exists to avoid, arrived at from the other end.
+
+**The upload is gated on the targets, not on the report having rows.** A clean scan still uploads
+its empty SARIF set, because that upload is what closes the alerts the last vulnerable scan opened.
+Gating it on findings would leave a fixed CVE showing on the Security tab until the next one turned
+up, which is the issue's stale-body problem reintroduced in a surface that does not have it.
+
+**The scan runs twice per image now, and `--ignore-unfixed` is the difference.** Only findings with
+a published fix become alerts, because an alert with no move attached is what this workflow exists
+not to produce; the unfixable ones stay a number in the run summary, where they are evidence about
+the base image rather than a task. The first pass keeps everything for that summary. `trivy convert`
+cannot derive the second pass from the first one's JSON — it filters on `--severity` and has no
+`--ignore-unfixed` — so it is a second `trivy image`, which is cheap because the image is in Trivy's
+local cache by then. The markdown report survives for the same reason: code scanning carries a
+finding and its severity, not which of two remedies applies to it, and the split between "dispatch
+Publish Image at this `v` tag" and "merge the bump and cut a release" is the whole value of the
+report.
+
+**Moving the body broke a relative link, which is the kind of thing that survives a careful read.**
+The footer linked the workflow as `../blob/main/.github/workflows/vulnerability-scan.yml`, and that
+resolved because an issue body renders at `/<owner>/<repo>/issues/<n>` — one segment after the
+repository name, so `..` lands on the repository root. A job summary renders at
+`/<owner>/<repo>/actions/runs/<id>`, three segments deep, where the same link resolves under
+`/actions/` and 404s. The depth of the page a markdown body is rendered on is part of that body's
+contract, so the footer builds absolute URLs from `github.server_url` and `github.repository` now.
+Anything else moved between an issue, a comment, a release note and a run summary has the same trap
+in it. `opendiving-web` hit it in its own copy of this workflow the same day; the footer here was
+identical, down to the `..`.
+
+**`github/codeql-action/upload-sarif` takes a major tag, not a digest.** It is GitHub's own, which
+is the split *"A pin is a promise to renew"* above describes and `.github/renovate.json5` is written
+around: `pinDigests` is `false`, first-party actions ride their major tag, third-party ones are
+SHA-pinned. The Trivy setup action a few lines up is one of the latter, and the two styles sitting
+in one file is the rule being applied rather than an inconsistency to tidy.
+
+**It does not collide with CodeQL default setup**, which is configured on this repository —
+`actions` and `python`, weekly. Default setup conflicts with an *advanced* CodeQL workflow, because
+both would upload CodeQL results for the same language; a third-party SARIF upload carries its own
+tool name and its own category and is independent of it.
+
+**The one thing the move does not do is tidy up after itself.** Issue #178, the last `image-cve`
+issue, is still open and nothing edits or closes it any more — the step that did is deleted. It
+needs closing by hand, and `CONTRIBUTING.md` and `SECURITY.md` both say so rather than pretending
+the surface changed retroactively. The `image-cve` label is left in place for the same reason: it is
+still attached to that issue.
 
 ## Security headers are the app's, not the proxy's
 
@@ -11245,10 +11372,12 @@ Three details that look arbitrary and are not:
   their files volume is missing is the worst one to hand them a 404.
 - **`blob/main`, not a release tag.** An operator on any version wants the current instructions, and
   the restore procedure is not versioned with the image.
-- **`opendiving/opendiving` is private until the public launch**, so the link 404s for a signed-out
-  reader today. Deliberate rather than premature: no release has been cut in any of these
-  repositories, so nothing has ever put these strings in front of an operator, and the link is
-  correct by the time one exists.
+- **`opendiving/opendiving` was private until the public launch**, so the link 404'd for a
+  signed-out reader. Deliberate rather than premature: no release had been cut in any of these
+  repositories, so nothing had ever put these strings in front of an operator, and the link was
+  correct by the time one existed. **It resolves as of 2026-09-12**: the front door is public and
+  `v0.1.0` is released there, so the first operator who can meet this message also gets a working
+  link out of it.
 
 This was the first `github.com/opendiving/opendiving/` reference in this repository, and
 `blob/main/<path>` became the shape for the rest of them — it is already what the issue templates
@@ -11602,15 +11731,18 @@ and `CONTRIBUTING.md` no longer asks for them. (ii) The instruction below to tar
 with the `required_signatures` ruleset the day this repo goes public - it is every branch *except*
 `main`, because with required signatures on `main` GitHub refuses to squash-merge a pull request you
 did not author, and squash is the only merge method enabled here, so every outside PR would be
-unmergeable on day one. (iii) The description below of the Claude hook as rejecting the offending
-command outright - it now asks git first and rejects only where the key that command would disable
-is reported on. (iv) The claim below that the Claude hook is committed - the *script* is, and the
-`.claude/*` pattern forensics below are why it can be, but the `PreToolUse` registration that points
-at it is not: it moved to the untracked `.claude/settings.local.json`, and the ignore file's one
-exception line is `!.claude/hooks/` now rather than `!.claude/settings.json`. The paragraph's
-reasoning about what reaches an agent checkout is correct and is exactly what that move gives up.
-Everything else here stands and is why the section is kept whole: that no git setting can prevent an
-inline override, the pre-push hook's mechanics and its `%G?`-of-`N` reasoning, the
+unmergeable on day one. **Done on 2026-09-12, as corrected**: the repository went public and a
+`signatures` ruleset now targets every branch except `main`, beside a `main` ruleset that requires a
+pull request and allows squash only, and a `tags` ruleset protecting `v*`. The instruction below is
+history; this is what was actually applied. (iii) The description below of the Claude hook as
+rejecting the offending command outright - it now asks git first and rejects only where the key that
+command would disable is reported on. (iv) The claim below that the Claude hook is committed - the
+*script* is, and the `.claude/*` pattern forensics below are why it can be, but the `PreToolUse`
+registration that points at it is not: it moved to the untracked `.claude/settings.local.json`, and
+the ignore file's one exception line is `!.claude/hooks/` now rather than `!.claude/settings.json`.
+The paragraph's reasoning about what reaches an agent checkout is correct and is exactly what that
+move gives up. Everything else here stands and is why the section is kept whole: that no git setting
+can prevent an inline override, the pre-push hook's mechanics and its `%G?`-of-`N` reasoning, the
 committed-past-`.claude/*` forensics as they bear on the script and the pattern, the Python-version
 fail-open note, and the bare-command-substitution post-mortem.
 
@@ -11637,7 +11769,12 @@ public - which is the intent - add a ruleset with `required_signatures` and **ta
 not `main`**. A `main`-only rule is theatre: pull requests here are squash-merged, and GitHub
 creates and signs that commit with its own web-flow key, so `main` is already 100% verified while
 the branch behind it can be entirely unsigned. That gap is the exact state this section exists to
-describe.
+describe. **Turned on 2026-09-12, with the one correction the superseding note at the top of this
+section makes: every branch *except* `main`,** because required signatures on `main` and squash-only
+merging cannot both hold for a pull request you did not author. The reasoning for *every branch* is
+why that exception is one branch wide rather than a `main`-only rule, and it does not put the demand
+back on contributors: an outside contributor's branch lives on their own fork, which no ruleset here
+reaches.
 
 Until then, two local hooks:
 
@@ -11695,7 +11832,10 @@ pass waiting to happen.
 None of this survives someone determined: `git push --no-verify` skips the push hook, a commit made
 outside the Bash tool never meets the other one, and both files are editable by anything that can
 edit the repo. They are speed bumps against a habit, and the habit is the actual failure mode. The
-guard that holds against everything else is the ruleset above, the day the repo is public.
+guard that holds against everything else is the ruleset above, **active since 2026-09-12** — which
+means a `--no-verify` push of an unsigned commit to a branch here is now refused by the server
+rather than merely unguarded. `main` is the exception, for the squash-merge reason the superseding
+note at the top of this section gives.
 
 ## A refresh token is only as alive as its account
 
@@ -12817,8 +12957,11 @@ outside these machines was prose - and the prose was hostile. A contributor who 
 went: the *Pull requests* bullet says PR commits do not need to be signed, the
 `git config core.hooksPath .githooks` line moved out of *Getting set up* into *For maintainers*, and
 `AGENTS.md` went conditional on what git actually reports. Signing itself is unchanged - the
-maintainer's machines still sign, both hooks are still committed, and the ruleset below still lands
-the day this repo is public.
+maintainer's machines still sign, both hooks are still committed, and the ruleset below **landed on
+2026-09-12, the day this repo went public** - on every branch except `main`, which is the exception
+that section's superseding note explains. It does not put the demand back on contributors: an
+outside contributor's branch lives on their own fork, which no ruleset here reaches, and what lands
+on `main` is the squash commit GitHub signs itself.
 
 **Squash-only is now load-bearing, and it is a repo setting nobody should tidy later.** `main`'s
 provenance never came from the branch: pull requests here are squash-merged, GitHub creates that
@@ -12964,8 +13107,11 @@ private vulnerability reporting, because anything with a form behind it produces
 SECURITY.md's whole argument is that a public issue starts the exposure clock before the fix exists.
 The same file's other two links route questions to Discussions and browser-side reports to
 `opendiving-web`. Private vulnerability reporting and Discussions are both repository switches
-thrown when this goes public, so both URLs 404 until then — written ahead of the flip on purpose,
+thrown when this goes public, so both URLs 404'd until then — written ahead of the flip on purpose,
 since the alternative is a security link that appears the day *after* the file describing it does.
+**Both resolve as of 2026-09-12**: the repositories went public and private vulnerability reporting
+was switched on in the same sitting, so nothing here is outstanding. Writing the links in advance is
+the reusable half — the alternative, links added later, is the one that gets forgotten.
 
 **The Discussions link points at `opendiving/opendiving`, not here, and there is one space for the
 whole project.** The product repository is the front door — it carries the install bundle and the
@@ -12974,9 +13120,10 @@ route there — so the one space belongs beside them. Hosting it here instead wa
 was planned that way for a while; it was rejected because a second space splits every thread by
 which half of the app the asker guessed at, and someone who has a question about a parser is not
 reliably the person who knows it is the API's parser. So the link above leaves this repository, and
-the switch behind it is thrown on the product repository rather than on this one — which does not
-change the paragraph above: it still 404s until that repository is public, for the same reason and
-written ahead of the same flip.
+the switch behind it is thrown on the product repository rather than on this one — which did not
+change the paragraph above: it 404'd until that repository was public, for the same reason and
+written ahead of the same flip. **`opendiving/opendiving` went public on 2026-09-12 with Discussions
+already on**, so this link resolves too.
 
 **The install link points at the chooser rather than at a blank issue.** A `contact_links` entry
 carries a whole URL, so `…/opendiving/issues/new` and `…/opendiving/issues/new/choose` are both
@@ -12990,8 +13137,8 @@ the start. Nothing warns about the difference, because both spellings open a wor
 the repository already, so the forms name only `bug` and `enhancement` — the stock set plus the
 conventional-commit type labels `pr-title.yml` manages is everything there is, and an area label
 invented in a form would simply be dropped on submission with nothing to notice it. Issues opened
-through the API skip templates altogether, so the `image-cve` issue the vulnerability scan files is
-unaffected by any of this.
+through the API skip templates altogether, so the `image-cve` issue the vulnerability scan used to
+file was unaffected by any of this — and since 2026-09-12 that workflow opens no issues at all.
 
 **Blank issues stay enabled.** Three forms are a guess about what people will report, and a report
 nobody anticipated is worth more than a well-formatted one.
