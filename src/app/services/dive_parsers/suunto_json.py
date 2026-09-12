@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
+from ...schemas.dive import DecoAlgorithm, DiveMode
 from ...schemas.dive_mixture import GasRole
 from ...schemas.dive_profile import (
     ParsedPressureSeries,
@@ -11,9 +12,17 @@ from ...schemas.dive_profile import (
     ParsedProfileSchema,
     ProfileEventType,
 )
-from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDevice, ParsedDiveSchema
+from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDecoModel, ParsedDevice, ParsedDiveSchema
 from .base import DiveParser
-from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, ceiling_cm, scaled_int_or_none, series
+from .channels import (
+    CENTIMETERS_PER_METER,
+    TENTHS_PER_UNIT,
+    UNSCALED,
+    ceiling_cm,
+    scaled_int_or_none,
+    series,
+    unsigned_int_or_none,
+)
 from .exceptions import EXTRACTION_ERRORS, DiveParseError
 from .positions import (
     NO_POSITIONS,
@@ -142,24 +151,91 @@ def _role(state: Any) -> GasRole | None:
 # never needs to fall back from, and fixed here because a chart marker has no such backup.
 _EVENT_KEYS = ("Events", "DiveEvents")
 
-# `Notify[].Type` onto the two stop types, matched case-insensitively. A normalization
-# table rather than a cast, for the same reason `_GAS_ROLE_BY_STATE` is one: this
-# vocabulary is Suunto's, and a value not listed here must come out as something other than
-# a stop rather than being forced into the nearest one.
+# `Notify[].Type` onto the vocabulary, matched case-insensitively. A normalization table
+# rather than a cast, for the same reason `_GAS_ROLE_BY_STATE` is one: this vocabulary is
+# Suunto's, and a value not listed here must come out as nothing rather than be forced into
+# the nearest one.
 #
-# Deliberately only the two the diver is being told to *do*. The corpus also carries
-# "Deep Stop Ahead", "Safety Stop Ahead" and "Stop done", which are the prompt before and
-# the confirmation after; marking all three would put three ticks on a chart for one stop.
+# **Four of the twelve, and two of them are not stops.** `Deep Stop` and `Safety Stop` are
+# the stops the diver is being told to make. `Deco` is the moment the dive became a
+# decompression dive and `Safety Stop Broken` is a required stop left early - both are
+# occurrences the vocabulary now has a value for, which is the whole of why they stopped
+# being dropped: "the format has no word for this" was the old reason and is no longer one.
+#
+# **None of the four carries a label**, unlike an `Alarm`/`Warning`: a `Notify`'s `Type` is
+# the device's name for its own *state*, so writing "Deco" as the wording of an occurrence
+# would put on the marker something the diver never read.
+#
+# The other eight stay dropped, each for a reason of its own rather than for want of a type.
+# "Deep Stop Ahead", "Safety Stop Ahead" and "Stop done" are the prompt before and the
+# confirmation after a stop this reader already marks, and carrying all three would put three
+# ticks on one stop. "Gas Switch" duplicates the `GasSwitch` event in the same sample.
+# "Deco Window", "NoFly Time", "Dive Time" and "Gas Available" are the computer narrating its
+# own state rather than something that happened on the dive - the reason everything under
+# `State` goes, applied to the four `Notify` values that are the same thing.
 _STOP_TYPE_BY_NOTIFY = {
     "deep stop": ProfileEventType.DEEP_STOP,
     "safety stop": ProfileEventType.SAFETY_STOP,
+    "deco": ProfileEventType.NDL_REACHED,
+    "safety stop broken": ProfileEventType.SAFETY_STOP_VIOLATION,
 }
 
-# Event families that become an `OTHER` carrying the device's own wording. These are the
-# ceiling breaks, ppO2 alarms and ascent-rate alarms - the events a tech diver most wants
-# marked, and the ones no closed vocabulary of ours should be paraphrasing. Rare enough to
-# render: 69 across the 35-dive corpus.
+# The event families that carry an alert - the ceiling breaks, ppO2 alarms and ascent-rate
+# alarms a tech diver most wants marked. Rare enough to render: 69 across the 35-dive corpus.
 _ALERT_NAMES = ("Alarm", "Warning")
+
+# `Alarm`/`Warning` `Type` onto the vocabulary, matched case-insensitively. **The wording is
+# what earns the type**: the vocabulary was seeded from this exact list, one value per
+# distinct meaning, so each alert this format names is classified rather than arriving as an
+# unlabelled tick - and the device's own wording travels beside it in `label`, because
+# "Ceiling Broken" is what the diver was shown and no type says it as well.
+#
+# Two spellings of one occurrence share a value on purpose ("Safety Stop Broken" and
+# "Mandatory Safety Stop Broken"; "Deep Stop Broken" and "Violated Deep Stop"): the type says
+# what class of thing happened and the label says which wording the device used.
+#
+# A `Type` outside this table stays `OTHER` with that wording - the vocabulary grows when a
+# file names something it has no value for, and nothing is forced into the nearest one in the
+# meantime.
+_ALERT_TYPES = {
+    "ascent speed": ProfileEventType.ASCENT_RATE,
+    "mandatory safety stop": ProfileEventType.SAFETY_STOP_MANDATORY,
+    "safety stop broken": ProfileEventType.SAFETY_STOP_VIOLATION,
+    "mandatory safety stop broken": ProfileEventType.SAFETY_STOP_VIOLATION,
+    "deep stop broken": ProfileEventType.DEEP_STOP_VIOLATION,
+    "violated deep stop": ProfileEventType.DEEP_STOP_VIOLATION,
+    "ceiling broken": ProfileEventType.CEILING_VIOLATION,
+    "nodecotime": ProfileEventType.NDL_REACHED,
+    "po2 high": ProfileEventType.PPO2_HIGH,
+    "tank pressure": ProfileEventType.PRESSURE_LOW,
+    "max.depth": ProfileEventType.DEPTH_ALARM,
+}
+
+# `Header.Diving.DiveMode` onto the recording's mode, matched case-insensitively. All three
+# values real files carry are gas modes of an **open-circuit** computer: `Air` and `Nitrox`
+# on eight D5 exports each, and `Mixed` on the one fixture that states it.
+#
+# **`Gauge` and `Free` are deliberately absent.** No file in hand carries either - the D5's
+# free and gauge modes write no `Header.Diving` this reader has seen - and a mapping no file
+# exercises is a mapping nothing checks. A value outside the table leaves `mode` absent,
+# which is what §6.4a requires: guessing at an unseen string is the one thing the member
+# forbids.
+_DIVE_MODES = {
+    "air": DiveMode.OPEN_CIRCUIT,
+    "nitrox": DiveMode.OPEN_CIRCUIT,
+    "mixed": DiveMode.OPEN_CIRCUIT,
+}
+
+# `Header.Diving.Algorithm` onto the model's family, matched case-insensitively. Two strings,
+# each sourced separately: `Suunto Fused2 RGBM` is what 16 real exports carry and
+# `Suunto Fused RGBM 2` is what the spec corpus's D5 fixture does. Both are RGBM.
+#
+# A string outside the table still fills `name` and leaves `algorithm` absent: a family is a
+# claim about the mathematics, not a guess off a product string.
+_ALGORITHMS = {
+    "suunto fused2 rgbm": DecoAlgorithm.RGBM,
+    "suunto fused rgbm 2": DecoAlgorithm.RGBM,
+}
 
 
 def _sample_events(sample: dict[str, Any], elapsed: float) -> list[ParsedProfileEvent]:
@@ -167,8 +243,9 @@ def _sample_events(sample: dict[str, Any], elapsed: float) -> list[ParsedProfile
 
     Three families are read and the rest are dropped, which is a decision about noise
     rather than about trust. `GasSwitch` is the dive's gas history. `Notify` is the device
-    prompting the diver, and two of its values are stops. `Alarm`/`Warning` are the things
-    that went wrong. **Everything under `State` is dropped**: it is the computer narrating
+    prompting the diver, and four of its twelve values name an occurrence the vocabulary has
+    a word for. `Alarm`/`Warning` are the things that went wrong, each classified by its own
+    wording. **Everything under `State` is dropped**: it is the computer narrating
     its own mode - "Below Surface", "Wet Outside", "Surface Calculation", "Dive Active",
     "Tank pressure available" - which is not an event on a dive, and five of them land on
     t=0 of every single dive in the corpus. The 2026 Ocean's `DiveState`, `DiveStatus`,
@@ -218,10 +295,18 @@ def _event(name: str, payload: Any, elapsed: float) -> ParsedProfileEvent | None
         stop = _STOP_TYPE_BY_NOTIFY.get(reported.strip().lower())
         return None if stop is None else ParsedProfileEvent(t=elapsed, type=stop, gas_number=None, label=None)
     if name in _ALERT_NAMES:
-        # The device's wording verbatim, which is the whole point of `OTHER` - "Ceiling
-        # Broken" says more than any type we could map it onto, and re-spelling it here
-        # would be this module inventing a vocabulary for someone else's alarms.
-        return ParsedProfileEvent(t=elapsed, type=ProfileEventType.OTHER, gas_number=None, label=reported.strip())
+        # The type this wording names, and the wording itself beside it. **Both**, not one or
+        # the other: the type is what a chart draws a glyph from and the label is what the
+        # diver was actually shown, and "Ceiling Broken" says something no type can. An
+        # alert this table has no value for stays `OTHER` with its wording, which is the
+        # same marker one class less specific rather than a marker lost.
+        label = reported.strip()
+        return ParsedProfileEvent(
+            t=elapsed,
+            type=_ALERT_TYPES.get(label.lower(), ProfileEventType.OTHER),
+            gas_number=None,
+            label=label,
+        )
     return None
 
 
@@ -285,6 +370,48 @@ def _device(device_log: dict[str, Any], header: dict[str, Any], diving: dict[str
         firmware=info.get("SW"),
         name=device.get("Name"),
         dive_number=diving.get("NumberInSeries"),
+    )
+
+
+def _mode(diving: dict[str, Any]) -> DiveMode | None:
+    """The mode this computer ran in, from `Header.Diving.DiveMode`.
+
+    **Only the D5 header shape states it.** The 2026 Ocean shape has no `Header.Diving` at
+    all, so an Ocean file yields the channels and no mode - which is correct rather than a
+    gap, and is why this takes the block rather than reaching for the key itself.
+    """
+    reported = diving.get("DiveMode")
+    return _DIVE_MODES.get(reported.strip().lower()) if isinstance(reported, str) else None
+
+
+def _deco_model(diving: dict[str, Any]) -> ParsedDecoModel:
+    """The model this computer ran, from `Header.Diving`.
+
+    **`Algorithm` fills two members and they are not derived from each other.** `name` takes
+    the string verbatim, because the member is the device's own name for its model and
+    vendors name and version theirs as they please; `algorithm` comes from a table of the two
+    strings files in hand carry, because a family is a claim about the mathematics. A string
+    outside the table therefore fills `name` and leaves `algorithm` absent rather than being
+    read for the word "RGBM" in it.
+
+    **`Conservatism` is the one reading in this parser with no floor.** §6.4c puts none on the
+    member, so a `0` is the P0 setting and a negative is Suunto's P-1 or P-2 - two of the
+    three values the owner's exports carry. Reading a negative here as an absent-marker, which
+    is the right answer for every channel above, would delete a real setting.
+
+    Returns an object rather than `None` for an empty header: `ParsedDiveSchema`'s
+    `_drop_empty_deco_model` is what turns five nulls back into no model, in one place, so a
+    fourth parser inherits it.
+
+    The tissue blocks beside these are deliberately unread: a compartment loading means
+    something only inside the algorithm that computed it, and §6.4c has no member for one.
+    """
+    reported = diving.get("Algorithm")
+    name = reported.strip() if isinstance(reported, str) else None
+    return ParsedDecoModel(
+        algorithm=_ALGORITHMS.get(name.lower()) if name else None,
+        name=name,
+        conservatism=diving.get("Conservatism"),
     )
 
 
@@ -580,20 +707,28 @@ def _mixtures_from_cylinders(samples: list[dict[str, Any]], dive_end: datetime |
 class SuuntoJsonParser(DiveParser):
     """Parses Suunto app / Suunto Ocean JSON dive-log exports (`DeviceLog.Header`).
 
-    Extracts the fields with a direct equivalent on the `Dive`/`DiveMixture`
-    backend models (`models/dive.py`, `models/dive_mixture.py`), plus -
-    separately, via `parse_profile` - the per-sample depth/ceiling/temperature/
-    tank-pressure curves and the sample stream's events, stored as
-    `DiveProfile`, and - from the same sample stream, out of both its satellite
-    fixes and its `DiveRouteOrigin` - the entry/exit positions described in
-    `positions.py`. The export has plenty of other
-    fields (per-compartment tissue loading, algorithm metadata, the rest of the
-    GPS track, battery telemetry) with nowhere to persist them, so they aren't
-    parsed at all - except `Header.Device`, which has no column behind it either
-    and is read all the same, as the `ParsedDevice` `_device` builds: two exports
-    of one dive can only be told apart by what recorded them. Gas mixtures come from
-    `DeviceLog.Header.Diving.Gases` (present in Suunto D5-style exports; absent
-    from "clean"/header-only exports, which don't have gas data at all).
+    Extracts the fields with a direct equivalent on the `Dive`/`DiveMixture` backend models
+    (`models/dive.py`, `models/dive_mixture.py`), the recording's own mode and deco model out
+    of `Header.Diving` (`_mode`, `_deco_model`), plus - separately, via `parse_profile` - the
+    per-sample curves and the sample stream's events stored as `DiveProfile`, and - from the
+    same sample stream, out of both its satellite fixes and its `DiveRouteOrigin` - the
+    entry/exit positions described in `positions.py`.
+
+    **Seven of the ten channels**: depth, deco ceiling, temperature and tank pressure, plus
+    the no-decompression clock, the time to surface and both gradient factors. The two this
+    format does not carry are `ppo2` and `cns` - no sample object holds a computed partial
+    pressure or a running CNS clock anywhere, and the dive-level `StartTissue.CNS` /
+    `EndTissue.CNS` that are read are two scalars rather than a curve.
+
+    What is still refused: the per-compartment tissue loading (a loading means something only
+    inside the algorithm that computed it), `gfLeadingTissue` (the compartment's *number*,
+    not a loading), `DeviceInternalAbsPressure` (the device's own ambient sensor, not a tank
+    pressure - see `_parse_samples`), the rest of the GPS track and the battery telemetry.
+    `Header.Device` has no column behind it either and is read all the same, as the
+    `ParsedDevice` `_device` builds: two exports of one dive can only be told apart by what
+    recorded them. Gas mixtures come from `DeviceLog.Header.Diving.Gases` (present in Suunto
+    D5-style exports; absent from "clean"/header-only exports, which don't have gas data at
+    all).
     """
 
     key = "suunto_json"
@@ -676,6 +811,10 @@ class SuuntoJsonParser(DiveParser):
         depth: list[tuple[float, int]] = []
         ceiling: list[tuple[float, int]] = []
         temperature: list[tuple[float, int]] = []
+        ndl: list[tuple[float, int]] = []
+        tts: list[tuple[float, int]] = []
+        gradient_factor: list[tuple[float, int]] = []
+        surface_gradient_factor: list[tuple[float, int]] = []
         # Insertion-ordered, so the cylinders come out in the order the device listed
         # them rather than sorted by a number that is only a label.
         pressure: dict[int, list[tuple[float, int]]] = {}
@@ -704,6 +843,54 @@ class SuuntoJsonParser(DiveParser):
             if temperature_c10 is not None:
                 temperature.append((elapsed, temperature_c10))
 
+            # Already whole seconds, which is the scale the channel is stored in. **A zero
+            # is a reading**: it is what a computer shows the moment a dive stops being a
+            # no-decompression dive, and a D5 export in hand writes it on five consecutive
+            # samples at 42.6 to 44.5 m with a time to surface of 256 to 268 s beside it.
+            # The `-1` this export writes on 1 031 samples across the 19 Ocean files - 916
+            # of them with a ceiling above zero, the device showing a stop depth in place of
+            # a clock it no longer has - is the absent-marker, and `unsigned_int_or_none`
+            # drops it. A `6000` is the Ocean's display cap and carried as the reading it is.
+            ndl_seconds = unsigned_int_or_none(sample.get("NoDecTime"), UNSCALED)
+            if ndl_seconds is not None:
+                ndl.append((elapsed, ndl_seconds))
+
+            # **A `TimeToSurface` of zero is this format's absent-marker**, which only the
+            # file could settle and which is why it is decided here rather than in the shared
+            # helper. The Ocean writes it on 199 of the 364 samples of one dive that carry
+            # the member, at every depth from 0 to 19 m - including two rows from a sample at
+            # 14.63 m that says `88`. A time to surface that is zero at 14 m and 88 s at 14 m
+            # seconds later is not a time; it is the space the device writes when it has no
+            # figure. The D5 shapes write exactly one per file, always on the first sample,
+            # where a real ascent from 1.24 m would take the 8 to 12 s the next sample states.
+            tts_seconds = unsigned_int_or_none(sample.get("TimeToSurface"), UNSCALED)
+            if tts_seconds is not None and tts_seconds > 0:
+                tts.append((elapsed, tts_seconds))
+
+            factors = sample.get("RtGradientFactors")
+            if isinstance(factors, dict):
+                # `-100` is the absent-marker, written on 5 531 of 7 194 samples - where no
+                # compartment leads - while `0` is a reading, a leading tissue at ambient, on
+                # 585. Nothing is capped above: `gf99` reaches four figures on a real
+                # decompression ascent, Suunto publishes no definition of the field, and
+                # nothing in the file accounts for the size, so the number goes in as written.
+                gf99 = unsigned_int_or_none(factors.get("gf99"), UNSCALED)
+                if gf99 is not None:
+                    gradient_factor.append((elapsed, gf99))
+
+                # **Two spellings of one field, and both are real.** The Ocean's 2.40.56
+                # firmware writes `gtSurface` on all 7 194 samples of the 19 files in hand
+                # and its 2.51.28 firmware writes `gfSurface`; the `gt` is a vendor typo
+                # fixed in an update. A reader that knew one would lose the channel on
+                # whichever half of the installed base wrote the other.
+                #
+                # `gfLeadingTissue` beside them is the compartment's *number* rather than a
+                # loading, and is not read.
+                surface = factors.get("gfSurface", factors.get("gtSurface"))
+                gf_surface = unsigned_int_or_none(surface, UNSCALED)
+                if gf_surface is not None:
+                    surface_gradient_factor.append((elapsed, gf_surface))
+
             # `Cylinders[].Pressure` is the transmitter. `DeviceInternalAbsPressure`,
             # which sits right next to it in the same sample object, is the *device's own
             # ambient pressure sensor* - roughly 96 400 Pa at the surface. It is
@@ -724,13 +911,21 @@ class SuuntoJsonParser(DiveParser):
                     continue
                 pressure.setdefault(gas_number, []).append((elapsed, cylinder_bar10))
 
-        if not depth and not temperature and not pressure and not ceiling:
+        if not any((depth, ceiling, temperature, ndl, tts, gradient_factor, surface_gradient_factor, pressure)):
             return None
 
         return ParsedProfileSchema(
             depth=series(depth),
             ceiling=series(ceiling),
             temperature=series(temperature),
+            ndl=series(ndl),
+            tts=series(tts),
+            # **No `ppo2` and no `cns` channel from this format**, which is the export's
+            # shape rather than a refusal: a sample object carries no computed partial
+            # pressure and no running CNS clock anywhere. The dive-level `StartTissue.CNS`
+            # and `EndTissue.CNS` are read, and they are two scalars rather than a curve.
+            gradient_factor=series(gradient_factor),
+            surface_gradient_factor=series(surface_gradient_factor),
             pressure=[
                 ParsedPressureSeries(gas_number=gas_number, t=channel.t, v=channel.v)
                 for gas_number, channel in ((number, series(points)) for number, points in pressure.items())
@@ -837,6 +1032,8 @@ class SuuntoJsonParser(DiveParser):
             # lifetime number. It is read, and it goes on the device below.
             dive_number=None,
             device=_device(data["DeviceLog"], header, diving),
+            mode=_mode(diving),
+            deco_model=_deco_model(diving),
             # D5-style exports report this as `Duration` rather than `DiveTime`.
             duration=_round_or_none(header.get("DiveTime", header.get("Duration"))),
             max_depth=depth.get("Max"),

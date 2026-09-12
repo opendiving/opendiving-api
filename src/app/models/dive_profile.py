@@ -7,7 +7,13 @@ from ..core.db.models import PublicUUIDMixin, TimestampMixin
 
 
 class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
-    """One recording's per-sample depth / temperature / tank-pressure curves.
+    """One recording's per-sample curves: what the sensors read, and what the computer
+    computed from them.
+
+    Ten channels. Four are measurements - depth, deco ceiling, temperature and per-cylinder
+    tank pressure - and six are the device's own decompression arithmetic: the no-deco clock,
+    the time to surface, the computed ppO2, the CNS clock and the two gradient factors.
+    `schemas/dive_profile.py` holds the scale each is stored in.
 
     Derived from the recording's stored exports (`DiveFile`) on every path but one: the
     samples are extracted server-side by `DiveParser.parse_profile` during
@@ -43,16 +49,26 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
         {"depth":       {"t": [0, 10, 20], "v": [139, 372, 632]},
          "ceiling":     {"t": [20],        "v": [300]},
          "temperature": {"t": [0, 1, 2],   "v": [219, 219, 218]},
+         "ndl":         {"t": [0, 10],     "v": [5940, 1260]},
+         "gradient_factor": {"t": [20],    "v": [64]},
          "pressure":    [{"gas_number": 1, "t": [0, 10], "v": [2052, 2041]}],
          "events":      [{"t": 0, "type": "gas_switch", "gas_number": 1}]}
 
     `t` is integer elapsed seconds from the first sample; `v` is integer-scaled (depth and
-    ceiling in cm, temperature in 0.1 C, pressure in 0.1 bar) so a float round-trip can't
-    reintroduce `20.600000000000023`-class noise several thousand times per dive. There
-    are no nulls inside a series - a sensor dropout is a gap in `t`, which the chart breaks
-    the polyline across, and on the ceiling channel a gap is a stretch of the dive with no
-    decompression obligation. See `services/dive_profiles.py` for the shape's full
+    ceiling in cm, temperature in 0.1 C, pressure in 0.1 bar, ndl and tts in seconds, ppO2
+    in 0.01 bar, CNS in 0.1 %, both gradient factors in whole percent) so a float round-trip
+    can't reintroduce `20.600000000000023`-class noise several thousand times per dive.
+    There are no nulls inside a series - a sensor dropout is a gap in `t`, which the chart
+    breaks the polyline across, and on the ceiling channel a gap is a stretch of the dive
+    with no decompression obligation. See `services/dive_profiles.py` for the shape's full
     rationale.
+
+    **The decompression channels are the device's own arithmetic and nothing here derives
+    one.** They depend on the model the computer ran, on its settings and on the diver's
+    exposure history, none of which a logged dive carries - the same argument that keeps
+    `ceiling` a stored reading rather than something the chart computes. The model itself is
+    on the recording (`dive_recording.deco_*`), because it is one setting for the whole dive
+    rather than a sample of one.
 
     Mirrors `DiveFile` deliberately: a `deferred` payload and no `SoftDeleteMixin` (a
     soft-deleted blob occupies its bytes forever with nothing able to read it). No
@@ -139,6 +155,29 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     max_temperature_c10: Mapped[int | None] = mapped_column(Integer, default=None)
     min_pressure_bar10: Mapped[int | None] = mapped_column(Integer, default=None)
     max_pressure_bar10: Mapped[int | None] = mapped_column(Integer, default=None)
+
+    # One summary extreme per decompression channel, on the terms the six columns above
+    # follow: NULL is "this profile has no such channel", which is what `channels` on the
+    # read schema derives its list from, and a stored `0` is a reading.
+    #
+    # **Which extreme is decided per quantity rather than uniformly**, exactly as
+    # min/max temperature and min/max pressure are. `min_ndl_s` is the one a diver reads -
+    # how close the dive came to its no-decompression limit - where the *maximum* NDL is
+    # the device's display cap on almost every recreational dive and says nothing; `0` is
+    # the real reading a decompression dive records and is why NULL has to mean absence
+    # rather than zero. The other five take their maximum, which is the figure that
+    # matters for each: the longest ascent owed, the highest oxygen partial pressure, the
+    # end-of-dive oxygen clock, and how close the leading tissue came to its M-value on
+    # the way up and on a direct ascent.
+    #
+    # Unit-suffixed like their neighbours so the scale is readable off the column name:
+    # `_s` is seconds, `_bar100` is 0.01 bar, `_pct10` is 0.1 %, `_pct` is whole percent.
+    min_ndl_s: Mapped[int | None] = mapped_column(Integer, default=None)
+    max_tts_s: Mapped[int | None] = mapped_column(Integer, default=None)
+    max_ppo2_bar100: Mapped[int | None] = mapped_column(Integer, default=None)
+    max_cns_pct10: Mapped[int | None] = mapped_column(Integer, default=None)
+    max_gradient_factor_pct: Mapped[int | None] = mapped_column(Integer, default=None)
+    max_surface_gradient_factor_pct: Mapped[int | None] = mapped_column(Integer, default=None)
     # Not an extreme like the columns above, and it is here for the reason they are: to
     # answer "is there anything to draw" for the dive detail response without decoding the
     # payload. Events have no extremes to be derived from, so this is a plain count - `0`

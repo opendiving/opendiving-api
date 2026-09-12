@@ -41,22 +41,106 @@ PRESSURE_SCALE = 10  # tenths of a bar
 # bounds. Named all the same, so a reader of the payload doesn't have to know that.
 CEILING_SCALE = DEPTH_SCALE
 
+# The six channels a computer's own decompression arithmetic produces, each in the scale
+# the format fixes (spec §5.1, §6.4). A scale of 1 is still declared rather than left
+# implicit: `channel / SCALE` is what every consumer writes, and a channel with no constant
+# beside its siblings is the one a reader assumes must be scaled like them.
+NDL_SCALE = 1  # seconds
+TTS_SCALE = 1  # seconds
+# Hundredths of a bar rather than tenths, which cannot tell 1.30 from 1.32 - and Shearwater
+# exports a computed ppO2 to two decimals. A third pressure scale in this module, and the
+# only one of the three that is not a tank pressure.
+PPO2_SCALE = 100
+# Tenths of a percent, because the two Suunto exports of one dive disagree about the
+# resolution: the JSON records `0.069` where the XML rounds to `7`, and the finer reading
+# is the one worth keeping. Not the same quantity as `dive.cns_start`/`cns_end`, which are
+# the device's own dive-level figures in whole percent and are neither derived from this
+# channel nor a source for it.
+CNS_SCALE = 10
+# Whole percent, and **the unit rather than a range**: a gradient factor is uncapped above.
+# A Suunto Ocean's `gf99` reaches 12 575 on a decompression ascent while the surface
+# gradient factor beside it declines smoothly through the same stops, Suunto publishes no
+# definition of the field, and nothing in the file accounts for the size - so the number is
+# stored as the device wrote it. Clamping it would be a guess wearing a plausible number.
+GRADIENT_FACTOR_SCALE = 1
+SURFACE_GRADIENT_FACTOR_SCALE = GRADIENT_FACTOR_SCALE
+
+# Every channel that is a single series, in the order §6.4 lists its members - which is
+# also the order `DiveProfileRead` declares them and therefore the order they are written
+# in an exported document. `pressures` is a list rather than a series and sits between
+# `temperature` and `ndl`; it is absent here because nothing that walks this tuple can
+# treat it like the rest.
+#
+# One tuple because a dozen functions in `services/dive_profiles.py` have to touch every
+# channel, and spelling nine names out a dozen times is how the tenth comes to be missing
+# from one of them. The order is load-bearing for the export: a writer emitting channels in
+# whatever order it happened to build them produces a profile that reads down nothing.
+SINGLE_SERIES_CHANNELS: tuple[str, ...] = (
+    "depth",
+    "ceiling",
+    "temperature",
+    "ndl",
+    "tts",
+    "ppo2",
+    "cns",
+    "gradient_factor",
+    "surface_gradient_factor",
+)
+
+# The same order with `pressure` restored to its §6.4 place, which is what `channels` on the
+# read schema is sorted by. A separate tuple rather than a computed insertion, so the order a
+# client stacks its curves in is one readable list rather than an index arithmetic nobody
+# checks. `pressure` is singular here because that is what the *list* is called in
+# `channels` - the wire member beside it is `pressures`.
+PROFILE_CHANNEL_ORDER: tuple[str, ...] = (
+    "depth",
+    "ceiling",
+    "temperature",
+    "pressure",
+    "ndl",
+    "tts",
+    "ppo2",
+    "cns",
+    "gradient_factor",
+    "surface_gradient_factor",
+)
+
 
 class ProfileEventType(StrEnum):
     """What a marker on the profile chart says happened.
 
     A closed vocabulary, like `GasRole`, and for the same reason: three formats spell the
     same occurrence three ways, and a chart that has to render a marker needs to know what
-    it is drawing. Anything a device records that isn't one of the first four becomes
+    it is drawing. Anything a device records that this vocabulary has no value for becomes
     `OTHER` **carrying the device's own wording in `label`** rather than being forced into
     a neighbouring type - see the normalization tables in the parsers, and `_validate_events`
     below, which is what stops an `OTHER` from being an unlabelled tick that says nothing.
+
+    **Thirteen of these fourteen values are the format's, and `OTHER` is not one of them.**
+    DiveJSON §6.6 makes `type` OPTIONAL and spells "unclassified" as an *absent* type beside
+    a required `label`; this enum keeps `OTHER` as the internal spelling of that same fact,
+    because a column and a JSONB key both want a value rather than a hole. The boundary is
+    where the two meet: the export writes no `type` for an `OTHER`, and the import reads an
+    absent or unrecognized `type` back as one. Nothing else in the app needs to know.
     """
 
     GAS_SWITCH = "gas_switch"
     DEEP_STOP = "deep_stop"
     SAFETY_STOP = "safety_stop"
     BOOKMARK = "bookmark"
+    # The alarm classes, seeded from the wording real computers use (§6.6). One value per
+    # distinct meaning rather than one per vendor string - "Safety Stop Broken" and
+    # "Mandatory Safety Stop Broken" are one occurrence with two spellings, and the spelling
+    # travels in `label`.
+    ASCENT_RATE = "ascent_rate"
+    SAFETY_STOP_MANDATORY = "safety_stop_mandatory"
+    SAFETY_STOP_VIOLATION = "safety_stop_violation"
+    DEEP_STOP_VIOLATION = "deep_stop_violation"
+    CEILING_VIOLATION = "ceiling_violation"
+    NDL_REACHED = "ndl_reached"
+    PPO2_HIGH = "ppo2_high"
+    PRESSURE_LOW = "pressure_low"
+    DEPTH_ALARM = "depth_alarm"
     OTHER = "other"
 
 
@@ -179,17 +263,27 @@ class ParsedProfileSchema(BaseModel):
     depth: ParsedSeries | None = None
     ceiling: ParsedSeries | None = None
     temperature: ParsedSeries | None = None
+    # The device's own decompression arithmetic, in the scales above. A parser emits one
+    # only where its format records it and its mapping document maps it - see each parser's
+    # class docstring for what it still refuses and why.
+    ndl: ParsedSeries | None = None
+    tts: ParsedSeries | None = None
+    ppo2: ParsedSeries | None = None
+    cns: ParsedSeries | None = None
+    gradient_factor: ParsedSeries | None = None
+    surface_gradient_factor: ParsedSeries | None = None
     pressure: list[ParsedPressureSeries] = Field(default_factory=list)
     events: list[ParsedProfileEvent] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_series(self) -> Self:
-        if self.depth is not None:
-            _validate_series(self.depth.t, self.depth.v, "depth")
-        if self.ceiling is not None:
-            _validate_series(self.ceiling.t, self.ceiling.v, "ceiling")
-        if self.temperature is not None:
-            _validate_series(self.temperature.t, self.temperature.v, "temperature")
+        # Driven by the channel tuple rather than named one by one, so a channel added to
+        # this schema cannot ship unvalidated: the two lists would have to be edited
+        # separately, and only one of them fails a test when it isn't.
+        for channel in SINGLE_SERIES_CHANNELS:
+            series: ParsedSeries | None = getattr(self, channel)
+            if series is not None:
+                _validate_series(series.t, series.v, channel)
         for cylinder in self.pressure:
             _validate_series(cylinder.t, cylinder.v, f"pressure[gas {cylinder.gas_number}]")
         _validate_events(self.events)
@@ -245,10 +339,32 @@ class DiveProfilePressureSeries(DiveProfileSeries):
 
 
 class DiveProfileEvent(BaseModel):
-    """One marker on the profile chart, at an integer second like every series' `times`."""
+    """One marker on the profile chart, at an integer second like every series' `times`.
+
+    **`type` is nullable here and `OTHER` never reaches the wire**, which is the one place
+    the stored vocabulary and the published one differ. DiveJSON §6.6 spells "the device
+    recorded something and nothing in the vocabulary says what" as an *absent* `type` beside
+    a `label` that is then REQUIRED; storage spells the same fact `OTHER`, because a JSONB
+    key and an enum both want a value rather than a hole. `to_read_schema` is the boundary
+    and it maps one onto the other, so this class is the format's shape exactly - which it
+    has to be, since `ExportRecording.profile` is this very schema and the document's
+    `profile` object is `additionalProperties: false`.
+
+    A client therefore sees `type: null` with a `label` where it used to see
+    `type: "other"`, and the two say the same thing. The export drops the null entirely
+    (`exclude_none`), which is what §5.4 requires of a writer.
+    """
 
     time: Annotated[int, Field(description="Elapsed seconds from the start of the dive")]
-    type: Annotated[ProfileEventType, Field(description="What happened", examples=[ProfileEventType.GAS_SWITCH])]
+    type: Annotated[
+        ProfileEventType | None,
+        Field(
+            default=None,
+            description="What happened. **Null means unclassified** - the device recorded something here and this "
+            "vocabulary has no word for it - and `label` then carries the device's own wording.",
+            examples=[ProfileEventType.GAS_SWITCH],
+        ),
+    ]
     gas_number: Annotated[
         int | None,
         Field(
@@ -262,8 +378,9 @@ class DiveProfileEvent(BaseModel):
         Field(
             default=None,
             examples=["Ceiling Broken"],
-            description="The device's own wording for this event. Always set on an `other`, which is what makes that "
-            "type worth rendering; absent on the types that speak for themselves.",
+            description="The device's own wording for this event. Always set where `type` is null, which is what "
+            "makes an unclassified marker worth rendering; set beside a type wherever the device had wording of its "
+            "own, and absent on the types that speak for themselves.",
         ),
     ]
 
@@ -313,6 +430,63 @@ class DiveProfileRead(BaseModel):
         Field(
             default_factory=list,
             description=f"Tank pressure per cylinder, in tenths of a bar (scale {PRESSURE_SCALE})",
+        ),
+    ]
+    # **Declared in §6.4's order, not in the order anything happens to build them**, which
+    # is why `pressures` sits above rather than at the end: this class is what the exported
+    # document's `profile` object is serialized from, and a profile whose members arrive in
+    # build order reads down nothing. The order here is the format's.
+    #
+    # Each is the device's *own* arithmetic and nothing else can produce it - it depends on
+    # the model the device ran, its settings and the diver's exposure history, none of which
+    # a logged dive carries. Nothing in this app derives one from depth and a gas fraction.
+    ndl: Annotated[
+        DiveProfileSeries | None,
+        Field(
+            default=None,
+            description=f"Remaining no-decompression time in seconds (scale {NDL_SCALE}). A zero is a reading - the "
+            "moment the dive stopped being a no-decompression dive - and a value at the device's display maximum is "
+            "a reading too.",
+        ),
+    ]
+    tts: Annotated[
+        DiveProfileSeries | None,
+        Field(
+            default=None,
+            description=f"Time to surface in seconds (scale {TTS_SCALE}), stops included, as the device computed it",
+        ),
+    ]
+    ppo2: Annotated[
+        DiveProfileSeries | None,
+        Field(
+            default=None,
+            description=f"The partial pressure of oxygen the device computed, in hundredths of a bar "
+            f"(scale {PPO2_SCALE}). What it calculated from the gas it believed it was breathing, not a cell reading.",
+        ),
+    ]
+    cns: Annotated[
+        DiveProfileSeries | None,
+        Field(
+            default=None,
+            description=f"The CNS oxygen clock during the dive, in tenths of a percent (scale {CNS_SCALE}). "
+            "Unbounded above - real computers report past 100 %.",
+        ),
+    ]
+    gradient_factor: Annotated[
+        DiveProfileSeries | None,
+        Field(
+            default=None,
+            description=f"The leading tissue's gradient factor, in whole percent (scale {GRADIENT_FACTOR_SCALE}) - a "
+            "device's GF99. Unbounded above: a value over 100 is a compartment past its M-value, and real exports "
+            "carry far larger ones.",
+        ),
+    ]
+    surface_gradient_factor: Annotated[
+        DiveProfileSeries | None,
+        Field(
+            default=None,
+            description="The gradient factor the leading tissue would have on surfacing directly from here, in whole "
+            f"percent (scale {SURFACE_GRADIENT_FACTOR_SCALE}). Unbounded above for the same reason.",
         ),
     ]
     events: Annotated[
@@ -367,12 +541,14 @@ class DiveProfileInfo(BaseModel):
     channels: Annotated[
         list[str],
         Field(
-            description="Which curves this profile carries: any of `depth`, `ceiling`, `temperature`, `pressure`",
-            examples=[["depth", "ceiling", "temperature", "pressure"]],
+            description="Which curves this profile carries, in the order a chart stacks them: any of `depth`, "
+            "`ceiling`, `temperature`, `pressure`, `ndl`, `tts`, `ppo2`, `cns`, `gradient_factor`, "
+            "`surface_gradient_factor`",
+            examples=[["depth", "ceiling", "temperature", "pressure", "ndl", "gradient_factor"]],
         ),
     ]
     # Events have no extremes to derive presence from the way a channel does, so this is
-    # the count rather than a sixth entry in `channels` - and it is a count because "3
+    # the count rather than an entry in `channels` - and it is a count because "3
     # markers" is worth showing next to the chart's toggle where a bare boolean isn't.
     # Null on a profile extracted before events were recorded at all, which is what a
     # backfill run clears.

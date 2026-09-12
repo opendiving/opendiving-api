@@ -56,13 +56,14 @@ from ...models.gear_set import GearSet
 from ...models.species import Species
 from ...models.trip import Trip
 from ...schemas.certification import AGENCY_OTHER_NOT_ALLOWED_MESSAGE, CertificationAgency, CertificationSide
-from ...schemas.dive_profile import DEPTH_SCALE, ProfileEventType
+from ...schemas.dive_profile import DEPTH_SCALE, SINGLE_SERIES_CHANNELS, ProfileEventType
 from ...schemas.export import DIVEJSON_PRODUCER_KEY
 from ...schemas.gear_item import GearType
 from ...schemas.logbook_import import (
     ImportCertification,
     ImportCollectionReport,
     ImportCourse,
+    ImportDecoModel,
     ImportDive,
     ImportDiveSite,
     ImportFileReport,
@@ -89,8 +90,10 @@ from ..dive_profiles import (
     ProfileSeries,
     derive_gas_attribution,
     downsample,
+    with_channels,
 )
 from ..dive_recordings import (
+    DECO_MODEL_COLUMNS,
     DEVICE_COLUMNS,
     DeviceIdentity,
     RecordingCandidate,
@@ -249,6 +252,12 @@ class PlannedRecording:
 
     ordinal: int
     device: dict[str, Any] = field(default_factory=dict)
+    # The recording's own settings, keyed by **column** name like `device` above and for the
+    # same reason: the writer spreads them into the row and never has to know that the format
+    # says `gf_low` and the column says `deco_gf_low`. `mode` is its own column rather than a
+    # key in the dict because it is not part of the model.
+    mode: str | None = None
+    deco_model: dict[str, Any] = field(default_factory=dict)
     start_time: datetime | None = None
     utc_offset_minutes: int | None = None
     duration: int | None = None
@@ -441,6 +450,31 @@ _MIXTURE_BOUNDS: tuple[_Bound, ...] = (
         "gas_number",
         lambda value: 0 <= value <= _INT32_MAX,
         f"a gas number must be between 0 and {_INT32_MAX}",
+    ),
+)
+
+# The deco model's three integers, same rules, from `models/dive_recording.py`. The gradient
+# factors are 0-100 because the member is a whole percent of the M-value and no computer
+# offers a setting above it - deliberately *not* the per-sample `gradient_factor` channel,
+# which is uncapped above because a GF99 past 100 is a real reading.
+#
+# **`conservatism` is bounded only by the column's width**, which makes it the one entry on
+# any of these three lists with no floor: it is the device's own scale, and Suunto's P-1 is a
+# genuine `-1`. Reading a negative as an absent-marker here, which is right for every channel,
+# would delete a real setting.
+# The channels §6.4 floors at zero - every one the computer computed rather than measured.
+# Depth, ceiling and temperature are absent because a signed reading is real in all three: a
+# temperature below zero is ordinary, and a depth of zero at the surface is what a Suunto
+# Ocean records.
+_UNSIGNED_CHANNELS = frozenset(SINGLE_SERIES_CHANNELS) - {"depth", "ceiling", "temperature"}
+
+_DECO_MODEL_BOUNDS: tuple[_Bound, ...] = (
+    _Bound("gf_low", lambda value: 0 <= value <= 100, "a gradient factor must be between 0 and 100 percent"),
+    _Bound("gf_high", lambda value: 0 <= value <= 100, "a gradient factor must be between 0 and 100 percent"),
+    _Bound(
+        "conservatism",
+        lambda value: -_INT32_MAX <= value <= _INT32_MAX,
+        "a conservatism setting must be a whole number this app can store",
     ),
 )
 
@@ -1781,9 +1815,15 @@ class _Planner:
         """
         if source is None:
             return None
-        depth = self._series("dives", dive_uuid, source.depth, "depth")
-        ceiling = self._series("dives", dive_uuid, source.ceiling, "ceiling")
-        temperature = self._series("dives", dive_uuid, source.temperature, "temperature")
+        # Every single-series channel through the same check, driven by the channel tuple:
+        # a document's `ndl` is re-validated under §6.5's rules exactly as its `depth` is,
+        # and a channel added to the format cannot ship here unchecked.
+        channels = {
+            channel: self._series(
+                "dives", dive_uuid, getattr(source, channel), channel, unsigned=channel in _UNSIGNED_CHANNELS
+            )
+            for channel in SINGLE_SERIES_CHANNELS
+        }
         pressures: list[ProfilePressureSeries] = []
         for series in source.pressures:
             if series.gas_number is None or series.gas_number < 0:
@@ -1793,15 +1833,13 @@ class _Planner:
             if checked is not None:
                 pressures.append(ProfilePressureSeries(t=checked.t, v=checked.v, gas_number=series.gas_number))
 
-        if depth is None and ceiling is None and temperature is None and not pressures:
-            if any((source.depth, source.ceiling, source.temperature, source.pressures)):
+        if not any(channels.values()) and not pressures:
+            if any(getattr(source, channel) for channel in SINGLE_SERIES_CHANNELS) or source.pressures:
                 self._dropped("dives", dive_uuid, "A recording's profile carried no usable channel, and was dropped")
             return None
 
-        profile = NormalizedProfile(
-            depth=depth,
-            ceiling=ceiling,
-            temperature=temperature,
+        profile = with_channels(
+            channels,
             pressure=pressures,
             events=self._events(dive_uuid, source),
         )
@@ -1819,8 +1857,21 @@ class _Planner:
             declared = 0
         return PlannedProfile(profile=capped, duration=max(declared, capped.duration))
 
-    def _series(self, collection: str, record_uuid: uuid_pkg.UUID, series: Any, label: str) -> ProfileSeries | None:
-        """One channel, or `None` with a note. Spec §6.5's rules, exactly."""
+    def _series(
+        self, collection: str, record_uuid: uuid_pkg.UUID, series: Any, label: str, *, unsigned: bool = False
+    ) -> ProfileSeries | None:
+        """One channel, or `None` with a note. Spec §6.5's rules, exactly.
+
+        `unsigned` is §6.4's floor on the six decompression channels: none of them is a
+        quantity that runs below zero, and a negative in one is what several devices write to
+        mean "no figure". Depth, ceiling and temperature keep the signed reading - a
+        temperature below zero is ordinary, and so is a depth of zero at the surface - which
+        is why this is a parameter rather than a rule applied to every channel.
+
+        The whole channel goes rather than the offending sample, which is `_series`' rule
+        throughout: there is no half of a series to keep, and a document whose `values` and
+        `times` no longer line up is worse than one channel short.
+        """
         if series is None:
             return None
         times, values = series.times, series.values
@@ -1847,29 +1898,41 @@ class _Planner:
                 collection, record_uuid, f"The {label} channel carried readings this app cannot store, and was dropped"
             )
             return None
+        if unsigned and any(value < 0 for value in values):
+            self._dropped(collection, record_uuid, f"The {label} channel carried a negative reading, and was dropped")
+            return None
         return ProfileSeries(t=list(times), v=list(values))
 
     def _events(self, record_uuid: uuid_pkg.UUID, source: ImportProfile) -> list[ProfileEvent]:
         """The markers, sorted, deduped and capped - `_rebase_events` minus the rebasing.
 
         Sorted here because `derive_gas_attribution` walks them in time order and nothing
-        upstream guarantees it. An `other` with no label is dropped rather than kept: the
-        format makes the label REQUIRED there (spec §6.6) precisely because an unclassified
-        marker with no wording carries no information at all.
+        upstream guarantees it.
+
+        **An absent or unrecognized `type` reads as `OTHER`**, which is the boundary this
+        app's storage keeps with the format: §6.6 makes `type` OPTIONAL and spells
+        "unclassified" as its absence, while a JSONB key and an enum both want a value, so
+        `OTHER` is what that absence is stored as. `_unknown_is_absent` has already turned a
+        value from a later minor version into `None` before it reaches here, and this reads
+        that `None` as the unclassified marker it is rather than dropping a real event over a
+        vocabulary this build predates.
+
+        Which makes the `label` REQUIRED there, and that is §6.6's rule rather than this
+        app's: an event that is neither classified nor labelled carries no information at
+        all, so it is dropped with a note.
         """
         usable: list[tuple[int, ProfileEventType, int | None, str | None]] = []
         for event in source.events:
-            if event.time is None or event.type is None:
-                # `time` and `type` are both REQUIRED (spec §6.6), and an unknown `type` has
-                # already read as absent under §5.6 - either way there is no marker left to
-                # draw.
-                self._dropped("dives", record_uuid, "A profile event with no time or no recognized type was dropped")
+            if event.time is None:
+                # `time` is REQUIRED (spec §6.6); without it there is no marker to place.
+                self._dropped("dives", record_uuid, "A profile event with no time was dropped")
                 continue
             label = event.label[:MAX_LABEL_CHARS] if event.label is not None else None
-            if event.type is ProfileEventType.OTHER and not (label or "").strip():
-                self._dropped("dives", record_uuid, "An unlabelled `other` event was dropped")
+            kind = event.type if event.type is not None else ProfileEventType.OTHER
+            if kind is ProfileEventType.OTHER and not (label or "").strip():
+                self._dropped("dives", record_uuid, "An unclassified event with no label was dropped")
                 continue
-            usable.append((max(0, event.time), event.type, event.gas_number, label))
+            usable.append((max(0, event.time), kind, event.gas_number, label))
 
         seen: set[tuple[int, ProfileEventType, int | None, str | None]] = set()
         ordered: list[ProfileEvent] = []
@@ -1929,6 +1992,8 @@ class _Planner:
                 PlannedRecording(
                     ordinal=len(planned),
                     device=device,
+                    mode=None if source.mode is None else source.mode.value,
+                    deco_model=self._plan_deco_model(dive.uuid, source.deco_model),
                     start_time=start_time,
                     utc_offset_minutes=offset_minutes,
                     # **Derived from the samples**, which is the only place a document offers
@@ -1944,6 +2009,51 @@ class _Planner:
                 )
             )
         return planned
+
+    def _plan_deco_model(self, dive_uuid: uuid_pkg.UUID, source: ImportDecoModel | None) -> dict[str, Any]:
+        """One recording's deco model, as the columns that carry it - keyed by column name.
+
+        **The gradient-factor pair is enforced here and not left to the `CheckConstraint`**,
+        which is the difference between one bad reading and a lost logbook: a document whose
+        pair is inverted would otherwise reach the database, and an `IntegrityError` inside
+        the import transaction takes every dive in the archive with it. `_plan_cylinders`
+        makes exactly this move for an oxygen and a helium summing past 100 - neither number
+        says which of the two is wrong, so both go and the record stays.
+
+        Both-or-neither goes the same way and for §6.4c's own reason: one gradient factor
+        alone names no setting. A document carrying one half therefore contributes neither,
+        with a note, rather than half a setting.
+
+        An empty dict where the document recorded no model, which is what the writer needs:
+        every value is a column it may write, and a member the document did not carry is a
+        column it must leave alone.
+        """
+        if source is None:
+            return {}
+
+        bounded = self._bounded("dives", dive_uuid, source, _DECO_MODEL_BOUNDS)
+        gf_low, gf_high = bounded.get("gf_low"), bounded.get("gf_high")
+        if (gf_low is None) != (gf_high is None):
+            self._dropped(
+                "dives", dive_uuid, "A recording's deco model named one gradient factor without the other, so it went"
+            )
+            gf_low = gf_high = None
+        elif gf_low is not None and gf_high is not None and gf_low > gf_high:
+            self._dropped("dives", dive_uuid, "A recording's low gradient factor was above its high one, so both went")
+            gf_low = gf_high = None
+
+        members: dict[str, Any] = {
+            "algorithm": None if source.algorithm is None else source.algorithm.value,
+            # Not `self._text`, which answers `""` - that is right for a `NOT NULL` notes
+            # column whose own spelling of "the diver wrote nothing" is the empty string, and
+            # wrong for a nullable one, where `""` would be a model named nothing rather than
+            # no model recorded.
+            "name": (source.name or "").strip() or None,
+            "gf_low": gf_low,
+            "gf_high": gf_high,
+            "conservatism": bounded.get("conservatism"),
+        }
+        return {DECO_MODEL_COLUMNS[member]: value for member, value in members.items() if value is not None}
 
     # ------------------------------------------------------------------ files
 

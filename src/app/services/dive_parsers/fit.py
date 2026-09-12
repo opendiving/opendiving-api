@@ -23,7 +23,7 @@ from typing import Any
 import fitdecode
 from fitdecode.types import DevField, FieldData
 
-from ...schemas.dive import WaterType
+from ...schemas.dive import DecoAlgorithm, WaterType
 from ...schemas.dive_mixture import GasRole
 from ...schemas.dive_profile import (
     ParsedPressureSeries,
@@ -31,7 +31,7 @@ from ...schemas.dive_profile import (
     ParsedProfileSchema,
     ProfileEventType,
 )
-from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDevice, ParsedDiveSchema
+from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDecoModel, ParsedDevice, ParsedDiveSchema
 from .base import DiveParser
 from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, ceiling_cm, scaled_int, series
 from .exceptions import EXTRACTION_ERRORS, DiveParseError
@@ -101,7 +101,12 @@ _MESSAGE_INDEX_MASK = 0x0FFF
 # `dive_alert` is mapped to `OTHER` rather than being decoded further because its `data`
 # subfield is a 40-member enum (`deco_ceiling_broken`, `po2_crit_high`, `cns_warning`, ...)
 # that the profile spells out in words. Passing those words through as the label is the
-# same choice the JSON parser makes with `Alarm`/`Warning`, and for the same reason.
+# choice the JSON parser used to make with `Alarm`/`Warning` - **and no longer does**: that
+# parser now classifies each alert by its wording, because the corpus said what each of its
+# labels means. This enum's 40 members have no such reading behind them, so an alert here
+# stays unclassified with its wording, which is what `OTHER` spells in storage and what an
+# absent `type` spells on the wire. It is the same marker one class less specific, not a
+# marker lost.
 _EVENT_TYPE_BY_NAME = {
     "dive_gas_switched": ProfileEventType.GAS_SWITCH,
     "user_marker": ProfileEventType.BOOKMARK,
@@ -118,6 +123,12 @@ _WATER_TYPE_BY_NAME = {
     "salt": WaterType.SALT,
     "en13319": WaterType.EN13319,
 }
+
+# The one member `tissue_model_type` has in the FIT profile, and the only value
+# `dive_settings.model` can decode to. Named rather than compared inline so that the
+# refusal `_deco_model` documents - a family is read only where the file *states* one - is
+# legible as a comparison against a real value rather than as a magic string.
+_BUHLMANN_TISSUE_MODEL = "zhl_16c"
 
 # How many cylinders one dive may describe, **in total**. No device pairs more than a
 # handful of transmitters - a Descent Mk3i tops out around five - so a file claiming
@@ -351,12 +362,21 @@ class FitParser(DiveParser):
     """Parses ANT/Garmin FIT dive activity files (Garmin Descent, Suunto native export).
 
     Extracts the fields with a direct equivalent on the `Dive`/`DiveMixture` backend
-    models (`models/dive.py`, `models/dive_mixture.py`), plus - separately, via
-    `parse_profile` - the per-sample depth/ceiling/temperature/tank-pressure curves and
-    the file's dive events, stored as `DiveProfile`. The `record` stream's satellite fixes
-    are reduced to the dive's entry and exit positions; see `positions.py`. FIT activity
-    files carry a great deal more (the rest of the GPS track, ascent rates, heart rate,
-    battery telemetry) with nowhere to persist it, so none of that is parsed.
+    models (`models/dive.py`, `models/dive_mixture.py`), the deco model out of
+    `dive_settings` (`_deco_model`), plus - separately, via `parse_profile` - the per-sample
+    depth, deco ceiling, temperature and tank-pressure curves and the file's dive events,
+    stored as `DiveProfile`. The `record` stream's satellite fixes are reduced to the dive's
+    entry and exit positions; see `positions.py`. FIT activity files carry a great deal more
+    (the rest of the GPS track, ascent rates, heart rate, battery telemetry) with nowhere to
+    persist it, so none of that is parsed.
+
+    **Four of the six decompression channels have a `record` field here and none is read**,
+    and that is a refusal with a date on it rather than a gap in the format: `ndl_time`,
+    `time_to_surface`, `cns_load` and `po2` are empty on every `record` of all three FIT
+    recordings in hand, and a mapping written against the profile listing rather than against
+    a file is speculation. `_collect_record` says so beside the ceiling field they neighbour.
+    The recording's mode has the same shape - `session.sub_sport` would carry it and no file
+    writes one - so a FIT freedive imports as a dive that does not say what kind it is.
 
     The one exception to "a direct equivalent on the models" is the `ParsedDevice` built
     by `_device`, which has no column behind it: it is reported so that a caller holding
@@ -590,6 +610,17 @@ class FitParser(DiveParser):
         # measure durations rather than a depth. Unattested in this corpus - no file in it
         # writes the field at all - which is the same position `tank_update` was in when it
         # was implemented, and it is tested the same way, through `tests/helpers/fit.py`.
+        #
+        # **Two of those three neighbours now have a channel and are still not read**, which
+        # is a different refusal from the one this comment used to make. `ndl_time` (96) and
+        # `time_to_surface` (95) are the `ndl` and `tts` channels, and `cns_load` (97) and
+        # `po2` (129) are `cns` and `ppo2` - four fields with somewhere to go. Every `record`
+        # in all three FIT recordings in hand carries all four empty, and a mapping written
+        # against a profile listing rather than against a file is speculation. They land the
+        # day a file arrives with one. `next_stop_time` (94) has no channel at all - the
+        # depth and time of the next stop are deferred by the format - and `session.sub_sport`
+        # would carry the recording's mode and no file in hand writes one, which is why a FIT
+        # freedive imports as a dive that does not say what kind it is.
         ceiling = ceiling_cm(_native_value(frame, "next_stop_depth"))
         if ceiling is not None:
             scan.ceiling.append((timestamp, ceiling))
@@ -722,6 +753,11 @@ class FitParser(DiveParser):
             # `GET /dives/next-number` - see `services/dive_numbering.py`.
             dive_number=None,
             device=cls._device(scan, session),
+            # No mode: `session.sub_sport` is the field that would carry one and no file in
+            # hand writes it, so a FIT dive - a freediving one included - is a dive that does
+            # not say what kind it is. The DM5 XML path does say, because its files state it.
+            mode=None,
+            deco_model=cls._deco_model(scan),
             duration=round(duration) if duration is not None else None,
             max_depth=cls._depth(session, summary, "max_depth"),
             start_time=start_time.isoformat() if isinstance(start_time, datetime) else None,
@@ -815,6 +851,40 @@ class FitParser(DiveParser):
             if firmware is not None:
                 return firmware
         return None
+
+    @staticmethod
+    def _deco_model(scan: _FitScan) -> ParsedDecoModel | None:
+        """The model this computer ran, out of `dive_settings` (258).
+
+        `gf_low` (2) and `gf_high` (3) are already whole percent in the FIT profile, which is
+        the member's unit, so nothing is scaled. They are written both or neither, which
+        `ParsedDecoModel` enforces rather than this function: a file stating one alone yields
+        neither.
+
+        **`model` (1) is read only where it states a value.** `tissue_model_type` has exactly
+        one member in the FIT profile, `zhl_16c`, and reading "there is only one value in the
+        enum" as "the family must be Bühlmann" would be this parser deciding what the device
+        ran. The file that would get it wrong is exactly the one this parser most often sees:
+        a Suunto watch writing Garmin's format, whose own app export names an RGBM model for
+        the same dive. Two of the three FIT recordings in hand state a gradient-factor pair
+        with no `model` beside it, and each yields a pair and no family - the honest shape.
+
+        `None` where the file wrote no `dive_settings` at all, which is the third recording:
+        the message is the computer's *configuration* rather than a record of the dive, so
+        its absence is not a device that declined to say.
+
+        `po2_warn`, `po2_critical` and `po2_deco` in the same message are the device's alarm
+        thresholds rather than the model's settings, and are read by nothing (see `_mixture`,
+        which refuses them as a cylinder's ppO2 limit for the same reason).
+        """
+        if scan.dive_settings is None:
+            return None
+        model = _native_value(scan.dive_settings, "model")
+        return ParsedDecoModel(
+            algorithm=DecoAlgorithm.BUHLMANN if model == _BUHLMANN_TISSUE_MODEL else None,
+            gf_low=_native_value(scan.dive_settings, "gf_low"),
+            gf_high=_native_value(scan.dive_settings, "gf_high"),
+        )
 
     @staticmethod
     def _water_type(scan: _FitScan) -> WaterType | None:

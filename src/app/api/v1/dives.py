@@ -210,6 +210,34 @@ _MIXTURE_CONSTRAINT_MESSAGES = {
 }
 
 
+_RECORDING_CONSTRAINT_MESSAGES = {
+    # Unreachable through any path that exists today, and here for the reason the imported
+    # block in `_DIVE_CONSTRAINT_MESSAGES` is: both writers drop an inverted gradient-factor
+    # pair before it can reach the column - the parsers in
+    # `ParsedDecoModel._pair_the_gradient_factors`, the importer in its planner - so a
+    # violation would mean one of those stopped working. Without a message the attach route
+    # would answer a 500 to a diver whose file is perfectly importable apart from two
+    # numbers, and a parser bug would be invisible in the response.
+    "ck_dive_recording_deco_gf_low_within_high": (
+        "This file's decompression settings are inconsistent: its low gradient factor is above its high one."
+    ),
+}
+
+
+def _recording_error_detail(exc: IntegrityError) -> str:
+    """As `_fk_error_detail`, for the constraints on a recording's own columns.
+
+    Its own table rather than an entry in the dive one, because the two are reached from
+    different routes: a recording's columns are written by the attach path and by logbook
+    import, never by a dive body, so a message about them would never be looked up there.
+    """
+    msg = str(exc.orig)
+    for constraint, detail in _RECORDING_CONSTRAINT_MESSAGES.items():
+        if constraint in msg:
+            return detail
+    return "This dive-computer file could not be stored: one of its values is not one this app can hold."
+
+
 def _mixture_error_detail(exc: IntegrityError) -> str:
     """As `_fk_error_detail`, but for the gas-mixture constraints (oxygen/helium ranges,
     their sum, volume, pressure ordering). Separate because a mixture failure has to name
@@ -856,12 +884,28 @@ async def renumber_user_dives(
     return result
 
 
-# Keyed `user_{user_id}_dive:{uuid}` rather than the flat `dive_cache:{uuid}` it used
+# Keyed `user_{user_id}_dive:v2:{uuid}` rather than the flat `dive_cache:{uuid}` it used
 # to be. A dive read embeds its dive sites' and gear items' names, so renaming either
 # has to drop the cached dives that reference it - and the renaming endpoint knows only
 # the owner's id, not which of their dives are affected. Scoping the key by user is what
 # makes `invalidate_dive_caches()` able to express that as a pattern at all.
-@cache(key_prefix="user_{user_id}_dive", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
+#
+# **`:v2` is a shape version, and it is what a deployed instance costs.** An entry this
+# cache wrote is replayed through `DiveReadWithMixtures` without the route body running, so
+# a response whose *shape* changed comes back as a `ResponseValidationError` - a 500 on this
+# endpoint for whoever is signed in when the new build lands, for the whole of the hour this
+# key lives. `recordings[].profile.channels` and `recordings[].mode` are exactly such a
+# change. `DECISIONS.md`'s *"Changing the shape of a cached response outlives the restart
+# that ships it"* offers version-the-key or write-down-how-that-Redis-is-flushed, and this
+# is the first change to owe the call: versioning needs no access to the instance and cannot
+# be forgotten at deploy time, where a documented flush is a step somebody has to run.
+#
+# **The suffix goes after the colon and not after an underscore.** `invalidate_dive_caches`
+# sweeps `user_{id}_dives:*` and `user_{id}_dive:*` - two literal patterns rather than one
+# `user_{id}_dive*`, deliberately, so the shorter one does not also eat the dive *site* list.
+# A `user_{id}_dive_v2` would fall outside both, and invalidation would silently stop working
+# on the one response this change reshapes.
+@cache(key_prefix="user_{user_id}_dive:v2", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
 async def _cached_read_dive(
     request: Request, user_id: int, uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession
 ) -> DiveReadWithMixtures:
@@ -1308,6 +1352,12 @@ async def write_dive_recording(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except DiveFileConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        # A parsed value the schemas let through and the database will not take. Every
+        # writable column here is filled from a file rather than from a body, so this is a
+        # parser bug rather than a diver's mistake - but a 500 would say nothing at all, and
+        # the message names the field so the file can be reported.
+        raise UnprocessableEntityException(_recording_error_detail(exc)) from exc
 
     # Dive reads embed every recording, its files' metadata *and* the summary of the profile
     # extracted from them, so they're now stale.
@@ -1405,7 +1455,13 @@ async def read_dive_profile(
         Query(description="Opaque cache-busting version token; ignored by the server"),
     ] = None,
 ) -> Response | RecordingProfileRead:
-    """Serve one recording's per-sample depth/ceiling/temperature/tank-pressure curves and events.
+    """Serve one recording's per-sample curves and the events alongside them.
+
+    Ten channels: what its sensors read - depth, deco ceiling, temperature and per-cylinder
+    tank pressure - and what its computer worked out from them - the no-decompression clock,
+    the time to surface, the computed ppO2, the CNS clock and the two gradient factors. A
+    recording carries whichever of them its files recorded, and `channels` on the dive read
+    says which without fetching the samples.
 
     Per **recording**, not per dive: a diver on two computers has two profiles of one dive
     and neither is a version of the other. `rid` is the recording's uuid, from the dive's

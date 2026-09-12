@@ -4,6 +4,7 @@ from decimal import Decimal
 import defusedxml.ElementTree as DET
 from defusedxml.common import DefusedXmlException
 
+from ...schemas.dive import DiveMode
 from ...schemas.dive_profile import (
     ParsedPressureSeries,
     ParsedProfileEvent,
@@ -11,7 +12,7 @@ from ...schemas.dive_profile import (
     ParsedSeries,
     ProfileEventType,
 )
-from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDevice, ParsedDiveSchema
+from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDecoModel, ParsedDevice, ParsedDiveSchema
 from .base import DiveParser
 from .channels import CENTIMETERS_PER_METER, TENTHS_PER_UNIT, ceiling_cm, scaled_int_or_none
 from .exceptions import EXTRACTION_ERRORS, DiveParseError, UnsupportedDiveFileError
@@ -62,6 +63,22 @@ _XML_GAS_NUMBER = 1
 # `file_id.manufacturer` decodes to `suunto`. `SuuntoJsonParser` says the same thing about
 # its own format.
 _BRAND = "Suunto"
+
+# `<Mode>` onto the recording's mode. A normalization table rather than a cast, like every
+# other vendor vocabulary in this package: the numbers are Suunto's, and one this corpus has
+# not seen must leave `mode` absent rather than become the nearest value.
+#
+# **0 and 1 are air and nitrox, which are both open circuit**, and the oxygen fractions in
+# the corpus say so: 243 of the 244 `<Mode>0</Mode>` exports carry a single 21 % mixture and
+# every one of the 98 `<Mode>1</Mode>` exports carries something richer. **3 is a freedive**,
+# and the 42 stating it are exactly the 42 carrying no `<DiveMixture>` at all - nil
+# `<Algorithm>`, durations of 3 to 60 seconds, depths of 1.39 to 15.48 m. The D5 has no
+# rebreather mode, so nothing here maps one.
+_DIVE_MODES = {
+    0: DiveMode.OPEN_CIRCUIT,
+    1: DiveMode.OPEN_CIRCUIT,
+    3: DiveMode.FREEDIVE,
+}
 
 
 def _tag(name: str) -> str:
@@ -201,12 +218,22 @@ class SuuntoXmlParser(DiveParser):
     """Parses Suunto dive-log XML exports (e.g. from the Suunto app / DM5).
 
     Extracts the fields with a direct equivalent on the `Dive`/`DiveMixture` backend
-    models (`models/dive.py`, `models/dive_mixture.py`), plus - separately, via
-    `parse_profile` - the per-sample depth/ceiling/temperature/tank-pressure curves and the
-    gas switches stored as `DiveProfile`. The export has plenty of other fields
-    (algorithm/tissue-loading stats, planned deco stops) with nowhere to persist them, so
-    they aren't parsed at all, and `<Marks>` is a refusal rather than an omission - see
-    `_gas_switches`.
+    models (`models/dive.py`, `models/dive_mixture.py`), the recording's own `<Mode>` and
+    `<PersonalMode>` (`_mode` and `_deco_model`), plus - separately, via `parse_profile` -
+    the per-sample depth, deco ceiling, temperature and tank-pressure curves and the gas
+    switches stored as `DiveProfile`.
+
+    **This format carries none of the six decompression channels**, which is a property of
+    the export rather than a refusal: a `Dive.Sample` has `<Depth>`, `<Ceiling>`,
+    `<Temperature>` and `<Pressure>` and nothing that measures a no-decompression time, a
+    time to surface, a ppO2, a CNS clock or a gradient factor. The app's JSON export of the
+    same dives does carry four of them, and `SuuntoJsonParser` reads them.
+
+    What is still refused and why: `<Marks>`, whose `<Type>` is an undocumented numeric code
+    the corpus says plainly cannot be guessed (see `_gas_switches`); `<Algorithm>` and the
+    nil GF, setpoint and switch-point elements (see `_deco_model`); and the per-dive
+    tissue-loading blocks, which have nowhere to go and would mean nothing outside the
+    algorithm that computed them.
 
     The exception is `_device`'s four elements, which have no column behind them either
     and are read all the same: two exports of one dive can only be told apart by what
@@ -282,9 +309,9 @@ class SuuntoXmlParser(DiveParser):
         """Group `DiveSamples/Dive.Sample` into one series per channel.
 
         Each channel gets its own time axis rather than sharing one: a sample element may
-        carry any subset of depth, deco ceiling, temperature and tank pressure, so a shared
-        axis would be mostly nulls. Samples without a `Time` are skipped - a reading with no
-        position on the axis can't be plotted.
+        carry any subset of the four this format records - depth, deco ceiling, temperature
+        and tank pressure - so a shared axis would be mostly nulls. Samples without a `Time`
+        are skipped - a reading with no position on the axis can't be plotted.
 
         Events do not come from here at all - this format keeps its gas changes on the
         mixtures rather than on the samples. See `_gas_switches`.
@@ -391,11 +418,61 @@ class SuuntoXmlParser(DiveParser):
             # dive's own date - see `services/dive_numbering.py`.
             dive_number=None,
             device=cls._device(root),
+            mode=cls._mode(root),
+            deco_model=cls._deco_model(root),
             duration=_int(root, "Duration"),
             max_depth=_float(root, "MaxDepth"),
             start_time=_text(root, "StartTime"),
             mixtures=mixtures,
         )
+
+    @staticmethod
+    def _mode(root: ET.Element) -> DiveMode | None:
+        """The mode this computer ran in, from `<Mode>`.
+
+        Every record this format holds is a dive of some kind - a freedive included - so
+        nothing is skipped for its mode and this parser has no not-a-dive test at all. The
+        app's JSON export needs one, because there a run and a dive are the same shape.
+
+        A document stating no `<Mode>`, or one outside the table, leaves `mode` absent and is
+        read on: an absence is not a claim, and §6.4a forbids reading one as open circuit.
+        """
+        return _DIVE_MODES.get(_int(root, "Mode"))  # type: ignore[arg-type]  # `.get(None)` is a miss, not an error
+
+    @classmethod
+    def _deco_model(cls, root: ET.Element) -> ParsedDecoModel | None:
+        """What this format says about the model the computer ran, which is one setting.
+
+        **`<PersonalMode>` is the conservatism**, on Suunto's own P-2 to P2 scale, which is
+        exactly what the member holds: the device's number, meaningful beside the device. `0`
+        is the P0 setting rather than an absence and `-1` is P-1 - the two values in the
+        corpus - so no floor is applied, which makes this the one reading in the package
+        where a negative is data.
+
+        **A freedive states one too and it is not carried.** The model is what a device ran
+        on *this* dive; a freedive ran none, and a model carrying only a conservatism would
+        say otherwise.
+
+        **`<Algorithm>` is deliberately not read as the family.** It is an undocumented enum
+        that reads `0` on every scuba export in hand and nil on every freedive, so nothing in
+        the corpus says what any other value would mean - and a family is a claim about the
+        mathematics rather than a number nobody has decoded. It is the same refusal `<Type>`
+        on a `<DiveMixture>` gets from `_parse_mixture`. The app's JSON export of these same
+        dives names the model as a string and *is* read, which is where a D5's model comes
+        from.
+
+        The five GF, setpoint and switch-point elements beside it - `<MaxGf>`, `<MinGf>`,
+        `<SetPoint>`, `<HighSwitchPoint>`, `<LowSwitchPoint>`, `<LowSetPoint>` - are
+        `i:nil="true"` on all 384 exports and all five fixtures, so two members they could
+        fill wait for a file that states one: a mapping no file exercises is a mapping nothing
+        checks. `<AltitudeMode>`, `<AscentMode>` and `<LastDecoStopDepth>` do carry values on
+        every file and are refused for a reason of their own - the model carries a family, a
+        name, a gradient-factor pair and a conservatism, and has no member for an altitude
+        band, an ascent rule or a last-stop depth.
+        """
+        if cls._mode(root) is DiveMode.FREEDIVE:
+            return None
+        return ParsedDecoModel(conservatism=_int(root, "PersonalMode"))
 
     @staticmethod
     def _device(root: ET.Element) -> ParsedDevice:

@@ -33,9 +33,9 @@ import divejson
 import pytest
 import pytest_asyncio
 from fastapi import UploadFile
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, undefer
 from uuid6 import uuid7
 
 from src.app.api.v1 import dives as dives_module
@@ -710,6 +710,331 @@ class TestProfiles:
             .scalars()
             .all()
         )
+
+
+class TestTheDecompressionMembersRoundTrip:
+    """Export a dive carrying every new member, import it, and read back what arrived.
+
+    The invariant this node exists for, and the only test here that exercises the whole
+    loop - the storage, the writer's member names and scales, the reader's schemas and the
+    planner's re-validation - against one another rather than each against an assertion.
+    """
+
+    PROFILE = {
+        "depth": {"t": [0, 10, 20], "v": [100, 5200, 300]},
+        "ndl": {"t": [0, 10, 20], "v": [5940, 0, 1260]},
+        "tts": {"t": [10], "v": [268]},
+        "ppo2": {"t": [0, 20], "v": [34, 96]},
+        "cns": {"t": [20], "v": [800]},
+        # Past 100, which is a real reading - a clamping reader fails here rather than
+        # passing quietly.
+        "gradient_factor": {"t": [10, 20], "v": [17, 398]},
+        "surface_gradient_factor": {"t": [20], "v": [116]},
+        "events": [{"t": 10, "type": "ceiling_violation", "label": "Ceiling Broken"}],
+    }
+
+    @staticmethod
+    async def _profile(async_db: AsyncSession, dive_id: int) -> Any:
+        """The stored profile with its payload loaded.
+
+        `data` is `deferred`, so reading it off an ORM instance inside an async session is a
+        lazy load on a sync connection - which raises rather than fetching. `undefer` is the
+        same opt-in `load_profile` uses in `services/dive_profiles.py`.
+        """
+        return (
+            (
+                await async_db.execute(
+                    select(DiveProfile).where(DiveProfile.dive_id == dive_id).options(undefer(DiveProfile.data))
+                )
+            )
+            .scalars()
+            .one()
+        )
+
+    def _seed(self, db: Session) -> tuple[Any, Any]:
+        user = _seed_logbook(db)
+        dive = db.query(Dive).filter(Dive.user_id == user.id).one()
+        recording = create_dive_recording(db, user, dive)
+        db.execute(
+            update(DiveRecording)
+            .where(DiveRecording.id == recording.id)
+            .values(
+                mode="closed_circuit",
+                deco_algorithm="buhlmann",
+                deco_name="ZHL-16C",
+                deco_gf_low=50,
+                deco_gf_high=85,
+                deco_conservatism=-1,
+            )
+        )
+        db.add(
+            DiveProfile(
+                recording_id=recording.id,
+                dive_id=dive.id,
+                source_sha256="c" * 64,
+                parser_key="suunto_json",
+                extractor_version=4,
+                duration=20,
+                depth_sample_count=3,
+                data=self.PROFILE,
+            )
+        )
+        db.commit()
+        return user, dive
+
+    @pytest.mark.asyncio
+    async def test_every_channel_arrives_sample_for_sample(self, db: Session, async_db: AsyncSession) -> None:
+        user, _ = self._seed(db)
+        document = await _export(async_db, user.id)
+        destination = create_user(db)
+
+        await _apply(async_db, destination.id, document)
+
+        imported = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        profile = await self._profile(async_db, imported.id)
+        for channel, series in self.PROFILE.items():
+            if channel != "events":
+                assert profile.data[channel] == series, channel
+
+    @pytest.mark.asyncio
+    async def test_the_summary_extremes_are_re_derived_from_the_samples(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The importer stores samples, never a document's own summary - so the columns
+        `channels` is derived from come out of the readings that arrived."""
+        user, _ = self._seed(db)
+        document = await _export(async_db, user.id)
+        destination = create_user(db)
+
+        await _apply(async_db, destination.id, document)
+
+        imported = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        profile = await self._profile(async_db, imported.id)
+        assert profile.min_ndl_s == 0
+        assert profile.max_tts_s == 268
+        assert profile.max_ppo2_bar100 == 96
+        assert profile.max_cns_pct10 == 800
+        assert profile.max_gradient_factor_pct == 398
+        assert profile.max_surface_gradient_factor_pct == 116
+
+    @pytest.mark.asyncio
+    async def test_the_recordings_mode_and_model_arrive_whole(self, db: Session, async_db: AsyncSession) -> None:
+        user, _ = self._seed(db)
+        document = await _export(async_db, user.id)
+        destination = create_user(db)
+
+        await _apply(async_db, destination.id, document)
+
+        imported = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        recording = (
+            (await async_db.execute(select(DiveRecording).where(DiveRecording.dive_id == imported.id))).scalars().one()
+        )
+        assert recording.mode == "closed_circuit"
+        assert (recording.deco_algorithm, recording.deco_name) == ("buhlmann", "ZHL-16C")
+        assert (recording.deco_gf_low, recording.deco_gf_high) == (50, 85)
+        assert recording.deco_conservatism == -1
+
+    @pytest.mark.asyncio
+    async def test_an_inverted_gradient_factor_pair_drops_both_halves_and_keeps_the_dive(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """Enforced on the import path rather than left to the `CheckConstraint`: an
+        `IntegrityError` inside the import transaction takes every dive in the archive with
+        it, and neither number says which of the two is wrong."""
+        _, document = seeded
+        parsed = json.loads(document)
+        # With a device, because §3's rule 4 counts three members and the model is not one
+        # of them - a recording carrying only a model describes nothing and is dropped whole.
+        parsed["dives"][0]["recordings"] = [
+            {"device": {"brand": "Shearwater"}, "deco_model": {"gf_low": 85, "gf_high": 50, "name": "ZHL-16C"}}
+        ]
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["dives"] == (1, 0, 0, 0)
+        assert ImportNoteCode.VALUE_DROPPED in _codes(plan)
+        imported = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        recording = (
+            (await async_db.execute(select(DiveRecording).where(DiveRecording.dive_id == imported.id))).scalars().one()
+        )
+        assert (recording.deco_gf_low, recording.deco_gf_high) == (None, None)
+        assert recording.deco_name == "ZHL-16C"
+
+    @pytest.mark.asyncio
+    async def test_one_gradient_factor_without_its_pair_names_no_setting(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["recordings"] = [
+            {"device": {"brand": "Shearwater"}, "deco_model": {"gf_low": 50, "name": "ZHL-16C"}}
+        ]
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert ImportNoteCode.VALUE_DROPPED in _codes(plan)
+        imported = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        recording = (
+            (await async_db.execute(select(DiveRecording).where(DiveRecording.dive_id == imported.id))).scalars().one()
+        )
+        assert (recording.deco_gf_low, recording.deco_gf_high) == (None, None)
+
+    @pytest.mark.asyncio
+    async def test_a_recording_carrying_only_a_mode_and_a_model_describes_nothing(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """§3's rule 4 counts `device`, `profile` and `source_files`, and the spec says
+        outright that these two are not on its list: a mode with no device, no samples and no
+        file behind it is a setting nothing recorded a dive with. The dive still imports."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["recordings"] = [{"mode": "gauge", "deco_model": {"algorithm": "buhlmann"}}]
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["dives"] == (1, 0, 0, 0)
+        imported = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        assert not (
+            (await async_db.execute(select(DiveRecording.id).where(DiveRecording.dive_id == imported.id)))
+            .scalars()
+            .all()
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_mode_this_build_does_not_know_reads_as_absent(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """Spec §5.6: a value from a later minor version reads as *not recorded*, and a
+        reader must never fall back to open circuit. The rest of the recording survives."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["recordings"] = [{"mode": "rebreather", "device": {"brand": "Shearwater"}}]
+        destination = create_user(db)
+
+        await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        imported = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        recording = (
+            (await async_db.execute(select(DiveRecording).where(DiveRecording.dive_id == imported.id))).scalars().one()
+        )
+        assert recording.mode is None
+        assert recording.device_brand == "Shearwater"
+
+    @pytest.mark.asyncio
+    async def test_a_negative_reading_drops_the_channel_and_keeps_the_dive(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """§6.4 floors all six at zero, and a negative is what several devices write to mean
+        "no figure" - so a document carrying one is not a document to store verbatim. The
+        whole channel goes, because there is no half of a series to keep."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["recordings"] = [
+            {
+                "profile": {
+                    "duration": 20,
+                    "depth": {"times": [0, 10], "values": [100, 5200]},
+                    "ndl": {"times": [0, 10], "values": [5940, -1]},
+                }
+            }
+        ]
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert ImportNoteCode.VALUE_DROPPED in _codes(plan)
+        imported = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        profile = await self._profile(async_db, imported.id)
+        assert "ndl" not in profile.data
+        assert profile.data["depth"]["v"] == [100, 5200]
+
+    @pytest.mark.asyncio
+    async def test_a_negative_depth_is_kept_because_depth_is_not_one_of_the_six(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The floor is per channel rather than blanket: a temperature below zero is
+        ordinary, and a depth of zero at the surface is what a Suunto Ocean records."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["recordings"] = [
+            {
+                "profile": {
+                    "duration": 10,
+                    "depth": {"times": [0, 10], "values": [0, 5200]},
+                    "temperature": {"times": [0], "values": [-15]},
+                }
+            }
+        ]
+        destination = create_user(db)
+
+        await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        imported = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        profile = await self._profile(async_db, imported.id)
+        assert profile.data["temperature"]["v"] == [-15]
+
+    @pytest.mark.asyncio
+    async def test_an_event_with_no_type_reads_back_as_unclassified(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The absent `type` §6.6 spells "unclassified" with, read back as `other` - the
+        storage spelling of the same fact. An unknown one from a later minor version takes
+        the same path, because `_unknown_is_absent` has already made it absent."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["recordings"] = [
+            {
+                "profile": {
+                    "duration": 10,
+                    "depth": {"times": [0, 10], "values": [100, 5200]},
+                    "events": [
+                        {"time": 1, "label": "Ceiling Broken"},
+                        {"time": 2, "type": "bailout", "label": "Bailout"},
+                        {"time": 3, "type": "ppo2_high", "label": "PO2 High"},
+                    ],
+                }
+            }
+        ]
+        destination = create_user(db)
+
+        await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        imported = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        profile = await self._profile(async_db, imported.id)
+        assert [(event["type"], event.get("label")) for event in profile.data["events"]] == [
+            ("other", "Ceiling Broken"),
+            ("other", "Bailout"),
+            ("ppo2_high", "PO2 High"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_an_event_that_is_neither_classified_nor_labelled_is_dropped(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """§6.6 makes `label` REQUIRED where `type` is absent, because an event that is
+        neither carries no information at all."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["recordings"] = [
+            {
+                "profile": {
+                    "duration": 10,
+                    "depth": {"times": [0, 10], "values": [100, 5200]},
+                    "events": [{"time": 1}, {"time": 2, "type": "bookmark"}],
+                }
+            }
+        ]
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert ImportNoteCode.VALUE_DROPPED in _codes(plan)
+        imported = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        profile = await self._profile(async_db, imported.id)
+        assert [event["type"] for event in profile.data["events"]] == ["bookmark"]
 
 
 class TestSpeciesLinks:
@@ -1883,6 +2208,12 @@ class TestTheIntegerColumnCensus:
         ("dive_profile", "max_temperature_c10"): "an extreme of a channel `_series` bounds",
         ("dive_profile", "min_pressure_bar10"): "an extreme of a channel `_series` bounds",
         ("dive_profile", "max_pressure_bar10"): "an extreme of a channel `_series` bounds",
+        ("dive_profile", "min_ndl_s"): "an extreme of a channel `_series` bounds",
+        ("dive_profile", "max_tts_s"): "an extreme of a channel `_series` bounds",
+        ("dive_profile", "max_ppo2_bar100"): "an extreme of a channel `_series` bounds",
+        ("dive_profile", "max_cns_pct10"): "an extreme of a channel `_series` bounds",
+        ("dive_profile", "max_gradient_factor_pct"): "an extreme of a channel `_series` bounds",
+        ("dive_profile", "max_surface_gradient_factor_pct"): "an extreme of a channel `_series` bounds",
         ("gear_service_schedule", "id"): "the sequence's",
         ("gear_service_schedule", "user_id"): "the caller's",
         ("gear_service_schedule", "gear_item_id"): "resolved from a row this import wrote",
@@ -1929,6 +2260,9 @@ class TestTheIntegerColumnCensus:
         ("dive_recording", "dive_id"): "resolved from a row this import wrote",
         ("dive_recording", "ordinal"): "the list index, not the document's",
         ("dive_recording", "device_dive_number"): "bounded in `_plan_recordings`",
+        ("dive_recording", "deco_gf_low"): "bounded in `_DECO_MODEL_BOUNDS`, to 0..100",
+        ("dive_recording", "deco_gf_high"): "bounded in `_DECO_MODEL_BOUNDS`, to 0..100",
+        ("dive_recording", "deco_conservatism"): "bounded in `_DECO_MODEL_BOUNDS`, to the column's own width",
         ("dive_recording", "utc_offset_minutes"): "derived from a parsed UTC offset, which Python bounds at a day",
         ("dive_recording", "duration"): "the samples' own span, capped by `_plan_profile`",
         ("dive_file", "byte_size"): "the restored bytes' own length, capped by `MAX_DIVE_FILE_SIZE`",
