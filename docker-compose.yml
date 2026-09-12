@@ -32,9 +32,13 @@ services:
       - ./src/app:/code/app
       - ./src/.env:/code/.env
       # One-shot maintenance scripts (`src/scripts/`) import their modules as `src.app.*`,
-      # so they need the package rooted at `/code/src` - the app itself is served from
-      # `/code/app` and is unaffected. This is what makes
-      # `docker compose exec api python -m src.scripts.backfill_dive_profiles` work.
+      # so the package has to be rooted at `/code/src` for the *host's* copy of them to be
+      # what runs - the app itself is served from `/code/app` and is unaffected. This mount
+      # decides which copy `docker compose exec api python -m src.scripts.backfill_dive_profiles`
+      # picks up, not whether it runs at all: the image's virtualenv carries an installed
+      # `src` package either way, and `/code` wins only by being the working directory. See
+      # DECISIONS.md, "`admin_init` runs as `app.admin.initialize`, and `src.scripts.*`
+      # marks nothing".
       - ./src:/code/src
       # Migrations are baked into the image at these paths (see Dockerfile), and the
       # startup `alembic upgrade head` reads them from there. Bind-mounted over so a

@@ -2467,8 +2467,12 @@ reports only successes hides the parser that stopped working.
 through. Without `create_redis_cache_pool()` first, every backfilled dive's cached detail response
 would keep claiming the dive has no profile for up to an hour, with no error anywhere.
 
-`src/scripts/` is now bind-mounted into the `api` service (`./src:/code/src`) so that command works
-at all; the app itself is still served from `/code/app` and is unaffected.
+`src/scripts/` is bind-mounted into the `api` service (`./src:/code/src`) so that the copy of the
+script which runs is the one on the host; the app itself is still served from `/code/app` and is
+unaffected. This paragraph used to say the mount is what makes that command work "at all", which is
+false - the image's virtualenv carries an installed `src` package whether or not anything is mounted
+over it, and `/code` leads `sys.path` only because it is the working directory. See *"`admin_init`
+runs as `app.admin.initialize`, and `src.scripts.*` marks nothing"*.
 
 ## No manual DDL for the dive-profile feature
 
@@ -16246,8 +16250,8 @@ is that a registration either creates the account with its three presets or crea
 `complete_profile` is the one place *self-service registration* makes a `User` row (see *"Unified
 auth flow"*), which is what makes eager seeding tractable. The two other writers are not
 registration — the admin panel's generic insert, off by default and slated for retirement, and
-`scripts/create_first_superuser.py`, which is excluded from the shipped image — and an account made
-either way reaches the same three through `POST /dive-form-presets/defaults`.
+`src/scripts/create_first_superuser.py`, which someone runs by hand — and an account made either way
+reaches the same three through `POST /dive-form-presets/defaults`.
 
 Rejected: lazy seeding on the first `GET /dive-form-presets` behind a `seeded` flag on the user. It
 covers every writer, which is its whole appeal, and it costs a GET that writes and a column on the
