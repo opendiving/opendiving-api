@@ -348,10 +348,11 @@ class TestCacheInvalidation:
 
         matches = lambda key: any(fnmatch(key, p) for p in patterns)  # noqa: E731
         assert matches("user_7_dive:019f-abc")
-        # **The versioned key too**, which is the one this sweep now has to reach: the
-        # suffix goes after the colon precisely so it stays inside `user_{id}_dive:*`. An
-        # underscore-joined `user_7_dive_v2:...` falls outside both patterns, and nothing
-        # would say so - the invalidation would simply stop working on the detail read.
+        # **A suffixed key too.** The detail read carried a `:v2` for a day and no longer
+        # does, but the shape of that sweep is the live part: a suffix after the colon stays
+        # inside `user_{id}_dive:*`, where an underscore-joined `user_7_dive_v2:...` falls
+        # outside both patterns - and nothing would say so, the invalidation would simply
+        # stop working on the detail read.
         assert matches("user_7_dive:v2:019f-abc")
         # Another user's keys, and other resources', must be left alone.
         assert not matches("user_8_dive:019f-abc")

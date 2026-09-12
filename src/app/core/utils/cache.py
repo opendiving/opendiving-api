@@ -1,5 +1,7 @@
 import functools
+import hashlib
 import json
+import pathlib
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any, Concatenate, ParamSpec, TypeVar, cast
@@ -8,10 +10,105 @@ from fastapi import Request
 from fastapi.encoders import jsonable_encoder
 from redis.asyncio import ConnectionPool, Redis
 
+from ..config import settings
 from ..exceptions.cache_exceptions import CacheIdentificationInferenceError, InvalidRequestError, MissingClientError
 
 pool: ConnectionPool | None = None
 client: Redis | None = None
+
+# Every key this module writes is namespaced by the build that wrote it, because what it
+# stores is a *response body* and a response body outlives the build whose shape it matches.
+# A hit is `json.loads`ed and handed straight to FastAPI without re-running the route, so an
+# entry written before a field was added fails `response_model` validation on the way out -
+# a 500 on that endpoint, for everyone reading it, until the TTL runs out. That is one minute
+# on the aggregate endpoints and **an hour** on the single-resource reads, which take this
+# module's default `expiration`.
+#
+# Pre-launch this could be left alone: the only way to reach it was a developer switching
+# branches with a warm Redis, and `DECISIONS.md` said a deployed API would flip that trade.
+# One did, on 2026-09-12. The argument for a namespace here rather than a version suffix per
+# key - and for `species:` and `geocode:` keeping the hand-bumped versions they have - is
+# under *"A deploy cannot serve the previous build's response cache"* there.
+_NAMESPACE_ROOT = "resp"
+
+
+def _source_fingerprint() -> str | None:
+    """A digest of the `app` package's sources, or `None` if they cannot be read.
+
+    This is what identifies a build where no commit was baked into the image - a source
+    checkout, or an image someone built without the build arg. `APP_VERSION` cannot do that
+    job: it comes from the installed distribution metadata and moves on a release, so every
+    branch of a development tree shares one value and a branch switch with a warm Redis
+    serves the other branch's bodies. That was this mechanism's one documented gap, and a
+    digest of the code closes it with nothing to configure and nothing to remember.
+
+    **The whole package rather than `schemas/` alone.** A response body is shaped by the
+    schema *and* by whatever populated it, so a `_to_public_dive` that starts filling a field
+    differently changes the body with no schema edit anywhere - and a rule that says "the
+    code" needs no judgement about which files count.
+
+    Deterministic across processes, which is what makes it usable: gunicorn's four workers
+    hash the same files and agree, where a value minted per process would split the cache
+    four ways. Inside an image the sources are baked, so it is simply a constant - which is
+    also why `APP_COMMIT` is consulted first and this never runs there.
+    """
+    # This file is `app/core/utils/cache.py`, so the package root is three levels up.
+    return _digest_sources(pathlib.Path(__file__).resolve().parents[2])
+
+
+def _digest_sources(package: pathlib.Path) -> str | None:
+    """Hash every `.py` under `package`, path and contents, in a fixed order.
+
+    The path goes into the digest as well as the bytes, so moving a file between modules
+    moves the digest even when nothing inside any file changed.
+    """
+    digest = hashlib.blake2b(digest_size=6)
+    hashed = 0
+    try:
+        for source in sorted(package.rglob("*.py")):
+            digest.update(str(source.relative_to(package)).encode())
+            digest.update(source.read_bytes())
+            hashed += 1
+    except OSError:
+        # Never a reason to fail startup: a namespace that is merely coarse costs a stale
+        # window, and `APP_VERSION` is the coarse one.
+        return None
+
+    # **Hashing nothing is the failure that hides.** `rglob` on a directory that does not
+    # exist yields no paths and raises nothing, so a root that misses the package returns a
+    # digest of the empty string - a perfectly stable value, identical in every checkout and
+    # every image, which namespaces every key and separates no builds at all. Everything
+    # downstream keeps working and the fallback silently stops doing its job.
+    return digest.hexdigest() if hashed else None
+
+
+# What identifies a build, most specific first. `APP_COMMIT` is baked into the image and
+# moves on every merge to the edge channel; it comes first because it is the only one of the
+# three that also moves when a *dependency* does, and `PaginatedListResponse` is FastCRUD's
+# envelope rather than ours. The digest below is next, and answers everywhere the arg was not
+# passed. `APP_VERSION` and the `dev` tail are what remain if the sources cannot be read at
+# all - neither is expected, and neither is wrong enough to crash startup over.
+_BUILD = (settings.APP_COMMIT or "")[:12] or _source_fingerprint() or settings.APP_VERSION or "dev"
+_NAMESPACE = f"{_NAMESPACE_ROOT}:{_BUILD}"
+
+
+def namespaced(key: str) -> str:
+    """The Redis key this build reads and writes for the logical cache key `key`."""
+    return f"{_NAMESPACE}:{key}"
+
+
+def across_builds(pattern: str) -> str:
+    """The same key or pattern, widened to every build's namespace.
+
+    **Keyed deletes are this build's; pattern sweeps are every build's.** An invalidation
+    says "this user's dives changed", which is as true of a superseded build's copy as of
+    this one's - and `erase_user` sweeping `user_{id}_*` has to mean *every* cached row of
+    that user's, not the ones this particular image happened to write. A keyed delete needs
+    no such widening, because a key is deleted so that *this* build stops serving it and no
+    other build's entry is reachable from here.
+    """
+    return f"{_NAMESPACE_ROOT}:*:{pattern}"
+
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -158,6 +255,10 @@ async def _delete_keys_by_pattern(pattern: str) -> None:
     It retrieves a batch of keys matching the pattern on each iteration and deletes them
     until no matching keys are left.
 
+    The pattern is widened to every build's namespace before it is scanned (see
+    `across_builds`), so callers pass the logical pattern - `user_7_dives:*` - and never
+    spell the namespace themselves.
+
     Parameters
     ----------
     pattern: str
@@ -180,8 +281,9 @@ async def _delete_keys_by_pattern(pattern: str) -> None:
         return
 
     cursor = 0
+    namespaced_pattern = across_builds(pattern)
     while True:
-        cursor, keys = await client.scan(cursor, match=pattern, count=100)
+        cursor, keys = await client.scan(cursor, match=namespaced_pattern, count=100)
         if keys:
             await client.delete(*keys)
         if cursor == 0:
@@ -324,12 +426,12 @@ def cache(
                 resource_id = _infer_resource_id(kwargs=kwargs_dict, resource_id_type=resource_id_type)
 
             formatted_key_prefix = _format_prefix(key_prefix, kwargs_dict)
-            cache_key = f"{formatted_key_prefix}:{resource_id}"
+            stored_key = namespaced(f"{formatted_key_prefix}:{resource_id}")
             if request.method == "GET":
                 if to_invalidate_extra is not None or pattern_to_invalidate_extra is not None:
                     raise InvalidRequestError
 
-                cached_data = await client.get(cache_key)
+                cached_data = await client.get(stored_key)
                 if cached_data:
                     return cast(R, json.loads(cached_data.decode()))
 
@@ -339,18 +441,18 @@ def cache(
                 serializable_data = jsonable_encoder(result)
                 serialized_data = json.dumps(serializable_data)
 
-                await client.set(cache_key, serialized_data)
-                await client.expire(cache_key, expiration)
+                await client.set(stored_key, serialized_data)
+                await client.expire(stored_key, expiration)
 
                 return cast(R, json.loads(serialized_data))
 
             else:
-                await client.delete(cache_key)
+                # Namespaced, unlike the pattern sweeps below - see `across_builds`.
+                await client.delete(stored_key)
                 if to_invalidate_extra is not None:
                     formatted_extra = _format_extra_data(to_invalidate_extra, kwargs_dict)
                     for prefix, id in formatted_extra.items():
-                        extra_cache_key = f"{prefix}:{id}"
-                        await client.delete(extra_cache_key)
+                        await client.delete(namespaced(f"{prefix}:{id}"))
 
                 if pattern_to_invalidate_extra is not None:
                     for pattern in pattern_to_invalidate_extra:

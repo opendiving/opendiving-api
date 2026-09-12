@@ -3948,24 +3948,24 @@ Redis survives `docker compose restart api`, so the cure is to drop the stale ke
 restart again:
 
 ```bash
-docker compose exec -T redis redis-cli --scan --pattern 'user_*_dives:dive_activity*' | xargs -r docker compose exec -T redis redis-cli DEL
+docker compose exec -T redis redis-cli --scan --pattern 'resp:*:user_*_dives:dive_activity*' | xargs -r docker compose exec -T redis redis-cli DEL
 ```
 
-Deliberately not fixed by versioning the key (`dive_activity_v2`). The window is one 60-second TTL,
-it self-heals, and pre-launch it can only ever be a developer switching branches with a warm Redis -
-which is a smaller cost than a version suffix that every future shape change has to remember to
-bump, and that goes stale the moment someone forgets. A longer-lived cache, or a deployed API, would
-flip that trade.
+**This was deliberately not fixed by versioning the key (`dive_activity_v2`)**, and the paragraph
+that said so named the condition that would flip the trade: "a longer-lived cache, **or a deployed
+API**". The second of those arrived on 2026-09-12, and it changes who pays: the stale window belongs
+to whoever is signed in when a shape change reaches them rather than to the developer who made it,
+and the remedy above - `docker compose exec` into the local stack's Redis - has no counterpart on an
+instance whose Redis is managed. See *"`PROJECT_OPERATED` is the first setting that knows who runs
+the instance, and it selects copy only"*.
 
-**The second of those two arrived on 2026-09-12**, so the paragraph above records a trade that has
-expired rather than one still in force. There is a deployed API: the stale window belongs to whoever
-is signed in when a shape change reaches it rather than to the developer who made it, and the remedy
-above - `docker compose exec` into the local stack's Redis - has no counterpart on an instance whose
-Redis is managed. Neither half of that is settled here. Whoever next changes the shape of a cached
-response owes the call the flip condition asks for - version the key, or write down how that
-instance's Redis is flushed - and must not read the paragraph above as having made it for them. See
-*"`PROJECT_OPERATED` is the first setting that knows who runs the instance, and it selects copy
-only"*.
+**Both halves of that call are now settled, and not on this key.** What the flip bought is not a
+suffix here - the objection to per-key suffixes only got stronger once the exposure was swept,
+because this endpoint is neither the only cached response nor the worst-exposed one - but a
+namespace under every key the response cache writes, which is what the `resp:*:` in the pattern
+above is, plus a written-down flush for the managed instance. So the next person to reshape a cached
+response owes neither: see *"A deploy cannot serve the previous build's response cache"*, which
+carries the sweep, the alternatives and both remedies.
 
 ## FIT is one parser for both vendors, and its one real trap is developer fields
 
@@ -17745,13 +17745,21 @@ with no key at all for a channel that did not exist then — reads back without 
 summary columns are NULL, which is exactly what `channels` means by "this profile has no such
 curve".
 
-## The dive *detail* cache key is versioned, and the suffix goes after the colon
+## The dive *detail* cache key was versioned, and the suffix went after the colon
 
-`_cached_read_dive` is keyed `user_{user_id}_dive:v2` rather than `user_{user_id}_dive`. This is the
-first change to owe the call *"Changing the shape of a cached response outlives the restart that
-ships it"* asks of whoever next reshapes a cached response, and it takes the version-the-key half:
-it needs no access to the instance and cannot be forgotten at deploy time, where a documented flush
-is a step somebody has to run.
+**Superseded after a day.** `_cached_read_dive` is keyed `user_{user_id}_dive` again; the response
+cache is namespaced per build instead, which is the same property for every cached response rather
+than for this one, and without anyone having to decide to have it. See *"A deploy cannot serve the
+previous build's response cache"* below. Kept because the two paragraphs after this one are not
+about the suffix: the first is the clearest statement in this file of *which* failure a stale
+response body causes, which is what the namespace has to be good enough to replace, and the second
+is a trap that is still live for anyone who ever adds a suffix here.
+
+What it said, for as long as it was true: `_cached_read_dive` is keyed `user_{user_id}_dive:v2`
+rather than `user_{user_id}_dive`. This is the first change to owe the call *"Changing the shape of
+a cached response outlives the restart that ships it"* asks of whoever next reshapes a cached
+response, and it takes the version-the-key half: it needs no access to the instance and cannot be
+forgotten at deploy time, where a documented flush is a step somebody has to run.
 
 **The failure it prevents is a wrong answer, not the 500 that section records**, and the difference
 decides when the next reader owes this at all. That section's worked example is a *required* field
@@ -17777,6 +17785,15 @@ renders — so its shape is untouched by this change. `read_dive_profile` is not
 the shorter one does not also eat the dive *site* list. A suffix joined with an underscore
 (`user_{id}_dive_v2:…`) falls outside both, and invalidation would silently stop working on the one
 response this change reshapes, with nothing failing to say so.
+
+**Why the suffix went rather than staying as harmless belt-and-braces.** A namespace that moves on
+every build makes a per-key suffix inert wherever it matters: `resp:{build}:user_7_dive:v2` and
+`resp:{build}:user_7_dive` are equally cold behind a new build. The one place it still reached was a
+source checkout — and the fingerprint fallback took that too, so what was left was a key segment
+nobody could act on and a standing question for the next reader about whether they owed a `:v3`.
+They do not, and neither does the next cached response to be reshaped. The obligation the paragraph
+above hands them is discharged by *"A deploy cannot serve the previous build's response cache"*
+rather than by them.
 
 ## `other` is storage's spelling of an absent event type, and it never reaches the wire
 
@@ -17881,10 +17898,160 @@ beside the primary keeps its answer in `logbook.divejson`, which carries every r
 **Nothing here needed a cache change**, which is worth saying out loud now that an instance holds
 data: the export routes carry no `@cache` and answer `no-store` (*"The export endpoints are never
 cached, and say `no-store`"*), so a shape change to the document reaches the next download with
-nothing to invalidate. The read shapes this depends on were already versioned by the change that
-stored the channels.
+nothing to invalidate. The read shapes this depends on were carrying a version suffix when this was
+written; the suffix is gone and the response cache is namespaced per build instead, which changes
+nothing here — the export routes were never in it either way.
 
 **The two writers do not share code, deliberately.** `divejson`'s `uddf_write.py` emits from a
 DiveJSON document and this one from the app's models, and the app's is the reference writer of the
 two. They agree on every one of the decisions above because both were settled against the same XSD
 and the same round trip, not because either calls the other.
+
+## A deploy cannot serve the previous build's response cache
+
+`core/utils/cache.py` writes every key it owns under `resp:{build}:`, where `{build}` is
+`APP_COMMIT` (truncated), falling back to a digest of the `app` package's sources. A build therefore
+reads only what it wrote, and a deploy starts from a cold response cache rather than from the
+previous build's bodies.
+
+**The failure it removes is a 500, not stale data.** `@cache` stores a serialized response body, and
+a hit is `json.loads`ed and handed straight back without re-running the route - so an entry written
+before a field existed reaches FastAPI's `response_model` validation and fails it:
+
+```
+ResponseValidationError: {'type': 'missing', 'loc': ('response', 0, 'day'),
+                          'input': {'year': 2025, 'month': 10, 'dives': 47}}
+```
+
+Every reader of that endpoint gets a 500 until the entry expires. Nothing fails at build time, in
+CI, or on the first request - the error arrives only where a warm cache meets new code, which before
+2026-09-12 meant a developer switching branches and nowhere else. *"Dives-per-day is counted in
+Python"* recorded that trade and named the condition that would end it: a deployed API. The
+project-operated instance became one.
+
+**The sweep found that dive-activity was the endpoint that noticed, not the one most exposed.** The
+exposure belongs to the `@cache` decorator rather than to any endpoint, so it is every function it
+wraps: each `@cache`-decorated read in `api/v1/`, plus the two builds `OwnedResourceCache` makes in
+its constructor. The aggregate and list caches pass `expiration=60`; **every single-resource read
+takes the decorator's 3600-second default**, `_cached_read_dive` and `_cached_read_certification`
+among them. So the window on a chart nobody had loaded yet was a minute, and the window on
+`GET /dive/{uuid}` - which a diver opens on every dive page - was an hour. Sweeping by shape rather
+than by endpoint is the only way to see that: the question is which cached values outlive a shape
+change, not which ones mention a version.
+
+**Why a namespace and not a version suffix per key.** A suffix has to be bumped by the person making
+the shape change, on the right key, in the same commit - and nothing fails when they don't. That is
+not a hypothetical failure mode: `species_service`'s `v6` → `v7` is recorded two sections up as "the
+step this change could most easily have shipped without", and the geocoder's `v2` → `v3` is the same
+trap hit earlier. One suffix per cached response would be that obligation once per cached response,
+forever, and the count is not small. The namespace moves on its own, covers everything the decorator
+writes including whatever is added next, and is the same mechanism - invalidation by moving a prefix
+
+- with the bump taken out of a human's hands.
+
+**Why `species:` and `geocode:` keep their hand-bumped `_CACHE_VERSION` and are deliberately not
+namespaced.** Two reasons, and either would be enough. They cache a *remote register's* answer for a
+month, and surviving a deploy is the entire point - namespacing them would re-ask WoRMS, Wikidata
+and the geocoder for everything, from cold, on every merge to the edge channel. And they do not have
+this failure mode anyway: both read an entry back through their model's constructor inside a
+`try`/`except ValueError, TypeError, ValidationError`, so an entry whose shape no longer fits is a
+cache miss rather than a 500. Their versions exist for the case a namespace could not catch either -
+an entry that still *validates* but carries text the normalizer no longer writes, like the WoRMS
+attribution. `@cache` has no model to validate against, which is why it gets the blunter instrument.
+
+**Reads and writes are namespaced, pattern sweeps are not, and keyed deletes are.**
+`_delete_keys_by_pattern` widens whatever it is given to `resp:*:` (`across_builds`), because an
+invalidation means "this user's dives changed", which is as true of a superseded build's copy as of
+this one's - and `erase_user` sweeping `user_{id}_*` has to mean every cached row of that account's,
+not the ones this image happened to write. A keyed delete inside the decorator needs no widening:
+the key is deleted so that *this* build stops serving it, and no other build's entry is readable
+from here. The residue that leaves is a rollback landing inside the TTL - the older image's own
+entries become readable again, up to an hour stale on a single-resource read, and self-healing.
+Closing that would cost a `SCAN` on every mutation of a trip or a dive site, to cover a case a
+cache-busting deploy of the same image already handles.
+
+**The one per-key suffix in the tree went with this.** `_cached_read_dive` was keyed
+`user_{user_id}_dive:v2` the day before, reasoned for at *"The dive detail cache key was versioned"*
+above on the grounds that a suffix "cannot be forgotten at deploy time" - which is exactly the
+property this has, for every cached response rather than for one, so the suffix reached nothing the
+namespace did not and left the next reader wondering whether they owed a `:v3`. They do not.
+
+**A shape check on read was the serious alternative, and it is weaker than it looks.** Holding the
+expected type in the decorator and rejecting a body that no longer fits would be automatic, need no
+build identity, and catch a stale entry whatever made it stale. It also catches only half the
+failure, and the quieter half survives: the members that change a response are usually *defaulted* -
+`RecordingRead.mode` and `.deco_model` are `Field(default=None)` - so the previous build's body
+validates perfectly and tells a diver their dive has no mode and four curves for the whole hour.
+*"The dive detail cache key was versioned"* has that worked out in full. A namespace does not reason
+about shape at all, which is what lets it catch both: a body written by different code is not this
+code's to serve. The other half of it is that half the cached functions are typed `-> dict` - the
+FastCRUD paginated lists - so a type held at the decorator would have validated nothing precisely
+where the list pages carry the same rows that break.
+
+**A source checkout gets a digest of its own code**, which is the half of this that nearly did not
+get built. `APP_COMMIT` is empty outside a published image, and the obvious fallback - `APP_VERSION`
+
+- is useless for the case that matters: it comes from the installed distribution metadata, so every
+  branch of a development tree shares one value (`0.1.0` today) and a branch switch with a warm
+  Redis goes on serving the other branch's bodies. That was the original gap this whole section was
+  written around, left standing with a flush as its remedy. `_source_fingerprint` closes it by
+  hashing every `.py` under `app/` once at import: it moves when the code moves and at no other
+  time, it is identical across gunicorn's four workers because they hash the same files, and inside
+  an image it is simply a constant - which is why `APP_COMMIT` is consulted first and the walk never
+  runs there. Two things about it are load-bearing:
+
+- **The whole package, not `schemas/`.** A body is shaped by the schema *and* by what populated it,
+  so a `_to_public_dive` that starts filling a field differently reshapes the response with no
+  schema edit anywhere. "The code" also needs no judgement about which files count, which is what
+  keeps it from drifting.
+
+- **Hashing nothing returns `None`, not a digest.** `rglob` on a directory that does not exist
+  yields no paths and raises nothing, so a root that misses the package would digest the empty
+  string - a stable value, identical in every checkout and every image, which namespaces every key
+  and separates no builds while everything downstream keeps working. `TestTheSourceFingerprint` pins
+  that, and pins that `parents[2]` lands on `app/`.
+
+`APP_VERSION` and the `dev` tail remain only for a tree whose sources cannot be read at all. Neither
+is expected, and neither is worth failing startup over - this is evaluated at import.
+
+The flush is still worth knowing, because a namespace is not a way to drop a payload cached from a
+bug - with `resp:*:` in front of the pattern now, and worth widening past `dive_activity` since the
+hour-long keys are the ones that hurt:
+
+```bash
+docker compose exec -T redis redis-cli --scan --pattern 'resp:*' | xargs -r docker compose exec -T redis redis-cli DEL
+```
+
+**What the sweep excluded, and why.** Each of these is in Redis and none of them has this exposure:
+
+- **Rate-limit counters** (`<action>:user:{id}`, `<action>:ip:{addr}`) are integers behind `INCR`,
+  with no shape to outlive. Namespacing them would restart every window on every deploy, which is
+  the opposite of what a rate limit is for.
+- **Passkey challenges** (`auth:passkey-challenge:*`) are opaque strings, consumed once, ten minutes
+  long. A deploy landing mid-registration must not invalidate the challenge in the browser's hands.
+- **The arq queue** holds no job arguments to go stale: `WorkerSettings.functions` is empty and
+  every entry is a `cron` job taking only `ctx`, so nothing is ever enqueued with a payload.
+- **The `Cache-Control` header** is the one cache here that is not Redis at all, and it does carry a
+  response body across a deploy - in a browser. `ClientCacheMiddleware` only ever says
+  `public, max-age=<CLIENT_CACHE_MAX_AGE>` - a minute by default - only on a safe method, and only
+  when the request carried no credential, so what can be held is an unauthenticated body, read by a
+  web app that is deployed separately and version-skewed against this API by design.
+
+**Flushing the project-operated instance, which cannot be `docker compose exec`ed into.** Its Key
+Value instance is Render-managed with an empty `ipAllowList` and is reachable only over the private
+network, so the flush has to run from inside the `api` service. Two details make the obvious command
+fail:
+
+- Render's SSH gateway authenticates the key but **refuses exec requests** - `ssh host 'cmd'`
+  connects and closes with no output. It allows an interactive shell, so commands go in on stdin
+  with a TTY: `printf 'cmd\nexit\n' | ssh -tt <service-id>@ssh.<region>.render.com`.
+- There is no `redis-cli` in the image. The runtime stage is `python:3.14-slim-bookworm` plus the
+  virtualenv, and `redis` is already a dependency, so the client to reach for is
+  `/app/.venv/bin/python` with `redis.Redis.from_url` and `scan_iter`, building the URL from
+  `REDIS_CACHE_HOST`/`REDIS_CACHE_PORT`/`REDIS_PASSWORD` in `os.environ` rather than importing
+  `app.core.config` (settings validate at import, and `~` is not on the path).
+
+With the namespace in place this is no longer the remedy for a deploy - it is the remedy for a
+payload cached from a bug, and for a namespace left behind by a rollback. `FLUSHALL` is the wrong
+instrument for either: it would take the rate-limit windows and the in-flight passkey challenges
+with it. Scan `resp:*` and delete what matches.

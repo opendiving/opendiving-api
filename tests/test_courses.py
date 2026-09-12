@@ -47,6 +47,7 @@ from src.app.core.exceptions.http_exceptions import (
     UnprocessableEntityException,
 )
 from src.app.core.utils import cache as cache_module
+from src.app.core.utils.cache import across_builds, namespaced
 from src.app.crud.crud_courses import (
     _LIST_ORDER,
     crud_courses,
@@ -536,8 +537,8 @@ class TestReadPath:
             )
 
         (key,) = redis.written
-        assert key == f"user_{USER_ID}_courses:page_2:items_per_page:10:search:nitrox:{USER_ID}"
-        assert fnmatch(key, f"user_{USER_ID}_course*")
+        assert key == namespaced(f"user_{USER_ID}_courses:page_2:items_per_page:10:search:nitrox:{USER_ID}")
+        assert fnmatch(key, across_builds(f"user_{USER_ID}_course*"))
 
     @pytest.mark.asyncio
     async def test_the_item_key_is_swept_by_the_same_pattern(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -553,8 +554,8 @@ class TestReadPath:
             )
 
         (key,) = redis.written
-        assert key == f"user_{USER_ID}_course:{course.uuid}"
-        assert fnmatch(key, f"user_{USER_ID}_course*")
+        assert key == namespaced(f"user_{USER_ID}_course:{course.uuid}")
+        assert fnmatch(key, across_builds(f"user_{USER_ID}_course*"))
 
     @pytest.mark.asyncio
     async def test_listing_another_users_courses_is_a_403(self, monkeypatch: pytest.MonkeyPatch) -> None:

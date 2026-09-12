@@ -54,6 +54,7 @@ from src.app.api.v1 import trips as trips_module
 from src.app.core.exceptions.http_exceptions import NotFoundException, UnprocessableEntityException
 from src.app.core.schemas import DATE_RANGE_MESSAGE
 from src.app.core.utils import cache as cache_module
+from src.app.core.utils.cache import across_builds, namespaced
 from src.app.crud.crud_trip_locations import get_locations_for_trip, replace_locations_for_trip
 from src.app.models.trip import Trip
 from src.app.models.trip_location import TripLocation
@@ -558,8 +559,8 @@ class TestReadPath:
         # reads were hand-rolled, and inside the `user_{id}_trips:*` pattern
         # `invalidate_list` sweeps after every create, update and delete.
         (key,) = redis.written
-        assert key == f"user_{USER_ID}_trips:page_2:items_per_page:10:search:moalboal:{USER_ID}"
-        assert fnmatch(key, f"user_{USER_ID}_trips:*")
+        assert key == namespaced(f"user_{USER_ID}_trips:page_2:items_per_page:10:search:moalboal:{USER_ID}")
+        assert fnmatch(key, across_builds(f"user_{USER_ID}_trips:*"))
 
     @pytest.mark.asyncio
     async def test_a_single_trip_embeds_its_locations(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -581,7 +582,7 @@ class TestReadPath:
         assert [location["name"] for location in body["locations"]] == ["Moalboal", "Bohol"]
         # The same key `patch_trip` and `erase_trip` delete - moving off
         # `OwnedResourceCache.read_item` had to leave invalidation untouched.
-        assert list(redis.written) == [f"trip_cache:{trip.uuid}"]
+        assert list(redis.written) == [namespaced(f"trip_cache:{trip.uuid}")]
 
     @pytest.mark.asyncio
     async def test_a_missing_trip_is_a_404(self, monkeypatch: pytest.MonkeyPatch) -> None:
