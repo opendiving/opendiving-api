@@ -30,6 +30,7 @@ from uuid6 import uuid7
 from src.app.api.v1 import dives as dives_module
 from src.app.core.exceptions.http_exceptions import NotFoundException
 from src.app.core.utils import cache as cache_module
+from src.app.core.utils.cache import across_builds, namespaced
 from src.app.models.dive import Dive
 from src.app.models.user import User
 from src.app.schemas.dive import DiveNeighbors
@@ -298,6 +299,7 @@ class TestCacheKey:
             )
 
         key = redis.set.call_args[0][0]
-        assert key == f"user_7_dives:neighbors:{uuid}"
-        # The pattern `invalidate_dive_caches(7)` deletes. Redis glob, `fnmatch` here.
-        assert fnmatch(key, "user_7_dives:*")
+        assert key == namespaced(f"user_7_dives:neighbors:{uuid}")
+        # The pattern `invalidate_dive_caches(7)` deletes, widened to every build's
+        # namespace the way `_delete_keys_by_pattern` widens it. Redis glob, `fnmatch` here.
+        assert fnmatch(key, across_builds("user_7_dives:*"))

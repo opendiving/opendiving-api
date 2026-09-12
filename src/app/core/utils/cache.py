@@ -8,10 +8,54 @@ from fastapi import Request
 from fastapi.encoders import jsonable_encoder
 from redis.asyncio import ConnectionPool, Redis
 
+from ..config import settings
 from ..exceptions.cache_exceptions import CacheIdentificationInferenceError, InvalidRequestError, MissingClientError
 
 pool: ConnectionPool | None = None
 client: Redis | None = None
+
+# Every key this module writes is namespaced by the build that wrote it, because what it
+# stores is a *response body* and a response body outlives the build whose shape it matches.
+# A hit is `json.loads`ed and handed straight to FastAPI without re-running the route, so an
+# entry written before a field was added fails `response_model` validation on the way out -
+# a 500 on that endpoint, for everyone reading it, until the TTL runs out. That is one minute
+# on the aggregate endpoints and **an hour** on the single-resource reads, which take this
+# module's default `expiration`.
+#
+# Pre-launch this could be left alone: the only way to reach it was a developer switching
+# branches with a warm Redis, and `DECISIONS.md` said a deployed API would flip that trade.
+# One did, on 2026-09-12. The argument for a namespace here rather than a version suffix per
+# key - and for `species:` and `geocode:` keeping the hand-bumped versions they have - is
+# under *"A deploy cannot serve the previous build's response cache"* there.
+_NAMESPACE_ROOT = "resp"
+
+# What identifies a build, most specific first. `APP_COMMIT` is baked into the image and so
+# moves on every merge to the edge channel; `APP_VERSION` comes from the installed package
+# metadata and moves on every release, which is what an image built without the build arg
+# has. A source checkout has neither, and gets a constant - a branch switch there is the case
+# `DECISIONS.md` documents a flush for, because no value available in-process distinguishes
+# one working tree from the same tree a commit later.
+_BUILD = (settings.APP_COMMIT or "")[:12] or settings.APP_VERSION or "dev"
+_NAMESPACE = f"{_NAMESPACE_ROOT}:{_BUILD}"
+
+
+def namespaced(key: str) -> str:
+    """The Redis key this build reads and writes for the logical cache key `key`."""
+    return f"{_NAMESPACE}:{key}"
+
+
+def across_builds(pattern: str) -> str:
+    """The same key or pattern, widened to every build's namespace.
+
+    **Keyed deletes are this build's; pattern sweeps are every build's.** An invalidation
+    says "this user's dives changed", which is as true of a superseded build's copy as of
+    this one's - and `erase_user` sweeping `user_{id}_*` has to mean *every* cached row of
+    that user's, not the ones this particular image happened to write. A keyed delete needs
+    no such widening, because a key is deleted so that *this* build stops serving it and no
+    other build's entry is reachable from here.
+    """
+    return f"{_NAMESPACE_ROOT}:*:{pattern}"
+
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -158,6 +202,10 @@ async def _delete_keys_by_pattern(pattern: str) -> None:
     It retrieves a batch of keys matching the pattern on each iteration and deletes them
     until no matching keys are left.
 
+    The pattern is widened to every build's namespace before it is scanned (see
+    `across_builds`), so callers pass the logical pattern - `user_7_dives:*` - and never
+    spell the namespace themselves.
+
     Parameters
     ----------
     pattern: str
@@ -180,8 +228,9 @@ async def _delete_keys_by_pattern(pattern: str) -> None:
         return
 
     cursor = 0
+    namespaced_pattern = across_builds(pattern)
     while True:
-        cursor, keys = await client.scan(cursor, match=pattern, count=100)
+        cursor, keys = await client.scan(cursor, match=namespaced_pattern, count=100)
         if keys:
             await client.delete(*keys)
         if cursor == 0:
@@ -324,12 +373,12 @@ def cache(
                 resource_id = _infer_resource_id(kwargs=kwargs_dict, resource_id_type=resource_id_type)
 
             formatted_key_prefix = _format_prefix(key_prefix, kwargs_dict)
-            cache_key = f"{formatted_key_prefix}:{resource_id}"
+            stored_key = namespaced(f"{formatted_key_prefix}:{resource_id}")
             if request.method == "GET":
                 if to_invalidate_extra is not None or pattern_to_invalidate_extra is not None:
                     raise InvalidRequestError
 
-                cached_data = await client.get(cache_key)
+                cached_data = await client.get(stored_key)
                 if cached_data:
                     return cast(R, json.loads(cached_data.decode()))
 
@@ -339,18 +388,18 @@ def cache(
                 serializable_data = jsonable_encoder(result)
                 serialized_data = json.dumps(serializable_data)
 
-                await client.set(cache_key, serialized_data)
-                await client.expire(cache_key, expiration)
+                await client.set(stored_key, serialized_data)
+                await client.expire(stored_key, expiration)
 
                 return cast(R, json.loads(serialized_data))
 
             else:
-                await client.delete(cache_key)
+                # Namespaced, unlike the pattern sweeps below - see `across_builds`.
+                await client.delete(stored_key)
                 if to_invalidate_extra is not None:
                     formatted_extra = _format_extra_data(to_invalidate_extra, kwargs_dict)
                     for prefix, id in formatted_extra.items():
-                        extra_cache_key = f"{prefix}:{id}"
-                        await client.delete(extra_cache_key)
+                        await client.delete(namespaced(f"{prefix}:{id}"))
 
                 if pattern_to_invalidate_extra is not None:
                     for pattern in pattern_to_invalidate_extra:

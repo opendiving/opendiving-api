@@ -7,13 +7,22 @@ from fastapi import Request
 
 from src.app.core.exceptions.cache_exceptions import InvalidRequestError, MissingClientError
 from src.app.core.utils import cache as cache_module
-from src.app.core.utils.cache import cache
+from src.app.core.utils.cache import cache, namespaced
 
 
 def _make_request(method: str) -> Request:
     request = Mock(spec=Request)
     request.method = method
     return request
+
+
+def _sweeping_redis(*existing: str) -> Mock:
+    """A Redis stand-in whose `scan` answers with `existing` once, then ends the cursor."""
+    redis = Mock()
+    scanned = [(0, [key.encode() for key in existing])]
+    redis.scan = AsyncMock(side_effect=lambda *_args, **_kwargs: scanned.pop(0) if scanned else (0, []))
+    redis.delete = AsyncMock(return_value=len(existing))
+    return redis
 
 
 class TestCacheDecoratorGet:
@@ -48,7 +57,7 @@ class TestCacheDecoratorGet:
         func.assert_called_once()
         mock_redis.set.assert_called_once()
         cache_key = mock_redis.set.call_args[0][0]
-        assert cache_key == "item:1"
+        assert cache_key == namespaced("item:1")
         mock_redis.expire.assert_called_once_with(cache_key, 120)
 
     @pytest.mark.asyncio
@@ -65,7 +74,7 @@ class TestCacheDecoratorGet:
             await decorated(_make_request("GET"), user_id=7, item_id=99)
 
         cache_key = mock_redis.set.call_args[0][0]
-        assert cache_key == "user_7_items:99"
+        assert cache_key == namespaced("user_7_items:99")
 
     @pytest.mark.asyncio
     async def test_raises_invalid_request_error_when_get_has_invalidation_config(self):
@@ -109,7 +118,7 @@ class TestCacheDecoratorNonGet:
             result = await decorated(_make_request("PATCH"), id=1)
 
         assert result == {"message": "updated"}
-        mock_redis.delete.assert_called_once_with("item:1")
+        mock_redis.delete.assert_called_once_with(namespaced("item:1"))
 
     @pytest.mark.asyncio
     async def test_invalidates_extra_keys(self):
@@ -127,4 +136,56 @@ class TestCacheDecoratorNonGet:
             await decorated(_make_request("PUT"), item_id=1, user_id=7)
 
         deleted_keys = {call.args[0] for call in mock_redis.delete.call_args_list}
-        assert deleted_keys == {"item_data:1", "user_items:7"}
+        assert deleted_keys == {namespaced("item_data:1"), namespaced("user_items:7")}
+
+
+class TestTheNamespaceIsTheBuild:
+    """The guard for *"A deploy cannot serve the previous build's response cache"* in
+    `DECISIONS.md`.
+
+    What `@cache` stores is a response body, replayed without re-running the route, so an
+    entry outliving the shape it was written for is a `ResponseValidationError` - a 500 for
+    every reader of that endpoint until the TTL runs out, and up to an hour of it on the
+    single-resource reads. Nothing else fails when the namespace stops separating builds:
+    the tests above all pass, and so does every endpoint, right up until the deploy.
+    """
+
+    def test_the_key_carries_the_build(self):
+        assert namespaced("user_7_dive:abc").startswith(f"resp:{cache_module._BUILD}:")
+        assert namespaced("user_7_dive:abc").endswith(":user_7_dive:abc")
+
+    @pytest.mark.asyncio
+    async def test_another_builds_entry_is_not_a_hit(self):
+        """The whole point: the previous build's body is unreachable rather than replayed."""
+        stored = {"resp:an-older-build:item:1": b'{"shape": "yesterday"}'}
+        mock_redis = Mock()
+        mock_redis.get = AsyncMock(side_effect=lambda key: stored.get(key))
+        mock_redis.set = AsyncMock(return_value=True)
+        mock_redis.expire = AsyncMock(return_value=True)
+
+        func = AsyncMock(return_value={"shape": "today"})
+
+        with patch.object(cache_module, "client", mock_redis):
+            decorated = cache(key_prefix="item")(func)
+            result = await decorated(_make_request("GET"), id=1)
+
+        assert result == {"shape": "today"}
+        func.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_a_sweep_reaches_every_builds_entries(self):
+        """A keyed delete is this build's; a *pattern* sweep is every build's.
+
+        `erase_user` sweeps `user_{id}_*` and has to mean every cached row of that user's,
+        not the ones this image happened to write - and an ordinary invalidation is as true
+        of a superseded build's copy as of this one's.
+        """
+        older = "resp:an-older-build:user_7_dives:page_1"
+        mine = namespaced("user_7_dives:page_2")
+        mock_redis = _sweeping_redis(older, mine)
+
+        with patch.object(cache_module, "client", mock_redis):
+            await cache_module.delete_keys_by_pattern("user_7_dives:*")
+
+        assert mock_redis.scan.call_args.kwargs["match"] == "resp:*:user_7_dives:*"
+        mock_redis.delete.assert_awaited_once_with(older.encode(), mine.encode())

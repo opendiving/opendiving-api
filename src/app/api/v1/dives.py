@@ -905,9 +905,17 @@ async def renumber_user_dives(
 # repeats.
 #
 # `DECISIONS.md`'s *"Changing the shape of a cached response outlives the restart that ships
-# it"* offers version-the-key or write-down-how-that-Redis-is-flushed, and this is the first
+# it"* offered version-the-key or write-down-how-that-Redis-is-flushed, and this was the first
 # change to owe the call: versioning needs no access to the instance and cannot be forgotten
 # at deploy time, where a documented flush is a step somebody has to run.
+#
+# **That call has since been answered for every cached response at once**, by namespacing the
+# whole response cache per build (`core/utils/cache.py`), which is the same property without
+# anyone having to decide to have it. So this suffix is inert on any instance that ships - a
+# new build's namespace is cold whether the key ends `:v2` or not - and it reaches only a
+# source checkout, where the build identity is a constant. **The next response to be reshaped
+# owes no `:v3` and no suffix of its own**; see *"A deploy cannot serve the previous build's
+# response cache"*.
 #
 # **The suffix goes after the colon and not after an underscore.** `invalidate_dive_caches`
 # sweeps `user_{id}_dives:*` and `user_{id}_dive:*` - two literal patterns rather than one

@@ -54,7 +54,10 @@ class AppSettings(BaseSettings):
     APP_VERSION: str | None = config("APP_VERSION", default=_installed_version())
     # The commit the running image was built from, baked in by the `Dockerfile`'s
     # `APP_COMMIT` build arg. `None` everywhere else - a source checkout, a locally built
-    # image - and `/api/v1/health` is the only consumer. It exists because `APP_VERSION`
+    # image. Two consumers: `/api/v1/health` reports it, and `core/utils/cache.py` names the
+    # response cache's keys after it, so a deploy cannot be served the previous build's
+    # response bodies. Falling back to `APP_VERSION` there is why an image built without this
+    # arg still separates one release from the next. It exists because `APP_VERSION`
     # stops identifying a build the moment images are published per merge rather than per
     # release: on that channel every one of them reports the manifest's version, and the
     # AGPL source offer has to name something an operator can check out. Deliberately not
