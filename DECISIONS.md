@@ -18242,12 +18242,13 @@ cannot. So every reader of this message is either a developer whose `src/.env` c
 `src/.env.example`, or an operator on the by-hand path whose `.env` came from `example.env`. Both of
 them are editing a file called `.env`, and neither needs to know about the other's template.
 
-`Settings._require_s3_credentials` and `blob_store.backend_for` are the same defect in the same
-module, and they are being corrected to the same wording in **#184**, which was open and unmerged
-when this was written. Neither branch chooses the order, so read this section as the rule rather
-than as a report of the module's state: whichever lands first, the other still names
-`src/.env.example` until it lands too. If you are reading a checkout where one of those two still
-does and #184 is merged, that is a regression rather than the transitional state.
+`Settings._require_s3_credentials` (`src/app/core/config.py`) and `blob_store.backend_for`
+(`src/app/services/blob_store.py`) are the same defect one layer away, and they are being corrected
+to the same wording in **#184**, which was open and unmerged when this was written. Neither branch
+chooses the order, so read this section as the rule rather than as a report of what the tree says:
+whichever lands first, the other still names `src/.env.example` until it lands too. If you are
+reading a checkout where one of those two still does and #184 is merged, that is a regression rather
+than the transitional state.
 
 What did not change is the rest of the message, and that is deliberate: it says *why* the value
 matters (it signs every token this app issues) and carries the fix inline (`openssl rand -hex 32`).
