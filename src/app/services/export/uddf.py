@@ -14,16 +14,41 @@ conversions is a one-liner with a unit test carrying a hand-computed expectation
 a silently wrong factor of 100 000 produces a file that validates perfectly and is
 nonsense.
 
-**What the format cannot hold, this module does not fake.** Three cases came out of
-reading the XSD, and all three are exported in `logbook.divejson`/CSV instead:
+**The device's own decompression arithmetic goes out too, wherever UDDF has an element for
+it.** `<nodecotime>`, `<calculatedpo2>`, `<cns>` and `<gradientfactor>` are `<waypoint>`
+children, so `ndl`, `ppo2`, `cns` and `gradient_factor` travel a sample at a time beside
+the depth they were computed at; the primary recording's `mode` becomes a `<divemode type>`
+on the first waypoint. `<gradientfactor>` carries the **documented fraction** - our whole
+percent divided by 100 - rather than the percent itself, because the percent spelling is
+only read back by a consumer that recognizes the generator that wrote it, and nothing
+recognizes ours. A reader taking `67` at the documented scale gets 6700 %; our own logbook
+import is one of those readers, so the fraction is what makes a round trip through this
+app's own front door land on the number it started from.
+
+**What the format cannot hold, this module does not fake.** Every case here came out of
+reading the XSD, and each is exported in `logbook.divejson`/CSV instead:
 
 - **The deco ceiling.** The only per-waypoint slot is `<decostop>`, whose `duration`
   attribute is `use="required"` - and a ceiling sample says how deep the obligation was,
   never how long the stop should last. Emitting one would mean inventing the number that
   matters most.
-- **CNS and OTU.** `informationafterdiveType` has no oxygen-exposure element at all (the
-  only `<cns>`/`<otu>` in the schema are children of `<waypoint>`, and we store end-of-dive
-  scalars rather than a per-sample series).
+- **OTU, and the dive's own CNS and OTU totals.** `informationafterdiveType` has no
+  oxygen-exposure element at all, so `cns_start`/`cns_end`/`otu_start`/`otu_end` - the
+  device's figures for the whole dive - have nowhere to go. `<otu>` is a `<waypoint>` child
+  like `<cns>` and stays empty for the other half of the same sentence: we store no `otu`
+  channel to put in it. The per-sample `cns` channel *is* written, which is what makes
+  these two different answers now rather than one.
+- **The deco model.** `<decomodel>` is an `xs:all` of `<buehlmann>`, `<rgbm>` and `<vpm>`
+  with none of the three optional, and each of those requires at least one `<tissue>`
+  carrying a half-time and its coefficients. A recording holds a family, the device's own
+  name for the model, a gradient-factor pair and a conservatism setting - no tissue table -
+  so there is no way to write one and stay valid against the XSD every document here is
+  held to. `<gradientfactorlow>`/`<gradientfactorhigh>` live *inside* `<buehlmann>` and go
+  with it, which is why `deco_gf_low`/`deco_gf_high` reach the file nowhere at all.
+- **`tts` and `surface_gradient_factor`.** 3.2.2 has no time-to-surface element and no
+  surface gradient factor - not a mandatory attribute we cannot fill, simply no slot. The
+  per-waypoint `<gradientfactor>` above is the leading tissue's now, which is
+  `gradient_factor` and not the surface figure beside it.
 - **Gas `role`, tank `usage`, service schedules and training courses.** No slot for any
   of them. A course is the one that looks close to having one - `<divetrip>` carries a
   name and a date range - but a training course is not a trip, and folding it in would
@@ -62,8 +87,18 @@ from ...core.config import settings
 from ...core.utils.datetime_offset import combine_start_time
 from ...models.dive import Dive
 from ...models.gear_item import GearItem
+from ...schemas.dive import DiveMode
 from ...schemas.dive_mixture import DiveMixtureRead
-from ...schemas.dive_profile import DEPTH_SCALE, PRESSURE_SCALE, TEMPERATURE_SCALE, ProfileEventType
+from ...schemas.dive_profile import (
+    CNS_SCALE,
+    DEPTH_SCALE,
+    GRADIENT_FACTOR_SCALE,
+    NDL_SCALE,
+    PPO2_SCALE,
+    PRESSURE_SCALE,
+    TEMPERATURE_SCALE,
+    ProfileEventType,
+)
 from ...schemas.gear_item import GearType
 from ..dive_profiles import load_profile
 from .loader import ExportBundle
@@ -79,6 +114,10 @@ PASCAL_PER_BAR = 100_000.0
 # UDDF tank volumes are cubic meters; divers, cylinder stampings and our `volume` column
 # are all litres.
 LITRES_PER_CUBIC_METRE = 1000.0
+# `<gradientfactor>` is documented as a fraction - its one example is `0.8` glossed as 80 %
+# - where `gradient_factor` is stored in whole percent. See the module docstring for why
+# the fraction is the only spelling this writer can use.
+PERCENT_PER_FRACTION = 100.0
 # The furthest a reading is ever moved to reach a waypoint - see `_snap_tolerance`.
 MAX_SNAP_SECONDS = 30
 
@@ -143,12 +182,35 @@ _EQUIPMENT_ORDER = (
 
 _SUIT_TYPE = {GearType.WETSUIT: "wet-suit", GearType.DRYSUIT: "dry-suit"}
 
+# What `<divemode type>` spells each of our modes. `divemodeType` enumerates five values and
+# `DiveMode` five, and they are not the same five.
+#
+# `freedive` is written `apnoe` rather than `apnea`: the schema carries both, `apnea` having
+# been added beside the original in 2017, and the older word is the one every 3.2.x reader
+# knows.
+#
+# **`gauge` maps to nothing, and that is a fact about UDDF.** `divemodeType` has no value
+# for a computer run as a bottom timer, so a gauge recording gets no `<divemode>` at all -
+# writing the nearest would tell an importer the diver was on a circuit they were not.
+# Spelled as an explicit `None` rather than left out, so the assert below covers every mode
+# and a sixth added later cannot arrive here as a silent hole.
+_DIVE_MODE_TYPE: dict[DiveMode, str | None] = {
+    DiveMode.OPEN_CIRCUIT: "opencircuit",
+    DiveMode.CLOSED_CIRCUIT: "closedcircuit",
+    DiveMode.SEMI_CLOSED: "semiclosedcircuit",
+    DiveMode.GAUGE: None,
+    DiveMode.FREEDIVE: "apnoe",
+}
+
 # `_EQUIPMENT_ELEMENT` is looked up unguarded, so a `GearType` added without a home here
 # would be a `KeyError` at export time rather than a mis-categorized item - and the one
 # place it would surface is a diver's download. Asserted at import, where it is a startup
 # failure in CI instead.
 assert set(_EQUIPMENT_ELEMENT) == set(GearType), "every GearType needs a UDDF equipment element"
 assert set(_EQUIPMENT_ELEMENT.values()) <= set(_EQUIPMENT_ORDER), "equipmentType is a sequence; every tag needs a slot"
+# The same guard for the same reason, and the `None` above is why it can be an equality: a
+# mode with no UDDF value is answered here rather than absent from here.
+assert set(_DIVE_MODE_TYPE) == set(DiveMode), "every DiveMode needs an answer, including 'no UDDF value'"
 
 
 def _num(value: float) -> str:
@@ -309,6 +371,30 @@ def _gear_type(stored: str | None) -> GearType:
         return GearType(stored) if stored else GearType.OTHER
     except ValueError:
         return GearType.OTHER
+
+
+def _divemode_type(stored: str | None) -> str | None:
+    """The `<divemode type>` a stored `dive_recording.mode` maps to, or `None` for no element.
+
+    Three separate cases arrive as the same answer, which is the point: no mode was recorded,
+    the mode was `gauge` and UDDF has no word for it, or the column holds a value outside
+    `DiveMode` altogether. `mode` is a stored vocabulary with no DB `CHECK` behind it (see
+    *"A stored vocabulary is read back as a string"* in DECISIONS.md), so the third is a real
+    row and not a defensive hypothetical - the same trap `_gear_type` above exists for, where
+    a bare `DiveMode(stored)` was a `ValueError` on one row and a 500 on the whole export.
+
+    `None` here means the waypoint gets no `<divemode>`, which UDDF reads as its own default
+    of open circuit. That is the format's claim about its default rather than ours about the
+    dive, and it is the only thing this writer can do: an absence is the one spelling
+    available for a mode 3.2.2 cannot name.
+    """
+    if not stored:
+        return None
+    try:
+        mode = DiveMode(stored)
+    except ValueError:
+        return None
+    return _DIVE_MODE_TYPE[mode]
 
 
 def _equipment_element(bundle: ExportBundle) -> ET.Element | None:
@@ -529,6 +615,7 @@ def _waypoints(
     data: dict,
     *,
     mix_id_by_gas_number: dict[int, str],
+    mode: str | None,
 ) -> None:
     """Turn the stored per-channel series into UDDF's one-waypoint-per-instant shape.
 
@@ -560,6 +647,12 @@ def _waypoints(
     A profile with no depth channel therefore emits **no `<samples>` at all** rather than
     the depth-less waypoints that started this. Everything at full resolution, on its own
     unsnapped time axis, is in `logbook.divejson`.
+
+    **`mode` is the recording's and rides on the first waypoint**, which is where UDDF puts
+    a `<divemode>` and why it is a parameter here rather than something `_dive_element`
+    could write beside `<greatestdepth>`. A recording whose depth channel is missing
+    therefore loses its mode along with its samples - there is no waypoint to carry it, and
+    `informationbeforedive` has no slot of its own.
     """
     depth = _series_by_second(data.get("depth"))
     if not depth:
@@ -568,6 +661,14 @@ def _waypoints(
 
     tolerance = _snap_tolerance(seconds)
     temperature = _snapped(_series_by_second(data.get("temperature")), seconds, tolerance)
+    # The four deco readouts UDDF has a `<waypoint>` child for, snapped onto the depth axis
+    # exactly like temperature: they are readings the device computed at an instant, and the
+    # rule for reaching a waypoint honestly is the channel's, not the quantity's.
+    ndl = _snapped(_series_by_second(data.get("ndl")), seconds, tolerance)
+    ppo2 = _snapped(_series_by_second(data.get("ppo2")), seconds, tolerance)
+    cns = _snapped(_series_by_second(data.get("cns")), seconds, tolerance)
+    gradient_factor = _snapped(_series_by_second(data.get("gradient_factor")), seconds, tolerance)
+    divemode = _divemode_type(mode)
     pressure: list[tuple[str, dict[int, int]]] = []
     for cylinder in data.get("pressure") or []:
         mix_id = mix_id_by_gas_number.get(cylinder["gas_number"])
@@ -622,8 +723,19 @@ def _waypoints(
 
     samples = _sub(parent, "samples")
     for second in seconds:
-        # `waypointType` is an `xs:sequence`, so these have to go in exactly this order.
+        # `waypointType` is an `xs:sequence`, so these have to go in exactly this order -
+        # which is the type's own order and not a preference. `<cns>` comes third in it and
+        # therefore first in a waypoint carrying no alarm or battery reading, and
+        # `<nodecotime>` is last of all, several elements after the `<depth>` it was
+        # computed at. The XSD validation test is what holds this.
         waypoint = _sub(samples, "waypoint")
+        if second in cns:
+            # Percent, from our tenths of a percent.
+            _sub(waypoint, "cns", _num(cns[second] / CNS_SCALE))
+        if second in ppo2:
+            # Bar, from our hundredths of a bar - the second pressure in this file that is
+            # not Pascal, and for the same reason `<mix><maximumpo2>` is not.
+            _sub(waypoint, "calculatedpo2", _num(ppo2[second] / PPO2_SCALE))
         _sub(waypoint, "depth", _num(depth[second] / DEPTH_SCALE))
         _sub(waypoint, "divetime", _num(second))
         if second in markers_at:
@@ -637,6 +749,22 @@ def _waypoints(
                 _sub(waypoint, "tankpressure", _num(series[second] / PRESSURE_SCALE * PASCAL_PER_BAR), ref=mix_id)
         if second in temperature:
             _sub(waypoint, "temperature", _num(temperature[second] / TEMPERATURE_SCALE + KELVIN_OFFSET))
+        if divemode is not None and second == seconds[0]:
+            # Once per profile, on the first waypoint: the mode is one setting for the whole
+            # recording, and UDDF's reader convention is that the first waypoint stating one
+            # gives the dive its mode. Repeating it on every waypoint would be the same fact
+            # written several thousand times.
+            _sub(waypoint, "divemode", type=divemode)
+        if second in gradient_factor:
+            # The documented fraction, from our whole percent - see the module docstring.
+            # `@tissue` is left off: the channel is the *leading* tissue's, and the schema
+            # makes the attribute optional precisely because a file need not say which.
+            _sub(
+                waypoint, "gradientfactor", _num(gradient_factor[second] / GRADIENT_FACTOR_SCALE / PERCENT_PER_FRACTION)
+            )
+        if second in ndl:
+            # Seconds in both, which is why this one has no factor and still names its scale.
+            _sub(waypoint, "nodecotime", _num(ndl[second] / NDL_SCALE))
 
 
 def _deepest(profile_data: dict[str, Any] | None) -> float | None:
@@ -657,6 +785,7 @@ def _dive_element(
     *,
     mix_ids: dict[_MixKey, str],
     profile_data: dict | None,
+    mode: str | None,
 ) -> ET.Element:
     element = ET.Element("dive", {"id": _uddf_id("dive", dive.uuid)})
 
@@ -716,7 +845,7 @@ def _dive_element(
             _sub(tank, "tankpressureend", _num(mixture.end_pressure * PASCAL_PER_BAR))
 
     if profile_data:
-        _waypoints(element, profile_data, mix_id_by_gas_number=mix_id_by_gas_number)
+        _waypoints(element, profile_data, mix_id_by_gas_number=mix_id_by_gas_number, mode=mode)
 
     after = _sub(element, "informationafterdive")
     lowest = None if dive.bottom_temperature is None else dive.bottom_temperature + KELVIN_OFFSET
@@ -776,7 +905,17 @@ async def write_uddf(db: AsyncSession, bundle: ExportBundle, *, exported_at: dat
             profile = (
                 await load_profile(db, recording_id=primary.id) if primary is not None and primary.has_profile else None
             )
-            element = _dive_element(bundle, dive, mix_ids=mix_ids, profile_data=profile.data if profile else None)
+            # The mode comes from the same recording as the samples, for the same reason the
+            # samples come from the primary one: `<divemode>` is a waypoint child, so it can
+            # only ever describe the record the document actually carries. A backup computer
+            # run in gauge mode beside this one keeps its answer in `logbook.divejson`.
+            element = _dive_element(
+                bundle,
+                dive,
+                mix_ids=mix_ids,
+                profile_data=profile.data if profile else None,
+                mode=primary.mode if primary is not None else None,
+            )
             yield _serialize(element, level=3)
         yield f"{_INDENT * 2}</repetitiongroup>\n{_INDENT}</profiledata>\n".encode()
 

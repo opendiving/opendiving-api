@@ -5577,16 +5577,30 @@ The mapping from our columns to UDDF elements was settled against the vendored X
 (`tests/fixtures/uddf/uddf_3.2.2.xsd`), not from memory, and the schema contradicted what had been
 proposed in both directions.
 
-**Three things genuinely have nowhere to go, and are exported in `logbook.divejson`/CSV instead:**
+**Three things came out of that mapping with nowhere to go, and are exported in
+`logbook.divejson`/CSV instead.** Three is what *that* exercise found, and the list has grown since
+— `deco_model`, `tts` and `surface_gradient_factor` joined it when a recording started carrying a
+decompression model, under *"The UDDF export carries every deco readout the format has an element
+for"* below. The number is left standing as the count of what this section examined rather than
+raised to a figure that would go stale again the next time a member arrives.
 
 - **The deco ceiling.** The only per-waypoint slot is `<decostop>`, whose `duration` attribute is
   `use="required"`. A ceiling sample says how deep the obligation was; it says nothing about how
   long the stop should last. Emitting one means inventing precisely the number a reader would act
   on, so the channel is dropped — the same rule as *"Parsers report what a file recorded"*, applied
   on the way out.
+
 - **CNS and OTU.** `informationafterdiveType` has no oxygen-exposure element at all. The only
   `<cns>`/`<otu>` in the schema are children of `<waypoint>`, and what we store is a pair of
   end-of-dive scalars, not a per-sample series.
+
+  **Half of that stopped being true when a profile gained a per-sample `cns`.** The reasoning above
+  is the dive's `cns_start`/`cns_end`/`otu_start`/`otu_end` scalars', and for those it still holds
+  exactly as written; the sentence that no longer covers everything is "not a per-sample series",
+  because there is one now and it goes out as `<cns>`. OTU keeps the whole refusal, there being no
+  `otu` channel to put in the `<otu>` beside it. *"The UDDF export carries every deco readout the
+  format has an element for"* below is the current answer for all six channels and for `mode`.
+
 - **Gas `role`, gear sets, service schedules and history, c-card records, training courses.** No
   elements exist. A course is the near miss: `<divetrip>` has a name and a date range, but a
   training course is not a trip, and writing one there would have an importer read "PADI Open Water"
@@ -17778,3 +17792,73 @@ wording, which is the same marker one class less specific rather than a marker l
 FIT's `dive_alert` stays unclassified for the opposite reason: its `data` subfield is a 40-member
 enum nothing in hand says the meaning of, so the words go through as the label and no type is
 claimed. That is the same refusal, applied where the evidence is missing rather than present.
+
+## The UDDF export carries every deco readout the format has an element for
+
+Storing the six decompression channels and the recording's `mode` falsified this writer's own census
+without touching the file. Its module docstring opens *"What the format cannot hold, this module
+does not fake"* and gave, as the reason CNS stays out, that *"we store end-of-dive scalars rather
+than a per-sample series"* — true until a profile carried a `cns` channel, false the moment it did.
+Left alone the module would have dropped members UDDF holds while claiming to drop only what it
+cannot, which is the one failure a census like that exists to prevent.
+
+**Five elements, four of them per-sample.** `<nodecotime>`, `<calculatedpo2>`, `<cns>` and
+`<gradientfactor>` are `waypointType` children and take `ndl`, `ppo2`, `cns` and `gradient_factor` a
+reading at a time; `<divemode type>` goes on the **first** waypoint and states the recording's
+`mode`. The units are the conversions the rest of the writer already has a shape for — CNS tenths of
+a percent to percent, ppO₂ hundredths of a bar to bar, `ndl` seconds to seconds — and each is
+asserted against a hand-computed expectation rather than against the constant it is testing.
+
+**`<gradientfactor>` goes out as the documented fraction, and that is not a style choice.** UDDF
+documents the per-waypoint element as a fraction (its one example is `0.8` glossed as 80 %) while
+Shearwater Cloud Desktop writes whole percent in it. A magnitude test cannot separate the two —
+nearly every real value is `0` or `1` — so a reader has to key the question on the generator that
+wrote the file, which is what `divejson`'s `PERCENT_GRADIENT_FACTORS` does, and its one row is
+Shearwater's. This app's `<generator><name>` is `APP_NAME`, in nobody's table, so **our own logbook
+import reads our own export by the fraction branch**: a written `17` comes back as 1700 and a
+written `0.17` comes back as 17. The round trip through the app's own front door is what settles it,
+and no XSD test could have — both spellings validate.
+
+**`gauge` has no UDDF value at all.** `divemodeType` enumerates `apnea`, `apnoe`, `closedcircuit`,
+`opencircuit` and `semiclosedcircuit`; a computer run as a bottom timer is not among them, and
+writing the nearest would tell an importer the diver was on a circuit they were not. It gets no
+`<divemode>`, which UDDF reads as its own default of open circuit — the format's claim about its
+default rather than ours about the dive, and the only spelling available. `freedive` is written
+`apnoe` rather than the `apnea` added beside it in 2017, the older word being the one every 3.2.x
+reader knows. `_DIVE_MODE_TYPE` in `services/export/uddf.py` spells `gauge`'s answer as an explicit
+`None` so that the import-time assert can be an equality against `DiveMode` — a sixth mode added
+later cannot arrive as a hole.
+
+**The mode comes from the primary recording, and dies with its samples.** `<divemode>` is a waypoint
+child, so it can only describe the record the document actually carries — the same reason
+`<greatestdepth>` is taken off the profile being written. A recording whose depth channel is missing
+emits no `<samples>` at all and therefore loses its mode too; a backup computer run in gauge mode
+beside the primary keeps its answer in `logbook.divejson`, which carries every recording.
+
+**Three members stay out, and each for a different reason.**
+
+- **`deco_model`.** `<decomodel>` is an `xs:all` of `<buehlmann>`, `<rgbm>` and `<vpm>` with none of
+  the three optional, and each of those requires at least one `<tissue>` carrying a half-time and
+  its coefficients. A recording holds a family, a product name, a gradient-factor pair and a
+  conservatism setting — no tissue table — so there is no way to write one and stay valid against
+  the XSD every document here is held to. Shearwater ships `<decomodel><buehlmann>` with the pair
+  alone, which is evidence the schema is stricter than practice and not a licence to match it: the
+  XSD assertion is what holds element order right across this writer, and exempting one element from
+  it would cost more than the member is worth. `<gradientfactorlow>`/`<gradientfactorhigh>` live
+  inside `<buehlmann>` and go with it, so `deco_gf_low`/`deco_gf_high` reach the file nowhere.
+- **`tts` and `surface_gradient_factor`.** No element at all — 3.2.2 has no time-to-surface and no
+  surface gradient factor. A plainer refusal than the ceiling's, and one with no tag to assert the
+  absence of, so the test pins the *closed set* of children a waypoint may carry instead. That is
+  what stops a later hand deciding `tts` is close enough to `<remainingbottomtime>`, or that the
+  surface figure may as well ride in `<gradientfactor>` beside the leading tissue's.
+
+**Nothing here needed a cache change**, which is worth saying out loud now that an instance holds
+data: the three export endpoints carry no `@cache` and answer `no-store` (*"The export endpoints are
+never cached, and say `no-store`"*), so a shape change to the document reaches the next download
+with nothing to invalidate. The read shapes this depends on were already versioned by the change
+that stored the channels.
+
+**The two writers do not share code, deliberately.** `divejson`'s `uddf_write.py` emits from a
+DiveJSON document and this one from the app's models, and the app's is the reference writer of the
+two. They agree on every one of the decisions above because both were settled against the same XSD
+and the same round trip, not because either calls the other.
