@@ -1,5 +1,7 @@
 import functools
+import hashlib
 import json
+import pathlib
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any, Concatenate, ParamSpec, TypeVar, cast
@@ -29,17 +31,64 @@ client: Redis | None = None
 # under *"A deploy cannot serve the previous build's response cache"* there.
 _NAMESPACE_ROOT = "resp"
 
-# What identifies a build, most specific first. `APP_COMMIT` is baked into the image and so
-# moves on every merge to the edge channel; `APP_VERSION` comes from the installed package
-# metadata and moves on every release, which is what an image built without the build arg has
-# - and, because `uv sync` installs this project, what a source checkout has too (`0.1.0`
-# today, so the namespace there is `resp:0.1.0:`). The `dev` tail is reached only by a tree
-# that was never installed, where `_installed_version` raises `PackageNotFoundError`.
-#
-# So a local checkout's namespace is constant across branches, which is why a branch switch
-# with a warm Redis is still the case `DECISIONS.md` documents a flush for: nothing available
-# in-process distinguishes one working tree from the same tree a commit later.
-_BUILD = (settings.APP_COMMIT or "")[:12] or settings.APP_VERSION or "dev"
+
+def _source_fingerprint() -> str | None:
+    """A digest of the `app` package's sources, or `None` if they cannot be read.
+
+    This is what identifies a build where no commit was baked into the image - a source
+    checkout, or an image someone built without the build arg. `APP_VERSION` cannot do that
+    job: it comes from the installed distribution metadata and moves on a release, so every
+    branch of a development tree shares one value and a branch switch with a warm Redis
+    serves the other branch's bodies. That was this mechanism's one documented gap, and a
+    digest of the code closes it with nothing to configure and nothing to remember.
+
+    **The whole package rather than `schemas/` alone.** A response body is shaped by the
+    schema *and* by whatever populated it, so a `_to_public_dive` that starts filling a field
+    differently changes the body with no schema edit anywhere - and a rule that says "the
+    code" needs no judgement about which files count.
+
+    Deterministic across processes, which is what makes it usable: gunicorn's four workers
+    hash the same files and agree, where a value minted per process would split the cache
+    four ways. Inside an image the sources are baked, so it is simply a constant - which is
+    also why `APP_COMMIT` is consulted first and this never runs there.
+    """
+    # This file is `app/core/utils/cache.py`, so the package root is three levels up.
+    return _digest_sources(pathlib.Path(__file__).resolve().parents[2])
+
+
+def _digest_sources(package: pathlib.Path) -> str | None:
+    """Hash every `.py` under `package`, path and contents, in a fixed order.
+
+    The path goes into the digest as well as the bytes, so moving a file between modules
+    moves the digest even when nothing inside any file changed.
+    """
+    digest = hashlib.blake2b(digest_size=6)
+    hashed = 0
+    try:
+        for source in sorted(package.rglob("*.py")):
+            digest.update(str(source.relative_to(package)).encode())
+            digest.update(source.read_bytes())
+            hashed += 1
+    except OSError:
+        # Never a reason to fail startup: a namespace that is merely coarse costs a stale
+        # window, and `APP_VERSION` is the coarse one.
+        return None
+
+    # **Hashing nothing is the failure that hides.** `rglob` on a directory that does not
+    # exist yields no paths and raises nothing, so a root that misses the package returns a
+    # digest of the empty string - a perfectly stable value, identical in every checkout and
+    # every image, which namespaces every key and separates no builds at all. Everything
+    # downstream keeps working and the fallback silently stops doing its job.
+    return digest.hexdigest() if hashed else None
+
+
+# What identifies a build, most specific first. `APP_COMMIT` is baked into the image and
+# moves on every merge to the edge channel; it comes first because it is the only one of the
+# three that also moves when a *dependency* does, and `PaginatedListResponse` is FastCRUD's
+# envelope rather than ours. The digest below is next, and answers everywhere the arg was not
+# passed. `APP_VERSION` and the `dev` tail are what remain if the sources cannot be read at
+# all - neither is expected, and neither is wrong enough to crash startup over.
+_BUILD = (settings.APP_COMMIT or "")[:12] or _source_fingerprint() or settings.APP_VERSION or "dev"
 _NAMESPACE = f"{_NAMESPACE_ROOT}:{_BUILD}"
 
 

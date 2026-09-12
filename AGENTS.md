@@ -102,8 +102,9 @@ something to look up, not to restate it.
 - **Cache keys stay user-scoped** (`user_{id}_...`) — pattern invalidation depends on it. That is
   the *logical* key; `core/utils/cache.py` writes it under a `resp:{build}:` namespace so a deploy
   cannot be served the previous build's response bodies, and widens every sweep pattern to match.
-  Pass logical keys and patterns; never spell the namespace. → *"A deploy cannot serve the previous
-  build's response cache"*
+  Pass logical keys and patterns; never spell the namespace. **A reshaped response owes no version
+  suffix of its own** — the namespace is that, for all of them. → *"A deploy cannot serve the
+  previous build's response cache"*
 - **Mutations invalidate whatever *embeds* the record**, not just the record. →
   `services/cache_invalidation.py`
 - **New per-user owned resource → `OwnedResourceCache`**; hand-roll for reads that enrich rows with

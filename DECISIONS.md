@@ -17725,13 +17725,21 @@ with no key at all for a channel that did not exist then — reads back without 
 summary columns are NULL, which is exactly what `channels` means by "this profile has no such
 curve".
 
-## The dive *detail* cache key is versioned, and the suffix goes after the colon
+## The dive *detail* cache key was versioned, and the suffix went after the colon
 
-`_cached_read_dive` is keyed `user_{user_id}_dive:v2` rather than `user_{user_id}_dive`. This is the
-first change to owe the call *"Changing the shape of a cached response outlives the restart that
-ships it"* asks of whoever next reshapes a cached response, and it takes the version-the-key half:
-it needs no access to the instance and cannot be forgotten at deploy time, where a documented flush
-is a step somebody has to run.
+**Superseded after a day.** `_cached_read_dive` is keyed `user_{user_id}_dive` again; the response
+cache is namespaced per build instead, which is the same property for every cached response rather
+than for this one, and without anyone having to decide to have it. See *"A deploy cannot serve the
+previous build's response cache"* below. Kept because the two paragraphs after this one are not
+about the suffix: the first is the clearest statement in this file of *which* failure a stale
+response body causes, which is what the namespace has to be good enough to replace, and the second
+is a trap that is still live for anyone who ever adds a suffix here.
+
+What it said, for as long as it was true: `_cached_read_dive` is keyed `user_{user_id}_dive:v2`
+rather than `user_{user_id}_dive`. This is the first change to owe the call *"Changing the shape of
+a cached response outlives the restart that ships it"* asks of whoever next reshapes a cached
+response, and it takes the version-the-key half: it needs no access to the instance and cannot be
+forgotten at deploy time, where a documented flush is a step somebody has to run.
 
 **The failure it prevents is a wrong answer, not the 500 that section records**, and the difference
 decides when the next reader owes this at all. That section's worked example is a *required* field
@@ -17758,16 +17766,14 @@ the shorter one does not also eat the dive *site* list. A suffix joined with an 
 (`user_{id}_dive_v2:…`) falls outside both, and invalidation would silently stop working on the one
 response this change reshapes, with nothing failing to say so.
 
-**`:v3` is not owed, and neither is a suffix on the next cached response to be reshaped.** The other
-half of the call this took — writing down how a deployed instance's Redis is flushed — was answered
-a day later by namespacing the whole response cache per build, and a namespace that moves on every
-deploy makes a per-key suffix inert on any instance that ships: `resp:{build}:user_7_dive:v2` and
-`resp:{build}:user_7_dive` are equally cold behind a new build. What the suffix still reaches is the
-one place the namespace cannot, a source checkout whose namespace is the installed `APP_VERSION` and
-so does not move when the branch does — which is also the one place the person reshaping the
-response can run the flush themselves. So `:v2` stays because moving it would cost more than leaving
-it, not because it is load-bearing, and the obligation the paragraph above hands the next reader is
-discharged by *"A deploy cannot serve the previous build's response cache"* rather than by them.
+**Why the suffix went rather than staying as harmless belt-and-braces.** A namespace that moves on
+every build makes a per-key suffix inert wherever it matters: `resp:{build}:user_7_dive:v2` and
+`resp:{build}:user_7_dive` are equally cold behind a new build. The one place it still reached was a
+source checkout — and the fingerprint fallback took that too, so what was left was a key segment
+nobody could act on and a standing question for the next reader about whether they owed a `:v3`.
+They do not, and neither does the next cached response to be reshaped. The obligation the paragraph
+above hands them is discharged by *"A deploy cannot serve the previous build's response cache"*
+rather than by them.
 
 ## `other` is storage's spelling of an absent event type, and it never reaches the wire
 
@@ -17872,8 +17878,9 @@ beside the primary keeps its answer in `logbook.divejson`, which carries every r
 **Nothing here needed a cache change**, which is worth saying out loud now that an instance holds
 data: the export routes carry no `@cache` and answer `no-store` (*"The export endpoints are never
 cached, and say `no-store`"*), so a shape change to the document reaches the next download with
-nothing to invalidate. The read shapes this depends on were already versioned by the change that
-stored the channels.
+nothing to invalidate. The read shapes this depends on were carrying a version suffix when this was
+written; the suffix is gone and the response cache is namespaced per build instead, which changes
+nothing here — the export routes were never in it either way.
 
 **The two writers do not share code, deliberately.** `divejson`'s `uddf_write.py` emits from a
 DiveJSON document and this one from the app's models, and the app's is the reference writer of the
@@ -17883,9 +17890,9 @@ and the same round trip, not because either calls the other.
 ## A deploy cannot serve the previous build's response cache
 
 `core/utils/cache.py` writes every key it owns under `resp:{build}:`, where `{build}` is
-`APP_COMMIT` (truncated), falling back to `APP_VERSION` and then to the constant `dev`. A build
-therefore reads only what it wrote, and a deploy starts from a cold response cache rather than from
-the previous build's bodies.
+`APP_COMMIT` (truncated), falling back to a digest of the `app` package's sources. A build therefore
+reads only what it wrote, and a deploy starts from a cold response cache rather than from the
+previous build's bodies.
 
 **The failure it removes is a 500, not stale data.** `@cache` stores a serialized response body, and
 a hit is `json.loads`ed and handed straight back without re-running the route - so an entry written
@@ -17943,24 +17950,53 @@ entries become readable again, up to an hour stale on a single-resource read, an
 Closing that would cost a `SCAN` on every mutation of a trip or a dive site, to cover a case a
 cache-busting deploy of the same image already handles.
 
-**The one per-key suffix in the tree stays, and stops being an obligation.** `_cached_read_dive` is
-keyed `user_{user_id}_dive:v2`, landed the day before this and reasoned for at *"The dive detail
-cache key is versioned"* above on the grounds that a suffix "cannot be forgotten at deploy time".
-The namespace is that property, for every cached response and without anyone deciding to have it, so
-the suffix is inert behind a new build and the next reshape owes no `:v3`. It is left where it is
-because it costs a key segment and removing it would cost a behaviour change, and because it does
-still reach the case below - the one place a namespace that only moves per build cannot.
+**The one per-key suffix in the tree went with this.** `_cached_read_dive` was keyed
+`user_{user_id}_dive:v2` the day before, reasoned for at *"The dive detail cache key was versioned"*
+above on the grounds that a suffix "cannot be forgotten at deploy time" - which is exactly the
+property this has, for every cached response rather than for one, so the suffix reached nothing the
+namespace did not and left the next reader wondering whether they owed a `:v3`. They do not.
 
-**A source checkout's namespace is constant, and that is the case the chain cannot help with.**
-`uv sync` installs this project, so `_installed_version` answers and a local run lands on
-`APP_VERSION` - `resp:0.1.0:` today, not `resp:dev:`, which is worth knowing before going looking
-for the latter by hand. (`dev` is the tail of the chain, reached only by a tree that was never
-installed.) That value moves on a release and on nothing else, so switching branches does not move
-it: nothing available in-process distinguishes one working tree from the same tree a commit later,
-and a value that changed per process would split the cache across gunicorn's four workers for
-everyone. So a branch switch with a warm Redis behaves exactly as it did, and the flush above
-remains its remedy - with `resp:*:` in front of the pattern now, and worth widening past
-`dive_activity` since the hour-long keys are the ones that hurt:
+**A shape check on read was the serious alternative, and it is weaker than it looks.** Holding the
+expected type in the decorator and rejecting a body that no longer fits would be automatic, need no
+build identity, and catch a stale entry whatever made it stale. It also catches only half the
+failure, and the quieter half survives: the members that change a response are usually *defaulted* -
+`RecordingRead.mode` and `.deco_model` are `Field(default=None)` - so the previous build's body
+validates perfectly and tells a diver their dive has no mode and four curves for the whole hour.
+*"The dive detail cache key was versioned"* has that worked out in full. A namespace does not reason
+about shape at all, which is what lets it catch both: a body written by different code is not this
+code's to serve. The other half of it is that half the cached functions are typed `-> dict` - the
+FastCRUD paginated lists - so a type held at the decorator would have validated nothing precisely
+where the list pages carry the same rows that break.
+
+**A source checkout gets a digest of its own code**, which is the half of this that nearly did not
+get built. `APP_COMMIT` is empty outside a published image, and the obvious fallback - `APP_VERSION`
+
+- is useless for the case that matters: it comes from the installed distribution metadata, so every
+  branch of a development tree shares one value (`0.1.0` today) and a branch switch with a warm
+  Redis goes on serving the other branch's bodies. That was the original gap this whole section was
+  written around, left standing with a flush as its remedy. `_source_fingerprint` closes it by
+  hashing every `.py` under `app/` once at import: it moves when the code moves and at no other
+  time, it is identical across gunicorn's four workers because they hash the same files, and inside
+  an image it is simply a constant - which is why `APP_COMMIT` is consulted first and the walk never
+  runs there. Two things about it are load-bearing:
+
+- **The whole package, not `schemas/`.** A body is shaped by the schema *and* by what populated it,
+  so a `_to_public_dive` that starts filling a field differently reshapes the response with no
+  schema edit anywhere. "The code" also needs no judgement about which files count, which is what
+  keeps it from drifting.
+
+- **Hashing nothing returns `None`, not a digest.** `rglob` on a directory that does not exist
+  yields no paths and raises nothing, so a root that misses the package would digest the empty
+  string - a stable value, identical in every checkout and every image, which namespaces every key
+  and separates no builds while everything downstream keeps working. `TestTheSourceFingerprint` pins
+  that, and pins that `parents[2]` lands on `app/`.
+
+`APP_VERSION` and the `dev` tail remain only for a tree whose sources cannot be read at all. Neither
+is expected, and neither is worth failing startup over - this is evaluated at import.
+
+The flush is still worth knowing, because a namespace is not a way to drop a payload cached from a
+bug - with `resp:*:` in front of the pattern now, and worth widening past `dive_activity` since the
+hour-long keys are the ones that hurt:
 
 ```bash
 docker compose exec -T redis redis-cli --scan --pattern 'resp:*' | xargs -r docker compose exec -T redis redis-cli DEL

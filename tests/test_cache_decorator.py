@@ -1,5 +1,6 @@
 """Regression tests for the `cache` decorator (behavior should be unaffected by its typing refactor)."""
 
+import pathlib
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -7,7 +8,7 @@ from fastapi import Request
 
 from src.app.core.exceptions.cache_exceptions import InvalidRequestError, MissingClientError
 from src.app.core.utils import cache as cache_module
-from src.app.core.utils.cache import cache, namespaced
+from src.app.core.utils.cache import _digest_sources, cache, namespaced
 
 
 def _make_request(method: str) -> Request:
@@ -189,3 +190,75 @@ class TestTheNamespaceIsTheBuild:
 
         assert mock_redis.scan.call_args.kwargs["match"] == "resp:*:user_7_dives:*"
         mock_redis.delete.assert_awaited_once_with(older.encode(), mine.encode())
+
+
+class TestTheSourceFingerprint:
+    """`_digest_sources` is what gives a source checkout a build identity, and the only
+    property that matters is that it **moves when the code moves**.
+
+    Nothing else in the suite would notice it stopping: a digest that never changes still
+    namespaces every key, still sweeps correctly, and still passes every test above - it just
+    quietly serves the other branch's response bodies after a branch switch, which is the one
+    failure this fallback exists for. An "optimisation" to hash mtimes, or only `schemas/`,
+    is what that would look like in a diff.
+    """
+
+    def _tree(self, root, **files):
+        for name, body in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body)
+        return root
+
+    def test_the_same_sources_digest_the_same(self, tmp_path):
+        self._tree(tmp_path, **{"a.py": "x = 1", "pkg/b.py": "y = 2"})
+        assert _digest_sources(tmp_path) == _digest_sources(tmp_path)
+
+    def test_editing_a_file_moves_it(self, tmp_path):
+        self._tree(tmp_path, **{"a.py": "x = 1"})
+        before = _digest_sources(tmp_path)
+        (tmp_path / "a.py").write_text("x = 2")
+        assert _digest_sources(tmp_path) != before
+
+    def test_adding_a_file_moves_it(self, tmp_path):
+        self._tree(tmp_path, **{"a.py": "x = 1"})
+        before = _digest_sources(tmp_path)
+        (tmp_path / "b.py").write_text("x = 1")
+        assert _digest_sources(tmp_path) != before
+
+    def test_moving_a_file_moves_it(self, tmp_path):
+        """The path is hashed alongside the bytes, so a module that changes home changes the
+        digest even though no file's contents did."""
+        self._tree(tmp_path, **{"a.py": "x = 1"})
+        before = _digest_sources(tmp_path)
+        (tmp_path / "a.py").rename(tmp_path / "moved.py")
+        assert _digest_sources(tmp_path) != before
+
+    def test_a_tree_with_nothing_in_it_is_none(self, tmp_path):
+        """A root that finds no sources must not answer with a digest. `rglob` on a missing
+        directory yields nothing and raises nothing, so the digest of an empty run is a
+        perfectly stable value that is the same everywhere - it would namespace every key and
+        separate no builds, with nothing failing to say so."""
+        assert _digest_sources(tmp_path / "does-not-exist") is None
+        assert _digest_sources(tmp_path) is None
+
+    def test_it_runs_at_import_so_it_never_raises(self, tmp_path):
+        """Whatever it is pointed at, the answer is a digest or `None` - never an exception,
+        because this is evaluated while the module is being imported."""
+        (tmp_path / "a.py").write_text("x = 1")
+        (tmp_path / "a.py").chmod(0o000)
+        try:
+            assert _digest_sources(tmp_path) is None
+        finally:
+            (tmp_path / "a.py").chmod(0o644)
+
+    def test_the_real_package_is_what_gets_hashed(self):
+        """`parents[2]` has to land on the `app` package itself. It is a positional walk up
+        the tree, so moving this module one directory either way changes what it hashes."""
+        from src.app.core.utils.cache import _source_fingerprint
+
+        package = pathlib.Path(cache_module.__file__).resolve().parents[2]
+        assert package.name == "app"
+        assert (package / "main.py").is_file()
+        assert _source_fingerprint() == _digest_sources(package)
+        assert _source_fingerprint() is not None

@@ -884,45 +884,31 @@ async def renumber_user_dives(
     return result
 
 
-# Keyed `user_{user_id}_dive:v2:{uuid}` rather than the flat `dive_cache:{uuid}` it used
-# to be. A dive read embeds its dive sites' and gear items' names, so renaming either
-# has to drop the cached dives that reference it - and the renaming endpoint knows only
-# the owner's id, not which of their dives are affected. Scoping the key by user is what
-# makes `invalidate_dive_caches()` able to express that as a pattern at all.
+# Keyed `user_{user_id}_dive:{uuid}` rather than the flat `dive_cache:{uuid}` it used to
+# be. A dive read embeds its dive sites' and gear items' names, so renaming either has to
+# drop the cached dives that reference it - and the renaming endpoint knows only the
+# owner's id, not which of their dives are affected. Scoping the key by user is what makes
+# `invalidate_dive_caches()` able to express that as a pattern at all.
 #
-# **`:v2` is a shape version, and it is what a deployed instance costs.** An entry this
-# cache wrote is replayed without the route body running, so an entry the previous build
-# wrote goes on answering this endpoint for the whole of the hour this key lives.
+# **This carried a `:v2` shape suffix for a day**, added when the decompression members
+# landed and removed once the response cache became namespaced per build
+# (`core/utils/cache.py`), which is the same property for every cached response and without
+# anyone having to decide to have it. The reasoning is worth keeping even though the suffix
+# is gone, because it is what the namespace has to be good enough to replace: every member
+# that change added is defaulted - `RecordingRead.mode` and `.deco_model` are
+# `Field(default=None)`, and `DiveProfileInfo.channels` was already a plain `list[str]`, so a
+# short one still validates. An entry from the previous build therefore replays *cleanly* and
+# tells a diver their dive has no mode, no model and four curves, for the whole of the hour
+# this key lives. **A wrong answer, not the 500** that a required field with no default
+# produces (`day` on `DiveActivityPoint`) - which is the failure a shape check on read would
+# catch and this one would not, and why the namespace does not reason about shape at all.
 #
-# **It is a wrong answer rather than a 500**, and the distinction is worth keeping: every
-# member the decompression change adds to this response is defaulted - `RecordingRead.mode`
-# and `.deco_model` are `Field(default=None)`, and `DiveProfileInfo.channels` was already a
-# plain `list[str]`, so a short one still validates. A v1 entry therefore replays cleanly and
-# says the dive has no mode, no model and four curves. That is the failure to version for
-# here: the 500 the precedent below records came from a *required* field with no default
-# (`day` on `DiveActivityPoint`), which is the shape `DiveReadWithMixtures.species` and
-# `.recordings` carry `default_factory=list` to avoid, and which nothing in this change
-# repeats.
-#
-# `DECISIONS.md`'s *"Changing the shape of a cached response outlives the restart that ships
-# it"* offered version-the-key or write-down-how-that-Redis-is-flushed, and this was the first
-# change to owe the call: versioning needs no access to the instance and cannot be forgotten
-# at deploy time, where a documented flush is a step somebody has to run.
-#
-# **That call has since been answered for every cached response at once**, by namespacing the
-# whole response cache per build (`core/utils/cache.py`), which is the same property without
-# anyone having to decide to have it. So this suffix is inert on any instance that ships - a
-# new build's namespace is cold whether the key ends `:v2` or not - and it reaches only a
-# source checkout, where the build identity is a constant. **The next response to be reshaped
-# owes no `:v3` and no suffix of its own**; see *"A deploy cannot serve the previous build's
-# response cache"*.
-#
-# **The suffix goes after the colon and not after an underscore.** `invalidate_dive_caches`
-# sweeps `user_{id}_dives:*` and `user_{id}_dive:*` - two literal patterns rather than one
-# `user_{id}_dive*`, deliberately, so the shorter one does not also eat the dive *site* list.
-# A `user_{id}_dive_v2` would fall outside both, and invalidation would silently stop working
-# on the one response this change reshapes.
-@cache(key_prefix="user_{user_id}_dive:v2", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
+# **If a suffix is ever wanted here again, it goes after the colon**, not after an
+# underscore. `invalidate_dive_caches` sweeps `user_{id}_dives:*` and `user_{id}_dive:*` -
+# two literal patterns rather than one `user_{id}_dive*`, deliberately, so the shorter one
+# does not also eat the dive *site* list. A `user_{id}_dive_v2` falls outside both, and
+# invalidation would silently stop working on this read.
+@cache(key_prefix="user_{user_id}_dive", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
 async def _cached_read_dive(
     request: Request, user_id: int, uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession
 ) -> DiveReadWithMixtures:
