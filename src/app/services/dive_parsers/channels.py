@@ -19,6 +19,12 @@ from ...schemas.dive_profile import ParsedSeries
 CENTIMETERS_PER_METER = Decimal("100")
 TENTHS_PER_UNIT = Decimal("10")
 
+# For a channel whose source already reports it in the scale the format stores it in - a
+# no-decompression time in seconds, a gradient factor in whole percent. Written out rather
+# than passed as a bare `1` at each call site, so a reading that needs no conversion still
+# goes through the same guard as one that does.
+UNSCALED = Decimal("1")
+
 
 def scaled_int(value: float, factor: Decimal) -> int:
     """Scale a reading into the integer units a profile is stored in.
@@ -77,6 +83,35 @@ def ceiling_cm(value: float | None) -> int | None:
         return None
     scaled = scaled_int(value, CENTIMETERS_PER_METER)
     return scaled if scaled > 0 else None
+
+
+def unsigned_int_or_none(value: float | None, factor: Decimal) -> int | None:
+    """A reading on one of the unsigned channels, or `None` where the device meant nothing.
+
+    **A negative is an absent-marker on every channel this covers**, and this is the one
+    place that judgement is made so the formats cannot disagree about it. A no-decompression
+    time, a time to surface, a partial pressure, a CNS clock and a gradient factor are none
+    of them quantities that run below zero, and the devices in hand use a negative to say
+    they have no figure: a Suunto Ocean writes `NoDecTime: -1` where it is showing a stop
+    depth instead of a clock, and `gf99: -100` where no compartment leads. The format floors
+    all six at zero for the same reason.
+
+    `ceiling_cm`'s shape rather than a new rule, and deliberately *not* its rule: a zero
+    ceiling is dropped because for that quantity zero is the absence of the thing being
+    measured, while a zero here is a reading - an NDL of zero is the moment a dive stopped
+    being a no-decompression dive, which is the one reading a decompression dive most needs.
+    Where a zero means something else in one format, that format's own parser decides it, the
+    way the Suunto JSON export's `TimeToSurface: 0` is decided against the file.
+
+    **Nothing is clamped above.** A gradient factor runs into four figures on a real Suunto
+    decompression ascent and a no-decompression time sits at the device's display maximum on
+    most recreational dives; both are what the diver was shown, and a cap would be a guess
+    wearing a plausible number.
+    """
+    if value is None:
+        return None
+    scaled = scaled_int(value, factor)
+    return scaled if scaled >= 0 else None
 
 
 def series(points: list[tuple[float, int]]) -> ParsedSeries | None:

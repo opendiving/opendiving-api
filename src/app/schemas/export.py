@@ -52,7 +52,7 @@ from pydantic import BaseModel, Field
 from ..core.schemas import PublicUUIDSchema
 from .certification import CertificationAgency
 from .course import CourseStatus
-from .dive import DiveLocalStartTime, WaterType
+from .dive import DecoAlgorithm, DiveLocalStartTime, DiveMode, WaterType
 from .dive_mixture import DiveMixtureBase
 from .dive_profile import DiveProfileRead
 from .gear_item import GearType
@@ -185,6 +185,40 @@ class ExportDevice(BaseModel):
     ]
 
 
+class ExportDecoModel(BaseModel):
+    """The decompression model one device ran on one dive (spec §6.4c).
+
+    Every member OPTIONAL, and an object with no member at all is not written -
+    `envelope._recording` drops it rather than emitting `{}`, on `ExportDevice`'s terms and
+    for §6.4c's own reason: an empty model says nothing a missing `deco_model` does not.
+
+    `algorithm` is the **family** and `name` is the product, and neither is derived from the
+    other: one source names `<buehlmann>` as an element and never spells a product, another
+    writes `Suunto Fused RGBM 2` as a string and never names a family.
+
+    `gf_low` and `gf_high` are written both or neither, and `gf_low <= gf_high` is a §3 rule
+    the schema cannot express. Both hold here by construction rather than by assertion - the
+    parsers and the import planner each drop both halves before a row can carry a half or an
+    inverted pair, and `ck_dive_recording_deco_gf_low_within_high` is the backstop under
+    them.
+    """
+
+    algorithm: Annotated[DecoAlgorithm | None, Field(default=None, description="The model's family, not the product")]
+    name: Annotated[
+        str | None, Field(default=None, description="The device's own name for its model, as the source spelled it")
+    ]
+    gf_low: Annotated[int | None, Field(default=None, ge=0, le=100, description="Whole percent")]
+    gf_high: Annotated[int | None, Field(default=None, ge=0, le=100, description="Whole percent")]
+    conservatism: Annotated[
+        int | None,
+        Field(
+            default=None,
+            description="The device's own conservatism setting, on the device's own scale. Unfloored: a negative is "
+            "Suunto's P-1 rather than an absent-marker.",
+        ),
+    ]
+
+
 class ExportRecording(BaseModel):
     """One device's record of one dive (spec §6.4a).
 
@@ -199,10 +233,20 @@ class ExportRecording(BaseModel):
 
     A recording carries at least one of `device`, `profile` and `source_files` - §3's
     beyond-schema rule 4 - which this writer satisfies by construction: it only emits a
-    recording for a row that has one.
+    recording for a row that has one. **`mode` and `deco_model` are not on that list**, and
+    the format says so in as many words: a mode with no device, no samples and no file behind
+    it is a setting nothing recorded a dive with, so a row carrying only those two is still
+    dropped.
     """
 
     device: ExportDevice | None = None
+    # **The device's, not the dive's.** A backup computer run in gauge mode beside a primary
+    # on open circuit is ordinary practice and the dive was not a gauge dive; two computers
+    # running different gradient factors give the diver two ceilings, which is exactly why
+    # divers wear two. A dive-level mode would be the diver's own statement about the kind of
+    # dive it was, which is a different member and one nothing in this version writes.
+    mode: DiveMode | None = None
+    deco_model: ExportDecoModel | None = None
     started_at: Annotated[
         DiveLocalStartTime | None,
         Field(

@@ -43,11 +43,16 @@ from src.app.services.dive_profiles import (
     derive_gas_attribution,
     downsample,
     extract_profile,
+    fill_channels,
     finalize_profile,
     get_gas_attribution_for_dives,
+    join_profiles,
     normalize,
+    profile_from_data,
     provenance_of,
+    shift_profile,
     should_extract,
+    summary_extremes,
     to_read_schema,
     to_recording_read_schema,
 )
@@ -526,7 +531,12 @@ class TestSuuntoJsonParseProfile:
 
         assert [(event.t, event.type) for event in events] == [(10.0, ProfileEventType.DEEP_STOP)]
 
-    def test_alarms_and_warnings_keep_the_device_s_own_wording(self):
+    def test_alarms_and_warnings_are_classified_and_keep_the_device_s_own_wording(self):
+        """The wording is what earns the type, and it travels beside it.
+
+        Both, never one or the other: the type is what a chart draws a glyph from, and
+        "Ceiling Broken" is what the diver was actually shown.
+        """
         content = _json_with_samples(
             [
                 {
@@ -543,9 +553,185 @@ class TestSuuntoJsonParseProfile:
         events = SuuntoJsonParser.parse_profile(content).events
 
         assert [(event.type, event.label) for event in events] == [
-            (ProfileEventType.OTHER, "Ceiling Broken"),
-            (ProfileEventType.OTHER, "PO2 High"),
+            (ProfileEventType.CEILING_VIOLATION, "Ceiling Broken"),
+            (ProfileEventType.PPO2_HIGH, "PO2 High"),
         ]
+
+    def test_two_spellings_of_one_occurrence_share_a_type(self):
+        """The type says what class of thing happened; the label says which words the
+        device used for it."""
+        content = _json_with_samples(
+            [
+                {
+                    "Depth": 30.0,
+                    "Events": [
+                        {"Alarm": {"Type": "Safety Stop Broken", "Active": True}},
+                        {"Alarm": {"Type": "Mandatory Safety Stop Broken", "Active": True}},
+                    ],
+                    "TimeISO8601": "2025-05-31T12:59:16.310+02:00",
+                }
+            ]
+        )
+
+        events = SuuntoJsonParser.parse_profile(content).events
+
+        assert [(event.type, event.label) for event in events] == [
+            (ProfileEventType.SAFETY_STOP_VIOLATION, "Safety Stop Broken"),
+            (ProfileEventType.SAFETY_STOP_VIOLATION, "Mandatory Safety Stop Broken"),
+        ]
+
+    def test_an_alert_this_table_has_no_value_for_stays_unclassified(self):
+        """The vocabulary grows when a file names something it has no word for, and nothing
+        is forced into the nearest one meanwhile - so the marker survives with its wording."""
+        content = _json_with_samples(
+            [
+                {
+                    "Depth": 30.0,
+                    "Events": [{"Alarm": {"Type": "Battery Critically Low", "Active": True}}],
+                    "TimeISO8601": "2025-05-31T12:59:16.310+02:00",
+                }
+            ]
+        )
+
+        events = SuuntoJsonParser.parse_profile(content).events
+
+        assert [(event.type, event.label) for event in events] == [(ProfileEventType.OTHER, "Battery Critically Low")]
+
+    def test_two_notify_values_carry_an_occurrence_and_no_wording(self):
+        """`Deco` is the moment the dive became a decompression dive and `Safety Stop Broken`
+        is a required stop left early - both occurrences the vocabulary has a word for. Their
+        `Type` is the device's name for its own *state*, so writing it as the wording of an
+        occurrence would put "Deco" on a marker the diver never read."""
+        content = _json_with_samples(
+            [
+                {
+                    "Depth": 30.0,
+                    "Events": [
+                        {"Notify": {"Type": "Deco", "Active": True}},
+                        {"Notify": {"Type": "Safety Stop Broken", "Active": True}},
+                    ],
+                    "TimeISO8601": "2025-05-31T12:59:16.310+02:00",
+                }
+            ]
+        )
+
+        events = SuuntoJsonParser.parse_profile(content).events
+
+        assert [(event.type, event.label) for event in events] == [
+            (ProfileEventType.NDL_REACHED, None),
+            (ProfileEventType.SAFETY_STOP_VIOLATION, None),
+        ]
+
+    def test_reads_the_four_decompression_channels_this_format_carries(self):
+        content = _json_with_samples(
+            [
+                {
+                    "Depth": 30.0,
+                    "NoDecTime": 6000,
+                    "TimeToSurface": 268,
+                    "RtGradientFactors": {"gf99": 64, "gfSurface": 116},
+                    "TimeISO8601": "2025-05-31T12:59:06.310+02:00",
+                }
+            ]
+        )
+
+        profile = SuuntoJsonParser.parse_profile(content)
+
+        assert profile.ndl.v == [6000]
+        assert profile.tts.v == [268]
+        assert profile.gradient_factor.v == [64]
+        assert profile.surface_gradient_factor.v == [116]
+        # No sample object in this format carries a computed partial pressure or a running
+        # CNS clock - the dive-level `EndTissue.CNS` is two scalars rather than a curve.
+        assert profile.ppo2 is None
+        assert profile.cns is None
+
+    def test_reads_the_earlier_firmwares_spelling_of_the_surface_gradient_factor(self):
+        """`gtSurface` is `gfSurface` one firmware earlier - a vendor typo fixed in an
+        update. Both files are real, so a reader that knew one would lose the channel on
+        whichever half of the installed base wrote the other."""
+        content = _json_with_samples(
+            [
+                {
+                    "Depth": 30.0,
+                    "RtGradientFactors": {"gf99": 64, "gtSurface": 116},
+                    "TimeISO8601": "2025-05-31T12:59:06.310+02:00",
+                }
+            ]
+        )
+
+        assert SuuntoJsonParser.parse_profile(content).surface_gradient_factor.v == [116]
+
+    def test_a_negative_no_deco_time_is_the_absent_marker_and_a_zero_is_a_reading(self):
+        """`-1` is the device showing a stop depth in place of a clock it no longer has -
+        1 031 samples across the 19 Ocean exports in hand. A zero is the moment the dive
+        stopped being a no-decompression dive, which is the reading a deco dive most needs.
+        """
+        content = _json_with_samples(
+            [
+                {"Depth": 30.0, "NoDecTime": 0, "TimeISO8601": "2025-05-31T12:59:06.310+02:00"},
+                {"Depth": 31.0, "NoDecTime": -1, "TimeISO8601": "2025-05-31T12:59:16.310+02:00"},
+            ]
+        )
+
+        profile = SuuntoJsonParser.parse_profile(content)
+
+        assert profile.ndl.t == [0.0]
+        assert profile.ndl.v == [0]
+
+    def test_a_negative_gradient_factor_is_the_absent_marker_and_a_zero_is_a_reading(self):
+        """`gf99: -100` is where no compartment leads - 5 531 of 7 194 samples - and `0` is a
+        leading tissue at ambient, on 585 of them."""
+        content = _json_with_samples(
+            [
+                {
+                    "Depth": 3.0,
+                    "RtGradientFactors": {"gf99": 0},
+                    "TimeISO8601": "2025-05-31T12:59:06.310+02:00",
+                },
+                {
+                    "Depth": 30.0,
+                    "RtGradientFactors": {"gf99": -100},
+                    "TimeISO8601": "2025-05-31T12:59:16.310+02:00",
+                },
+            ]
+        )
+
+        profile = SuuntoJsonParser.parse_profile(content)
+
+        assert profile.gradient_factor.t == [0.0]
+        assert profile.gradient_factor.v == [0]
+
+    def test_a_zero_time_to_surface_is_this_formats_absent_marker(self):
+        """Only the file could settle it: the Ocean writes a zero on 199 of one dive's 364
+        samples that carry the member, at every depth from 0 to 19 m - including two rows
+        from a sample at 14.63 m that says 88. A TTS of zero at 14 m is not a time."""
+        content = _json_with_samples(
+            [
+                {"Depth": 14.63, "TimeToSurface": 0, "TimeISO8601": "2025-05-31T12:59:06.310+02:00"},
+                {"Depth": 14.63, "TimeToSurface": 88, "TimeISO8601": "2025-05-31T12:59:16.310+02:00"},
+            ]
+        )
+
+        profile = SuuntoJsonParser.parse_profile(content)
+
+        assert profile.tts.t == [10.0]
+        assert profile.tts.v == [88]
+
+    def test_a_gradient_factor_past_100_is_carried_as_written(self):
+        """`ocean-deco-ppo2.json` keeps two such samples, so a clamping reader fails a pair
+        rather than passing quietly."""
+        content = _json_with_samples(
+            [
+                {
+                    "Depth": 7.62,
+                    "RtGradientFactors": {"gf99": 398},
+                    "TimeISO8601": "2025-05-31T12:59:06.310+02:00",
+                }
+            ]
+        )
+
+        assert SuuntoJsonParser.parse_profile(content).gradient_factor.v == [398]
 
     def test_drops_the_device_narrating_its_own_state(self):
         """Five of these land on t=0 of every dive in the corpus. "Wet Outside" is not an
@@ -1431,6 +1617,147 @@ class TestToData:
         ]
 
 
+class TestTheDecompressionChannels:
+    """The six channels the computer worked out for itself, through the storage pipeline.
+
+    Grouped rather than folded into `TestToData`/`TestNormalize` above because the point is
+    that every stage treats them exactly as it treats depth - and a stage that named the
+    four original channels and forgot the new ones is what these would catch.
+    """
+
+    def _parsed(self) -> ParsedProfileSchema:
+        return ParsedProfileSchema(
+            depth=ParsedSeries(t=[0.0, 10.0], v=[3000, 2400]),
+            ndl=ParsedSeries(t=[0.0, 10.0], v=[5940, 0]),
+            tts=ParsedSeries(t=[10.0], v=[268]),
+            ppo2=ParsedSeries(t=[0.0], v=[96]),
+            cns=ParsedSeries(t=[10.0], v=[800]),
+            gradient_factor=ParsedSeries(t=[10.0], v=[398]),
+            surface_gradient_factor=ParsedSeries(t=[10.0], v=[116]),
+        )
+
+    def test_normalize_rebases_every_channel_against_one_origin(self):
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=[10.0, 20.0], v=[3000, 2400]),
+            ndl=ParsedSeries(t=[20.0], v=[0]),
+            gradient_factor=ParsedSeries(t=[30.0], v=[398]),
+        )
+
+        profile = normalize(parsed)
+
+        assert profile.depth.t == [0, 10]
+        assert profile.ndl.t == [10]
+        assert profile.gradient_factor.t == [20]
+
+    def test_a_file_of_only_a_computed_channel_still_has_a_profile(self):
+        """The origin is the earliest reading across *all* channels, not across the four a
+        sensor produces - so a recording that carried an NDL and no depth is a profile."""
+        profile = normalize(ParsedProfileSchema(ndl=ParsedSeries(t=[5.0, 15.0], v=[5940, 1260])))
+
+        assert profile is not None
+        assert profile.ndl.t == [0, 10]
+        assert profile.channels == ["ndl"]
+
+    def test_to_data_and_back_is_the_same_profile(self):
+        profile = normalize(self._parsed())
+
+        assert profile_from_data(profile.to_data()) == profile
+
+    def test_a_zero_is_a_reading_and_survives_the_round_trip(self):
+        """An NDL of zero is the moment a dive stopped being a no-decompression dive, which
+        is the one reading a decompression dive most needs."""
+        profile = normalize(self._parsed())
+
+        assert profile.ndl.v == [5940, 0]
+        assert profile_from_data(profile.to_data()).ndl.v == [5940, 0]
+
+    def test_channels_lists_them_in_the_formats_order(self):
+        """`pressure` between `temperature` and the computed channels, which is where §6.4
+        puts it - and what a chart stacks its curves in."""
+        profile = normalize(
+            ParsedProfileSchema(
+                depth=ParsedSeries(t=[0.0], v=[3000]),
+                temperature=ParsedSeries(t=[0.0], v=[219]),
+                pressure=[ParsedPressureSeries(gas_number=1, t=[0.0], v=[2052])],
+                ndl=ParsedSeries(t=[0.0], v=[5940]),
+                gradient_factor=ParsedSeries(t=[0.0], v=[64]),
+            )
+        )
+
+        assert profile.channels == ["depth", "temperature", "pressure", "ndl", "gradient_factor"]
+
+    def test_each_channel_is_capped_independently(self):
+        long = ParsedSeries(t=[float(second) for second in range(9_000)], v=list(range(9_000)))
+        profile = downsample(normalize(ParsedProfileSchema(depth=long, ndl=long, cns=long)))
+
+        assert len(profile.ndl.t) <= MAX_POINTS_PER_CHANNEL
+        assert len(profile.cns.t) <= MAX_POINTS_PER_CHANNEL
+        assert max(profile.ndl.v) == 8_999
+
+    def test_a_second_file_fills_a_channel_the_first_did_not_carry(self):
+        base = normalize(ParsedProfileSchema(depth=ParsedSeries(t=[0.0], v=[3000])))
+        addition = normalize(ParsedProfileSchema(ppo2=ParsedSeries(t=[0.0], v=[96])))
+
+        filled = fill_channels(base, addition)
+
+        assert filled.depth.v == [3000]
+        assert filled.ppo2.v == [96]
+
+    def test_a_channel_the_first_file_carried_is_never_overwritten(self):
+        base = normalize(ParsedProfileSchema(ndl=ParsedSeries(t=[0.0], v=[5940])))
+        addition = normalize(ParsedProfileSchema(ndl=ParsedSeries(t=[0.0], v=[10])))
+
+        assert fill_channels(base, addition).ndl.v == [5940]
+
+    def test_shifting_moves_every_channel_onto_one_clock(self):
+        profile = normalize(self._parsed())
+
+        moved = shift_profile(profile, 223)
+
+        assert moved.ndl.t == [223, 233]
+        assert moved.cns.t == [233]
+
+    def test_joining_two_records_of_one_dive_joins_every_channel(self):
+        earlier = normalize(ParsedProfileSchema(tts=ParsedSeries(t=[0.0], v=[120])))
+        later = shift_profile(normalize(ParsedProfileSchema(tts=ParsedSeries(t=[0.0], v=[60]))), 300)
+
+        joined = join_profiles(earlier, later)
+
+        assert joined.tts.t == [0, 300]
+        assert joined.tts.v == [120, 60]
+
+    def test_the_summary_extremes_are_per_quantity(self):
+        """`min` for the no-decompression clock, because the *maximum* is the device's
+        display cap on almost every recreational dive and says nothing; `max` for the rest.
+        """
+        extremes = summary_extremes(normalize(self._parsed()))
+
+        assert extremes["min_ndl_s"] == 0
+        assert extremes["max_tts_s"] == 268
+        assert extremes["max_ppo2_bar100"] == 96
+        assert extremes["max_cns_pct10"] == 800
+        assert extremes["max_gradient_factor_pct"] == 398
+        assert extremes["max_surface_gradient_factor_pct"] == 116
+
+    def test_a_channel_this_profile_has_none_of_clears_its_column(self):
+        """Every column is written, `None` included: a rewrite that left one out would leave
+        the previous profile's extreme standing beside samples that no longer contain it."""
+        extremes = summary_extremes(normalize(ParsedProfileSchema(depth=ParsedSeries(t=[0.0], v=[3000]))))
+
+        assert extremes["min_ndl_s"] is None
+        assert extremes["max_surface_gradient_factor_pct"] is None
+        assert extremes["max_depth_cm"] == 3000
+
+    def test_a_gradient_factor_past_100_is_stored_as_written(self):
+        """A GF99 runs into four figures on a real Suunto decompression ascent. Suunto
+        publishes no definition of the field and nothing in the file accounts for the size,
+        so a cap would be a guess wearing a plausible number."""
+        profile = normalize(ParsedProfileSchema(gradient_factor=ParsedSeries(t=[0.0], v=[12_575])))
+
+        assert profile.gradient_factor.v == [12_575]
+        assert summary_extremes(profile)["max_gradient_factor_pct"] == 12_575
+
+
 class TestToReadSchema:
     """The stored payload back out as the wire shape. Pure, so it is tested here rather
     than through the endpoint."""
@@ -1450,10 +1777,32 @@ class TestToReadSchema:
         read = to_read_schema(LoadedProfile(duration=10, data=profile.to_data(), parser_key="suunto_xml"))
 
         assert read.ceiling.values == [300]
+        # **`other` does not reach the wire.** The format spells "unclassified" as an absent
+        # `type` beside the label that is then required, and storage spells it `OTHER`
+        # because a JSONB key wants a value; `to_read_schema` is where the two meet. This
+        # schema is what an exported document's `profile` object is serialized from, so a
+        # `"type": "other"` here would make every document invalid.
         assert [(event.time, event.type, event.gas_number, event.label) for event in read.events] == [
             (0, ProfileEventType.GAS_SWITCH, 1, None),
-            (60, ProfileEventType.OTHER, None, "Ceiling Broken"),
+            (60, None, None, "Ceiling Broken"),
         ]
+
+    def test_an_event_type_this_build_does_not_know_reads_as_unclassified(self):
+        """A row a later build wrote, read by this one. The column carries no `CHECK`, so it
+        really can hold a value this enum has not heard of - and the label beside it is still
+        a marker worth drawing, which is why this is `None` rather than a raise."""
+        read = to_read_schema(
+            LoadedProfile(
+                duration=10,
+                data={
+                    "depth": {"t": [0], "v": [3000]},
+                    "events": [{"t": 5, "type": "bailout", "label": "Bailout"}],
+                },
+                parser_key="suunto_xml",
+            )
+        )
+
+        assert [(event.type, event.label) for event in read.events] == [(None, "Bailout")]
 
     def test_reads_a_payload_written_before_ceilings_and_events_existed(self):
         """Extractor version 1's rows, which a backfill has not reached yet. The optional

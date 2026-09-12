@@ -5,7 +5,7 @@ from typing import Annotated, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .dive import WaterType
+from .dive import DecoAlgorithm, DiveMode, WaterType
 from .dive_mixture import GasRole
 
 # The bounds `ck_dive_entry_latitude_range` and its three siblings enforce, and the only
@@ -14,6 +14,12 @@ from .dive_mixture import GasRole
 # a junk fix before it can displace a real one), and the `CHECK`s themselves.
 LATITUDE_LIMIT = 90.0
 LONGITUDE_LIMIT = 180.0
+
+# The width of `dive_recording.deco_name`, which is also the format's own bound on the
+# member (§6.4c). Named because two places apply it - this schema on the parse path and
+# `schemas/logbook_import.py` on the import one - and a device's model string is free text,
+# so it is the one member here a real file can genuinely overrun.
+MODEL_NAME_MAX_LENGTH = 64
 
 
 class _ParserOutput(BaseModel):
@@ -281,6 +287,98 @@ class ParsedDevice(_ParserOutput):
         return None if value is not None and value < 0 else value
 
 
+class ParsedDecoModel(_ParserOutput):
+    """The decompression model a file says its computer ran, and the settings it ran it with.
+
+    Sits beside `ParsedDevice` above rather than inside it: a device is the hardware and this
+    is how the hardware was configured for one dive, and the same computer dived twice on
+    different gradient factors is one device and two models.
+
+    Every member nullable on `DiveMixtureSchema`'s terms - `None` is "the file did not say".
+    A model with no member at all is not a model: `ParsedDiveSchema._drop_empty_deco_model`
+    nulls the whole object, the same move `_drop_empty_device` makes.
+
+    **`gf_low` and `gf_high` are both or neither**, and the pair is dropped rather than
+    reordered when it arrives inverted. That is the same refusal as `_drop_half_positions`
+    and it is enforced *here* rather than left to the `CheckConstraint`: a parse that dies on
+    the database takes the whole upload down with it, and one inverted pair is not worth a
+    lost file. The constraint stays as the backstop.
+    """
+
+    algorithm: DecoAlgorithm | None = None
+    name: str | None = None
+    gf_low: int | None = None
+    gf_high: int | None = None
+    conservatism: int | None = None
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _as_trimmed_name(cls, value: object) -> str | None:
+        """The device's own wording, trimmed to the width of the column it lands in.
+
+        `mode="before"` and truncating rather than rejecting, on `ParsedDevice`'s terms: a
+        model name longer than `deco_name`'s 64 characters is a file this app cannot store
+        that member of, and failing the upload over it would lose the dive. 64 is the
+        format's own bound for the member as well as the column's.
+        """
+        if not isinstance(value, str):
+            return None
+        return value.strip()[:MODEL_NAME_MAX_LENGTH] or None
+
+    @field_validator("gf_low", "gf_high", "conservatism", mode="before")
+    @classmethod
+    def _as_whole_number(cls, value: object) -> int | None:
+        """A setting as a whole number, where the file wrote one.
+
+        `ParsedDevice._as_count`'s job, one shape across and `mode="before"` for the same
+        reason: a JSON export can write any number at all into `Conservatism`, and a float
+        that is not a whole number is not a setting on any scale a device offers. Pydantic's
+        own coercion would raise on it and take the whole parse with it, which is the wrong
+        answer for a file worth importing.
+
+        **Unlike `_as_count` this does not floor at zero**, and it is the one number in this
+        module that must not be: a Suunto conservatism of `-1` is the P-1 setting rather than
+        an absent-marker, and both `0` and `-1` are in the owner's exports.
+        """
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, float):
+            return int(value) if value.is_integer() else None
+        return value if isinstance(value, int) else None
+
+    @field_validator("gf_low", "gf_high")
+    @classmethod
+    def _drop_gradient_factor_outside_percent(cls, value: int | None) -> int | None:
+        """A gradient factor is a whole percent of the M-value, so 0-100 is the whole range.
+
+        The bound the format states for both members, mirrored here on the same terms as
+        every other bounded reading in this module: no parsed value should reach a column
+        without having passed the rule the column is meant to hold. Unattested - the only
+        file in hand carrying the pair writes `50`/`85` - and here because of where the
+        value lands rather than because a file was caught writing a bad one.
+
+        Not the per-sample `gradient_factor` *channel*, which is uncapped above on purpose:
+        a GF99 past 100 is a compartment past its M-value and real exports carry far larger
+        ones. These two are a *setting* a diver dialled in, and no computer offers one above
+        100.
+        """
+        return None if value is not None and not (0 <= value <= 100) else value
+
+    @model_validator(mode="after")
+    def _pair_the_gradient_factors(self) -> Self:
+        """One gradient factor alone names no setting, and an inverted pair names a wrong one.
+
+        Both rules drop **both** halves, because the file does not say which of the two is
+        wrong and keeping one would publish half a setting as though it were whole. §6.4c
+        makes the pair both-or-neither for the same reason.
+        """
+        if (self.gf_low is None) != (self.gf_high is None):
+            self.gf_low = self.gf_high = None
+        elif self.gf_low is not None and self.gf_high is not None and self.gf_low > self.gf_high:
+            self.gf_low = self.gf_high = None
+        return self
+
+
 class ParsedDiveSchema(_ParserOutput):
     avg_depth: float | None
     bottom_temperature: float | None
@@ -311,6 +409,18 @@ class ParsedDiveSchema(_ParserOutput):
     # `extra="forbid"` - so a prefilled form cannot hand it back as though a diver had
     # typed it.
     device: ParsedDevice | None = None
+
+    # How the computer was configured for this dive, on the same terms as `device` above
+    # and stored beside it on `dive_recording`. **Not dive-level facts**, which is why they
+    # are not in the form block at the top of this schema: two computers on one dive
+    # legitimately disagree about both, and a recording is the row that can hold two answers.
+    #
+    # They ride `ParsedDiveSchema` rather than `ParsedDevice` because a device is the
+    # hardware and these are settings - the same computer dived twice on different gradient
+    # factors is one device and two models - and because `same_device` compares a device,
+    # where a setting would read as evidence of identity and is not.
+    mode: DiveMode | None = None
+    deco_model: ParsedDecoModel | None = None
 
     # Oxygen exposure and surface pressure, on the same all-nullable terms as everything
     # above. These have no place on the dive *form* - they are the device's own
@@ -466,6 +576,22 @@ class ParsedDiveSchema(_ParserOutput):
             getattr(self.device, member) is None for member in ParsedDevice.model_fields
         ):
             self.device = None
+        return self
+
+    @model_validator(mode="after")
+    def _drop_empty_deco_model(self) -> Self:
+        """A model with nothing on it is not a model the file described.
+
+        `_drop_empty_device`'s move, one member down, and reachable the same way: a file
+        that states an unrecognized algorithm string, one gradient factor without its pair
+        and nothing else leaves an object of five `None`s once `ParsedDecoModel`'s own
+        validators have run. Reporting that would tell a caller the export named a model
+        when it named none - and §6.4c says an empty model is not written.
+        """
+        if self.deco_model is not None and all(
+            getattr(self.deco_model, member) is None for member in ParsedDecoModel.model_fields
+        ):
+            self.deco_model = None
         return self
 
 

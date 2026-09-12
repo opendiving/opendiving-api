@@ -32,14 +32,16 @@ from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_recording import DiveRecording
 from src.app.models.user import User
-from src.app.schemas.dive import RecordingUpdateRequest
+from src.app.schemas.dive import DecoAlgorithm, DiveMode, RecordingUpdateRequest
 from src.app.schemas.dive_profile import ProfileProvenance
+from src.app.schemas.parsed_dive import ParsedDecoModel
 from src.app.services import blob_store
 from src.app.services.dive_files import delete_dive_file, store_recording_file
 from src.app.services.dive_parsers.suunto_xml import SuuntoXmlParser
 from src.app.services.dive_profiles import IMPORT_PARSER_KEY, MERGE_PARSER_KEY, NormalizedProfile, ProfileSeries
 from src.app.services.dive_recordings import (
     delete_recording,
+    fill_recording_settings,
     fill_start,
     get_recordings_for_dives,
     make_primary,
@@ -505,6 +507,117 @@ class TestFillingAStart:
             )
         ).one()
         assert (row.start_time, row.utc_offset_minutes) == (self.WALL_CLOCK, 180)
+
+
+class TestFillingTheModeAndTheDecoModel:
+    """The same never-overwrite rule the device columns follow, one object across.
+
+    A second file of one recording contributes what the first did not carry - a Suunto's
+    JSON names the model its FIT has no room for - and takes nothing from it. The rejected
+    alternative is "the later file wins", which loses a value the first file recorded.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_later_file_fills_what_the_first_did_not_carry(
+        self, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        recording = create_dive_recording(db, diver, dive)
+        await async_db.execute(
+            update(DiveRecording)
+            .where(DiveRecording.id == recording.id)
+            .values(mode=None, deco_gf_low=50, deco_gf_high=85)
+        )
+        await async_db.commit()
+
+        await fill_recording_settings(
+            async_db,
+            recording_id=recording.id,
+            mode=DiveMode.OPEN_CIRCUIT,
+            deco_model=ParsedDecoModel(name="Suunto Fused2 RGBM", conservatism=-1),
+        )
+        await async_db.commit()
+
+        row = await self._settings(async_db, recording.id)
+        assert row.mode == "open_circuit"
+        assert row.deco_name == "Suunto Fused2 RGBM"
+        assert row.deco_conservatism == -1
+        assert (row.deco_gf_low, row.deco_gf_high) == (50, 85)
+
+    @pytest.mark.asyncio
+    async def test_a_value_the_first_file_recorded_is_never_overwritten(
+        self, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        recording = create_dive_recording(db, diver, dive)
+        await async_db.execute(
+            update(DiveRecording)
+            .where(DiveRecording.id == recording.id)
+            .values(mode="freedive", deco_algorithm="rgbm", deco_gf_low=50, deco_gf_high=85)
+        )
+        await async_db.commit()
+
+        await fill_recording_settings(
+            async_db,
+            recording_id=recording.id,
+            mode=DiveMode.OPEN_CIRCUIT,
+            deco_model=ParsedDecoModel(algorithm=DecoAlgorithm.BUHLMANN, gf_low=30, gf_high=70),
+        )
+        await async_db.commit()
+
+        row = await self._settings(async_db, recording.id)
+        assert (row.mode, row.deco_algorithm) == ("freedive", "rgbm")
+        assert (row.deco_gf_low, row.deco_gf_high) == (50, 85)
+
+    @pytest.mark.asyncio
+    async def test_a_file_that_recorded_neither_writes_nothing(
+        self, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        recording = create_dive_recording(db, diver, dive)
+
+        await fill_recording_settings(async_db, recording_id=recording.id, mode=None, deco_model=None)
+        await async_db.commit()
+
+        row = await self._settings(async_db, recording.id)
+        assert (row.mode, row.deco_algorithm, row.deco_name) == (None, None, None)
+
+    @pytest.mark.asyncio
+    async def test_the_dive_read_reports_both_and_null_where_nothing_recorded_one(
+        self, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        """`null` for the whole model rather than five nulls, on `_read_device`'s terms: a
+        recording whose files said nothing about it must not come back claiming an empty
+        one."""
+        recording = create_dive_recording(db, diver, dive)
+        bare = create_dive_recording(db, diver, dive, ordinal=1)
+        await async_db.execute(
+            update(DiveRecording)
+            .where(DiveRecording.id == recording.id)
+            .values(mode="open_circuit", deco_algorithm="buhlmann", deco_gf_low=50, deco_gf_high=85)
+        )
+        await async_db.commit()
+
+        read = (await get_recordings_for_dives(async_db, dive_ids=[dive.id]))[dive.id]
+
+        first = next(one for one in read if one.uuid == recording.uuid)
+        assert first.mode == "open_circuit"
+        assert first.deco_model is not None
+        assert (first.deco_model.algorithm, first.deco_model.gf_low, first.deco_model.gf_high) == ("buhlmann", 50, 85)
+        second = next(one for one in read if one.uuid == bare.uuid)
+        assert (second.mode, second.deco_model) == (None, None)
+
+    @staticmethod
+    async def _settings(async_db: AsyncSession, recording_id: int) -> Any:
+        return (
+            await async_db.execute(
+                select(
+                    DiveRecording.mode,
+                    DiveRecording.deco_algorithm,
+                    DiveRecording.deco_name,
+                    DiveRecording.deco_gf_low,
+                    DiveRecording.deco_gf_high,
+                    DiveRecording.deco_conservatism,
+                ).where(DiveRecording.id == recording_id)
+            )
+        ).one()
 
 
 class TestDeletingAFile:

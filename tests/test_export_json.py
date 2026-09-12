@@ -23,6 +23,7 @@ outside this database.
 
 import json
 import uuid as uuid_pkg
+from dataclasses import replace
 from datetime import date
 from typing import Any
 from unittest.mock import AsyncMock
@@ -52,6 +53,7 @@ from tests.helpers.export import (
     build_bundle,
     full_bundle,
     make_dive,
+    make_recording,
     mixture,
 )
 
@@ -398,10 +400,154 @@ class TestTheProfileVocabulary:
         document = await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
         profile = document["dives"][1]["recordings"][0]["profile"]
 
-        assert set(profile) == {"duration", "depth", "ceiling", "temperature", "pressures", "events"}
+        assert set(profile) == {
+            "duration",
+            "depth",
+            "ceiling",
+            "temperature",
+            "pressures",
+            "ndl",
+            "tts",
+            "ppo2",
+            "cns",
+            "gradient_factor",
+            "surface_gradient_factor",
+            "events",
+        }
         assert profile["depth"] == {"times": [0, 30, 60, 90], "values": [0, 1800, 5200, 300]}
         assert profile["pressures"][0] == {"times": [0, 60], "values": [2320, 1400], "gas_number": 1}
         assert profile["events"][0] == {"time": 0, "type": "gas_switch", "gas_number": 1}
+
+    @pytest.mark.asyncio
+    async def test_the_members_are_written_in_the_formats_order(self, monkeypatch):
+        """§6.4 puts `pressures` between `temperature` and `ndl`, so a writer emitting
+        channels in whatever order it happened to build them produces a profile that reads
+        down nothing. The order comes off `DiveProfileRead`'s own declaration."""
+        document = await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
+
+        assert list(document["dives"][1]["recordings"][0]["profile"]) == [
+            "duration",
+            "depth",
+            "ceiling",
+            "temperature",
+            "pressures",
+            "ndl",
+            "tts",
+            "ppo2",
+            "cns",
+            "gradient_factor",
+            "surface_gradient_factor",
+            "events",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_the_decompression_channels_keep_their_own_scales(self, monkeypatch):
+        """Seconds, hundredths of a bar, tenths of a percent and whole percent - all fixed by
+        the format (spec §5.1), and none of them depth's or temperature's."""
+        profile = (await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}))["dives"][1][
+            "recordings"
+        ][0]["profile"]
+
+        assert profile["ndl"] == {"times": [0, 30, 60], "values": [5940, 1260, 0]}
+        assert profile["tts"]["values"] == [268, 120]
+        assert profile["ppo2"]["values"] == [34, 96]
+        assert profile["cns"]["values"] == [100, 800]
+        # Unbounded above: 398 is a compartment past its M-value, and a writer that clamped
+        # would be deciding what the device should have written.
+        assert profile["gradient_factor"]["values"] == [17, 398]
+        assert profile["surface_gradient_factor"]["values"] == [90, 116]
+
+    @pytest.mark.asyncio
+    async def test_an_unclassified_event_is_written_with_no_type(self, monkeypatch):
+        """§6.6 spells "the device recorded something and nothing in the vocabulary says
+        what" as an *absent* `type` beside a required `label`; storage spells it `other`.
+        A document carrying `"type": "other"` is invalid, which is what makes this the one
+        place the two vocabularies have to meet."""
+        document = await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
+        events = document["dives"][1]["recordings"][0]["profile"]["events"]
+
+        unclassified = [event for event in events if "type" not in event]
+        assert unclassified == [{"time": 60, "label": "Ceiling Broken"}]
+        assert all(event.get("type") != "other" for event in events)
+        _assert_conforms(document)
+
+
+class TestTheRecordingsModeAndDecoModel:
+    """§6.4a's `mode` and the whole of §6.4c, which are the device's and not the dive's."""
+
+    @pytest.mark.asyncio
+    async def test_both_members_ride_the_recording(self, monkeypatch):
+        document = await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
+        recording = document["dives"][1]["recordings"][0]
+
+        assert recording["mode"] == "open_circuit"
+        assert recording["deco_model"] == {
+            "algorithm": "buhlmann",
+            "name": "ZHL-16C",
+            "gf_low": 50,
+            "gf_high": 85,
+            # Unfloored: a negative is the device's own P-1 rather than an absent-marker.
+            "conservatism": -1,
+        }
+        assert "mode" not in document["dives"][1]
+        assert "deco_model" not in document["dives"][1]
+
+    @pytest.mark.asyncio
+    async def test_a_recording_that_recorded_neither_writes_neither(self, monkeypatch):
+        """Absence is the only spelling of "not recorded", and an empty `deco_model` object
+        says nothing a missing one does not (§6.4c)."""
+        bundle = full_bundle()
+        bundle.recordings_by_dive[2][0] = replace(bundle.recordings_by_dive[2][0], mode=None, deco_model={})
+
+        recording = (await _render(bundle, monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}))["dives"][1][
+            "recordings"
+        ][0]
+
+        assert "mode" not in recording
+        assert "deco_model" not in recording
+
+    @pytest.mark.asyncio
+    async def test_a_stored_mode_the_format_has_no_word_for_drops_the_field_not_the_record(self, monkeypatch):
+        """`_sayable`'s rule for an OPTIONAL member: the column carries no `CHECK`, so it
+        really can hold a value outside the vocabulary - and a diver's profile must not
+        vanish from their export over how a mode is spelt."""
+        bundle = full_bundle()
+        bundle.recordings_by_dive[2][0] = replace(bundle.recordings_by_dive[2][0], mode="rebreather")
+
+        document = await _render(bundle, monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
+        recording = document["dives"][1]["recordings"][0]
+
+        assert "mode" not in recording
+        assert recording["profile"]["depth"]["values"] == [0, 1800, 5200, 300]
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_a_stored_algorithm_the_format_has_no_word_for_keeps_the_rest_of_the_model(self, monkeypatch):
+        bundle = full_bundle()
+        bundle.recordings_by_dive[2][0] = replace(
+            bundle.recordings_by_dive[2][0],
+            deco_model={"algorithm": "vpm", "name": "VPM-B", "conservatism": 3},
+        )
+
+        document = await _render(bundle, monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
+
+        assert document["dives"][1]["recordings"][0]["deco_model"] == {"name": "VPM-B", "conservatism": 3}
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_neither_member_satisfies_the_rule_that_a_recording_describes_something(self, monkeypatch):
+        """§3's rule 4 counts three members and these two are not among them: a mode with no
+        device, no samples and no file behind it is a setting nothing recorded a dive with.
+        """
+        bundle = full_bundle()
+        bundle.recordings_by_dive[2] = [
+            make_recording(9, UUIDS["recording-second"], mode="gauge", deco_model={"algorithm": "buhlmann"})
+        ]
+
+        document = await _render(bundle, monkeypatch)
+
+        assert document["dives"][1]["recordings"] == []
+        _assert_conforms(document)
 
     @pytest.mark.asyncio
     async def test_the_samples_keep_the_stored_integer_scales(self, monkeypatch):

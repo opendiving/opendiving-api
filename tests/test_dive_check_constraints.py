@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from src.app.models.dive import Dive
 from src.app.models.dive_mixture import DiveMixture
+from src.app.models.dive_recording import DiveRecording
 from src.app.models.user import User
 from tests.conftest import db_available
 from tests.helpers.generators import create_user
@@ -448,4 +449,64 @@ class TestDiveMixtureCheckConstraints:
         """A hand-entered cylinder has no position in any file, and most exports record
         no ppO2 or role."""
         db.add(_make_mixture(dive.id, po2_limit=None, gas_number=None, role=None))
+        db.commit()
+
+
+class TestDiveRecordingCheckConstraints:
+    """The one constraint on a recording's own columns, against the real database.
+
+    Nothing that exists today can reach it: both writers - the parsers through
+    `ParsedDecoModel` and the importer through its planner - drop an inverted gradient-factor
+    pair before it gets here, which is what stops one bad reading costing a whole upload or a
+    whole archive. This is the backstop under them, and a test that inserts the row directly
+    is the only way to see it fire.
+    """
+
+    @pytest.fixture
+    def dive(self, db: Session, dive_owner: User) -> Generator[Dive, Any]:
+        dive = _make_dive(dive_owner.id)
+        db.add(dive)
+        db.commit()
+        db.refresh(dive)
+        yield dive
+
+    def _recording(self, dive: Dive, **overrides: Any) -> DiveRecording:
+        defaults: dict[str, Any] = {"dive_id": dive.id, "user_id": dive.user_id, "ordinal": 0}
+        defaults.update(overrides)
+        return DiveRecording(**defaults)
+
+    def test_an_inverted_pair_is_rejected(self, db: Session, dive: Dive) -> None:
+        _assert_violates(
+            db,
+            self._recording(dive, deco_gf_low=85, deco_gf_high=50),
+            "ck_dive_recording_deco_gf_low_within_high",
+        )
+
+    def test_a_pair_in_order_is_allowed(self, db: Session, dive: Dive) -> None:
+        db.add(self._recording(dive, deco_gf_low=50, deco_gf_high=85))
+        db.commit()
+
+    def test_an_equal_pair_is_allowed(self, db: Session, dive: Dive) -> None:
+        """`<=`, not `<`: a computer set to 85/85 is a real, if aggressive, configuration."""
+        db.add(self._recording(dive, deco_gf_low=85, deco_gf_high=85))
+        db.commit()
+
+    def test_a_null_on_either_side_passes(self, db: Session, dive: Dive) -> None:
+        """Both-or-neither is the writers' rule rather than something a `CHECK` can express,
+        so a half pair is not this constraint's to refuse - it never reaches the column."""
+        db.add(self._recording(dive, ordinal=0, deco_gf_low=50))
+        db.add(self._recording(dive, ordinal=1, deco_gf_high=85))
+        db.commit()
+
+    def test_a_negative_conservatism_is_stored(self, db: Session, dive: Dive) -> None:
+        """Suunto's P-1, and the one reading in this app with no floor: the number means
+        nothing without `deco_name` and the device columns beside it."""
+        db.add(self._recording(dive, deco_conservatism=-1, deco_name="Suunto Fused2 RGBM"))
+        db.commit()
+
+    def test_an_unrecognized_mode_is_stored(self, db: Session, dive: Dive) -> None:
+        """A closed vocabulary with no DB `CHECK`, the pattern `dive.water_type` and
+        `gear_item.type` follow: the write schemas hold the vocabulary, and the read shapes
+        widen to a string so one such row cannot fail a whole dive read."""
+        db.add(self._recording(dive, mode="rebreather_semiclosed_unheard_of"))
         db.commit()

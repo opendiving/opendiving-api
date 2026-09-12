@@ -172,6 +172,8 @@ def make_recording(row_id: int, uuid: uuid_pkg.UUID, **overrides: Any) -> Export
     defaults: dict[str, Any] = {
         "ordinal": 0,
         "device": {},
+        "mode": None,
+        "deco_model": {},
         "start_time": None,
         "utc_offset_minutes": None,
         "files": [],
@@ -516,6 +518,16 @@ def full_bundle() -> ExportBundle:
                     1,
                     UUIDS["recording"],
                     device={"brand": "Suunto", "model": "Suunto Ocean", "serial": "253810000400"},
+                    # The two settings that are the device's rather than the dive's, so the
+                    # conformance test covers §6.4a's `mode` and the whole of §6.4c.
+                    mode="open_circuit",
+                    deco_model={
+                        "algorithm": "buhlmann",
+                        "name": "ZHL-16C",
+                        "gf_low": 50,
+                        "gf_high": 85,
+                        "conservatism": -1,
+                    },
                     start_time=datetime(2026, 6, 1, 6, 15, tzinfo=UTC),
                     utc_offset_minutes=120,
                     files=[
@@ -576,13 +588,30 @@ def full_bundle() -> ExportBundle:
 
 
 # The profile the `trimix` dive carries, in the stored integer scales: depth in cm,
-# temperature in 0.1 C, pressure in 0.1 bar. Three channels and two events, every reading
-# landing on a depth sample - the ordinary case, where `uddf.py::_waypoints` has nothing
-# to snap. `OFF_GRID_PROFILE` below is the one that disagrees.
+# temperature in 0.1 C, pressure in 0.1 bar, ndl and tts in seconds, ppO2 in 0.01 bar, CNS
+# in 0.1 % and both gradient factors in whole percent. Every reading lands on a depth sample
+# - the ordinary case, where `uddf.py::_waypoints` has nothing to snap. `OFF_GRID_PROFILE`
+# below is the one that disagrees.
+#
+# **Every channel the format defines is here**, which is what makes the conformance test
+# worth running: a writer that emitted one of them under the wrong member name, in the wrong
+# scale, or out of §6.4's order fails against `divejson.validate_document` rather than
+# against an assertion someone remembered to write.
 TRIMIX_PROFILE: dict[str, Any] = {
     "depth": {"t": [0, 30, 60, 90], "v": [0, 1800, 5200, 300]},
     "ceiling": {"t": [60, 90], "v": [600, 300]},
     "temperature": {"t": [0, 60], "v": [249, 181]},
+    # A no-decompression clock that runs out: 5940 is a Shearwater's display maximum, and
+    # the 0 at 60 s is the moment the dive became a decompression dive - the reading the
+    # ceiling beside it is the consequence of.
+    "ndl": {"t": [0, 30, 60], "v": [5940, 1260, 0]},
+    "tts": {"t": [60, 90], "v": [268, 120]},
+    "ppo2": {"t": [0, 60], "v": [34, 96]},
+    "cns": {"t": [0, 90], "v": [100, 800]},
+    # Past 100 on one sample, which is a compartment past its M-value and a real reading:
+    # the format puts no ceiling on the channel, so a writer that clamped would fail here.
+    "gradient_factor": {"t": [60, 90], "v": [17, 398]},
+    "surface_gradient_factor": {"t": [60, 90], "v": [90, 116]},
     "pressure": [
         {"gas_number": 1, "t": [0, 60], "v": [2320, 1400]},
         {"gas_number": 2, "t": [90], "v": [2000]},

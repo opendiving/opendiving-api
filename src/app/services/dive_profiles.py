@@ -1,7 +1,14 @@
 """Extraction and storage for a dive's per-sample curves and the events alongside them.
 
-Four channels - depth, deco ceiling, temperature and per-cylinder tank pressure - plus the
-moments a device marked rather than sampled: gas switches, stops, bookmarks and alerts.
+Ten channels - depth, deco ceiling, temperature and per-cylinder tank pressure, plus the six
+the computer worked out for itself: the no-decompression clock, the time to surface, the
+computed ppO2, the CNS clock and the two gradient factors - plus the moments a device marked
+rather than sampled: gas switches, stops, bookmarks and alerts.
+
+**The six computed channels are stored, never derived.** Each depends on the model the
+device ran, on its settings and on the diver's exposure history, none of which a logged dive
+carries, so nothing in this module reconstructs one from depth and a gas fraction. The model
+itself is on `dive_recording` - it is one setting for the whole dive rather than a sample.
 
 The **only** module that reads or writes `dive_profile.data` - the same seam discipline
 as `services/dive_files.py`, for the same reason: the payload's encoding is an
@@ -29,7 +36,7 @@ on the box, is worth more than the bytes. This is the codebase's first JSONB col
 import hashlib
 import logging
 from bisect import bisect_right
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
@@ -47,6 +54,8 @@ from ..schemas.dive_profile import (
     CEILING_SCALE,
     DEPTH_SCALE,
     PRESSURE_SCALE,
+    PROFILE_CHANNEL_ORDER,
+    SINGLE_SERIES_CHANNELS,
     TEMPERATURE_SCALE,
     DiveProfileEvent,
     DiveProfileInfo,
@@ -55,6 +64,7 @@ from ..schemas.dive_profile import (
     DiveProfileSeries,
     GasAttribution,
     ParsedProfileSchema,
+    ParsedSeries,
     ProfileEventType,
     ProfileProvenance,
     RecordingProfileRead,
@@ -74,7 +84,14 @@ logger = logging.getLogger(__name__)
 #    and how deep - and `_downsample_series` keeping each channel's first and last sample,
 #    which it had not been guaranteeing. The second is why this covers the samples and not
 #    only the new column.
-PROFILE_EXTRACTOR_VERSION = 3
+# 4: the six decompression channels, and the Suunto JSON parser classifying an alarm
+#    instead of storing every one as `other`. Both change what the same bytes yield.
+#
+# **A profile already stored stays on the channels it has**, which is a decision rather than
+# an oversight: `backfill_profiles` would re-extract everything behind this number and
+# nothing runs it. See *"The decompression channels arrive for new dives only"* in
+# `DECISIONS.md`.
+PROFILE_EXTRACTOR_VERSION = 4
 
 # The two `parser_key` values that are **not** a parser's, and the set both backfills refuse
 # to overwrite. `dive_profile.parser_key` answers "which of three things is this profile":
@@ -129,6 +146,35 @@ MAX_EVENTS = 200
 # Broken", at 28.
 MAX_LABEL_CHARS = 120
 
+# Which summary column each single-series channel's extreme lands in, and which extreme it
+# is. Two writers derive these columns (`store_profile` and `replace_profile_samples`) and a
+# third reads them back to say which curves a row carries - so the list lives here once
+# rather than three times, and a channel added without a column is a `KeyError` at the first
+# write rather than a curve that silently never appears in `channels`.
+#
+# **Which extreme is per quantity**, which is why this is a tuple per channel rather than a
+# single function: temperature wants both ends, `ndl` wants its minimum (how close the dive
+# came to its no-decompression limit - the maximum is the device's display cap on almost
+# every recreational dive), and the rest want their maximum. `models/dive_profile.py` says
+# the same in the columns' own comments.
+#
+# **The first column of each tuple is the presence test** `channels` is derived from: it is
+# non-NULL exactly when the channel has readings. `pressure` is absent from this table
+# because it is a list of series rather than one, and its two columns are derived from every
+# cylinder's readings flattened; `depth` keeps `depth_sample_count` as its presence test,
+# which answers the same question and predates these columns.
+_SUMMARY_COLUMNS: Mapping[str, tuple[tuple[str, Callable[[list[int]], int]], ...]] = {
+    "depth": (("max_depth_cm", max),),
+    "ceiling": (("max_ceiling_cm", max),),
+    "temperature": (("min_temperature_c10", min), ("max_temperature_c10", max)),
+    "ndl": (("min_ndl_s", min),),
+    "tts": (("max_tts_s", max),),
+    "ppo2": (("max_ppo2_bar100", max),),
+    "cns": (("max_cns_pct10", max),),
+    "gradient_factor": (("max_gradient_factor_pct", max),),
+    "surface_gradient_factor": (("max_surface_gradient_factor_pct", max),),
+}
+
 
 @dataclass(frozen=True, slots=True)
 class ProfileSeries:
@@ -158,11 +204,24 @@ class ProfileEvent:
 
 @dataclass(frozen=True, slots=True)
 class NormalizedProfile:
-    """A dive's channels, ready to store: rebased to zero, deduped, sorted, capped."""
+    """A dive's channels, ready to store: rebased to zero, deduped, sorted, capped.
+
+    The nine single-series channels are declared in `SINGLE_SERIES_CHANNELS`' order, which is
+    the format's; `pressure` is a list rather than a series and sits where §6.4 puts it.
+    Every function below that has to touch all nine walks that tuple through `channels_of`
+    and `with_channels` rather than naming them, because naming nine channels a dozen times
+    is how the tenth comes to be missing from one of them.
+    """
 
     depth: ProfileSeries | None = None
     ceiling: ProfileSeries | None = None
     temperature: ProfileSeries | None = None
+    ndl: ProfileSeries | None = None
+    tts: ProfileSeries | None = None
+    ppo2: ProfileSeries | None = None
+    cns: ProfileSeries | None = None
+    gradient_factor: ProfileSeries | None = None
+    surface_gradient_factor: ProfileSeries | None = None
     pressure: list[ProfilePressureSeries] = field(default_factory=list)
     events: list[ProfileEvent] = field(default_factory=list)
     # Not a channel and not stored in `data`: a summary column, derived from `events` and
@@ -177,7 +236,8 @@ class NormalizedProfile:
 
         `ceiling` sits next to `depth` because it is drawn on depth's axis rather than one
         of its own - a ceiling of 3 m has to land at the same y as a depth of 3 m, or the
-        shaded no-ascent region wouldn't bound the curve it describes.
+        shaded no-ascent region wouldn't bound the curve it describes. `pressure` keeps its
+        place between `temperature` and the computed channels, which is where §6.4 puts it.
 
         **Nothing in `src` reads this.** What ships is `get_profile_infos_for_recordings`, which
         derives the same list from which summary columns came back non-NULL - a row's own
@@ -186,16 +246,10 @@ class NormalizedProfile:
         two are meant to agree; a test that finds them disagreeing has found a bug in the
         column-derived one, which is the copy that matters.
         """
-        present = []
-        if self.depth is not None:
-            present.append("depth")
-        if self.ceiling is not None:
-            present.append("ceiling")
-        if self.temperature is not None:
-            present.append("temperature")
+        present = {channel for channel, series in channels_of(self).items() if series is not None}
         if self.pressure:
-            present.append("pressure")
-        return present
+            present.add("pressure")
+        return [channel for channel in PROFILE_CHANNEL_ORDER if channel in present]
 
     @property
     def duration(self) -> int:
@@ -212,7 +266,7 @@ class NormalizedProfile:
         return len(self.depth.t) if self.depth is not None else 0
 
     def _all_series(self) -> list[ProfileSeries]:
-        return [series for series in (self.depth, self.ceiling, self.temperature, *self.pressure) if series is not None]
+        return [series for series in (*channels_of(self).values(), *self.pressure) if series is not None]
 
     def to_data(self) -> dict[str, Any]:
         """The JSONB payload. Absent key, never null, for a channel this dive doesn't carry.
@@ -220,14 +274,14 @@ class NormalizedProfile:
         Events follow the same rule as the channels: a dive whose file recorded none has no
         `events` key rather than an empty array, so the payload never carries a shape that
         means the same thing two ways.
+
+        The stored keys are the format's member names with the compact `t`/`v` inside, which
+        is what `to_read_schema` translates back to `times`/`values` on the way out.
         """
         data: dict[str, Any] = {}
-        if self.depth is not None:
-            data["depth"] = {"t": self.depth.t, "v": self.depth.v}
-        if self.ceiling is not None:
-            data["ceiling"] = {"t": self.ceiling.t, "v": self.ceiling.v}
-        if self.temperature is not None:
-            data["temperature"] = {"t": self.temperature.t, "v": self.temperature.v}
+        for channel, series in channels_of(self).items():
+            if series is not None:
+                data[channel] = {"t": series.t, "v": series.v}
         if self.pressure:
             data["pressure"] = [
                 {"gas_number": cylinder.gas_number, "t": cylinder.t, "v": cylinder.v} for cylinder in self.pressure
@@ -243,6 +297,47 @@ class NormalizedProfile:
                 for event in self.events
             ]
         return data
+
+
+def channels_of(profile: NormalizedProfile) -> dict[str, ProfileSeries | None]:
+    """A profile's nine single-series channels, keyed by member name, in the format's order.
+
+    The read half of the pair that keeps this module's ten-channel functions honest: every
+    one of them walks `SINGLE_SERIES_CHANNELS` through here rather than naming each channel,
+    so adding an eleventh is one tuple entry and one dataclass field instead of a dozen
+    edits one of which is forgotten.
+
+    Includes the absent ones, as `None`. The callers that only want what is present filter;
+    the ones rebuilding a profile need every key, because a missing key in `with_channels`
+    would silently reset that channel to its default.
+    """
+    return {channel: getattr(profile, channel) for channel in SINGLE_SERIES_CHANNELS}
+
+
+def with_channels(
+    channels: Mapping[str, ProfileSeries | None],
+    *,
+    pressure: list[ProfilePressureSeries],
+    events: list[ProfileEvent],
+    gas_attribution: list[GasAttribution] | None = None,
+) -> NormalizedProfile:
+    """A profile from a channel map plus the three members that are not single series.
+
+    `gas_attribution` defaults to empty rather than being carried, and that is the rule every
+    producer here follows: it is derived from the events and the depth channel *together*, so
+    a value carried across from one input describes the wrong profile the moment two are
+    joined. `attribute_and_cap` is what puts it back.
+
+    The `cast` is what a `**` unpack costs and it buys nothing away: mypy checks the mapping
+    against **every** field of the dataclass, including the three lists named above, and no
+    annotation says "the single-series ones only". The keys really are
+    `SINGLE_SERIES_CHANNELS` - `channels_of` is where every caller gets them - and one that
+    is not raises `TypeError` at the call rather than defaulting a channel away silently.
+    """
+    return replace(
+        NormalizedProfile(pressure=pressure, events=events, gas_attribution=list(gas_attribution or [])),
+        **cast(dict[str, Any], dict(channels)),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,32 +509,24 @@ def normalize(parsed: ParsedProfileSchema) -> NormalizedProfile | None:
     curve away from the axis the samples define. A file consisting only of events has no
     profile to draw and returns `None` for the same reason a file of no readings does.
     """
-    channels: list[list[tuple[float, int]]] = []
-    depth_points = list(zip(parsed.depth.t, parsed.depth.v, strict=True)) if parsed.depth else []
-    ceiling_points = list(zip(parsed.ceiling.t, parsed.ceiling.v, strict=True)) if parsed.ceiling else []
-    temperature_points = (
-        list(zip(parsed.temperature.t, parsed.temperature.v, strict=True)) if parsed.temperature else []
-    )
+    points_by_channel: dict[str, list[tuple[float, int]]] = {}
+    for channel in SINGLE_SERIES_CHANNELS:
+        parsed_series: ParsedSeries | None = getattr(parsed, channel)
+        points_by_channel[channel] = list(zip(parsed_series.t, parsed_series.v, strict=True)) if parsed_series else []
     pressure_points = [
         (cylinder.gas_number, list(zip(cylinder.t, cylinder.v, strict=True))) for cylinder in parsed.pressure
     ]
-    channels = [
-        points
-        for points in (depth_points, ceiling_points, temperature_points, *(p for _, p in pressure_points))
-        if points
-    ]
+    sampled = [points for points in (*points_by_channel.values(), *(p for _, p in pressure_points)) if points]
 
-    if not channels:
+    if not sampled:
         return None
 
     # Each channel is sorted (the schema validates it), so its first timestamp is its
     # minimum. The union across channels is not sorted, hence the `min`.
-    origin = min(points[0][0] for points in channels)
+    origin = min(points[0][0] for points in sampled)
 
-    return NormalizedProfile(
-        depth=_rebase(depth_points, origin) if depth_points else None,
-        ceiling=_rebase(ceiling_points, origin) if ceiling_points else None,
-        temperature=_rebase(temperature_points, origin) if temperature_points else None,
+    return with_channels(
+        {channel: _rebase(points, origin) if points else None for channel, points in points_by_channel.items()},
         pressure=[
             ProfilePressureSeries(gas_number=gas_number, t=series.t, v=series.v)
             for gas_number, series in (
@@ -669,10 +756,8 @@ def downsample(
             max_events,
         )
 
-    return NormalizedProfile(
-        depth=capped(profile.depth),
-        ceiling=capped(profile.ceiling),
-        temperature=capped(profile.temperature),
+    return with_channels(
+        {channel: capped(series) for channel, series in channels_of(profile).items()},
         pressure=[
             ProfilePressureSeries(gas_number=cylinder.gas_number, t=t, v=v)
             for cylinder, (t, v) in (
@@ -785,10 +870,9 @@ def fill_channels(base: NormalizedProfile | None, addition: NormalizedProfile | 
         return addition
     if addition is None:
         return base
-    return NormalizedProfile(
-        depth=base.depth if base.depth is not None else addition.depth,
-        ceiling=base.ceiling if base.ceiling is not None else addition.ceiling,
-        temperature=base.temperature if base.temperature is not None else addition.temperature,
+    filled = channels_of(addition)
+    return with_channels(
+        {channel: series if series is not None else filled[channel] for channel, series in channels_of(base).items()},
         pressure=base.pressure or addition.pressure,
         events=base.events or addition.events,
     )
@@ -808,15 +892,16 @@ def profile_from_data(data: Mapping[str, Any]) -> NormalizedProfile:
     `attribute_and_cap` over the result, as every other producer of a `NormalizedProfile`
     does.
     """
-    depth = data.get("depth")
-    ceiling = data.get("ceiling")
-    temperature = data.get("temperature")
-    return NormalizedProfile(
-        depth=None if depth is None else ProfileSeries(t=list(depth["t"]), v=list(depth["v"])),
-        ceiling=None if ceiling is None else ProfileSeries(t=list(ceiling["t"]), v=list(ceiling["v"])),
-        temperature=(
-            None if temperature is None else ProfileSeries(t=list(temperature["t"]), v=list(temperature["v"]))
-        ),
+
+    def stored(channel: str) -> ProfileSeries | None:
+        # `.get`, because a row written by any earlier extractor version simply has no key
+        # for a channel that did not exist then - which is the ordinary state of every
+        # profile stored before the decompression channels arrived.
+        series = data.get(channel)
+        return None if series is None else ProfileSeries(t=list(series["t"]), v=list(series["v"]))
+
+    return with_channels(
+        {channel: stored(channel) for channel in SINGLE_SERIES_CHANNELS},
         pressure=[
             ProfilePressureSeries(gas_number=cylinder["gas_number"], t=list(cylinder["t"]), v=list(cylinder["v"]))
             for cylinder in data.get("pressure") or []
@@ -854,10 +939,8 @@ def shift_profile(profile: NormalizedProfile, seconds: int) -> NormalizedProfile
     def moved(series: ProfileSeries | None) -> ProfileSeries | None:
         return None if series is None else ProfileSeries(t=[t + seconds for t in series.t], v=series.v)
 
-    return NormalizedProfile(
-        depth=moved(profile.depth),
-        ceiling=moved(profile.ceiling),
-        temperature=moved(profile.temperature),
+    return with_channels(
+        {channel: moved(series) for channel, series in channels_of(profile).items()},
         pressure=[
             ProfilePressureSeries(gas_number=cylinder.gas_number, t=[t + seconds for t in cylinder.t], v=cylinder.v)
             for cylinder in profile.pressure
@@ -890,10 +973,9 @@ def join_profiles(earlier: NormalizedProfile | None, later: NormalizedProfile | 
     if later is None:
         return replace(earlier, gas_attribution=[])
 
-    return NormalizedProfile(
-        depth=_join_series(earlier.depth, later.depth),
-        ceiling=_join_series(earlier.ceiling, later.ceiling),
-        temperature=_join_series(earlier.temperature, later.temperature),
+    tail = channels_of(later)
+    return with_channels(
+        {channel: _join_series(series, tail[channel]) for channel, series in channels_of(earlier).items()},
         pressure=_join_pressure(earlier.pressure, later.pressure),
         events=_join_events(earlier.events, later.events),
     )
@@ -993,6 +1075,32 @@ def should_extract(
     return "skip"
 
 
+def summary_extremes(profile: NormalizedProfile) -> dict[str, int | None]:
+    """Every extreme column this profile writes, keyed by column name.
+
+    The one derivation of the summary block, shared by the two writers that maintain it, so
+    an insert and a rewrite of the same profile cannot disagree about a column - which is
+    exactly the drift a second copy of this arithmetic invites, and silently: nothing
+    re-derives these, and a wrong one only ever shows up as a curve missing from `channels`.
+
+    **Every column is written, `None` included.** A channel this profile does not carry has
+    to clear its column rather than be left out of the statement, or a rewrite would leave
+    the previous profile's extreme standing beside samples that no longer contain it.
+    """
+    extremes: dict[str, int | None] = {}
+    for channel, series in channels_of(profile).items():
+        values = series.v if series is not None else []
+        for column, extreme in _SUMMARY_COLUMNS[channel]:
+            extremes[column] = extreme(values) if values else None
+
+    # Flattened across the cylinders, because the two columns are the dive's lowest and
+    # highest tank pressure rather than any one cylinder's.
+    pressure_values = [value for cylinder in profile.pressure for value in cylinder.v]
+    extremes["min_pressure_bar10"] = min(pressure_values) if pressure_values else None
+    extremes["max_pressure_bar10"] = max(pressure_values) if pressure_values else None
+    return extremes
+
+
 def _scaled(value: int | None, scale: int) -> float | None:
     """Integer-scaled storage back into display units.
 
@@ -1040,11 +1148,6 @@ async def store_profile(
     than the samples: the importer clamps before it gets here, because a duration that
     fails to cover its own readings is incoherent.
     """
-    depth_values = profile.depth.v if profile.depth else []
-    ceiling_values = profile.ceiling.v if profile.ceiling else []
-    temperature_values = profile.temperature.v if profile.temperature else []
-    pressure_values = [value for cylinder in profile.pressure for value in cylinder.v]
-
     await db.execute(delete(DiveProfile).where(DiveProfile.recording_id == recording_id))
     await db.execute(
         insert(DiveProfile).values(
@@ -1059,12 +1162,7 @@ async def store_profile(
             # and found nothing, which is a different fact from an older one never having
             # looked - and the difference is what a later backfill selects on.
             event_count=len(profile.events),
-            max_depth_cm=max(depth_values) if depth_values else None,
-            max_ceiling_cm=max(ceiling_values) if ceiling_values else None,
-            min_temperature_c10=min(temperature_values) if temperature_values else None,
-            max_temperature_c10=max(temperature_values) if temperature_values else None,
-            min_pressure_bar10=min(pressure_values) if pressure_values else None,
-            max_pressure_bar10=max(pressure_values) if pressure_values else None,
+            **summary_extremes(profile),
             # A list rather than `None` when there is nothing to attribute, for the same
             # reason `event_count` is a count rather than `None`: this extractor looked.
             gas_attribution=[entry.model_dump() for entry in profile.gas_attribution],
@@ -1125,10 +1223,6 @@ async def replace_profile_samples(db: AsyncSession, *, recording_id: int, profil
     `gas_number`, which is precisely what just moved.
     """
     attributed = replace(profile, gas_attribution=derive_gas_attribution(profile))
-    depth_values = attributed.depth.v if attributed.depth else []
-    ceiling_values = attributed.ceiling.v if attributed.ceiling else []
-    temperature_values = attributed.temperature.v if attributed.temperature else []
-    pressure_values = [value for cylinder in attributed.pressure for value in cylinder.v]
 
     await db.execute(
         update(DiveProfile)
@@ -1136,12 +1230,7 @@ async def replace_profile_samples(db: AsyncSession, *, recording_id: int, profil
         .values(
             depth_sample_count=attributed.depth_sample_count,
             event_count=len(attributed.events),
-            max_depth_cm=max(depth_values) if depth_values else None,
-            max_ceiling_cm=max(ceiling_values) if ceiling_values else None,
-            min_temperature_c10=min(temperature_values) if temperature_values else None,
-            max_temperature_c10=max(temperature_values) if temperature_values else None,
-            min_pressure_bar10=min(pressure_values) if pressure_values else None,
-            max_pressure_bar10=max(pressure_values) if pressure_values else None,
+            **summary_extremes(attributed),
             gas_attribution=[entry.model_dump() for entry in attributed.gas_attribution],
             data=attributed.to_data(),
         )
@@ -1208,14 +1297,16 @@ def to_read_schema(loaded: LoadedProfile) -> DiveProfileRead:
     trade - nothing outside this module reads the payload.
     """
     data = loaded.data or {}
-    depth = data.get("depth")
-    ceiling = data.get("ceiling")
-    temperature = data.get("temperature")
+
+    def channel(name: str) -> DiveProfileSeries | None:
+        # `.get`, so a row an older extractor wrote - with no key at all for a channel that
+        # did not exist then - reads back without a `KeyError`.
+        series = data.get(name)
+        return DiveProfileSeries(times=series["t"], values=series["v"]) if series else None
+
     return DiveProfileRead(
         duration=loaded.duration,
-        depth=DiveProfileSeries(times=depth["t"], values=depth["v"]) if depth else None,
-        ceiling=DiveProfileSeries(times=ceiling["t"], values=ceiling["v"]) if ceiling else None,
-        temperature=DiveProfileSeries(times=temperature["t"], values=temperature["v"]) if temperature else None,
+        **{name: channel(name) for name in SINGLE_SERIES_CHANNELS},
         pressures=[
             DiveProfilePressureSeries(gas_number=cylinder["gas_number"], times=cylinder["t"], values=cylinder["v"])
             for cylinder in data.get("pressure") or []
@@ -1226,13 +1317,34 @@ def to_read_schema(loaded: LoadedProfile) -> DiveProfileRead:
             # module reads back without a `KeyError`.
             DiveProfileEvent(
                 time=event["t"],
-                type=ProfileEventType(event["type"]),
+                type=_published_event_type(event["type"]),
                 gas_number=event.get("gas_number"),
                 label=event.get("label"),
             )
             for event in data.get("events") or []
         ],
     )
+
+
+def _published_event_type(stored: str) -> ProfileEventType | None:
+    """A stored event type as the wire spells it - and `other` does not reach the wire.
+
+    Storage keeps `other` because a JSONB key and an enum both want a value rather than a
+    hole; DiveJSON §6.6 spells the same fact as an *absent* `type` beside the label that is
+    then REQUIRED. This is the one line where the two meet, and it is on the read side rather
+    than in each of the two surfaces that serve this schema - the profile route and the
+    exported document both go through `to_read_schema`, and a document carrying
+    `"type": "other"` would be invalid against the schema `api-2`'s and the web's readers
+    validate with.
+
+    A value this build does not recognize reads as unclassified rather than raising: the
+    column is not `CHECK`ed, so a row written by a later build really can hold one, and the
+    label beside it is still a marker worth drawing. The same answer `_unknown_is_absent`
+    gives on the import side, from the other direction.
+    """
+    if stored == ProfileEventType.OTHER.value or stored not in set(ProfileEventType):
+        return None
+    return ProfileEventType(stored)
 
 
 def to_recording_read_schema(loaded: LoadedProfile) -> RecordingProfileRead:
@@ -1297,29 +1409,32 @@ async def get_profile_infos_for_recordings(
         DiveProfile.depth_sample_count,
         DiveProfile.parser_key,
         DiveProfile.event_count,
-        DiveProfile.max_depth_cm,
-        DiveProfile.max_ceiling_cm,
-        DiveProfile.min_temperature_c10,
-        DiveProfile.max_temperature_c10,
         DiveProfile.min_pressure_bar10,
         DiveProfile.max_pressure_bar10,
         DiveProfile.updated_at,
+        # Every extreme column the table names, rather than a hand-kept list of them: a
+        # channel added to `_SUMMARY_COLUMNS` reaches this read without a second edit - the
+        # one that would otherwise be forgotten, since a curve missing from `channels` fails
+        # nothing and shows up only as a toggle the chart never offers.
+        *(getattr(DiveProfile, column) for columns in _SUMMARY_COLUMNS.values() for column, _ in columns),
     ).where(DiveProfile.recording_id.in_(set(recording_ids)))
 
     infos: dict[int, DiveProfileInfo] = {}
     for row in await db.execute(stmt):
-        channels: list[str] = []
+        # A channel whose extreme came back NULL is a channel this profile has no readings
+        # for - a dive that never owed a decompression stop has no ceiling to draw, and one
+        # whose computer reported no gradient factor has no gradient factor. The same
+        # derivation for all ten, and the reason a ceiling of zero is stored as no reading.
+        present = {
+            channel
+            for channel, columns in _SUMMARY_COLUMNS.items()
+            if channel != "depth" and getattr(row, columns[0][0]) is not None
+        }
         if row.depth_sample_count > 0:
-            channels.append("depth")
-        # A dive that never owed a decompression stop has no ceiling column to draw, which
-        # is exactly what a NULL extreme means here - the same derivation as the others,
-        # and the reason a ceiling of zero is stored as no reading rather than as zero.
-        if row.max_ceiling_cm is not None:
-            channels.append("ceiling")
-        if row.min_temperature_c10 is not None:
-            channels.append("temperature")
+            present.add("depth")
         if row.min_pressure_bar10 is not None:
-            channels.append("pressure")
+            present.add("pressure")
+        channels = [channel for channel in PROFILE_CHANNEL_ORDER if channel in present]
 
         infos[row.recording_id] = DiveProfileInfo(
             uuid=row.uuid,

@@ -838,6 +838,12 @@ async def store_recording_file(
             await dive_recordings.fill_device_fields(
                 db, recording_id=recording_id, device=None if extraction.parsed is None else extraction.parsed.device
             )
+            await dive_recordings.fill_recording_settings(
+                db,
+                recording_id=recording_id,
+                mode=None if extraction.parsed is None else extraction.parsed.mode,
+                deco_model=None if extraction.parsed is None else extraction.parsed.deco_model,
+            )
             if incoming is not None:
                 await dive_recordings.fill_gate_figures(
                     db, recording_id=recording_id, duration=incoming.duration, max_depth=incoming.max_depth
@@ -856,6 +862,8 @@ async def store_recording_file(
                 user_id=user_id,
                 ordinal=ordinal,
                 device=None if extraction.parsed is None else extraction.parsed.device,
+                mode=None if extraction.parsed is None else extraction.parsed.mode,
+                deco_model=None if extraction.parsed is None else extraction.parsed.deco_model,
                 start_time=None if incoming is None else incoming.start_time,
                 utc_offset_minutes=None if incoming is None else incoming.utc_offset_minutes,
                 duration=None if incoming is None else incoming.duration,
@@ -1653,6 +1661,12 @@ async def backfill_tech_fields(
                     db,
                     recording_id=row.recording_id,
                     device=None if extraction.device_source is None else extraction.device_source.device,
+                )
+                await dive_recordings.fill_recording_settings(
+                    db,
+                    recording_id=row.recording_id,
+                    mode=None if extraction.device_source is None else extraction.device_source.mode,
+                    deco_model=None if extraction.device_source is None else extraction.device_source.deco_model,
                 )
                 for mixture_id, values in updates or []:
                     await db.execute(update(DiveMixture).where(DiveMixture.id == mixture_id).values(**values))

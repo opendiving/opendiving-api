@@ -7,10 +7,21 @@ Run once after deploying the columns, from the API container:
     docker compose exec api python -m src.scripts.backfill_dive_tech_fields --dry-run
 
 Fills `dive.cns_start/cns_end/otu_start/otu_end/surface_pressure_bar`, the entry/exit
-coordinates beside them, `dive_recording`'s six device columns, and - where the stored
-cylinders still demonstrably match the file's - `dive_mixture.po2_limit/gas_number/role`.
+coordinates beside them, `dive_recording`'s six device columns plus the mode the computer
+ran in and the five `deco_*` columns of the model it ran, and - where the stored cylinders
+still demonstrably match the file's - `dive_mixture.po2_limit/gas_number/role`.
 The dive columns are whatever `DiveTechScalars` publishes rather than a list kept here,
 which is what let the coordinates arrive without editing this script.
+
+**The recording's mode and deco model are the exception to that**: they come off
+`ParsedDiveSchema` rather than a pivot, so `fill_recording_settings` is named in
+`backfill_tech_fields` beside `fill_device_fields` and this sentence has to be edited when a
+member is added. Both follow the same never-overwrite rule as the device columns, so a run
+fills what no earlier file recorded and takes nothing away.
+
+**It does not touch the profile's samples**, which are a different backfill's
+(`backfill_dive_profiles`) and a different question - see *"The decompression channels
+arrive for new dives only"* in `DECISIONS.md` for why nothing runs that one.
 
 **Every primary recording holding a stored file is a candidate on every run**, and only the
 primary: a second computer's exposure readings are its own device's arithmetic and are never

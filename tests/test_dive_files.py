@@ -348,9 +348,18 @@ class TestCacheInvalidation:
 
         matches = lambda key: any(fnmatch(key, p) for p in patterns)  # noqa: E731
         assert matches("user_7_dive:019f-abc")
+        # **The versioned key too**, which is the one this sweep now has to reach: the
+        # suffix goes after the colon precisely so it stays inside `user_{id}_dive:*`. An
+        # underscore-joined `user_7_dive_v2:...` falls outside both patterns, and nothing
+        # would say so - the invalidation would simply stop working on the detail read.
+        assert matches("user_7_dive:v2:019f-abc")
         # Another user's keys, and other resources', must be left alone.
         assert not matches("user_8_dive:019f-abc")
+        assert not matches("user_8_dive:v2:019f-abc")
         assert not matches("user_7_certification:019f-abc")
+        # The dive *site* list is why there are two literal patterns rather than one
+        # `user_{id}_dive*`, and a version suffix must not have quietly widened either.
+        assert not matches("user_7_dive_sites:page_1")
 
 
 def _attach_result() -> MagicMock:

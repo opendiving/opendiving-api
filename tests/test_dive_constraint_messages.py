@@ -11,7 +11,7 @@ constraints themselves against a live Postgres database.
 
 from sqlalchemy.exc import IntegrityError
 
-from src.app.api.v1.dives import _fk_error_detail, _mixture_error_detail
+from src.app.api.v1.dives import _fk_error_detail, _mixture_error_detail, _recording_error_detail
 
 
 def _integrity_error(constraint_name: str) -> IntegrityError:
@@ -139,3 +139,20 @@ class TestMixtureErrorDetail:
     def test_unknown_violation_falls_back_to_generic_message(self):
         exc = IntegrityError("INSERT ...", {}, Exception("some other constraint"))
         assert _mixture_error_detail(exc) == "Invalid gas mixture."
+
+
+class TestRecordingErrorDetail:
+    """The attach route's own translation. Its columns are filled from a file rather than
+    from a body, so a violation here is a parser bug - but a 500 would say nothing at all,
+    and the fallback message has to name the *file* rather than a field a diver typed."""
+
+    def test_an_inverted_gradient_factor_pair(self):
+        assert _recording_error_detail(_integrity_error("ck_dive_recording_deco_gf_low_within_high")) == (
+            "This file's decompression settings are inconsistent: its low gradient factor is above its high one."
+        )
+
+    def test_unknown_violation_falls_back_to_generic_message(self):
+        exc = IntegrityError("INSERT ...", {}, Exception("some other constraint"))
+        assert _recording_error_detail(exc) == (
+            "This dive-computer file could not be stored: one of its values is not one this app can hold."
+        )

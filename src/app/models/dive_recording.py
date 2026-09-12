@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String
+from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -91,6 +91,43 @@ class DiveRecording(Base, PublicUUIDMixin, TimestampMixin):
     # this is nullable rather than defaulting to zero.
     device_dive_number: Mapped[int | None] = mapped_column(Integer, default=None)
 
+    # **How this computer was configured for this dive**, which is the recording's and not
+    # the dive's: a backup run in gauge mode beside a primary on open circuit is ordinary
+    # practice, and the dive was not a gauge dive. Two computers give two answers to every
+    # column below, and this row is what can hold both.
+    #
+    # A closed vocabulary with **no DB `CHECK`**, the pattern `water_type` and
+    # `GearItem.type` follow: the Pydantic enum on the write shapes is the boundary, and the
+    # read shapes widen to `StoredVocabulary` so one unrecognized row cannot fail a whole
+    # dive read. NULL means the file recorded no mode - never "open circuit".
+    mode: Mapped[str | None] = mapped_column(String(32), default=None)
+
+    # The decompression model this device ran, as five prefixed columns rather than a JSONB
+    # object: they are five scalars a `psql` session and a `WHERE` clause both want, and the
+    # prefix is what keeps them legible beside the device block above. `DECO_MODEL_COLUMNS`
+    # in `services/dive_recordings.py` is the one place the member-to-column mapping lives.
+    #
+    # **Not a channel.** The readouts a model produces - the no-deco clock, the time to
+    # surface, the gradient factors - are samples and live on `dive_profile`; the model is
+    # one setting for the whole dive and lives here. A setting stored per sample would be the
+    # same five values repeated several thousand times.
+    deco_algorithm: Mapped[str | None] = mapped_column(String(32), default=None)
+    # The device's own name for its model, as the source spelled it - `Suunto Fused RGBM 2`,
+    # `ZHL-16C`. Free text on purpose and deliberately not folded into `deco_algorithm`:
+    # vendors name and version their models as they please, and a family is a claim about
+    # the mathematics that a product string does not make.
+    deco_name: Mapped[str | None] = mapped_column(String(64), default=None)
+    # Whole percent, written both or neither - one alone names no setting. The `CHECK` below
+    # is the backstop; every write path drops both halves before it can fire.
+    deco_gf_low: Mapped[int | None] = mapped_column(Integer, default=None)
+    deco_gf_high: Mapped[int | None] = mapped_column(Integer, default=None)
+    # The device's own conservatism setting, on the device's own scale - Suunto's P-2 to P2.
+    # **Unfloored, unlike every other reading in this app**: a negative here is P-1 rather
+    # than an absent-marker, and `0` is the P0 setting rather than nothing. The number means
+    # nothing without `deco_name` and the device columns above, which is why it is stored
+    # beside them rather than normalized into something comparable across vendors.
+    deco_conservatism: Mapped[int | None] = mapped_column(Integer, default=None)
+
     # The device's own start, split exactly as the dive's is: the instant in `start_time`
     # and the offset it was expressed in beside it, with NULL meaning "the source recorded a
     # wall clock and no offset" (DiveJSON §5.2). A second computer starts when its diver's
@@ -115,6 +152,17 @@ class DiveRecording(Base, PublicUUIDMixin, TimestampMixin):
     @classmethod
     def __table_args__(cls) -> tuple:
         return (
+            # A gradient factor pair runs low-to-high, which no schema can express and every
+            # write path already enforces: the parsers drop both halves and the import
+            # planner drops both halves with a note, precisely so this never fires. It is
+            # here because the rule is about the row rather than about any one path into it,
+            # and because a value that reached the column inverted would be a setting nobody
+            # could have dialled in. NULL on either side passes - the pair is both-or-neither
+            # and that is the writers' rule, not a constraint's.
+            CheckConstraint(
+                "deco_gf_low IS NULL OR deco_gf_high IS NULL OR deco_gf_low <= deco_gf_high",
+                name="ck_dive_recording_deco_gf_low_within_high",
+            ),
             # One recording per slot per dive. What used to be `ux_dive_file_dive_id`'s job
             # - stopping a dive from accumulating records nobody asked for - moved here and
             # became "in a defined order" instead of "at most one".

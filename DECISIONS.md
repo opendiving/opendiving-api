@@ -17503,3 +17503,278 @@ another `pytest`, or `select datname, count(*) from pg_stat_activity group by da
 set of connections to `opendive_test`. Diagnosed the slow way first - five green full runs either
 side of failures in four different modules, none of them in the code under change, before a `ps`
 showed a sibling worktree's suite running with a `DROP DATABASE` ahead of it.
+
+## The decompression channels are a profile's, and the model is a recording's
+
+DiveJSON 1.0 gained six profile channels — `ndl`, `tts`, `ppo2`, `cns`, `gradient_factor` and
+`surface_gradient_factor` — and two recording members, `mode` and `deco_model`. The split is not
+arbitrary and it is the whole design: **a readout is a sample and a setting is not.**
+
+The six are what a computer *computed*, once per sample, from the model it was running: a
+no-decompression clock counting down, the time an ascent would take from here, the ppO₂ it believed
+it was breathing, the CNS clock, and how close the leading tissue came to its M-value now and on a
+direct ascent. They belong beside `depth` and `ceiling` in `dive_profile.data` because they are
+readings on the same axis, and because the alternative — a `deco` object on the recording holding
+its own series — is two time axes to keep aligned for one device's record.
+
+The model is one configuration for the whole dive: a family, the device's own name for it, a
+gradient-factor pair and a conservatism setting. Stored per sample it would be the same five values
+repeated several thousand times, so it is five prefixed columns on `dive_recording`
+(`deco_algorithm`, `deco_name`, `deco_gf_low`, `deco_gf_high`, `deco_conservatism`), with
+`DECO_MODEL_COLUMNS` in `services/dive_recordings.py` the one place the member-to-column mapping
+lives — the read shape, the fill rule and the row writes all walk it.
+
+**Both are the recording's and never the dive's**, which is the same argument the recording row
+exists for. A backup computer run in gauge mode beside a primary on open circuit is ordinary
+practice and the dive was not a gauge dive; two computers running different gradient factors give
+the diver two ceilings and two clocks, which is exactly why divers wear two. A dive-level `mode`
+would be the diver's own statement about the kind of dive it was — a different member, and one
+nothing in this app writes. It arrives with freediving as a product.
+
+**Nothing here derives any of the six.** Each depends on the model the device ran, on its settings
+and on the diver's exposure history, none of which a logged dive carries — the same argument that
+keeps `ceiling` a stored reading rather than something the chart computes from depth and a gas
+fraction. A ppO₂ curve reconstructed from depth and FO₂ is a *derivation* and the format says a
+reader that computes one must say so; this app computes none.
+
+### The scales, and why each is what it is
+
+`schemas/dive_profile.py` declares one constant per channel beside `DEPTH_SCALE`, including the ones
+whose scale is 1: a channel with no constant beside its siblings is the one the next reader assumes
+must be scaled like them.
+
+| channel                                      | unit                | why                                                                                                                                                                            |
+| -------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ndl`, `tts`                                 | seconds             | devices report whole minutes or whole seconds, and seconds is the format's duration unit already                                                                               |
+| `ppo2`                                       | hundredths of a bar | tenths cannot tell 1.30 from 1.32, and Shearwater exports a computed ppO₂ to two decimals. A third pressure scale in that module, and the only one that is not a tank pressure |
+| `cns`                                        | tenths of a percent | the Suunto JSON export records `0.069` where the XML rounds to `7`, and the finer reading is the one worth keeping                                                             |
+| `gradient_factor`, `surface_gradient_factor` | whole percent       | every source in hand reports whole percent                                                                                                                                     |
+
+Rejected: millibar for ppO₂ — no source in hand resolves below a hundredth of a bar, and the scale
+is part of the published format. Rejected: reusing tenths-of-a-bar because it is "a pressure" — see
+the first reason.
+
+**`cns` the channel and `dive.cns_start`/`cns_end` are not the same quantity and neither is derived
+from the other.** The two dive columns are the device's own figures for the start and end of the
+dive, in whole percent, and they stay on the dive under the rule *"A second file of one recording
+fills, and never overwrites"* records: the dive's readings are the primary recording's.
+
+### Zero is a reading, a negative is an absent-marker, and neither rule is the ceiling's
+
+`ceiling_cm` drops a zero because *for that quantity* zero is the absence of the thing being
+measured — "you may surface" is not an obligation at 0 m. The six new channels take the opposite
+answer on zero and a third answer on negatives, which is why `unsigned_int_or_none` in
+`dive_parsers/channels.py` is a sibling of `ceiling_cm` rather than a generalisation of it.
+
+- **A zero is a reading.** An NDL of zero is the moment a dive stopped being a no-decompression
+  dive, which is the one reading a decompression dive most needs; a D5 export in hand writes it on
+  five consecutive samples at 42.6 to 44.5 m with a time to surface of 256 to 268 s beside it.
+- **A negative is the absent-marker**, and it is what the devices in hand actually write: a Suunto
+  Ocean writes `NoDecTime: -1` on 1 031 samples across 19 exports — 916 of them with a ceiling above
+  zero, the device showing a stop depth in place of a clock it no longer has — and `gf99: -100` on 5
+  531 of 7 194, where no compartment leads. None of the six is a quantity that runs below zero, and
+  the format floors all six for the same reason.
+- **A value at a device's display cap is a reading.** A Suunto Ocean writes `NoDecTime: 6000` and a
+  Shearwater `<nodecotime>5940</nodecotime>` on most samples of a recreational dive. Both mean *at
+  least this*, which is a fact the diver read off the wrist. Mapping a cap to absence would delete
+  the only NDL reading most dives have.
+- **A zero that means something else in one format is that format's parser's to decide.** The Ocean
+  writes `TimeToSurface: 0` on 199 of the 364 samples of one dive that carry the member, at every
+  depth from 0 to 19 m — including two rows from a sample at 14.63 m that says `88` seconds later. A
+  time to surface that is zero at 14 m is not a time; it is the space the device writes when it has
+  no figure. That judgement is in `suunto_json.py` because a converter that has read the file is the
+  one that knows.
+
+**Nothing is clamped above.** `gf99` reaches 12 575 on a real Suunto decompression ascent while the
+surface gradient factor beside it declines smoothly through the same stops — which no reading of the
+field as a ratio explains. Suunto publishes no definition and nothing in the file accounts for the
+size, so the number is stored as written: a cap is a guess wearing a plausible number, and the
+format puts no ceiling on the channel for that reason.
+
+### Which summary extreme, per quantity
+
+`dive_profile` gains one column per channel — `min_ndl_s`, `max_tts_s`, `max_ppo2_bar100`,
+`max_cns_pct10`, `max_gradient_factor_pct`, `max_surface_gradient_factor_pct` — and `channels` on
+the read schema is derived from which of them came back non-NULL, the rule *"a column saying which
+curves a row carries is a column that can disagree with the row"* already applies to the others.
+
+`min` for the NDL and `max` for the other five is a per-quantity choice, exactly as min/max
+temperature and min/max pressure are. The *maximum* NDL is the device's display cap on almost every
+recreational dive and says nothing; the minimum is what a diver reads — how close the dive came to
+its limit — and a stored `0` there is a real reading, which is why NULL has to mean absence rather
+than zero.
+
+`_SUMMARY_COLUMNS` in `services/dive_profiles.py` is the one table naming the column and the extreme
+per channel. Two writers derive these columns and a third reads them back to build `channels`, so a
+channel added without an entry is a `KeyError` at the first write rather than a curve that silently
+never appears.
+
+### What the parsers still refuse, and why
+
+The rule is the mapping documents': a parser reads what its format's document maps and nothing the
+document leaves unmapped.
+
+- **Suunto DM5 XML** carries none of the six — a `Dive.Sample` has depth, ceiling, temperature and
+  pressure and nothing that measures a duration, a partial pressure or a tissue loading. It does
+  carry `<Mode>` (0 and 1 are the air and nitrox modes of an open-circuit computer, 3 is a freedive)
+  and `<PersonalMode>`, which is the conservatism on Suunto's own P−2 to P2 scale. `<Algorithm>` is
+  an undocumented enum reading `0` on every scuba export in hand, so nothing says what another value
+  would mean — the same refusal `<Type>` on a `<DiveMixture>` already gets. The five GF, setpoint
+  and switch-point elements are `i:nil` on all 384 exports, and `<AltitudeMode>`, `<AscentMode>` and
+  `<LastDecoStopDepth>` carry real values the model has no member for.
+- **Suunto app JSON** carries four of the six and neither `ppo2` nor `cns` — no sample object holds
+  a computed partial pressure or a running CNS clock. `gfLeadingTissue` is the compartment's
+  *number* rather than a loading. The header's `DiveMode`, `Algorithm` and `Conservatism` are the
+  mode and the model; `Gauge` and `Free` are not in the mode table because no file in hand carries
+  either.
+- **FIT** has a `record` field for four of the six — `ndl_time` (96), `time_to_surface` (95),
+  `cns_load` (97) and `po2` (129) — and **none is read**: every `record` in all three recordings in
+  hand carries all four empty, and a mapping written against the profile listing rather than against
+  a file is speculation. `next_stop_time` (94) has no channel at all.
+  `dive_settings.gf_low`/`gf_high` are the model, and `model` is read only where it states
+  `zhl_16c`: reading "there is only one value in the enum" as "the family must be Bühlmann" would be
+  the parser deciding what the device ran, and a Suunto watch writing Garmin's format is exactly the
+  file that would get it wrong — its own app export names an RGBM model for the same dive.
+  `session.sub_sport` would carry the mode and no file writes one, so a FIT freedive imports as a
+  dive that does not say what kind it is.
+
+**A family is never derived from a product string.** `deco_algorithm` comes from a table of the two
+strings files in hand carry (`Suunto Fused2 RGBM` and `Suunto Fused RGBM 2`, both RGBM); anything
+else fills `deco_name` verbatim and leaves the family absent. A family is a claim about the
+mathematics, and a product string is not one.
+
+### `deco_conservatism` is the one reading in this app with no floor
+
+Every other parsed number here is floored somewhere: a pressure at or below zero is not a fill, a
+gas number is not negative, a gradient factor is not. `deco_conservatism` is Suunto's P−2 to P2
+scale stored as the device's own number, so `0` is the P0 setting and `-1` is P−1 — both in the
+owner's exports. Reading a negative here as an absent-marker, which is the right answer for every
+channel, would delete a real setting. The number means nothing without `deco_name` and the device
+columns beside it, which is why it is stored beside them rather than normalized into something
+comparable across vendors.
+
+### `gf_low ≤ gf_high` is enforced by the writers, and the constraint is the backstop
+
+`ck_dive_recording_deco_gf_low_within_high` exists because the rule is about the row rather than
+about any one path into it. But **both write paths drop the pair before it can fire**, and that is
+the load-bearing half: `ParsedDecoModel._pair_the_gradient_factors` drops both halves on the parse
+path and `_plan_deco_model` drops both with a note on the import path.
+
+The reason is what an `IntegrityError` costs at each. On the parse path it dies inside
+`store_recording_file`'s transaction and surfaces to the diver as "the file changed while this
+upload was in flight" — advice that is both wrong and unactionable, since the retry it asks for
+fails identically every time. On the import path it is worse: the whole import is one transaction,
+so one inverted pair in one dive takes every dive in the archive with it. Neither number says which
+of the two is wrong, so both go and the record stays — the same move `_plan_cylinders` makes for an
+oxygen and a helium summing past 100.
+
+Both-or-neither travels the same way and for §6.4c's own reason: one gradient factor alone names no
+setting. A `COALESCE` fill on one of the pair can therefore only ever fill both or neither, because
+a stored pair is whole by construction.
+
+## The decompression channels arrive for new dives only
+
+`PROFILE_EXTRACTOR_VERSION` went 3 → 4, because the same bytes now yield different stored samples.
+That is the whole mechanism: `should_extract` re-extracts anything behind the version, so the
+existing script would pick the corpus up with **no change**:
+
+```bash
+docker compose exec api python -m src.scripts.backfill_dive_profiles
+```
+
+**Nothing in this change runs it, and that is a decision rather than an omission.** The project
+operates an instance every merge to `main` reaches within minutes, holding real dives — so shipping
+the bump alone leaves every profile already stored there on the four channels it has, indefinitely,
+and invisibly to anyone whose test is a fresh upload. Recorded here so the next reader finds a
+decision rather than a gap.
+
+Owner's ruling, 2026-09-12: existing profiles stay short until their recording is re-uploaded and
+re-extracted. The data this adds is worth having for new dives without a migration pass over old
+ones. The backfill remains available and safe to re-run by its own design, so the call is reversible
+by running the command above; what is not reversible is the cost of running it on a whim, which is
+that **every profile ETag changes** (it is `{source_sha256}:{extractor_version}`) and the dive
+caches of every user it touches are flushed.
+
+**A migration is the wrong place for it in any case**, which is why the revision that adds the
+columns does not attempt one: re-extraction reads the stored dive-computer files out of the blob
+store, and an Alembic revision has neither the blob store nor the parsers.
+
+The version bump reaches a stale row harmlessly in the meantime. `profile_from_data` and
+`to_read_schema` read every channel with `.get`, so a payload written by any earlier extractor —
+with no key at all for a channel that did not exist then — reads back without a `KeyError`, and its
+summary columns are NULL, which is exactly what `channels` means by "this profile has no such
+curve".
+
+## The dive *detail* cache key is versioned, and the suffix goes after the colon
+
+`_cached_read_dive` is keyed `user_{user_id}_dive:v2` rather than `user_{user_id}_dive`. This is the
+first change to owe the call *"Changing the shape of a cached response outlives the restart that
+ships it"* asks of whoever next reshapes a cached response, and it takes the version-the-key half:
+it needs no access to the instance and cannot be forgotten at deploy time, where a documented flush
+is a step somebody has to run.
+
+**The failure it prevents is a wrong answer, not the 500 that section records**, and the difference
+decides when the next reader owes this at all. That section's worked example is a *required* field
+with no default — `day` on `DiveActivityPoint` — where a v1 entry fails `response_model` validation
+outright. Nothing here repeats that shape: `RecordingRead.mode` and `.deco_model` are
+`Field(default=None)`, `DiveProfileInfo.channels` was already a plain `list[str]` so a four-entry
+one still validates, and every new profile member is defaulted too. A v1 entry therefore replays
+*cleanly* and tells a signed-in diver their dive has no mode, no model and four curves, for an hour,
+on a build that stored six more. Two different costs, and a member added with `default=None` buys
+only the second — which is still worth a suffix on an hour-long key serving an instance, and would
+not be on the 60-second list beside it. `DiveReadWithMixtures.species` and `.recordings` carry
+`default_factory=list` for exactly this reason and say so at the field.
+
+**The detail read and not the list**, and the distinction is worth stating because an earlier
+reading of it got this backwards. `DiveProfileInfo` reaches the wire only through
+`RecordingRead.profile` under `DiveReadWithMixtures.recordings`, which is `GET /dive/{uuid}`'s shape
+and lives an hour. `_cached_read_dives` builds `DiveRead`, which carries no `recordings` and no
+`profile` — deliberately, so the paginated list does not pay for something only the detail page
+renders — so its shape is untouched by this change. `read_dive_profile` is not cached at all.
+
+**The suffix lands after the colon.** `invalidate_dive_caches` sweeps the two literal patterns
+`user_{id}_dives:*` and `user_{id}_dive:*` — two rather than one `user_{id}_dive*` on purpose, so
+the shorter one does not also eat the dive *site* list. A suffix joined with an underscore
+(`user_{id}_dive_v2:…`) falls outside both, and invalidation would silently stop working on the one
+response this change reshapes, with nothing failing to say so.
+
+## `other` is storage's spelling of an absent event type, and it never reaches the wire
+
+`ProfileEventType` widened from five values to fourteen: the four that were already there, nine
+alarm classes seeded from the wording real computers use, and `OTHER`. Thirteen of the fourteen are
+the format's; `OTHER` is not one of them.
+
+DiveJSON §6.6 makes `type` OPTIONAL and spells "the device recorded something here and nothing in
+this vocabulary says what" as an **absent** `type` beside a `label` that is then REQUIRED. There is
+exactly one spelling of unclassified, and an `"other"` value beside it would be a second. Storage
+keeps `OTHER` all the same, because a JSONB key and an enum both want a value rather than a hole,
+and because every row already written carries it.
+
+So the two vocabularies meet at exactly two functions, and nowhere else:
+
+- `_published_event_type` in `services/dive_profiles.py`, on the way out. `to_read_schema` is the
+  only mapping from the stored payload to the wire, and both surfaces that serve `DiveProfileRead` —
+  the recording profile route and `logbook.divejson` — go through it. That matters more for the
+  document than for the route: `ExportRecording.profile` *is* `DiveProfileRead` and the schema's
+  `profile` object is `additionalProperties: false`, so a `"type": "other"` would make every
+  exported document invalid. The export's `exclude_none=True` then drops the null entirely, which is
+  what §5.4 requires of a writer.
+- `_events` in `logbook_import/planner.py`, on the way in. An absent `type` reads as `OTHER`, and so
+  does an unrecognized one — `_unknown_is_absent` has already turned a value from a later minor
+  version into `None` before the planner sees it, and reading that as the unclassified marker it is
+  beats dropping a real event over a vocabulary this build predates.
+
+A client therefore sees `type: null` with a `label` where it used to see `type: "other"`, and the
+two say the same thing. That is a breaking change to the read shape, which is the point of it.
+
+**The alarm classes are earned by wording, not by name.** The Suunto JSON parser's `_ALERT_TYPES`
+maps each `Alarm`/`Warning` string the corpus carries onto a value and **keeps the label beside
+it**: the type is what a chart draws a glyph from and "Ceiling Broken" is what the diver was
+actually shown, and no type says it as well. Two spellings of one occurrence share a value — "Safety
+Stop Broken" and "Mandatory Safety Stop Broken" — because the type says what class of thing happened
+and the label says which words the device used. A string outside the table stays `OTHER` with its
+wording, which is the same marker one class less specific rather than a marker lost.
+
+FIT's `dive_alert` stays unclassified for the opposite reason: its `data` subfield is a 40-member
+enum nothing in hand says the meaning of, so the words go through as the label and no type is
+claimed. That is the same refusal, applied where the evidence is missing rather than present.

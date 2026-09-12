@@ -91,6 +91,54 @@ class WaterType(StrEnum):
     EN13319 = "en13319"
 
 
+class DiveMode(StrEnum):
+    """The mode one **device** ran in - never the dive's kind, which is a different claim.
+
+    A closed vocabulary on `WaterType`'s terms and with no DB `CHECK` behind it for the same
+    reason (see *"`GearItem.type` is a closed vocabulary, but has no DB `CHECK` constraint"*
+    in DECISIONS.md): the enum is the write boundary, `StoredVocabulary` is how the column
+    is read back.
+
+    **It lives on the recording rather than on the dive**, which is what makes it a mode and
+    not a genre. A backup computer run in gauge mode beside a primary on open circuit is
+    ordinary practice and the dive was not a gauge dive; two computers give two answers, and
+    the recording is the row that can hold both. A dive-level mode is the diver's own
+    statement about the dive and nothing in this app writes one - it arrives with freediving
+    as a product, not here.
+
+    No `OTHER`, and no default: `None` means the file did not record one, and a reader must
+    never read that as open circuit however a source format's documentation glosses an
+    absence. UDDF says an absent `<divemode>` means open circuit; that is the *format*'s
+    claim about its own default rather than the device's about the dive, so this app does not
+    read it.
+    """
+
+    OPEN_CIRCUIT = "open_circuit"
+    CLOSED_CIRCUIT = "closed_circuit"
+    SEMI_CLOSED = "semi_closed"
+    GAUGE = "gauge"
+    FREEDIVE = "freedive"
+
+
+class DecoAlgorithm(StrEnum):
+    """The **family** a decompression model belongs to - not the product.
+
+    Two values, because two are what files in hand name: a UDDF `<decomodel><buehlmann>`
+    element and a FIT `dive_settings.model` of `zhl_16c` say Bühlmann, and Suunto's own
+    exports name a Fused RGBM product. A family is a claim about the mathematics, so nothing
+    here derives one from a product string it has not seen: a `Suunto Fused RGBM 2` is
+    `RGBM` because a mapping table says that exact string is, and an unrecognized string
+    fills `deco_name` and leaves this absent.
+
+    Closed like `WaterType` and `DiveMode`, with no DB `CHECK` for the same reason. It grows
+    when a file arrives naming another family - VPM and DCIEM are the two libdivecomputer
+    knows and no export in hand carries either.
+    """
+
+    BUHLMANN = "buhlmann"
+    RGBM = "rgbm"
+
+
 class DiveBase(BaseModel):
     """Shared by the read shapes and the write ones, which is why `start_time` is the
     permissive spelling here and `DiveCreate` re-declares it as the strict one."""
@@ -365,6 +413,50 @@ class RecordingDevice(BaseModel):
     ]
 
 
+class RecordingDecoModel(BaseModel):
+    """The decompression model one device ran on one dive, and the settings it ran it with.
+
+    Five stored columns rather than a channel, and the distinction is what each thing is: the
+    model is one setting for the whole dive, its readouts are samples of what it computed. A
+    recording with no member of this recorded reports `null` for the whole object rather than
+    five nulls - `_read_deco_model` in `services/dive_recordings.py` is where that is decided,
+    on `_read_device`'s terms.
+
+    `algorithm` is `StoredVocabulary` and not `DecoAlgorithm` for the reason every read shape
+    in this app widens a closed vocabulary: the column has no `CHECK`, so typing the enum here
+    would assert an invariant storage declined to enforce and one unrecognized row would fail
+    the whole dive read.
+    """
+
+    algorithm: Annotated[
+        StoredVocabulary | None,
+        Field(default=None, examples=["buhlmann"], description="The model's family, where the source named one"),
+    ]
+    name: Annotated[
+        StoredVocabulary | None,
+        Field(
+            default=None,
+            examples=["Suunto Fused RGBM 2"],
+            description="The device's own name for its model, as the source spelled it. Free text: vendors name and "
+            "version their models as they please.",
+        ),
+    ]
+    gf_low: Annotated[
+        int | None,
+        Field(default=None, examples=[50], description="Whole percent. Recorded with `gf_high` or not at all"),
+    ]
+    gf_high: Annotated[int | None, Field(default=None, examples=[85], description="Whole percent")]
+    conservatism: Annotated[
+        int | None,
+        Field(
+            default=None,
+            examples=[0],
+            description="The device's own conservatism setting, on the device's own scale - Suunto's P-2 to P2. "
+            "Negative values are real, and the number means nothing without `name` and the recording's device.",
+        ),
+    ]
+
+
 class RecordingRead(BaseModel):
     """One device's record of a dive: what recorded it, when it started, its files and a
     summary of its samples.
@@ -384,6 +476,23 @@ class RecordingRead(BaseModel):
     uuid: uuid_pkg.UUID
     ordinal: Annotated[int, Field(description="Position among this dive's recordings; 0 is primary")]
     device: RecordingDevice | None = None
+    # **The device's, not the dive's**, for the reason this row exists: two computers on one
+    # dive give two answers to both, and a backup run in gauge mode does not make the dive a
+    # gauge dive. `StoredVocabulary` rather than `DiveMode` on the read side, as everywhere
+    # else a closed vocabulary is published.
+    mode: Annotated[
+        StoredVocabulary | None,
+        Field(
+            default=None,
+            examples=["open_circuit"],
+            description="The mode this device ran in: one of `open_circuit`, `closed_circuit`, `semi_closed`, "
+            "`gauge`, `freedive`. Null means the file did not record one - never assume open circuit.",
+        ),
+    ]
+    deco_model: Annotated[
+        RecordingDecoModel | None,
+        Field(default=None, description="The decompression model this device ran, or null where nothing recorded one"),
+    ]
     started_at: Annotated[
         DiveLocalStartTime | None,
         Field(

@@ -20,6 +20,7 @@ import uuid as uuid_pkg
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,8 +31,8 @@ from ..models.dive import Dive
 from ..models.dive_file import DiveFile
 from ..models.dive_profile import DiveProfile
 from ..models.dive_recording import DiveRecording
-from ..schemas.dive import DiveFileInfo, RecordingDevice, RecordingRead
-from ..schemas.parsed_dive import ParsedDevice
+from ..schemas.dive import DiveFileInfo, DiveMode, RecordingDecoModel, RecordingDevice, RecordingRead
+from ..schemas.parsed_dive import ParsedDecoModel, ParsedDevice
 from . import blob_store
 from .dive_profiles import get_profile_infos_for_recordings
 
@@ -48,6 +49,22 @@ DEVICE_COLUMNS: dict[str, str] = {
     "firmware": "device_firmware",
     "name": "device_name",
     "dive_number": "device_dive_number",
+}
+
+# The deco model's five members, the same way: keyed member name -> column name. Its own
+# table rather than an extension of `DEVICE_COLUMNS`, because a device and a model are two
+# objects on the wire and two objects on the way in - the read schema builds one of each,
+# `same_device` compares only the first, and folding them would make a gradient factor read
+# as evidence of which computer this was.
+#
+# The read shape, the fill rule and the row writes all walk this, so a sixth member of the
+# model is added here and nowhere else.
+DECO_MODEL_COLUMNS: dict[str, str] = {
+    "algorithm": "deco_algorithm",
+    "name": "deco_name",
+    "gf_low": "deco_gf_low",
+    "gf_high": "deco_gf_high",
+    "conservatism": "deco_conservatism",
 }
 
 # |Δ start| admitting a second *file of the same recording*. Two seconds, because the same
@@ -542,6 +559,8 @@ async def create_recording(
     user_id: int,
     ordinal: int,
     device: ParsedDevice | None = None,
+    mode: DiveMode | None = None,
+    deco_model: ParsedDecoModel | None = None,
     start_time: datetime | None = None,
     utc_offset_minutes: int | None = None,
     duration: int | None = None,
@@ -549,13 +568,15 @@ async def create_recording(
 ) -> int:
     """Insert one recording and return its row id. Does not commit.
 
-    The device's six members are spread from `DEVICE_COLUMNS` rather than named, so a member
-    added to `ParsedDevice` is stored without this function being edited.
+    The device's six members and the model's five are spread from their column tables rather
+    than named, so a member added to either shape is stored without this function being
+    edited.
     """
     values: dict[str, object] = {
         "dive_id": dive_id,
         "user_id": user_id,
         "ordinal": ordinal,
+        "mode": None if mode is None else mode.value,
         "start_time": start_time,
         "utc_offset_minutes": utc_offset_minutes,
         "duration": duration,
@@ -568,6 +589,12 @@ async def create_recording(
     }
     for member, column in DEVICE_COLUMNS.items():
         values[column] = None if device is None else getattr(device, member)
+    for member, column in DECO_MODEL_COLUMNS.items():
+        value = None if deco_model is None else getattr(deco_model, member)
+        # `.value`, because `algorithm` is the one member of the five that is an enum on the
+        # parsed shape and a plain string in the column - the closed-vocabulary pattern
+        # `mode` above follows.
+        values[column] = value.value if isinstance(value, StrEnum) else value
 
     result = await db.execute(insert(DiveRecording).values(**values).returning(DiveRecording.id))
     return int(result.scalar_one())
@@ -592,6 +619,39 @@ async def fill_device_fields(db: AsyncSession, *, recording_id: int, device: Par
         for member, column in DEVICE_COLUMNS.items()
         if getattr(device, member) is not None
     }
+    if not values:
+        return
+    await db.execute(update(DiveRecording).where(DiveRecording.id == recording_id).values(**values))
+
+
+async def fill_recording_settings(
+    db: AsyncSession, *, recording_id: int, mode: DiveMode | None, deco_model: ParsedDecoModel | None
+) -> None:
+    """Fill this recording's blank mode and deco-model columns from a later file. **Never
+    overwrites**, exactly as `fill_device_fields` does not.
+
+    The same rule and the same reason: a second file of one recording contributes what the
+    first did not carry - a Suunto's JSON names the model its FIT has no room for - and takes
+    nothing from it. Separate from `fill_device_fields` because the two shapes come off
+    different objects and a caller holding only one of them should not have to pass the other
+    as `None`; identical in mechanism, down to the `COALESCE`.
+
+    **The `gf_low`/`gf_high` pair is not filled half at a time.** Each column coalesces
+    independently, which is right for five unrelated settings and would be wrong for these
+    two: a file carrying only `gf_high` reaches here with both already dropped
+    (`ParsedDecoModel._pair_the_gradient_factors`), so there is never half a pair to fill
+    with - and a stored pair is whole for the same reason, so a `COALESCE` on one of them can
+    only ever fill both or neither.
+    """
+    values: dict[str, object] = {}
+    if mode is not None:
+        values["mode"] = func.coalesce(DiveRecording.mode, mode.value)
+    for member, column in DECO_MODEL_COLUMNS.items():
+        value = None if deco_model is None else getattr(deco_model, member)
+        if value is not None:
+            values[column] = func.coalesce(
+                getattr(DiveRecording, column), value.value if isinstance(value, StrEnum) else value
+            )
     if not values:
         return
     await db.execute(update(DiveRecording).where(DiveRecording.id == recording_id).values(**values))
@@ -814,6 +874,8 @@ async def get_recordings_for_dives(db: AsyncSession, *, dive_ids: Sequence[int])
                 uuid=row.uuid,
                 ordinal=row.ordinal,
                 device=_read_device(row),
+                mode=row.mode,
+                deco_model=_read_deco_model(row),
                 started_at=(
                     None if row.start_time is None else combine_start_time(row.start_time, row.utc_offset_minutes)
                 ),
@@ -836,6 +898,19 @@ def _read_device(row: DiveRecording) -> RecordingDevice | None:
     if all(value is None for value in members.values()):
         return None
     return RecordingDevice(**members)
+
+
+def _read_deco_model(row: DiveRecording) -> RecordingDecoModel | None:
+    """The five columns as the response's deco model, or `None` where nothing recorded one.
+
+    `_read_device`'s rule, one object across: a recording whose files said nothing about the
+    model must not come back claiming an empty one, and §6.4c says a model with no members is
+    not written either. So the same all-null test rather than a flag.
+    """
+    members = {member: getattr(row, column) for member, column in DECO_MODEL_COLUMNS.items()}
+    if all(value is None for value in members.values()):
+        return None
+    return RecordingDecoModel(**members)
 
 
 async def get_file_infos_for_recordings(

@@ -46,7 +46,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 from ..core.schemas import NOTES_MAX_LENGTH
 from .certification import CertificationAgency
 from .course import CourseStatus
-from .dive import WaterType
+from .dive import DecoAlgorithm, DiveMode, WaterType
 from .dive_mixture import GasRole, TankUsage
 from .dive_profile import ProfileEventType
 from .gear_service import ServiceKind
@@ -176,6 +176,16 @@ class ImportProfile(_ReadModel):
     ceiling: ImportSeries | None = None
     temperature: ImportSeries | None = None
     pressures: Annotated[list[ImportPressureSeries], Field(default_factory=list), _Collection]
+    # The six decompression channels, read back on exactly the terms they are written. §6.4
+    # floors all six at zero, and the planner re-validates each one under §6.5's rules the
+    # way it does the three above - a document is not trusted for having been written by
+    # this app.
+    ndl: ImportSeries | None = None
+    tts: ImportSeries | None = None
+    ppo2: ImportSeries | None = None
+    cns: ImportSeries | None = None
+    gradient_factor: ImportSeries | None = None
+    surface_gradient_factor: ImportSeries | None = None
     events: Annotated[list[ImportEvent], Field(default_factory=list), _Collection]
 
 
@@ -197,6 +207,30 @@ class ImportDevice(_ReadModel):
     dive_number: int | None = None
 
 
+class ImportDecoModel(_ReadModel):
+    """The decompression model one device ran on one dive (spec §6.4c).
+
+    `algorithm` goes through `_unknown_is_absent` like every other closed vocabulary here:
+    the member is OPTIONAL, so §7 lets the family list grow in a minor version, and a `vpm`
+    from a 1.1 document has to read as "not recorded" rather than 422 a whole logbook.
+
+    `name` is bounded to the format's own 64, which is also `dive_recording.deco_name`'s
+    width - a document naming a model longer than the column is one this app cannot store
+    that member of, and a Pydantic bound is where that is decided rather than an
+    `IntegrityError` mid-import.
+
+    The three integers are bounded by the planner rather than here, with the pair's ordering
+    rule beside them: the bounds are droppable per member and a drop wants a note, which is
+    what `_bounded` is for.
+    """
+
+    algorithm: Annotated[DecoAlgorithm | None, _unknown_is_absent(DecoAlgorithm), Field(default=None)]
+    name: Annotated[str | None, Field(default=None, max_length=_SHORT_MAX)]
+    gf_low: int | None = None
+    gf_high: int | None = None
+    conservatism: int | None = None
+
+
 class ImportRecording(_ReadModel):
     """One device's record of one dive (spec §6.4a).
 
@@ -205,10 +239,14 @@ class ImportRecording(_ReadModel):
     NULL, and a recording whose device entered the water later carries its own.
 
     A recording with none of `device`, `profile` and `source_files` describes nothing (§3's
-    rule 4) and the planner drops it with a note rather than creating an empty row.
+    rule 4) and the planner drops it with a note rather than creating an empty row. **`mode`
+    and `deco_model` are not on that list**, which the spec states outright: a mode with no
+    device, no samples and no file behind it is a setting nothing recorded a dive with.
     """
 
     device: ImportDevice | None = None
+    mode: Annotated[DiveMode | None, _unknown_is_absent(DiveMode), Field(default=None)]
+    deco_model: ImportDecoModel | None = None
     started_at: datetime | None = None
     source_files: Annotated[list[ImportStoredFile], Field(default_factory=list), _Collection]
     profile: ImportProfile | None = None

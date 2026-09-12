@@ -4,6 +4,7 @@ import json
 import math
 import random
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -11,12 +12,13 @@ from sqlalchemy import CheckConstraint
 
 from src.app.models.dive import Dive
 from src.app.models.dive_mixture import DiveMixture
-from src.app.schemas.dive import DiveCreate, WaterType
+from src.app.schemas.dive import DecoAlgorithm, DiveCreate, DiveMode, WaterType
 from src.app.schemas.dive_mixture import GasRole
 from src.app.schemas.parsed_dive import (
     LATITUDE_LIMIT,
     LONGITUDE_LIMIT,
     DiveMixtureSchema,
+    ParsedDecoModel,
     ParsedDiveResponse,
     ParsedDiveSchema,
 )
@@ -1981,6 +1983,213 @@ class TestParsersReportTheDevice:
         assert [(error["type"], error["loc"]) for error in raised.value.errors()] == [("extra_forbidden", ("device",))]
 
 
+class TestParsersReportTheModeAndTheDecoModel:
+    """How the computer was configured for this dive - the recording's, never the dive's.
+
+    Two computers on one dive give two answers to each: a backup run in gauge mode beside a
+    primary on open circuit is ordinary practice, and the dive was not a gauge dive. Both
+    members ride `ParsedDiveSchema` beside the device rather than inside it, because a device
+    is the hardware and these are settings - the same computer dived twice on different
+    gradient factors is one device and two models.
+
+    Every mapping below is a table drawn from files in hand, never from the vocabulary's own
+    names: an unseen value leaves the member absent, which is the one thing `mode` requires -
+    a reader must not read an absence as open circuit.
+    """
+
+    @pytest.mark.parametrize(
+        ("mode", "expected"),
+        [("0", DiveMode.OPEN_CIRCUIT), ("1", DiveMode.OPEN_CIRCUIT), ("3", DiveMode.FREEDIVE)],
+    )
+    def test_the_xml_mode_table_is_the_corpus_own(self, mode: str, expected: DiveMode) -> None:
+        """0 and 1 are the air and nitrox modes of an open-circuit computer, which the oxygen
+        fractions say: 243 of the 244 `<Mode>0</Mode>` exports carry a single 21 % mixture and
+        every one of the 98 `<Mode>1</Mode>` exports carries something richer. 3 is a
+        freedive, and the 42 stating it are exactly the 42 carrying no `<DiveMixture>`."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}"><Mode>{mode}</Mode></Dive>
+""".encode()
+
+        assert SuuntoXmlParser.parse(content).mode is expected
+
+    def test_an_unseen_or_absent_xml_mode_leaves_the_member_absent(self):
+        """An absence is not a claim, and a reader must not read one as open circuit however
+        a source format's documentation glosses it."""
+        template = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}">{{body}}</Dive>
+"""
+
+        assert SuuntoXmlParser.parse(template.format(body="").encode()).mode is None
+        assert SuuntoXmlParser.parse(template.format(body="<Mode>7</Mode>").encode()).mode is None
+
+    def test_the_xml_personal_mode_is_the_conservatism_and_keeps_its_sign(self):
+        """Suunto's own P-2 to P2 scale, which is exactly what the member holds: the device's
+        number, meaningful beside the device. `0` is the P0 setting rather than an absence and
+        `-1` is P-1 - the two values in the corpus - so no floor is applied. It is the one
+        reading in this package where a negative is data."""
+        template = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}"><Mode>0</Mode><PersonalMode>{{value}}</PersonalMode></Dive>
+"""
+
+        for value, expected in ((0, 0), (-1, -1)):
+            model = SuuntoXmlParser.parse(template.format(value=value).encode()).deco_model
+            assert model is not None and model.conservatism == expected
+
+    def test_a_freedive_states_a_personal_mode_and_it_is_not_carried(self):
+        """The model is what a device ran on *this* dive; a freedive ran none, and a model
+        carrying only a conservatism would say otherwise."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}"><Mode>3</Mode><PersonalMode>0</PersonalMode></Dive>
+""".encode()
+
+        parsed = SuuntoXmlParser.parse(content)
+
+        assert parsed.mode is DiveMode.FREEDIVE
+        assert parsed.deco_model is None
+
+    def test_the_xml_algorithm_enum_is_deliberately_not_the_family(self):
+        """`<Algorithm>` reads `0` on every scuba export in hand and nil on every freedive,
+        so nothing in the corpus says what any other value would mean. A family is a claim
+        about the mathematics rather than a number nobody has decoded."""
+        content = f"""<?xml version="1.0" encoding="utf-8"?>
+<Dive xmlns="{SUUNTO_NS}"><Mode>0</Mode><Algorithm>0</Algorithm></Dive>
+""".encode()
+
+        assert SuuntoXmlParser.parse(content).deco_model is None
+
+    @pytest.mark.parametrize("dive_mode", ["Air", "Nitrox", "Mixed"])
+    def test_the_json_mode_table_is_three_gas_modes_of_one_open_circuit_computer(self, dive_mode: str) -> None:
+        content = json.dumps(
+            {"DeviceLog": {"Header": {"DateTime": "2025-05-31T12:59:06+02:00", "Diving": {"DiveMode": dive_mode}}}}
+        ).encode()
+
+        assert SuuntoJsonParser.parse(content).mode is DiveMode.OPEN_CIRCUIT
+
+    def test_gauge_and_free_are_not_in_the_json_table(self):
+        """No file in hand carries either - the D5's free and gauge modes write no
+        `Header.Diving` this reader has seen - and a mapping no file exercises is a mapping
+        nothing checks."""
+        content = json.dumps(
+            {"DeviceLog": {"Header": {"DateTime": "2025-05-31T12:59:06+02:00", "Diving": {"DiveMode": "Gauge"}}}}
+        ).encode()
+
+        assert SuuntoJsonParser.parse(content).mode is None
+
+    def test_the_json_algorithm_fills_the_name_verbatim_and_the_family_from_a_table(self):
+        """Neither is derived from the other: the member is the device's own name for its
+        model, and vendors name and version theirs as they please."""
+        content = json.dumps(
+            {
+                "DeviceLog": {
+                    "Header": {
+                        "DateTime": "2025-05-31T12:59:06+02:00",
+                        "Diving": {"Algorithm": "Suunto Fused2 RGBM", "Conservatism": -1},
+                    }
+                }
+            }
+        ).encode()
+
+        model = SuuntoJsonParser.parse(content).deco_model
+
+        assert model is not None
+        assert (model.name, model.algorithm) == ("Suunto Fused2 RGBM", DecoAlgorithm.RGBM)
+        assert model.conservatism == -1
+
+    def test_an_algorithm_string_outside_the_table_fills_the_name_and_no_family(self):
+        """A family is a claim about the mathematics, not a guess off a product string."""
+        content = json.dumps(
+            {
+                "DeviceLog": {
+                    "Header": {"DateTime": "2025-05-31T12:59:06+02:00", "Diving": {"Algorithm": "Suunto Fused RGBM"}}
+                }
+            }
+        ).encode()
+
+        model = SuuntoJsonParser.parse(content).deco_model
+
+        assert model is not None
+        assert (model.name, model.algorithm) == ("Suunto Fused RGBM", None)
+
+    def test_an_ocean_export_yields_no_model_at_all(self):
+        """The 2026 Ocean shape has no `Header.Diving`, so it yields the channels and no
+        model - which is correct rather than a gap."""
+        content = json.dumps({"DeviceLog": {"Header": {"DateTime": "2025-05-31T12:59:06+02:00"}}}).encode()
+
+        parsed = SuuntoJsonParser.parse(content)
+
+        assert parsed.mode is None
+        assert parsed.deco_model is None
+
+    def test_fit_reads_the_gradient_factor_pair_off_dive_settings(self):
+        """Already whole percent in the FIT profile, which is the member's unit, so nothing
+        is scaled."""
+        content = dive_fit_file(message("dive_settings", gf_low=50, gf_high=85))
+
+        model = FitParser.parse(content).deco_model
+
+        assert model is not None
+        assert (model.gf_low, model.gf_high) == (50, 85)
+
+    def test_fit_reads_the_family_only_where_the_file_states_one(self):
+        """`tissue_model_type` has exactly one member in the FIT profile, and reading "there
+        is only one value in the enum" as "the family must be Buhlmann" would be the parser
+        deciding what the device ran - on a Suunto watch writing Garmin's format, whose own
+        app export names an RGBM model for the same dive."""
+        without = FitParser.parse(dive_fit_file(message("dive_settings", gf_low=50, gf_high=85))).deco_model
+        stated = FitParser.parse(
+            dive_fit_file(message("dive_settings", gf_low=50, gf_high=85, model="zhl_16c"))
+        ).deco_model
+
+        assert without is not None and without.algorithm is None
+        assert stated is not None and stated.algorithm is DecoAlgorithm.BUHLMANN
+
+    def test_a_fit_file_with_no_dive_settings_yields_no_model(self):
+        """The message is the computer's *configuration* rather than a record of the dive, so
+        its absence is not a device that declined to say."""
+        assert FitParser.parse(VALID_FIT).deco_model is None
+
+    def test_fit_states_no_mode(self):
+        """`session.sub_sport` is the field that would carry one and no file in hand writes
+        it, so a FIT dive - a freediving one included - is a dive that does not say what kind
+        it is. The DM5 XML path does say, because its files state it."""
+        assert FitParser.parse(VALID_FIT).mode is None
+
+    def test_one_gradient_factor_without_its_pair_names_no_setting(self):
+        """Both or neither: one alone is half a setting, and §6.4c makes the pair
+        both-or-neither for that reason."""
+        model = FitParser.parse(dive_fit_file(message("dive_settings", gf_low=50))).deco_model
+
+        assert model is None
+
+    def test_an_inverted_pair_is_dropped_rather_than_reordered(self):
+        """Enforced on the parse rather than left to `ck_dive_recording_deco_gf_low_within_high`:
+        a parse that dies on the database takes the whole upload with it, and one inverted
+        pair is not worth a lost file. Neither number says which of the two is wrong, so both
+        go and the rest of the dive stays."""
+        parsed = FitParser.parse(dive_fit_file(message("dive_settings", gf_low=85, gf_high=50)))
+
+        assert parsed.deco_model is None
+        assert parsed.duration is not None
+
+    def test_a_gradient_factor_outside_whole_percent_is_not_a_setting(self):
+        """The bound the column holds, mirrored where the value is produced - and
+        deliberately not the per-sample `gradient_factor` channel's rule, which is uncapped
+        above because a GF99 past 100 is a real reading."""
+        model = FitParser.parse(dive_fit_file(message("dive_settings", gf_low=50, gf_high=150))).deco_model
+
+        assert model is None
+
+    def test_the_parse_response_carries_both_members_through(self):
+        """`ParsedDiveResponse` subclasses the parse schema, so they reach `POST /dive/parse`
+        without the route naming them."""
+        parsed = SuuntoXmlParser.parse(VALID_SUUNTO_XML.encode())
+
+        response = ParsedDiveResponse(**parsed.model_dump(), file_token="token")
+
+        assert response.mode is parsed.mode
+        assert response.deco_model == parsed.deco_model
+
+
 class TestTechScalars:
     """CNS/OTU/surface pressure and the per-mixture ppO2, role and gas number.
 
@@ -2542,6 +2751,74 @@ class TestTechScalars:
         )
 
         assert [m.gas_number for m in FitParser.parse(content).mixtures] == [1, 2]
+
+
+class TestTheDecoModelShape:
+    """`ParsedDecoModel`'s own validators, which every parser inherits.
+
+    Unit tests rather than per-parser ones for the reason `_drop_unpressurized` is on
+    `DiveMixtureSchema` rather than in `SuuntoXmlParser`: the rules are about the members and
+    not about any one format, and putting them on the schema is what makes a fourth parser
+    inherit them.
+    """
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [(0, 0), (-1, -1), (2.0, 2), (1.5, None), (True, None), ("P2", None), (None, None)],
+    )
+    def test_a_setting_is_a_whole_number_or_nothing(self, value: Any, expected: int | None) -> None:
+        """A JSON export can write any number at all into `Conservatism`, and Pydantic's own
+        coercion would raise on a fractional one and take the whole parse with it. A `bool` is
+        excluded before `int` because `isinstance(True, int)` is true and a flag is not a
+        setting. **And nothing is floored**: `-1` is Suunto's P-1 rather than an absence."""
+        assert ParsedDecoModel(conservatism=value).conservatism == expected
+
+    def test_a_model_name_longer_than_the_column_is_truncated_rather_than_refused(self):
+        """A file this app cannot store one member of is still a file worth importing, and
+        64 is the format's own bound as well as `deco_name`'s width."""
+        model = ParsedDecoModel(name="  " + "Suunto Fused RGBM " * 10 + "  ")
+
+        assert model.name is not None
+        assert len(model.name) == 64
+        assert model.name.startswith("Suunto Fused RGBM")
+
+    def test_a_name_that_is_only_whitespace_is_absent(self):
+        """`""` is not a model the file named, and a trimmed empty string is the same thing
+        one step later - the rule `ParsedDevice._as_trimmed_text` makes for an identity."""
+        assert ParsedDecoModel(name="   ").name is None
+
+    def test_a_model_of_nothing_is_not_a_model_the_file_described(self):
+        """Reachable only through the validators above: a file stating an unrecognized
+        algorithm string and one gradient factor leaves an object of five nulls, and
+        reporting that would claim the export named a model when it named none."""
+        parsed = ParsedDiveSchema(
+            avg_depth=None,
+            bottom_temperature=None,
+            dive_number=None,
+            duration=None,
+            max_depth=None,
+            start_time=None,
+            mixtures=[],
+            deco_model=ParsedDecoModel(gf_low=50),
+        )
+
+        assert parsed.deco_model is None
+
+    def test_a_model_carrying_one_member_survives(self):
+        """The boundary the test above needs: `_drop_empty_deco_model` drops an *empty* one,
+        not a sparse one. A Suunto XML export states a conservatism and nothing else."""
+        parsed = ParsedDiveSchema(
+            avg_depth=None,
+            bottom_temperature=None,
+            dive_number=None,
+            duration=None,
+            max_depth=None,
+            start_time=None,
+            mixtures=[],
+            deco_model=ParsedDecoModel(conservatism=0),
+        )
+
+        assert parsed.deco_model is not None and parsed.deco_model.conservatism == 0
 
 
 class TestParsersInventNothing:

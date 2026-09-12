@@ -67,7 +67,7 @@ from ...schemas.dive_mixture import DiveMixtureRead
 from ...schemas.trip import TripLocationRead
 from ..certification_files import get_file_infos_for_certifications
 from ..dive_profiles import ProfileGasAttribution, get_gas_attribution_for_dives
-from ..dive_recordings import DEVICE_COLUMNS, get_file_infos_for_recordings
+from ..dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS, get_file_infos_for_recordings
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +94,12 @@ class ExportRecordingRow:
     uuid: uuid_pkg.UUID
     ordinal: int
     device: dict[str, Any]
+    # The recording's own settings, keyed by **member** name the way `device` is, with the
+    # columns that are NULL left out - so `_recording` can ask "did this row record a model
+    # at all" of an empty dict rather than of five nulls, exactly as it already does for the
+    # device.
+    mode: str | None
+    deco_model: dict[str, Any]
     start_time: datetime | None
     utc_offset_minutes: int | None
     files: list[ExportFileRow]
@@ -454,6 +460,12 @@ async def _recordings_by_dive(db: AsyncSession, dive_ids: list[int]) -> dict[int
                 device={
                     member: getattr(row, column)
                     for member, column in DEVICE_COLUMNS.items()
+                    if getattr(row, column) is not None
+                },
+                mode=row.mode,
+                deco_model={
+                    member: getattr(row, column)
+                    for member, column in DECO_MODEL_COLUMNS.items()
                     if getattr(row, column) is not None
                 },
                 start_time=row.start_time,

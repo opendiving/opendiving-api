@@ -51,9 +51,10 @@ from ...models.gear_set import GearSet
 from ...models.trip import Trip
 from ...models.trip_location import TripLocation
 from ...schemas.certification import CertificationSide
+from ...schemas.dive import DiveMode
 from ...schemas.dive_mixture import DiveMixtureCreate, as_create
 from ...schemas.logbook_import import ImportNote, ImportNoteCode
-from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDevice
+from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDecoModel, ParsedDevice
 from ..blob_store import new_key
 from ..blob_store import put as put_blob
 from ..certification_files import KEY_KIND as CERTIFICATION_KEY_KIND
@@ -75,10 +76,12 @@ from ..dive_profiles import (
     store_profile,
 )
 from ..dive_recordings import (
+    DECO_MODEL_COLUMNS,
     DEVICE_COLUMNS,
     create_recording,
     fill_device_fields,
     fill_gate_figures,
+    fill_recording_settings,
     fill_start,
     next_ordinal,
 )
@@ -402,15 +405,19 @@ class _Writer:
             dive_id=dive_id,
             user_id=self._user_id,
             ordinal=planned.ordinal if ordinal is None else ordinal,
+            mode=None if planned.mode is None else DiveMode(planned.mode),
             start_time=planned.start_time,
             utc_offset_minutes=planned.utc_offset_minutes,
             duration=planned.duration,
             max_depth=planned.max_depth,
         )
-        if planned.device:
-            await self._db.execute(
-                update(DiveRecording).where(DiveRecording.id == recording_id).values(**planned.device)
-            )
+        # The device columns and the model's, both already keyed by column name and both
+        # already bounded by the planner - one statement rather than two, since they land on
+        # the same row and neither depends on the other. `mode` goes through
+        # `create_recording` instead, being a plain column the insert already names.
+        columns = {**planned.device, **planned.deco_model}
+        if columns:
+            await self._db.execute(update(DiveRecording).where(DiveRecording.id == recording_id).values(**columns))
 
         digests, parser_key = await self._write_recording_files(
             record.source_uuid, recording_id=recording_id, dive_id=dive_id, planned_files=planned.files
@@ -541,6 +548,22 @@ class _Writer:
             self._db,
             recording_id=match.recording_id,
             device=ParsedDevice(**{member: planned.device.get(column) for member, column in DEVICE_COLUMNS.items()}),
+        )
+        # The same fill-only rule for the two settings, through the same helper the attach
+        # path uses: this document is a second reading of a record the logbook already holds,
+        # so it contributes what the stored recording has no value for and overwrites nothing.
+        #
+        # Rebuilt as the parsed shapes because that is what the fill takes, and the round trip
+        # is safe rather than lossy: the planner has already bounded every member and dropped
+        # the gradient-factor pair unless it is whole and in order, so `ParsedDecoModel`'s own
+        # validators have nothing left to reject.
+        await fill_recording_settings(
+            self._db,
+            recording_id=match.recording_id,
+            mode=None if planned.mode is None else DiveMode(planned.mode),
+            deco_model=ParsedDecoModel(
+                **{member: planned.deco_model.get(column) for member, column in DECO_MODEL_COLUMNS.items()}
+            ),
         )
         await fill_gate_figures(
             self._db, recording_id=match.recording_id, duration=planned.duration, max_depth=planned.max_depth

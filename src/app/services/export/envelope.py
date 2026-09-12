@@ -5,7 +5,7 @@ The shape, and why the app's own JSON format became the published one, is docume
 it whole.
 
 **Why it is streamed rather than serialized from `ExportEnvelope`.** Every dive embeds
-its full profile, and a profile is a few thousand samples across up to four channels. A
+its full profile, and a profile is a few thousand samples across up to ten channels. A
 model instance for a thousand-dive log, plus the encoded JSON of the same, is hundreds of
 megabytes resident - for a file the caller is going to write straight to a socket or a
 temp file. So the envelope's scalars are emitted once, and each dive is loaded, encoded
@@ -36,7 +36,7 @@ from ...models.course import Course
 from ...models.dive import Dive
 from ...schemas.certification import CertificationAgency, CertificationSide
 from ...schemas.course import CourseStatus
-from ...schemas.dive import WaterType
+from ...schemas.dive import DecoAlgorithm, DiveMode, WaterType
 from ...schemas.dive_mixture import DiveMixtureBase, DiveMixtureRead, GasRole, TankUsage
 from ...schemas.export import (
     DIVEJSON_FORMAT,
@@ -45,6 +45,7 @@ from ...schemas.export import (
     ExportBoundingBox,
     ExportCertification,
     ExportCourse,
+    ExportDecoModel,
     ExportDevice,
     ExportDive,
     ExportDiver,
@@ -266,8 +267,25 @@ def _recording(
     """
     files = [stored for file in row.files if (stored := _stored_file(bundle, file, paths)) is not None]
     device = ExportDevice(**row.device) if row.device else None
+    # **§3's rule 4 counts three members and these two are not among them**, which the spec
+    # states outright: a mode with no device, no samples and no file behind it is a setting
+    # nothing recorded a dive with. So the test below stays exactly as it was, and a row
+    # carrying only a mode is still dropped.
     if device is None and profile is None and not files:
         return None
+
+    # Through `_sayable`, the same as `water_type` and a mixture's `role`: the column has no
+    # `CHECK`, so it really can hold a value the format has no word for, and an OPTIONAL
+    # member's answer to that is to drop the *field* and keep the record. Dropping the
+    # recording instead would lose a diver's profile over how a mode is spelt.
+    deco_model = (
+        ExportDecoModel(
+            **{member: value for member, value in row.deco_model.items() if member != "algorithm"},
+            algorithm=_sayable(row.deco_model.get("algorithm"), DecoAlgorithm),
+        )
+        if row.deco_model
+        else None
+    )
 
     started_at = None
     if row.start_time is not None and (
@@ -276,6 +294,8 @@ def _recording(
         started_at = combine_start_time(row.start_time, row.utc_offset_minutes)
     return ExportRecording(
         device=device,
+        mode=_sayable(row.mode, DiveMode),
+        deco_model=deco_model,
         started_at=started_at,
         source_files=files,
         profile=None if profile is None else to_read_schema(profile),
