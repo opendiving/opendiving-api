@@ -979,14 +979,22 @@ class Settings(
         them are editing. (The `install.sh` path generates the key before writing `.env`, so
         it never reaches here - which is why the by-hand install is the case that decides
         the wording rather than an edge of it.)
+
+        **The first seven words are load-bearing and are not ours to reword.** The front
+        door's `docs/configuration`-neighbouring `docs/troubleshooting.md` opens an entry
+        with `SECRET_KEY is unset or still a placeholder` in bold, as the string an operator
+        pastes in from their terminal; nothing over there is generated from this file, so a
+        rewrite of that prefix silently stops the page being findable by the error it is
+        about. `test_the_refusal_keeps_the_prefix_the_front_door_indexes_on` pins it. Change
+        it only together with that repository, and only as a deliberate pair.
         """
         secret = self.SECRET_KEY.get_secret_value().strip()
 
         if not secret or secret.lower() in PLACEHOLDER_SECRET_KEYS:
             raise ValueError(
-                "SECRET_KEY is unset or still the placeholder your .env arrived with. It signs "
-                "every token this app issues, so a published value lets anyone mint one for any "
-                "account. Generate your own: openssl rand -hex 32"
+                "SECRET_KEY is unset or still a placeholder - the one your .env arrived with. It "
+                "signs every token this app issues, so a published value lets anyone mint one for "
+                "any account. Generate your own: openssl rand -hex 32"
             )
         return self
 

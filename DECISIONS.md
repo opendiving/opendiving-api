@@ -18240,12 +18240,31 @@ validator fires — with an error that pointed at a file nowhere on the machine.
 rather than complicating it: the script generates `SECRET_KEY` before writing `.env` and dies if it
 cannot. So every reader of this message is either a developer whose `src/.env` came from
 `src/.env.example`, or an operator on the by-hand path whose `.env` came from `example.env`. Both of
-them are editing a file called `.env`, and neither needs to know about the other's template — the
-same reasoning `Settings._require_s3_credentials` and `blob_store.backend_for` were changed under
-(#184), and the same wording, so that the refusals in this module read as one voice.
+them are editing a file called `.env`, and neither needs to know about the other's template.
+
+`Settings._require_s3_credentials` and `blob_store.backend_for` are the same defect in the same
+module, and they are being corrected to the same wording in **#184**, which was open and unmerged
+when this was written. Neither branch chooses the order, so read this section as the rule rather
+than as a report of the module's state: whichever lands first, the other still names
+`src/.env.example` until it lands too. If you are reading a checkout where one of those two still
+does and #184 is merged, that is a regression rather than the transitional state.
 
 What did not change is the rest of the message, and that is deliberate: it says *why* the value
 matters (it signs every token this app issues) and carries the fix inline (`openssl rand -hex 32`).
 Only the file pointer was wrong. The general shape, stated once so the next refusal does not have to
 rediscover it: **a startup error may name a file only if every reader of that error has it.** A
 template is never that file. The one the reader edited is.
+
+**And the opening of the message is not ours alone to reword.** The first draft of this change
+rewrote the sentence whole, to "still the placeholder your .env arrived with" — which reads better
+and breaks something invisible from here. The front door's `docs/troubleshooting.md` opens an entry
+with **`SECRET_KEY is unset or still a placeholder`** in bold: an operator's route into that page is
+pasting the string their terminal just printed, and nothing over there is generated from this file,
+so the two drift with nothing to notice. The wording now keeps those words verbatim and appends the
+`.env` pointer after a dash, which fixes the file reference without touching the part another
+repository indexes on. `test_the_refusal_keeps_the_prefix_the_front_door_indexes_on` pins it.
+Generally: **an error string quoted verbatim in the other repository's docs is a shared interface**,
+and the grep that finds them is over that checkout, not this one —
+`git grep -F 'SECRET_KEY is unset' origin/main` in
+[opendiving/opendiving](https://github.com/opendiving/opendiving), the same way any other
+cross-repository contract here is checked.
