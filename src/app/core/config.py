@@ -56,8 +56,10 @@ class AppSettings(BaseSettings):
     # `APP_COMMIT` build arg. `None` everywhere else - a source checkout, a locally built
     # image. Two consumers: `/api/v1/health` reports it, and `core/utils/cache.py` names the
     # response cache's keys after it, so a deploy cannot be served the previous build's
-    # response bodies. Falling back to `APP_VERSION` there is why an image built without this
-    # arg still separates one release from the next. It exists because `APP_VERSION`
+    # response bodies - and is consulted first there because it is the only build identity
+    # that also moves when a *dependency* does. Where the arg was not passed, that module
+    # falls back to a digest of its own sources rather than to `APP_VERSION`, which moves per
+    # release and so cannot tell two commits apart. It exists because `APP_VERSION`
     # stops identifying a build the moment images are published per merge rather than per
     # release: on that channel every one of them reports the manifest's version, and the
     # AGPL source offer has to name something an operator can check out. Deliberately not
