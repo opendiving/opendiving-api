@@ -304,7 +304,11 @@ class TestWhatUddfCannotHold:
 
     @pytest.mark.asyncio
     async def test_the_per_cylinder_role_ppo2_limit_and_usage_survive(self, monkeypatch):
-        """The three fields UDDF has no slot for, which is why this document exists.
+        """`role` and `usage` are the two UDDF has no slot for, which is why this document
+        exists. `po2_limit` is asserted beside them because it completes the cylinder's gas
+        planning, not because it is lost - it maps to `<mix><maximumpo2>`, which is why
+        `_MixKey` dedupes on it and why `test_the_planned_ppo2_lands_in_maximumpo2` pins it.
+
         `usage` rides in for free on `DiveMixtureBase` - the envelope re-wraps every read
         as that schema - so this is what would catch it silently not doing so. The absent
         `usage` is *absent* rather than null, which is the format's only spelling of it.
@@ -334,11 +338,6 @@ class TestWhatUddfCannotHold:
         cylinder = document["dives"][0]["cylinders"][0]
         assert cylinder == {"start_pressure": 200.0}
         _assert_conforms(await _render(bundle, monkeypatch))
-
-    @pytest.mark.asyncio
-    async def test_multi_site_visit_order_is_a_list_not_a_primary_site(self, monkeypatch):
-        document = await _render(full_bundle(), monkeypatch)
-        assert document["dives"][0]["site_uuids"] == [str(UUIDS["site-reef"]), str(UUIDS["site-wall"])]
 
     @pytest.mark.asyncio
     async def test_cns_and_otu_are_here_since_uddf_has_no_slot_for_them(self, monkeypatch):
@@ -604,6 +603,19 @@ class TestReferences:
         `envelope.py` would leave every other assertion here green."""
         document = await _render(full_bundle(), monkeypatch)
         assert document["sites"][0]["position"] == {"latitude": 27.7278, "longitude": 34.2564}
+
+    @pytest.mark.asyncio
+    async def test_multi_site_visit_order_is_a_list_not_a_primary_site(self, monkeypatch):
+        """A dive's sites are an ordered list with the primary at index 0, which is what a
+        drift dive needs and what a single `site_uuid` could not express.
+
+        This lived in `TestWhatUddfCannotHold` until the class stopped being true of it:
+        `informationbeforedive/link` is `maxOccurs="unbounded"`, and
+        `test_every_site_is_linked_in_visit_order` pins the same itinerary in `dives.uddf`.
+        The ordering is the claim here, not the survival.
+        """
+        document = await _render(full_bundle(), monkeypatch)
+        assert document["dives"][0]["site_uuids"] == [str(UUIDS["site-reef"]), str(UUIDS["site-wall"])]
 
     @pytest.mark.asyncio
     async def test_a_trip_carries_its_places_structured_and_in_order(self, monkeypatch):
