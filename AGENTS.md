@@ -33,8 +33,13 @@ after editing one rather than matching the wrapping by hand.
   renamed one, a new service) has to be made in **both repositories**, and
   [that repository's `docs/`](https://github.com/opendiving/opendiving/tree/main/docs) is where an
   installer reads about it — a change made only here reaches no install at all. Nothing that runs
-  from the published image may depend on `src/` being present — only the installed `app` package and
-  `migrations/` are in it.
+  from the published image may depend on the `src/` **tree** being on disk: `/code` holds `app`,
+  `migrations` and `alembic.ini` and nothing else, so a relative path into the source tree resolves
+  to nothing there. The `src` **package** is a different question and the answer is the opposite one
+  — the wheel installs it, so `src.scripts.*` and `src.app.*` import fine from `site-packages` with
+  no bind mount, which is how an operator's `docker compose exec api python -m src.scripts.…` works.
+  See *"`admin_init` runs as `app.admin.initialize`, and `src.scripts.*` marks nothing"* in
+  `DECISIONS.md`; this bullet claimed the opposite until 2026-09-13.
 
 - **Schema changes**: every one ships an Alembic revision. `alembic upgrade head` runs in the API's
   lifespan (`core/setup.py`), so a schema change reaches a database — yours or a self-hoster's — by

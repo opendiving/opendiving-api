@@ -9985,23 +9985,56 @@ move:**
   is a soft line on purpose, so the issue templates invite rather than gate - told to guess, people
   guess wrong, and an issue in the wrong repository costs one move.
 
-## `admin_init` moved into the app package, because `src/` is not in the image
+## `admin_init` runs as `app.admin.initialize`, and `src.scripts.*` marks nothing
 
-The one-shot that creates the admin panel's tables ran as `python -m src.scripts.initialize_admin`,
-and the shipped image contains neither `src/scripts/` nor `src/app/` - only the installed `app`
-package at `/code/app` and the migrations beside it. The command worked in development for one
-reason: the development compose file bind-mounts `./src` over the container. Pointed at a published
-image it fails with `No module named src`, which is exactly what
-[the install bundle's compose file](https://github.com/opendiving/opendiving/blob/main/docker-compose.yml)
-would have done on its first run.
+The one-shot that creates the admin panel's tables ran as `python -m src.scripts.initialize_admin`.
+Its `main()` moved to `app/admin/initialize.py`, next to the `create_admin_interface()` it calls,
+and both compose files now run `python -m app.admin.initialize`. That part stands. The reason
+recorded for it does not.
 
-So `main()` moved to `app/admin/initialize.py`, next to the `create_admin_interface()` it calls, and
-both compose files now run `python -m app.admin.initialize`. The maintenance scripts that remain in
-`src/scripts/` (`backfill_dive_profiles`, `backfill_dive_tech_fields`, `create_first_superuser`) are
-unaffected and stay there: they are run by a developer against a bind-mounted tree, not by a
-container an installer starts. That is the line - **anything a compose file names as a `command:`
-has to be reachable from the installed package**, and anything reached as `src.scripts.*` is a
-development tool by construction.
+**This entry used to claim the shipped image contains neither `src/scripts/` nor `src/app/`, and
+that is false.** It is corrected rather than deleted because the false version travels: the sentence
+it ended on - "anything reached as `src.scripts.*` is a development tool by construction" - is a
+rule, and the front door's `DECISIONS.md` records that same conclusion being reached once in review
+of an operator command that does in fact work. The wheel installs the whole `src` package, so `src`,
+`src.app` and `src.scripts` are all importable in the published image with no bind mount anywhere.
+The mechanism is written out once, in `opendiving/opendiving`'s `DECISIONS.md` under *"The operator
+commands are `python -m src.scripts.…`, and they do run in the shipped image"*; that entry is the
+authority for it and this one deliberately does not restate it.
+
+Measured against `ghcr.io/opendiving/opendiving-api:latest` running the install bundle's compose
+file, on a container `docker inspect` reports with no mounts at all:
+
+```bash
+docker compose exec api python -c "import src.scripts, sys; print(src.scripts.__file__)"
+# /app/.venv/lib/python3.14/site-packages/src/scripts/__init__.py
+```
+
+`backfill_dive_profiles`, `backfill_dive_tech_fields` and `create_first_superuser` each resolve into
+that same directory, and so does `src.app.admin.initialize` - the very entrypoint the old text said
+could only run against a bind-mounted tree. No failing run is recorded anywhere, and the install
+bundle's compose file has never named `src.scripts.initialize_admin` in any revision of it, so the
+claim was drawn off the `Dockerfile`'s `COPY` lines and never checked against an image. It was
+phrased as a prediction - what the bundle "would have" done on its first run - which is why nothing
+here ever contradicted it: there is no run to grep for.
+
+**What survives is narrower and still worth having.** `/code` holds `app`, `migrations` and
+`alembic.ini` and nothing else, so anything that resolves a path relative to the working directory,
+or opens a file out of the source tree, genuinely does break in the image. That is a statement about
+the filesystem, not about import names, and `src.scripts.*` is not a marker for either. Beside it:
+**anything a compose file names as a `command:` has to be reachable from the installed package**,
+and it should name the same package the image's own `CMD` names. The image carries two importable
+copies of the application - `/code/app` from the runtime stage's `COPY`, and `site-packages/src/app`
+from the wheel - and they are separate module objects with separate `settings` singletons, so a
+one-shot reaching the app under the other name configures a second copy of it. That, plus sitting
+next to the function it calls, is what keeps `main()` where it now is.
+
+The maintenance scripts in `src/scripts/` stay put for the mirror-image reason rather than because
+they are development-only: nothing starts them automatically, a developer or an operator invokes
+each by hand, and they run out of `site-packages` either way. Which of them an *operator* is handed
+is the front door's business and moves there, so it is a question to ask that repository rather than
+a list to keep here: `git grep -oE 'python -m src\.scripts\.[a-z_]+' -- docs/` in
+[opendiving/opendiving](https://github.com/opendiving/opendiving) answers it.
 
 Verified on the bundle running the published-image layout: `admin_init` created the four `admin_*`
 tables in the app's Postgres, seeded the initial admin, logged
@@ -18202,3 +18235,29 @@ With the namespace in place this is no longer the remedy for a deploy - it is th
 payload cached from a bug, and for a namespace left behind by a rollback. `FLUSHALL` is the wrong
 instrument for either: it would take the rate-limit windows and the in-flight passkey challenges
 with it. Scan `resp:*` and delete what matches.
+
+## A startup refusal names `.env`, because that is the file every reader of it has
+
+`Settings._require_s3_credentials` and `blob_store.backend_for` both refuse an `s3` backend with
+settings missing, and both used to end by pointing at `src/.env.example`. That is a path in this
+repository's source tree, and neither audience for the message is reliably standing in it.
+
+A self-hoster installs the front door's bundle - `docker-compose.yml`, `Caddyfile`, `install.sh` and
+`example.env` - and has no `src/` anywhere on the machine. They meet the first of these two at
+startup, before anything serves; they meet the second through
+`docker compose exec api python -m src.scripts.migrate_blobs`, which the front door's
+`docs/configuration.md` hands them by name. An error that names a file they cannot open is worse
+than one that names no file at all, because it reads like an instruction.
+
+`.env` is the answer for both of them at once. `install.sh` writes it out of `example.env` a line at
+a time rather than generating a tidy one, specifically so that the comments around each setting
+survive into the operator's own copy - the object-storage block included. A developer's `src/.env`
+is `src/.env.example` by the same route, carrying the same block. So "the object-storage block in
+your .env" is a true sentence in both places, and neither has to know about the other's template.
+
+Every other refusal in `core/config.py` names settings and an alternative and no file at all, which
+is the shape to copy when adding one. `_reject_placeholder_secret_key` is the remaining exception -
+it names `src/.env.example` as the *source* of the placeholder it just rejected, which is wrong in
+the same way for the same reader, since `example.env` ships that exact value
+(`change-me-openssl-rand-hex-32`) and is where a self-hoster's copy of it came from. Left alone here
+deliberately, as a separate change to a separate user-visible string.

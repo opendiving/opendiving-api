@@ -554,6 +554,11 @@ def backend_for(option: FileStorageBackendOption) -> Backend:
 
     `migrate_blobs.py` is why this takes an argument: copying between the two means holding
     both at once, which no setting can express. Everything else wants `_backend()` below.
+
+    The refusal below names `.env` rather than `src/.env.example`, for the reason
+    `Settings._require_s3_credentials` spells out: this one is reached by
+    `docker compose exec api python -m src.scripts.migrate_blobs`, which the front door
+    hands to an operator who has no `src/` tree at all.
     """
     global _s3_cache
 
@@ -564,7 +569,7 @@ def backend_for(option: FileStorageBackendOption) -> Backend:
     if missing:
         raise RuntimeError(
             f"FILE_STORAGE_BACKEND=s3 needs {', '.join(missing)}, which {'is' if len(missing) == 1 else 'are'} "
-            f"not set. See the object-storage block in src/.env.example."
+            f"not set. See the object-storage block in your .env."
         )
 
     identity = _s3_identity()

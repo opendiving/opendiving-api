@@ -1064,6 +1064,13 @@ class Settings(
         copied verbatim, which is the configuration this whole class is most easily broken
         against: a cross-field validator that fires on the template's own values takes out
         `docker compose up` and pytest collection together.
+
+        The message names `.env` and not `src/.env.example`, which is what it used to name.
+        A self-hoster installs the bundle from the front door - `docker-compose.yml`,
+        `Caddyfile`, `install.sh` and `example.env` - and has no `src/` tree to open. What
+        they do have is `.env`, written out of `example.env` one line at a time precisely so
+        the comments around each setting survive into it, object-storage block included; a
+        developer's `src/.env` is the same file by the same route. One name is true for both.
         """
         if self.FILE_STORAGE_BACKEND is not FileStorageBackendOption.S3:
             return self
@@ -1073,9 +1080,9 @@ class Settings(
             raise ValueError(
                 f"FILE_STORAGE_BACKEND is s3 but {', '.join(missing)} "
                 f"{'is' if len(missing) == 1 else 'are'} not set. Uploaded dive-computer exports "
-                "and c-card images have nowhere to go without them. Set the S3_* group (see "
-                "src/.env.example), or set FILE_STORAGE_BACKEND=local to keep using a filesystem "
-                "volume."
+                "and c-card images have nowhere to go without them. Set the S3_* group - the "
+                "object-storage block in your .env documents each one - or set "
+                "FILE_STORAGE_BACKEND=local to keep using a filesystem volume."
             )
         return self
 
