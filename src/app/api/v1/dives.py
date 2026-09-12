@@ -891,14 +891,23 @@ async def renumber_user_dives(
 # makes `invalidate_dive_caches()` able to express that as a pattern at all.
 #
 # **`:v2` is a shape version, and it is what a deployed instance costs.** An entry this
-# cache wrote is replayed through `DiveReadWithMixtures` without the route body running, so
-# a response whose *shape* changed comes back as a `ResponseValidationError` - a 500 on this
-# endpoint for whoever is signed in when the new build lands, for the whole of the hour this
-# key lives. `recordings[].profile.channels` and `recordings[].mode` are exactly such a
-# change. `DECISIONS.md`'s *"Changing the shape of a cached response outlives the restart
-# that ships it"* offers version-the-key or write-down-how-that-Redis-is-flushed, and this
-# is the first change to owe the call: versioning needs no access to the instance and cannot
-# be forgotten at deploy time, where a documented flush is a step somebody has to run.
+# cache wrote is replayed without the route body running, so an entry the previous build
+# wrote goes on answering this endpoint for the whole of the hour this key lives.
+#
+# **It is a wrong answer rather than a 500**, and the distinction is worth keeping: every
+# member the decompression change adds to this response is defaulted - `RecordingRead.mode`
+# and `.deco_model` are `Field(default=None)`, and `DiveProfileInfo.channels` was already a
+# plain `list[str]`, so a short one still validates. A v1 entry therefore replays cleanly and
+# says the dive has no mode, no model and four curves. That is the failure to version for
+# here: the 500 the precedent below records came from a *required* field with no default
+# (`day` on `DiveActivityPoint`), which is the shape `DiveReadWithMixtures.species` and
+# `.recordings` carry `default_factory=list` to avoid, and which nothing in this change
+# repeats.
+#
+# `DECISIONS.md`'s *"Changing the shape of a cached response outlives the restart that ships
+# it"* offers version-the-key or write-down-how-that-Redis-is-flushed, and this is the first
+# change to owe the call: versioning needs no access to the instance and cannot be forgotten
+# at deploy time, where a documented flush is a step somebody has to run.
 #
 # **The suffix goes after the colon and not after an underscore.** `invalidate_dive_caches`
 # sweeps `user_{id}_dives:*` and `user_{id}_dive:*` - two literal patterns rather than one

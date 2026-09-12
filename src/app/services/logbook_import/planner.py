@@ -453,21 +453,21 @@ _MIXTURE_BOUNDS: tuple[_Bound, ...] = (
     ),
 )
 
-# The deco model's three integers, same rules, from `models/dive_recording.py`. The gradient
-# factors are 0-100 because the member is a whole percent of the M-value and no computer
-# offers a setting above it - deliberately *not* the per-sample `gradient_factor` channel,
-# which is uncapped above because a GF99 past 100 is a real reading.
-#
-# **`conservatism` is bounded only by the column's width**, which makes it the one entry on
-# any of these three lists with no floor: it is the device's own scale, and Suunto's P-1 is a
-# genuine `-1`. Reading a negative as an absent-marker here, which is right for every channel,
-# would delete a real setting.
 # The channels §6.4 floors at zero - every one the computer computed rather than measured.
 # Depth, ceiling and temperature are absent because a signed reading is real in all three: a
 # temperature below zero is ordinary, and a depth of zero at the surface is what a Suunto
 # Ocean records.
 _UNSIGNED_CHANNELS = frozenset(SINGLE_SERIES_CHANNELS) - {"depth", "ceiling", "temperature"}
 
+# The deco model's three integers, same rules, from `models/dive_recording.py`. The gradient
+# factors are 0-100 because the member is a whole percent of the M-value and no computer
+# offers a setting above it - deliberately *not* the per-sample `gradient_factor` channel
+# above, which is uncapped because a GF99 past 100 is a real reading.
+#
+# **`conservatism` is bounded only by the column's width**, which makes it the one entry on
+# any of these three lists with no floor: it is the device's own scale, and Suunto's P-1 is a
+# genuine `-1`. Reading a negative as an absent-marker here, which is right for every channel,
+# would delete a real setting.
 _DECO_MODEL_BOUNDS: tuple[_Bound, ...] = (
     _Bound("gf_low", lambda value: 0 <= value <= 100, "a gradient factor must be between 0 and 100 percent"),
     _Bound("gf_high", lambda value: 0 <= value <= 100, "a gradient factor must be between 0 and 100 percent"),

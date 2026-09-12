@@ -17713,6 +17713,18 @@ ships it"* asks of whoever next reshapes a cached response, and it takes the ver
 it needs no access to the instance and cannot be forgotten at deploy time, where a documented flush
 is a step somebody has to run.
 
+**The failure it prevents is a wrong answer, not the 500 that section records**, and the difference
+decides when the next reader owes this at all. That section's worked example is a *required* field
+with no default — `day` on `DiveActivityPoint` — where a v1 entry fails `response_model` validation
+outright. Nothing here repeats that shape: `RecordingRead.mode` and `.deco_model` are
+`Field(default=None)`, `DiveProfileInfo.channels` was already a plain `list[str]` so a four-entry
+one still validates, and every new profile member is defaulted too. A v1 entry therefore replays
+*cleanly* and tells a signed-in diver their dive has no mode, no model and four curves, for an hour,
+on a build that stored six more. Two different costs, and a member added with `default=None` buys
+only the second — which is still worth a suffix on an hour-long key serving an instance, and would
+not be on the 60-second list beside it. `DiveReadWithMixtures.species` and `.recordings` carry
+`default_factory=list` for exactly this reason and say so at the field.
+
 **The detail read and not the list**, and the distinction is worth stating because an earlier
 reading of it got this backwards. `DiveProfileInfo` reaches the wire only through
 `RecordingRead.profile` under `DiveReadWithMixtures.recordings`, which is `GET /dive/{uuid}`'s shape
