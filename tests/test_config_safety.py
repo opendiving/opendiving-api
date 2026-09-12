@@ -87,6 +87,21 @@ class TestPlaceholderSecretKeysAreRefused:
 
         assert shipped.split("=", 1)[1].strip('"') in PLACEHOLDER_SECRET_KEYS
 
+    def test_the_refusal_points_at_a_file_the_reader_has(self):
+        """It used to name `src/.env.example` as the source of the placeholder. The front
+        door's `example.env` ships the same value and its by-hand install downloads that
+        file straight to `.env`, so an operator meets this refusal with no `src/` tree on
+        the machine at all - sent, by the error itself, to a file they cannot open. `.env`
+        is the file both audiences are editing.
+        """
+        with pytest.raises(ValueError) as raised:
+            _settings(SECRET_KEY="change-me-openssl-rand-hex-32")
+
+        message = str(raised.value)
+        assert "your .env" in message
+        assert "src/" not in message
+        assert "openssl rand -hex 32" in message
+
     @pytest.mark.parametrize("value", ["CHANGEME", "  change-me  ", "ChangeThis"])
     def test_casing_and_padding_do_not_get_past_it(self, value: str):
         with pytest.raises(ValueError, match="SECRET_KEY"):

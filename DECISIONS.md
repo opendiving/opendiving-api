@@ -10669,11 +10669,30 @@ in one file is the rule being applied rather than an inconsistency to tidy.
 both would upload CodeQL results for the same language; a third-party SARIF upload carries its own
 tool name and its own category and is independent of it.
 
-**The one thing the move does not do is tidy up after itself.** Issue #178, the last `image-cve`
-issue, is still open and nothing edits or closes it any more — the step that did is deleted. It
-needs closing by hand, and `CONTRIBUTING.md` and `SECURITY.md` both say so rather than pretending
-the surface changed retroactively. The `image-cve` label is left in place for the same reason: it is
-still attached to that issue.
+**The move did not tidy up after itself, and the leftover was closed by hand.** #178 was opened by
+the last scheduled run under the old surface, 09:47 UTC on 2026-09-12; the flip merged that evening
+at 21:10 UTC and took the issue step with it, so from that minute nothing edited or closed an
+`image-cve` issue. The maintainer closed #178 at 22:28 UTC, seventy-eight minutes later. Nothing in
+the new surface could have done it for them: an upload replaces the alert set for its category and
+knows nothing about issues, which is the same property the section above counts as the gain.
+
+**The findings #178 carried are not in the Security tab yet, and saying they were is the error worth
+recording.** `CONTRIBUTING.md` claimed it for a day. The `published-images` job runs on `schedule`
+and `workflow_dispatch` only — the `push`/`pull_request` half of this workflow is the
+dependency-tree scan, which uploads nothing — and the last scheduled run fired that morning, before
+the flip. So the first `published-images` upload is still ahead: until it happens
+`gh api /repos/opendiving/opendiving-api/code-scanning/analyses --jq '[.[].category]|unique'`
+returns the two CodeQL categories and nothing else. **Retiring an output surface moves the surface,
+not what it already produced** — what the old one reported reappears only when the new one next
+runs, and between those two moments the repository holds no record of it at all. Anything #178
+reported that is still present comes back as an alert on the next scan.
+
+The `image-cve` label is still on the repository, and #178 is the only issue that has ever carried
+it. Nothing under `.github/` names it any more, so no workflow creates it, applies it or files under
+it again — which leaves it attached to one closed issue rather than orphaned, and that is the reason
+to leave it: deleting a label strips it from every issue carrying it, and #178 is the only record of
+what the old surface produced. `CONTRIBUTING.md` and `SECURITY.md` carried this as a standing to-do
+and now record it in the past tense.
 
 ## Security headers are the app's, not the proxy's
 
@@ -18202,3 +18221,31 @@ With the namespace in place this is no longer the remedy for a deploy - it is th
 payload cached from a bug, and for a namespace left behind by a rollback. `FLUSHALL` is the wrong
 instrument for either: it would take the rate-limit windows and the in-flight passkey challenges
 with it. Scan `resp:*` and delete what matches.
+
+## The placeholder refusal names the file the placeholder is *in*, not the one it came from
+
+`Settings._reject_placeholder_secret_key` used to end its message with "still a placeholder from
+src/.env.example". That is a path in this repository's source tree, and the reader most likely to be
+staring at this particular refusal has no such tree.
+
+`example.env` in [opendiving/opendiving](https://github.com/opendiving/opendiving) ships
+`SECRET_KEY=change-me-openssl-rand-hex-32`, the same string `PLACEHOLDER_SECRET_KEYS` lists, and it
+says so where it sits: "the placeholder below is published in this repository and the API REFUSES TO
+START on it". The by-hand install in that repository's `docs/install.md` is
+`curl -Lo .env …/example.env` followed by a table of six values to edit, so between those two steps
+the operator's `.env` *is* the template, placeholder and all. Start the stack there and this
+validator fires — with an error that pointed at a file nowhere on the machine.
+
+**The `install.sh` path never reaches here**, which is the part that makes the wording decision
+rather than complicating it: the script generates `SECRET_KEY` before writing `.env` and dies if it
+cannot. So every reader of this message is either a developer whose `src/.env` came from
+`src/.env.example`, or an operator on the by-hand path whose `.env` came from `example.env`. Both of
+them are editing a file called `.env`, and neither needs to know about the other's template — the
+same reasoning `Settings._require_s3_credentials` and `blob_store.backend_for` were changed under
+(#184), and the same wording, so that the refusals in this module read as one voice.
+
+What did not change is the rest of the message, and that is deliberate: it says *why* the value
+matters (it signs every token this app issues) and carries the fix inline (`openssl rand -hex 32`).
+Only the file pointer was wrong. The general shape, stated once so the next refusal does not have to
+rediscover it: **a startup error may name a file only if every reader of that error has it.** A
+template is never that file. The one the reader edited is.

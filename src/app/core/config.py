@@ -81,6 +81,11 @@ class AppSettings(BaseSettings):
 # weak key, it is no key at all. Treated exactly like `LEGACY_DEFAULT_ADMIN_PASSWORD` below,
 # and matched case-insensitively after stripping.
 #
+# `change-me-openssl-rand-hex-32` is published in two repositories, not one: the front
+# door's `example.env` ships that exact value too, and an operator's `.env` is a copy of
+# *that* file. Which is why `_reject_placeholder_secret_key` names `.env` rather than
+# either template - see its docstring.
+#
 # An explicit list rather than an entropy heuristic on purpose: the failure this guards is
 # "the template's own value reached a deployment", not "the operator chose badly", and a
 # heuristic that rejects a key someone genuinely generated is a worse bug than the one it
@@ -963,14 +968,25 @@ class Settings(
         Every environment, with no `ENVIRONMENT` gate: a staging instance signing tokens
         with a published key is compromised in exactly the way a production one is, and
         the local instance is the one whose `.env` came straight from the template.
+
+        The message names `.env` and not `src/.env.example`, which is what it used to name.
+        This refusal has a *second* audience the template path does not describe: the front
+        door's `example.env` ships `change-me-openssl-rand-hex-32`, the same string this
+        module lists as a placeholder, and its by-hand install downloads that file straight
+        to `.env` and tells the operator to replace six values in it. Someone who starts the
+        stack a step early meets this error with no `src/` tree anywhere on the machine, so
+        the old text sent them to a file they could not open. `.env` is the file both of
+        them are editing. (The `install.sh` path generates the key before writing `.env`, so
+        it never reaches here - which is why the by-hand install is the case that decides
+        the wording rather than an edge of it.)
         """
         secret = self.SECRET_KEY.get_secret_value().strip()
 
         if not secret or secret.lower() in PLACEHOLDER_SECRET_KEYS:
             raise ValueError(
-                "SECRET_KEY is unset or still a placeholder from src/.env.example. It signs every "
-                "token this app issues, so a published value lets anyone mint one for any account. "
-                "Generate your own: openssl rand -hex 32"
+                "SECRET_KEY is unset or still the placeholder your .env arrived with. It signs "
+                "every token this app issues, so a published value lets anyone mint one for any "
+                "account. Generate your own: openssl rand -hex 32"
             )
         return self
 

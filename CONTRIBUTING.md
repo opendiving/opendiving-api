@@ -552,8 +552,11 @@ published fix become alerts; the ones upstream has not fixed are a count in the 
 no rebuild collects them and an alert you cannot act on is noise.
 
 Until 2026-09-12 this alert was a GitHub issue labelled `image-cve` instead, because SARIF upload
-was a paid feature on a private repository. If one of those issues is still open, it is a leftover:
-nothing updates or closes it any more, and its findings are in the Security tab.
+was a paid feature on a private repository. Deleting that step left the last such issue with nothing
+to update or close it, so it was closed by hand the same evening; none has been filed under that
+label since. Anything it reported that is still present comes back as an alert on the next scan —
+the `published-images` job runs on the schedule and on `workflow_dispatch` and nowhere else, so that
+is the daily `0 6 * * *` (which GitHub starts late) or a dispatch now.
 
 **Proposed changes.** The same workflow runs a second, much cheaper job on every PR — Trivy over
 `uv.lock`, no image built — which *fails the check* on a HIGH or CRITICAL that has a fix available.

@@ -44,9 +44,10 @@ whole stack in a couple of minutes.
   to this rule. They are code-scanning alerts on this repository, raised by
   `.github/workflows/vulnerability-scan.yml` so the base-image rebuild gets done, and they name
   advisories Debian and NVD published first — running `trivy image` against the same public tag
-  tells you the same thing. Before 2026-09-12 they were issues labelled `image-cve`; one may still
-  be open, and nothing maintains it. This rule is about a defect in *our* code that nobody has
-  disclosed yet — that still goes to the private channel above.)
+  tells you the same thing. Before 2026-09-12 they were issues labelled `image-cve`; the last of
+  those was closed by hand on the day of the move, and none has been opened since. This rule is
+  about a defect in *our* code that nobody has disclosed yet — that still goes to the private
+  channel above.)
 - **Don't use the in-app contact form.** It has a *Security* category, and it is still the wrong
   route: `POST /api/v1/contact` delivers to whoever runs *that* instance, not to this project, and
   on most instances it delivers nowhere at all — `CONTACT_FORM_EMAIL` has no default, and unset the
