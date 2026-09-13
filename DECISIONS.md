@@ -18403,10 +18403,8 @@ under the type it used to have, which is the one thing the removal loop exists t
 the wrong notes are generated weeks later by somebody who never saw this job, with nothing on screen
 connecting the two.
 
-Not every `pr-title.yml` in this project carries this job. A repository that generates no release
-notes has nothing to read the labels, so its copy stops at the semantic-title check. But wherever
-the labelling job does exist, the step is byte-identical to the one here but for the example titles
-in the semantic-title error message — which is why this fix landed in all of those copies together,
-and the only reason this section can be read as describing a solved problem. A later change to the
-step that lands in one copy and not the rest leaves the others with whatever this section is about;
-diff the step across them before assuming they agree.
+This step is duplicated. Every repository that generates release notes from these labels runs its
+own copy of it, and this fix landed in all of them together — which is the only reason this section
+can be read as describing a solved problem. Nothing checks that the copies agree, so a later change
+that lands in one and not the rest leaves the others with whatever this section is about. Diff the
+labelling step across them before assuming otherwise.
