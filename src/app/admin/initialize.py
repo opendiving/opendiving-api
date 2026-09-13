@@ -78,14 +78,18 @@ async def main() -> None:
     `service_completed_successfully`, so neither local development nor an install needs a
     manual step.
 
-    It lives in this package rather than in `src/scripts/` - where it started - because
-    the shipped image contains only the installed `app` package: `src/scripts/` and
-    `src/app/` are both absent from it, so a `python -m src.scripts.initialize_admin`
-    entrypoint could only ever run against a bind-mounted source tree. That was invisible
-    while the only compose file was the development one, which mounts `./src`, and became
-    a broken `admin_init` service the moment the install bundle's compose file
-    (https://github.com/opendiving/opendiving/blob/main/docker-compose.yml) ran the
-    published image instead.
+    It lives in this package rather than in `src/scripts/` - where it started - so that
+    every compose `command:` names the app under the same name the image's own `CMD` does.
+    The image carries two importable copies of it: `/code/app`, which the `CMD` and the
+    development bind mount use, and `site-packages/src/app`, which the wheel installs.
+    They are separate module objects with separate `settings` singletons, so a one-shot
+    that reaches the app as `src.app.*` initializes a second copy of it.
+
+    Not because `src` is missing from the image - it is not, and this docstring said
+    otherwise until 2026-09-13. `pyproject.toml` declares `packages = ["src"]` and the
+    builder installs the project, so `src.scripts.*` resolves out of `site-packages` in
+    the published image with no bind mount. See *"`admin_init` runs as
+    `app.admin.initialize`, and `src.scripts.*` marks nothing"* in `DECISIONS.md`.
 
     Why this isn't in the app's lifespan: it used to be, and the lifespan runs once *per
     worker*. Under `gunicorn -w 4` the four workers raced to create the same tables and

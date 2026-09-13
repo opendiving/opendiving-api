@@ -166,3 +166,20 @@ class TestAskingForABackendThatIsNotConfigured:
 
         with pytest.raises(RuntimeError, match="S3_BUCKET"):
             blob_store.backend_for(FileStorageBackendOption.S3)
+
+    def test_it_points_at_a_file_the_reader_has(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """This refusal is the one an *operator* meets: the front door's
+        `docs/configuration.md` hands them
+        `docker compose exec api python -m src.scripts.migrate_blobs`, and they have no
+        `src/` tree for the message to send them to. `.env` is the file they do have.
+        """
+        select_s3_backend(monkeypatch)
+        monkeypatch.setattr(blob_store.settings, "FILE_STORAGE_BACKEND", FileStorageBackendOption.LOCAL)
+        monkeypatch.setattr(blob_store.settings, "S3_BUCKET", None)
+
+        with pytest.raises(RuntimeError) as raised:
+            blob_store.backend_for(FileStorageBackendOption.S3)
+
+        message = str(raised.value)
+        assert "object-storage block in your .env" in message
+        assert "src/" not in message
