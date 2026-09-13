@@ -9972,8 +9972,8 @@ and nothing warns you. `AGENTS.md` carries that as a rule; this is why it is one
 **Three consequences worth naming, because each was a live behaviour of this repository until the
 move:**
 
-- **The release here stopped carrying artifacts.** `publish-image.yml`'s `draft-release` job used to
-  attach the three install files to every `v*` release, which made this repository's release
+- **The release here stopped carrying artifacts.** `publish-image.yml`'s `publish-release` job used
+  to attach the three install files to every `v*` release, which made this repository's release
   simultaneously the api's component release *and* the product's - and is why the guard it carried
   could only ever check half of what it was guarding. The job stays: delete it and api becomes the
   only one of the three repositories with no component release, with `.github/release.yml` and the
@@ -10255,7 +10255,7 @@ If one of these jobs ever does need more, the block goes on that job rather than
 workflow's — and the job has to re-state `contents: read` alongside whatever it adds, because a
 job-level `permissions:` block *replaces* the workflow-level one rather than adding to it.
 `pr-title.yml` is the worked example (`permissions: {}` at the top, and the labelling job asking for
-exactly the two scopes it uses); `publish-image.yml`'s `draft-release` job is the other, taking
+exactly the two scopes it uses); `publish-image.yml`'s `publish-release` job is the other, taking
 `contents: write` for itself alone rather than for the file.
 
 The `actions/*` steps stay on major tags (`@v7`), deliberately untouched. Whether to SHA-pin them
@@ -18411,9 +18411,9 @@ labelling step across them before assuming otherwise.
 
 ## The component release publishes itself, and the human pass moved to the product release
 
-`publish-image.yml`'s `draft-release` job opened a draft, and a person wrote the headline, confirmed
-the **Breaking** section and pressed publish. It now runs `gh release create --generate-notes` with
-no `--draft`, so a `v*` tag leaves a published release behind and nothing waits on anybody.
+`publish-image.yml`'s release job opened a draft, and a person wrote the headline, confirmed the
+**Breaking** section and pressed publish. It now runs `gh release create --generate-notes` with no
+`--draft`, so a `v*` tag leaves a published release behind and nothing waits on anybody.
 
 **The premise the human pass rested on had expired.** It was kept here deliberately, on the grounds
 that self-hosters read *this* repository's release before they upgrade — and that stopped being true
@@ -18446,8 +18446,18 @@ published release nobody reads it first, so the labels `pr-title.yml` derives fr
 whole of the categorisation, and a mistitled PR is published in the wrong section rather than
 corrected in a draft.
 
-**The job keeps the id `draft-release`.** The word is stale and the alternative was worse: the id is
-the check-run name on every release run, and `opendiving-web` carries the mirror of this job under
-the same id — the two files are one policy said twice, so renaming it in one repository alone is a
-drift the next reader of either has to reconcile. The step name and the comment above the job carry
-the meaning instead. Rename it in both files in one go or not at all.
+**The job id became `publish-release`, in both repositories at once.** It was going to stay
+`draft-release` — the id is the check-run name on every release run, `opendiving-web` carries the
+mirror of this job under the same id, and the two files are one policy said twice, so renaming it
+here alone would be a drift the next reader of either has to reconcile. What made the coordinated
+rename available is that the two changes were in flight at the same time rather than one after the
+other: web renamed its job on its own branch, before either merged, so the mirror never held two
+ids. An id asserting a draft is a stale name a reader trusts before they read the step under it, and
+that is the whole of what the rename buys. The next one costs the same coordination — rename it in
+both files in one go or not at all.
+
+Nothing else referred to the old id. No other job here `needs:` it, and it is not among `main`'s
+required status checks: it runs only on a `v*` tag push and on the dispatch that rebuilds a released
+version, so a pull request never produces the check run a ruleset could require. Re-derive both
+before a second rename rather than trusting this paragraph — the first from the workflow, the second
+from the repository's rulesets, which no file in this tree records.

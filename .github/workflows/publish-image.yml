@@ -560,9 +560,9 @@ jobs:
   # deleted and re-cut.
   #
   # The job id is a check-run name and `opendiving-web` carries the mirror of this job under
-  # the same one, so it stays `draft-release` even though nothing it does is a draft any
-  # more. DECISIONS.md, *The component release publishes itself*, is why.
-  draft-release:
+  # the same one, so the rename off `draft-release` had to land in both files together - it
+  # did. Keep them in step. DECISIONS.md, *The component release publishes itself*, is why.
+  publish-release:
     needs: [prepare, merge]
     if: needs.prepare.outputs.version != ''
     runs-on: ubuntu-latest
