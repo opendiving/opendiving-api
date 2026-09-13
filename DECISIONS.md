@@ -18355,3 +18355,47 @@ and the grep that finds them is over that checkout, not this one —
 `git grep -F 'SECRET_KEY is unset' origin/main` in
 [opendiving/opendiving](https://github.com/opendiving/opendiving), the same way any other
 cross-repository contract here is checked.
+
+## The labelling step retries, and "already exists" is not a failure
+
+`.github/workflows/pr-title.yml` reads the repository's labels, creates the one it wants if that
+read says it is missing, and then puts it on the PR. On 2026-09-13 that sequence failed a PR whose
+title was perfectly good — in [opendiving/opendiving](https://github.com/opendiving/opendiving),
+which carries the same workflow, but nothing about it was particular to that repository. The job log
+is the whole argument for the shape the step has here now:
+
+```
+HTTP 500 (https://api.github.com/graphql)
+HTTP 500 (https://api.github.com/graphql)
+label with name "feat" already exists; use `--force` to update its color and description
+```
+
+Two weaknesses compounded. The read was `mapfile -t existing < <(gh label list …)`, which cannot
+fail: the non-zero status belongs to the process substitution, `mapfile` succeeds on the nothing it
+was handed, and a repository whose labels could not be read comes out looking exactly like one that
+has none. A flap on `api.github.com` was therefore reclassified, silently, as "`feat` does not
+exist" — and the step went on to create a label this repository has carried since its first PR. The
+create was the second weakness: `gh label create` exits non-zero on a name that is taken, the step
+treated it as infallible, and `set -e` turned that into a red X on somebody's clean PR.
+
+The fix is one small function and two rules about what counts as an error. `gh_retry` runs a `gh`
+call up to three times with a widening pause, because GitHub's API bursts-fail and a single 500 is
+rarely a fact about the repository. It takes a glob of *expected* non-zero output and returns on a
+match rather than retrying, so "already exists" costs one call instead of three and fifteen seconds
+of backoff; that arm has to be matched before the generic failure path, which would otherwise
+swallow an expected state and call it a flap.
+
+The first rule is that creating a label that already exists is not an error — it is the goal,
+reached by somebody else. It happens for two ordinary reasons: a concurrent run of this same
+workflow on another PR got there between this run's read and its create, or one of this call's own
+earlier attempts landed and it was the *reply* that flapped. `--force` is not the answer to either,
+because it would take a hand-tuned colour back off whoever tuned it.
+
+The second is that a read or a write which genuinely fails all three attempts *is* an error, and the
+job stops with an `::error::` quoting what gh actually said. Failing loudly is the point of the
+exercise rather than a caveat to it: a run that went quietly green having read nothing would leave
+the PR unlabelled, `.github/release.yml` sorts merged PRs into the notes by exactly these labels,
+and the cost would land weeks later on whoever publishes a release and never saw this job. Both
+reads are fatal on failure for that reason — including the read of the PR's *current* labels, where
+the stake is the removals rather than the creates: an empty answer there leaves a retitled PR
+carrying its old type into the notes, which is the one thing the removal loop exists to stop.
