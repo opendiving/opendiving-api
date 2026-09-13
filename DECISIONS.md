@@ -18280,9 +18280,9 @@ is `src/.env.example` by the same route, carrying the same block. So "the object
 your .env" is a true sentence in both places, and neither has to know about the other's template.
 
 Every other refusal in `core/config.py` names settings and an alternative and no file at all, which
-is the shape to copy when adding one. `_reject_placeholder_secret_key` was the last exception - the
-same defect one layer along - and it was corrected separately, as its own change to its own
-user-visible string - the section below, *"The placeholder refusal names the file the placeholder is
+is the shape to copy when adding one. `_reject_placeholder_secret_key` was the last exception, the
+same defect one layer along, and it was corrected separately as its own change to its own
+user-visible string: the section below, *"The placeholder refusal names the file the placeholder is
 in, not the one it came from"*.
 
 **The two do not share a sentence, and that is not an inconsistency to tidy.** These refusals send
