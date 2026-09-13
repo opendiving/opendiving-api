@@ -3,10 +3,11 @@ name: Publish Image
 # Three ways in, and they mean different things.
 #
 # A `v*` tag push is the release path: it publishes the whole alias set for that version
-# and opens a draft release. Tags are cut deliberately - by hand, after bumping
-# `pyproject.toml`, which the guard below insists on - because self-hosters consume
-# releases as events, and a version per merge trains people onto `:latest` instead of
-# reading what changed.
+# and publishes this repository's component release. Tags are cut deliberately rather than
+# per merge - by the product repository's `release-cut.yml`, which bumps the version-bearing
+# files here and tags the commit that lands, so the tag agrees with `pyproject.toml` the way
+# the guard below insists on - because self-hosters consume releases as events, and a
+# version per merge trains people onto `:latest` instead of reading what changed.
 #
 # A push to `main` is the edge channel, and it exists for the project's own instance
 # rather than for anybody else's: it publishes `:edge` and `:sha-<12>` and nothing else -
@@ -53,7 +54,7 @@ on:
 
 # `packages: write` is the whole point of the job; `contents: read` is what checkout
 # needs. The GITHUB_TOKEN these grant is also what links the resulting package back to
-# this repository, so no personal access token is involved. The draft release needs
+# this repository, so no personal access token is involved. The release job needs
 # `contents: write`, which is granted to that job alone rather than to everything.
 permissions:
   contents: read
@@ -73,7 +74,7 @@ permissions:
 # acceptable on the release path, and one shared group would have imposed it there: a `v*` tag
 # is pushed straight after the version bump merges, so the tag run queues behind that merge's
 # own edge build and any merge landing meanwhile cancels it outright - no `X.Y.Z`, no `X.Y`,
-# no `:latest`, no draft release, and a cancelled check that looks exactly like the
+# no `:latest`, no release, and a cancelled check that looks exactly like the
 # dropped-merge case above.
 #
 # A `workflow_dispatch` sits with the releases even when it is launched from `main`, because
@@ -552,9 +553,15 @@ jobs:
   # A release exists for the notes, not for the artifacts - the install bundle and its
   # assets are published by `opendiving/opendiving`, and this repository's release is the
   # record of what went into the image an operator pulls. `.github/release.yml` sorts the
-  # PRs by the labels `pr-title.yml` applies; the human writes the headline and the
-  # Breaking section, per CONTRIBUTING.md, and publishes. It runs after `merge`, so a build
-  # that failed leaves no release behind and the tag is free to be deleted and re-cut.
+  # PRs by the labels `pr-title.yml` applies, and the notes go out as generated: the release
+  # somebody reads before deciding to upgrade is the product one next door, and that is the
+  # one that still gets a headline and a Breaking section written by hand. It runs after
+  # `merge`, so a build that failed leaves no release behind and the tag is free to be
+  # deleted and re-cut.
+  #
+  # The job id is a check-run name and `opendiving-web` carries the mirror of this job under
+  # the same one, so it stays `draft-release` even though nothing it does is a draft any
+  # more. DECISIONS.md, *The component release publishes itself*, is why.
   draft-release:
     needs: [prepare, merge]
     if: needs.prepare.outputs.version != ''
@@ -563,7 +570,7 @@ jobs:
       contents: write
 
     steps:
-      - name: Open a draft release
+      - name: Publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -574,4 +581,4 @@ jobs:
             echo "Release $TAG already exists - leaving it as it is."
             exit 0
           fi
-          gh release create "$TAG" --draft --generate-notes --title "$TAG"
+          gh release create "$TAG" --generate-notes --title "$TAG"

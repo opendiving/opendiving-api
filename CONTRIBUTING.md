@@ -439,9 +439,12 @@ identifies a running build; `version` on its own no longer does.
 Versions move in lockstep across all three repositories — this one,
 [opendiving-web](https://github.com/opendiving/opendiving-web) and the product repository: one
 product version, so `opendiving-api:0.4.0`, `opendiving-web:0.4.0` and release `v0.4.0` over there
-are always a matched set. That is also why no release tool runs here — semantic-release and
-release-please both compute a version per repo from that repo's own commits, which drifts apart on
-the first api-only fix and then has to be forced back by hand at every release afterwards.
+are always a matched set. That is also why the only release tool that runs is the product
+repository's own coordinator — semantic-release and release-please both compute a version per repo
+from that repo's own commits, which drifts apart on the first api-only fix and then has to be forced
+back by hand at every release afterwards. Neither is used, and nothing in *this* repository decides
+a version: one workflow next door reads all three windows and writes one number into two
+repositories.
 
 **Pick the number** by looking at all three repos' windows together:
 
@@ -462,55 +465,76 @@ Every PR title is a conventional commit subject, so the breaking half of that ta
 git log --format=%s v0.3.0..main | grep -E '^[a-z]+(\([^)]+\))?!:'
 ```
 
-Then, in the two code repos:
+Then run
+**[Cut the release](https://github.com/opendiving/opendiving/actions/workflows/release-cut.yml)**
+from the product repository's Actions tab, on `main`. One dispatch cuts the whole product release,
+and
+[that repository's CONTRIBUTING.md](https://github.com/opendiving/opendiving/blob/main/CONTRIBUTING.md)
+documents the two boxes it takes. **Nothing here is bumped or tagged by hand** — an instruction
+anywhere to do either describes the ritual this replaced. What the dispatch does to *this*
+repository is:
 
-1. Bump `version` in `pyproject.toml` (and `package.json` in the web repo) — one small PR each,
-   titled `chore: release v0.4.0`. Nothing else carries a version number: the API reads its own from
-   the installed package metadata, and the product repository has no manifest to bump on purpose —
-   the check that matters there is "do both images exist at this version", which is stronger than
-   any local record of what the version is supposed to be.
+1. It opens a pull request titled `chore(release): v0.4.0` writing `0.4.0` into `pyproject.toml`
+   **and** into `uv.lock`, waits for the required checks, and squash-merges it. Both files carry the
+   number: the lockfile records this project's own version in its
+   `[[package]] name = "opendiving-api"` block, and the `Dockerfile` installs with
+   `uv sync --locked`, so a bump that wrote the manifest alone would produce a pull request
+   `runtime-imports` can never let merge. Nothing else here declares one — the API reads its own
+   from the installed package metadata, and the product repository has no manifest to bump on
+   purpose, the check that matters there being "do both images exist at this version", which is
+   stronger than any local record of what the version is supposed to be.
 
-2. Tag the bump commit and push the tag:
-
-   ```bash
-   git tag v0.4.0 && git push origin v0.4.0
-   ```
+2. It tags the squash commit `v0.4.0`. A hand bump or a stray tag is how the *next* release gets
+   stuck rather than this one: the version decision refuses when the entries that declare a version
+   disagree, or when a repository's newest tag is not what its manifests say, and either of those is
+   exactly what hand work leaves behind.
 
 3. The tag push runs **Publish Image**, which builds amd64 and arm64 on native runners and pushes
    `0.4.0`, `0.4`, `latest` and `sha-<12>` — plus the bare major (`1`, `2`, …) once this is past
    1.0.0, which is withheld below it because a `0` alias would read as "any 0.x". The tag has to be
    exactly `vX.Y.Z`: pre-releases and other shapes have no alias story here and are refused. A tag
    whose name disagrees with the manifest version is refused the same way, before anything is built
-   — so nothing was published, and the fix is to delete the tag, correct the bump, and re-cut it.
+   — so nothing was published, and the fix is to correct the bump and re-cut the tag.
 
-4. The same run opens a **draft** release here with generated notes and **no assets** — the three
-   install files are attached by the product repository's release, which is the one an operator
-   downloads from. Write the headline paragraph and confirm the **Breaking** section: say "None" in
-   so many words when it is empty, because generated notes simply omit an empty category and silence
-   is not an answer someone deciding whether to upgrade can use. A change an existing install has to
-   copy into its own `.env` or compose file — a new required variable, a new service — belongs in
-   that section, since `docker compose pull` does not update the compose file. Then publish.
+4. The same run **publishes** this repository's component release, with generated notes and **no
+   assets** — the install files are attached by the product repository's release, which is the one
+   an operator downloads from. Nobody writes a headline here and nobody presses publish. The release
+   somebody reads before deciding whether to upgrade is the product one, and that is where the
+   **Breaking** section is written by hand: say "None" in so many words when it is empty, because
+   generated notes omit an empty category and silence is not an answer. A change an existing install
+   has to copy into its own `.env` or compose file — a new required variable, a new service —
+   belongs in that section, since `docker compose pull` does not update the compose file.
 
-5. **Tag the product repository last**, once both images are green. Its **Release** workflow checks
-   that `ghcr.io/opendiving/opendiving-api:0.4.0` and `ghcr.io/opendiving/opendiving-web:0.4.0` both
-   exist with both architectures and refuses to publish anything if either is missing — the check
-   that replaced the by-eye "is the web image there?" step this section used to carry, and the one
-   no per-repo workflow can make. The steps are in that repository's `CONTRIBUTING.md`.
+5. Once both images are green the coordinator tags the product repository last, whose **Release**
+   workflow checks that `ghcr.io/opendiving/opendiving-api:0.4.0` and
+   `ghcr.io/opendiving/opendiving-web:0.4.0` both exist with both architectures and refuses to
+   publish anything if either is missing — the check that replaced the by-eye "is the web image
+   there?" step this section used to carry, and the one no per-repo workflow can make. It leaves a
+   draft, and a person finishes it.
 
-The first release cut this way is `v0.1.0`, which is what both manifests already read. No `v` tag
-exists in any of the three repositories, so nothing is spoken for and nothing is being skipped over.
-It has one quirk, and only the first one does: with no earlier release to generate notes against,
-the draft the workflow opens enumerates the entire history, and there is no floor to hand
-`--generate-notes` instead. Trim it by hand. Every release after it has a predecessor and needs none
-of this.
+`v0.1.0` was cut by hand on 2026-09-12, before the coordinator existed, and it is the only release
+this repository has so far. It had the quirk only a first release has: with no earlier tag to
+generate notes against, `--generate-notes` had no floor and enumerated the entire history, which was
+trimmed by hand. Every release after it has a predecessor and needs none of that — which is part of
+why these notes can go out generated rather than reviewed.
 
 **A published version is never repointed.** A bad release gets a successor, not a rewrite.
 Immutability starts at *publish*, so a tag whose build failed before pushing anything published
-nothing and may be deleted and re-cut. The one sanctioned reason to rebuild a released version is a
-CVE in a base image: run **Publish Image** by hand with `ref` set to the `v` tag, and tick **Also
-push :latest** if that version is still the newest. One run recomputes the version's whole alias
-set, which is the point — a hand-picked subset would leave everyone following `latest` or `0.4` on
-the vulnerable digest. What tells you there is a CVE to rebuild for is the next section.
+nothing; deleting and re-cutting such a tag is an organisation admin's operation, since the `tags`
+ruleset blocks deletion and force-pushes on `refs/tags/v*` for everybody else. The one sanctioned
+reason to rebuild a released version is a CVE in a base image: run **Publish Image** by hand with
+`ref` set to the `v` tag, and tick **Also push :latest** if that version is still the newest. One
+run recomputes the version's whole alias set, which is the point — a hand-picked subset would leave
+everyone following `latest` or `0.4` on the vulnerable digest. What tells you there is a CVE to
+rebuild for is the next section.
+
+**What publishing this release rather than drafting it costs.** It goes out minutes before the
+product repository's guard runs, so a guard failure — one image missing, or half-published — leaves
+a published component release here for a product version that never released, and nothing can
+un-publish the tag it names. That is the existing window widened rather than a new one: both images,
+`latest` included, were already pushed by then, and what the guard protects is the product release
+and the install assets, never the images. The genuinely free-to-delete guard is the tag↔manifest
+check in step 3, which runs before anything is built.
 
 ## Staying on top of CVEs
 
