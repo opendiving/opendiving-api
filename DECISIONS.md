@@ -10713,13 +10713,14 @@ at 21:10 UTC and took the issue step with it, so from that minute nothing edited
 the new surface could have done it for them: an upload replaces the alert set for its category and
 knows nothing about issues, which is the same property the section above counts as the gain.
 
-**The findings #178 carried are not in the Security tab yet, and saying they were is the error worth
-recording.** `CONTRIBUTING.md` claimed it for a day. The `published-images` job runs on `schedule`
-and `workflow_dispatch` only — the `push`/`pull_request` half of this workflow is the
+**The findings #178 carried were not in the Security tab when it was closed, and saying they were is
+the error worth recording.** `CONTRIBUTING.md` claimed it for a day. The `published-images` job runs
+on `schedule` and `workflow_dispatch` only — the `push`/`pull_request` half of this workflow is the
 dependency-tree scan, which uploads nothing — and the last scheduled run fired that morning, before
-the flip. So the first `published-images` upload is still ahead: until it happens
-`gh api /repos/opendiving/opendiving-api/code-scanning/analyses --jq '[.[].category]|unique'`
-returns the two CodeQL categories and nothing else. **Retiring an output surface moves the surface,
+the flip. So the first `published-images` upload was still ahead of the whole episode: as late as
+05:20 UTC on 2026-09-13, nearly seven hours after #178 was closed,
+`gh api /repos/opendiving/opendiving-api/code-scanning/analyses --jq '[.[].category]|unique'` still
+returned the two CodeQL categories and nothing else. **Retiring an output surface moves the surface,
 not what it already produced** — what the old one reported reappears only when the new one next
 runs, and between those two moments the repository holds no record of it at all. Anything #178
 reported that is still present comes back as an alert on the next scan.
