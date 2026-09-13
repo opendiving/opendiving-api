@@ -18404,9 +18404,9 @@ the wrong notes are generated weeks later by somebody who never saw this job, wi
 connecting the two.
 
 Not every `pr-title.yml` in this project carries this job. A repository that generates no release
-notes has nothing to read the labels, so its copy stops at the semantic-title check and says so in a
-trailing comment. But wherever the labelling job does exist, the step is byte-identical to the one
-here but for the example titles in the semantic-title error message — which is why this fix landed
-in all of those copies together, and the only reason this section can be read as describing a solved
-problem. A later change to the step that lands in one copy and not the rest leaves the others with
-whatever this section is about; diff the step across them before assuming they agree.
+notes has nothing to read the labels, so its copy stops at the semantic-title check. But wherever
+the labelling job does exist, the step is byte-identical to the one here but for the example titles
+in the semantic-title error message — which is why this fix landed in all of those copies together,
+and the only reason this section can be read as describing a solved problem. A later change to the
+step that lands in one copy and not the rest leaves the others with whatever this section is about;
+diff the step across them before assuming they agree.
