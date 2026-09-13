@@ -18393,9 +18393,12 @@ because it would take a hand-tuned colour back off whoever tuned it.
 
 The second is that a read or a write which genuinely fails all three attempts *is* an error, and the
 job stops with an `::error::` quoting what gh actually said. Failing loudly is the point of the
-exercise rather than a caveat to it: a run that went quietly green having read nothing would leave
-the PR unlabelled, `.github/release.yml` sorts merged PRs into the notes by exactly these labels,
-and the cost would land weeks later on whoever publishes a release and never saw this job. Both
+exercise rather than a caveat to it, and the cost is quieter than "the PR falls out of the release
+notes" — which it does not. `.github/release.yml` ends its categories with a `"*"` catch-all, so an
+unlabelled PR is filed under *Other changes*: nothing is missing from the notes, a `feat:` is merely
+absent from Features, and a section that is short reads as a section nobody had anything for. Both
 reads are fatal on failure for that reason — including the read of the PR's *current* labels, where
-the stake is the removals rather than the creates: an empty answer there leaves a retitled PR
-carrying its old type into the notes, which is the one thing the removal loop exists to stop.
+the stake is the removals rather than the creates: an empty answer there leaves a retitled PR filed
+under the type it used to have, which is the one thing the removal loop exists to stop. Either way
+the wrong notes are generated weeks later by somebody who never saw this job, with nothing on screen
+connecting the two.

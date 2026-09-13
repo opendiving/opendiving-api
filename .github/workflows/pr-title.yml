@@ -106,9 +106,12 @@ jobs:
           # instead of spending the remaining attempts and their backoff on a verdict
           # that will not change; pass '' where the command has no such state. Running
           # out of attempts returns 1, and every caller below treats that as fatal.
-          # Going quietly green is worth less than a red X here: a run that read
-          # nothing leaves the PR unlabelled, and the release notes it drops out of are
-          # generated weeks later by somebody who never saw this job.
+          # Going quietly green is worth less than a red X here. A run that read
+          # nothing leaves the PR unlabelled, and `.github/release.yml`'s trailing
+          # `"*"` catch-all does not drop it from the notes - it files it under Other
+          # changes, which is worse, because a `feat:` missing from Features looks
+          # like a category nobody had anything for. Notes generated weeks later by
+          # somebody who never saw this job are where that surfaces.
           #
           # stderr is folded into stdout because that is where gh writes the message
           # both the glob and the error lines below need; nothing would print it
