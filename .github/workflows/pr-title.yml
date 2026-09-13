@@ -94,6 +94,56 @@ jobs:
         run: |
           set -euo pipefail
 
+          # api.github.com bursts-fail, and this step used to take one on the chin. On
+          # 2026-09-13 two `HTTP 500`s inside a single run turned an otherwise-clean PR
+          # red: the label read failed, its empty output read as "no such label", and
+          # the create that followed hit a label that had been there all along. Three
+          # attempts, because a second 500 immediately after the first is much rarer
+          # than the first; the pause widens, 5s then 10s, so a burst that outlasts one
+          # retry has somewhere to land. Fifteen seconds is the most any one call can
+          # spend, and the call that recovers on the third attempt has spent it too -
+          # the PR goes green having waited, which is the trade.
+          #
+          # $1 is a glob matched against a failing attempt's output. A match is an
+          # *expected* non-zero state rather than a flap, so it returns 2 straight away
+          # instead of spending the remaining attempts and their backoff on a verdict
+          # that will not change; pass '' where the command has no such state. Running
+          # out of attempts returns 1, and every caller below treats that as fatal.
+          # Going quietly green is worth less than a red X here. A run that read
+          # nothing leaves the PR unlabelled, and `.github/release.yml`'s trailing
+          # `"*"` catch-all does not drop it from the notes - it files it under Other
+          # changes, which is worse, because a `feat:` missing from Features looks
+          # like a category nobody had anything for. Notes generated weeks later by
+          # somebody who never saw this job are where that surfaces.
+          #
+          # stderr is folded into stdout because that is where gh writes the message
+          # both the glob and the error lines below need; nothing would print it
+          # otherwise.
+          gh_retry() {
+            local expect=$1
+            shift
+            local out i
+            for i in 1 2 3; do
+              if out=$("$@" 2>&1); then
+                printf '%s' "$out"
+                return 0
+              fi
+              if [ -n "$expect" ]; then
+                case $out in
+                  $expect)
+                    printf '%s' "$out"
+                    return 2
+                    ;;
+                esac
+              fi
+              if [ "$i" -lt 3 ]; then
+                sleep $((i * 5))
+              fi
+            done
+            printf '%s' "$out"
+            return 1
+          }
+
           # The title matched the pattern above, so this extracts from a known
           # shape - and the result can only ever be one of `$TYPES`, which is
           # what keeps a title from naming an arbitrary label.
@@ -115,8 +165,38 @@ jobs:
           IFS='|' read -r -a managed <<< "$TYPES"
           managed+=(breaking)
 
-          mapfile -t existing < <(gh label list --limit 200 --json name --jq '.[].name')
-          mapfile -t current < <(gh pr view "$PR" --json labels --jq '.labels[].name')
+          # Read into a variable first and only then into an array. `mapfile -t x <
+          # <(gh ...)` cannot fail: the failure belongs to the process substitution,
+          # `mapfile` succeeds on the nothing it was handed, and a repository whose
+          # labels could not be read becomes indistinguishable from one that has none.
+          # `rc` is that whole distinction. An empty `$names` with `rc` 0 really is a
+          # repository with no labels yet - the first PR into a fresh clone of this
+          # workflow - and must go on to create.
+          rc=0
+          names=$(gh_retry '' gh label list --limit 200 --json name --jq '.[].name') || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::Could not read this repository's labels: $names"
+            exit 1
+          fi
+          existing=()
+          if [ -n "$names" ]; then
+            mapfile -t existing <<< "$names"
+          fi
+
+          # Same shape, and here the stake is the removals rather than the creates: a
+          # read that quietly returned nothing would leave a retitled PR carrying its
+          # old type into the notes, which is the one thing the removal loop exists to
+          # stop.
+          rc=0
+          names=$(gh_retry '' gh pr view "$PR" --json labels --jq '.labels[].name') || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::Could not read the labels already on #$PR: $names"
+            exit 1
+          fi
+          current=()
+          if [ -n "$names" ]; then
+            mapfile -t current <<< "$names"
+          fi
 
           contains() {
             local needle="$1"
@@ -143,7 +223,21 @@ jobs:
                 fix) colour=1d76db ;;
                 *) colour=ededed ;;
               esac
-              gh label create "$label" --color "$colour" --description "Set from the PR title by pr-title.yml" >/dev/null
+              rc=0
+              out=$(gh_retry '*already exists*' gh label create "$label" \
+                --color "$colour" --description "Set from the PR title by pr-title.yml") || rc=$?
+              case "$rc" in
+                0) ;;
+                # The label is there, which is the whole of what this step wanted of
+                # it. It can get there without this run creating it in two ordinary
+                # ways: the read above was taken before a concurrent run on another PR
+                # created it, or one of this call's own earlier attempts did the work
+                # and it was the reply that flapped. Neither is a reason to fail a PR,
+                # and `--force` is not the answer either - it would take a tuned colour
+                # back off whoever tuned it.
+                2) echo "The \`$label\` label already exists, which is fine." ;;
+                *) echo "::error::Could not create the \`$label\` label: $out"; exit 1 ;;
+              esac
             fi
             args+=(--add-label "$label")
           done
@@ -154,4 +248,12 @@ jobs:
             fi
           done
 
-          gh pr edit "$PR" "${args[@]}"
+          # Retried like the reads. `--add-label`/`--remove-label` name an end state
+          # rather than a change to apply, so a second attempt after a flap that had in
+          # fact landed asks only for what is already true.
+          rc=0
+          out=$(gh_retry '' gh pr edit "$PR" "${args[@]}") || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::Could not set the labels on #$PR: $out"
+            exit 1
+          fi
