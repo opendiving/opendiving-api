@@ -18402,3 +18402,9 @@ the stake is the removals rather than the creates: an empty answer there leaves 
 under the type it used to have, which is the one thing the removal loop exists to stop. Either way
 the wrong notes are generated weeks later by somebody who never saw this job, with nothing on screen
 connecting the two.
+
+Every repository that carries `pr-title.yml` carries this step byte-identical to the one here, but
+for the example titles in the semantic-title error message — so the fix landed in all of them
+together, and that is the only reason this section can be read as describing a solved problem. A
+later change to the labelling step that lands in one of them and not the others leaves the rest with
+whatever this section is about; diff the step across the copies before assuming they agree.
