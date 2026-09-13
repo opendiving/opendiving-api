@@ -87,6 +87,38 @@ class TestPlaceholderSecretKeysAreRefused:
 
         assert shipped.split("=", 1)[1].strip('"') in PLACEHOLDER_SECRET_KEYS
 
+    def test_the_refusal_points_at_a_file_the_reader_has(self):
+        """It used to name `src/.env.example` as the source of the placeholder. The front
+        door's `example.env` ships the same value and its by-hand install downloads that
+        file straight to `.env`, so an operator meets this refusal with no `src/` tree on
+        the machine at all - sent, by the error itself, to a file they cannot open. `.env`
+        is the file both audiences are editing.
+        """
+        with pytest.raises(ValueError) as raised:
+            _settings(SECRET_KEY="change-me-openssl-rand-hex-32")
+
+        message = str(raised.value)
+        assert "your .env" in message
+        assert "src/" not in message
+        assert "openssl rand -hex 32" in message
+
+    def test_the_refusal_keeps_the_prefix_the_front_door_indexes_on(self):
+        """The front door's `docs/troubleshooting.md` opens an entry with this string in
+        bold - it is what an operator pastes in from their terminal, and nothing over there
+        is generated from this file. Rewording the opening breaks that page's findability
+        with no error anywhere, which is how the `.env` fix nearly went in. Changing it is a
+        deliberate pair of edits across two repositories, not a local one.
+
+        Asserted as a substring rather than a prefix because pydantic wraps this in its own
+        `1 validation error for Settings / Value error, …` frame - what reaches the
+        operator's terminal never starts with our text, and the thing the page has to match
+        is the contiguous phrase inside it.
+        """
+        with pytest.raises(ValueError) as raised:
+            _settings(SECRET_KEY="change-me-openssl-rand-hex-32")
+
+        assert "SECRET_KEY is unset or still a placeholder" in str(raised.value)
+
     @pytest.mark.parametrize("value", ["CHANGEME", "  change-me  ", "ChangeThis"])
     def test_casing_and_padding_do_not_get_past_it(self, value: str):
         with pytest.raises(ValueError, match="SECRET_KEY"):
