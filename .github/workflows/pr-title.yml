@@ -100,8 +100,9 @@ jobs:
           # the create that followed hit a label that had been there all along. Three
           # attempts, because a second 500 immediately after the first is much rarer
           # than the first; the pause widens, 5s then 10s, so a burst that outlasts one
-          # retry has somewhere to land. Fifteen seconds is the whole worst case, and
-          # only a PR that was going to go red anyway ever pays it.
+          # retry has somewhere to land. Fifteen seconds is the most any one call can
+          # spend, and the call that recovers on the third attempt has spent it too -
+          # the PR goes green having waited, which is the trade.
           #
           # $1 is a glob matched against a failing attempt's output. A match is an
           # *expected* non-zero state rather than a flap, so it returns 2 straight away
