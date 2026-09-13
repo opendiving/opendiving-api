@@ -16291,6 +16291,23 @@ One helper serves both callers (`services/dive_form_presets.py::seed_default_pre
 account a diver registers today and the account they press "Restore default presets" on tomorrow get
 the same three things.
 
+**Changing a default set afterwards reaches new accounts only, and that is a choice rather than an
+oversight.** `water_type` joined Recreational's hidden set once the instance already had real
+accounts on it. Restore adds by name and never overwrites, so an account already holding a row
+called Recreational keeps whatever that row stores until the diver edits it — the seed and the
+installed base disagree from that day on, deliberately. Nothing breaks while they do: a client marks
+the current preset by comparing the account's state against its *stored* rows and never against this
+tuple, so an existing diver simply goes on seeing water type under a preset called Recreational.
+
+A revision closing the gap for rows still holding exactly the old set was considered and declined,
+and the second reason is the one that is easy to miss. It would rewrite a saved preference nobody
+asked to have rewritten — and it would *un-mark* Recreational as the current preset for every diver
+sitting on it, because `user.dive_form_hidden_fields` would still hold the old set and no stored row
+would match it any more. Repairing that too means editing what a real diver's form shows on their
+next page load. A later change to a default that genuinely must reach existing accounts is still a
+revision with a narrow `WHERE`, decided on its own merits; what this one settles is that a changed
+default does not get one by default.
+
 ## The revision that backfills presets carries its own frozen copy of them
 
 Accounts that existed before this feature never went through the registration seed, so the revision
