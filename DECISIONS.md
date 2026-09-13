@@ -9907,14 +9907,14 @@ after checkout - and the matrix jobs check out `needs.prepare.outputs.sha` rathe
 because a branch that moved between jobs would otherwise put two architectures of different code
 behind one manifest.
 
-**The draft release is created by the workflow, and published by a person.**
-`gh release create --draft --generate-notes` runs after the manifest exists, so a failed build never
-produces a release. What it produces is a skeleton categorised by `.github/release.yml`; the
-headline paragraph and the **Breaking** section are written by hand before it goes out (see the
-release checklist in `CONTRIBUTING.md`). It carries **no assets** - it used to attach the three
-install files, and *The install bundle lives next door* is why it no longer does. It is the one job
-that needs `contents: write`, granted to it alone rather than to the whole file, which stays on
-`contents: read` plus `packages: write`.
+**The release is created by the workflow, and nobody publishes it by hand.** It was a draft with a
+human pass until 2026-09-13; *The component release publishes itself, and the human pass moved to
+the product release* below is why it stopped being one, and is the live record.
+`gh release create --generate-notes` runs after the manifest exists, so a failed build never
+produces a release. What it produces is categorised by `.github/release.yml`. It carries **no
+assets** - it used to attach the three install files, and *The install bundle lives next door* is
+why it no longer does. It is the one job that needs `contents: write`, granted to it alone rather
+than to the whole file, which stays on `contents: read` plus `packages: write`.
 
 ## The PR title becomes a label, in a job of its own
 
@@ -9972,15 +9972,15 @@ and nothing warns you. `AGENTS.md` carries that as a rule; this is why it is one
 **Three consequences worth naming, because each was a live behaviour of this repository until the
 move:**
 
-- **The release here stopped carrying artifacts.** `publish-image.yml`'s `draft-release` job used to
-  attach the three install files to every `v*` release, which made this repository's release
+- **The release here stopped carrying artifacts.** `publish-image.yml`'s `publish-release` job used
+  to attach the three install files to every `v*` release, which made this repository's release
   simultaneously the api's component release *and* the product's - and is why the guard it carried
   could only ever check half of what it was guarding. The job stays: delete it and api becomes the
   only one of the three repositories with no component release, with `.github/release.yml` and the
-  title-to-label plumbing left as dead config. It now opens a draft with generated notes and nothing
-  else, which is what `opendiving-web`'s job already does. Attaching the files is the product
-  repository's, and so is the check no per-repository workflow can make: refuse to publish unless
-  *both* images exist at that version, on both architectures.
+  title-to-label plumbing left as dead config. It now creates a release with generated notes and
+  nothing else, which is what `opendiving-web`'s job already does. Attaching the files is the
+  product repository's, and so is the check no per-repository workflow can make: refuse to publish
+  unless *both* images exist at that version, on both architectures.
 - **Renovate here stopped watching the bundle's digests.** The `matchFileNames` rule and its
   `prBodyNotes` - the note that a security bump merged here does not reach any install until the
   next tag - went with the file to the repository that has it now.
@@ -10255,7 +10255,7 @@ If one of these jobs ever does need more, the block goes on that job rather than
 workflow's — and the job has to re-state `contents: read` alongside whatever it adds, because a
 job-level `permissions:` block *replaces* the workflow-level one rather than adding to it.
 `pr-title.yml` is the worked example (`permissions: {}` at the top, and the labelling job asking for
-exactly the two scopes it uses); `publish-image.yml`'s `draft-release` job is the other, taking
+exactly the two scopes it uses); `publish-image.yml`'s `publish-release` job is the other, taking
 `contents: write` for itself alone rather than for the file.
 
 The `actions/*` steps stay on major tags (`@v7`), deliberately untouched. Whether to SHA-pin them
@@ -17461,7 +17461,7 @@ self-hosters and only a human cuts one. The edge channel is for the one instance
 runs: every merge to `main` publishes `:edge` and `:sha-<12>`, and the new `deploy` job hands that
 build's digest to Render, so the hosted instance runs `main` continuously.
 
-**The absent tags are the design.** No `:latest`, no `X.Y.Z`, no `X.Y`, no draft release. Those are
+**The absent tags are the design.** No `:latest`, no `X.Y.Z`, no `X.Y`, no release at all. Those are
 the names someone can be pinned to, and the whole objection to building per merge was that it trains
 people onto a moving `latest`. A channel nobody is pinned to does not have that problem, so the rule
 is mechanical: the version block in `prepare` is the only place a semver alias is ever assembled,
@@ -17473,12 +17473,12 @@ group named `publish-image` was enough while a `v*` tag was the only trigger tha
 itself, and it stopped being enough the moment `main` was a trigger too — silently, which is the
 problem. A tag is pushed straight after the version bump merges, so under one shared group the tag
 run queues behind that merge's own edge build and the next merge to land cancels it outright: no
-`X.Y.Z`, no `X.Y`, no `:latest`, no draft release, and a check that reads as cancelled rather than
-failed. So the group is `publish-image-edge` on a push to `main` and `publish-image-release` on
-everything else, which puts a `workflow_dispatch` with the releases — it can be told to push
-`:latest` and it can be pointed at a `v*` tag. Losing a pending run *is* acceptable on the edge
-side: a burst of merges leaves the middle ones unbuilt, every commit that does build keeps its own
-`:sha-<12>`, and the last merge of the burst is the one deployed.
+`X.Y.Z`, no `X.Y`, no `:latest`, no release, and a check that reads as cancelled rather than failed.
+So the group is `publish-image-edge` on a push to `main` and `publish-image-release` on everything
+else, which puts a `workflow_dispatch` with the releases — it can be told to push `:latest` and it
+can be pointed at a `v*` tag. Losing a pending run *is* acceptable on the edge side: a burst of
+merges leaves the middle ones unbuilt, every commit that does build keeps its own `:sha-<12>`, and
+the last merge of the burst is the one deployed.
 
 **The `prepare` checkout takes `github.sha`, not `github.ref`.** The same cause, the opposite
 symptom. `github.ref` on a tag push names a tag and resolves to one commit forever; on a push to
@@ -18408,3 +18408,56 @@ own copy of it, and this fix landed in all of them together — which is the onl
 can be read as describing a solved problem. Nothing checks that the copies agree, so a later change
 that lands in one and not the rest leaves the others with whatever this section is about. Diff the
 labelling step across them before assuming otherwise.
+
+## The component release publishes itself, and the human pass moved to the product release
+
+`publish-image.yml`'s release job opened a draft, and a person wrote the headline, confirmed the
+**Breaking** section and pressed publish. It now runs `gh release create --generate-notes` with no
+`--draft`, so a `v*` tag leaves a published release behind and nothing waits on anybody.
+
+**The premise the human pass rested on had expired.** It was kept here deliberately, on the grounds
+that self-hosters read *this* repository's release before they upgrade — and that stopped being true
+when the install bundle moved to `opendiving/opendiving` (*The install bundle lives next door*). The
+release an operator downloads from is the product one; this one is the record of what went into an
+image they pull by tag. The product release keeps the whole human pass, headline and Breaking
+section both, and is still a draft for exactly that reason. Auto-publishing all three was rejected
+on the same argument from the other end: generated notes omit an empty category, so an
+auto-published product release would carry no Breaking section at all rather than one saying "None",
+and that is the one part of the old reasoning whose premise has not moved.
+
+**The other half is that nobody is in the loop here any more.** The release is cut by one dispatch
+in the product repository rather than by a person walking three repositories in order, so a draft
+here is a step that run cannot take and that nothing else reliably would. A draft nobody publishes
+is, to anyone reading the releases page before they upgrade, a release that does not exist.
+
+**What this costs, written down rather than discovered later.** This release is published minutes
+before the product repository's guard — the one that refuses to release unless both images exist at
+the version on both architectures — has run. A guard failure therefore leaves a published component
+release here for a product version that never released, and the `tags` ruleset means nobody but an
+organisation admin can delete the tag it names. That is the existing window widened rather than a
+new one: both images, `latest` included, are already pushed by the time the guard runs, so what the
+guard protects was always the product release and the install assets and never the images. The
+genuinely free-to-delete guard is still the tag↔manifest check that runs before any layer is built.
+
+**`.github/release.yml`'s category order got sharper, not merely louder.** A PR lands in the first
+category whose labels it carries, and `breaking` before `feat` was already load-bearing. Under a
+draft, a miscategorised PR was something a person might catch while writing the headline. Under a
+published release nobody reads it first, so the labels `pr-title.yml` derives from PR titles are the
+whole of the categorisation, and a mistitled PR is published in the wrong section rather than
+corrected in a draft.
+
+**The job id became `publish-release`, in both repositories at once.** It was going to stay
+`draft-release` — the id is the check-run name on every release run, `opendiving-web` carries the
+mirror of this job under the same id, and the two files are one policy said twice, so renaming it
+here alone would be a drift the next reader of either has to reconcile. What made the coordinated
+rename available is that the two changes were in flight at the same time rather than one after the
+other: web renamed its job on its own branch, before either merged, so the mirror never held two
+ids. An id asserting a draft is a stale name a reader trusts before they read the step under it, and
+that is the whole of what the rename buys. The next one costs the same coordination — rename it in
+both files in one go or not at all.
+
+Nothing else referred to the old id. No other job here `needs:` it, and it is not among `main`'s
+required status checks: it runs only on a `v*` tag push and on the dispatch that rebuilds a released
+version, so a pull request never produces the check run a ruleset could require. Re-derive both
+before a second rename rather than trusting this paragraph — the first from the workflow, the second
+from the repository's rulesets, which no file in this tree records.
