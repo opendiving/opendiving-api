@@ -18,9 +18,12 @@ class DefaultPreset(NamedTuple):
     hidden_fields: tuple[DiveFormField, ...]
 
 
-# The three defaults, and the only definition of them: the registration seed, the restore
-# route and the revision that backfilled the accounts predating this feature all describe
-# the same three sets, so "default" cannot come to mean two things.
+# The three defaults, and the only *live* definition of them: the registration seed and the
+# restore route read this tuple, so "default" cannot come to mean two things in anything
+# running today. The revision that backfilled the accounts predating this feature
+# (`e0cfbd603859`) carries a frozen copy that this one has already outgrown, and owes it
+# nothing - see "The revision that backfills presets carries its own frozen copy of them"
+# in DECISIONS.md before reaching for that file to "fix" the difference.
 #
 # They are seeded as **ordinary rows**. Nothing downstream special-cases them - a diver
 # edits, renames or deletes any of the three exactly as they would one they saved
@@ -59,10 +62,12 @@ DEFAULT_PRESETS: tuple[DefaultPreset, ...] = (
     DefaultPreset(
         # Gas is on screen with its pressures - a recreational diver logs a cylinder and
         # what it read - but not the planning fields a ppO2 limit and a gas role are, not
-        # helium, which is nitrox and air's constant zero, and not altitude, which almost
-        # nobody dives at.
+        # helium, which is nitrox and air's constant zero, not altitude, which almost
+        # nobody dives at, and not water type, which holds for a whole trip and so is a
+        # question already answered by where the diver is.
         name="Recreational",
         hidden_fields=(
+            DiveFormField.WATER_TYPE,
             DiveFormField.ALTITUDE,
             DiveFormField.MIXTURE_PO2_LIMIT,
             DiveFormField.MIXTURE_HELIUM,

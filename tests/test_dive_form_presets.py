@@ -376,6 +376,24 @@ class TestTheDefaults:
             DiveFormField.NOTES,
         ]
 
+    def test_recreational_hides_water_type_alongside_the_planning_fields(self) -> None:
+        """Pinned as the hidden set rather than as the visible one, which is the longer list
+        here and would have to be edited every time the form gains a field. These sets are
+        written by hand and go into the column without passing through a schema, so what a
+        new account is seeded with is worth reading back somewhere it can be compared against
+        the intent above it.
+        """
+        recreational = next(preset for preset in DEFAULT_PRESETS if preset.name == "Recreational")
+
+        assert list(recreational.hidden_fields) == [
+            DiveFormField.WATER_TYPE,
+            DiveFormField.ALTITUDE,
+            DiveFormField.MIXTURE_PO2_LIMIT,
+            DiveFormField.MIXTURE_HELIUM,
+            DiveFormField.MIXTURE_ROLE,
+            DiveFormField.MIXTURE_USAGE,
+        ]
+
     def test_with_all_three_present_nothing_is_missing(self) -> None:
         assert missing_default_presets(["Basic", "Recreational", "Technical"]) == []
 
