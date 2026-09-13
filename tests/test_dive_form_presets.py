@@ -365,14 +365,17 @@ class TestTheDefaults:
         assert technical.hidden_fields == ()
 
     def test_basic_keeps_the_fields_a_holiday_diver_fills_in(self) -> None:
+        """Pinned as the visible set, which is the shorter list under this preset and the
+        one the intent above it is written in terms of - trip and bottom temperature were
+        on it until they were hidden, and the assertion that catches a fourth field
+        arriving on screen is this one rather than a hidden set nobody reads.
+        """
         basic = next(preset for preset in DEFAULT_PRESETS if preset.name == "Basic")
         visible = [value for value in DiveFormField if value not in basic.hidden_fields]
 
         assert visible == [
-            DiveFormField.TRIP_UUID,
             DiveFormField.DIVE_SITE_UUIDS,
             DiveFormField.MAX_DEPTH,
-            DiveFormField.BOTTOM_TEMPERATURE,
             DiveFormField.NOTES,
         ]
 
