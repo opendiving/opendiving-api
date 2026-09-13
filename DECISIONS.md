@@ -16293,12 +16293,12 @@ the same three things.
 
 **Changing a default set afterwards reaches new accounts only, and that is a choice rather than an
 oversight.** `water_type` joined Recreational's hidden set once the instance already had real
-accounts on it, and `trip_uuid` and `bottom_temperature` joined Basic's on the same terms a day
-later. Restore adds by name and never overwrites, so an account already holding a row called
-Recreational keeps whatever that row stores until the diver edits it — the seed and the installed
-base disagree from that day on, deliberately. Nothing breaks while they do: a client marks the
-current preset by comparing the account's state against its *stored* rows and never against this
-tuple, so an existing diver simply goes on seeing water type under a preset called Recreational.
+accounts on it, and `trip_uuid` and `bottom_temperature` joined Basic's on the same terms. Restore
+adds by name and never overwrites, so an account already holding a row called Recreational keeps
+whatever that row stores until the diver edits it — the seed and the installed base disagree from
+that day on, deliberately. Nothing breaks while they do: a client marks the current preset by
+comparing the account's state against its *stored* rows and never against this tuple, so an existing
+diver simply goes on seeing water type under a preset called Recreational.
 
 A revision closing the gap for rows still holding exactly the old set was considered and declined,
 and the second reason is the one that is easy to miss. It would rewrite a saved preference nobody
