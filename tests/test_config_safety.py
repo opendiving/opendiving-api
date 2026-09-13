@@ -408,6 +408,20 @@ class TestTheObjectStoreBackendNeedsItsCredentials:
         with pytest.raises(ValueError, match="FILE_STORAGE_BACKEND=local"):
             _settings(**{**self._S3, "S3_BUCKET": None})
 
+    def test_the_error_points_at_a_file_the_reader_has(self):
+        """It used to name `src/.env.example`. A self-hoster installs the front door's
+        bundle and has no `src/` tree at all, so that sent them to a file they cannot open -
+        in a refusal they hit at startup. `.env` is true for both audiences: the installer
+        writes it out of `example.env` keeping every comment, and a developer's `src/.env`
+        comes from `src/.env.example` the same way.
+        """
+        with pytest.raises(ValueError) as raised:
+            _settings(**{**self._S3, "S3_BUCKET": None})
+
+        message = str(raised.value)
+        assert "object-storage block in your .env" in message
+        assert "src/" not in message
+
     def test_the_local_backend_never_looks_at_the_group(self):
         """The property that keeps this validator off everyone's back, and the reason
         `local` is the default: a cross-field check that fired on an untouched configuration
