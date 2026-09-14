@@ -179,7 +179,7 @@ services:
   # (see src/.env.example), and comment `SMTP_HOST` back out when you're done.
   mailpit:
     # Mailpit publishes no bare-major tag, so `v1.30` is the widest pin available.
-    image: axllent/mailpit:v1.30
+    image: axllent/mailpit:v1.31
     restart: unless-stopped
     profiles: ["mail"]
     # The web inbox only. It holds live sign-in tokens, so it is bound to the loopback
