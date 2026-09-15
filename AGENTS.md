@@ -3,9 +3,12 @@
 FastAPI + SQLAlchemy + PostgreSQL + Redis.
 
 `DECISIONS.md` in this repo holds the reasoning and the exact remedies behind most of what follows —
-read the relevant section before changing anything unfamiliar, and append to it when you hit a new
-gotcha. It and the other markdown docs are formatted: run `uv run mdformat *.md docs .github tests`
-after editing one rather than matching the wrapping by hand.
+grep it for what you are about to touch and read the matching section. Append to it only when the
+code cannot carry the reason; a one-line comment at the site is the better home for most of them. An
+entry is under 150 words, present tense: what was chosen, what was rejected, why. No history, no
+symptom narrative, no verification story — git holds the previous state. It and the other markdown
+docs are formatted: run `uv run mdformat *.md docs .github tests` after editing one rather than
+matching the wrapping by hand.
 
 ## Environment & Setup
 

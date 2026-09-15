@@ -150,10 +150,10 @@ The markdown docs are formatted too — drop the `--check` to rewrite them:
 uv run mdformat *.md docs .github tests
 ```
 
-That covers `DECISIONS.md`, which you will be appending to. Write the new section however it comes
-out, run the command, and it gets wrapped to 100 columns like the rest; no counting characters by
-hand. The settings are in `.mdformat.toml`, and the paths are listed explicitly because `mdformat .`
-would walk into `.venv/`.
+That covers `DECISIONS.md`, if you append to it. Write the new section however it comes out, run the
+command, and it gets wrapped to 100 columns like the rest; no counting characters by hand. The
+settings are in `.mdformat.toml`, and the paths are listed explicitly because `mdformat .` would
+walk into `.venv/`.
 
 Docstring style follows the numpy convention by habit, not by enforcement: no `D` rules are enabled,
 so nothing checks it.
@@ -230,11 +230,13 @@ column that was dropped from the models — a stamp asserts a state nobody verif
 migrate-on-start will never notice afterwards. Apply whatever `check` reports by hand, or wipe the
 database and let the migrations build it: `docker compose down -v && docker compose up`.
 
-**Read [DECISIONS.md](DECISIONS.md) before your first PR.** It records the non-obvious choices and
-the traps already hit — the schema-change workflow above, check-constraint behaviour, the caching
-and cache-invalidation strategy, auth details. When you make a decision that would puzzle the next
-person, append a section to it as part of your PR. The auth design, with sequence diagrams for every
-flow, is in [docs/authentication.md](docs/authentication.md).
+**Grep [DECISIONS.md](DECISIONS.md) for what you are about to touch.** It records the non-obvious
+choices and the traps already hit — the schema-change workflow above, check-constraint behaviour,
+the caching and cache-invalidation strategy, auth details — and is far too long to read whole. When
+you make a decision the code cannot explain by itself, append a short section as part of your PR:
+under 150 words, present tense, what was chosen and why. Most reasons belong in a one-line comment
+at the site instead. The auth design, with sequence diagrams for every flow, is in
+[docs/authentication.md](docs/authentication.md).
 
 ## Adding a dive-computer parser
 
