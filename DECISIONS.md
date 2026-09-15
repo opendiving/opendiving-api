@@ -18512,3 +18512,29 @@ Note what is *not* affected: route paths, schemas and per-endpoint descriptions 
 because `routes=` was one of the three arguments that survived. Endpoint docstrings reaching
 `/openapi.json` (the reason `AGENTS.md` requires one on every route handler) never went through this
 path.
+
+## The DiveJSON export is laid out a member and a record to a line
+
+`envelope.write_divejson` writes whitespace where JSON gives it no meaning, and the layout is the
+one thing about the document that no test parsing it can see. It now writes every top-level member
+on its own line — `format` and `version` were sharing the first one — with a space after each of
+their colons, and every record of every collection on a line of its own. `dives` already read that
+way, because it is streamed a dive at a time and each dive gets a separator; the other nine were
+encoded in one go by `_encode` and arrived as a single line each, so `sites` for a real logbook was
+one line some hundreds of kilobytes long. `_encode_collection` is the whole change: the same
+per-record encoding, joined with newlines.
+
+**What this does not touch.** Records are still compact internally — a profile is thousands of
+samples across up to ten channels, and indenting one would multiply the size of the payload for no
+reader's benefit. Peak memory is unchanged: the collections were already held whole (they are small,
+the biggest being a few hundred gear items), and `dives` is still loaded, encoded and dropped one at
+a time. And `format`/`version` are still the document's first two members, which is a normative rule
+about the text rather than a courtesy (spec §3, §4) — putting them on separate lines does not weaken
+it, and `tests/test_export_endpoints.py` still asserts it against the raw bytes.
+
+**It is pinned by `TestTheLayout` in `tests/test_export_json.py`, and it had to be.** Every other
+test in that file parses the bytes first, and a parser cannot tell one layout from the other — the
+old collection layout was invisible to every test in that file, which is how it survived. Those
+tests read the byte stream: one asserting each top-level member opens a line, one walking every
+collection off the parsed document (not a written-out list, so a collection added later is covered
+the day it is written) and checking each record starts a line of its own.
