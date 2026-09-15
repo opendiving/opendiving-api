@@ -164,7 +164,7 @@ class TestResponseHeaders:
 class TestBodies:
     def test_the_divejson_route_serves_a_divejson_document(self, client: TestClient, signed_in):
         body = client.get(PATHS[0]).content
-        assert body.startswith(b'{"format":"divejson","version":"1.0",')
+        assert body.startswith(b'{"format": "divejson",\n"version": "1.0",\n')
 
     def test_the_archive_member_is_the_same_writer_as_the_standalone_route(self, client: TestClient, signed_in):
         """One writer, two surfaces - the way `dives.uddf` and `GET /export/uddf` already

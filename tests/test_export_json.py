@@ -234,6 +234,45 @@ class TestTheDeclaredShape:
         assert set(document) == set(ExportEnvelope.model_fields)
 
 
+class TestTheLayout:
+    """Whitespace only - which JSON gives no meaning and a person reading the file does.
+
+    Every top-level member opens a line and every record sits on one, so `head`, a pager or
+    a diff of two exports shows the document's structure instead of one unbounded line per
+    collection. It is pinned here because it is invisible to every other test in this file:
+    they all parse the bytes first, and a parser cannot tell the two layouts apart.
+    """
+
+    @pytest.mark.asyncio
+    async def test_every_top_level_member_opens_a_line(self, monkeypatch):
+        body = (await _stream(full_bundle(), monkeypatch)).decode()
+        lines = body.splitlines()
+        assert lines[0].startswith('{"format": ')
+        for member in list(ExportEnvelope.model_fields)[1:]:
+            assert any(line.startswith(f'"{member}": ') for line in lines), member
+
+    @pytest.mark.asyncio
+    async def test_every_collection_writes_one_record_to_a_line(self, monkeypatch):
+        """`dives` has been written this way since it was streamed a dive at a time; the
+        other collections are encoded in one go and used to arrive as a single line."""
+        body = (await _stream(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})).decode()
+        lines = body.splitlines()
+        collections = {
+            member: records for member, records in parse_document(body.encode()).items() if isinstance(records, list)
+        }
+        # Off the document rather than a written-out list, so a collection added later is
+        # covered by this the day it is written.
+        assert "dives" in collections
+        for member, records in collections.items():
+            opening = next(index for index, line in enumerate(lines) if line.startswith(f'"{member}": ['))
+            if not records:
+                assert lines[opening].startswith(f'"{member}": []')
+                continue
+            written = lines[opening + 1 : opening + 1 + len(records)]
+            assert all(line.startswith("{") for line in written), member
+            assert lines[opening + 1 + len(records)].startswith("]"), member
+
+
 class TestWhatUddfCannotHold:
     """The reason this document exists beside `dives.uddf`."""
 

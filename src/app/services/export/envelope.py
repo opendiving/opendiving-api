@@ -86,6 +86,20 @@ def _encode(value: Any) -> bytes:
     return json.dumps(jsonable_encoder(value, exclude_none=True), ensure_ascii=False).encode("utf-8")
 
 
+def _encode_collection(records: list[Any]) -> bytes:
+    """A top-level collection, one record per line.
+
+    The layout `dives` gets from being streamed a dive at a time, given to the collections
+    that are small enough to encode in one go - so every top-level array reads the same way
+    in a diff or a pager, rather than `dives` alone being legible and the other nine each
+    arriving as one unbounded line. The whitespace is between values only, where JSON gives
+    it no meaning, so nothing about the document changes for a reader that parses it.
+    """
+    if not records:
+        return b"[]"
+    return b"[\n" + b",\n".join(_encode(record) for record in records) + b"\n]"
+
+
 def _speakable(value: str | None, vocabulary: type[StrEnum]) -> bool:
     """Whether a stored value can be written into a DiveJSON document at all.
 
@@ -404,7 +418,9 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
     """Everything after `dives`, in the order `ExportEnvelope` declares it.
 
     All of it is small enough to encode in one go - the biggest is a few hundred gear
-    items - so only `dives` gets the per-record treatment.
+    items - so only `dives` is loaded and encoded a record at a time. They are still
+    *written* a record to a line, by `_encode_collection`, which is a layout question
+    rather than a memory one.
     """
     return [
         (
@@ -618,12 +634,13 @@ async def write_divejson(
     `archive_path`. `None` leaves those *absent*; only `archive.py` passes a layout today,
     and without one there is no zip for a path to point into.
     """
-    yield b'{"format":' + _encode(DIVEJSON_FORMAT) + b',"version":' + _encode(DIVEJSON_VERSION) + b",\n"
-    yield b'"exported_at":' + _encode(exported_at) + b",\n"
-    yield b'"generator":' + _encode(ExportGenerator(name=settings.APP_NAME, version=settings.APP_VERSION)) + b",\n"
-    yield b'"diver":' + _encode(_diver(bundle)) + b",\n"
+    yield b'{"format": ' + _encode(DIVEJSON_FORMAT) + b",\n"
+    yield b'"version": ' + _encode(DIVEJSON_VERSION) + b",\n"
+    yield b'"exported_at": ' + _encode(exported_at) + b",\n"
+    yield b'"generator": ' + _encode(ExportGenerator(name=settings.APP_NAME, version=settings.APP_VERSION)) + b",\n"
+    yield b'"diver": ' + _encode(_diver(bundle)) + b",\n"
 
-    yield b'"dives":['
+    yield b'"dives": ['
     for index, dive in enumerate(bundle.dives):
         # One dive's profiles at a time, which is what keeps peak memory to a dive rather
         # than a logbook - the same contract as before, now over however many recordings the
@@ -639,5 +656,5 @@ async def write_divejson(
     collections = _collections(bundle, paths)
     for index, (key, records) in enumerate(collections):
         trailer = b",\n" if index < len(collections) - 1 else b"\n"
-        yield _encode(key) + b":" + _encode(records) + trailer
+        yield _encode(key) + b": " + _encode_collection(records) + trailer
     yield b"}\n"
