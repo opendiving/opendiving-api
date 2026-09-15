@@ -257,13 +257,12 @@ def create_application(
         }
 
         # Only when there is something to publish, which is not cosmetic: all three settings are
-        # unset by default - `src/.env.example` ships the contact pair commented out and no
-        # `LICENSE` line at all - and the dict is passed on without being looked inside. Built
-        # unconditionally, `{"name": None}` fails the document's own validation, because `name` is
-        # *required* wherever a license object appears: the whole of `/openapi.json` then 500s for
-        # every operator who never set `LICENSE`, which is the default install. The contact pair
-        # fails softer and publishes an empty `"contact": {}`. Neither is worth shipping to get a
-        # field nobody filled in.
+        # unset by default - `src/.env.example` ships every one of them commented out - and the dict
+        # is passed on without being looked inside. Built unconditionally, `{"name": None}` fails the
+        # document's own validation, because `name` is *required* wherever a license object appears:
+        # the whole of `/openapi.json` then 500s for every operator who never set `LICENSE`, which is
+        # the default install. The contact pair fails softer and publishes an empty `"contact": {}`.
+        # Neither is worth shipping to get a field nobody filled in.
         contact = {
             key: value for key, value in (("name", settings.CONTACT_NAME), ("email", settings.CONTACT_EMAIL)) if value
         }

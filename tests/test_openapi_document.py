@@ -106,8 +106,8 @@ class TestContactAndLicense:
         assert info["license"] == {"name": "AGPL-3.0-or-later"}
 
     def test_omits_contact_and_license_entirely_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The default for everyone: `src/.env.example` ships the contact pair commented
-        out and no `LICENSE` line at all.
+        """The default for everyone: `src/.env.example` ships `LICENSE` and the contact
+        pair alike commented out.
 
         This is the case that has to be built rather than passed through, and the `200`
         `_document` asserts is half the test. A `license_info` handed over as

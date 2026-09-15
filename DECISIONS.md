@@ -18499,9 +18499,10 @@ on every field it holds — summary, terms of service, webhooks, tags, servers, 
 when the route set changes, where the hand-rolled call rebuilt the whole schema on every request.
 
 **Contact and license are built conditionally, and that is not tidiness.** All three settings are
-unset by default: `src/.env.example` ships `CONTACT_NAME`/`CONTACT_EMAIL` commented out and no
-`LICENSE` line at all. The dict is published as handed over, so `license_info={"name": None}` fails
-the document's own validation — `name` is required wherever a license object appears — and
+unset by default: `src/.env.example` ships `LICENSE`, `CONTACT_NAME` and `CONTACT_EMAIL` commented
+out — under a header reading "OpenAPI metadata shown at /docs", which is a promise only this change
+makes good on. The dict is published as handed over, so `license_info={"name": None}` fails the
+document's own validation — `name` is required wherever a license object appears — and
 `/openapi.json` **500s for every operator who never set `LICENSE`**, which is the default install.
 An all-`None` contact fails softer, publishing an empty `"contact": {}`. So the straight-through fix
 is worse than the bug it repairs, and `tests/test_openapi_document.py` pins the unset case on its
