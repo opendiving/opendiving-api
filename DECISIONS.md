@@ -2931,7 +2931,9 @@ Four things about it are deliberate:
 default recipient, and no recipient means 503" below. It is *not* the same setting as
 `AppSettings.CONTACT_EMAIL`, which is OpenAPI document metadata shown in `/docs` and nothing else;
 the two are separate so that publishing a maintainer address in the API docs doesn't silently
-reroute a stranger's support mail.
+reroute a stranger's support mail. That description of `CONTACT_EMAIL` only became true of the
+running code later — the served document dropped the contact block entirely until then, see *"The
+`/openapi.json` route rebuilt the document and dropped everything but the title"*.
 
 With `SMTP_HOST` unset the send is a logged no-op, like every other sender here - but the whole
 submission is written to the log, so a local instance can still see what would have gone out. The
@@ -18461,3 +18463,51 @@ required status checks: it runs only on a `v*` tag push and on the dispatch that
 version, so a pull request never produces the check run a ruleset could require. Re-derive both
 before a second rename rather than trusting this paragraph — the first from the workflow, the second
 from the repository's rulesets, which no file in this tree records.
+
+## The `/openapi.json` route rebuilt the document and dropped everything but the title
+
+`create_application` assembled `title`, `description`, `contact` and `license_info` for the FastAPI
+constructor, and the route that actually serves the document rebuilt it from scratch:
+
+```python
+out: dict = get_openapi(title=application.title, version=application.version, routes=application.routes)
+```
+
+Three fields in, so three fields out. The description, the maintainer contact and the license never
+reached a reader, and nothing anywhere reported it: a document missing its metadata still parses,
+still renders in Swagger and still generates clients. This is the only `/openapi.json` there is —
+FastAPI's built-in one is off (`openapi_url=None` for `EnvironmentSettings`), and `/docs` and
+`/redoc` both point here — so the fields were configured, documented and dead. The section on
+`CONTACT_FORM_EMAIL` above says `AppSettings.CONTACT_EMAIL` "is OpenAPI document metadata shown in
+`/docs`"; that was written as a description of intent and was false about the running code for as
+long as both existed.
+
+It was never a decision. `git log -S'get_openapi' -- src/app/core/setup.py` returns exactly one
+commit, the boilerplate import (#4) the repository started from.
+
+**`version` was the worse half, because it answered.** It was never passed to `FastAPI()` at all, so
+`application.version` was FastAPI's own default — `"0.1.0"`. That is a plausible version string
+rather than an obviously missing one, and it stayed `0.1.0` through the `v0.2.0` release and would
+have stayed there through every release after. It now comes from `APP_VERSION`, with the
+`or "unknown"` that `/api/v1/health` already uses for a source tree that was never installed;
+`info.version` is required by the spec, so the `None` case cannot be handled by omitting the field
+the way the UDDF writer omits its `<version>` element.
+
+**The fix is `application.openapi()`, not a longer `get_openapi` call.** FastAPI's own method passes
+on every field it holds — summary, terms of service, webhooks, tags, servers, external docs, the lot
+— so the failure mode cannot recur one forgotten field at a time. It also caches, re-deriving only
+when the route set changes, where the hand-rolled call rebuilt the whole schema on every request.
+
+**Contact and license are built conditionally, and that is not tidiness.** All three settings are
+unset by default: `src/.env.example` ships `CONTACT_NAME`/`CONTACT_EMAIL` commented out and no
+`LICENSE` line at all. The dict is published as handed over, so `license_info={"name": None}` fails
+the document's own validation — `name` is required wherever a license object appears — and
+`/openapi.json` **500s for every operator who never set `LICENSE`**, which is the default install.
+An all-`None` contact fails softer, publishing an empty `"contact": {}`. So the straight-through fix
+is worse than the bug it repairs, and `tests/test_openapi_document.py` pins the unset case on its
+status code as much as on its `info` block.
+
+Note what is *not* affected: route paths, schemas and per-endpoint descriptions were always correct,
+because `routes=` was one of the three arguments that survived. Endpoint docstrings reaching
+`/openapi.json` (the reason `AGENTS.md` requires one on every route handler) never went through this
+path.

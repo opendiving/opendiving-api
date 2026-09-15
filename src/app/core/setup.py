@@ -10,7 +10,6 @@ import redis.asyncio as redis
 from fastapi import APIRouter, Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
-from fastapi.openapi.utils import get_openapi
 from sqlalchemy import text
 
 from ..api.dependencies import get_current_superuser
@@ -245,12 +244,34 @@ def create_application(
     """
     # --- before creating application ---
     if isinstance(settings, AppSettings):
-        to_update = {
+        # These reach the served document through `application.openapi()` at the `/openapi.json`
+        # route below, which reads them back off the app - so this block is the only place any of
+        # them is spelled. `version` is here because FastAPI otherwise supplies its own hardcoded
+        # `"0.1.0"`, which does not move when a release does; `or "unknown"` is the word
+        # `/api/v1/health` already uses for an `APP_VERSION` that is `None` (a source tree nobody
+        # installed), and `info.version` is a required string, so it cannot simply be omitted.
+        to_update: dict[str, Any] = {
             "title": settings.APP_NAME,
             "description": settings.APP_DESCRIPTION,
-            "contact": {"name": settings.CONTACT_NAME, "email": settings.CONTACT_EMAIL},
-            "license_info": {"name": settings.LICENSE_NAME},
+            "version": settings.APP_VERSION or "unknown",
         }
+
+        # Only when there is something to publish, which is not cosmetic: all three settings are
+        # unset by default - `src/.env.example` ships the contact pair commented out and no
+        # `LICENSE` line at all - and the dict is passed on without being looked inside. Built
+        # unconditionally, `{"name": None}` fails the document's own validation, because `name` is
+        # *required* wherever a license object appears: the whole of `/openapi.json` then 500s for
+        # every operator who never set `LICENSE`, which is the default install. The contact pair
+        # fails softer and publishes an empty `"contact": {}`. Neither is worth shipping to get a
+        # field nobody filled in.
+        contact = {
+            key: value for key, value in (("name", settings.CONTACT_NAME), ("email", settings.CONTACT_EMAIL)) if value
+        }
+        if contact:
+            to_update["contact"] = contact
+        if settings.LICENSE_NAME:
+            to_update["license_info"] = {"name": settings.LICENSE_NAME}
+
         kwargs.update(to_update)
 
     if isinstance(settings, EnvironmentSettings):
@@ -319,7 +340,12 @@ def create_application(
 
             @docs_router.get("/openapi.json", include_in_schema=False)
             async def openapi() -> dict[str, Any]:
-                out: dict = get_openapi(title=application.title, version=application.version, routes=application.routes)
+                # `application.openapi()` rather than a `get_openapi` call of our own: this is the
+                # only `/openapi.json` there is (the built-in one is off - `openapi_url=None`
+                # above), and a hand-rolled call publishes exactly the fields somebody remembered
+                # to list. This one passes on everything configured, and re-derives the schema when
+                # the route set changes rather than on every request.
+                out: dict[str, Any] = application.openapi()
                 return out
 
             application.include_router(docs_router)
