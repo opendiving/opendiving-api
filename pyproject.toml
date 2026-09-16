@@ -43,8 +43,9 @@ dependencies = [
     # tests used to reach through a vendored copy.
     #
     # 0.7.0 is the floor because it is the release whose readers spell a dive's number
-    # `number`. Resolved lower, every converted UDDF or `.ssrf` upload would land its dives
-    # on the placeholder `0` with no note - a silent runtime loss, not a test failure.
+    # `number`. `services/logbook_import/reader.py` converts uploads with them on the
+    # request path, so resolved lower every converted UDDF or `.ssrf` dive lands on the
+    # placeholder `0` - a wrong logbook rather than an error.
     "divejson>=0.7.0",
     "webauthn>=3.0.0",
     # Decodes and re-encodes uploaded avatars (`services/user_avatars.py`) - the only

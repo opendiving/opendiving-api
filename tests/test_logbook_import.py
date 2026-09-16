@@ -240,12 +240,14 @@ class TestConvertedUploads:
     async def test_a_converted_upload_keeps_the_numbers_its_source_gave_it(
         self, db: Session, async_db: AsyncSession
     ) -> None:
-        """What holds the `divejson` floor up, and the only check that can.
+        """The reader's half of the `divejson` floor.
 
         The converter runs on the request path, so the member its readers write has to be
-        the member `ImportDive` declares. Resolve the package below the floor and every
-        assertion above still passes while each of these eight dives silently lands on the
-        placeholder `0` - which is the whole failure, and it is invisible to a count.
+        the member `ImportDive` declares. A package resolved below the floor is caught on
+        the writer's side by the conformance tests, which validate against the installed
+        schema; nothing but this covers the reader, where the failure is each of these
+        eight dives landing on the placeholder `0` rather than an error - invisible to
+        every other assertion in this class, both of which count rather than read.
         """
         user = create_user(db)
 
