@@ -202,6 +202,23 @@ class TestCourseSchema:
 
         assert course.start_date == course.end_date
 
+    def test_a_course_need_not_name_an_agency(self) -> None:
+        """A course taught by a private instructor runs under none, and the field is where
+        the diver says so - absence, not a sentinel value in the vocabulary."""
+        course = CourseCreate.model_validate({"user_uuid": str(USER_UUID), "name": "Sidemount Fundamentals"})
+
+        assert course.agency is None
+        assert course.agency_other is None
+
+    def test_a_course_with_no_agency_may_not_name_one(self) -> None:
+        """`agency_other` names the agency `other` stands for, so with no agency at all
+        there is nothing for it to name - the same branch of `validate_agency_pairing` that
+        refuses it beside `padi`."""
+        with pytest.raises(ValidationError, match="agency_other may only be set"):
+            CourseCreate.model_validate(
+                {"user_uuid": str(USER_UUID), "name": "Sidemount Fundamentals", "agency_other": "NSS-CDS"}
+            )
+
     def test_agency_other_is_required_when_the_agency_is_other(self) -> None:
         with pytest.raises(ValidationError, match="agency_other is required"):
             CourseCreate.model_validate({"user_uuid": str(USER_UUID), "name": "Cave 1", "agency": "other"})
@@ -230,10 +247,10 @@ class TestCourseSchema:
         with pytest.raises(ValidationError, match="cannot be null"):
             CourseUpdate.model_validate({"status": None})
 
-    @pytest.mark.parametrize("field", ["start_date", "end_date", "instructor_name", "training_center"])
+    @pytest.mark.parametrize("field", ["start_date", "end_date", "instructor_name", "training_center", "agency"])
     def test_the_update_schema_still_clears_a_nullable_field(self, field: str) -> None:
         """Clearing these is a real edit - an instructor misremembered, a course that
-        turned out to be `planned` after all."""
+        turned out to be `planned` after all, an agency the course never ran under."""
         values = CourseUpdate.model_validate({field: None})
 
         assert field in values.model_fields_set
@@ -418,6 +435,39 @@ class TestPatchCourse:
         write_collaborators["update"].assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_clearing_the_agency_is_written(self, write_collaborators: dict[str, Any]) -> None:
+        """The column is nullable, so an explicit null is an edit rather than the 500
+        `NON_NULLABLE_FIELDS` exists to prevent - a course entered under a default agency
+        it never ran under has to be correctable."""
+        await _patch({"agency": None})
+
+        write_collaborators["update"].assert_awaited_once()
+        assert write_collaborators["update"].await_args.kwargs["object"] == {"agency": None}
+
+    @pytest.mark.asyncio
+    async def test_clearing_the_agency_while_a_name_is_stored_is_a_422(
+        self, write_collaborators: dict[str, Any]
+    ) -> None:
+        """The merged check answers this one, not the schema: the stored `agency_other`
+        would be left naming an agency the course no longer has."""
+        write_collaborators["owned"].return_value = _internal_course(agency="other", agency_other="NSS-CDS")
+
+        with pytest.raises(UnprocessableEntityException, match="agency_other may only be set"):
+            await _patch({"agency": None})
+
+        write_collaborators["update"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_clearing_both_halves_together_is_written(self, write_collaborators: dict[str, Any]) -> None:
+        """The way out of `other` for a course that turns out to have had no agency, and the
+        mirror of moving to a named one."""
+        write_collaborators["owned"].return_value = _internal_course(agency="other", agency_other="NSS-CDS")
+
+        await _patch({"agency": None, "agency_other": None})
+
+        write_collaborators["update"].assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_an_empty_patch_writes_nothing(self, write_collaborators: dict[str, Any]) -> None:
         await _patch({})
 
@@ -470,6 +520,29 @@ class TestListOrderingSql:
 
 
 class TestReadPath:
+    @pytest.mark.asyncio
+    async def test_a_course_with_no_agency_reads_back_without_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The read shapes widened with the column. A `CourseRead` that still demanded a
+        value would fail `response_model` validation on the row the migration now admits -
+        a 500 for whoever is signed in rather than for whoever wrote the migration."""
+        rows = [{**_internal_course(id=11, agency=None).model_dump(), "id": 11}]
+        monkeypatch.setattr(
+            courses_module, "get_courses_page", AsyncMock(return_value={"data": rows, "total_count": 1})
+        )
+
+        page = await _read_courses_uncached(
+            _get_request(),
+            user_id=USER_ID,
+            user_uuid=USER_UUID,
+            db=MagicMock(),
+            page=1,
+            items_per_page=10,
+            search=None,
+        )
+
+        assert page["data"][0]["agency"] is None
+        assert page["data"][0]["name"] == "Advanced Nitrox"
+
     @pytest.mark.asyncio
     async def test_a_page_is_public_shapes_with_no_internal_ids(self, monkeypatch: pytest.MonkeyPatch) -> None:
         rows = [
@@ -846,6 +919,32 @@ class TestTheDatabaseKeepsTheDateRange:
         db.commit()
 
         assert course.start_date is None
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestTheDatabaseAdmitsACourseWithNoAgency:
+    """The column's own half of the change, which only Postgres settles: the suite migrates
+    its database from the revisions, so this fails on a schema the revision did not reach."""
+
+    @pytest.mark.asyncio
+    async def test_a_course_stores_with_no_agency(self, db: Session, diver: User) -> None:
+        course = create_course(db, diver, agency=None)
+
+        assert (course.agency, course.agency_other) == (None, None)
+        assert course.id is not None
+
+    @pytest.mark.asyncio
+    async def test_a_certification_still_may_not(self, db: Session, diver: User) -> None:
+        """The asymmetry, from the side that does not move: `certification.agency` is still
+        `NOT NULL`, and a card without one is refused by the database itself."""
+        from sqlalchemy.exc import IntegrityError
+
+        card = create_certification(db, diver)
+        card.agency = None  # type: ignore[assignment]
+
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
 
 
 @pytest.mark.skipif(not db_available(), reason="No database connection available")

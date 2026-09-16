@@ -56,12 +56,15 @@ _course_cache: OwnedResourceCache[CourseReadInternal, CourseRead] = OwnedResourc
 )
 
 
-def _validate_merged_agency_pairing(agency: str, agency_other: str | None) -> None:
+def _validate_merged_agency_pairing(agency: str | None, agency_other: str | None) -> None:
     """Enforce the `agency`/`agency_other` pairing on a PATCH's merged result.
 
     `CourseBase` already does this for whole-object writes, but a PATCH may carry either
     field alone, so the check can only be made once the incoming values have been merged
     over the stored ones - the same shape `patch_certification` uses.
+
+    A course's `agency` is nullable, so the merged value may be `None` and clearing it
+    while an `agency_other` still names one is the 422 this produces.
     """
     try:
         validate_agency_pairing(agency, agency_other)

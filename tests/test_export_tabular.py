@@ -14,10 +14,12 @@ becoming the string `None`.
 
 import csv
 import io
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from src.app.models.course import Course
 from src.app.services.export.tabular import (
     BOM,
     CERTIFICATIONS_HEADER,
@@ -41,7 +43,7 @@ from src.app.services.export.tabular import (
     write_species_csv,
     write_trips_csv,
 )
-from tests.helpers.export import UUIDS, build_bundle, full_bundle, make_dive, mixture
+from tests.helpers.export import UUIDS, _with_id, build_bundle, full_bundle, make_dive, mixture
 
 GOLDEN = Path(__file__).parent / "fixtures" / "export" / "dives.csv"
 
@@ -345,6 +347,28 @@ class TestTheNormalizedFiles:
             assert len(rows) > 1, writer.__name__
             assert tuple(rows[0]) == header, writer.__name__
             assert all(len(row) == len(header) for row in rows[1:]), writer.__name__
+
+    def test_a_course_with_no_agency_leaves_the_cell_empty(self):
+        """The column reads `agency_other or agency`, so a course that ran under no agency
+        yields nothing - and nothing in a CSV is an empty cell, the same as every other
+        unrecorded value in these files. There is nothing to invent and no row to drop: a
+        CSV keeps every row with its stored value, having no vocabulary to keep."""
+        course = _with_id(
+            Course(
+                user_id=1,
+                name="Sidemount Fundamentals",
+                status="completed",
+                uuid=UUIDS["course"],
+                notes="",
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            ),
+            1,
+        )
+
+        rows = _parse(_render(write_courses_csv(build_bundle(courses=[course]))))
+
+        assert rows[1][COURSES_HEADER.index("name")] == "Sidemount Fundamentals"
+        assert rows[1][COURSES_HEADER.index("agency")] == ""
 
     def test_every_file_carries_the_byte_order_mark_not_just_dives(self):
         """`dive-sites.csv`, `trips.csv`, `courses.csv` and `certifications.csv` hold the

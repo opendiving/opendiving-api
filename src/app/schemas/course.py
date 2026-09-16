@@ -45,12 +45,20 @@ class CourseBase(BaseModel):
         Field(min_length=1, max_length=255, examples=["Advanced Nitrox + Decompression Procedures"]),
     ]
     agency: Annotated[
-        CertificationAgency,
-        Field(examples=[CertificationAgency.TDI], description="Training agency whose syllabus this course ran"),
+        CertificationAgency | None,
+        Field(
+            default=None,
+            examples=[CertificationAgency.TDI],
+            description="Training agency whose syllabus this course ran; absent when it ran under none",
+        ),
     ]
     agency_other: Annotated[
         str | None,
-        Field(default=None, max_length=64, description="Agency name, required when `agency` is `other`"),
+        Field(
+            default=None,
+            max_length=64,
+            description="Agency name, required when `agency` is `other` and not allowed otherwise",
+        ),
     ]
     # `completed` because back-filling history is the common case: a diver entering the
     # course that issued a card they already hold is entering one that finished.
@@ -83,7 +91,7 @@ class CourseRead(CourseBase, PublicUUIDSchema):
 
     # Override `CourseBase`'s enums, which stay enums for the writes that base validates.
     # See *"A stored vocabulary is read back as a string"* in DECISIONS.md.
-    agency: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+    agency: StoredVocabulary | None = None  # type: ignore[assignment]  # widening a write base's field
     status: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
 
     user_uuid: uuid_pkg.UUID
@@ -96,7 +104,7 @@ class CourseReadInternal(CourseBase, PublicUUIDSchema):
     which additionally resolves `user_id` to the owning user's `uuid`).
     """
 
-    agency: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+    agency: StoredVocabulary | None = None  # type: ignore[assignment]  # widening a write base's field
     status: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
 
     id: int
@@ -129,10 +137,10 @@ class CourseUpdate(RejectsExplicitNulls):
     model_config = ConfigDict(extra="forbid")
 
     # Everything nullable stays off this list, so an explicit null clears it: an
-    # instructor misremembered, and the dates of a course that turned out to be `planned`
-    # after all, are both real edits. `agency_other` in particular is half of moving a
-    # course off `agency="other"`.
-    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "agency", "status", "notes")
+    # instructor misremembered, the dates of a course that turned out to be `planned`
+    # after all, and the agency of one that turns out to have run under none are all real
+    # edits. `agency_other` in particular is half of moving a course off `agency="other"`.
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "status", "notes")
 
     name: Annotated[str | None, Field(default=None, min_length=1, max_length=255)]
     agency: Annotated[CertificationAgency | None, Field(default=None)]

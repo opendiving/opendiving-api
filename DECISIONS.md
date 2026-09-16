@@ -5255,6 +5255,22 @@ check to equal the set of registered models with no unique index over anything b
 directions — a `Course` that gains a unique name fails there until the helper and the entry arrive
 with it.
 
+## A course may have no agency, and a certification may not
+
+`course.agency` is nullable and OPTIONAL in DiveJSON (§6.17); `certification.agency` is `NOT NULL`
+and REQUIRED (§6.16). The asymmetry is about who issues what: a c-card is issued by an agency, so a
+card naming none is not a card, while a course can be taught by an independent instructor and a
+diver logging one has nothing to put in the field. A default there fabricates the fact the record
+exists to hold.
+
+So the two answer an unreadable agency differently. A certification without one is skipped on import
+and omitted from an export; a course keeps the record and loses the pair, along with every dive's
+link to it. `validate_agency_pairing` is shared and decides neither — requiredness lives in the
+field declarations and in each update schema's `NON_NULLABLE_FIELDS`.
+
+Rejected: a vocabulary value meaning "no agency", which would be meaningless on a card and is one
+list with §6.16's.
+
 ## Courses: Both dates are nullable, and three layers keep them ordered
 
 `Trip.start_date` is `NOT NULL`; a course's is not — a `planned` course has no dates yet. A stored
@@ -5976,8 +5992,10 @@ meaning the diver wrote nothing), the booleans `rented`, `archived` and `active`
 
 Otherwise the record is skipped and reported: a course with no `status` (§6.17), a service record
 with no `dive_count_at_service`, a dive with no `duration` and no profile, a species with no
-`aphia_id`, and a record whose REQUIRED closed-vocabulary member (`agency`, a service `type`)
-carries an unknown value, which §5.6 reads as absent.
+`aphia_id`, and a record whose REQUIRED closed-vocabulary member (a certification's `agency`, a
+service `type`) carries an unknown value, which §5.6 reads as absent. A course's `agency` is
+OPTIONAL and so costs the field rather than the record — see *A course may have no agency, and a
+certification may not*.
 
 Two derivations are allowed and reported: a dive with no `duration` takes its profile's span; one
 with no `number` gets a placeholder, duplicates being legal (`DiveNumberingSummary`).
@@ -6121,10 +6139,11 @@ reason `gear_item.type` has none, so the vocabulary needs no migration.
 Rejected: laundering real agencies through `other`/`agency_other` on the way in, which makes a round
 trip lossy on a member the format guarantees.
 
-The list cannot grow: `agency` is a REQUIRED member of a closed set, and §7 freezes those at 1.0
-because a reader treats an unrecognized value as absent, which for a REQUIRED member leaves the
-record uninterpretable. That is why the spec seeded the list wide, and why a national CMAS
-federation is `cmas`.
+The list cannot grow: a certification's `agency` is a REQUIRED member of a closed set, and §7
+freezes those at 1.0 because a reader treats an unrecognized value as absent, which for a REQUIRED
+member leaves the record uninterpretable. That is why the spec seeded the list wide, and why a
+national CMAS federation is `cmas`. The freeze holds for the whole enum although a course's `agency`
+is OPTIONAL: one list is shared by both, so the certification's requiredness is what governs it.
 
 ## Logbook import spools its upload and still parses the document whole
 
@@ -6542,17 +6561,18 @@ coercing to `OTHER`/`NULL`; `ServiceKind | str`, which collapses to the `str` ar
 DiveJSON. It must not 500 either, since the migration leaves a colliding row unrepaired. The
 envelope splits on REQUIRED (`_speakable`/`_sayable`, `services/export/envelope.py`): a REQUIRED
 member outside the vocabulary — `gear_service_schedule.type`, `gear_service_record.type`,
-`course.agency`, `certification.agency` — omits the record (spec §5.6); an OPTIONAL one
-(`gear_item.type`, `dive.water_type`, `dive_mixture.role`/`usage`, `course.status`) costs only the
-field. The three references reaching an omittable collection — `dive.course_uuid`,
-`certification.course_uuid`, `gear_service_record.gear_service_schedule_uuid` — are OPTIONAL and go
-absent through `_course`/`_schedule_uuid`.
+`certification.agency` — omits the record (spec §5.6); an OPTIONAL one (`gear_item.type`,
+`dive.water_type`, `dive_mixture.role`/`usage`, `course.agency`/`status`) costs only the field.
+`gear_service_schedule` is the one omittable collection anything references, and
+`gear_service_record.gear_service_schedule_uuid` is OPTIONAL, so it goes absent through
+`_schedule_uuid`. A course's `agency` and `agency_other` are written as a pair or not at all
+(`_course_agency`), the schema admitting `agency_other` only beside `other`.
 
 A read shape re-validated as a write one repeats the widening: every `DiveMixtureCreate` rebuild
 goes through `as_create` (`schemas/dive_mixture.py`), and `validate_agency_pairing` takes
-`agency: str`, not `CertificationAgency`. `services/export/tabular.py` carries the stored string
-rather than `ServiceKind(schedule.kind).value`; `services/export/uddf.py` picks its element through
-`_gear_type`, falling back to `<variouspieces>` as `OTHER` does.
+`agency: str | None`, not `CertificationAgency`. `services/export/tabular.py` carries the stored
+string rather than `ServiceKind(schedule.kind).value`; `services/export/uddf.py` picks its element
+through `_gear_type`, falling back to `<variouspieces>` as `OTHER` does.
 
 ## Stored vocabulary: The migration names two literals, and is not a vocabulary sweep
 

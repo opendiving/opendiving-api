@@ -23,13 +23,15 @@ class CertificationAgency(StrEnum):
     DECISIONS.md), which is why widening it needs no migration.
 
     **Value for value, and in order, the DiveJSON vocabulary** (spec §6.16, shared with
-    §6.17's courses). That is a stronger statement than it is for `GearType`, because
-    `agency` is a REQUIRED member of a closed set and the format freezes those at 1.0 - so
-    this list cannot grow again without a major version, and the five that arrived with
-    the importer (`andi`, `snsi`, `acuc`, `pss`, `ida`) are the last additions there will
-    be. The alternative was laundering five real agencies through `other`/`agency_other`
-    on the way in, which would have made a round trip lossy on a member the format
-    guarantees.
+    §6.17's courses). That is a stronger statement than it is for `GearType`, because a
+    *certification's* `agency` is a REQUIRED member of a closed set and the format freezes
+    those at 1.0 - so this list cannot grow again without a major version, and the five
+    that arrived with the importer (`andi`, `snsi`, `acuc`, `pss`, `ida`) are the last
+    additions there will be. One list serves both resources, so the freeze governs the
+    whole enum although a course's `agency` is OPTIONAL and may be absent entirely - see
+    *"A course may have no agency, and a certification may not"* in DECISIONS.md. The
+    alternative was laundering five real agencies through `other`/`agency_other` on the way
+    in, which would have made a round trip lossy on a member the format guarantees.
     """
 
     PADI = "padi"
@@ -57,7 +59,7 @@ AGENCY_OTHER_REQUIRED_MESSAGE = "agency_other is required when agency is 'other'
 AGENCY_OTHER_NOT_ALLOWED_MESSAGE = "agency_other may only be set when agency is 'other'"
 
 
-def validate_agency_pairing(agency: str, agency_other: str | None) -> None:
+def validate_agency_pairing(agency: str | None, agency_other: str | None) -> None:
     """The one place the `agency`/`agency_other` pairing is decided.
 
     Public because four callers need the same rule and must not spell it four ways:
@@ -67,12 +69,19 @@ def validate_agency_pairing(agency: str, agency_other: str | None) -> None:
     `ValueError` here is a per-field 422 from the schema, and the flat `{"detail": ...}`
     from a route.
 
-    `agency` is typed `str`, not `CertificationAgency`. The schemas pass the enum and the
-    two PATCH routes pass the stored column, which since the read widening is a plain string
-    that may be outside the vocabulary - and reconstructing the enum to satisfy this
+    `agency` is typed `str | None`, not `CertificationAgency`. The schemas pass the enum and
+    the two PATCH routes pass the stored column, which since the read widening is a plain
+    string that may be outside the vocabulary - and reconstructing the enum to satisfy this
     signature is what made `PATCH /certification/{uuid}` a 500 on exactly the rows the
     widening exists to make readable, including the PATCH that would have repaired one. The
     rule below is a value comparison, which `StrEnum` answers correctly either way.
+
+    `None` is admitted because a course may have no agency at all, which is the state that
+    then reaches here; a certification may not, and this helper is not where that is
+    decided. **Requiredness lives in the field declarations and in each update schema's
+    `NON_NULLABLE_FIELDS`, never here**, so a caller's answer is unchanged by the widening:
+    `None` is not `OTHER`, so a stray `agency_other` beside it is refused, which is the
+    right answer for either resource.
 
     Rejecting `agency_other` alongside a *named* agency (rather than quietly ignoring it)
     keeps the stored row unambiguous: a row with `agency="padi"` can never also carry a

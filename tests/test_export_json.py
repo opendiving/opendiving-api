@@ -773,6 +773,55 @@ class TestAbsence:
             "created_at",
         }
 
+    @pytest.mark.asyncio
+    async def test_a_course_with_no_agency_omits_the_member(self, monkeypatch):
+        """A course taught by a private instructor ran under no agency, and the column now
+        says so. The dive logged on it keeps its `course_uuid`: nothing about the course is
+        unwritable, so there is nothing for a reference to lose."""
+        course = _with_id(
+            Course(
+                user_id=1,
+                name="Sidemount Fundamentals",
+                status="completed",
+                uuid=UUIDS["course"],
+                notes="",
+                created_at=CREATED_AT,
+            ),
+            1,
+        )
+        bundle = build_bundle(dives=[make_dive(1, UUIDS["dive-air"], course_id=1)], courses=[course])
+
+        document = await _render(bundle, monkeypatch)
+
+        exported = document["courses"][0]
+        assert exported["name"] == "Sidemount Fundamentals"
+        assert "agency" not in exported and "agency_other" not in exported
+        assert document["dives"][0]["course_uuid"] == str(UUIDS["course"])
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_an_agency_the_enum_has_no_member_for_is_still_written_as_other(self, monkeypatch):
+        """The pair the format does admit, unchanged by the agency becoming optional: a
+        national body the vocabulary has no member for travels as `other` plus the name."""
+        course = _with_id(
+            Course(
+                user_id=1,
+                name="Plongeur Niveau 2",
+                agency="other",
+                agency_other="FFESSM",
+                status="completed",
+                uuid=UUIDS["course"],
+                notes="",
+                created_at=CREATED_AT,
+            ),
+            1,
+        )
+        document = await _render(build_bundle(courses=[course]), monkeypatch)
+
+        assert document["courses"][0]["agency"] == "other"
+        assert document["courses"][0]["agency_other"] == "FFESSM"
+        _assert_conforms(document)
+
 
 class TestAnUnrecognizedVocabularyValueDoesNotFiveHundredTheExport:
     """The three writers, and each answers differently because each is bound differently.
@@ -911,11 +960,11 @@ class TestAnUnrecognizedVocabularyValueDoesNotFiveHundredTheExport:
         _assert_conforms(document)
 
     @pytest.mark.asyncio
-    async def test_a_dive_and_a_card_pointing_at_an_omitted_course_lose_the_link(self, monkeypatch) -> None:
-        """`course.agency` is REQUIRED, so an unspeakable one omits the course - and both
-        things that can point at one are OPTIONAL references, so they go absent rather than
-        going with it. Losing a dive from an export over the spelling of its course's agency
-        would be the worst answer available."""
+    async def test_an_unspeakable_agency_costs_the_field_not_the_course(self, monkeypatch) -> None:
+        """`course.agency` is OPTIONAL (spec §6.17), so the course survives its own agency
+        being unreadable - and so do the dive and the card that point at it. Losing a dive
+        from an export over the spelling of its course's agency would be the worst answer
+        available."""
         course = _with_id(
             Course(
                 user_id=1,
@@ -948,16 +997,132 @@ class TestAnUnrecognizedVocabularyValueDoesNotFiveHundredTheExport:
 
         document = await _render(bundle, monkeypatch)
 
-        assert document["courses"] == []
-        assert "course_uuid" not in document["dives"][0]
-        assert "course_uuid" not in document["certifications"][0]
-        assert document["certifications"][0]["name"] == "Open Water Diver"
+        assert [c["name"] for c in document["courses"]] == ["Deco Procedures"]
+        assert "agency" not in document["courses"][0]
+        assert document["dives"][0]["course_uuid"] == str(UUIDS["course"])
+        assert document["certifications"][0]["course_uuid"] == str(UUIDS["course"])
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_an_unspeakable_agency_takes_its_agency_other_with_it(self, monkeypatch) -> None:
+        """The pair is written together or not at all: `$defs/course` forbids `agency_other`
+        beside anything but `other`, an absent agency included, so a leftover row carrying
+        both would export as a document the validator rejects at the far end."""
+        course = _with_id(
+            Course(
+                user_id=1,
+                name="Cave 1",
+                agency="frobnicator",
+                agency_other="NSS-CDS",
+                status="completed",
+                uuid=UUIDS["course"],
+                notes="",
+                created_at=CREATED_AT,
+            ),
+            1,
+        )
+        bundle = build_bundle(dives=[make_dive(1, UUIDS["dive-air"], course_id=1)], courses=[course])
+
+        document = await _render(bundle, monkeypatch)
+
+        assert [c["name"] for c in document["courses"]] == ["Cave 1"]
+        assert "agency" not in document["courses"][0] and "agency_other" not in document["courses"][0]
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_other_with_nothing_to_name_is_not_an_agency(self, monkeypatch) -> None:
+        """`other` is a promise to name the agency in `agency_other`, and the schema's `then`
+        branch requires it. A row that broke the promise - only a direct write can, the
+        pairing rule refusing it everywhere else - has claimed nothing, so nothing is
+        written."""
+        course = _with_id(
+            Course(
+                user_id=1,
+                name="Cave 1",
+                agency="other",
+                agency_other="   ",
+                status="completed",
+                uuid=UUIDS["course"],
+                notes="",
+                created_at=CREATED_AT,
+            ),
+            1,
+        )
+        bundle = build_bundle(courses=[course])
+
+        document = await _render(bundle, monkeypatch)
+
+        assert "agency" not in document["courses"][0] and "agency_other" not in document["courses"][0]
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_a_named_agency_drops_a_stray_agency_other(self, monkeypatch) -> None:
+        """The mirror of the case above, and the one the reader already answers this way
+        (`logbook_import/planner.py::_agency`): the agency is the load-bearing half, and the
+        name beside it is unwritable next to anything but `other`."""
+        course = _with_id(
+            Course(
+                user_id=1,
+                name="Advanced Nitrox",
+                agency="tdi",
+                agency_other="NSS-CDS",
+                status="completed",
+                uuid=UUIDS["course"],
+                notes="",
+                created_at=CREATED_AT,
+            ),
+            1,
+        )
+        bundle = build_bundle(courses=[course])
+
+        document = await _render(bundle, monkeypatch)
+
+        assert document["courses"][0]["agency"] == "tdi"
+        assert "agency_other" not in document["courses"][0]
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_a_card_with_an_unspeakable_agency_is_still_omitted(self, monkeypatch) -> None:
+        """The side of the asymmetry that does not move: §6.16 keeps a certification's
+        `agency` REQUIRED, so a card the format has no word for is uninterpretable and goes,
+        while the course beside it stays. See *A course may have no agency, and a
+        certification may not* in DECISIONS.md."""
+        course = _with_id(
+            Course(
+                user_id=1,
+                name="Deco Procedures",
+                agency="tdi",
+                status="completed",
+                uuid=UUIDS["course"],
+                notes="",
+                created_at=CREATED_AT,
+            ),
+            1,
+        )
+        certification = _with_id(
+            Certification(
+                user_id=1,
+                agency="frobnicator",
+                name="Open Water Diver",
+                course_id=1,
+                notes="",
+                uuid=UUIDS["certification"],
+                created_at=CREATED_AT,
+            ),
+            1,
+        )
+        bundle = build_bundle(courses=[course], certifications=[certification])
+
+        document = await _render(bundle, monkeypatch)
+
+        assert document["certifications"] == []
+        assert [c["name"] for c in document["courses"]] == ["Deco Procedures"]
         _assert_conforms(document)
 
     @pytest.mark.asyncio
     async def test_an_unspeakable_status_costs_the_field_not_the_course(self, monkeypatch) -> None:
         """`status` reads like a REQUIRED member and is not - `$defs/course` requires only
-        uuid/name/agency, and spec §6.17 marks it O. Classifying it by intuition dropped the
+        uuid/name, and spec §6.17 marks it O. Classifying it by intuition dropped the
         diver's whole course."""
         course = _with_id(
             Course(

@@ -374,12 +374,16 @@ class ExportCourse(PublicUUIDSchema):
     """
 
     name: str
-    agency: CertificationAgency
+    # OPTIONAL in the format, like `status` below (`$defs/course` requires only
+    # uuid/name), because a course taught by a private instructor ran under no agency.
+    # Absent also carries a stored value outside the vocabulary, and `agency_other`
+    # travels with it - see `_course_agency` in `services/export/envelope.py`, which is
+    # the only thing allowed to produce this pair.
+    agency: CertificationAgency | None = None
     agency_other: str | None = None
-    # OPTIONAL in the format (`$defs/course` requires only uuid/name/agency; spec §6.17
-    # says absent means not recorded, and readers must not assume `completed`). Null is
-    # also where a stored status outside the vocabulary lands - see `_speakable` in
-    # `services/export/envelope.py`.
+    # Spec §6.17 says absent means not recorded, and readers must not assume `completed`.
+    # Null is also where a stored status outside the vocabulary lands - see `_speakable`
+    # in `services/export/envelope.py`.
     status: CourseStatus | None = None
     starts_on: date | None = None
     ends_on: date | None = None
