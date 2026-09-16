@@ -18,11 +18,11 @@ serves its leading column exactly like a declared one.
 
 **And usable**, which rules out a partial index however well it leads. The lookup a foreign key
 provokes carries no predicate for one to be implied by, so Postgres scans the table rather than
-using it - measured, not reasoned about, in `DECISIONS.md` under *"The indexes are the part that
-needed care, not the deletes"*, which is also where the two plain indexes on
-`gear_service_record` come from. That distinction is the whole reason this test asserts a usable
-index rather than any index: without it, deleting those two would leave the partial composites
-standing, this test green, and the seq scan back.
+using it - measured, not reasoned about, in `DECISIONS.md` under *"The ten `is_deleted` indexes
+are recreated plain, and a partial index cannot serve a cascade"*, which is also where the two
+plain indexes on `gear_service_record` come from. That distinction is the whole reason this test
+asserts a usable index rather than any index: without it, deleting those two would leave the
+partial composites standing, this test green, and the seq scan back.
 
 This passes today and is expected to keep passing. Its job is the *next* model - the one whose
 `ForeignKey(...)` arrives without `index=True` beside it and without a composite that happens
@@ -67,14 +67,14 @@ def _leading_column_name(index: Index) -> str | None:
 def _is_partial(index: Index) -> bool:
     """Whether the index carries a `WHERE` predicate, which disqualifies it here.
 
-    A referential-integrity lookup carries no predicate of its own - it is
-    `WHERE parent_id = $1` and nothing else - so Postgres cannot prove a partial index covers
-    the rows it needs and scans the table instead. Measured rather than assumed, and the
-    measurement is in `DECISIONS.md` under *"The indexes are the part that needed care, not the
-    deletes"*: two partial indexes leading with the column being looked up, right table, and a
-    `Seq Scan` all the same. It is why `gear_service_record` carries a plain index beside each of
-    its partial ones, and why `ux_gear_service_schedule_item_kind_label` may never gain a
-    predicate.
+    A referential-integrity lookup carries no predicate of its own - it is `WHERE parent_id = $1`
+    and nothing else - so Postgres cannot prove a partial index covers the rows it needs and
+    scans the table instead. Measured rather than assumed, and the measurement is in
+    `DECISIONS.md` under *"The ten `is_deleted` indexes are recreated plain, and a partial index
+    cannot serve a cascade"*: two partial indexes leading with the column being looked up, right
+    table, and a `Seq Scan` all the same. It is why `gear_service_record` carries a plain index
+    beside each of its partial ones, and why `ux_gear_service_schedule_item_kind_label` may never
+    gain a predicate.
     """
     return index.dialect_kwargs.get("postgresql_where") is not None
 

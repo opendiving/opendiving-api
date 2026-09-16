@@ -2,7 +2,7 @@
 
 Ten foreign keys pointed at `user.id` with no `ondelete` rule, so `DELETE FROM "user"`
 failed for any account that had ever logged a dive, saved a site or earned a c-card. See
-*"The ten cascades that were never declared"* in `DECISIONS.md` for why they are declared
+*"Every foreign key into `user.id` declares `ondelete="CASCADE"`"* in `DECISIONS.md` for why they are declared
 here rather than hand-rolled in the account purge job built on top of them.
 
 Nothing issues a `DELETE FROM "user"` yet - this revision only makes one possible.

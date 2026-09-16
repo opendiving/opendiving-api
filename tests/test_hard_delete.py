@@ -328,7 +328,7 @@ class TestTheRowIsActuallyRemoved:
 
 @needs_a_database
 class TestASecondDeleteIsA404:
-    """`DELETE` stopped being idempotent, and that is a deliberate contract change.
+    """`DELETE` is not idempotent, and a second call 404s, and that is a deliberate contract change.
 
     The idempotency insured against a half-failed multi-statement delete; a single
     statement in one transaction cannot half-fail. Every one of these routes resolves the

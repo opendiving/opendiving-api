@@ -1,9 +1,9 @@
 """drop course.cost
 
 `course.cost` was a free-text note ("EUR 650", "1 200 AUD including gear") on one entity, and
-money is a cross-cutting concern the app has no architecture for - see *"`Course.cost` is gone,
-and money is a cross-cutting concern this app has not designed yet"* in DECISIONS.md for the
-reasoning and the alternatives.
+money is a cross-cutting concern the app has no architecture for - see *"There is no
+`Course.cost`, and money is a cross-cutting concern this app has not designed yet"* in
+DECISIONS.md for the reasoning and the alternatives.
 
 **No data is preserved, deliberately.** Folding the stored strings into `course.notes` first was
 considered and rejected: nothing is deployed anywhere, so the only rows this meets are local

@@ -4,7 +4,7 @@
   structured copy, including everything UDDF has no slot for - gear sets, service history,
   c-cards, training courses, per-cylinder role and usage among them - so nothing is
   reachable only through the lossy file. Those are examples and not the list: DECISIONS.md,
-  *"What UDDF 3.2.2 has no slot for, and what the plan got wrong about it"*, enumerates the
+  *"What UDDF 3.2.2 has no slot for, and what it forces"*, enumerates the
   members against the XSD and is what moves when one arrives. Restating that census here
   only made a second place to be wrong, and it was from the start - this bullet counted a
   dive's multi-site visit order as lost in the very commit that taught `uddf.py` to link

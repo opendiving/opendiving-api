@@ -18,7 +18,7 @@ There are two backends now, chosen by `FILE_STORAGE_BACKEND`:
 The file used to say there would deliberately never be a `FILE_STORAGE_BACKEND` setting,
 because a setting with one valid value is a lie about choice. That was right while there
 was one implementation and it named its own expiry condition; `DECISIONS.md`, *"A second
-backend, because the disk stopped being shared"*, records the condition firing. What
+backend, because the hosted disk is not shared"*, records the condition firing. What
 carried over intact is the shape the old note predicted would take a second backend:
 opaque string keys that are also valid S3 object keys, bytes in and bytes out, and no
 caller anywhere holding a `Path`. Keys are identical on both backends, so an install can

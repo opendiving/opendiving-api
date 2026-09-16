@@ -15,7 +15,7 @@ prefix, which errors mean "gone" rather than "broken", that the emptiness check 
 key, and that a committed transaction's deletes actually reach the store.
 
 `moto` would have covered more, at the price of a large dev dependency emulating the whole
-of S3 for six calls. See *"A second backend, because the disk stopped being shared"* in
+of S3 for six calls. See *"A second backend, because the hosted disk is not shared"* in
 `DECISIONS.md`.
 """
 

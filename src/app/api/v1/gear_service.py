@@ -515,9 +515,9 @@ async def _schedule_uuids_by_id(db: AsyncSession, schedule_ids: list[int | None]
     null when the rule is gone, which is exactly the state that produces.
 
     No liveness filter, and none is reachable - a schedule row cannot outlive itself. It
-    carried one through the soft-delete era for the same reason the null exists; see "The
-    service-record resolvers split, and only one of them was the same question" in
-    DECISIONS.md.
+    carried one through the soft-delete era for the same reason the null exists; see
+    "`get_gear_item_uuids_by_id` filters nothing, and no call site indexes its mapping
+    directly" in DECISIONS.md.
     """
     wanted = {schedule_id for schedule_id in schedule_ids if schedule_id is not None}
     if not wanted:
