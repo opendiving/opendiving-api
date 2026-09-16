@@ -41,7 +41,12 @@ dependencies = [
     # at container start with every test green (`DECISIONS.md`, *The importer is a reader,
     # not a validator*). It also carries the JSON Schema and the beyond-schema rules the
     # tests used to reach through a vendored copy.
-    "divejson>=0.6.0",
+    #
+    # 0.7.0 is the floor because it is the release whose readers spell a dive's number
+    # `number`. `services/logbook_import/reader.py` converts uploads with them on the
+    # request path, so resolved lower every converted UDDF or `.ssrf` dive lands on the
+    # placeholder `0` - a wrong logbook rather than an error.
+    "divejson>=0.7.0",
     "webauthn>=3.0.0",
     # Decodes and re-encodes uploaded avatars (`services/user_avatars.py`) - the only
     # image processing in the app. 12.0.0 is the first release with official Python 3.14

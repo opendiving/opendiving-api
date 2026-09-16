@@ -333,7 +333,7 @@ def _dive(
     course = _course(bundle, dive)
     return ExportDive(
         uuid=dive.uuid,
-        dive_number=dive.dive_number,
+        number=dive.dive_number,
         # The API's one rule for this column everywhere: one combined offset-aware
         # string, never the stored UTC instant next to a separate offset. That is also the
         # format's rule (spec §5.2), which is where it came from.
@@ -398,7 +398,7 @@ def _certifications(bundle: ExportBundle, paths: ArchivePaths | None) -> list[Ex
                 agency=certification.agency,
                 agency_other=certification.agency_other,
                 name=certification.name,
-                certification_number=certification.certification_number,
+                number=certification.certification_number,
                 certified_on=certification.certified_on,
                 expires_on=certification.expires_on,
                 instructor_name=certification.instructor_name,

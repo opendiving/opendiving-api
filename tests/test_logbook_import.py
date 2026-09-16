@@ -237,6 +237,26 @@ class TestConvertedUploads:
         assert len(stored) == created
 
     @pytest.mark.asyncio
+    async def test_a_converted_upload_keeps_the_numbers_its_source_gave_it(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The reader's half of the `divejson` floor.
+
+        The converter runs on the request path, so the member its readers write has to be
+        the member `ImportDive` declares. A package resolved below the floor is caught on
+        the writer's side by the conformance tests, which validate against the installed
+        schema; nothing but this covers the reader, where the failure is each of these
+        eight dives landing on the placeholder `0` rather than an error - invisible to
+        every other assertion in this class, both of which count rather than read.
+        """
+        user = create_user(db)
+
+        await _apply(async_db, user.id, UDDF_CORPUS.read_bytes(), "demo-account.uddf")
+
+        numbers = (await async_db.execute(select(Dive.dive_number).where(Dive.user_id == user.id))).scalars().all()
+        assert sorted(numbers) == [38, 39, 40, 41, 42, 43, 44, 45]
+
+    @pytest.mark.asyncio
     async def test_converting_twice_plans_identically(
         self, db: Session, async_db: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -319,7 +339,7 @@ class TestTheRoundTrip:
             assert len(re_exported[collection]) == len(original[collection]), collection
 
         source_dive, restored_dive = original["dives"][0], re_exported["dives"][0]
-        for member in ("dive_number", "started_at", "duration", "max_depth", "avg_depth", "created_at"):
+        for member in ("number", "started_at", "duration", "max_depth", "avg_depth", "created_at"):
             assert restored_dive.get(member) == source_dive.get(member), member
         assert len(restored_dive["site_uuids"]) == 2
         assert restored_dive["cylinders"] == source_dive["cylinders"]
@@ -1401,6 +1421,53 @@ class TestTheReaderRefusesOnlyWhatItMust:
             await load_import(_upload(b'{"format": "divejson", "version": "1.0", "dives": "not a list"}'))
 
 
+class TestTheOldSpellingsAreUndefinedMembers:
+    """`dive_number` on a dive and `certification_number` on a certification are members
+    this format no longer has, and the reader has no alias for either.
+
+    Every export this app wrote before the rename spells them that way, so this is what
+    happens to one: §5.6's answer to a member a reader does not know, which is to ignore it
+    and carry on. The dive lands on the placeholder its own absent number would have given
+    it and the card carries no number - a loss the diver can see and fix, rather than a
+    refused logbook.
+
+    The test is here so that the alias stays rejected. Added back as a kindness it would be
+    a second spelling the format never had, and one nothing would later remember to remove.
+    """
+
+    @staticmethod
+    def _in_the_old_spelling(document: bytes) -> bytes:
+        """The seeded document with both members written the way a draft-era export wrote
+        them."""
+        parsed = json.loads(document)
+        dive = parsed["dives"][0]
+        dive["dive_number"] = dive.pop("number")
+        assert dive["dive_number"] > 0, "the fixture has to carry a number the placeholder is distinguishable from"
+        parsed["certifications"][0]["certification_number"] = "1234567"
+        return json.dumps(parsed).encode()
+
+    @pytest.mark.asyncio
+    async def test_both_records_import_without_their_numbers_and_without_a_note(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        _, document = seeded
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, self._in_the_old_spelling(document))
+
+        assert _counts(plan)["dives"] == (1, 0, 0, 0)
+        assert _counts(plan)["certifications"] == (1, 0, 0, 0)
+        stored_dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        assert stored_dive.dive_number == 0
+        stored_card = (
+            (await async_db.execute(select(Certification).where(Certification.user_id == destination.id)))
+            .scalars()
+            .one()
+        )
+        assert stored_card.certification_number is None
+        assert not [note for note in plan.notes if "number" in note.message.lower()]
+
+
 class TestNothingInventedNothingFatal:
     @pytest.mark.asyncio
     async def test_a_value_the_database_refuses_is_dropped_and_the_dive_imports(
@@ -1651,7 +1718,7 @@ class TestTwoRecordsClaimingOneIdentifier:
         _, document = seeded
         parsed = json.loads(document)
         twin = dict(parsed["dives"][0])
-        twin["dive_number"] = 99
+        twin["number"] = 99
         twin["started_at"] = "2027-06-01T09:00:00+00:00"
         parsed["dives"].append(twin)
         destination = create_user(db)
@@ -1665,7 +1732,7 @@ class TestTwoRecordsClaimingOneIdentifier:
         numbers = sorted(
             (await async_db.execute(select(Dive.dive_number).where(Dive.user_id == destination.id))).scalars()
         )
-        assert numbers == sorted([parsed["dives"][0]["dive_number"], 99])
+        assert numbers == sorted([parsed["dives"][0]["number"], 99])
 
     @pytest.mark.asyncio
     async def test_a_skippable_twin_does_not_take_the_good_record_with_it(
@@ -1699,7 +1766,7 @@ class TestTwoRecordsClaimingOneIdentifier:
         user, document = seeded
         parsed = json.loads(document)
         twin = dict(parsed["dives"][0])
-        twin["dive_number"] = 99
+        twin["number"] = 99
         twin["started_at"] = "2027-06-01T09:00:00+00:00"
         parsed["dives"].append(twin)
 
@@ -2012,7 +2079,7 @@ class TestAnArchiveThatWillNotInflate:
 
 
 class TestNumbersWiderThanTheColumn:
-    """The format puts no ceiling on any of its integer members - `dive_number` is a bare
+    """The format puts no ceiling on any of its integer members - a dive's `number` is a bare
     `{"type": "integer"}` in the published schema - and `Integer` here is 32 bits.
 
     So a **conforming** document can carry a number this app's columns cannot, and a
@@ -2024,12 +2091,12 @@ class TestNumbersWiderThanTheColumn:
     HUGE = 2**31
 
     @pytest.mark.asyncio
-    async def test_an_unstorable_dive_number_falls_back_to_the_placeholder(
+    async def test_an_unstorable_number_falls_back_to_the_placeholder(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
         _, document = seeded
         parsed = json.loads(document)
-        parsed["dives"][0]["dive_number"] = self.HUGE
+        parsed["dives"][0]["number"] = self.HUGE
         destination = create_user(db)
 
         plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
@@ -2380,7 +2447,7 @@ class TestTheImportGates:
             "dives": [
                 {
                     "uuid": str(uuid7()),
-                    "dive_number": 1,
+                    "number": 1,
                     "started_at": "2026-09-08T15:17:38+03:00",
                     "duration": 3051,
                     "max_depth": 19.04,
