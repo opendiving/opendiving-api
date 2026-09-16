@@ -827,14 +827,20 @@ class _Planner:
         return latitude, longitude
 
     def _agency(self, collection: str, record_uuid: uuid_pkg.UUID, source: Any) -> tuple[str, str | None] | None:
-        """The `agency`/`agency_other` pair, or `None` when the record cannot carry one.
+        """The `agency`/`agency_other` pair, or `None` when the document names no agency
+        this app can read.
 
-        `agency` is a REQUIRED member of a vocabulary the format freezes at 1.0 (spec §§6.16,
-        7), so a value outside it has already read as absent under §5.6 and the record is
-        uninterpretable - skipping it is that rule followed through rather than a second
-        one. A stray `agency_other` beside a *named* agency is dropped instead: the app
-        refuses the pair (`validate_agency_pairing`), and the agency is the load-bearing
-        half.
+        `None` covers three states the callers are free to answer differently: the member
+        was absent, it carried a value outside the vocabulary (§5.6 reads that as absent
+        too), or it claimed `other` without naming one. What each caller does with it is
+        the member's requiredness, which is per-record: a certification's `agency` is
+        REQUIRED and `_plan_certification` skips (spec §§6.16, 7 freeze that vocabulary
+        precisely so a conforming document never lands here), a course's is OPTIONAL and
+        `_course_agency` keeps the record.
+
+        A stray `agency_other` beside a *named* agency is dropped rather than taken as an
+        answer: the app refuses the pair (`validate_agency_pairing`), and the agency is the
+        load-bearing half.
         """
         if source.agency is None:
             return None
@@ -846,6 +852,30 @@ class _Planner:
         if agency_other is not None:
             self._dropped(collection, record_uuid, f"`agency_other` was dropped: {AGENCY_OTHER_NOT_ALLOWED_MESSAGE}")
         return source.agency.value, None
+
+    def _course_agency(self, record_uuid: uuid_pkg.UUID, course: ImportCourse) -> tuple[str | None, str | None]:
+        """A course's agency pair, where no readable agency costs the pair and not the
+        course.
+
+        The mirror of `_course_agency` in `services/export/envelope.py`, and the half of
+        `_agency`'s `None` that differs from the certification's: a diver does not lose a
+        course, or every dive's link to it, over the agency member. `agency` is OPTIONAL
+        (spec §6.17), so absent is a reading rather than a failure - and a value outside the
+        vocabulary is absent too, `_unknown_is_absent` having applied §5.6 before this sees
+        the document.
+
+        What is reported is the pair that still holds something after the agency is gone:
+        `other` with nothing to name it, and an `agency_other` with no agency beside it.
+        Both are states the schema refuses, so a conforming document has neither, and
+        dropping one silently would leave the diver reading an import report that says
+        their course arrived intact.
+        """
+        pair = self._agency("courses", record_uuid, course)
+        if pair is not None:
+            return pair
+        if course.agency is not None or course.agency_other is not None:
+            self._dropped("courses", record_uuid, "The agency this course claimed named nobody, and was dropped")
+        return None, None
 
     def _count(self, collection: str, record_uuid: uuid_pkg.UUID, value: int | None) -> int:
         """A lifetime dive-count snapshot, as an `Integer` column can hold it.
@@ -1012,13 +1042,7 @@ class _Planner:
         # uuid to say otherwise.
         if not (course.name or "").strip():
             return self._skip("courses", course.uuid, "A course needs a name, and this one has none.")
-        agency = self._agency("courses", course.uuid, course)
-        if agency is None:
-            return self._skip(
-                "courses",
-                course.uuid,
-                "A course needs an agency this app recognizes, and this one does not name one.",
-            )
+        agency, agency_other = self._course_agency(course.uuid, course)
         if course.status is None:
             # `course.status` is `NOT NULL` here and OPTIONAL in the format, and §6.17 says
             # in as many words that a reader must not assume `completed`. There is no
@@ -1040,8 +1064,8 @@ class _Planner:
         record.values = {
             "user_id": self._user_id,
             "name": course.name,
-            "agency": agency[0],
-            "agency_other": agency[1],
+            "agency": agency,
+            "agency_other": agency_other,
             "status": course.status.value,
             "start_date": course.starts_on,
             "end_date": end_date,

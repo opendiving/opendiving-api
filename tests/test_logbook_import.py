@@ -1603,6 +1603,119 @@ class TestNothingInventedNothingFatal:
         assert stored.volume == parsed["dives"][0]["cylinders"][0]["volume"]
 
     @pytest.mark.asyncio
+    async def test_a_course_with_no_agency_imports_as_one(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """`agency` is OPTIONAL on a course (spec §6.17), so a document that records none
+        describes a real course rather than an unreadable one - and the dive logged on it
+        keeps the link that a skip would have taken with it."""
+        _, document = seeded
+        parsed = json.loads(document)
+        del parsed["courses"][0]["agency"]
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["courses"] == (1, 0, 0, 0)
+        assert ImportNoteCode.RECORD_SKIPPED not in _codes(plan)
+        course = (await async_db.execute(select(Course).where(Course.user_id == destination.id))).scalars().one()
+        assert (course.agency, course.agency_other) == (None, None)
+        dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        assert dive.course_id == course.id
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_course_agency_reads_as_absent(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """§5.6 already reads it as absent, and absent is now a state the course can hold -
+        so the record survives a vocabulary the writer and this reader do not share."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["courses"][0]["agency"] = "frobnicator"
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["courses"] == (1, 0, 0, 0)
+        course = (await async_db.execute(select(Course).where(Course.user_id == destination.id))).scalars().one()
+        assert course.agency is None
+
+    @pytest.mark.asyncio
+    async def test_a_course_claiming_other_with_nothing_to_name_keeps_the_course(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """A malformed pair is not an absent member, and the claim is reported - but the
+        answer is the same, because `agency` is OPTIONAL and an OPTIONAL member costs the
+        field rather than the diver's course and every dive's link to it."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["courses"][0]["agency"] = "other"
+        parsed["courses"][0].pop("agency_other", None)
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["courses"] == (1, 0, 0, 0)
+        assert ImportNoteCode.VALUE_DROPPED in _codes(plan)
+        course = (await async_db.execute(select(Course).where(Course.user_id == destination.id))).scalars().one()
+        assert (course.agency, course.agency_other) == (None, None)
+
+    @pytest.mark.asyncio
+    async def test_a_course_naming_an_agency_the_vocabulary_lacks_keeps_both_halves(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The pair the format does admit, and the one the writer emits unchanged: `other`
+        plus the name it stands for."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["courses"][0]["agency"] = "other"
+        parsed["courses"][0]["agency_other"] = "FFESSM"
+        destination = create_user(db)
+
+        await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        course = (await async_db.execute(select(Course).where(Course.user_id == destination.id))).scalars().one()
+        assert (course.agency, course.agency_other) == ("other", "FFESSM")
+
+    @pytest.mark.asyncio
+    async def test_a_named_agency_drops_a_stray_agency_other(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The agency is the load-bearing half, and the app's own pairing rule refuses the
+        two together - so the name goes and is reported, rather than the course."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["courses"][0]["agency"] = "padi"
+        parsed["courses"][0]["agency_other"] = "FFESSM"
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert ImportNoteCode.VALUE_DROPPED in _codes(plan)
+        course = (await async_db.execute(select(Course).where(Course.user_id == destination.id))).scalars().one()
+        assert (course.agency, course.agency_other) == ("padi", None)
+
+    @pytest.mark.asyncio
+    async def test_a_certification_with_no_agency_is_still_skipped(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The asymmetry this change creates, pinned from the side that does not move:
+        §6.16 keeps a card's `agency` REQUIRED, so a card without one is uninterpretable and
+        the column behind it is still `NOT NULL`."""
+        _, document = seeded
+        parsed = json.loads(document)
+        del parsed["certifications"][0]["agency"]
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["certifications"] == (0, 0, 0, 1)
+        assert ImportNoteCode.RECORD_SKIPPED in _codes(plan)
+        assert (
+            await async_db.execute(select(Certification).where(Certification.user_id == destination.id))
+        ).scalars().all() == []
+
+    @pytest.mark.asyncio
     async def test_an_unknown_gear_type_reads_as_absent(self, seeded: Any, db: Session, async_db: AsyncSession) -> None:
         _, document = seeded
         parsed = json.loads(document)

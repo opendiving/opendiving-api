@@ -31,7 +31,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.config import settings
 from ...core.utils.datetime_offset import combine_start_time
-from ...models.certification import Certification
 from ...models.course import Course
 from ...models.dive import Dive
 from ...schemas.certification import CertificationAgency, CertificationSide
@@ -113,24 +112,25 @@ def _speakable(value: str | None, vocabulary: type[StrEnum]) -> bool:
     a string"* in DECISIONS.md.
 
     The answer is the format's own, split by whether the member is REQUIRED - which is a
-    question for the schema, not for intuition. `course.status` reads like one and is not
-    (`$defs/course` requires only uuid/name/agency; spec §6.17 marks it O).
+    question for the schema, not for intuition. A course's `agency` and `status` both read
+    like REQUIRED members and neither is (`$defs/course` requires only uuid/name; spec
+    §6.17 marks both O).
 
     - REQUIRED (`gear_service_schedule.type`, `gear_service_record.type`,
-      `course.agency`, `certification.agency`) - the record is uninterpretable and is
-      omitted, which is the writer's side of the rule the reader already follows (spec
-      §5.6, and `logbook_import/planner.py::_agency`, which skips for that reason).
+      `certification.agency`) - the record is uninterpretable and is omitted, which is the
+      writer's side of the rule the reader already follows (spec §5.6, and
+      `logbook_import/planner.py::_agency`, which skips for that reason).
     - OPTIONAL (`gear_item.type`, `dive.water_type`, `dive_mixture.role`/`usage`,
-      `course.status`) - `_sayable` below drops the *field* and keeps the record. A diver's
-      cylinder must not vanish from their export over how its category is spelt.
+      `course.agency`/`status`) - `_sayable` below drops the *field* and keeps the record.
+      A diver's cylinder must not vanish from their export over how its category is spelt,
+      and neither must their course.
 
     **An omitted record is a record nothing may reference.** DiveJSON checks referential
-    closure, so dropping a course or a schedule without also clearing what points at it
-    produces a document the validator rejects - which is worse than the 500, because it
-    fails at the far end, on someone else's importer. The three references that can reach
-    an omittable collection (`dive.course_uuid`, `certification.course_uuid`,
-    `gear_service_record.gear_service_schedule_uuid`) are all OPTIONAL, so they resolve
-    through `_course`/`_schedule_uuid` and become absent - which is a state each of them
+    closure, so dropping a schedule without also clearing what points at it produces a
+    document the validator rejects - which is worse than the 500, because it fails at the
+    far end, on someone else's importer. `gear_service_schedule` is the one omittable
+    collection anything references, and `gear_service_record.gear_service_schedule_uuid` is
+    OPTIONAL, so it resolves through `_schedule_uuid` and becomes absent - a state it
     already has a meaning for.
 
     Nothing is lost from an archive either way: the CSVs carry every row with its stored
@@ -143,6 +143,48 @@ def _sayable[T: StrEnum](value: str | None, vocabulary: type[T]) -> T | None:
     """An OPTIONAL member's value, or `None` when the format has no word for it - see
     `_speakable` for why that is a different answer from skipping the record."""
     return vocabulary(value) if value is not None and _speakable(value, vocabulary) else None
+
+
+def _export_course(course: Course) -> ExportCourse:
+    """One course, as the document spells it. Never omitted: nothing a course stores is a
+    REQUIRED member the format could find unreadable."""
+    agency, agency_other = _course_agency(course)
+    return ExportCourse(
+        uuid=course.uuid,
+        name=course.name,
+        agency=agency,
+        agency_other=agency_other,
+        status=_sayable(course.status, CourseStatus),
+        starts_on=course.start_date,
+        ends_on=course.end_date,
+        instructor_name=course.instructor_name,
+        instructor_number=course.instructor_number,
+        training_center=course.training_center,
+        notes=_text(course.notes),
+        created_at=course.created_at,
+    )
+
+
+def _course_agency(course: Course) -> tuple[CertificationAgency | None, str | None]:
+    """A course's `agency`/`agency_other` pair as `$defs/course` admits it.
+
+    That object pairs the two: `agency_other` is REQUIRED beside `other` and forbidden
+    beside anything else, an absent `agency` included. So the pair is written together or
+    not at all, and `agency` being OPTIONAL (spec §6.17) means "not at all" costs the two
+    fields rather than the diver's course.
+
+    Three stored pairs reach "not at all": no agency, which is the state the column now
+    has; a value the vocabulary has no word for, which §5.6 already reads as absent; and an
+    `other` with nothing to name it, which claims an agency without producing one. The
+    reader takes the same three the same way (`logbook_import/planner.py::_agency` and
+    `_course_agency`), and a stray `agency_other` beside a named agency is dropped there
+    too.
+    """
+    agency = _sayable(course.agency, CertificationAgency)
+    if agency is not CertificationAgency.OTHER:
+        return agency, None
+    named = course.agency_other
+    return (agency, named) if (named or "").strip() else (None, None)
 
 
 def _text(value: str | None) -> str | None:
@@ -330,7 +372,7 @@ def _dive(
     ]
 
     trip = bundle.trip_for(dive)
-    course = _course(bundle, dive)
+    course = bundle.course_for(dive)
     return ExportDive(
         uuid=dive.uuid,
         number=dive.dive_number,
@@ -391,7 +433,7 @@ def _certifications(bundle: ExportBundle, paths: ArchivePaths | None) -> list[Ex
         # REQUIRED, and the certification carries nothing that survives without it.
         if not _speakable(certification.agency, CertificationAgency):
             continue
-        course = _course(bundle, certification)
+        course = bundle.course_for(certification)
         exported.append(
             ExportCertification(
                 uuid=certification.uuid,
@@ -440,27 +482,9 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
         ),
         (
             "courses",
-            [
-                ExportCourse(
-                    uuid=course.uuid,
-                    name=course.name,
-                    agency=CertificationAgency(course.agency),
-                    agency_other=course.agency_other,
-                    status=_sayable(course.status, CourseStatus),
-                    starts_on=course.start_date,
-                    ends_on=course.end_date,
-                    instructor_name=course.instructor_name,
-                    instructor_number=course.instructor_number,
-                    training_center=course.training_center,
-                    notes=_text(course.notes),
-                    created_at=course.created_at,
-                )
-                for course in bundle.courses
-                # `agency` only: it is the REQUIRED half, and `status` is OPTIONAL (spec
-                # §6.17), so an unrecognized status costs that field rather than the
-                # diver's whole course - see `_speakable`.
-                if _speakable(course.agency, CertificationAgency)
-            ],
+            # Every course the diver has, with no filter: `agency` and `status` are both
+            # OPTIONAL (spec §6.17), so neither can cost the record - see `_speakable`.
+            [_export_course(course) for course in bundle.courses],
         ),
         (
             "sites",
@@ -601,20 +625,6 @@ def _schedule_uuid(bundle: ExportBundle, schedule_id: int) -> uuid_pkg.UUID | No
     if schedule is None or not _speakable(schedule.kind, ServiceKind):
         return None
     return schedule.uuid
-
-
-def _course(bundle: ExportBundle, row: Dive | Certification) -> Course | None:
-    """The course a dive or certification points at, if it is in the document.
-
-    `bundle.course_for` answers the database's question - is there a course row - and this
-    answers the document's, which is narrower: a course omitted for an unspeakable `agency`
-    is not there to be referenced. `course_uuid` is OPTIONAL on both, so the link is simply
-    absent, exactly as it is for a dive whose course was deleted.
-    """
-    course = bundle.course_for(row)
-    if course is None or not _speakable(course.agency, CertificationAgency):
-        return None
-    return course
 
 
 async def write_divejson(

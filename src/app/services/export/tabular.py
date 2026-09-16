@@ -314,7 +314,10 @@ def write_courses_csv(bundle: ExportBundle) -> Iterator[str]:
                 course.name,
                 # `agency_other` is the whole point of `OTHER`, so the column shows the
                 # agency the diver actually named rather than the enum's escape hatch -
-                # the same rule `write_certifications_csv` applies.
+                # the same rule `write_certifications_csv` applies. A course that ran under
+                # no agency yields `None` and so an empty cell, which is how every other
+                # unrecorded value in these files reads; the certification column never
+                # can, its column being `NOT NULL`.
                 course.agency_other or course.agency,
                 course.status,
                 None if course.start_date is None else course.start_date.isoformat(),

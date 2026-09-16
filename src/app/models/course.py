@@ -29,12 +29,6 @@ class Course(Base, PublicUUIDMixin, TimestampMixin):
     id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(255))
-    # Which agency's syllabus this course ran - see `CertificationAgency` in
-    # `schemas/certification.py`, reused rather than duplicated so a course and the cards
-    # it issued can never name the same agency two ways. Stored as a plain string with no
-    # DB `CHECK`, exactly like `certification.agency`: the Pydantic field already rejects
-    # unknown values on every write path, including the admin panel's.
-    agency: Mapped[str] = mapped_column(String(32))
     # Where the course got to - see `CourseStatus` in `schemas/course.py`, the single
     # source of truth for the vocabulary, and a closed one for the same reason `agency` is:
     # free text here would make a status badge impossible. No DB `CHECK`, as above.
@@ -43,7 +37,19 @@ class Course(Base, PublicUUIDMixin, TimestampMixin):
     # a default here would be a second copy of that choice, in the layer that cannot
     # explain it.
     status: Mapped[str] = mapped_column(String(32))
-    # The agency's name when `agency == "other"`, same pairing rule as a certification's.
+    # Which agency's syllabus this course ran - see `CertificationAgency` in
+    # `schemas/certification.py`, reused rather than duplicated so a course and the cards
+    # it issued can never name the same agency two ways. Stored as a plain string with no
+    # DB `CHECK`, exactly like `certification.agency`: the Pydantic field already rejects
+    # unknown values on every write path, including the admin panel's.
+    #
+    # Nullable, where `certification.agency` is not - see *"A course may have no agency,
+    # and a certification may not"* in DECISIONS.md. It sits after `status` rather than
+    # before it because `MappedAsDataclass` generates `__init__` in declaration order and
+    # every column with a `default` has to follow every column without one.
+    agency: Mapped[str | None] = mapped_column(String(32), default=None)
+    # The agency's name when `agency == "other"`, same pairing rule as a certification's -
+    # and, a course's agency being optional, unnameable without one.
     agency_other: Mapped[str | None] = mapped_column(String(64), default=None)
     # Both nullable, diverging from `Trip.start_date`: a `planned` course has no dates
     # yet, and a referral course spans months with fuzzy edges. The ordering invariant

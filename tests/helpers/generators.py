@@ -85,7 +85,13 @@ def create_certification(
     )
 
 
-def create_course(db: Session, user: models.User, *, start_date: date | None = date(2026, 3, 2)) -> models.Course:
+def create_course(
+    db: Session,
+    user: models.User,
+    *,
+    start_date: date | None = date(2026, 3, 2),
+    agency: str | None = "tdi",
+) -> models.Course:
     """A training course of this user's.
 
     Uniquely named like the rest of these, though for a weaker reason than most: `course`
@@ -95,14 +101,16 @@ def create_course(db: Session, user: models.User, *, start_date: date | None = d
 
     `start_date` is settable and nullable because a dateless course is the case
     `_LIST_ORDER` in `crud_courses` exists for - the `NULLS LAST` half of that ordering has
-    no other way to be exercised.
+    no other way to be exercised. `agency` is settable for the same shape of reason: a
+    course that ran under none is a state only this column can hold, `certification.agency`
+    staying `NOT NULL`.
     """
     return _persist(
         db,
         models.Course(
             user_id=user.id,
             name=f"Advanced Nitrox {uuid7().hex[-8:]}",
-            agency="tdi",
+            agency=agency,
             status="completed",
             start_date=start_date,
             notes="",
