@@ -35,8 +35,8 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
     bucket depending on `FILE_STORAGE_BACKEND`. `services/dive_files.py` is still the only
     module that knows an export is stored at all, and the second backend arrived without
     it changing - see *"File payloads live on the files volume, not in Postgres"* in
-    `DECISIONS.md` for why they left Postgres, and *"A second backend, because the disk
-    stopped being shared"* for why there are now two places they can land.
+    `DECISIONS.md` for why they left Postgres, and *"A second backend, because the hosted
+    disk is not shared"* for why there are now two places they can land.
 
     A separate table rather than columns on `dive`: `dive` is read by `get_multi` on the
     hot list path, and the file's metadata has no business riding along with every page of

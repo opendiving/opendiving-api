@@ -52,8 +52,7 @@ dependencies = [
     # dependency rather than an extra, even though most installs never select that backend:
     # the shipped image is built with `uv sync --locked` and no extras, so an s3-only extra
     # would be absent from the one place the hosted instance runs. Its cost is botocore's
-    # ~26 MB of service models in every image; `DECISIONS.md`, *"A second backend, because
-    # the disk stopped being shared"*, weighs that against signing the requests by hand.
+    # ~26 MB of service models in every image; `DECISIONS.md`, *"A second backend, because the hosted disk is not shared"*, weighs that against signing the requests by hand.
     "boto3>=1.43.93",
 ]
 

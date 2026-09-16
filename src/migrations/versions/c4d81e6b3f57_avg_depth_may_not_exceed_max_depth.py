@@ -5,8 +5,8 @@ wrong number. Until now the app had no comparison anywhere - only the independen
 `ck_dive_max_depth_positive` and `ck_dive_avg_depth_positive` - so `POST /dive` accepted
 `avg_depth` 30 with `max_depth` 20, and the export then produced a document the DiveJSON
 reference validator rejects (spec §6.2, and §3's cross-member arithmetic list). See *"A
-dive's average depth cannot exceed its maximum, and now nothing can store one that does"*
-in DECISIONS.md.
+dive's average depth cannot exceed its maximum, and nothing can store one that does"* in
+DECISIONS.md.
 
 **Existing violations are repaired rather than met with a failed upgrade.** A migration
 that simply added the constraint would abort on the first offending row and take the

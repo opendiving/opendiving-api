@@ -57,7 +57,7 @@ already leads on it, and `Index("ix_dive_dive_site_dive_id_position", "dive_id",
 `get_dive_sites_for_dive`/`get_dive_sites_for_dives` including their `ORDER BY position`.
 `dive_site_id` keeps its own index.
 
-## Hot list queries needed composite indexes, not independent single-column ones
+## Hot list queries have composite indexes, not independent single-column ones
 
 The list endpoints (`_cached_read_dives`, `read_trips`, `read_dive_sites`) run
 `WHERE user_id = ... ORDER BY <col> LIMIT ... OFFSET ...`; Postgres uses one index per scan and
@@ -88,7 +88,7 @@ whose value is `None`, so a field declared `Field(default=None)` without `X | No
 annotation passes the first pass and fails the second. Always pair `Field(default=None)` with an
 `X | None` annotation.
 
-## `DiveMixture.po2` was replaced with `helium`
+## `DiveMixture` records `helium`, not a `po2` set-point
 
 A mixture records a `helium` percentage (for trimix), not a PO₂ set-point; there is no `po2` column.
 `helium` is handled identically to `oxygen` on the model, `DiveMixtureBase` and the web app's
@@ -134,7 +134,7 @@ skips the list when `update_data` is empty. The factory covers only read/cache/i
 bodies stay per resource. `dives.py` keeps `_cached_read_dives`/`_cached_read_dive`, since its reads
 add filters, related uuids and mixtures. New simple owned resources use `OwnedResourceCache`.
 
-## The dive form's pickers search server-side, because they used to fetch whole tables
+## The dive form's pickers search server-side via `search=`, never fetching whole tables
 
 `GET /dive-sites`, `GET /trips` and `GET /gear-items` take `search=`, a case-insensitive substring
 match, with `items_per_page` capped at 100 (`MAX_DIVE_SITES_PER_PAGE`, `MAX_TRIPS_PER_PAGE`,
@@ -149,7 +149,7 @@ wildcard still purges it; routes lowercase and strip the term first. A resource 
 `search_columns` passes no `search` kwarg, or `@cache` would `KeyError`. Gear calls
 `search_clause`/`search_multi` directly, not through `OwnedResourceCache`.
 
-## `/{username}/...` resource routes were flattened to `/...` + explicit ids
+## Resource routes are flat, `/...` + explicit ids, never `/{username}/...`
 
 Resource routes are flat and take ids, never a username. `POST /dive`, `/trip`, `/dive-site` carry
 `user_id` in the body (`DiveCreateRequest`/`TripCreate`/`DiveSiteCreate`); the handler checks it
@@ -176,7 +176,7 @@ cached GET into a private `_cached_read_*` helper (pure fetch, no auth) and a pu
 checks ownership first. Never put authorization inside a `@cache`-decorated function; gate access in
 the uncached caller.
 
-## Single-resource path params were renamed from `{resource}_uuid` to `{uuid}`
+## Single-resource path params are a bare `{uuid}`, not `{resource}_uuid`
 
 Single-resource path parameters are a bare `{uuid}`: `/trip/{uuid}`, `/dive-site/{uuid}`,
 `/dive/{uuid}`, `/user/{uuid}` — the resource name is already the path segment, so `{trip_uuid}`
@@ -188,11 +188,11 @@ match, because FastAPI requires the handler parameter to match the placeholder. 
 module is imported as `uuid_pkg` in these files so a parameter can be named `uuid` without shadowing
 it.
 
-## `GET /dive-stats` was moved under `/user/{uuid}/...`
+## `GET /user/dive-stats` lives in `users.py`; there is no `/dive-stats` router
 
 `read_dive_stats` lives in `api/v1/users.py` under the `"user"` tag, one more current-user route at
-`GET /user/dive-stats` (see *Current-user routes moved off `/user/me` and `/user/{uuid}` onto a bare
-`/user`*). There is no separate `dive_stats.py` router module and no `"dive-stats"` tag;
+`GET /user/dive-stats` (see *Current-user routes live at a bare `/user`, not `/user/me` or
+`/user/{uuid}`*). There is no separate `dive_stats.py` router module and no `"dive-stats"` tag;
 `api/v1/__init__.py` registers none. `schemas/user_dive_stats.py`, `crud/crud_user_dive_stats.py`
 and `services/dive_stats.py` (the recalculation invoked from `dives.py`) are internals and keep
 their names. Unlike `/dives`, `/trips`, `/dive-sites`, the route takes no other id that would need
@@ -233,7 +233,7 @@ the index, so counting it forces a heap fetch per row and defeats the covering i
 `EXPLAIN (ANALYZE, BUFFERS)` show `Index Only Scan using ix_dive_user_id_stats` with
 `Heap Fetches: 0`. Revisit if a bulk-import endpoint lands (recompute once per batch).
 
-## The Arq worker now does one real thing: purging expired `token_blacklist` rows
+## The Arq worker runs one job: purging expired `token_blacklist` rows
 
 The worker (`core/worker/`) runs one job: `purge_expired_tokens` (`core/worker/functions.py`), an
 hourly cron (`core/worker/settings.py`, `arq.cron.cron(..., minute=0, run_at_startup=True)`)
@@ -268,7 +268,7 @@ and one `db.commit()`; `IntegrityError` rolls back into `DuplicateValueException
 is `None`. Only `POST /auth/refresh` is cookie-authenticated, via an httpOnly, `samesite="lax"`
 `refresh_token` cookie.
 
-## `/refresh` and `/logout` moved from their own `login.py`/`logout.py` modules into `/auth`
+## `/refresh` and `/logout` live under `/auth` in `auth.py`, not in `login.py`/`logout.py` modules
 
 `POST /auth/refresh` and `POST /auth/logout` live in `api/v1/auth.py` on its
 `APIRouter(prefix="/auth", tags=["auth"])`, beside `/auth/email/request` and `/auth/google`; there
@@ -370,7 +370,7 @@ costs one click on "Request a new sign-in link".
 an applied change; sign-in would mint a second credential. `POST /auth/email/verify` answers 401 for
 a used link; the web precheck never sends one.
 
-## Current-user routes moved off `/user/me` and `/user/{uuid}` onto a bare `/user`
+## Current-user routes live at a bare `/user`, not `/user/me` or `/user/{uuid}`
 
 Current-user routes resolve the account from the access token at a bare `/user`: `GET /user`
 (`read_current_user`), `PATCH /user`, `DELETE /user`, `GET /user/dive-stats`. There is no `{uuid}`
@@ -385,7 +385,7 @@ Public-profile-shaped replacements are separate work, and public dive stats woul
 such as `GET /profile/{uuid}/dive-stats`. `opendiving-web` (`authAPI.getCurrentUser`/`updateProfile`
 in `lib/api/auth.ts`) and `opendiving-ios` (`AuthAPI.currentUser()`) match.
 
-## `CORSMiddleware` was missing entirely - every cross-origin request 405'd on preflight
+## `CORSMiddleware` is gated on `FrontendSettings`; without it every preflight is a 405
 
 `create_application` (`core/setup.py`) adds `CORSMiddleware` gated on
 `isinstance(settings, FrontendSettings)`, like the `ClientSideCacheSettings`/`EnvironmentSettings`
@@ -400,7 +400,7 @@ their `settings` union. `tests/test_cors.py` builds its own app with
 `client` fixture, whose lifespan runs `alembic upgrade head` against `POSTGRES_URI`; checking
 middleware headers on an `OPTIONS` request needs no Postgres.
 
-## `/dive/parse-xml` renamed to `/dive/parse`, added a Suunto JSON parser
+## `/dive/parse` accepts Suunto XML and Suunto JSON; there is no `/dive/parse-xml`
 
 `POST /dive/parse` (`parse_dive` in `dives.py`) accepts Suunto DM5-style XML (`SuuntoXmlParser`,
 `services/dive_parsers/suunto_xml.py`) and Suunto app/Ocean JSON (`SuuntoJsonParser`,
@@ -431,10 +431,10 @@ literal's exact digits. Fields with no source: `State` ("Primary", "Deco") stand
 `StartPressure`/`EndPressure`/`TransmitterID` are optional per gas and come back `None` when absent.
 `duration` falls back like `avg_depth` (`header.get("DepthAverage", depth.get("Avg"))`):
 `header.get("DiveTime", header.get("Duration"))`, because D5-style exports carry only a top-level
-`Duration`. `ascent_time` has no fallback — see *`ParsedDiveSchema`/`DiveMixtureSchema` trimmed to
-fields the backend models actually support*.
+`Duration`. `ascent_time` has no fallback — see *`ParsedDiveSchema`/`DiveMixtureSchema` carry only
+fields the backend models support*.
 
-## `ParsedDiveSchema`/`DiveMixtureSchema` trimmed to fields the backend models actually support
+## `ParsedDiveSchema`/`DiveMixtureSchema` carry only fields the backend models support
 
 `ParsedDiveSchema` (`schemas/parsed_dive.py`) carries only what `Dive` (`models/dive.py`) persists —
 `avg_depth`, `bottom_temperature`, `dive_number`, `duration`, `max_depth`, `start_time`, `mixtures`
@@ -529,7 +529,7 @@ and the management page's full view never serve each other — the same reason `
 keys on its `trip_id`/`dive_site_id`/`gear_item_id` filters. See "Renaming a dive site or gear item
 invalidates that user's dive caches".
 
-## `GET /dives` gained a `gear_item_uuid` filter alongside `dive_site_uuid`
+## `GET /dives` takes a `gear_item_uuid` filter alongside `dive_site_uuid`
 
 `crud_dives`' `custom_filters` has a `with_gear_item` entry mirroring `at_dive_site`: one
 `id IN (SELECT dive_id FROM dive_gear_item WHERE gear_item_id = ...)` condition rather than a
@@ -721,7 +721,7 @@ Every read route resolves the row and checks ownership *uncached* first, then ca
 `_cached_read_*` helper — see the `@cache`/authorization gotcha under "All
 `/user*`/`/users`/`/dive/parse` endpoints require auth".
 
-## Every service cache key starts with `user_{id}_gear_`, so invalidation needed no change
+## Every service cache key starts with `user_{id}_gear_`, so `invalidate_gear_caches` sweeps them
 
 The five service cache keys (`..._gear_service_schedules:page_...`,
 `..._gear_service_schedule:{uuid}`, `..._gear_service_records:page_...`,
@@ -799,7 +799,7 @@ The digest query and `get_due_overview_for_user` exclude on three flags, each fo
 or touching the item. Each flag answers a distinct question — is this *item* retired, is this *rule*
 paused, is this *user* opted out.
 
-## `user.gear_service_emails` is the only new column on an existing table
+## `user.gear_service_emails` is an opt-out with `server_default="true"`
 
 Opt-*out*, not opt-in: a reminder nobody switched on never arrives, and the feature exists to reach
 a diver who isn't in the app.
@@ -1075,7 +1075,7 @@ which sits beside `Cylinders[].Pressure` but is the device's *ambient* sensor.
 A DM5 `<Pressure>` sample has no cylinder identity, so it becomes a single-entry list labelled gas
 number 1, as the JSON export does; `<TransmitterId>` is a device serial.
 
-## DM5 XML expresses every pressure in millibar, and `_parse_mixture` used to read them as bar
+## DM5 XML expresses every pressure in millibar, and `_parse_mixture` reads them as millibar, not bar
 
 DM5 XML carries every pressure in millibar — `DiveMixture/StartPressure` `205203`, sample
 `<Pressure>` `205200`, `CylinderWorkPressure = 200000`, `SurfacePressure = 105500` — cross-checked
@@ -1088,7 +1088,7 @@ For stored `dive_mixture` rows in the millibar range, dividing by 1000 is the un
 correction. "Above ~500 bar" is a heuristic for spotting a factor-of-1000 error, not a validity
 bound: `ck_dive_mixture_start_pressure_range` and `ck_dive_mixture_end_pressure_range` band both
 fields at **350 bar**, so a database cleaned to ~500 alone still holds 351–500 bar rows that fail
-the `ALTER`. See *"A cylinder pressure is a bounded field, and every layer that writes one now says
+the `ALTER`. See *"A cylinder pressure is a bounded field, and every layer that writes one says
 so"*.
 
 ## Profile extraction is idempotent on (file digest, extractor version), and never fails an upload
@@ -1200,10 +1200,10 @@ Units are converted at the parser: XML writes bar (`1.4`), JSON Pascal (`140000`
 ## `DiveMixture.role` is a structured column, not the gas-name synthesis that was rejected
 
 Suunto's `Gases[].State` ("Primary") describes a gas's role, not a label a diver recognizes, so it
-never feeds a name (`DiveMixture.name` is gone). Role gets its own nullable `VARCHAR(20)` column
-typed by `GasRole` (`schemas/dive_mixture.py`), a `StrEnum` like `GearType` with no mirroring DB
-`CHECK`. Shown beside `gasName()`'s "EAN50" as a "deco" badge; editable on the form, since the file
-usually doesn't say.
+never feeds a name (`DiveMixture.name` is not a field: the label is a pure function of the
+fractions). Role gets its own nullable `VARCHAR(20)` column typed by `GasRole`
+(`schemas/dive_mixture.py`), a `StrEnum` like `GearType` with no mirroring DB `CHECK`. Shown beside
+`gasName()`'s "EAN50" as a "deco" badge; editable on the form, since the file usually doesn't say.
 
 - Suunto JSON: `Header.Diving.Gases[].State` through `_GAS_ROLE_BY_STATE`, not a `GasRole(state)`
   cast, so an unseen value comes out `None`; "Primary" maps to `bottom`. Not the `State: "OC"` under
@@ -1361,7 +1361,7 @@ separate from `_validate_series`. Rebasing clamps at zero, so the opening
 `Field(max_length=...)`, since `extract_profile` never fails the upload; `label` is file-controlled
 text.
 
-## `PROFILE_EXTRACTOR_VERSION` 2, and the manual DDL for the two summary columns
+## A `PROFILE_EXTRACTOR_VERSION` bump re-extracts the corpus, and the two summary columns are nullable
 
 `PROFILE_EXTRACTOR_VERSION` is 2 because the same bytes now yield different samples;
 `should_extract` re-extracts anything behind it, so the existing script picks the corpus up
@@ -1604,7 +1604,7 @@ Two invocations, not one: the app is reachable as `app.*` (via `mypy_path`) and 
 tests import it), and `mypy src tests` refuses with "source file found twice under different module
 names".
 
-## The runtime image now contains the app, and ships gunicorn
+## The runtime image contains the app, and ships gunicorn
 
 The final stage `COPY`s the application package into `/code` alongside `/app/.venv`, so
 `app.main:app` imports without a bind mount. `docker-compose.yml` still bind-mounts `./src/app` over
@@ -1614,7 +1614,7 @@ The final stage `COPY`s the application package into `/code` alongside `/app/.ve
 any write. `docker-compose.yml` overrides `command:` with the uvicorn `--reload` form, so local
 development is unchanged.
 
-## Two things raced once the image ran four workers
+## The lifespan runs once per gunicorn worker, so nothing in it may race a sibling
 
 `gunicorn -w 4` runs the FastAPI lifespan once per worker: deployment steps do not belong in it, and
 a startup check that can fail spuriously is worse than none.
@@ -1686,7 +1686,7 @@ startup regardless of the `cast=` passed to `config()`. `CRUD_ADMIN_ALLOWED_IPS`
 `CRUD_ADMIN_ALLOWED_NETWORKS` are strings for the same reason. Tests patching the attribute cannot
 catch this; `TestTheSettingParsesFromTheEnvironment` goes through `Settings`.
 
-## `ClientCacheMiddleware` inferred "not user-specific" from the wrong signal
+## `ClientCacheMiddleware` marks `public` only on a safe method, and never overwrites an explicit header
 
 Whether the request carries an `Authorization` header is the wrong signal for public cacheability.
 The endpoints that mint credentials — `POST /auth/email/verify`, `/auth/google`, `/auth/complete`
@@ -1768,7 +1768,7 @@ never sends `None`, and the server-constructed
 `AuthenticationProviderUpdate`/`AuthenticationRequestUpdate`); a companion test fails on any
 `*Update` class in neither list.
 
-## The `trip_uuid` detach path has a test now
+## The `trip_uuid` detach path is pinned by `tests/test_dive_update.py`
 
 `PATCH /dive/{uuid}` detaches a dive from its trip only through
 
@@ -2011,7 +2011,7 @@ never submit. Zod `min(0)` is rejected: it stores a cylinder breathed from 0 bar
 The guard is on the schema, not in `SuuntoXmlParser`: the fact is about the field, not the format.
 `<= 0` also covers a negative gauge.
 
-## A cylinder pressure is a bounded field, and every layer that writes one now says so
+## A cylinder pressure is a bounded field, and every layer that writes one says so
 
 A `start_pressure` of 0 must never reach the database. `DiveMixtureSchema` nulls a parsed 0, but
 without the rest the API accepts any float, `dive_mixture` carries only the ordering constraint, and
@@ -2103,7 +2103,7 @@ The parse layer follows: `_drop_unpressurized` nulls anything outside `(0, 350]`
 `TestEveryParsedPressureSatisfiesTheRequestSchema` drives a real parser with out-of-range files,
 since no corpus fixture produces one.
 
-## Cylinder pressure bounds: No backfill, and what this changed for clients
+## Cylinder pressure bounds: No backfill, and an out-of-band pressure is a 422 for clients
 
 No stored row violates either bound, so the constraints validate as added. Do not re-run the earlier
 import fix's `UPDATE ... WHERE start_pressure <= 0 AND end_pressure <= 0`.
@@ -2304,10 +2304,10 @@ failing the per-tank checks is left out, its seconds a reported shortfall; `deri
 drops zero-length stretches so such cylinders reach the refusal.
 
 `sac_bar_per_min` is null here, bar/min being a rate per cylinder volume, except a flagged
-`parallel` set of equal volumes (see *"The pooled `sac_bar_per_min`, and why the equal-volume case
-reverses a recorded rejection"*). `resolve_gas_use` is the only entry point.
+`parallel` set of equal volumes (see *"The pooled `sac_bar_per_min` exists only for a flagged
+parallel set of equal volumes"*). `resolve_gas_use` is the only entry point.
 
-## `PROFILE_EXTRACTOR_VERSION` 3, and the manual DDL for `gas_attribution`
+## A stored profile is a pure function of `PROFILE_EXTRACTOR_VERSION`, and `gas_attribution` is nullable
 
 Version 3 covers the new column and `_downsample_series` pinning each channel's first and last
 sample (see *"Profiles are capped at 1 200 points"*); a stored profile is a pure function of its
@@ -2327,7 +2327,7 @@ way out degrades an older payload to "no per-tank figure" with a warning, not a 
 unlike `data`: a few integers read on every dive detail; fetched by its own narrow query, not
 `get_profile_infos_for_dives`, because `gas_use_history` needs only this column.
 
-## `DiveMixture.name` is gone
+## `DiveMixture.name` is not a field: the label is a pure function of the fractions
 
 `DiveMixture` carries no free-text cylinder label: not in `DiveMixtureBase`/`DiveMixtureUpdate`, not
 in `DiveMixtureSchema`, and no parser passes `name=`. The label a diver recognizes is a pure
@@ -2381,7 +2381,7 @@ The writers stay generators: the spool bounds what is resident, the generators w
 `dive_profile.data`, `dive_file.data` and `certification_file.data` one row at a time — the
 package's one deliberate N+1.
 
-## What UDDF 3.2.2 has no slot for, and what the plan got wrong about it
+## What UDDF 3.2.2 has no slot for, and what it forces
 
 Settled against the vendored `tests/fixtures/uddf/uddf_3.2.2.xsd`.
 
@@ -2663,7 +2663,7 @@ half is rewritten: parentheses added to the unbound form fail `ruff format --che
 the bound form they are a `SyntaxError` ("multiple exception types must be parenthesized when using
 'as'"). Check for an `as` before concluding anything about a clause.
 
-## Trip locations are a value-object child table, and `trip.location` is gone
+## Trip locations are a value-object child table, not a `trip.location` column
 
 `trip_location` holds a trip's places as ordered rows (name, `display_name`, optional position and
 bounding box); `trip.location` is gone. Rows are value objects: no `uuid`, no `PublicUUIDMixin`, no
@@ -2721,7 +2721,7 @@ maintainer-facing reason for the bare import lives in the HTML comment atop the 
 it; moving it is a separate change. The web repo's extra reason (`next dev` writes a managed block)
 does not apply: nothing generates into these files, and `mdformat` treats `AGENTS.md` like any doc.
 
-## GPS from an import lands on the dive, and the plan that said otherwise was wrong twice
+## GPS from an import lands on the dive, not on the dive site
 
 `dive` carries `entry_latitude`/`entry_longitude`/`exit_latitude`/`exit_longitude`, four `Float`
 columns like `dive_site.latitude`/`longitude`. Pre-filling a new site's coordinates from the import
@@ -2820,7 +2820,7 @@ CNS/OTU scalars (*"What UDDF 3.2.2 has no slot for"*). `dives.csv` gets four col
 other import-owned readings, empty where there was no fix rather than `0`: the Null Island trap from
 the writing side.
 
-## The dive page is the map view, so `DiveSiteInfo` carries coordinates after all
+## The dive page is the map view, so `DiveSiteInfo` carries coordinates
 
 `DiveSiteInfo` carries `latitude`/`longitude`, so every dive read embeds the pins its location map
 needs; the alternative is a per-site fetch waterfall. The cost is two floats per linked site on rows
@@ -2852,7 +2852,7 @@ Anything raising in between makes `async_get_db` close the session and roll back
 `tests/test_move_dives_on_delete.py` asserts call order. No schema change: two query parameters and
 three statements over existing columns.
 
-## Move dives on delete: The count was in the response, and has since been taken back out
+## Move dives on delete: The response carries no moved-dives count
 
 Both routes answer `{"message": "Trip deleted"}` / `{"message": "Dive site deleted"}`, the bare
 `dict[str, str]` every other delete returns, with no moved-dives count: nothing reads one. The web
@@ -2928,7 +2928,7 @@ no ETag); this avoids seeding a discrepancy for whatever reads it first.
 `PATCH /dive` with only `dive_site_uuids` leaves `update_data` empty and skips `crud_dives.update`,
 so not touching `dive.updated_at` matches the per-dive call.
 
-## Move dives on delete: Cache invalidation moved on one route and not the other
+## Move dives on delete: Both routes drop the dive caches unconditionally
 
 `erase_trip` and `erase_dive_site` both drop the caller's dive caches unconditionally, plain delete
 included. A skip justified by "nothing changed" is a claim about a read path (here
@@ -2957,7 +2957,7 @@ was never handed. `resolve_trip_id_for_user`, `resolve_dive_site_ids_for_user` a
 the narrower fix; not having a row the writes refuse is the wider. With nothing hidden, echoing a
 read back destroys nothing.
 
-## The three legs that defeated "clear the link", checked one at a time
+## The three objections to "clear the link", and why none holds
 
 Three objections stand against clearing the association at delete time; none holds, and the cascade
 is that option as one `DELETE`.
@@ -2975,7 +2975,7 @@ Renumbering: only `replace_dive_sites_for_dive`, `replace_gear_items_for_dive` a
 at `max+1`, nothing reads `position` except as an `ORDER BY` key, neither join table constrains it,
 so a gap sorts identically. `replace_dive_site_on_dives` keeps its renumbering as its own invariant.
 
-## `DELETE` stopped being idempotent
+## `DELETE` is not idempotent, and a second call 404s
 
 `DELETE /trip/{uuid}` and `DELETE /dive-site/{uuid}` 404 on a second call rather than answering 200
 and honouring `move_dives_to` on an already-deleted row. Two grounds for idempotency, both gone: it
@@ -2994,7 +2994,7 @@ the whole log moved and this site is gone, or nothing happened" holds for the lo
 not for the rows underneath. No surface renders a soft-deleted dive, so there is no visible
 consequence; recorded rather than fixed. It disappears if dives ever hard-delete too.
 
-## What the cascade destroys that the soft delete kept
+## What the cascade destroys: a gear item's service history, not a schedule's receipts
 
 Deleting a gear item destroys its service history: `gear_service_record.gear_item_id` is
 `ON DELETE CASCADE`, so the records go with the item. The gear delete dialog promises exactly this —
@@ -3004,7 +3004,7 @@ does"* is why that is affordable. Deleting a schedule is gentler: its `ON DELETE
 the receipts in the item's history with `gear_service_schedule_id: null`, the state
 `GearServiceRecordRead` documents.
 
-## The indexes are the part that needed care, not the deletes
+## The ten `is_deleted` indexes are recreated plain, and a partial index cannot serve a cascade
 
 `DROP COLUMN is_deleted` silently drops every index whose predicate references it — ten across the
 five tables — and `create_all` never touches an existing table, so the migration's `CREATE INDEX`
@@ -3039,7 +3039,7 @@ CREATE INDEX ix_gear_service_record_schedule_id  ON gear_service_record (gear_se
 A nonzero orphan count means a constraint is missing, not that a sweep is needed. A name missing
 from the final listing is an index that will not come back on its own.
 
-## What stayed soft-deleted, and why
+## What is soft-deleted, and why
 
 `Dive`, `User`, `GearServiceRecord` and `Certification` keep `SoftDeleteMixin`. A dive is the
 irreplaceable record; `dive_profile` rows cascade, but `dive_file` keys files outside Postgres, read
@@ -3055,7 +3055,7 @@ unconditional `is_deleted=False` would 500 every `GET`/`PATCH`/`DELETE` through 
 the model, not a per-call flag, so a soft-deleting table added later is filtered by default; the
 accident to avoid is a deleted dive in an export.
 
-## One new failure mode: the resolve is a second statement
+## The resolve is a second statement, and a hard delete can race it
 
 Every gear-service read collects `gear_item_id`s off a page of schedules or records and resolves
 them to uuids in a separate statement. READ COMMITTED takes a snapshot per statement, so a
@@ -3071,7 +3071,7 @@ so `None` is a validation error; those are the only two shapes.
 `TestAVanishedGearItemDoesNotFiveHundred` in `tests/test_gear_service.py` stubs the two statements
 to disagree, at all four call sites.
 
-## The admin panel lost its delete on all five
+## The admin panel has no delete on the five hard-deleted models
 
 `admin/views.py` registers `Trip`, `DiveSite`, `GearItem`, `GearSet` and `GearServiceSchedule`
 without `"delete"`; `view`/`create`/`update` stay. FastCRUD's `delete` branches on the column's
@@ -3080,13 +3080,13 @@ its service records and every join row" with no cache invalidation — that live
 routes (`services/cache_invalidation.py`), leaving Redis stale for the TTL. The panel is off by
 default.
 
-## No trash bin, and this change does not close that door
+## No trash bin, and the decision is deferred
 
 There is no trash bin: nothing restores a deleted row and no endpoint names one. Deciding the real
 thing — `deleted_at`, a restore endpoint, a TTL purge job, UI — or adopting "deletes are final" as a
 stated stance is deferred, and stops being optional once there are users who are not the developer.
 
-## The service-record resolvers split, and only one of them was the same question
+## `get_gear_item_uuids_by_id` filters nothing, and no call site indexes its mapping directly
 
 `get_gear_item_uuids_by_id` filters nothing, and no call site indexes its mapping directly.
 `gear_item_uuid` is required on `GearServiceRecordRead` and `GearServiceScheduleRead`, so a miss is
@@ -3266,7 +3266,7 @@ P225 lets an entity become a row: an AphiaID item with no taxon name is dropped 
 Claims are read statement-rank first: `deprecated` skipped, `preferred` first, then serialization
 order; pinned by a test on `resolve_species`.
 
-## The timeouts are measured, and copying the geocoder's broke the feature
+## The timeouts are measured, and the geocoder's must not be copied
 
 WoRMS `like=true` searches take 6–9 s and `AphiaRecordByAphiaID` about 11 s, Nominatim milliseconds,
 so `services/geocoding_service.py`'s 5 s read and 10 s deadline must not be copied: under them
@@ -3510,7 +3510,7 @@ Seed what the writer writes. A wildcard test needs a decoy that matches only wit
 and a `matched_name` test needs the `scientific`-kind name row `resolve_species` always writes; a
 fixture simpler than the real row lets absence of input satisfy the assertion.
 
-## `species_seen` is derived at last
+## `species_seen` is computed in `recalculate_dive_stats`
 
 `species_seen` is `COUNT(DISTINCT dive_species.species_id)` over the diver's live dives, computed in
 `recalculate_dive_stats`, which already runs on every dive write, so it adds no invalidation
@@ -3547,7 +3547,7 @@ Mailpit is the opt-in `mail` compose profile (`docker compose --profile mail up`
 `127.0.0.1:8025`) so the logged magic link stays the default sign-in. `docker compose restart` does
 not re-read `env_file`; `docker compose up -d --force-recreate api` does.
 
-## Postgres is pinned to 18, and the volume mounts one level up from where it used to
+## Postgres is pinned to 18, and the volume mounts one level above `PGDATA`
 
 `docker-compose.yml` and `.github/workflows/tests.yml` both pin `postgres:18` and move together, so
 CI tests what ships. 18 because a major upgrade is a self-hoster's most painful operation and 18
@@ -3563,7 +3563,7 @@ naming the paths. For an old-layout volume, `docker compose down` and remove `po
 (`pg_dumpall` first to keep it). PG18's `initdb` enables data checksums; `pg_upgrade` requires that
 setting to match on both sides.
 
-## The `worker` service inherits `api`'s HTTP healthcheck, and had to be told not to
+## The `worker` service overrides `api`'s inherited HTTP healthcheck with `arq --check`
 
 `worker` and `api` build from one `Dockerfile`, whose `HEALTHCHECK` GETs
 `http://127.0.0.1:8000/api/v1/health/ready`. `worker` runs
@@ -3580,7 +3580,7 @@ talking to Redis. The default `health_check_interval` is an hour (TTL interval +
 Any further non-HTTP service from this image needs its own override; `admin_init` disables it (see
 *Dev compose restarts, and its third-party tags are pinned*).
 
-## The config template stopped being a working configuration
+## The config template is not a working configuration
 
 `cp src/.env.example src/.env` must not boot: a setting nobody has to touch is one nobody touches.
 
@@ -3650,7 +3650,7 @@ There is no `POSTGRES_URL` — `db/database.py` builds only from `POSTGRES_URI` 
 `SQLiteSettings` or `MySQLSettings` mixins, which no code path read. `DatabaseSettings` stays as the
 base class because `core/setup.py` dispatches on it.
 
-## `core/logger.py` is gone, and `LOG_LEVEL` configures logging for real
+## There is no `core/logger.py`; `configure_logging` in `core/config.py` reads `LOG_LEVEL`
 
 There is no `core/logger.py`; `configure_logging(level)` in `core/config.py` is the one setup,
 called by both entrypoints: `core/setup.py` for the API and `core/worker/functions.py` for the
@@ -3808,7 +3808,7 @@ load, so `TRUSTED_PROXY_IPS=172.29.0.1/16` exits `api` with
 `Error: 172.29.0.1/16 has host bits set`. Write `172.29.0.0/16`; `example.env` and the docs name the
 shape and the error. Per-IP rate limits still key on the true peer.
 
-## Staging is a deployment, so the relay guards stopped being about production
+## Staging is a deployment, so the relay guards fire on any `ENVIRONMENT` other than `local`
 
 `core.config.Settings._require_smtp_outside_local` and
 `services.email_service._refuse_to_log_credential_outside_local` fire for any `ENVIRONMENT` other
@@ -3828,7 +3828,7 @@ argument.
 `tests/test_config_safety.py` and `tests/test_email_service.py` parametrise both guards over
 `production` and `staging`; the email side pins that the raise precedes the warning.
 
-## `ADMIN_EMAIL` had a default, and `admin.com` belongs to somebody else
+## `ADMIN_EMAIL` has no default, because `admin.com` belongs to somebody else
 
 `ADMIN_EMAIL` is `str | None` with no default, `src/.env.example` ships it commented out, and
 `create_first_user` exits early naming the setting. Unset means no admin account.
@@ -3892,7 +3892,7 @@ Endpoint tests use `stub_claim` (`tests/helpers/mocks.py`), since a bare `Mock(s
 `rowcount` reads as won; `tests/test_authentication_request_claim.py` races two claims under
 `asyncio.gather` on real Postgres.
 
-## The disclosure policy names two channels, and neither was live when it was written
+## The disclosure policy names two channels, and naming a channel means making it live
 
 `SECURITY.md` names two channels in a deliberate order. GitHub private vulnerability reporting comes
 first: it needs no mail infrastructure, the thread lives on the repository where the fix lands, and
@@ -3906,7 +3906,7 @@ and `docs@` behind that rule. `opendiving-web` carries a copy of the policy; `op
 carries a third that routes on the operator/app line instead of restating this one. No org-wide
 custom security configuration exists.
 
-## A pin is a promise to renew, and nothing here was renewing them
+## A pin is a promise to renew, and Renovate is what renews them
 
 The install bundle pins `postgres:18`, `redis:8-alpine` and `caddy:2.10-alpine` to digests;
 `.github/renovate.json5` renews them. A pin nothing renews is worse than a floating tag: both change
@@ -3993,7 +3993,7 @@ cookie names. Accepted costs: the install bundle serves API and web app from one
 for public data (anonymous visitors, whom a shared cache serves, still get `public, max-age=60`),
 and the panel's static assets are `no-store` for a signed-in admin.
 
-## The public branch had to grow a `Vary`
+## The public branch carries a `Vary` built from `CREDENTIAL_HEADERS`
 
 The public branch appends `Vary: Authorization, Cookie`. The label is decided from request headers,
 and a cache not told which ones answers the next request for that URL from the entry it stored: an
@@ -4057,10 +4057,10 @@ Mastodon, Outline, PhotoPrism) all default to local disk; MinIO itself is in mai
 proprietary successor. The shape that takes a second backend is what is built: opaque string keys
 that are also valid S3 object keys, bytes in and bytes out, no caller holding a `Path`, and the
 whole filesystem in `services/blob_store.py`. `FILE_STORAGE_BACKEND` exists because the first named
-trigger — a hosted offering — fired; see *"A second backend, because the disk stopped being
+trigger — a hosted offering — fired; see *"A second backend, because the hosted disk is not
 shared"*.
 
-## A second backend, because the disk stopped being shared
+## A second backend, because the hosted disk is not shared
 
 `FILE_STORAGE_BACKEND` selects `local` (default) or `s3`, any S3-compatible store. Topology forces
 it: on the hosting platform a persistent disk attaches to one service, and the API and the worker
@@ -4116,7 +4116,7 @@ refusing, because the documented restore order has a legitimate window. `TestCli
 lifespan, so `tests/conftest.py` pins `FILE_STORAGE_DIR` to a temp directory before importing
 `src.app.main`, and `.github/workflows/tests.yml` sets it too.
 
-## File payloads: What did not change, and one thing that did by accident
+## File payloads: Download routes keep their contract, and `async_engine` is disposed both ways
 
 The download routes keep their contract: ownership check, narrow sha256 query,
 `ETag`/`If-None-Match` 304, and their own CSP with `frame-ancestors 'none'` — load-bearing because a
@@ -4410,7 +4410,7 @@ because tuning it tunes that leniency unknowingly. One Core `DELETE` with `rowco
 match. `expires_at` is indexed by a hand-written revision. Cost: a link past retention reports
 "invalid" rather than "expired"; `check_email_link` already collapses both to `valid=false`.
 
-## The ten cascades that were never declared
+## Every foreign key into `user.id` declares `ondelete="CASCADE"`
 
 Every foreign key into `user.id` declares `ondelete="CASCADE"`: `certification_user_id_fkey`,
 `dive_user_id_fkey`, `dive_file_user_id_fkey`, `dive_site_user_id_fkey`, `gear_item_user_id_fkey`,
@@ -4550,7 +4550,7 @@ one" stays on the `valid=false` branch. Only the link path has that precheck; th
 the screen after the POST. `verify_email_code` claims the request before resolving the identity, so
 a code spent reaching the restore screen is spent; the link's token stays unused until redeemed.
 
-## Account restore: One funnel, three resolve sites, and the edit that makes it work everywhere
+## Account restore: One funnel, and three resolve sites that all admit a pending-deletion account
 
 Every sign-in path ends in `_start_onboarding_or_sign_in`, so the `deletion_pending` branch lives
 there: its `else` reads `outcome.email`, `.provider`, `.name`, and an unhandled third variant dies
@@ -4728,7 +4728,7 @@ sweeper's referenced set has a third source, the only one on a nullable column, 
 filters the NULLs out. The export archive carries a root `avatar.webp`, `ZIP_STORED` like the other
 already-compressed blobs, with the usual log-and-skip on `BlobMissingError`.
 
-## The admin bootstrap named the dropped column, silently
+## The admin bootstrap's `Table` copy is drift-checked in both directions
 
 `src/scripts/create_first_superuser.py` hand-builds a Core `Table` mirroring `user`, and a column
 with a client-side `default=` goes into the INSERT whether or not the script's `data` dict names it.
@@ -4753,9 +4753,9 @@ Postgres"* anticipates; nothing at the `blob_store` layer changes for it.
 ## Species photos: Fetched once and served from here, rather than hotlinked
 
 `<img src="https://upload.wikimedia.org/…">` is rejected on the grounds web `DECISIONS.md`'s
-*"Avatars are this instance's own, and Gravatar left rather than becoming a fallback"* records — a
-third-party host in the CSP and a privacy-page disclosure — plus a third cost: every viewer's
-browser would tell Wikimedia which species they look at.
+*"Avatars are this instance's own, and there is no Gravatar fallback"* records — a third-party host
+in the CSP and a privacy-page disclosure — plus a third cost: every viewer's browser would tell
+Wikimedia which species they look at.
 
 Serving from the API needs no CSP change in either topology: `DEFAULT_API_BASE_URL` is the relative
 `/api/v1` and `img-src` lists `'self'` unconditionally (a split-origin build already adds
@@ -4909,7 +4909,7 @@ poisoned: a stamped `photo_fetched_at` over a null `photo_storage_key` is byte-f
 the rule declined, so no `--retry-failed` could tell them apart. `--force --limit` redraws the same
 first `limit` ids, pinned by `test_force_with_a_limit_redraws_the_same_slice_rather_than_advancing`.
 
-## GBIF was cut on the evidence, not deferred
+## GBIF is rejected as a photo fallback, on the evidence
 
 GBIF is rejected as a fallback for species lacking a P18. Run live, its licences come back `null` or
 CC BY-NC-ND (NonCommercial and NoDerivatives, so even a thumbnail is unsafe), `/species/match`
@@ -4940,7 +4940,7 @@ Quiet properties: it reaches through `Dive.is_deleted` as `recalculate_dive_stat
 takes no `user_id`, spells `(species_map or {}).get(uuid, -1)` since an unknown uuid resolves to
 `None`, and adds `species_{id}` to the dives cache key.
 
-## Signing stopped being a demand on contributors, and the hook learned to check
+## Signing is a maintainer's setting, and the hook checks before it blocks
 
 Contributors need not sign (`CONTRIBUTING.md`, *Pull requests*);
 `git config core.hooksPath .githooks` is a *For maintainers* step. `main`'s provenance is the squash
@@ -5128,7 +5128,7 @@ half-populate `DiveTankGasUse` against `DiveGasUse`'s whole-object-or-nothing ru
 `MAX_PLAUSIBLE_RMV` is not applied, as in `compute_gas_use`: the ceiling targets segmentation
 artefacts, this path has none, and it would break the manifolded equivalence.
 
-## `resolve_gas_use` no longer dispatches on cylinder count alone
+## `resolve_gas_use` dispatches on cylinder count first, then on the `parallel` flag
 
 Count picks the first candidate — one cylinder is `compute_gas_use`'s, several are
 `compute_multi_tank_gas_use`'s — and where the multi-tank path declines and every mixture is flagged
@@ -5143,7 +5143,7 @@ still says nothing, and the fallback is reached only through a flag no import ca
 changes only after its owner edits. All three callers (dive read, CSV export, `gas_use_history`) get
 it. Gas use stays computed on read from row-only inputs, so cache-safe.
 
-## The pooled `sac_bar_per_min`, and why the equal-volume case reverses a recorded rejection
+## The pooled `sac_bar_per_min` exists only for a flagged parallel set of equal volumes
 
 *"A multi-cylinder figure covers the cylinders it can account for"* leaves `sac_bar_per_min` null
 for several cylinders, a combined definition being practically useless. One case reverses it: a
@@ -5336,7 +5336,7 @@ randomly-named worktrees get one written at session start; that is not a counter
 file in `.claude/` is not. Do not ignore the script too: untracking a tracked file deletes it on the
 next `git pull`, and a missing hook command exits non-2, non-blocking.
 
-## Refresh tokens grew a session behind them, and `sid` is what survives rotation
+## A refresh token has a `user_session` behind it, and `sid` is what survives rotation
 
 `user_session` is the state behind a refresh token, and answers "which devices am I signed in on",
 "sign my other devices out" and "which of these is this one". The design turns on one distinction.
@@ -5362,7 +5362,7 @@ number of rows and precisely the wrong ones — every session in daily use. Only
 which row survived, not how many, can catch that. Eviction is by `last_used_at`, not `created_at`,
 departing from GitLab's oldest-deleted: a diver's oldest browser is usually their busiest.
 
-## The refresh path asks a third question now, and answers it with the same 401
+## The refresh path asks three questions and answers every failure with the same 401
 
 `POST /auth/refresh` asks whether the token verifies, whether the account is live, and whether the
 token's `sid` resolves to an unrevoked, unexpired row belonging to that subject — which is what
@@ -5372,7 +5372,7 @@ a single statement so the route has nothing to tell apart. Both lookups happen b
 token is spent, so a request answering 401 writes nothing.
 
 Access tokens are session-checked as well, in `get_current_user` — *"Revoking a session ends its
-access token too, and the read it costs was miscounted"*.
+access token too, at the cost of a third indexed read"*.
 
 ## Sessions: Everyone is signed out once, and that is the whole compatibility story
 
@@ -5600,7 +5600,7 @@ With a position, distance is the ranking, not a tie-break. Without one: exact na
 substring, then name; full ties keep file order, since `CatalogSite` is not orderable. Half a
 position is a 422, mirroring `WholeCoordinatePair`.
 
-## Dive-site catalog: The selection rules are floors, and one of them cost the research a wrong first answer
+## Dive-site catalog: The selection rules are floors, and scuba attributes decide over `leisure`
 
 The generator takes every feature carrying `sport=scuba_diving` or `scuba_diving:divespot=yes`, then
 drops businesses and indoor facilities; both exclusion sets are floors, re-derived from the tag
@@ -5814,7 +5814,7 @@ slot; rejected: `variouspieces` for both (loses the grouping) or splitting by ph
 the sub-category, and no tested reader imports the kit list under `<diver><owner><equipment>` beyond
 Subsurface's `divecomputer`. Never emitted: `compressor`, `scooter`, `rebreather`, `watch`.
 
-## `Course.cost` is gone, and money is a cross-cutting concern this app has not designed yet
+## There is no `Course.cost`, and money is a cross-cutting concern this app has not designed yet
 
 `Course.cost`, `CourseBase`'s and `CourseUpdate`'s fields, `ExportCourse`'s, both export writers'
 handling and `courses.csv`'s `cost` column are removed; revision `84bee1255635` drops it. It was
@@ -5869,7 +5869,7 @@ the wire.
 `DIVES_HEADER` in `services/export/tabular.py` and `tests/fixtures/export/dives.csv` keep a
 `duration_seconds` column: it writes `dive.duration`, a different quantity.
 
-## A dive's average depth cannot exceed its maximum, and now nothing can store one that does
+## A dive's average depth cannot exceed its maximum, and nothing can store one that does
 
 The writer must not emit a dive whose `avg_depth` exceeds `max_depth`; the DiveJSON validator
 rejects one (spec §6.2).
@@ -6168,7 +6168,7 @@ the uploaded bytes and apply converts again, deterministic except `exported_at`,
 `MAX_CONVERSION_GROUPS`/`MAX_CONVERSION_WHERES`) keeps `groups[].kind` an opaque string, never
 `StrEnum` or `Literal`: a dependency bump can add a kind.
 
-## Two readings of one Suunto file now live here, and they disagree by design
+## Two readings of one Suunto file live here, and they disagree by design
 
 `divejson` reads the Suunto app's JSON export, and so does `services/dive_parsers/suunto_json.py`.
 `POST /dive/parse` fills a form from one file and wants this app's keys, prefill shape and rounding;
@@ -6352,7 +6352,7 @@ feature, unlocks no route and reaches no row; `git grep PROJECT_OPERATED` and
 `git grep project_operated` list every branch. `tests/test_email_service.py` asserts the unset
 message as a whole-message literal. The project's hosted instance answers `project_operated: true`.
 
-## Revoking a session ends its access token too, and the read it costs was miscounted
+## Revoking a session ends its access token too, at the cost of a third indexed read
 
 `DELETE /user/session/{uuid}` stamps `revoked_at`, and `get_current_user` honours it on every
 request: after the account lookup it calls the `live_session_for` that `/auth/refresh` calls, and
@@ -6574,7 +6574,7 @@ Pinned by `TestAnUnrecognizedKindDoesNotFiveHundred` (`tests/test_gear_service.p
 collision skip and idempotence: a revision failing partway rolls back without advancing
 `alembic_version` and restarts from the top.
 
-## The WoRMS credit became a link, and the cache prefix had to move with it
+## The WoRMS credit is a link, and any edit to it is a cache-version change
 
 `_WORMS_ATTRIBUTION` (`services/species_service.py`) is
 `[World Register of Marine Species](https://www.marinespecies.org) (CC BY)`: a credit names origin
@@ -6611,7 +6611,7 @@ hook is red. `::add-mask::` per hook; status via `-w '%{http_code}'`.
 
 Migrations are fix-forward: a wrong revision gets a follow-up, never an edit.
 
-## `/api/v1/health` reports the commit, because the version stopped identifying a build
+## `/api/v1/health` reports the commit, because the version moves only on a release
 
 `APP_VERSION` comes from the installed distribution's metadata and moves only on a release, so on
 the edge channel a fortnight of merges all report `0.1.0`; a bug report needs a build identifier and
@@ -6805,7 +6805,7 @@ revision has neither the blob store nor the parsers. Stale rows read harmlessly:
 and `to_read_schema` read every channel with `.get`, so a payload with no key for a newer channel
 raises no `KeyError`, and its NULL summary columns are what `channels` means by no such curve.
 
-## The dive *detail* cache key was versioned, and the suffix went after the colon
+## The dive *detail* cache key carries no version, and any suffix goes after the colon
 
 `_cached_read_dive` is keyed `user_{user_id}_dive` with no per-key version; the per-build namespace
 (*"A deploy cannot serve the previous build's response cache"*) covers stale bodies, and the next
@@ -6914,7 +6914,7 @@ leaves a retitled PR under its old type. `.github/release.yml`'s `"*"` catch-all
 PR under *Other changes*, so silence is wrong notes weeks later. Every repository generating release
 notes from these labels carries its own copy; nothing checks they agree, so diff them.
 
-## The component release publishes itself, and the human pass moved to the product release
+## The component release publishes itself, and the product release keeps the human pass
 
 `publish-image.yml`'s release job runs `gh release create --generate-notes` with no `--draft`, so a
 `v*` tag leaves a published release. Self-hosters read the product release in
@@ -6928,7 +6928,7 @@ reading a draft, `.github/release.yml`'s category order (`breaking` before `feat
 categorisation. The job id is `publish-release` here and in `opendiving-web`; rename both at once or
 neither.
 
-## The `/openapi.json` route rebuilt the document and dropped everything but the title
+## The `/openapi.json` route serves `application.openapi()`, never a hand-rolled document
 
 `create_application` serves `/openapi.json` through `application.openapi()`, not a hand-rolled
 `get_openapi(title=…, version=…, routes=…)` call. FastAPI's own method passes on every field it

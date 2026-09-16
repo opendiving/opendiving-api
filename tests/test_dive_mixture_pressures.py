@@ -3,7 +3,7 @@
 `start_pressure` is bounded to `(0, 350]` and `end_pressure` to `[0, 350]`, and the
 asymmetry between them is the point rather than an oversight: **you cannot start a dive
 on an empty cylinder, but you can finish one on an empty cylinder.** See DECISIONS.md
-*"A cylinder pressure is a bounded field, and every layer that writes one now says so"*.
+*"A cylinder pressure is a bounded field, and every layer that writes one says so"*.
 
 Four layers write or read these numbers and they do not all answer the same question, so
 each gets its own class here:

@@ -21,8 +21,8 @@ matching the wrapping by hand.
   with `openssl rand -hex 32`. Same shape elsewhere: no `CONTACT_FORM_EMAIL` default (the endpoint
   503s unset), no `ADMIN_EMAIL` default and the line commented out (unset means the first-superuser
   script creates nothing), no missing `SMTP_HOST` allowed on any `ENVIRONMENT` but `local`, admin
-  panel commented out. See *"The config template stopped being a working configuration"* in
-  `DECISIONS.md` before adding a setting that can be silently wrong.
+  panel commented out. See *"The config template is not a working configuration"* in `DECISIONS.md`
+  before adding a setting that can be silently wrong.
 
 - Runs in: Docker Compose — `db` (postgres), `redis`, `api`, `worker` (arq), and `admin_init`
   (one-shot, seeds the admin panel before `api` starts)
@@ -94,8 +94,8 @@ matching the wrapping by hand.
   plain `git worktree add` nothing is wired to the script and the push hook is the only guard left.
   Where signing is *not* configured, commit normally and do not set it up - your commits do not need
   to be signed, because PRs are squash-merged and GitHub signs the commit that lands on `main`. If
-  signing is on and genuinely fails, report the error instead of routing around it. See *"Signing
-  stopped being a demand on contributors, and the hook learned to check"* in `DECISIONS.md`.
+  signing is on and genuinely fails, report the error instead of routing around it. See *"Signing is
+  a maintainer's setting, and the hook checks before it blocks"* in `DECISIONS.md`.
 
 Test, lint, format and type-check commands are in `CONTRIBUTING.md`.
 
@@ -131,7 +131,7 @@ something to look up, not to restate it.
   come from `new_key` (a fresh nonce per write, never derived from the row) and are stored on the
   row. The ordering rule is not optional: write the file, *then* commit the row; delete the row,
   *then* delete the blob after the commit (`delete_after_commit`). → *"File payloads live on the
-  files volume, not in Postgres"* and *"A second backend, because the disk stopped being shared"*
+  files volume, not in Postgres"* and *"A second backend, because the hosted disk is not shared"*
 
 ## Code Style — Python
 

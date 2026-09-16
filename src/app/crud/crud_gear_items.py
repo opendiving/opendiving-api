@@ -96,7 +96,7 @@ async def get_gear_item_uuids_by_id(db: AsyncSession, gear_item_ids: list[int]) 
     That window is new. Through the soft-delete era the `gear_item` row survived its own
     deletion, so this lookup could not miss whatever the timing, and indexing directly was
     safe for a reason that stopped holding when the delete became real. See
-    "The service-record resolvers split, and only one of them was the same question" in
+    "`get_gear_item_uuids_by_id` filters nothing, and no call site indexes its mapping directly" in
     DECISIONS.md for why the mapping is nonetheless still unfiltered.
     """
     if not gear_item_ids:
