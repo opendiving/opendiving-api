@@ -759,7 +759,7 @@ class TestAbsence:
         bare = document["dives"][2]
         assert set(bare) == {
             "uuid",
-            "dive_number",
+            "number",
             "started_at",
             "duration",
             "site_uuids",

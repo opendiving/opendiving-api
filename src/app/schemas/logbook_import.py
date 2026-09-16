@@ -266,7 +266,7 @@ class ImportCylinder(_ReadModel):
 
 class ImportDive(_ReadModel):
     uuid: uuid_pkg.UUID
-    dive_number: int | None = None
+    number: int | None = None
     # No offset validator, unlike `DiveCreate` in `schemas/dive.py`: an offset-less
     # `started_at` is spec §5.2's local date-time, and admitting it is the reason
     # `dive.utc_offset_minutes` became nullable. `DiveUpdate` has since dropped its
@@ -424,7 +424,7 @@ class ImportCertification(_ReadModel):
     agency: Annotated[CertificationAgency | None, _unknown_is_absent(CertificationAgency), Field(default=None)]
     agency_other: Annotated[str | None, Field(default=None, max_length=_SHORT_MAX)]
     name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
-    certification_number: Annotated[str | None, Field(default=None, max_length=_SHORT_MAX)]
+    number: Annotated[str | None, Field(default=None, max_length=_SHORT_MAX)]
     certified_on: date | None = None
     expires_on: date | None = None
     instructor_name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]

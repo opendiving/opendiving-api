@@ -5980,7 +5980,7 @@ with no `dive_count_at_service`, a dive with no `duration` and no profile, a spe
 carries an unknown value, which §5.6 reads as absent.
 
 Two derivations are allowed and reported: a dive with no `duration` takes its profile's span; one
-with no `dive_number` gets a placeholder, duplicates being legal (`DiveNumberingSummary`).
+with no `number` gets a placeholder, duplicates being legal (`DiveNumberingSummary`).
 
 `visibility` is finer in the format (a number, §6.2) than here (whole metres); a fractional value is
 dropped and reported, not rounded.
@@ -6185,9 +6185,9 @@ floor; add to it rather than reconciling.
 
 ## An `Integer` column's real bound is its width, and no `CheckConstraint` census can see one
 
-Postgres `Integer` is 32 bits and DiveJSON puts no ceiling on any integer member (`dive_number` is a
-bare `{"type": "integer"}`), so a conforming document (a converter with a unit bug, say) can hold a
-number a column cannot, and unbounded that is SQLSTATE 22003 mid-transaction, a whole logbook
+Postgres `Integer` is 32 bits and DiveJSON puts no ceiling on any integer member (a dive's `number`
+is a bare `{"type": "integer"}`), so a conforming document (a converter with a unit bug, say) can
+hold a number a column cannot, and unbounded that is SQLSTATE 22003 mid-transaction, a whole logbook
 refused; the `CheckConstraint` census cannot see it.
 
 Every reachable integer is bounded in `_DIVE_BOUNDS`, `_MIXTURE_BOUNDS`, `_plan_schedule`,

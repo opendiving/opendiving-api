@@ -160,7 +160,7 @@ _LATITUDE_LIMIT = 90.0
 _LONGITUDE_LIMIT = 180.0
 
 # Postgres `Integer` is 32-bit, and **the format puts no ceiling on any of its integer
-# members** - `dive_number` is a bare `{"type": "integer"}` in the published schema, and
+# members** - a dive's `number` is a bare `{"type": "integer"}` in the published schema, and
 # `duration`, `visibility`, the profile's own `duration` and every `values` entry carry
 # only a minimum. So a *conforming* document can hold a number this app's columns cannot,
 # and a converter with a unit bug (a duration in microseconds, a depth in micrometres) is
@@ -414,7 +414,7 @@ class _Bound:
 # position is all-or-nothing by shape.
 _DIVE_BOUNDS: tuple[_Bound, ...] = (
     _Bound(
-        "dive_number",
+        "number",
         lambda value: 0 <= value <= _MAX_DIVE_COUNT,
         f"a dive number must be between 0 and {_MAX_DIVE_COUNT}",
     ),
@@ -1417,7 +1417,7 @@ class _Planner:
             "agency": agency[0],
             "agency_other": agency[1],
             "name": certification.name,
-            "certification_number": certification.certification_number,
+            "certification_number": certification.number,
             "certified_on": certification.certified_on,
             "expires_on": certification.expires_on,
             "instructor_name": certification.instructor_name,
@@ -1658,7 +1658,7 @@ class _Planner:
             # placeholder costs nothing a diver cannot fix, while dropping the dive would
             # lose everything else it carries. Every unnumbered dive in one document
             # therefore lands on 0, not on 1, 2, 3.
-            "dive_number": bounded.get("dive_number", 0),
+            "dive_number": bounded.get("number", 0),
             "start_time": start_time,
             "utc_offset_minutes": offset_minutes,
             "duration": int(duration),

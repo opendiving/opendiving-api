@@ -181,7 +181,11 @@ class ExportDevice(BaseModel):
     name: Annotated[str | None, Field(default=None, description="What the device calls itself, as its owner set it")]
     dive_number: Annotated[
         int | None,
-        Field(default=None, ge=0, description="The device's own counter - not the diver's numbering, which is §6.2's"),
+        Field(
+            default=None,
+            ge=0,
+            description="The device's own counter - not the diver's numbering, which is §6.2's `number`",
+        ),
     ]
 
 
@@ -280,7 +284,7 @@ class ExportDive(PublicUUIDSchema):
     `profile` object - the schema closes it.
     """
 
-    dive_number: int
+    number: int
     # Offset-aware wherever the source recorded an offset, and offset-less where it did
     # not - spec §5.2's local date-time, which the writer emits verbatim from the column
     # pair rather than fabricating a zone for. `exported_at` on the envelope is the one
@@ -476,7 +480,7 @@ class ExportCertification(PublicUUIDSchema):
     agency: CertificationAgency
     agency_other: str | None = None
     name: str
-    certification_number: str | None = None
+    number: str | None = None
     certified_on: date | None = None
     expires_on: date | None = None
     instructor_name: str | None = None
