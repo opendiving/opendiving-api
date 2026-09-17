@@ -186,7 +186,7 @@ async def write_trip(
 
     # `locations` is excluded rather than filtered downstream: `TripCreateInternal` is
     # `extra="forbid"`, and locations are rows in another table, not a trip column.
-    trip_internal_dict = trip.model_dump(exclude={"user_uuid", "locations"})
+    trip_internal_dict = trip.model_dump(exclude={"locations"})
     trip_internal = TripCreateInternal(**trip_internal_dict, user_id=current_user["id"])
     created_trip = await crud_trips.create(
         db=db, object=trip_internal, schema_to_select=TripReadInternal, return_as_model=True

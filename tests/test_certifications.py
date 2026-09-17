@@ -173,9 +173,7 @@ class TestAgencyPairing:
 
     def test_create_forbids_unknown_fields(self) -> None:
         with pytest.raises(ValueError):
-            CertificationCreate(
-                user_uuid=uuid7(), agency=CertificationAgency.PADI, name="Open Water Diver", dive_count=3
-            )
+            CertificationCreate(agency=CertificationAgency.PADI, name="Open Water Diver", dive_count=3)
 
     def test_unknown_agency_is_rejected(self) -> None:
         """The `StrEnum` is the single source of truth for the vocabulary - there is no DB

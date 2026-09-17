@@ -118,7 +118,7 @@ async def write_course(
     Dives and certifications are linked to a course from their own endpoints
     (`course_uuid` on `POST`/`PATCH /dive` and `/certification`), not from here.
     """
-    course_internal = CourseCreateInternal(**course.model_dump(exclude={"user_uuid"}), user_id=current_user["id"])
+    course_internal = CourseCreateInternal(**course.model_dump(), user_id=current_user["id"])
     created = await crud_courses.create(
         db=db, object=course_internal, schema_to_select=CourseReadInternal, return_as_model=True
     )

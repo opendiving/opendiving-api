@@ -4,7 +4,7 @@ from typing import Annotated, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..core.schemas import IGNORED_USER_UUID, NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls
+from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls
 
 Latitude = Annotated[float | None, Field(default=None, ge=-90, le=90, examples=[27.8506])]
 Longitude = Annotated[float | None, Field(default=None, ge=-180, le=180, examples=[34.3136])]
@@ -71,7 +71,6 @@ class DiveSiteReadInternal(DiveSiteBase, PublicUUIDSchema):
 
 class DiveSiteCreate(DiveSiteBase, WholeCoordinatePair):
     model_config = ConfigDict(extra="forbid")
-    user_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=IGNORED_USER_UUID)]
 
 
 class DiveSiteCreateInternal(DiveSiteBase, WholeCoordinatePair):

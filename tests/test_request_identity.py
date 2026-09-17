@@ -1,20 +1,15 @@
 """A request never names its owner; the session does.
 
-Three claims, each asserted at the wire rather than a layer below it: no route in the
-application declares a `user_uuid` query parameter; a create body that carries one is
-accepted and the row is still the caller's; and a list route handed one in the query
-answers the caller's own page, never the named account's and never a 403.
+Asserted at the wire rather than a layer below it: no route in the application declares a
+`user_uuid` query parameter; a create body carrying one is refused as an unknown key,
+while one that omits it creates the caller's row; and a list route handed one in the query
+answers the caller's own page, never the named account's and never a 403. Both halves are
+also swept structurally - over the route table, and over the OpenAPI document the app
+serves - so a route or a schema written later cannot reintroduce the field unnoticed.
 
-The create half still accepts the field on purpose. All eight create schemas are
-`extra="forbid"`, and the API and the web build deploy separately, so a schema that
-stopped declaring `user_uuid` would 422 every create for whichever web build the
-instance is still serving in between. The follow-up that removes the field is what
-turns `TestACreateBodyMayStillNameAnOwner` into a 422 naming `extra_forbidden`.
-
-The routes are exercised over HTTP with a stubbed session and a stubbed data source,
-the shape `tests/test_dive_mixture_pressures.py` uses: the wire is what the previously
-deployed web build speaks, and a test that built the schema by hand would not see a
-query parameter at all.
+The routes are exercised over HTTP with a stubbed session and a stubbed data source, the
+shape `tests/test_dive_mixture_pressures.py` uses: the wire is what a client speaks, and a
+test that built the schema by hand would not see a query parameter at all.
 """
 
 import uuid as uuid_pkg
@@ -78,8 +73,8 @@ def client() -> Iterator[TestClient]:
 
     Its paths carry no `/api/v1` prefix - the routers are included directly rather than
     through `create_application`, which would start a lifespan that wants Postgres. The
-    structural sweep below is the one thing that needs the real app, and it only reads
-    the route table.
+    structural sweeps are the only things that need the real app, and they read its route
+    table and the document assembled from it, never a request.
     """
     app = FastAPI()
     for module in ROUTER_MODULES:
@@ -121,6 +116,104 @@ class TestNoRouteDeclaresAUserUuidQueryParameter:
         dives = next(route for route in iter_api_routes(real_app) if route.key == ("GET", "/api/v1/dives"))
 
         assert "items_per_page" in {query_param.name for query_param in dives.dependant.query_params}
+
+
+def _reachable(node: Any, components: dict[str, Any], seen: set[str]) -> Iterator[dict[str, Any]]:
+    """Every schema object reachable from `node`, resolving each `$ref` once.
+
+    Resolution is what makes the sweep below mean anything: a request body's `schema` is
+    a bare `{"$ref": ...}`, so a walk that did not follow it would inspect a dict with no
+    properties and pass on everything. `seen` is shared across one walk because the
+    question is whether the field appears anywhere under the body, and because a schema
+    that refers back to itself - a dive site inside a dive - would otherwise not
+    terminate.
+    """
+    if isinstance(node, list):
+        for item in node:
+            yield from _reachable(item, components, seen)
+        return
+    if not isinstance(node, dict):
+        return
+
+    ref = node.get("$ref")
+    if isinstance(ref, str):
+        name = ref.rsplit("/", 1)[-1]
+        if name not in seen:
+            seen.add(name)
+            yield from _reachable(components.get(name, {}), components, seen)
+        return
+
+    yield node
+    for value in node.values():
+        yield from _reachable(value, components, seen)
+
+
+def _request_body_properties(operation: dict[str, Any], components: dict[str, Any]) -> set[str]:
+    body = operation.get("requestBody") or {}
+    names: set[str] = set()
+    for content in (body.get("content") or {}).values():
+        for schema in _reachable(content.get("schema"), components, set()):
+            names.update(schema.get("properties") or {})
+    return names
+
+
+def _operations(document: dict[str, Any]) -> Iterator[tuple[str, dict[str, Any]]]:
+    for path, methods in document["paths"].items():
+        for method, operation in methods.items():
+            if isinstance(operation, dict):
+                yield f"{method.upper():6} {path}", operation
+
+
+class TestTheServedDocumentDeclaresNoOwner:
+    """The structural half for bodies, read off the document a client is generated from.
+
+    The HTTP tests below can only assert the eight create routes they name; the failure
+    this guards against is a *new* write schema declaring the field. Read schemas keep
+    their `user_uuid` - a row does report whose it is - so only request bodies are swept,
+    which is why this cannot be a grep over `src/app/schemas`.
+
+    The parameter half restates what the route-table sweep above already asserts, one
+    step further out. They are worth having separately: the route table is the server's
+    own view of what it accepts, and the document is what every generated client will
+    believe.
+    """
+
+    def test_no_request_body_publishes_it(self) -> None:
+        document = real_app.openapi()
+        components = document.get("components", {}).get("schemas", {})
+        offenders = sorted(
+            name
+            for name, operation in _operations(document)
+            if "user_uuid" in _request_body_properties(operation, components)
+        )
+
+        assert not offenders, (
+            "these operations accept the caller's own uuid in the body:\n"
+            + "\n".join(f"  {offender}" for offender in offenders)
+            + "\n\nThe session already names the caller - the row belongs to `current_user`."
+        )
+
+    def test_no_operation_declares_it_as_a_parameter(self) -> None:
+        document = real_app.openapi()
+        offenders = sorted(
+            name
+            for name, operation in _operations(document)
+            if "user_uuid" in {parameter.get("name") for parameter in operation.get("parameters") or []}
+        )
+
+        assert not offenders, "these operations declare the caller's own uuid as a parameter:\n" + "\n".join(
+            f"  {offender}" for offender in offenders
+        )
+
+    def test_the_body_walk_resolves_refs_at_all(self) -> None:
+        """Without this the sweep above passes for a walk that resolved nothing - every
+        request body being a bare `$ref`, an unresolved one has no properties and no
+        operation ever offends."""
+        document = real_app.openapi()
+        components = document.get("components", {}).get("schemas", {})
+        create_trip = next(operation for name, operation in _operations(document) if name.endswith("/api/v1/trip"))
+
+        assert {"name", "start_date"} <= _request_body_properties(create_trip, components)
 
 
 def _internal_trip() -> TripReadInternal:
@@ -261,25 +354,40 @@ CREATE_ROUTES = (
 )
 
 
-class TestACreateBodyMayStillNameAnOwner:
-    """The field is accepted and has no authority: whoever it names, the row is the
-    caller's. Three bodies per route - absent, the caller's own, and somebody else's -
-    because only the third distinguishes "ignored" from "happened to match".
+class TestACreateBodyMayNotNameAnOwner:
+    """No create schema declares the field and all eight are `extra="forbid"`, so a body
+    that names an owner is a 422 - the caller's own uuid included, because a field with no
+    authority is not worth a special case for the one value that happens to match.
     """
 
     @pytest.mark.parametrize("route", CREATE_ROUTES, ids=str)
-    @pytest.mark.parametrize("owner", [None, CALLER_UUID, SOMEONE_ELSE], ids=["absent", "the caller's", "another's"])
-    def test_the_row_belongs_to_the_caller(
+    @pytest.mark.parametrize("owner", [CALLER_UUID, SOMEONE_ELSE], ids=["the caller's", "another's"])
+    def test_naming_one_is_refused_and_writes_nothing(
         self,
         client: TestClient,
         monkeypatch: pytest.MonkeyPatch,
         route: CreateRoute,
-        owner: uuid_pkg.UUID | None,
+        owner: uuid_pkg.UUID,
     ) -> None:
         create = route.install(monkeypatch)
-        body = dict(route.body) if owner is None else dict(route.body) | {"user_uuid": str(owner)}
 
-        response = client.post(route.path, json=body)
+        response = client.post(route.path, json=dict(route.body) | {"user_uuid": str(owner)})
+
+        assert response.status_code == 422, response.text
+        assert [(error["type"], error["loc"]) for error in response.json()["detail"]] == [
+            ("extra_forbidden", ["body", "user_uuid"])
+        ]
+        assert create.await_args is None
+
+    @pytest.mark.parametrize("route", CREATE_ROUTES, ids=str)
+    def test_omitting_it_creates_the_callers_row(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch, route: CreateRoute
+    ) -> None:
+        """The other half of the refusal: the field is gone, not moved, and every create
+        still works without it."""
+        create = route.install(monkeypatch)
+
+        response = client.post(route.path, json=dict(route.body))
 
         assert response.status_code == 201, response.text
         assert create.await_args is not None

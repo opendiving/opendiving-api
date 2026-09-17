@@ -565,7 +565,6 @@ async def write_dive(
             "dive_site_uuids",
             "gear_item_uuids",
             "species_uuids",
-            "user_uuid",
             "trip_uuid",
             "course_uuid",
         }

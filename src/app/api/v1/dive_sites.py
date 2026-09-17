@@ -91,8 +91,7 @@ async def write_dive_site(
     if await dive_site_name_exists(db=db, user_id=current_user["id"], name=dive_site.name, location=dive_site.location):
         raise DuplicateValueException("A dive site with this name already exists at this location")
 
-    dive_site_internal_dict = dive_site.model_dump(exclude={"user_uuid"})
-    dive_site_internal = DiveSiteCreateInternal(**dive_site_internal_dict, user_id=current_user["id"])
+    dive_site_internal = DiveSiteCreateInternal(**dive_site.model_dump(), user_id=current_user["id"])
     created_dive_site = await crud_dive_sites.create(
         db=db, object=dive_site_internal, schema_to_select=DiveSiteReadInternal, return_as_model=True
     )
