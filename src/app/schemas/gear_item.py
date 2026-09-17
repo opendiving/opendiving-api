@@ -5,7 +5,13 @@ from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
+from ..core.schemas import (
+    IGNORED_USER_UUID,
+    NOTES_MAX_LENGTH,
+    PublicUUIDSchema,
+    RejectsExplicitNulls,
+    StoredVocabulary,
+)
 from .gear_service import GearServiceScheduleInfo
 
 
@@ -126,7 +132,7 @@ class GearItemReadInternal(GearItemBase, PublicUUIDSchema):
 class GearItemCreate(GearItemBase):
     model_config = ConfigDict(extra="forbid")
 
-    user_uuid: Annotated[uuid_pkg.UUID, Field(description="Public id of the user this gear item belongs to")]
+    user_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=IGNORED_USER_UUID)]
 
 
 class GearItemCreateInternal(GearItemBase):

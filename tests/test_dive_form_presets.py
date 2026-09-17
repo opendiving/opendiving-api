@@ -41,7 +41,7 @@ from src.app.api.v1.dive_form_presets import (
     write_dive_form_preset,
 )
 from src.app.core.db.migrations import alembic_config
-from src.app.core.exceptions.http_exceptions import DuplicateValueException, ForbiddenException
+from src.app.core.exceptions.http_exceptions import DuplicateValueException
 from src.app.models.dive_form_preset import DiveFormPreset
 from src.app.models.user import User
 from src.app.schemas.dive import DiveCreateRequest
@@ -184,7 +184,7 @@ class TestTheCanonicalForm:
 
     def test_a_preset_stores_the_canonical_form(self) -> None:
         preset = DiveFormPresetCreate.model_validate(
-            {"user_uuid": uuid7(), "name": "Odd order", "hidden_fields": ["notes", "altitude", "notes"]}
+            {"name": "Odd order", "hidden_fields": ["notes", "altitude", "notes"]}
         )
 
         assert preset.hidden_fields == [DiveFormField.ALTITUDE, DiveFormField.NOTES]
@@ -288,7 +288,7 @@ class TestAStoredFieldNameOutsideTheVocabulary:
     def test_writing_one_is_still_a_422(self) -> None:
         """The vocabulary is unchanged: the enum is still what every write is typed with."""
         with pytest.raises(ValidationError):
-            DiveFormPresetCreate(user_uuid=uuid7(), name="Warm water", hidden_fields=[self.ODD])
+            DiveFormPresetCreate(name="Warm water", hidden_fields=[self.ODD])
         with pytest.raises(ValidationError):
             DiveFormPresetUpdate(hidden_fields=[self.ODD])
         with pytest.raises(ValidationError):
@@ -424,8 +424,8 @@ class TestTheDefaults:
 
 
 class TestTheRoutes:
-    """Route-level behaviour that needs no database: the ownership refusal on create, and
-    the duplicate-name refusals on create and rename.
+    """Route-level behaviour that needs no database: the duplicate-name refusals on create
+    and rename.
     """
 
     def test_the_public_shape_drops_the_internal_ids(self) -> None:
@@ -440,20 +440,9 @@ class TestTheRoutes:
         assert not hasattr(public, "user_id")
 
     @pytest.mark.asyncio
-    async def test_creating_one_for_somebody_else_is_a_403(self, mock_db) -> None:
-        """Naming an account that is not the caller's is a 403, not a 404: the caller got
-        their *own* identity wrong, which is the distinction this API's status codes make.
-        """
-        caller = _caller()
-        body = DiveFormPresetCreate(user_uuid=uuid7(), name="Warm water", hidden_fields=[])
-
-        with pytest.raises(ForbiddenException):
-            await write_dive_form_preset(Mock(), body, caller, mock_db)
-
-    @pytest.mark.asyncio
     async def test_a_duplicate_name_is_refused_on_create(self, mock_db) -> None:
         caller = _caller()
-        body = DiveFormPresetCreate(user_uuid=caller["uuid"], name="Warm water", hidden_fields=[])
+        body = DiveFormPresetCreate(name="Warm water", hidden_fields=[])
 
         with patch(
             "src.app.api.v1.dive_form_presets.dive_form_preset_name_exists", new_callable=AsyncMock
@@ -736,7 +725,6 @@ class TestTheRoutesAgainstPostgres:
         caller = _caller(user_id=diver.id, user_uuid=diver.uuid)
         body = DiveFormPresetCreate.model_validate(
             {
-                "user_uuid": diver.uuid,
                 "name": "Warm water",
                 # Out of order and with a repeat, which is what the canonical rule is for.
                 "hidden_fields": ["notes", "altitude", "notes"],
@@ -761,9 +749,7 @@ class TestTheRoutesAgainstPostgres:
         await seed_default_presets(async_db, user_id=diver.id)
         await seed_default_presets(async_db, user_id=other_diver.id)
 
-        page = await read_dive_form_presets(
-            Mock(), diver.uuid, _caller(user_id=diver.id, user_uuid=diver.uuid), async_db
-        )
+        page = await read_dive_form_presets(Mock(), _caller(user_id=diver.id, user_uuid=diver.uuid), async_db)
 
         assert [row["name"] for row in page["data"]] == ["Basic", "Recreational", "Technical"]
         assert page["total_count"] == 3
@@ -778,7 +764,6 @@ class TestTheRoutesAgainstPostgres:
 
         page = await read_dive_form_presets(
             Mock(),
-            diver.uuid,
             _caller(user_id=diver.id, user_uuid=diver.uuid),
             async_db,
             page=0,
@@ -789,24 +774,10 @@ class TestTheRoutesAgainstPostgres:
         assert page["items_per_page"] <= 100
 
     @pytest.mark.asyncio
-    async def test_listing_somebody_elses_presets_is_a_403(
-        self, db: Session, async_db: AsyncSession, other_diver: User
-    ) -> None:
-        """A `user_uuid` that is not the caller's own is the caller naming *themselves*
-        wrongly, which is this API's 403 rather than its 404.
-        """
-        diver = create_user(db)
-
-        with pytest.raises(ForbiddenException):
-            await read_dive_form_presets(
-                Mock(), other_diver.uuid, _caller(user_id=diver.id, user_uuid=diver.uuid), async_db
-            )
-
-    @pytest.mark.asyncio
     async def test_reading_one_back_answers_with_what_was_stored(self, db: Session, async_db: AsyncSession) -> None:
         diver = create_user(db)
         caller = _caller(user_id=diver.id, user_uuid=diver.uuid)
-        body = DiveFormPresetCreate(user_uuid=diver.uuid, name="Warm water", hidden_fields=[DiveFormField.ALTITUDE])
+        body = DiveFormPresetCreate(name="Warm water", hidden_fields=[DiveFormField.ALTITUDE])
         created = await write_dive_form_preset(Mock(), body, caller, async_db)
 
         read_back = await read_dive_form_preset(Mock(), created.uuid, caller, async_db)
@@ -849,13 +820,13 @@ class TestTheRoutesAgainstPostgres:
         diver = create_user(db)
         caller = _caller(user_id=diver.id, user_uuid=diver.uuid)
         await write_dive_form_preset(
-            Mock(), DiveFormPresetCreate(user_uuid=diver.uuid, name="Warm water", hidden_fields=[]), caller, async_db
+            Mock(), DiveFormPresetCreate(name="Warm water", hidden_fields=[]), caller, async_db
         )
 
         with pytest.raises(DuplicateValueException):
             await write_dive_form_preset(
                 Mock(),
-                DiveFormPresetCreate(user_uuid=diver.uuid, name="WARM WATER", hidden_fields=[]),
+                DiveFormPresetCreate(name="WARM WATER", hidden_fields=[]),
                 caller,
                 async_db,
             )
@@ -872,7 +843,7 @@ class TestTheRoutesAgainstPostgres:
         diver = create_user(db)
         caller = _caller(user_id=diver.id, user_uuid=diver.uuid)
         created = await write_dive_form_preset(
-            Mock(), DiveFormPresetCreate(user_uuid=diver.uuid, name="Warm water", hidden_fields=[]), caller, async_db
+            Mock(), DiveFormPresetCreate(name="Warm water", hidden_fields=[]), caller, async_db
         )
 
         result = await patch_dive_form_preset(
@@ -891,10 +862,10 @@ class TestTheRoutesAgainstPostgres:
         diver = create_user(db)
         caller = _caller(user_id=diver.id, user_uuid=diver.uuid)
         await write_dive_form_preset(
-            Mock(), DiveFormPresetCreate(user_uuid=diver.uuid, name="Warm water", hidden_fields=[]), caller, async_db
+            Mock(), DiveFormPresetCreate(name="Warm water", hidden_fields=[]), caller, async_db
         )
         second = await write_dive_form_preset(
-            Mock(), DiveFormPresetCreate(user_uuid=diver.uuid, name="Cold water", hidden_fields=[]), caller, async_db
+            Mock(), DiveFormPresetCreate(name="Cold water", hidden_fields=[]), caller, async_db
         )
 
         with pytest.raises(DuplicateValueException):
@@ -910,14 +881,14 @@ class TestTheRoutesAgainstPostgres:
         diver = create_user(db)
         await write_dive_form_preset(
             Mock(),
-            DiveFormPresetCreate(user_uuid=diver.uuid, name="Warm water", hidden_fields=[]),
+            DiveFormPresetCreate(name="Warm water", hidden_fields=[]),
             _caller(user_id=diver.id, user_uuid=diver.uuid),
             async_db,
         )
 
         created = await write_dive_form_preset(
             Mock(),
-            DiveFormPresetCreate(user_uuid=other_diver.uuid, name="Warm water", hidden_fields=[]),
+            DiveFormPresetCreate(name="Warm water", hidden_fields=[]),
             _caller(user_id=other_diver.id, user_uuid=other_diver.uuid),
             async_db,
         )

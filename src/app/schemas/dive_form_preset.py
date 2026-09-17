@@ -6,7 +6,7 @@ from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
+from ..core.schemas import IGNORED_USER_UUID, PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
 
 
 class DiveFormField(StrEnum):
@@ -164,7 +164,7 @@ class DiveFormPresetReadInternal(DiveFormPresetBase, PublicUUIDSchema):
 class DiveFormPresetCreate(DiveFormPresetBase):
     model_config = ConfigDict(extra="forbid")
 
-    user_uuid: Annotated[uuid_pkg.UUID, Field(description="Public id of the user this preset belongs to")]
+    user_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=IGNORED_USER_UUID)]
 
 
 class DiveFormPresetCreateInternal(DiveFormPresetBase):

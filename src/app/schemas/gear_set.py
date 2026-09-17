@@ -4,7 +4,7 @@ from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls
+from ..core.schemas import IGNORED_USER_UUID, PublicUUIDSchema, RejectsExplicitNulls
 from .gear_item import GearItemInfo
 
 
@@ -53,7 +53,7 @@ class GearSetCreateRequest(GearSetBase):
 
     model_config = ConfigDict(extra="forbid")
 
-    user_uuid: Annotated[uuid_pkg.UUID, Field(description="Public id of the user this gear set belongs to")]
+    user_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=IGNORED_USER_UUID)]
     gear_item_uuids: Annotated[
         list[uuid_pkg.UUID], Field(default_factory=list, description="Public ids of the items in the set, in order")
     ]

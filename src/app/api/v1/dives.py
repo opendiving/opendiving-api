@@ -15,7 +15,6 @@ from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import (
     BadRequestException,
-    ForbiddenException,
     NotFoundException,
     UnprocessableEntityException,
 )
@@ -518,19 +517,15 @@ async def write_dive(
 ) -> DiveReadWithMixtures:
     """Log a dive, together with its gas mixtures, dive sites, gear and species in one request.
 
-    `user_uuid` must be the caller's own (403 otherwise). Every referenced trip, training
-    course, dive site and gear item must belong to the caller too: one that doesn't - or
-    doesn't exist - is a 422 naming which, not a 403, since from the caller's side the two
-    are the same
-    thing. Species are the exception, and only because the catalog is global: a species
-    uuid needs to exist, but it belongs to nobody, so there is no ownership to fail. Dive
-    sites keep the order given; index 0 is the primary site, and species keep the order
-    they were spotted in. Values the DB's domain constraints reject (a non-positive
-    duration, a mixture over 100%) also come back as 422 with the offending field named.
+    Every referenced trip, training course, dive site and gear item must belong to the
+    caller: one that doesn't - or doesn't exist - is a 422 naming which, not a 403, since
+    from the caller's side the two are the same thing. Species are the exception, and only
+    because the catalog is global: a species uuid needs to exist, but it belongs to nobody,
+    so there is no ownership to fail. Dive sites keep the order given; index 0 is the
+    primary site, and species keep the order they were spotted in. Values the DB's domain
+    constraints reject (a non-positive duration, a mixture over 100%) also come back as 422
+    with the offending field named.
     """
-    if current_user["uuid"] != dive.user_uuid:
-        raise ForbiddenException()
-
     trip_id: int | None = None
     if dive.trip_uuid is not None:
         trip_id = await resolve_trip_id_for_user(db=db, trip_uuid=dive.trip_uuid, user_id=current_user["id"])
@@ -725,7 +720,6 @@ async def _cached_read_dives(
 @router.get("/dives", response_model=PaginatedListResponse[DiveRead])
 async def read_dives(
     request: Request,
-    user_uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     page: int = 1,
@@ -738,17 +732,14 @@ async def read_dives(
 ) -> dict:
     """List the caller's dives, newest first, each with its trip, course, sites and gear.
 
-    `user_uuid` must be the caller's own (403 otherwise). The `trip_uuid`, `course_uuid`,
-    `dive_site_uuid`, `gear_item_uuid` and `species_uuid` filters are combinable, and one
+    The `trip_uuid`, `course_uuid`, `dive_site_uuid`, `gear_item_uuid` and `species_uuid`
+    filters are combinable, and one
     naming something that doesn't exist or isn't the caller's returns an empty page rather
     than an error - it reveals nothing about whether that resource exists. `dive_site_uuid`
     matches any dive that *includes* the site, since a dive can span several, and
     `species_uuid` any dive that recorded that species. Out-of-range pagination is clamped,
     not rejected.
     """
-    if current_user["uuid"] != user_uuid:
-        raise ForbiddenException()
-
     page, items_per_page = clamp_pagination(page, items_per_page)
 
     trip_id: int | None = None
@@ -790,7 +781,7 @@ async def read_dives(
     return await _cached_read_dives(
         request,
         user_id=current_user["id"],
-        user_uuid=user_uuid,
+        user_uuid=current_user["uuid"],
         db=db,
         page=page,
         items_per_page=items_per_page,
@@ -803,10 +794,10 @@ async def read_dives(
 
 
 # -------------- numbering --------------
-# All three of these are about the caller's own log as a whole, so - unlike `GET /dives`
-# and every other route here - they take no `user_uuid`, matching `/user/dive-stats` and
-# `/user/gas-use-history`. `services/dive_numbering.py` carries the reasoning for what
-# they do and, more to the point, for what they deliberately don't.
+# All three of these are about the caller's own log as a whole rather than a page of it,
+# which is why they sit beside `/user/dive-stats` and `/user/gas-use-history` in shape.
+# `services/dive_numbering.py` carries the reasoning for what they do and, more to the
+# point, for what they deliberately don't.
 
 
 @router.get("/dives/next-number", response_model=DiveNumberSuggestion)
@@ -1038,8 +1029,8 @@ async def read_dive_neighbors(
     filtered list leaves that filter behind at the first step.
 
     Chronology is `start_time`, never `dive_number` (see `services/dive_numbering.py`), and
-    only the caller's own dives are ever neighbours. 404 when no such dive exists, 403 when
-    it belongs to another user - exactly as `GET /dive/{uuid}`.
+    only the caller's own dives are ever neighbours. A dive that does not exist and one
+    that belongs to another account are the same 404, exactly as `GET /dive/{uuid}`.
     """
     dive = await _get_owned_dive(db, uuid, current_user)
 

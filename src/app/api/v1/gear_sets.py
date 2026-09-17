@@ -9,7 +9,6 @@ from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import (
     DuplicateValueException,
-    ForbiddenException,
     NotFoundException,
     UnprocessableEntityException,
 )
@@ -88,14 +87,10 @@ async def write_gear_set(
     """Create a gear set - a named bundle of the caller's gear items, with an optional
     default weight the dive form can pre-fill.
 
-    `user_uuid` must be the caller's own (403 otherwise). Every uuid in `gear_item_uuids`
-    must resolve to a gear item the caller owns; one that doesn't - or doesn't exist - is
-    a 422, since from the caller's side the two are the same thing. Set names are unique
-    per user, so reusing one is a 422.
+    Every uuid in `gear_item_uuids` must resolve to a gear item the caller owns; one that
+    doesn't - or doesn't exist - is a 422, since from the caller's side the two are the
+    same thing. Set names are unique per user, so reusing one is a 422.
     """
-    if current_user["uuid"] != gear_set.user_uuid:
-        raise ForbiddenException()
-
     if await gear_set_name_exists(db=db, user_id=current_user["id"], name=gear_set.name):
         raise DuplicateValueException("A gear set with this name already exists")
 
@@ -160,7 +155,6 @@ async def _cached_read_gear_sets(
 @router.get("/gear-sets", response_model=PaginatedListResponse[GearSetRead])
 async def read_gear_sets(
     request: Request,
-    user_uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     page: int = 1,
@@ -168,19 +162,15 @@ async def read_gear_sets(
 ) -> dict:
     """List the caller's gear sets alphabetically, each with its gear items attached.
 
-    `user_uuid` must be the caller's own (403 otherwise). The items are fetched in one
-    batched lookup across the page rather than per set. Out-of-range pagination is
-    clamped, not rejected.
+    The items are fetched in one batched lookup across the page rather than per set.
+    Out-of-range pagination is clamped, not rejected.
     """
-    if current_user["uuid"] != user_uuid:
-        raise ForbiddenException()
-
     page, items_per_page = clamp_pagination(page, items_per_page)
 
     return await _cached_read_gear_sets(
         request,
         user_id=current_user["id"],
-        user_uuid=user_uuid,
+        user_uuid=current_user["uuid"],
         db=db,
         page=page,
         items_per_page=items_per_page,

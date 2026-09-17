@@ -57,7 +57,7 @@ def _body(schema: type[WholeCoordinatePair], **overrides: Any) -> dict[str, Any]
     """A minimal valid body for either schema - `DiveSiteCreate` needs a name and an
     owner, `DiveSiteUpdate` needs nothing at all."""
     if schema is DiveSiteCreate:
-        return {"name": "Blue Hole", "user_uuid": str(USER_UUID), **overrides}
+        return {"name": "Blue Hole", **overrides}
     return dict(overrides)
 
 

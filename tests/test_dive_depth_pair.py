@@ -38,7 +38,6 @@ def _create(**overrides: Any) -> DiveCreateRequest:
         "dive_number": 1,
         "start_time": START_TIME,
         "duration": 1800,
-        "user_uuid": uuid7(),
     }
     body.update(overrides)
     return DiveCreateRequest.model_validate(body)

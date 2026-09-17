@@ -306,7 +306,6 @@ class TestMixtureFieldsAreClosed:
         }
         if request_schema is DiveCreateRequest:
             body |= {
-                "user_uuid": str(uuid7()),
                 "dive_number": 1,
                 "start_time": START_TIME.isoformat(),
                 "duration": 2048,
@@ -376,7 +375,6 @@ class TestWaterTypeAndAltitude:
     def test_create_accepts_both(self) -> None:
         values = DiveCreateRequest.model_validate(
             {
-                "user_uuid": str(uuid7()),
                 "dive_number": 1,
                 "start_time": START_TIME.isoformat(),
                 "duration": 2048,
@@ -391,7 +389,6 @@ class TestWaterTypeAndAltitude:
     def test_create_leaves_both_unset_by_default(self) -> None:
         values = DiveCreateRequest.model_validate(
             {
-                "user_uuid": str(uuid7()),
                 "dive_number": 1,
                 "start_time": START_TIME.isoformat(),
                 "duration": 2048,
@@ -410,7 +407,6 @@ class TestWaterTypeAndAltitude:
         body: dict[str, Any] = {"water_type": "soda"}
         if request_schema is DiveCreateRequest:
             body |= {
-                "user_uuid": str(uuid7()),
                 "dive_number": 1,
                 "start_time": START_TIME.isoformat(),
                 "duration": 2048,

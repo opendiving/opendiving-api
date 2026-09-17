@@ -366,7 +366,7 @@ class TestACourseThatVanishesMidWrite:
         )
         user_uuid = uuid7()
         body = CertificationCreate.model_validate(
-            {"user_uuid": str(user_uuid), "agency": "tdi", "name": "Advanced Nitrox", "course_uuid": str(uuid7())}
+            {"agency": "tdi", "name": "Advanced Nitrox", "course_uuid": str(uuid7())}
         )
 
         with pytest.raises(UnprocessableEntityException, match="Course not found"):

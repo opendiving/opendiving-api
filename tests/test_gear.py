@@ -176,7 +176,7 @@ class TestGearSchemas:
         assert GearSetUpdateRequest(gear_item_uuids=[]).gear_item_uuids == []
 
     def test_gear_set_create_defaults_to_an_empty_item_list(self) -> None:
-        assert GearSetCreateRequest(user_uuid=uuid7(), name="Rec").gear_item_uuids == []
+        assert GearSetCreateRequest(name="Rec").gear_item_uuids == []
 
     def test_gear_item_update_rejects_unknown_fields(self) -> None:
         """`extra="forbid"` keeps derived columns (`dive_count`, `archived_at`) from

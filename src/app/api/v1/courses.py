@@ -9,7 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import (
-    ForbiddenException,
     NotFoundException,
     UnprocessableEntityException,
 )
@@ -112,17 +111,13 @@ async def write_course(
 ) -> CourseRead:
     """Create a training course for the authenticated user.
 
-    `user_uuid` in the body must be the caller's own: a mismatch is a 403 rather than a
-    silent reassignment to the caller. Unlike trips, course names are **not** unique per
-    user - a course failed once and retaken later is legitimately the same name twice - so
-    there is no duplicate-name refusal here.
+    Unlike trips, course names are **not** unique per user - a course failed once and
+    retaken later is legitimately the same name twice - so there is no duplicate-name
+    refusal here.
 
     Dives and certifications are linked to a course from their own endpoints
     (`course_uuid` on `POST`/`PATCH /dive` and `/certification`), not from here.
     """
-    if current_user["uuid"] != course.user_uuid:
-        raise ForbiddenException()
-
     course_internal = CourseCreateInternal(**course.model_dump(exclude={"user_uuid"}), user_id=current_user["id"])
     created = await crud_courses.create(
         db=db, object=course_internal, schema_to_select=CourseReadInternal, return_as_model=True
@@ -171,7 +166,6 @@ async def _cached_read_courses(
 @router.get("/courses", response_model=PaginatedListResponse[CourseRead])
 async def read_courses(
     request: Request,
-    user_uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     page: int = 1,
@@ -183,21 +177,17 @@ async def read_courses(
 ) -> dict:
     """List the caller's training courses, most recent start date first.
 
-    `user_uuid` must be the caller's own (403 otherwise) - this endpoint cannot be used to
-    read another user's courses. Courses with no dates yet sort **last**, not first, so a
-    `planned` course and a back-filled one without dates stay out of the way of the log's
-    chronology. `search` matches a case-insensitive substring of the name. Out-of-range
-    pagination is clamped rather than rejected.
+    Courses with no dates yet sort **last**, not first, so a `planned` course and a
+    back-filled one without dates stay out of the way of the log's chronology. `search`
+    matches a case-insensitive substring of the name. Out-of-range pagination is clamped
+    rather than rejected.
     """
-    if current_user["uuid"] != user_uuid:
-        raise ForbiddenException()
-
     page, items_per_page = clamp_pagination(page, items_per_page)
 
     return await _cached_read_courses(
         request,
         user_id=current_user["id"],
-        user_uuid=user_uuid,
+        user_uuid=current_user["uuid"],
         db=db,
         page=page,
         items_per_page=items_per_page,

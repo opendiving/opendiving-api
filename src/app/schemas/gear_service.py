@@ -146,9 +146,8 @@ class GearServiceScheduleReadInternal(GearServiceScheduleBase, PublicUUIDSchema)
 
 
 class GearServiceScheduleCreate(GearServiceScheduleBase):
-    """Carries `gear_item_uuid` rather than `user_uuid`: ownership is derived from the
-    item the schedule hangs off, which is strictly stronger than trusting a user id in
-    the body.
+    """Ownership is derived from the item the schedule hangs off, which `gear_item_uuid`
+    names: the caller cannot reach another account's item through it.
 
     `dive_count_at_start` and every derived/notify field are absent on purpose - the
     route snapshots the former from the item and `recalculate_service_schedule` owns the

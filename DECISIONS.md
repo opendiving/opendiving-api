@@ -151,10 +151,9 @@ wildcard still purges it; routes lowercase and strip the term first. A resource 
 
 ## Resource routes are flat, `/...` + explicit ids, never `/{username}/...`
 
-Resource routes are flat and take ids, never a username. `POST /dive`, `/trip`, `/dive-site` carry
-`user_id` in the body (`DiveCreateRequest`/`TripCreate`/`DiveSiteCreate`); the handler checks it
-against `current_user["id"]` and raises `403` on mismatch. `GET /dives`, `/trips`, `/dive-sites`
-take `user_id` as a query param, checked the same way, and require auth.
+Resource routes are flat and take ids, never a username. Nothing in a request names the account a
+row belongs to: `POST /dive`, `/trip`, `/dive-site` take the owner from the session, and
+`GET /dives`, `/trips`, `/dive-sites` list the caller's own rows with no owner parameter to check.
 `GET/PATCH/DELETE /dive/{uuid}`, `/trip/{uuid}`, `/dive-site/{uuid}` fetch by id alone, then compare
 the row's `user_id` with the caller's; a missing row and someone else's row are both a 404 (*Someone
 else's row is a 404, not a 403*). FastAPI matches routes in registration order, so two handlers on
@@ -170,23 +169,21 @@ the caller's identity, `Depends(get_current_user)` goes in the route's `dependen
 no unauthenticated signup exception: `POST /user` does not exist, and a `User` row is created only
 by `POST /auth/complete` (*Unified auth flow*). `@cache` and per-request authorization do not mix:
 the decorator (`core/utils/cache.py`) returns a cached GET response before the wrapped body runs, so
-an ownership check inside a cached function never executes on a hit, and `GET /dive/{id}` or
-`GET /dives?user_id=<victim>` would serve the victim's data from Redis. `dives.py` splits each
-cached GET into a private `_cached_read_*` helper (pure fetch, no auth) and a public route that
-checks ownership first. Never put authorization inside a `@cache`-decorated function; gate access in
-the uncached caller.
+an ownership check inside a cached function never executes on a hit, and `GET /dive/{uuid}` would
+serve another account's data from Redis. `dives.py` splits each cached GET into a private
+`_cached_read_*` helper (pure fetch, no auth) and a public route that checks ownership first. Never
+put authorization inside a `@cache`-decorated function; gate access in the uncached caller.
 
 ## Single-resource path params are a bare `{uuid}`, not `{resource}_uuid`
 
 Single-resource path parameters are a bare `{uuid}`: `/trip/{uuid}`, `/dive-site/{uuid}`,
 `/dive/{uuid}`, `/user/{uuid}` — the resource name is already the path segment, so `{trip_uuid}`
-would repeat it. Body fields (`user_uuid`/`trip_uuid` on `Dive`/`Trip`/`DiveSite` payloads) and the
-`user_uuid`/`trip_uuid`/`dive_site_uuid` query params on `/dives`, `/trips`, `/dive-sites` keep
-their prefixes: they name a *different* resource than the path segment, so there the prefix
-disambiguates. Each module's `_cached_read_*` helper and its `@cache(..., resource_id_name="uuid")`
-match, because FastAPI requires the handler parameter to match the placeholder. The stdlib `uuid`
-module is imported as `uuid_pkg` in these files so a parameter can be named `uuid` without shadowing
-it.
+would repeat it. A body field or query param that names a *different* resource keeps its prefix —
+`trip_uuid` and `course_uuid` on a dive payload, `dive_site_uuid` and `gear_item_uuid` on `/dives` —
+because there the prefix disambiguates rather than repeating the path segment. Each module's
+`_cached_read_*` helper and its `@cache(..., resource_id_name="uuid")` match, because FastAPI
+requires the handler parameter to match the placeholder. The stdlib `uuid` module is imported as
+`uuid_pkg` in these files so a parameter can be named `uuid` without shadowing it.
 
 ## `GET /user/dive-stats` lives in `users.py`; there is no `/dive-stats` router
 
@@ -711,11 +708,11 @@ and "`/user/{username}/...` routes were changed to `/user/{id}/...`": each resou
 `uuid`, and nesting would give it a second identity. Filtering by item is a query parameter, like
 `GET /dives?gear_item_uuid=`.
 
-Create bodies carry `gear_item_uuid` rather than `user_uuid`: ownership derived from the item is
-strictly stronger than trusting a user id in the body, since the caller cannot name an item that
-isn't theirs. `_owned_gear_item` answers identically (422, "Gear item not found.") for "doesn't
-exist" and "isn't yours", mirroring `_resolve_item_ids` in `gear_sets.py`, so other users' gear
-uuids stay unprobeable.
+Create bodies carry `gear_item_uuid`, and ownership is derived from it: the caller cannot name an
+item that isn't theirs, which is the same rule every other create body follows from the session.
+`_owned_gear_item` answers identically (422, "Gear item not found.") for "doesn't exist" and "isn't
+yours", mirroring `_resolve_item_ids` in `gear_sets.py`, so other users' gear uuids stay
+unprobeable.
 
 Every read route resolves the row and checks ownership *uncached* first, then calls a private
 `_cached_read_*` helper — see the `@cache`/authorization gotcha under "All
@@ -1580,8 +1577,8 @@ missing and not-yours alike, the uuid being a body reference, not the addressed 
 
 Someone else's row is a 404, not a 403: `fetch_owned_or_raise` raises `NotFoundException` with one
 message for both, since a 403 is an oracle, matching the empty page `GET /dives`'
-`trip_uuid`/`dive_site_uuid`/`gear_item_uuid` filters return. The `user_uuid` mismatch 403s in
-`create_dive`/`read_dives` and siblings stay: naming yourself wrongly discloses nothing.
+`trip_uuid`/`dive_site_uuid`/`gear_item_uuid` filters return. Nothing answers 403 over identity at
+all — see *A request never names its owner; the session does*.
 
 The log keeps the distinction: wrong owner names the owning `user_id` at `warning`, surviving a
 raised `LOG_LEVEL`; absent is `debug`, since a client looping over random uuids would otherwise emit
@@ -6975,3 +6972,17 @@ members (spec §3, §4), which `tests/test_export_endpoints.py` asserts against 
 `TestTheLayout` in `tests/test_export_json.py` reads the byte stream, since a parser cannot see
 layout: one test asserts each top-level member opens a line, one walks every collection off the
 parsed document, not a written-out list, and checks each record starts a line.
+
+## A request never names its owner; the session does
+
+No create body and no paginated list route names the account it belongs to: the row is the token's,
+and every handler scopes by `current_user["id"]`. *Rejected:* a `user_uuid` the handler compares to
+the session's and 403s on — it has authority over nothing, since the handler reads the id off the
+session either way. *Rejected:* keeping it optional as an on-behalf-of hook for a future admin path;
+nothing fetches another user's data through this API, and the admin surface takes email addresses.
+
+The eight create schemas still declare `user_uuid`, accepted and ignored. They are `extra="forbid"`,
+so dropping it outright 422s every create for the web build a deploy still serves while the two
+halves land; the field comes out once no live client sends it. *Rejected:* the web-first order
+`84bee1255635_drop_course_cost` records, which works for an optional field and cannot for a required
+one, and `extra="ignore"`, which abandons a convention every write schema here keeps.

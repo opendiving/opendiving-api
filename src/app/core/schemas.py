@@ -11,6 +11,14 @@ NOTES_MAX_LENGTH = 10_000
 
 DATE_RANGE_MESSAGE = "end_date must be on or after start_date"
 
+# A created row belongs to whoever is signed in, and no request names its own owner. The
+# eight create schemas that still declare `user_uuid` publish this description so the
+# contract says what the field is now; it lives here because they lose it together.
+IGNORED_USER_UUID = (
+    "Ignored: the row belongs to whoever is signed in. Still accepted so a web build that predates "
+    "this change keeps working across the deploy, and removed once no live client sends it."
+)
+
 # The read-side type for a column that stores one of a closed vocabulary - `ServiceKind`,
 # `GearType`, `WaterType` and the rest. Those enums are the *write* boundary: every route
 # body is typed with one, so nothing the API accepts is outside them. They are deliberately

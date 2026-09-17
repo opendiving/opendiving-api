@@ -42,7 +42,6 @@ from uuid6 import uuid7
 
 from src.app.api.v1 import courses as courses_module
 from src.app.core.exceptions.http_exceptions import (
-    ForbiddenException,
     NotFoundException,
     UnprocessableEntityException,
 )
@@ -163,7 +162,7 @@ class TestCourseSchema:
     def test_a_minimal_course_defaults_to_completed(self) -> None:
         """Back-filling history is the common case, and a course that issued a card the
         diver already holds is one that finished."""
-        course = CourseCreate.model_validate({"user_uuid": str(USER_UUID), "name": "Open Water", "agency": "padi"})
+        course = CourseCreate.model_validate({"name": "Open Water", "agency": "padi"})
 
         assert course.status is CourseStatus.COMPLETED
         assert (course.start_date, course.end_date) == (None, None)
@@ -171,9 +170,7 @@ class TestCourseSchema:
     def test_a_course_needs_no_dates_at_all(self) -> None:
         """The divergence from `TripCreate`, whose `start_date` is required: a `planned`
         course has none yet, and a referral spans months with fuzzy edges."""
-        course = CourseCreate.model_validate(
-            {"user_uuid": str(USER_UUID), "name": "Fundamentals", "agency": "gue", "status": "planned"}
-        )
+        course = CourseCreate.model_validate({"name": "Fundamentals", "agency": "gue", "status": "planned"})
 
         assert course.start_date is None
 
@@ -181,7 +178,6 @@ class TestCourseSchema:
         with pytest.raises(ValidationError, match="end_date must be on or after start_date"):
             CourseCreate.model_validate(
                 {
-                    "user_uuid": str(USER_UUID),
                     "name": "Advanced Nitrox",
                     "agency": "tdi",
                     "start_date": "2026-03-06",
@@ -192,7 +188,6 @@ class TestCourseSchema:
     def test_a_one_day_course_is_not_a_reversed_range(self) -> None:
         course = CourseCreate.model_validate(
             {
-                "user_uuid": str(USER_UUID),
                 "name": "Nitrox",
                 "agency": "padi",
                 "start_date": "2026-03-02",
@@ -205,7 +200,7 @@ class TestCourseSchema:
     def test_a_course_need_not_name_an_agency(self) -> None:
         """A course taught by a private instructor runs under none, and the field is where
         the diver says so - absence, not a sentinel value in the vocabulary."""
-        course = CourseCreate.model_validate({"user_uuid": str(USER_UUID), "name": "Sidemount Fundamentals"})
+        course = CourseCreate.model_validate({"name": "Sidemount Fundamentals"})
 
         assert course.agency is None
         assert course.agency_other is None
@@ -215,33 +210,25 @@ class TestCourseSchema:
         there is nothing for it to name - the same branch of `validate_agency_pairing` that
         refuses it beside `padi`."""
         with pytest.raises(ValidationError, match="agency_other may only be set"):
-            CourseCreate.model_validate(
-                {"user_uuid": str(USER_UUID), "name": "Sidemount Fundamentals", "agency_other": "NSS-CDS"}
-            )
+            CourseCreate.model_validate({"name": "Sidemount Fundamentals", "agency_other": "NSS-CDS"})
 
     def test_agency_other_is_required_when_the_agency_is_other(self) -> None:
         with pytest.raises(ValidationError, match="agency_other is required"):
-            CourseCreate.model_validate({"user_uuid": str(USER_UUID), "name": "Cave 1", "agency": "other"})
+            CourseCreate.model_validate({"name": "Cave 1", "agency": "other"})
 
     def test_agency_other_alongside_a_named_agency_is_refused(self) -> None:
         """Rejected rather than ignored, so a stored row can never carry both - the same
         rule `CertificationBase` applies, from the same function."""
         with pytest.raises(ValidationError, match="agency_other may only be set"):
-            CourseCreate.model_validate(
-                {"user_uuid": str(USER_UUID), "name": "Cave 1", "agency": "padi", "agency_other": "NSS-CDS"}
-            )
+            CourseCreate.model_validate({"name": "Cave 1", "agency": "padi", "agency_other": "NSS-CDS"})
 
     def test_an_unknown_status_is_refused(self) -> None:
         with pytest.raises(ValidationError):
-            CourseCreate.model_validate(
-                {"user_uuid": str(USER_UUID), "name": "Open Water", "agency": "padi", "status": "half-done"}
-            )
+            CourseCreate.model_validate({"name": "Open Water", "agency": "padi", "status": "half-done"})
 
     def test_a_field_the_api_does_not_have_is_refused(self) -> None:
         with pytest.raises(ValidationError, match="extra_forbidden"):
-            CourseCreate.model_validate(
-                {"user_uuid": str(USER_UUID), "name": "Open Water", "agency": "padi", "dives": 4}
-            )
+            CourseCreate.model_validate({"name": "Open Water", "agency": "padi", "dives": 4})
 
     def test_the_update_schema_refuses_an_explicit_null_for_a_not_null_column(self) -> None:
         with pytest.raises(ValidationError, match="cannot be null"):
@@ -266,21 +253,10 @@ class TestCourseSchema:
 
 class TestWriteCourse:
     @pytest.mark.asyncio
-    async def test_naming_another_user_is_a_403(self, write_collaborators: dict[str, Any]) -> None:
-        body = CourseCreate.model_validate({"user_uuid": str(uuid7()), "name": "Open Water", "agency": "padi"})
-
-        with pytest.raises(ForbiddenException):
-            await courses_module.write_course(
-                request=MagicMock(), course=body, current_user=_current_user(), db=MagicMock()
-            )
-
-        write_collaborators["create"].assert_not_awaited()
-
-    @pytest.mark.asyncio
     async def test_a_duplicate_name_is_allowed(self, write_collaborators: dict[str, Any]) -> None:
         """The divergence from trips, and the reason there is no `course_name_exists`
         helper: a course failed once and retaken later is the same name twice."""
-        body = CourseCreate.model_validate({"user_uuid": str(USER_UUID), "name": "Advanced Nitrox", "agency": "tdi"})
+        body = CourseCreate.model_validate({"name": "Advanced Nitrox", "agency": "tdi"})
 
         await courses_module.write_course(
             request=MagicMock(), course=body, current_user=_current_user(), db=MagicMock()
@@ -295,7 +271,7 @@ class TestWriteCourse:
     async def test_the_created_course_comes_back_in_its_public_shape(self, write_collaborators: dict[str, Any]) -> None:
         """The internal integer keys are what the create path has in hand, and neither may
         reach the response."""
-        body = CourseCreate.model_validate({"user_uuid": str(USER_UUID), "name": "Advanced Nitrox", "agency": "tdi"})
+        body = CourseCreate.model_validate({"name": "Advanced Nitrox", "agency": "tdi"})
 
         created = await courses_module.write_course(
             request=MagicMock(), course=body, current_user=_current_user(), db=MagicMock()
@@ -631,24 +607,6 @@ class TestReadPath:
         assert fnmatch(key, across_builds(f"user_{USER_ID}_course*"))
 
     @pytest.mark.asyncio
-    async def test_listing_another_users_courses_is_a_403(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """`user_uuid` is a query parameter here, not a path segment, so
-        `test_ownership.py`'s `{uuid}`-route sweep does not reach this one. A 403 rather
-        than a 404 because the caller is naming *themselves* wrongly."""
-        cached = AsyncMock()
-        monkeypatch.setattr(courses_module, "_cached_read_courses", cached)
-
-        with pytest.raises(ForbiddenException):
-            await courses_module.read_courses(
-                request=MagicMock(),
-                user_uuid=uuid7(),
-                current_user=_current_user(),
-                db=MagicMock(),
-            )
-
-        cached.assert_not_awaited()
-
-    @pytest.mark.asyncio
     async def test_an_oversized_page_is_clamped_before_the_cached_read(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Clamped rather than rejected, and clamped *before* the key is built - otherwise
         the ceiling would still be the value in the cache key."""
@@ -657,7 +615,6 @@ class TestReadPath:
 
         await courses_module.read_courses(
             request=MagicMock(),
-            user_uuid=USER_UUID,
             current_user=_current_user(),
             db=MagicMock(),
             page=1,
@@ -736,7 +693,6 @@ class TestTheCreatePathsRefuseAForeignCourse:
 
         body = DiveCreateRequest.model_validate(
             {
-                "user_uuid": str(USER_UUID),
                 "dive_number": 1,
                 "start_time": "2026-06-01T09:00:00+02:00",
                 "duration": 1800,
@@ -761,7 +717,6 @@ class TestTheCreatePathsRefuseAForeignCourse:
 
         body = CertificationCreate.model_validate(
             {
-                "user_uuid": str(USER_UUID),
                 "agency": "tdi",
                 "name": "Advanced Nitrox",
                 "course_uuid": str(uuid7()),
@@ -803,7 +758,6 @@ class TestTheCreatePathsRefuseAForeignCourse:
 
         body = CertificationCreate.model_validate(
             {
-                "user_uuid": str(USER_UUID),
                 "agency": "tdi",
                 "name": "Advanced Nitrox",
                 "course_uuid": str(course_uuid),
