@@ -88,6 +88,11 @@ class Course(Base, PublicUUIDMixin, TimestampMixin):
             # see `_LIST_ORDER` in `crud_courses`. The reader's trailing `uuid` tiebreak is
             # deliberately not a third column here; it only orders courses that already
             # share a date, which Postgres sorts incrementally on top of this index.
+            #
+            # That list's date/agency/status filters ride this index too, as a filter step on
+            # rows it is already walking in order. None earns an index of its own: one keyed
+            # on `agency` or `status` could not serve the `ORDER BY`, so it would buy a scan
+            # and pay for a sort, at a diver's handful of courses.
             Index(
                 "ix_course_user_id_start_date",
                 "user_id",
