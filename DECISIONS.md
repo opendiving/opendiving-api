@@ -6977,9 +6977,8 @@ parsed document, not a written-out list, and checks each record starts a line.
 
 No create body and no paginated list route names the account it belongs to: the row is the token's,
 and every handler scopes by `current_user["id"]`. *Rejected:* a `user_uuid` the handler compares to
-the session's and 403s on — it has authority over nothing, since the handler reads the id off the
-session either way. *Rejected:* keeping it optional as an on-behalf-of hook for a future admin path;
-nothing fetches another user's data through this API, and the admin surface takes email addresses.
+the session's and 403s on — it has authority over nothing. *Rejected:* keeping it optional as an
+on-behalf-of hook for a future admin path; nothing fetches another user's data through this API.
 
 The eight create schemas still declare `user_uuid`, accepted and ignored. They are `extra="forbid"`,
 so dropping it outright 422s every create for the web build a deploy still serves while the two
