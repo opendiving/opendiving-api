@@ -64,6 +64,7 @@ from ...schemas.export import (
 from ...schemas.gear_item import GearType
 from ...schemas.gear_service import ServiceKind
 from ...schemas.trip import TripLocationRead
+from ...schemas.user import CHECK_IN_FIELDS
 from ..dive_profiles import LoadedProfile, load_profile, to_read_schema
 from .loader import ExportBundle, ExportFileRow, ExportRecordingRow
 from .paths import ArchivePaths
@@ -253,6 +254,14 @@ def _diver(bundle: ExportBundle) -> ExportDiver:
                     {"name": preset.name, "hidden_fields": list(preset.hidden_fields)}
                     for preset in bundle.dive_form_presets
                 ],
+                # The check-in details, beside the preferences for the same reason and under
+                # the same key: a shop's desk asks for them, the format gives them no core
+                # member, and a writer may not invent one. A detail the diver never filled in
+                # is *absent* rather than null - the format has one spelling of "not
+                # applicable" (spec §6.7) - so an all-empty account's entry is exactly the
+                # four preferences above. Out only: nothing reads them back in (see
+                # `logbook_import/planner.py`, which restores no preference either).
+                **{field: value for field in CHECK_IN_FIELDS if (value := getattr(user, field)) is not None},
             }
         },
     )

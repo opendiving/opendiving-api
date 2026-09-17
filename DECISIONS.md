@@ -6985,3 +6985,16 @@ through this API.
 `tests/test_request_identity.py` holds the wire-level pins, and a structural one over the served
 OpenAPI document: no request body schema publishes an owner property and no operation declares one
 as a query parameter, so a schema written later cannot reintroduce it unnoticed.
+
+## The check-in details are columns on `user`, and an explicit null clears one
+
+Date of birth, phone, the emergency contact's three fields and the insurance provider, policy number
+and expiry are eight nullable columns on `user`, listed once as `CHECK_IN_FIELDS` in
+`schemas/user.py`. *Rejected:* a diver-owned table allowing several policies or contacts — it buys a
+second policy nobody asked for and costs a new model and its admin-panel classification. Nullable
+rather than defaulted: unfilled is the ordinary state, and `{"emergency_contact_name": null}` is how
+a diver removes a contact, so none of them joins `NON_NULLABLE_FIELDS`. They reach the admin panel
+the way `units` does, through `UserAdminUpdate`'s inheritance, with no `select_schema` hiding them
+from a panel that is off by default and being retired. On export they ride
+`diver.extensions.opendiving` beside the preferences, only where set; 1.0's Diver object is frozen
+and a writer may not invent a member. Nothing imports them back.

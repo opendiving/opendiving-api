@@ -86,7 +86,11 @@ def _with_id[T](row: T, row_id: int) -> T:
     return row
 
 
-def make_user(dive_form_hidden_fields: list[str] | None = None) -> User:
+def make_user(dive_form_hidden_fields: list[str] | None = None, **columns: Any) -> User:
+    """The account every bundle here belongs to. `**columns` is what a test fills the
+    check-in details in with, which are absent by default because an account that never
+    entered any is the ordinary one.
+    """
     return _with_id(
         User(
             name="Ada Lovelace",
@@ -95,6 +99,7 @@ def make_user(dive_form_hidden_fields: list[str] | None = None) -> User:
             uuid=UUIDS["user"],
             created_at=CREATED_AT,
             dive_form_hidden_fields=dive_form_hidden_fields or [],
+            **columns,
         ),
         1,
     )

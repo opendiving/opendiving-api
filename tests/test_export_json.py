@@ -54,6 +54,7 @@ from tests.helpers.export import (
     full_bundle,
     make_dive,
     make_recording,
+    make_user,
     mixture,
 )
 
@@ -322,7 +323,8 @@ class TestWhatUddfCannotHold:
         a form no reader of this document has. A preset travels as `{name, hidden_fields}`:
         its uuid and timestamps identify a row in *this* instance and mean nothing anywhere
         else. Asserting the whole extension object rather than its keys one at a time is the
-        point - a fourth preference added without a decision fails here.
+        point - a preference added without a decision fails here, and so does a check-in
+        detail written for a diver who never entered one.
         """
         document = await _render(full_bundle(), monkeypatch)
         assert document["diver"]["extensions"] == {
@@ -340,6 +342,41 @@ class TestWhatUddfCannotHold:
             }
         }
         assert document["dives"][0]["max_depth"] == 28.4
+
+    @pytest.mark.asyncio
+    async def test_the_check_in_details_travel_under_the_same_key(self, monkeypatch):
+        """1.0's Diver object is frozen at `uuid`, `name`, `username`, `email` and
+        `created_at`, so what a dive shop's desk asks for has no core member to go in and a
+        writer may not invent one - it rides this producer's key beside the preferences.
+
+        Only what the diver filled in is written. The three left unset here are *absent*
+        rather than null, which is the format's one spelling of "not applicable" (spec
+        §6.7) and what the assertion on the whole key set above pins for an account that
+        entered none of them.
+        """
+        bundle = replace(
+            full_bundle(),
+            user=make_user(
+                dive_form_hidden_fields=["altitude", "mixture.po2_limit"],
+                date_of_birth=date(1988, 4, 12),
+                phone="+20 100 123 4567",
+                emergency_contact_name="Grace Hopper",
+                emergency_contact_phone="+1 202 555 0143",
+                insurance_provider="DAN Europe",
+                insurance_expires_on=date(2027, 6, 30),
+            ),
+        )
+
+        entry = (await _render(bundle, monkeypatch))["diver"]["extensions"]["opendiving"]
+
+        assert entry["date_of_birth"] == "1988-04-12"
+        assert entry["phone"] == "+20 100 123 4567"
+        assert (entry["emergency_contact_name"], entry["emergency_contact_phone"]) == (
+            "Grace Hopper",
+            "+1 202 555 0143",
+        )
+        assert (entry["insurance_provider"], entry["insurance_expires_on"]) == ("DAN Europe", "2027-06-30")
+        assert set(entry) & {"emergency_contact_relationship", "insurance_policy_number"} == set()
 
     @pytest.mark.asyncio
     async def test_the_per_cylinder_role_ppo2_limit_and_usage_survive(self, monkeypatch):
