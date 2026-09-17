@@ -5,7 +5,6 @@ from typing import Annotated, ClassVar
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..core.schemas import (
-    IGNORED_USER_UUID,
     NOTES_MAX_LENGTH,
     PublicUUIDSchema,
     RejectsExplicitNulls,
@@ -109,7 +108,6 @@ class TripReadInternal(TripBase, PublicUUIDSchema):
 class TripCreate(TripBase):
     model_config = ConfigDict(extra="forbid")
     start_date: Annotated[date, Field(examples=["2024-06-01"])]
-    user_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=IGNORED_USER_UUID)]
     locations: Annotated[
         list[TripLocationInput],
         Field(

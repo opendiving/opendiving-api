@@ -6,7 +6,6 @@ from typing import Annotated, ClassVar, Literal, Self
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from ..core.schemas import (
-    IGNORED_USER_UUID,
     NOTES_MAX_LENGTH,
     PublicUUIDSchema,
     RejectsExplicitNulls,
@@ -978,7 +977,6 @@ class DiveCreateInternal(DiveBase):
 class DiveCreateRequest(DiveCreate):
     """Request body for creating a dive, including its gas mixtures, dive site(s) and gear."""
 
-    user_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=IGNORED_USER_UUID)]
     mixtures: Annotated[list[DiveMixtureCreate], Field(default_factory=list)]
     dive_site_uuids: Annotated[
         list[uuid_pkg.UUID],

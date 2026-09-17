@@ -164,7 +164,7 @@ async def write_certification(
             raise UnprocessableEntityException("Course not found.")
 
     certification_internal = CertificationCreateInternal(
-        **certification.model_dump(exclude={"user_uuid", "course_uuid"}),
+        **certification.model_dump(exclude={"course_uuid"}),
         user_id=current_user["id"],
         course_id=course_id,
     )

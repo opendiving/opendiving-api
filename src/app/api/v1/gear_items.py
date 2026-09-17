@@ -86,9 +86,7 @@ async def write_gear_item(
     if await gear_item_name_exists(db=db, user_id=current_user["id"], name=gear_item.name, brand=gear_item.brand):
         raise DuplicateValueException("A gear item with this brand and name already exists")
 
-    gear_item_internal = GearItemCreateInternal(
-        **gear_item.model_dump(exclude={"user_uuid"}), user_id=current_user["id"]
-    )
+    gear_item_internal = GearItemCreateInternal(**gear_item.model_dump(), user_id=current_user["id"])
     created_gear_item = await crud_gear_items.create(
         db=db, object=gear_item_internal, schema_to_select=GearItemReadInternal, return_as_model=True
     )
