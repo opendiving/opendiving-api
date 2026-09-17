@@ -9,7 +9,6 @@ from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import (
     DuplicateValueException,
-    ForbiddenException,
     NotFoundException,
     UnprocessableEntityException,
 )
@@ -85,14 +84,10 @@ async def write_dive_site(
 ) -> DiveSiteRead:
     """Create a dive site for the authenticated user.
 
-    `user_uuid` in the body must be the caller's own (403 otherwise). Uniqueness is on
-    name *and* location together, so the same site name at a different location is
-    allowed; a genuine repeat is a 422. `latitude` and `longitude` are one value: send
-    both or neither, since half a pair is a 422 as well.
+    Uniqueness is on name *and* location together, so the same site name at a different
+    location is allowed; a genuine repeat is a 422. `latitude` and `longitude` are one
+    value: send both or neither, since half a pair is a 422 as well.
     """
-    if current_user["uuid"] != dive_site.user_uuid:
-        raise ForbiddenException()
-
     if await dive_site_name_exists(db=db, user_id=current_user["id"], name=dive_site.name, location=dive_site.location):
         raise DuplicateValueException("A dive site with this name already exists at this location")
 
@@ -115,7 +110,6 @@ async def write_dive_site(
 @router.get("/dive-sites", response_model=PaginatedListResponse[DiveSiteRead])
 async def read_dive_sites(
     request: Request,
-    user_uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     page: int = 1,
@@ -127,20 +121,17 @@ async def read_dive_sites(
 ) -> dict:
     """List the caller's dive sites.
 
-    `user_uuid` must be the caller's own (403 otherwise). `search` matches a
-    case-insensitive substring against name and location, which is what backs the dive
-    form's picker: it narrows server-side as you type rather than shipping the whole list
-    to the browser. Out-of-range pagination is clamped, not rejected.
+    `search` matches a case-insensitive substring against name and location, which is
+    what backs the dive form's picker: it narrows server-side as you type rather than
+    shipping the whole list to the browser. Out-of-range pagination is clamped, not
+    rejected.
     """
-    if current_user["uuid"] != user_uuid:
-        raise ForbiddenException()
-
     page, items_per_page = clamp_pagination(page, items_per_page)
 
     return await _dive_site_cache.read_list(
         request,
         user_id=current_user["id"],
-        user_uuid=user_uuid,
+        user_uuid=current_user["uuid"],
         db=db,
         page=page,
         items_per_page=items_per_page,

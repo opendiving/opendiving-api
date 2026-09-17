@@ -12,7 +12,6 @@ from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import (
     DuplicateValueException,
-    ForbiddenException,
     NotFoundException,
     UnprocessableEntityException,
 )
@@ -174,18 +173,14 @@ async def write_trip(
 ) -> TripRead:
     """Create a trip for the authenticated user, together with the places it went to.
 
-    `user_uuid` in the body must be the caller's own: a mismatch is a 403 rather than a
-    silent reassignment to the caller. Trip names are unique per user, so reusing one
-    that already exists is a 422. `locations` keep the order given; index 0 is the one
-    shown wherever only a single place fits.
+    Trip names are unique per user, so reusing one that already exists is a 422.
+    `locations` keep the order given; index 0 is the one shown wherever only a single
+    place fits.
 
     The trip row commits before its locations do, so a failure inserting them leaves the
     trip behind without them - the same accepted semantics as `POST /dive` and its
     mixtures.
     """
-    if current_user["uuid"] != trip.user_uuid:
-        raise ForbiddenException()
-
     if await trip_name_exists(db=db, user_id=current_user["id"], name=trip.name):
         raise DuplicateValueException("A trip with this name already exists")
 
@@ -280,7 +275,6 @@ async def _cached_read_trips(
 @router.get("/trips", response_model=PaginatedListResponse[TripRead])
 async def read_trips(
     request: Request,
-    user_uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     page: int = 1,
@@ -292,21 +286,17 @@ async def read_trips(
 ) -> dict:
     """List the caller's trips, most recent start date first, each with its locations.
 
-    `user_uuid` must be the caller's own (403 otherwise) - this endpoint cannot be used
-    to read another user's trips. `search` matches a case-insensitive substring against
-    the trip's name and the names of the places it went to, so a trip is findable by
-    either. Out-of-range pagination is clamped rather than rejected, so `items_per_page`
-    above the ceiling returns the ceiling instead of a 422.
+    `search` matches a case-insensitive substring against the trip's name and the names
+    of the places it went to, so a trip is findable by either. Out-of-range pagination
+    is clamped rather than rejected, so `items_per_page` above the ceiling returns the
+    ceiling instead of a 422.
     """
-    if current_user["uuid"] != user_uuid:
-        raise ForbiddenException()
-
     page, items_per_page = clamp_pagination(page, items_per_page)
 
     return await _cached_read_trips(
         request,
         user_id=current_user["id"],
-        user_uuid=user_uuid,
+        user_uuid=current_user["uuid"],
         db=db,
         page=page,
         items_per_page=items_per_page,

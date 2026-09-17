@@ -2874,7 +2874,6 @@ class TestWriteDiveEmbedsSightings:
         user_uuid = uuid7()
         body = DiveCreateRequest.model_validate(
             {
-                "user_uuid": str(user_uuid),
                 "dive_number": 1,
                 "start_time": "2026-06-01T09:00:00+02:00",
                 "duration": 1800,

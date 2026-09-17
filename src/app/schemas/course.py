@@ -6,6 +6,7 @@ from typing import Annotated, ClassVar, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..core.schemas import (
+    IGNORED_USER_UUID,
     NOTES_MAX_LENGTH,
     PublicUUIDSchema,
     RejectsExplicitNulls,
@@ -115,7 +116,7 @@ class CourseReadInternal(CourseBase, PublicUUIDSchema):
 class CourseCreate(CourseBase):
     model_config = ConfigDict(extra="forbid")
 
-    user_uuid: Annotated[uuid_pkg.UUID, Field(description="Public id of the user this course belongs to")]
+    user_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=IGNORED_USER_UUID)]
 
 
 class CourseCreateInternal(CourseBase):

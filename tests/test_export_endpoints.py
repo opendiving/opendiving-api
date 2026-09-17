@@ -99,10 +99,10 @@ class TestAuthentication:
     def test_no_route_takes_any_parameter_at_all(self, client: TestClient, path: str):
         """The bearer token names the only account there is to export.
 
-        There being nothing to pass is what makes this stronger than the ownership check
-        every other route makes - there is no id to probe with and no comparison to get
-        backwards. Asserted against the published contract rather than the signature, so
-        a path, query or header parameter added later fails here whatever shape it takes.
+        There being nothing to pass is the guarantee every route in the API makes; here
+        it is the whole of one, with no id to probe with. Asserted against the published
+        contract rather than the signature, so a path, query or header parameter added
+        later fails here whatever shape it takes.
         """
         operation = client.get("/openapi.json").json()["paths"][path]["get"]
         assert operation.get("parameters", []) == []

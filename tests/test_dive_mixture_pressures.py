@@ -291,7 +291,6 @@ class TestTheRouteRefusesBeforeTheDatabase:
         response = client.post(
             "/dive",
             json={
-                "user_uuid": str(USER_UUID),
                 "dive_number": 1,
                 "start_time": START_TIME,
                 "duration": 2048,
@@ -326,6 +325,4 @@ class TestTheRouteRefusesBeforeTheDatabase:
         with pytest.raises(ValidationError):
             DiveUpdateRequest.model_validate(body)
         with pytest.raises(ValidationError):
-            DiveCreateRequest.model_validate(
-                body | {"user_uuid": str(USER_UUID), "dive_number": 1, "start_time": START_TIME, "duration": 2048}
-            )
+            DiveCreateRequest.model_validate(body | {"dive_number": 1, "start_time": START_TIME, "duration": 2048})

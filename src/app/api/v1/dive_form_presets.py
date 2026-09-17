@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
-from ...core.exceptions.http_exceptions import DuplicateValueException, ForbiddenException
+from ...core.exceptions.http_exceptions import DuplicateValueException
 from ...core.utils.pagination import clamp_pagination
 from ...crud.crud_dive_form_presets import crud_dive_form_presets, dive_form_preset_name_exists
 from ...schemas.dive_form_preset import (
@@ -58,18 +58,14 @@ async def write_dive_form_preset(
 ) -> DiveFormPresetRead:
     """Save the current set of hidden dive-form fields under a name.
 
-    `user_uuid` must be the caller's own (403 otherwise). Preset names are unique per
-    account, case-insensitively, so reusing one is a 422 - the same rule trips, dive sites
-    and gear sets keep.
+    Preset names are unique per account, case-insensitively, so reusing one is a 422 -
+    the same rule trips, dive sites and gear sets keep.
 
     `hidden_fields` may arrive in any order and with repeats; what is stored is the
     canonical form - form order, duplicates collapsed - so two equal sets are two equal
     lists and a client can decide which preset matches the account's current state by
     comparing them element by element. A name the vocabulary does not contain is a 422.
     """
-    if current_user["uuid"] != preset.user_uuid:
-        raise ForbiddenException()
-
     if await dive_form_preset_name_exists(db=db, user_id=current_user["id"], name=preset.name):
         raise DuplicateValueException(_DUPLICATE_NAME)
 
@@ -87,7 +83,6 @@ async def write_dive_form_preset(
 @router.get("/dive-form-presets", response_model=PaginatedListResponse[DiveFormPresetRead])
 async def read_dive_form_presets(
     request: Request,
-    user_uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     page: int = 1,
@@ -95,17 +90,13 @@ async def read_dive_form_presets(
 ) -> dict:
     """List the caller's dive form presets alphabetically.
 
-    `user_uuid` must be the caller's own (403 otherwise). Out-of-range pagination is
-    clamped, not rejected.
+    Out-of-range pagination is clamped, not rejected.
 
     Deliberately not Redis-cached, unlike the other per-user owned resources: nothing
     embeds a preset, so there is nothing to go stale anywhere else, and the panel that reads
     this list reads it once when it opens (see `OwnedResourceCache`'s docstring, which names
     every resource that opts out and why).
     """
-    if current_user["uuid"] != user_uuid:
-        raise ForbiddenException()
-
     page, items_per_page = clamp_pagination(page, items_per_page)
 
     data = await crud_dive_form_presets.get_multi(
@@ -116,7 +107,7 @@ async def read_dive_form_presets(
         sort_columns="name",
         sort_orders="asc",
     )
-    data["data"] = [_to_public(row, user_uuid=user_uuid).model_dump() for row in data["data"]]
+    data["data"] = [_to_public(row, user_uuid=current_user["uuid"]).model_dump() for row in data["data"]]
 
     response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
     return response

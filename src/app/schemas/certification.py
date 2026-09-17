@@ -5,7 +5,13 @@ from typing import Annotated, ClassVar, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
+from ..core.schemas import (
+    IGNORED_USER_UUID,
+    NOTES_MAX_LENGTH,
+    PublicUUIDSchema,
+    RejectsExplicitNulls,
+    StoredVocabulary,
+)
 
 
 class CertificationAgency(StrEnum):
@@ -213,7 +219,7 @@ class CertificationCreate(CertificationBase):
 
     model_config = ConfigDict(extra="forbid")
 
-    user_uuid: Annotated[uuid_pkg.UUID, Field(description="Public id of the user this certification belongs to")]
+    user_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=IGNORED_USER_UUID)]
     course_uuid: Annotated[
         uuid_pkg.UUID | None,
         Field(default=None, description="Public id of the training course this certification came from"),

@@ -160,11 +160,6 @@ async def fetch_owned_or_raise[OwnedRowT: OwnedRow](
     uuid is a reference inside a request body rather than the resource being addressed,
     and a 404 would name the wrong thing as missing - the request, not the route's
     resource.
-
-    Not to be confused with the 403 the routes still raise for a body or query
-    `user_uuid` that isn't the caller's own (`create_dive`, `read_dives`, and their
-    equivalents): there the caller is naming *themselves* wrongly rather than probing
-    for someone else's row, so nothing is disclosed by saying so.
     """
     filters: dict[str, Any] = {"uuid": uuid}
     if not include_deleted and hasattr(crud.model, "is_deleted"):

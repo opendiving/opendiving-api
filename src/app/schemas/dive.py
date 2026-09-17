@@ -5,7 +5,13 @@ from typing import Annotated, ClassVar, Literal, Self
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
-from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
+from ..core.schemas import (
+    IGNORED_USER_UUID,
+    NOTES_MAX_LENGTH,
+    PublicUUIDSchema,
+    RejectsExplicitNulls,
+    StoredVocabulary,
+)
 from ..core.utils.datetime_offset import require_utc_offset
 from .dive_mixture import DiveMixtureCreate, DiveMixtureRead
 from .dive_profile import DiveProfileInfo
@@ -972,7 +978,7 @@ class DiveCreateInternal(DiveBase):
 class DiveCreateRequest(DiveCreate):
     """Request body for creating a dive, including its gas mixtures, dive site(s) and gear."""
 
-    user_uuid: Annotated[uuid_pkg.UUID, Field(description="Public id of the user this dive belongs to")]
+    user_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=IGNORED_USER_UUID)]
     mixtures: Annotated[list[DiveMixtureCreate], Field(default_factory=list)]
     dive_site_uuids: Annotated[
         list[uuid_pkg.UUID],

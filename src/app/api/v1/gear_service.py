@@ -21,7 +21,6 @@ from ...api.dependencies import get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import (
     DuplicateValueException,
-    ForbiddenException,
     NotFoundException,
     UnprocessableEntityException,
 )
@@ -134,8 +133,8 @@ async def write_gear_service_schedule(
 ) -> GearServiceScheduleRead:
     """Create a servicing rule for a gear item.
 
-    Ownership comes from the item rather than a `user_uuid` in the body - strictly
-    stronger, since the caller can't name an item that isn't theirs in the first place.
+    Ownership comes from the item the schedule hangs off: the caller can't name an item
+    that isn't theirs in the first place, so there is nothing further to check.
     """
     db_gear_item = await _owned_gear_item(db, schedule.gear_item_uuid, current_user["id"])
 
@@ -227,17 +226,13 @@ async def _cached_read_schedules(
 @router.get("/gear-service-schedules", response_model=PaginatedListResponse[GearServiceScheduleRead])
 async def read_gear_service_schedules(
     request: Request,
-    user_uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     gear_item_uuid: uuid_pkg.UUID | None = None,
     page: int = 1,
     items_per_page: int = 10,
 ) -> dict:
-    """List a user's service schedules, optionally narrowed to one gear item."""
-    if current_user["uuid"] != user_uuid:
-        raise ForbiddenException()
-
+    """List the caller's service schedules, optionally narrowed to one gear item."""
     page, items_per_page = clamp_pagination(page, items_per_page)
 
     gear_item_id = None
@@ -247,7 +242,7 @@ async def read_gear_service_schedules(
     return await _cached_read_schedules(
         request,
         user_id=current_user["id"],
-        user_uuid=user_uuid,
+        user_uuid=current_user["uuid"],
         db=db,
         page=page,
         items_per_page=items_per_page,
@@ -535,7 +530,6 @@ async def _schedule_uuids_by_id(db: AsyncSession, schedule_ids: list[int | None]
 @router.get("/gear-service-records", response_model=PaginatedListResponse[GearServiceRecordRead])
 async def read_gear_service_records(
     request: Request,
-    user_uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     gear_item_uuid: uuid_pkg.UUID | None = None,
@@ -543,10 +537,7 @@ async def read_gear_service_records(
     page: int = 1,
     items_per_page: int = 10,
 ) -> dict:
-    """List a user's service history, optionally narrowed to one gear item or schedule."""
-    if current_user["uuid"] != user_uuid:
-        raise ForbiddenException()
-
+    """List the caller's service history, optionally narrowed to one gear item or schedule."""
     page, items_per_page = clamp_pagination(page, items_per_page)
 
     gear_item_id = None
@@ -565,7 +556,7 @@ async def read_gear_service_records(
     return await _cached_read_records(
         request,
         user_id=current_user["id"],
-        user_uuid=user_uuid,
+        user_uuid=current_user["uuid"],
         db=db,
         page=page,
         items_per_page=items_per_page,
@@ -698,7 +689,6 @@ async def _cached_read_due(request: Request, user_id: int, db: AsyncSession) -> 
 @router.get("/gear-service-due", response_model=GearServiceDueResponse)
 async def read_gear_service_due(
     request: Request,
-    user_uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict:
@@ -709,7 +699,4 @@ async def read_gear_service_due(
     bake today's date into the cached response, which then quietly goes wrong at
     midnight. The client buckets into due-soon/overdue itself.
     """
-    if current_user["uuid"] != user_uuid:
-        raise ForbiddenException()
-
     return await _cached_read_due(request, user_id=current_user["id"], db=db)

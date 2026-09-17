@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
-from ...core.exceptions.http_exceptions import ForbiddenException, NotFoundException, UnprocessableEntityException
+from ...core.exceptions.http_exceptions import NotFoundException, UnprocessableEntityException
 from ...core.utils.cache import cache
 from ...core.utils.pagination import clamp_pagination
 from ...core.utils.uploads import content_disposition_attachment
@@ -155,9 +155,6 @@ async def write_certification(
     that isn't the caller's own - or doesn't exist - is a 422, the same answer
     `POST /dive` gives for a trip it cannot resolve.
     """
-    if current_user["uuid"] != certification.user_uuid:
-        raise ForbiddenException()
-
     course_id: int | None = None
     if certification.course_uuid is not None:
         course_id = await resolve_course_id_for_user(
@@ -248,23 +245,19 @@ async def _cached_read_certifications(
 @router.get("/certifications", response_model=PaginatedListResponse[CertificationRead])
 async def read_certifications(
     request: Request,
-    user_uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     page: int = 1,
     items_per_page: int = 10,
     course_uuid: uuid_pkg.UUID | None = None,
 ) -> dict:
-    """List a user's certifications, newest first.
+    """List the caller's certifications, newest first.
 
     `course_uuid` narrows the list to the cards one training course issued - which is what
     a course's own page reads. One naming a course that doesn't exist or isn't the
     caller's returns an empty page rather than an error, exactly as `GET /dives`' filters
     do, so it reveals nothing about whether that course exists.
     """
-    if current_user["uuid"] != user_uuid:
-        raise ForbiddenException()
-
     page, items_per_page = clamp_pagination(page, items_per_page)
 
     course_id: int | None = None
@@ -276,7 +269,7 @@ async def read_certifications(
     return await _cached_read_certifications(
         request,
         user_id=current_user["id"],
-        user_uuid=user_uuid,
+        user_uuid=current_user["uuid"],
         db=db,
         page=page,
         items_per_page=items_per_page,
@@ -544,7 +537,6 @@ async def _cached_read_expiring(request: Request, user_id: int, db: AsyncSession
 @router.get("/certifications-expiring", response_model=CertificationExpiringResponse)
 async def read_certifications_expiring(
     request: Request,
-    user_uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict:
@@ -560,7 +552,4 @@ async def read_certifications_expiring(
     would bake today's date into the cached response, which then quietly goes wrong at
     midnight. The client buckets into expiring-soon/expired itself.
     """
-    if current_user["uuid"] != user_uuid:
-        raise ForbiddenException()
-
     return await _cached_read_expiring(request, user_id=current_user["id"], db=db)

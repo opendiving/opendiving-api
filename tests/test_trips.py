@@ -167,7 +167,6 @@ class TestTripLocationInput:
 
     def test_bounds_how_many_places_one_trip_can_have(self) -> None:
         body = {
-            "user_uuid": str(USER_UUID),
             "name": "Everywhere 2026",
             "start_date": "2026-03-01",
             "locations": [{"name": f"Stop {n}"} for n in range(MAX_TRIP_LOCATIONS + 1)],
@@ -177,9 +176,7 @@ class TestTripLocationInput:
             TripCreate.model_validate(body)
 
     def test_a_trip_with_no_locations_is_normal(self) -> None:
-        trip = TripCreate.model_validate(
-            {"user_uuid": str(USER_UUID), "name": "Somewhere 2026", "start_date": "2026-03-01"}
-        )
+        trip = TripCreate.model_validate({"name": "Somewhere 2026", "start_date": "2026-03-01"})
 
         assert trip.locations == []
 
@@ -266,7 +263,7 @@ def _current_user() -> dict[str, Any]:
 
 
 async def _write(**body: Any) -> Any:
-    trip = TripCreate.model_validate({"user_uuid": str(USER_UUID), "start_date": "2026-03-01", **body})
+    trip = TripCreate.model_validate({"start_date": "2026-03-01", **body})
     return await trips_module.write_trip(request=MagicMock(), trip=trip, current_user=_current_user(), db=MagicMock())
 
 
@@ -323,9 +320,7 @@ class TestWriteTrip:
         write_collaborators["replace_locations"].side_effect = IntegrityError("insert", {}, Exception("gone"))
         db = MagicMock()
         db.rollback = AsyncMock()
-        trip = TripCreate.model_validate(
-            {"user_uuid": str(USER_UUID), "name": "Cebu 2026", "start_date": "2026-03-01", "locations": [MOALBOAL]}
-        )
+        trip = TripCreate.model_validate({"name": "Cebu 2026", "start_date": "2026-03-01", "locations": [MOALBOAL]})
 
         with pytest.raises(UnprocessableEntityException):
             await trips_module.write_trip(request=MagicMock(), trip=trip, current_user=_current_user(), db=db)

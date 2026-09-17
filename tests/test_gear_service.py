@@ -448,7 +448,7 @@ class TestAnUnrecognizedKindDoesNotFiveHundred:
         the same blast radius as `kind` - one row, every dive in the list."""
         assert GearItemInfo(uuid=uuid7(), name="Fins", type="frobnicator").type == "frobnicator"
         with pytest.raises(ValidationError):
-            GearItemCreate(user_uuid=uuid7(), name="Fins", type="frobnicator")
+            GearItemCreate(name="Fins", type="frobnicator")
 
 
 class TestRecalculateServiceSchedule:

@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
-from ...core.exceptions.http_exceptions import DuplicateValueException, ForbiddenException, NotFoundException
+from ...core.exceptions.http_exceptions import DuplicateValueException, NotFoundException
 from ...core.utils.cache import cache
 from ...core.utils.pagination import clamp_pagination
 from ...core.utils.search import search_clause, search_multi
@@ -80,12 +80,9 @@ async def write_gear_item(
 ) -> GearItemRead:
     """Create a gear item for the authenticated user.
 
-    `user_uuid` must be the caller's own (403 otherwise). Uniqueness is on brand *and*
-    name together, so the same model from two brands is fine; a genuine repeat is a 422.
+    Uniqueness is on brand *and* name together, so the same model from two brands is
+    fine; a genuine repeat is a 422.
     """
-    if current_user["uuid"] != gear_item.user_uuid:
-        raise ForbiddenException()
-
     if await gear_item_name_exists(db=db, user_id=current_user["id"], name=gear_item.name, brand=gear_item.brand):
         raise DuplicateValueException("A gear item with this brand and name already exists")
 
@@ -186,7 +183,6 @@ async def _cached_read_gear_items(
 @router.get("/gear-items", response_model=PaginatedListResponse[GearItemRead])
 async def read_gear_items(
     request: Request,
-    user_uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     page: int = 1,
@@ -197,18 +193,15 @@ async def read_gear_items(
         Query(max_length=255, description="Case-insensitive substring match on name or brand"),
     ] = None,
 ) -> dict:
-    """List a user's gear. Archived items are excluded unless `include_archived=true`,
+    """List the caller's gear. Archived items are excluded unless `include_archived=true`,
     so the dive form's picker only ever offers gear that's still in service.
     """
-    if current_user["uuid"] != user_uuid:
-        raise ForbiddenException()
-
     page, items_per_page = clamp_pagination(page, items_per_page)
 
     return await _cached_read_gear_items(
         request,
         user_id=current_user["id"],
-        user_uuid=user_uuid,
+        user_uuid=current_user["uuid"],
         db=db,
         page=page,
         items_per_page=items_per_page,

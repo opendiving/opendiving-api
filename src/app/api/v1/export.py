@@ -5,8 +5,8 @@ layer because each is an HTTP concern:
 
 - **The caller's own data, and nothing else.** No `username` or `user_uuid` parameter: the
   bearer token names the only account there is to export, so there is no authorization
-  decision to get wrong and no id to probe with. That is a stronger guarantee than the
-  ownership check every other route makes, not a weaker one.
+  decision to get wrong and no id to probe with. That is the guarantee every route in the
+  API makes; here it is the whole of one.
 - **Never cached.** No `@cache` decorator and `Cache-Control: no-store` on the way out. An
   export is a whole logbook keyed by nothing but the user, so a Redis entry would be
   megabytes evicting everything the cache exists for - and *"`@cache` and per-request
