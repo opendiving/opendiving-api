@@ -90,7 +90,9 @@ def create_course(
     user: models.User,
     *,
     start_date: date | None = date(2026, 3, 2),
+    end_date: date | None = None,
     agency: str | None = "tdi",
+    status: str = "completed",
 ) -> models.Course:
     """A training course of this user's.
 
@@ -104,6 +106,11 @@ def create_course(
     no other way to be exercised. `agency` is settable for the same shape of reason: a
     course that ran under none is a state only this column can hold, `certification.agency`
     staying `NOT NULL`.
+
+    `end_date` and `status` are settable for `GET /courses`' filters: an interval only has
+    two ends if both are writable, and the whole point of the date window is the course
+    whose two dates straddle its edge. `end_date` defaults to `None` rather than to a day
+    after `start_date`, so an ongoing course stays the cheap fixture to ask for.
     """
     return _persist(
         db,
@@ -111,8 +118,9 @@ def create_course(
             user_id=user.id,
             name=f"Advanced Nitrox {uuid7().hex[-8:]}",
             agency=agency,
-            status="completed",
+            status=status,
             start_date=start_date,
+            end_date=end_date,
             notes="",
         ),
     )

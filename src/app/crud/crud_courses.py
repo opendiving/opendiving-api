@@ -1,8 +1,9 @@
 import uuid as uuid_pkg
+from datetime import date
 from typing import Any
 
 from fastcrud import FastCRUD
-from sqlalchemy import ColumnElement, func, select
+from sqlalchemy import ColumnElement, false, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.utils.search import search_clause
@@ -34,8 +35,55 @@ COURSE_SEARCH_COLUMNS = ("name",)
 _LIST_ORDER = (Course.start_date.desc().nulls_last(), Course.uuid.desc())
 
 
+def _overlap_conditions(date_from: date | None, date_to: date | None) -> tuple[ColumnElement[bool], ...]:
+    """The clauses matching courses whose dates overlap `[date_from, date_to]`, either bound
+    independently absent.
+
+    Overlap rather than containment: "courses I did in 2025" has to answer with the one that
+    began in December 2024 and finished in February 2025, which is the whole point of asking
+    by year. An open end (`start_date` set, `end_date` null) is an ongoing course and overlaps
+    anything it started on or before.
+
+    A course with *both* dates null has no interval to overlap, so it drops out of a
+    date-filtered list rather than sitting at the top of it - which is where `NULLS LAST`
+    would otherwise leave a `planned` course and a back-filled dateless one when a diver has
+    asked a question about dates.
+
+    An inverted window matches nothing, and that takes the explicit clause below rather than
+    falling out of the other three: `end_date >= date_from AND start_date <= date_to` is still
+    satisfiable with the bounds the wrong way round, by any course *spanning* the gap between
+    them. That answer - a diver's longest courses - is the answer to a question nobody asked.
+    The two bounds are one window in the UI that sends them, a From and a To on one row, so
+    inverting them is a swap to show an empty list for, not a "covers this whole period" query
+    to serve. An empty page rather than a 422 because nothing here is invalid: no such window
+    has courses in it. `_validate_merged_date_range` is the write-side counterpart, where an
+    end before a start really is a bad row.
+    """
+    if date_from is None and date_to is None:
+        return ()
+
+    if date_from is not None and date_to is not None and date_from > date_to:
+        return (false(),)
+
+    conditions: tuple[ColumnElement[bool], ...] = (or_(Course.start_date.is_not(None), Course.end_date.is_not(None)),)
+    if date_from is not None:
+        conditions += (or_(Course.end_date.is_(None), Course.end_date >= date_from),)
+    if date_to is not None:
+        conditions += (or_(Course.start_date.is_(None), Course.start_date <= date_to),)
+    return conditions
+
+
 async def get_courses_page(
-    db: AsyncSession, *, user_id: int, offset: int, limit: int, search: str | None = None
+    db: AsyncSession,
+    *,
+    user_id: int,
+    offset: int,
+    limit: int,
+    search: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    agency: str | None = None,
+    status: str | None = None,
 ) -> dict[str, Any]:
     """One page of a diver's courses, most recent first, in the same
     `{"data": [...], "total_count": n}` shape `crud.get_multi` returns.
@@ -55,6 +103,13 @@ async def get_courses_page(
     term = (search or "").strip()
     if term:
         conditions += (search_clause(Course, COURSE_SEARCH_COLUMNS, term),)
+    conditions += _overlap_conditions(date_from, date_to)
+    # Plain equality on columns the route has already narrowed to `CertificationAgency` and
+    # `CourseStatus`, so an unknown value is a 422 there rather than an empty page here.
+    if agency is not None:
+        conditions += (Course.agency == agency,)
+    if status is not None:
+        conditions += (Course.status == status,)
 
     total_count = await db.scalar(select(func.count()).select_from(Course).where(*conditions))
     rows = (

@@ -5302,7 +5302,7 @@ A `planned` course has no dates; under Postgres's default `NULLS FIRST` a diver 
 courses sees only those. `courses.py` keeps an `OwnedResourceCache` purely for
 `list_cache_key_prefix` and `invalidate_list`; its non-empty `search_columns` keeps the
 `:search:{search}` segment in the key, since every dimension a list read varies on — page, size,
-search term — appears in its key.
+search term, and this list's four filters — appears in its key.
 
 ## Deleting a course invalidates three cache families
 

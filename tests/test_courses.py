@@ -58,6 +58,7 @@ from src.app.models.certification import Certification
 from src.app.models.course import Course
 from src.app.models.dive import Dive
 from src.app.models.user import User
+from src.app.schemas.certification import CertificationAgency
 from src.app.schemas.course import CourseCreate, CourseReadInternal, CourseStatus, CourseUpdate
 from tests.conftest import db_available
 from tests.helpers.generators import create_certification, create_course, create_dive
@@ -90,6 +91,12 @@ def _internal_course(**overrides: Any) -> CourseReadInternal:
     }
     values.update(overrides)
     return CourseReadInternal(**values)
+
+
+# The four filters at rest. `_cached_read_courses` gives them no defaults on purpose - every
+# one is a cache-key dimension, so a caller that forgets one has to say so rather than get an
+# unfiltered page under a key claiming it filtered.
+_NO_FILTERS: dict[str, Any] = {"date_from": None, "date_to": None, "agency": None, "status": None}
 
 
 def _get_request() -> MagicMock:
@@ -514,6 +521,7 @@ class TestReadPath:
             page=1,
             items_per_page=10,
             search=None,
+            **_NO_FILTERS,
         )
 
         assert page["data"][0]["agency"] is None
@@ -536,6 +544,7 @@ class TestReadPath:
             page=1,
             items_per_page=10,
             search=None,
+            **_NO_FILTERS,
         )
 
         assert [course["name"] for course in page["data"]] == ["Advanced Nitrox", "Deco Procedures"]
@@ -560,6 +569,7 @@ class TestReadPath:
             page=1,
             items_per_page=10,
             search="nitrox",
+            **_NO_FILTERS,
         )
 
         assert page_query.await_args is not None
@@ -583,11 +593,89 @@ class TestReadPath:
                 page=2,
                 items_per_page=10,
                 search="nitrox",
+                **_NO_FILTERS,
             )
 
         (key,) = redis.written
-        assert key == namespaced(f"user_{USER_ID}_courses:page_2:items_per_page:10:search:nitrox:{USER_ID}")
+        assert key == namespaced(
+            f"user_{USER_ID}_courses:page_2:items_per_page:10:search:nitrox"
+            f":date_from:None:date_to:None:agency:None:status:None:{USER_ID}"
+        )
         assert fnmatch(key, across_builds(f"user_{USER_ID}_course*"))
+
+    @pytest.mark.asyncio
+    async def test_each_filter_is_a_dimension_of_the_list_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The defect the `:search:` segment exists to prevent, four more times over: a page
+        read under one filter must not be served to a request carrying another. Asserted by
+        varying one filter at a time and requiring every key to differ - a segment left out
+        of the prefix collapses its pair onto one entry."""
+        monkeypatch.setattr(courses_module, "get_courses_page", AsyncMock(return_value={"data": [], "total_count": 0}))
+        varied: list[dict[str, Any]] = [
+            {},
+            {"date_from": date(2025, 1, 1)},
+            {"date_to": date(2025, 12, 31)},
+            {"agency": "tdi"},
+            {"status": "planned"},
+        ]
+        redis = _FakeRedis()
+
+        with patch.object(cache_module, "client", redis):
+            for filters in varied:
+                await courses_module._cached_read_courses(
+                    _get_request(),
+                    user_id=USER_ID,
+                    user_uuid=USER_UUID,
+                    db=MagicMock(),
+                    page=1,
+                    items_per_page=10,
+                    search=None,
+                    **{**_NO_FILTERS, **filters},
+                )
+
+        assert len(redis.written) == len(varied)
+        # And still swept by the one wildcard, the filters sitting after the prefix it matches.
+        assert all(fnmatch(key, across_builds(f"user_{USER_ID}_course*")) for key in redis.written)
+
+    @pytest.mark.asyncio
+    async def test_the_filters_reach_the_query_as_stored_values(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The enums are the route's boundary, not the column's: `agency` and `status` are
+        `VARCHAR` holding whatever a write put there (see `StoredVocabulary`), so what reaches
+        the query - and the cache key - is the plain value rather than the member."""
+        cached = AsyncMock(return_value={})
+        monkeypatch.setattr(courses_module, "_cached_read_courses", cached)
+
+        await courses_module.read_courses(
+            request=MagicMock(),
+            current_user=_current_user(),
+            db=MagicMock(),
+            page=1,
+            items_per_page=10,
+            search=None,
+            date_from=date(2025, 1, 1),
+            date_to=date(2025, 12, 31),
+            agency=CertificationAgency.TDI,
+            status=CourseStatus.PLANNED,
+        )
+
+        assert cached.await_args is not None
+        assert cached.await_args.kwargs["date_from"] == date(2025, 1, 1)
+        assert cached.await_args.kwargs["date_to"] == date(2025, 12, 31)
+        assert cached.await_args.kwargs["agency"] == "tdi"
+        assert cached.await_args.kwargs["status"] == "planned"
+
+    @pytest.mark.asyncio
+    async def test_an_unfiltered_list_passes_every_filter_as_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The other half: absent means absent all the way down, so the unfiltered list keeps
+        one cache entry rather than gaining a second spelling of the same page."""
+        cached = AsyncMock(return_value={})
+        monkeypatch.setattr(courses_module, "_cached_read_courses", cached)
+
+        await courses_module.read_courses(
+            request=MagicMock(), current_user=_current_user(), db=MagicMock(), page=1, items_per_page=10
+        )
+
+        assert cached.await_args is not None
+        assert all(cached.await_args.kwargs[name] is None for name in ("date_from", "date_to", "agency", "status"))
 
     @pytest.mark.asyncio
     async def test_the_item_key_is_swept_by_the_same_pattern(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -844,6 +932,147 @@ class TestListOrderingAgainstPostgres:
 
         assert page["data"] == []
         assert page["total_count"] == 0
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestTheListFilters:
+    """The four filters `GET /courses` takes, through the real query and a real Postgres.
+
+    Here rather than as compiled SQL because what they turn on is NULL semantics - a course
+    with one date, or with neither - and whether `end_date IS NULL OR end_date >= ...` puts
+    an ongoing course in the window is a property of the database rather than of the clause
+    we emit.
+    """
+
+    @staticmethod
+    async def _names(async_db: AsyncSession, user_id: int, **filters: Any) -> set[str]:
+        page = await get_courses_page(db=async_db, user_id=user_id, offset=0, limit=50, **filters)
+        return {row["name"] for row in page["data"]}
+
+    @pytest.mark.asyncio
+    async def test_a_window_matches_every_course_overlapping_it(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        """ "Courses I did in 2025" is an overlap question, not a containment one: the course
+        that began in December 2024 and finished in February 2025 is one a diver did in 2025,
+        and so is the one that started that June and has not ended."""
+        straddling_start = create_course(db, diver, start_date=date(2024, 12, 10), end_date=date(2025, 2, 3))
+        ongoing = create_course(db, diver, start_date=date(2025, 6, 1), end_date=None)
+        wholly_inside = create_course(db, diver, start_date=date(2025, 4, 1), end_date=date(2025, 4, 5))
+        create_course(db, diver, start_date=date(2024, 3, 1), end_date=date(2024, 3, 5))
+        create_course(db, diver, start_date=None, end_date=None)
+
+        matched = await self._names(async_db, diver.id, date_from=date(2025, 1, 1), date_to=date(2025, 12, 31))
+
+        assert matched == {straddling_start.name, ongoing.name, wholly_inside.name}
+
+    @pytest.mark.asyncio
+    async def test_a_dateless_course_drops_out_under_either_bound_alone(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        """The `NULLS LAST` ordering keeps a dateless course at the bottom of an unfiltered
+        list; a date filter has to remove it outright, or a diver asking about one year gets
+        their `planned` courses back as well. Both bounds pass a NULL on their own - `end_date
+        IS NULL` is an ongoing course - so the interval clause is what excludes it."""
+        dateless = create_course(db, diver, start_date=None, end_date=None)
+        dated = create_course(db, diver, start_date=date(2025, 5, 1), end_date=date(2025, 5, 4))
+
+        assert await self._names(async_db, diver.id) == {dateless.name, dated.name}
+        assert await self._names(async_db, diver.id, date_from=date(2025, 1, 1)) == {dated.name}
+        assert await self._names(async_db, diver.id, date_to=date(2025, 12, 31)) == {dated.name}
+
+    @pytest.mark.asyncio
+    async def test_one_bound_alone_is_the_open_ended_question(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        """`date_from` alone is "still running on or after this day" and `date_to` alone is
+        "had started by it", so a course with only a start date is reachable from both."""
+        old = create_course(db, diver, start_date=date(2019, 1, 7), end_date=date(2019, 1, 11))
+        recent = create_course(db, diver, start_date=date(2026, 2, 1), end_date=None)
+
+        assert await self._names(async_db, diver.id, date_from=date(2020, 1, 1)) == {recent.name}
+        assert await self._names(async_db, diver.id, date_to=date(2020, 1, 1)) == {old.name}
+
+    @pytest.mark.asyncio
+    async def test_an_inverted_window_matches_nothing(self, db: Session, async_db: AsyncSession, diver: User) -> None:
+        """The case the three overlap clauses do *not* answer on their own: with the bounds
+        the wrong way round they still admit every course spanning the gap between them, so
+        a diver who swapped the two boxes would get their longest courses back. The explicit
+        clause in `_overlap_conditions` is what makes the swap visible as an empty list."""
+        create_course(db, diver, start_date=date(2024, 6, 1), end_date=date(2026, 1, 1))
+
+        page = await get_courses_page(
+            db=async_db, user_id=diver.id, offset=0, limit=50, date_from=date(2025, 12, 31), date_to=date(2025, 1, 1)
+        )
+
+        assert page["data"] == []
+        assert page["total_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_agency_and_status_are_exact_matches(self, db: Session, async_db: AsyncSession, diver: User) -> None:
+        tdi_planned = create_course(db, diver, agency="tdi", status="planned")
+        create_course(db, diver, agency="padi", status="planned")
+        create_course(db, diver, agency="tdi", status="completed")
+        # A course that ran under no agency at all is matched by neither agency, rather than
+        # by every one of them - `agency IS NULL` is not equal to anything.
+        create_course(db, diver, agency=None, status="planned")
+
+        assert await self._names(async_db, diver.id, agency="tdi", status="planned") == {tdi_planned.name}
+
+    @pytest.mark.asyncio
+    async def test_every_filter_ands_with_the_search_term(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        """All five narrow together, which is the whole contract: the web's filter row sits
+        beside the name search rather than replacing it."""
+        wanted = create_course(
+            db, diver, agency="tdi", status="completed", start_date=date(2025, 3, 2), end_date=date(2025, 3, 6)
+        )
+        # Same name, and each differs from `wanted` in exactly one filtered dimension.
+        for overrides in (
+            {"agency": "padi"},
+            {"status": "planned"},
+            {"start_date": date(2021, 3, 2), "end_date": date(2021, 3, 6)},
+        ):
+            other = create_course(
+                db,
+                diver,
+                **{  # type: ignore[arg-type]
+                    "agency": "tdi",
+                    "status": "completed",
+                    "start_date": date(2025, 3, 2),
+                    "end_date": date(2025, 3, 6),
+                    **overrides,
+                },
+            )
+            other.name = wanted.name
+            db.commit()
+
+        page = await get_courses_page(
+            db=async_db,
+            user_id=diver.id,
+            offset=0,
+            limit=50,
+            search=wanted.name.lower(),
+            date_from=date(2025, 1, 1),
+            date_to=date(2025, 12, 31),
+            agency="tdi",
+            status="completed",
+        )
+
+        assert [row["uuid"] for row in page["data"]] == [wanted.uuid]
+        assert page["total_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_filter_never_reaches_another_divers_courses(
+        self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
+    ) -> None:
+        """The ownership scope survives the new clauses - they are appended to it rather than
+        replacing it, and a filter that matched across users would be an IDOR wearing a
+        query parameter."""
+        create_course(db, other_diver, agency="tdi", status="completed", start_date=date(2025, 5, 1))
+
+        assert await self._names(async_db, diver.id, agency="tdi", date_from=date(2025, 1, 1)) == set()
 
 
 @pytest.mark.skipif(not db_available(), reason="No database connection available")
