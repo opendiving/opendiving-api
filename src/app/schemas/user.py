@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Annotated, ClassVar
 
@@ -23,6 +23,24 @@ class UnitSystem(StrEnum):
 
     METRIC = "metric"
     IMPERIAL = "imperial"
+
+
+#: The account columns a dive shop's desk asks for, in the order a form asks for them.
+#: Written once here because three places need the same list and must not spell it three
+#: ways: the two schemas below declare each field, and the DiveJSON export walks this to
+#: decide what rides under its producer key. Adding a column means adding it here, on the
+#: model, and on both schemas - `tests/test_check_in_details.py` fails on any of the three
+#: being missed.
+CHECK_IN_FIELDS: tuple[str, ...] = (
+    "date_of_birth",
+    "phone",
+    "emergency_contact_name",
+    "emergency_contact_phone",
+    "emergency_contact_relationship",
+    "insurance_provider",
+    "insurance_policy_number",
+    "insurance_expires_on",
+)
 
 
 class UserBase(BaseModel):
@@ -63,6 +81,19 @@ class UserRead(PublicUUIDSchema):
     # reason this lives on the account rather than on the device. Same note as its two
     # neighbours above on what the default is and isn't for.
     dive_form_hidden_fields: Annotated[list[StoredVocabulary], Field(default_factory=list)]
+    # The check-in details, null until the diver fills one in. Unconstrained here although
+    # the columns are bounded and `UserUpdate` says so: this schema re-validates the stored
+    # row on every authenticated request (`get_current_user`), so a rule stated here answers
+    # a request the diver is making now for a value written long ago - the reasoning behind
+    # `StoredVocabulary` beside it. The write side is where a bad value is refused.
+    date_of_birth: date | None = None
+    phone: str | None = None
+    emergency_contact_name: str | None = None
+    emergency_contact_phone: str | None = None
+    emergency_contact_relationship: str | None = None
+    insurance_provider: str | None = None
+    insurance_policy_number: str | None = None
+    insurance_expires_on: date | None = None
     # The caller's own record of whether they are this instance's operator, so a client can
     # decide whether to offer the operator's surface at all. Not a disclosure about anybody
     # else: `GET /user` returns the caller's row and no route returns another account's.
@@ -168,6 +199,24 @@ class UserUpdate(RejectsExplicitNulls):
         ),
     ]
 
+    # The check-in details. Each is absent from `NON_NULLABLE_FIELDS` on purpose: the
+    # columns are nullable, and an explicit `null` is how a diver removes a detail they
+    # once gave - the emergency contact above all, which is three fields cleared together.
+    date_of_birth: Annotated[
+        date | None, Field(default=None, examples=["1988-04-12"], description="Date of birth, as a shop's form asks")
+    ]
+    phone: Annotated[str | None, Field(default=None, max_length=32, examples=["+20 100 123 4567"])]
+    emergency_contact_name: Annotated[str | None, Field(default=None, max_length=100)]
+    emergency_contact_phone: Annotated[str | None, Field(default=None, max_length=32)]
+    emergency_contact_relationship: Annotated[
+        str | None, Field(default=None, max_length=50, examples=["Partner"], description="Free text, not a vocabulary")
+    ]
+    insurance_provider: Annotated[str | None, Field(default=None, max_length=100, examples=["DAN Europe"])]
+    insurance_policy_number: Annotated[str | None, Field(default=None, max_length=64)]
+    insurance_expires_on: Annotated[
+        date | None, Field(default=None, description="Expiry of the dive insurance policy named above")
+    ]
+
     @field_validator("dive_form_hidden_fields")
     @classmethod
     def _canonicalize_hidden_fields(cls, value: list[DiveFormField] | None) -> list[DiveFormField] | None:
@@ -175,6 +224,21 @@ class UserUpdate(RejectsExplicitNulls):
         current state equal this preset?" stays a list comparison for the client.
         """
         return None if value is None else canonical_hidden_fields(value)
+
+    @field_validator("date_of_birth")
+    @classmethod
+    def _reject_a_birth_date_in_the_future(cls, value: date | None) -> date | None:
+        """A mistyped year is the whole of what this catches, and it reaches a dive shop as
+        a diver who is not born yet.
+
+        Only on the way in: `UserRead` carries the same field unguarded, so a row that
+        somehow holds one still reads back rather than 500-ing the account on every
+        authenticated request. There is no floor beneath it either - a plausible oldest
+        diver is a guess, and refusing a real one is worse than storing an odd one.
+        """
+        if value is not None and value > datetime.now(UTC).date():
+            raise ValueError("date_of_birth cannot be in the future")
+        return value
 
 
 class UserUpdateInternal(UserUpdate):

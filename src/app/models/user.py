@@ -1,4 +1,6 @@
-from sqlalchemy import JSON, Boolean, Index, String, func
+from datetime import date
+
+from sqlalchemy import JSON, Boolean, Date, Index, String, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -81,6 +83,27 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # is client-side and invisible to Alembic, so only `server_default` gives the migration
     # adding this NOT NULL column a value for the rows already in the table.
     dive_form_hidden_fields: Mapped[list[str]] = mapped_column(JSON, default_factory=list, server_default="[]")
+
+    # What a dive shop's desk asks for, held once so a diver stops writing it out on
+    # arrival. Columns on the account rather than a diver-owned table: one of each, no
+    # history worth keeping, and `get_current_user` already selects every mapped column -
+    # the same trade the avatar pair above is here on.
+    #
+    # Every one is nullable, so none carries a `server_default`: that pair exists for a
+    # `NOT NULL` column being added over rows that already exist (see `gear_service_emails`
+    # above), and "not filled in" is the ordinary state for all of these. Clearing one is an
+    # explicit `null` on `PATCH /user`.
+    #
+    # The phone numbers are free text bounded by length - shops in six countries write them
+    # six ways, and nothing here dials one.
+    date_of_birth: Mapped[date | None] = mapped_column(Date, default=None)
+    phone: Mapped[str | None] = mapped_column(String(32), default=None)
+    emergency_contact_name: Mapped[str | None] = mapped_column(String(100), default=None)
+    emergency_contact_phone: Mapped[str | None] = mapped_column(String(32), default=None)
+    emergency_contact_relationship: Mapped[str | None] = mapped_column(String(50), default=None)
+    insurance_provider: Mapped[str | None] = mapped_column(String(100), default=None)
+    insurance_policy_number: Mapped[str | None] = mapped_column(String(64), default=None)
+    insurance_expires_on: Mapped[date | None] = mapped_column(Date, default=None)
 
     # Overrides `SoftDeleteMixin.is_deleted` to add an index: unlike Dive, Certification and
     # GearServiceRecord (each of which has a compound partial index whose predicate already

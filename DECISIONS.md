@@ -6114,13 +6114,15 @@ Six invalidators run after commit: `invalidate_dive_caches`, `invalidate_certifi
 
 ## The `diver` member is read, reported, and never applied
 
-A document carries its owner — name, username, email, `created_at` — and this producer's preferences
-(`units`, `gear_service_emails`, `dive_form_hidden_fields`, `dive_form_presets`) under its extension
-key. None is applied, and the preview says so. Import's contract is the logbook: flipping a live
-account's notification or unit preference, or rearranging its dive form, as a side effect of a
-restore is a worse surprise than setting a couple of toggles once. The `created_at`-imports rule
-governs logbook records, not a member that never imports. The archive's `avatar.webp` is the same
-decision's blob half and is not restored; the importing account has its own identity.
+A document carries its owner — name, username, email, `created_at` — and, under this producer's
+extension key, its preferences (`units`, `gear_service_emails`, `dive_form_hidden_fields`,
+`dive_form_presets`) and whichever of the check-in details (`CHECK_IN_FIELDS` in `schemas/user.py`)
+the diver filled in. None is applied, and the preview says so. Import's contract is the logbook:
+flipping a live account's notification or unit preference, rearranging its dive form, or overwriting
+the emergency contact a shop is about to read, as a side effect of a restore is a worse surprise
+than entering them once. The `created_at`-imports rule governs logbook records, not a member that
+never imports. The archive's `avatar.webp` is the same decision's blob half and is not restored; the
+importing account has its own identity.
 
 Rejected: restore-means-restore extended to preferences. Defensible for a fresh-instance migration,
 but the same path serves restores into accounts that were never empty, and the member rides in the
@@ -6985,3 +6987,17 @@ through this API.
 `tests/test_request_identity.py` holds the wire-level pins, and a structural one over the served
 OpenAPI document: no request body schema publishes an owner property and no operation declares one
 as a query parameter, so a schema written later cannot reintroduce it unnoticed.
+
+## The check-in details are columns on `user`, and an explicit null clears one
+
+Date of birth, phone, the emergency contact's three fields and the insurance provider, policy number
+and expiry are eight nullable columns on `user`, listed once as `CHECK_IN_FIELDS` in
+`schemas/user.py`. *Rejected:* a diver-owned table allowing several policies or contacts — it buys a
+second policy nobody asked for and costs a new model and its admin-panel classification. Nullable
+rather than defaulted: unfilled is the ordinary state, and `{"emergency_contact_name": null}` is how
+a diver removes a contact, so none of them joins `NON_NULLABLE_FIELDS`. They reach the admin panel
+the way `units` does, through `UserAdminUpdate`'s inheritance, with no `select_schema` hiding them
+from a panel that is off by default and being retired. On export they ride
+`diver.extensions.opendiving` beside the preferences, only where set: 1.0's Diver object is frozen
+and a writer may not invent a member. *"The `diver` member is read, reported, and never applied"*
+governs them on the way back in, as it does the preferences.

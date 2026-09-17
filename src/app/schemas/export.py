@@ -127,6 +127,12 @@ class ExportDiver(PublicUUIDSchema):
     member and they travel under this producer's key (spec §6.1). They are here at all
     because `/export/archive` promises nothing in the account is reachable only through the
     app - which is the whole reason the presets ride along too, UI configuration or not.
+
+    The check-in details - date of birth, phone, the emergency contact's name, phone and
+    relationship, and the insurance provider, policy number and expiry - travel under that
+    same key for the same reason: 1.0's Diver object is frozen at `uuid`, `name`,
+    `username`, `email` and `created_at`, and a writer may not invent a member. Only the
+    ones the diver filled in are written, and nothing reads any of them back in.
     """
 
     name: str
