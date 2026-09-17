@@ -5302,7 +5302,19 @@ A `planned` course has no dates; under Postgres's default `NULLS FIRST` a diver 
 courses sees only those. `courses.py` keeps an `OwnedResourceCache` purely for
 `list_cache_key_prefix` and `invalidate_list`; its non-empty `search_columns` keeps the
 `:search:{search}` segment in the key, since every dimension a list read varies on — page, size,
-search term — appears in its key.
+search term, and this list's four filters — appears in its key.
+
+## A course date filter is an overlap, and a dateless course is outside every window
+
+`GET /courses`' `date_from`/`date_to` match a course whose `[start_date, end_date]` *overlaps* the
+window, so "2025" returns the course that ran December 2024 to February 2025. Containment is
+rejected: it answers a question about a year by hiding the courses that straddle it. An open end is
+ongoing and overlaps anything it started before. A course with **both** dates null has no interval,
+so `(start_date IS NOT NULL OR end_date IS NOT NULL)` drops it once either bound is set — otherwise
+`NULLS LAST` hands a date question back every `planned` course. An inverted window needs its own
+`false()`: the three clauses alone still admit any course *spanning* the gap, which is a diver's
+longest courses in answer to a swap. Empty page, not a 422 — nothing is invalid, the window is. No
+new index: `ix_course_user_id_start_date` still scans and orders, with the filters a filter step.
 
 ## Deleting a course invalidates three cache families
 

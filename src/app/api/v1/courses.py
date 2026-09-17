@@ -17,8 +17,15 @@ from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
 from ...crud.crud_courses import COURSE_SEARCH_COLUMNS, crud_courses, get_courses_page
-from ...schemas.certification import validate_agency_pairing
-from ...schemas.course import CourseCreate, CourseCreateInternal, CourseRead, CourseReadInternal, CourseUpdate
+from ...schemas.certification import CertificationAgency, validate_agency_pairing
+from ...schemas.course import (
+    CourseCreate,
+    CourseCreateInternal,
+    CourseRead,
+    CourseReadInternal,
+    CourseStatus,
+    CourseUpdate,
+)
 from ...services.cache_invalidation import (
     invalidate_certification_caches,
     invalidate_course_caches,
@@ -40,8 +47,9 @@ def _to_public_course(db_course: CourseReadInternal | dict[str, Any], *, user_uu
 # keeps the `:search:{search}` segment in the key, and that segment is load-bearing: two
 # different searches on the same page must not serve each other's results.
 #
-# The invariant the key encodes: every dimension a list read varies on appears in it -
-# page, size and the search term.
+# The invariant the key encodes: every dimension a list read varies on appears in it. Page,
+# size and the search term come from here; this list's four filters are appended to the
+# prefix at `_LIST_CACHE_KEY_PREFIX` below.
 _course_cache: OwnedResourceCache[CourseReadInternal, CourseRead] = OwnedResourceCache(
     resource_name="courses",
     resource_label="Course",
@@ -127,8 +135,21 @@ async def write_course(
     return _to_public_course(cast(CourseReadInternal, created), user_uuid=current_user["uuid"])
 
 
+# Every dimension this list varies on has to appear in the key, or one filter's page is
+# served to another filter's request - the defect the `:search:` segment already exists to
+# prevent. The factory's prefix is the base, so that half stays byte-identical to what every
+# other list resource writes; the four filters are appended here rather than in
+# `OwnedResourceCache`, which builds one prefix for resources that do not have them. Like the
+# dive list's key, every placeholder is looked up as a **keyword** argument, so a filter
+# passed positionally raises at key construction rather than quietly collapsing two different
+# result sets onto one entry.
+_LIST_CACHE_KEY_PREFIX = (
+    _course_cache.list_cache_key_prefix + ":date_from:{date_from}:date_to:{date_to}:agency:{agency}:status:{status}"
+)
+
+
 @cache(
-    key_prefix=_course_cache.list_cache_key_prefix,
+    key_prefix=_LIST_CACHE_KEY_PREFIX,
     resource_id_name="user_id",
     expiration=60,
 )
@@ -140,22 +161,34 @@ async def _cached_read_courses(
     page: int,
     items_per_page: int,
     search: str | None,
+    date_from: date | None,
+    date_to: date | None,
+    agency: str | None,
+    status: str | None,
 ) -> dict:
     """Fetches (and caches) a user's paginated course list.
 
     Only ever called after `read_courses` below has checked the caller's authorization - a
     `@cache` hit skips this body entirely, authorization logic included.
 
-    The kwarg names are load-bearing: `user_id`, `page`, `items_per_page` and `search` fill
-    the placeholders in the key prefix this borrows from `_course_cache`, which is what
-    keeps the keys byte-identical to the ones `invalidate_course_caches` sweeps.
+    The kwarg names are load-bearing: every one of them fills a placeholder in
+    `_LIST_CACHE_KEY_PREFIX`, which is what keeps the keys inside the `user_{id}_course*`
+    pattern `invalidate_course_caches` sweeps.
 
     `get_courses_page` serves both the searched and the unsearched branch from one
     hand-written `select()`, rather than the `search_multi`/`get_multi` pair every other
     list resource uses - see its docstring for why neither can produce this ordering.
     """
     courses_data = await get_courses_page(
-        db=db, user_id=user_id, offset=compute_offset(page, items_per_page), limit=items_per_page, search=search
+        db=db,
+        user_id=user_id,
+        offset=compute_offset(page, items_per_page),
+        limit=items_per_page,
+        search=search,
+        date_from=date_from,
+        date_to=date_to,
+        agency=agency,
+        status=status,
     )
     courses_data["data"] = [_to_public_course(row, user_uuid=user_uuid).model_dump() for row in courses_data["data"]]
 
@@ -174,6 +207,22 @@ async def read_courses(
         str | None,
         Query(max_length=255, description="Case-insensitive substring match on the course's name"),
     ] = None,
+    date_from: Annotated[
+        date | None,
+        Query(description="Start of a window a course's own dates must overlap; alone, courses not yet over by it"),
+    ] = None,
+    date_to: Annotated[
+        date | None,
+        Query(description="End of that window; alone, courses that had started by it"),
+    ] = None,
+    agency: Annotated[
+        CertificationAgency | None,
+        Query(description="Only courses that ran under this training agency"),
+    ] = None,
+    status: Annotated[
+        CourseStatus | None,
+        Query(description="Only courses in this state"),
+    ] = None,
 ) -> dict:
     """List the caller's training courses, most recent start date first.
 
@@ -181,6 +230,21 @@ async def read_courses(
     back-filled one without dates stay out of the way of the log's chronology. `search`
     matches a case-insensitive substring of the name. Out-of-range pagination is clamped
     rather than rejected.
+
+    All four filters combine with each other and with `search`. `date_from`/`date_to`
+    describe a window a course's own `[start_date, end_date]` has to **overlap**, so
+    `2025-01-01`..`2025-12-31` answers "courses I did in 2025" with the one that began that
+    December and finished in February - and a course with neither date drops out of the list
+    entirely once either bound is set, having no interval to overlap. Either bound stands on
+    its own: `date_from` alone is "still running on or after that day", `date_to` alone is
+    "had started by it". A window with its bounds the wrong way round is a swap rather than a
+    refusal - it matches nothing, so the client shows the same empty list it shows for a
+    window with no courses in it.
+
+    `agency` and `status` are exact matches on the stored value. Unlike the uuid filters on
+    `GET /dives`, a value outside the vocabulary is a 422 rather than an empty page: those
+    name a resource whose existence must stay unprobeable, while these name a member of a
+    closed set the client already has.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
 
@@ -192,8 +256,16 @@ async def read_courses(
         page=page,
         items_per_page=items_per_page,
         # Normalized here rather than in the cache layer so that " TDI " and "tdi" share
-        # one cache entry instead of two identical ones under different keys.
+        # one cache entry instead of two identical ones under different keys. The other four
+        # need no equivalent: each has exactly one spelling by the time it is parsed, an
+        # unparseable one (`?agency=` included) having been a 422 before this line.
         search=(search or "").strip().lower() or None,
+        date_from=date_from,
+        date_to=date_to,
+        # The column holds a plain string (see `StoredVocabulary`); the enum's job is done
+        # once it has made an unknown value a 422 above.
+        agency=agency.value if agency is not None else None,
+        status=status.value if status is not None else None,
     )
 
 
