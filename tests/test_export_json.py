@@ -311,7 +311,9 @@ class TestWhatUddfCannotHold:
     @pytest.mark.asyncio
     async def test_the_account_preferences_travel_under_this_producer_s_key(self, monkeypatch):
         """`/export/archive` promises nothing in the account is reachable only through the
-        app, and these are the whole of what an account can be set to.
+        app, and these are the whole of what a diver can set *as a preference* - the
+        check-in details beside them are data a shop asks for, and travel under the same key
+        for a different reason (the test below).
 
         They ride `extensions.opendiving` because they are application preferences, not
         logbook data, and the format gives them no core member (spec §6.1) - a writer may
