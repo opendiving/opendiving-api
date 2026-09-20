@@ -6988,5 +6988,5 @@ diver's list.
 
 No second index. `ix_trip_part_trip_id_position` leads with `trip_id`, so the correlated subquery
 reads a handful of rows per trip. *Rejected:* `(trip_id, start_date)`, which changes what
-`tests/test_foreign_key_indexes.py` accounts for, for no measured gain; a node that finds the query
-plan says otherwise should add it and say so.
+`tests/test_foreign_key_indexes.py` accounts for, for no measured gain; a change that finds the
+query plan says otherwise should add it and say so.

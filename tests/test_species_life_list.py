@@ -124,8 +124,8 @@ def _stub_service(rows: list[dict[str, Any]] | None = None, total: int = 0) -> A
 class TestTheCacheKeyCarriesTheWholeQuery:
     """Asserted on the key template rather than on two live requests, because the live version
     of this check passes whether or not the key is right whenever it runs outside the 60 s TTL -
-    and a test that is only sometimes meaningful is worse than none. The end-to-end walk is in
-    the plan's live verification, where a human runs both requests inside a minute.
+    and a test that is only sometimes meaningful is worse than none. The end-to-end walk is a
+    manual one, where a human runs both requests inside a minute.
     """
 
     def test_page_two_is_not_served_page_ones_rows(self, client: TestClient, redis: _FakeRedis) -> None:

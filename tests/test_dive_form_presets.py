@@ -708,9 +708,9 @@ class TestTheBackfill:
 
 @pytest.mark.skipif(not db_available(), reason="Requires PostgreSQL")
 class TestTheRoutesAgainstPostgres:
-    """The wire contract `web-1` is written against, exercised end to end through a real
-    session: what a create stores, what the list answers with, and that a delete really
-    removes the row.
+    """The wire contract the web client is written against, exercised end to end through a
+    real session: what a create stores, what the list answers with, and that a delete
+    really removes the row.
 
     Route functions called directly rather than over HTTP, the way the rest of this suite
     exercises handlers - `get_current_user` is the only dependency these have, and it is

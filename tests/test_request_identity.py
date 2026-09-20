@@ -69,7 +69,7 @@ ROUTER_MODULES = (
 
 @pytest.fixture
 def client() -> Iterator[TestClient]:
-    """Every router this node touches on one app, with auth and the session stubbed.
+    """Every router this suite touches on one app, with auth and the session stubbed.
 
     Its paths carry no `/api/v1` prefix - the routers are included directly rather than
     through `create_application`, which would start a lifespan that wants Postgres. The

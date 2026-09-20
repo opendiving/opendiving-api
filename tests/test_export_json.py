@@ -116,7 +116,7 @@ def _nulls(value: Any, path: str = "$") -> list[str]:
 
 
 class TestConformance:
-    """The claim the whole node exists to make, and the only test here that can catch a
+    """The claim the whole exporter exists to make, and the only test here that can catch a
     writer producing something `divejson validate` would reject."""
 
     @pytest.mark.asyncio

@@ -240,7 +240,7 @@ class TestRequestAnInvite:
 
 
 class TestReadInvitations:
-    """`GET /user/invitations` - the contract `web-1`'s settings card is built against."""
+    """`GET /user/invitations` - the contract the web client's settings card is built against."""
 
     @pytest.mark.asyncio
     async def test_it_pages_the_callers_own_rows_newest_first(self, mock_db) -> None:

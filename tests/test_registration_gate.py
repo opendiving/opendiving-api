@@ -6,8 +6,8 @@ The **predicate** is unit-tested against a mocked session: mode, invitation, emp
 the case-folding of a Google claim are all decisions in Python and a database would only
 slow them down.
 
-The **transactional** claims are not testable that way at all, and they are the two this
-node actually rests on: that the gate's answer is still true at the moment the row is
+The **transactional** claims are not testable that way at all, and they are the two the
+gate actually rests on: that the gate's answer is still true at the moment the row is
 inserted, and that two first sign-ups against an empty table cannot both be admitted as the
 operator. A mocked session evaluates no `WHERE`, holds no lock and has no second connection
 to race, so those run against a real Postgres with two sessions - the shape

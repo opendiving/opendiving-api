@@ -35,7 +35,7 @@ _ABSENT = ("volume", "oxygen", "helium")
 
 
 class TestTheWriteSchemaCanSayNotRecorded:
-    """The API contract change, and the reason this node is a `feat!`.
+    """The API contract change, and the reason it is a `feat!`.
 
     `oxygen` and `helium` carried `default=21.0` / `default=0.0` on the shared base, which
     `DiveMixtureCreate` inherited. A client that omitted them was not saying "not recorded"
