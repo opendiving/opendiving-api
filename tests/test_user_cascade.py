@@ -44,7 +44,7 @@ from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.gear_set import GearSet
 from src.app.models.gear_set_item import GearSetItem
 from src.app.models.trip import Trip
-from src.app.models.trip_location import TripLocation
+from src.app.models.trip_part import TripPart
 from src.app.models.user import User
 from src.app.models.user_dive_stats import UserDiveStats
 from src.app.models.user_session import UserSession
@@ -99,7 +99,7 @@ class TestDeletingAUserTakesEverythingWithIt:
     too" is about.)
 
     Second-order coverage is not decoration. `certification_file`, `dive_file`,
-    `dive_dive_site`, `gear_set_item` and `trip_location` are the tables that would be left
+    `dive_dive_site`, `gear_set_item` and `trip_part` are the tables that would be left
     pointing at nothing if a cascade stopped one level short, and `dive_file` is on both
     lists: it holds `user_id` *and* `dive_id`, so it is reached twice and has to survive
     being deleted by whichever fires first.
@@ -116,7 +116,9 @@ class TestDeletingAUserTakesEverythingWithIt:
 
         dive = create_dive(db, diver)
         site = create_dive_site(db, diver)
-        trip = create_trip(db, diver)
+        # One `trip_part` row comes with it, which is what the second-order sweep counts;
+        # a second one here would make that sweep's "one row each" arithmetic wrong.
+        create_trip(db, diver)
         create_course(db, diver)
         item = create_gear_item(db, diver)
         schedule = create_gear_service_schedule(db, diver, item)
@@ -130,7 +132,6 @@ class TestDeletingAUserTakesEverythingWithIt:
                 UserDiveStats(user_id=diver.id, total_dives=1, max_depth=18.0, total_time=1800, species_seen=0),
                 DiveDiveSite(dive_id=dive.id, dive_site_id=site.id),
                 GearSetItem(gear_set_id=gear_set.id, gear_item_id=item.id),
-                TripLocation(trip_id=trip.id, name="Moalboal"),
                 UserSession(
                     user_id=diver.id,
                     expires_at=datetime.now(UTC) + timedelta(days=7),
@@ -212,7 +213,7 @@ class TestDeletingAUserTakesEverythingWithIt:
         raising, so counting only the eleven above would pass while they stayed."""
         second_order = {
             model: int(db.execute(select(func.count()).select_from(model)).scalar_one())
-            for model in (CertificationFile, DiveDiveSite, GearSetItem, TripLocation)
+            for model in (CertificationFile, DiveDiveSite, GearSetItem, TripPart)
         }
 
         db.execute(text('DELETE FROM "user" WHERE id = :id'), {"id": populated_diver.id})

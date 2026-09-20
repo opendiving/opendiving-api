@@ -31,7 +31,7 @@ from src.app.models.user import User
 from src.app.schemas.certification import CertificationFileInfo, CertificationSide
 from src.app.schemas.dive import DiveFileInfo
 from src.app.schemas.dive_mixture import DiveMixtureRead
-from src.app.schemas.trip import TripLocationRead
+from src.app.schemas.trip import TripLocationRead, TripPartRead
 from src.app.services.dive_profiles import ProfileGasAttribution
 from src.app.services.export.loader import ExportBundle, ExportFileRow, ExportRecordingRow
 
@@ -197,7 +197,7 @@ def build_bundle(
     species_ids_by_dive: dict[int, list[int]] | None = None,
     recordings_by_dive: dict[int, list[ExportRecordingRow]] | None = None,
     trips: list[Trip] | None = None,
-    locations_by_trip: dict[int, list[TripLocationRead]] | None = None,
+    parts_by_trip: dict[int, list[TripPartRead]] | None = None,
     courses: list[Course] | None = None,
     dive_sites: list[DiveSite] | None = None,
     gear_items: list[GearItem] | None = None,
@@ -245,7 +245,7 @@ def build_bundle(
         recordings_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(recordings_by_dive or {})},
         attribution_by_dive={dive_id: ProfileGasAttribution() for dive_id in dive_ids},
         trips=trips or [],
-        locations_by_trip={**{trip.id: [] for trip in (trips or [])}, **(locations_by_trip or {})},
+        parts_by_trip={**{trip.id: [] for trip in (trips or [])}, **(parts_by_trip or {})},
         courses=courses or [],
         dive_sites=dive_sites or [],
         gear_items=gear_items or [],
@@ -291,29 +291,37 @@ def full_bundle() -> ExportBundle:
         Trip(
             user_id=1,
             name="Red Sea 2026",
-            start_date=date(2026, 5, 30),
-            end_date=date(2026, 6, 6),
             notes="Liveaboard",
             uuid=UUIDS["trip"],
             created_at=CREATED_AT,
         ),
         1,
     )
-    # Two places, and deliberately unalike: one as the geocoder returned it, box and all,
-    # and one the diver typed when the provider had nothing - the free-text escape hatch,
-    # which every writer has to render without coordinates to lean on.
-    trip_locations = [
-        TripLocationRead(
-            name="Sharm el-Sheikh",
-            display_name="Sharm el-Sheikh, South Sinai, Egypt",
-            latitude=27.9158,
-            longitude=34.3300,
-            bbox_south=27.8,
-            bbox_north=28.0,
-            bbox_west=34.2,
-            bbox_east=34.4,
+    # Two dated parts, whose places are deliberately unalike: one as the geocoder returned
+    # it, box and all, and one the diver typed when the provider had nothing - the
+    # free-text escape hatch, which every writer has to render without coordinates to lean
+    # on. Their span is 2026-05-30 to 2026-06-06, which is what the trip used to carry
+    # itself, so every writer that renders a range still has one to render.
+    trip_parts = [
+        TripPartRead(
+            start_date=date(2026, 5, 30),
+            end_date=date(2026, 6, 2),
+            location=TripLocationRead(
+                name="Sharm el-Sheikh",
+                display_name="Sharm el-Sheikh, South Sinai, Egypt",
+                latitude=27.9158,
+                longitude=34.3300,
+                bbox_south=27.8,
+                bbox_north=28.0,
+                bbox_west=34.2,
+                bbox_east=34.4,
+            ),
         ),
-        TripLocationRead(name="Ras Mohammed"),
+        TripPartRead(
+            start_date=date(2026, 6, 2),
+            end_date=date(2026, 6, 6),
+            location=TripLocationRead(name="Ras Mohammed"),
+        ),
     ]
     # A completed course with every optional field filled in, so nothing about it is
     # exercised only by its absence. The `air` dive is logged on it and the certification
@@ -550,7 +558,7 @@ def full_bundle() -> ExportBundle:
             ]
         },
         trips=[trip],
-        locations_by_trip={1: trip_locations},
+        parts_by_trip={1: trip_parts},
         courses=[course],
         dive_sites=[reef, wall],
         gear_items=[regulator, second_regulator, suit, untyped],

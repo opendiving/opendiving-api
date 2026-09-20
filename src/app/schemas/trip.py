@@ -151,7 +151,11 @@ class _LegacyTripDates(BaseModel):
     end_date: Annotated[date | None, Field(default=None, examples=["2024-06-08"])]
     locations: Annotated[
         list[TripLocationInput] | None,
-        Field(default=None, max_length=MAX_TRIP_PARTS, deprecated="Send `parts` instead."),
+        Field(
+            default=None,
+            max_length=MAX_TRIP_PARTS,
+            description="Superseded by `parts`, and read only when `parts` is absent.",
+        ),
     ]
 
 

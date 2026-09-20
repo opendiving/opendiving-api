@@ -29,6 +29,7 @@ say anything about the writer.
 
 import xml.etree.ElementTree as ET
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -40,6 +41,7 @@ from uuid6 import uuid7
 from src.app.models.gear_item import GearItem
 from src.app.schemas.dive import DiveMode
 from src.app.schemas.gear_item import GearType
+from src.app.schemas.trip import TripLocationRead, TripPartRead
 from src.app.services.dive_profiles import LoadedProfile
 from src.app.services.export.uddf import (
     _DIVE_MODE_TYPE,
@@ -533,36 +535,94 @@ class TestDiveContent:
         assert [e.text for e in various] == ["Slate"]
 
     @pytest.mark.asyncio
-    async def test_the_trip_is_linked_and_dated(self, monkeypatch):
+    async def test_the_trip_is_linked_and_each_part_carries_its_own_dates(self, monkeypatch):
+        """The mapping is close to an identity: a `<trippart>` is a part, so the two parts
+        of the fixture trip emit their own ranges instead of the whole span landing on the
+        first one."""
         document = await _render(full_bundle(), monkeypatch=monkeypatch)
         trip = _tree(document).find(f"{UDDF}divetrip/{UDDF}trip")
         assert _dive(_tree(document), 0).find(f"{UDDF}informationbeforedive/{UDDF}tripmembership").get(
             "ref"
         ) == trip.get("id")
-        dates = trip.find(f"{UDDF}trippart/{UDDF}dateoftrip")
-        assert (dates.get("startdate"), dates.get("enddate")) == ("2026-05-30T00:00:00", "2026-06-06T00:00:00")
+        dates = [
+            (element.get("startdate"), element.get("enddate"))
+            for element in trip.findall(f"{UDDF}trippart/{UDDF}dateoftrip")
+        ]
+        assert dates == [
+            ("2026-05-30T00:00:00", "2026-06-02T00:00:00"),
+            ("2026-06-02T00:00:00", "2026-06-06T00:00:00"),
+        ]
 
     @pytest.mark.asyncio
-    async def test_the_trips_places_are_joined_into_its_one_location_slot(self, schema, monkeypatch):
-        """`geographyType` has a single `<location>` string and a trip has a list, so they
-        are joined in the order the diver listed them - the free-text one included, since
-        nothing here needs coordinates."""
+    async def test_each_part_gets_its_own_place_and_keeps_its_coordinates(self, schema, monkeypatch):
+        """A place per part, where the whole trip used to get one joined line - and the
+        coordinates survive with it, which they could not when three places shared one
+        `<geography>`. The free-text part has no position and emits none."""
         document = await _render(full_bundle(), monkeypatch=monkeypatch)
         schema.validate(document)
-        trip = _tree(document).find(f"{UDDF}divetrip/{UDDF}trip")
-        location = trip.find(f"{UDDF}trippart/{UDDF}geography/{UDDF}location")
-        assert location.text == "Sharm el-Sheikh, Ras Mohammed"
+        parts = _tree(document).findall(f"{UDDF}divetrip/{UDDF}trip/{UDDF}trippart")
+        assert [part.findtext(f"{UDDF}geography/{UDDF}location") for part in parts] == [
+            "Sharm el-Sheikh",
+            "Ras Mohammed",
+        ]
+        assert [part.findtext(f"{UDDF}geography/{UDDF}latitude") for part in parts] == ["27.9158", None]
 
     @pytest.mark.asyncio
-    async def test_a_trip_nobody_named_a_place_for_gets_no_geography(self, schema, monkeypatch):
-        """`<location>` is mandatory inside `<geography>`, so an empty join has to mean no
-        element rather than an empty one."""
+    async def test_a_part_with_no_place_gets_an_empty_name_and_no_geography(self, schema, monkeypatch):
+        """`<location>` is mandatory inside `<geography>`, so a part with no place emits
+        no element at all - and `<name>` is mandatory on the part itself but is an
+        `xs:string`, so it gets an empty one rather than borrowing the trip's."""
         bundle = full_bundle()
-        bundle.locations_by_trip[1] = []
+        bundle.parts_by_trip[1] = [TripPartRead(start_date=date(2026, 5, 30), end_date=date(2026, 6, 6))]
         document = await _render(bundle, monkeypatch=monkeypatch)
         schema.validate(document)
-        trip = _tree(document).find(f"{UDDF}divetrip/{UDDF}trip")
-        assert trip.find(f"{UDDF}trippart/{UDDF}geography") is None
+        (part,) = _tree(document).findall(f"{UDDF}divetrip/{UDDF}trip/{UDDF}trippart")
+        assert part.find(f"{UDDF}geography") is None
+        assert part.findtext(f"{UDDF}name") in (None, "")
+
+    @pytest.mark.asyncio
+    async def test_a_part_with_no_dates_gets_no_dateoftrip(self, schema, monkeypatch):
+        """`<dateoftrip>` is `minOccurs="0"`, so the absence is expressible here - unlike
+        in `logbook.divejson`, where the span is REQUIRED."""
+        bundle = full_bundle()
+        bundle.parts_by_trip[1] = [TripPartRead(location=TripLocationRead(name="Dahab"))]
+        document = await _render(bundle, monkeypatch=monkeypatch)
+        schema.validate(document)
+        (part,) = _tree(document).findall(f"{UDDF}divetrip/{UDDF}trip/{UDDF}trippart")
+        assert part.find(f"{UDDF}dateoftrip") is None
+
+    @pytest.mark.asyncio
+    async def test_a_part_with_one_date_repeats_it(self, schema, monkeypatch):
+        """Both attributes are `use="required"`, so a stretch that began on a day and has
+        no recorded end ends that day."""
+        bundle = full_bundle()
+        bundle.parts_by_trip[1] = [TripPartRead(start_date=date(2026, 5, 30))]
+        document = await _render(bundle, monkeypatch=monkeypatch)
+        schema.validate(document)
+        dates = _tree(document).find(f"{UDDF}divetrip/{UDDF}trip/{UDDF}trippart/{UDDF}dateoftrip")
+        assert (dates.get("startdate"), dates.get("enddate")) == ("2026-05-30T00:00:00", "2026-05-30T00:00:00")
+
+    @pytest.mark.asyncio
+    async def test_a_trip_with_no_parts_still_gets_one_trippart(self, schema, monkeypatch):
+        """`tripType` requires at least one, so the floor is the writer's rather than the
+        data's. Without it the document would be silently invalid, and no fixture would
+        catch it: every trip in every corpus document has a place."""
+        bundle = full_bundle()
+        bundle.parts_by_trip[1] = []
+        document = await _render(bundle, monkeypatch=monkeypatch)
+        schema.validate(document)
+        (part,) = _tree(document).findall(f"{UDDF}divetrip/{UDDF}trip/{UDDF}trippart")
+        assert part.find(f"{UDDF}geography") is None
+        assert part.find(f"{UDDF}dateoftrip") is None
+
+    @pytest.mark.asyncio
+    async def test_the_trips_notes_stay_on_the_first_part(self, schema, monkeypatch):
+        """The reader joins every part's notes, so writing them on each one returns them N
+        times through a round trip."""
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        schema.validate(document)
+        parts = _tree(document).findall(f"{UDDF}divetrip/{UDDF}trip/{UDDF}trippart")
+        assert [part.findtext(f"{UDDF}notes/{UDDF}para") for part in parts] == ["Liveaboard", None]
 
 
 class TestDiveSiteGeography:

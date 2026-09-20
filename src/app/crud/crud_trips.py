@@ -75,6 +75,8 @@ async def get_trips_page(
     without a `schema_to_select`, so a caller can hand them to the same public-shape
     conversion either way - including the internal `id` the parts hang off.
     """
+    # Replaced rather than appended to: `search_conditions` carries the ownership scope
+    # itself, so that nothing can call it and get an unscoped clause.
     conditions: tuple[ColumnElement[bool], ...] = (Trip.user_id == user_id,)
     term = (search or "").strip()
     if term:
