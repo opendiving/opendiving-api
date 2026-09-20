@@ -57,7 +57,7 @@ MAX_AVATAR_UPLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
 # Pixels the file *claims*, read from the header before anything is decoded. This is the
 # bomb check: a 10 MB upload can describe far more pixels than it costs bytes, and 50 MP is
 # roughly a 7000x7000 photo - comfortably above any camera somebody points at their own
-# face, and the number the plan for this feature settled on.
+# face.
 #
 # It is deliberately **not** the memory bound. A cap in pixels says nothing about bytes of
 # RAM: a uniform PNG describing 50 MP is a couple of hundred kilobytes on the wire and a

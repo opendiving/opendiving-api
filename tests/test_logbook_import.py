@@ -736,9 +736,10 @@ class TestProfiles:
 class TestTheDecompressionMembersRoundTrip:
     """Export a dive carrying every new member, import it, and read back what arrived.
 
-    The invariant this node exists for, and the only test here that exercises the whole
-    loop - the storage, the writer's member names and scales, the reader's schemas and the
-    planner's re-validation - against one another rather than each against an assertion.
+    The invariant the decompression members exist for, and the only test here that
+    exercises the whole loop - the storage, the writer's member names and scales, the
+    reader's schemas and the planner's re-validation - against one another rather than each
+    against an assertion.
     """
 
     PROFILE = {
