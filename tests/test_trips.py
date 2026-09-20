@@ -575,12 +575,9 @@ class TestTheDeploySkewShim:
     async def test_a_reversed_legacy_range_is_a_422_whatever_the_locations(
         self, write_collaborators: dict[str, Any], locations: list[dict[str, Any]] | None
     ) -> None:
-        """`_LegacyTripDates` carries no validator, so nothing refuses the pair at
-        request-validation time the way `TripBase` used to - and the two location shapes
-        fail differently without the check. With none or one, both dates land on the same
-        part and `TripPartInput` raises out of the route body, which is a 500. With two
-        they land on different parts, nothing compares them, and a trip that ends before
-        it begins is stored.
+        """Parametrized over the location count because that is what decides where the
+        two dates land: on one part with none or one, on different parts with two, and
+        only the route-level check spans both.
         """
         body: dict[str, Any] = {"name": "Cebu 2026", "start_date": "2026-03-12", "end_date": "2026-03-01"}
         if locations is not None:

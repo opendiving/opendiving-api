@@ -82,11 +82,9 @@ def _validate_merged_agency_pairing(agency: str | None, agency_other: str | None
 def _validate_merged_date_range(start_date: date | None, end_date: date | None) -> None:
     """Enforce `end_date >= start_date` on a PATCH's merged result.
 
-    `CourseUpdate` cannot see a pair whose other half is already stored, and the table's
-    `ck_course_date_range` answers with an `IntegrityError` rather than a sentence naming
-    the fields. The `ck_course_date_range` constraint would
-    refuse the write anyway, so this is about answering with a sentence naming the fields
-    rather than with an `IntegrityError`.
+    `CourseUpdate` cannot see a pair whose other half is already stored.
+    `ck_course_date_range` would refuse the write anyway, so this is about answering with
+    a sentence naming the fields rather than with an `IntegrityError`.
     """
     try:
         validate_date_range(start_date, end_date)

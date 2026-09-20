@@ -72,15 +72,11 @@ def _parts_from_legacy(
     locations at all. A body carrying none of the three yields no parts, which is the
     empty trip a new client would express as `parts: []`.
 
-    **The pair is range-checked here, before any part is built.** These members sit on
-    `_LegacyTripDates`, which carries no validator of its own, so nothing refuses a
-    reversed pair at request-validation time the way `TripBase` used to. Two shapes
-    follow from that and both are wrong: with no location or exactly one, the start and
-    the end land on the same part and `TripPartInput` raises out of the route body, which
-    is a 500 where the same body was a 422; with two or more they land on different parts,
-    nothing compares them, and a trip that ends before it begins is stored. Checking once
-    up front answers both with the 422 this always gave, in the flat `{"detail": ...}`
-    shape `patch_course` uses for its own merged pair.
+    **The pair is range-checked here, before any part is built**, because nothing else
+    checks it: these members sit on `_LegacyTripDates`, which carries no validator, and
+    spreading them across parts puts the two dates on different rows as soon as there are
+    two locations, where no per-part check can compare them. The 422 is the flat
+    `{"detail": ...}` shape `patch_course` uses for its own unschema'd pair.
 
     Deploy-skew only, and goes with the members it reads.
     """
