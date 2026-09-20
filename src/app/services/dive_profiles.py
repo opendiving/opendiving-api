@@ -1334,8 +1334,8 @@ def _published_event_type(stored: str) -> ProfileEventType | None:
     then REQUIRED. This is the one line where the two meet, and it is on the read side rather
     than in each of the two surfaces that serve this schema - the profile route and the
     exported document both go through `to_read_schema`, and a document carrying
-    `"type": "other"` would be invalid against the schema `api-2`'s and the web's readers
-    validate with.
+    `"type": "other"` would be invalid against the schema this API's import reader and the
+    web client validate with.
 
     A value this build does not recognize reads as unclassified rather than raising: the
     column is not `CHECK`ed, so a row written by a later build really can hold one, and the
