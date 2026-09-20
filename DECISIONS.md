@@ -2672,9 +2672,9 @@ references a part; dives point at trips. `name` says whether a part has a place,
 nullable and why `get_parts_for_trip` reads `location=None` off it. Order is the diver's, not date
 order: an undated part has no place in one, and parts may overlap or leave gaps.
 
-PATCH reads `model_fields_set`, so an omitted `parts` leaves them, `[]` clears, a list replaces.
-Trips keep an `OwnedResourceCache` for its key shapes alone — `search_columns` must stay non-empty
-and the hand-rolled helpers' kwarg names fill the placeholders.
+On PATCH an absent `parts` leaves them, `[]` clears, a list replaces. Trips keep an
+`OwnedResourceCache` for its key shapes alone — `search_columns` must stay non-empty and the
+hand-rolled helpers' kwarg names fill the placeholders.
 
 ## A bounding box is optional twice over, and west > east is a real box
 

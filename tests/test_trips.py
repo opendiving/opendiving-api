@@ -9,9 +9,8 @@ moved five things that nothing else pins:
 * a part's place is a *value object* validated on the way in - half a coordinate pair, a
   partial bounding box or a box with no position are refused rather than stored as a
   place a map cannot draw;
-* `parts` is replaced wholesale, so `PATCH` has to tell an omitted key (leave them
-  alone) from an empty list (clear them) - the same `model_fields_set` distinction
-  `test_dive_update.py` covers for `trip_uuid`;
+* `parts` is replaced wholesale, so `PATCH` has to tell no parts to write (leave them
+  alone) from an empty list (clear them);
 * a parts-only edit changes what the *list* pages say while leaving `update_data` empty,
   so the list cache has to be invalidated on a branch the route could easily skip;
 * search moved from two columns of one table to a name-OR-EXISTS over the child table,
@@ -251,14 +250,16 @@ class TestTripPartInput:
 
 
 class TestPartsOnAnUpdate:
-    """Omitted, `[]` and a list are three different instructions, and only
-    `model_fields_set` tells the first two apart - `parts` is `None` either way."""
+    """Leave them alone, clear them and replace them are three different instructions,
+    and the value carries all three - `None`, `[]` and a list."""
 
-    def test_an_omitted_key_is_not_an_instruction(self) -> None:
-        values = TripUpdateRequest.model_validate({"name": "Cebu 2026"})
+    @pytest.mark.parametrize("body", [{"name": "Cebu 2026"}, {"parts": None}])
+    def test_no_parts_to_write_is_not_an_instruction(self, body: dict[str, Any]) -> None:
+        """An omitted key and an explicit null are the same instruction: leave them. Only
+        `NON_NULLABLE_FIELDS` refuses a null, and `parts` is not one of them."""
+        values = TripUpdateRequest.model_validate(body)
 
         assert values.parts is None
-        assert "parts" not in values.model_fields_set
 
     def test_an_empty_list_clears_them(self) -> None:
         values = TripUpdateRequest.model_validate({"parts": []})
