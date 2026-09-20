@@ -34,7 +34,7 @@ import math
 import uuid as uuid_pkg
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -965,8 +965,8 @@ class _Planner:
         index: dict[tuple[str, ...], int],
         aliases: dict[tuple[str, ...], uuid_pkg.UUID],
     ) -> PlannedRecord:
-        if not (trip.name or "").strip() or trip.starts_on is None:
-            return self._skip("trips", trip.uuid, "A trip needs both a name and a start date, and this one does not.")
+        if not (trip.name or "").strip():
+            return self._skip("trips", trip.uuid, "A trip needs a name, and this one has none.")
         record = self._resolve("trips", trip.uuid, existing)
         if record.action is Action.CREATE:
             trip_key = _key(trip.name)
@@ -974,74 +974,71 @@ class _Planner:
         if record.action not in (Action.CREATE, Action.RESTORE):
             return record
 
-        ends_on = trip.ends_on
-        if ends_on is not None and ends_on < trip.starts_on:
-            self._dropped("trips", trip.uuid, "The end date preceded the start date, and was dropped")
-            ends_on = None
         record.values = {
             "user_id": self._user_id,
             "name": trip.name,
             "notes": self._text(trip.notes),
             "created_at": self._created_at(trip.created_at),
         }
-        record.children = {"parts": self._plan_trip_parts(trip, starts_on=trip.starts_on, ends_on=ends_on)}
+        record.children = {"parts": self._plan_trip_parts(trip)}
         return record
 
-    def _plan_trip_parts(self, trip: ImportTrip, *, starts_on: date, ends_on: date | None) -> list[dict[str, Any]]:
-        """A trip's parts, as `trip_part` rows.
+    def _plan_trip_parts(self, trip: ImportTrip) -> list[dict[str, Any]]:
+        """A trip's parts, as `trip_part` rows - one per part the document carries.
 
-        The document is DiveJSON 0.8.0, where a trip is still one span and a flat list of
-        places, so this applies the same rule the migration did: a part per place with the
-        start on the first and the end on the last, and one dated part with no place when
-        the document names none.
+        Value objects with no uuid of their own (spec §6.9a), replaced wholesale with the
+        trip, so `position` is the list index rather than anything the document carries.
+        Every part becomes a row, including one carrying neither a date nor a place: the
+        diver recorded a stretch, and dropping it would renumber the ones after it.
 
-        Value objects with no uuid of their own (spec §6.9), replaced wholesale with the
-        trip - so `position` is the list index rather than anything the document carries. A
-        bounding box needs its point: a rectangle with no centre frames nothing a reader can
-        place, and the writer's own rule is the same one.
+        A part's own date range is checked here because nothing below catches it -
+        `trip_part` has no check constraint, and a reversed range is what the format's
+        §3 rule 2 forbids a writer rather than something a reader refuses. A bounding box
+        needs its point: a rectangle with no centre frames nothing a reader can place, and
+        the writer's own rule is the same one.
+
+        Every row carries every column, the placeless ones as `None`: these go to Postgres
+        as one executemany, which takes its column list from the first row.
         """
         rows: list[dict[str, Any]] = []
-        for location in trip.locations:
-            if not (location.name or "").strip():
-                self._dropped("trips", trip.uuid, "A location with no name was dropped")
-                continue
-            latitude, longitude = self._position("trips", trip.uuid, location.position, "trip location's")
-            bbox = location.bbox
-            corners: dict[str, float | None] = dict.fromkeys(
-                ("bbox_south", "bbox_north", "bbox_west", "bbox_east"), None
+        for part in trip.parts:
+            ends_on = part.ends_on
+            if ends_on is not None and part.starts_on is not None and ends_on < part.starts_on:
+                self._dropped("trips", trip.uuid, "A part's end date preceded its start date, and was dropped")
+                ends_on = None
+            location = part.location
+            if location is not None and not (location.name or "").strip():
+                # §6.9 makes a location's `name` REQUIRED, so there is nothing to call this
+                # place; the part keeps its dates and loses the place, rather than going.
+                self._dropped("trips", trip.uuid, "A part's location had no name, and the location was dropped")
+                location = None
+            place: dict[str, Any] = dict.fromkeys(
+                ("name", "display_name", "latitude", "longitude", "bbox_south", "bbox_north", "bbox_west", "bbox_east")
             )
-            if bbox is not None and latitude is not None:
-                if bbox.south <= bbox.north and all(
-                    _finite(corner) for corner in (bbox.south, bbox.north, bbox.west, bbox.east)
-                ):
-                    corners = {
-                        "bbox_south": bbox.south,
-                        "bbox_north": bbox.north,
-                        "bbox_west": bbox.west,
-                        "bbox_east": bbox.east,
-                    }
-                else:
-                    self._dropped("trips", trip.uuid, "A bounding box the geocoder could not have produced was dropped")
-            rows.append(
-                {
+            if location is not None:
+                latitude, longitude = self._position("trips", trip.uuid, location.position, "trip part's")
+                place |= {
                     "name": location.name,
                     "display_name": location.display_name,
-                    "position": len(rows),
-                    "start_date": None,
-                    "end_date": None,
                     "latitude": latitude,
                     "longitude": longitude,
-                    **corners,
                 }
-            )
-
-        if not rows:
-            # No place the planner kept, so the span has nowhere else to go: one part with
-            # both dates and no name, which is what a placeless part is.
-            return [{"position": 0, "start_date": starts_on, "end_date": ends_on}]
-
-        rows[0]["start_date"] = starts_on
-        rows[-1]["end_date"] = ends_on
+                bbox = location.bbox
+                if bbox is not None and latitude is not None:
+                    if bbox.south <= bbox.north and all(
+                        _finite(corner) for corner in (bbox.south, bbox.north, bbox.west, bbox.east)
+                    ):
+                        place |= {
+                            "bbox_south": bbox.south,
+                            "bbox_north": bbox.north,
+                            "bbox_west": bbox.west,
+                            "bbox_east": bbox.east,
+                        }
+                    else:
+                        self._dropped(
+                            "trips", trip.uuid, "A bounding box the geocoder could not have produced was dropped"
+                        )
+            rows.append({"position": len(rows), "start_date": part.starts_on, "end_date": ends_on, **place})
         return rows
 
     async def _plan_courses(self) -> None:

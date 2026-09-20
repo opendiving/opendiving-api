@@ -31,7 +31,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.config import settings
 from ...core.utils.datetime_offset import combine_start_time
-from ...core.utils.trip_span import trip_span
 from ...models.course import Course
 from ...models.dive import Dive
 from ...models.trip import Trip
@@ -62,6 +61,7 @@ from ...schemas.export import (
     ExportStoredFile,
     ExportTrip,
     ExportTripLocation,
+    ExportTripPart,
 )
 from ...schemas.gear_item import GearType
 from ...schemas.gear_service import ServiceKind
@@ -286,27 +286,27 @@ def _trip_location(location: TripLocationRead) -> ExportTripLocation:
     )
 
 
-def _trip(trip: Trip, parts: list[TripPartRead]) -> ExportTrip:
-    """A trip as `$defs/trip` 0.8.0 describes it: a span and a flat list of places.
+def _trip_part(part: TripPartRead) -> ExportTripPart:
+    return ExportTripPart(
+        starts_on=part.start_date,
+        ends_on=part.end_date,
+        location=None if part.location is None else _trip_location(part.location),
+    )
 
-    The span is derived from the parts, where it used to be two columns. **A trip with no
-    part carrying a start date cannot be expressed here at all**, and this raises: an
-    all-undated trip satisfies that, and so does one whose every part carries only an end.
-    `starts_on` is REQUIRED in the installed schema and §5.4 forbids inventing a value, so
-    the export refuses rather than shipping a document that will not validate. The format
-    gains `parts[]` in its next release, which is what closes it; until then any account
-    holding such a trip takes a 500 from the DiveJSON and archive endpoints, which is
-    accepted.
+
+def _trip(trip: Trip, parts: list[TripPartRead]) -> ExportTrip:
+    """A trip as `$defs/trip` describes it: a name and a sequence of parts.
+
+    Every stored part is written, in the diver's own order, including one carrying neither
+    a date nor a place - §6.9a makes the empty object conforming, and dropping it would
+    lose a stretch the diver added and a position the rest are numbered by. Nothing here
+    derives a span: the trip member that held one is gone from the format, and a reader
+    that wants a range takes the earliest start and the latest end across these.
     """
-    starts_on, ends_on = trip_span(parts)
-    if starts_on is None:
-        raise ValueError(f"Trip {trip.uuid} has no part with a start date, and $defs/trip requires starts_on")
     return ExportTrip(
         uuid=trip.uuid,
         name=trip.name,
-        locations=[_trip_location(part.location) for part in parts if part.location is not None],
-        starts_on=starts_on,
-        ends_on=ends_on,
+        parts=[_trip_part(part) for part in parts],
         notes=_text(trip.notes),
         created_at=trip.created_at,
     )
