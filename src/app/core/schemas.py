@@ -45,11 +45,10 @@ def validate_date_range(start_date: date | None, end_date: date | None) -> None:
     """The one place a `start_date`/`end_date` pair's ordering is decided.
 
     Reached from the schemas that own a pair - `CourseBase`/`CourseUpdate` and
-    `TripPartInput` - and public because two routes have to run it on a pair no schema
-    sees: `patch_course` on a merged stored+incoming one, since a PATCH may carry either
-    date alone, and `_parts_from_legacy` on the deploy-skew members, which sit on a schema
-    with no validator of their own. Only `course` has a CHECK constraint underneath it; on
-    `trip_part` this is the whole enforcement.
+    `TripPartInput` - and public because `patch_course` has to run it on a pair no schema
+    sees: a merged stored+incoming one, since a PATCH may carry either date alone. Only
+    `course` has a CHECK constraint underneath it; on `trip_part` this is the whole
+    enforcement.
 
     Lives here rather than beside either resource so the two cannot drift apart into two
     spellings of the same rule.

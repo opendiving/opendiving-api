@@ -9,21 +9,14 @@ moved five things that nothing else pins:
 * a part's place is a *value object* validated on the way in - half a coordinate pair, a
   partial bounding box or a box with no position are refused rather than stored as a
   place a map cannot draw;
-* `parts` is replaced wholesale, so `PATCH` has to tell an omitted key (leave them
-  alone) from an empty list (clear them) - the same `model_fields_set` distinction
-  `test_dive_update.py` covers for `trip_uuid`;
+* `parts` is replaced wholesale, so `PATCH` has to tell no parts to write (leave them
+  alone) from an empty list (clear them);
 * a parts-only edit changes what the *list* pages say while leaving `update_data` empty,
   so the list cache has to be invalidated on a branch the route could easily skip;
 * search moved from two columns of one table to a name-OR-EXISTS over the child table,
   which is why `test_picker_search.py` no longer has Trip in it;
 * the list's ordering is an aggregate over that child table rather than a column, and a
   trip whose parts carry no dates has to sort last rather than first.
-
-**The deploy-skew shim is pinned here rather than walked.** `TripCreate`,
-`TripUpdateRequest` and `TripRead` go on speaking `start_date`, `end_date` and
-`locations` for the web build the flagship was serving before this one, and any walk over
-the running app happens after that build has been replaced, so it cannot reach them. These
-tests go when the shim does.
 
 Mostly without a database: the route's collaborators are stubbed and the assertions are
 on what it hands them (the `test_dive_update.py` style), and the search clause is asserted
@@ -48,7 +41,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
@@ -247,16 +240,26 @@ class TestTripPartInput:
 
         assert trip.parts == []
 
+    @pytest.mark.parametrize("member", ["start_date", "end_date", "locations"])
+    @pytest.mark.parametrize("schema", [TripCreate, TripUpdateRequest])
+    def test_a_trip_has_no_dates_or_places_of_its_own(self, schema: type[BaseModel], member: str) -> None:
+        """Both write schemas are `extra="forbid"`, so a body spelling a trip the old way
+        is a 422 rather than something quietly translated into parts."""
+        with pytest.raises(ValidationError, match="extra_forbidden"):
+            schema.model_validate({"name": "Cebu 2026", member: [] if member == "locations" else "2026-03-01"})
+
 
 class TestPartsOnAnUpdate:
-    """Omitted, `[]` and a list are three different instructions, and only
-    `model_fields_set` tells the first two apart - `parts` is `None` either way."""
+    """Leave them alone, clear them and replace them are three different instructions,
+    and the value carries all three - `None`, `[]` and a list."""
 
-    def test_an_omitted_key_is_not_an_instruction(self) -> None:
-        values = TripUpdateRequest.model_validate({"name": "Cebu 2026"})
+    @pytest.mark.parametrize("body", [{"name": "Cebu 2026"}, {"parts": None}])
+    def test_no_parts_to_write_is_not_an_instruction(self, body: dict[str, Any]) -> None:
+        """An omitted key and an explicit null are the same instruction: leave them. Only
+        `NON_NULLABLE_FIELDS` refuses a null, and `parts` is not one of them."""
+        values = TripUpdateRequest.model_validate(body)
 
         assert values.parts is None
-        assert "parts" not in values.model_fields_set
 
     def test_an_empty_list_clears_them(self) -> None:
         values = TripUpdateRequest.model_validate({"parts": []})
@@ -361,13 +364,11 @@ class TestWriteTrip:
     @pytest.mark.asyncio
     async def test_the_trip_row_never_sees_a_parts_key(self, write_collaborators: dict[str, Any]) -> None:
         """`TripCreateInternal` is `extra="forbid"` and a part is a row in another table,
-        so only the trip's own columns may reach it - and neither may the shim's members,
-        which are not columns at all now."""
-        await _write(name="Cebu 2026", parts=[{"location": MOALBOAL}], start_date="2026-03-01")
+        so only the trip's own columns may reach it."""
+        await _write(name="Cebu 2026", parts=[{"location": MOALBOAL}])
 
         trip_internal = write_collaborators["create"].await_args.kwargs["object"]
         assert not hasattr(trip_internal, "parts")
-        assert not hasattr(trip_internal, "start_date")
         assert trip_internal.user_id == USER_ID
 
     @pytest.mark.asyncio
@@ -471,168 +472,6 @@ class TestPatchTrip:
             )
 
         db.rollback.assert_awaited_once()
-
-
-class TestTheDeploySkewShim:
-    """What the previously deployed web build sends, and what it reads back.
-
-    Every write schema here is `extra="forbid"`, so the build the flagship is serving
-    while the two halves deploy apart would take a 422 on every trip it created or edited
-    without this. Nothing can walk it against the running app: by the time anyone could,
-    the build it protects is gone - so these are its only coverage, and they go with it.
-    """
-
-    @pytest.mark.asyncio
-    async def test_a_create_carrying_the_old_members_stores_one_part_per_location(
-        self, write_collaborators: dict[str, Any]
-    ) -> None:
-        """The migration's own rule: the start on the first, the end on the last, and the
-        middle carrying neither."""
-        await _write(
-            name="Cebu 2026",
-            start_date="2026-03-01",
-            end_date="2026-03-12",
-            locations=[MOALBOAL, {"name": "Bohol"}, {"name": "Anilao"}],
-        )
-
-        parts = _written_parts(write_collaborators)
-        assert [(p.start_date, p.end_date) for p in parts] == [
-            (date(2026, 3, 1), None),
-            (None, None),
-            (None, date(2026, 3, 12)),
-        ]
-        assert [p.location.name for p in parts if p.location] == ["Moalboal", "Bohol", "Anilao"]
-
-    @pytest.mark.asyncio
-    async def test_a_create_with_dates_and_no_locations_stores_one_placeless_part(
-        self, write_collaborators: dict[str, Any]
-    ) -> None:
-        await _write(name="Cebu 2026", start_date="2026-03-01", end_date="2026-03-12")
-
-        (part,) = _written_parts(write_collaborators)
-        assert (part.start_date, part.end_date, part.location) == (date(2026, 3, 1), date(2026, 3, 12), None)
-
-    @pytest.mark.asyncio
-    async def test_parts_win_over_the_old_members(self, write_collaborators: dict[str, Any]) -> None:
-        """A client that has been updated sends `parts`; anything else in the body is the
-        old shape and is ignored rather than merged, which would double the trip."""
-        await _write(
-            name="Cebu 2026",
-            parts=[{"start_date": "2027-01-01", "location": {"name": "Dahab"}}],
-            start_date="2026-03-01",
-            locations=[MOALBOAL],
-        )
-
-        (part,) = _written_parts(write_collaborators)
-        assert part.location is not None
-        assert (part.location.name, part.start_date) == ("Dahab", date(2027, 1, 1))
-
-    @pytest.mark.asyncio
-    async def test_an_empty_parts_list_still_wins(self, write_collaborators: dict[str, Any]) -> None:
-        """`parts: []` is a new client clearing them, not an absent key - `model_fields_set`
-        is what tells the two apart, and reading the legacy members here would resurrect
-        what the diver just deleted."""
-        await _write(name="Cebu 2026", parts=[], start_date="2026-03-01", locations=[MOALBOAL])
-
-        assert _written_parts(write_collaborators) == []
-
-    @pytest.mark.asyncio
-    async def test_a_patch_carrying_the_old_locations_replaces_the_parts(
-        self, write_collaborators: dict[str, Any]
-    ) -> None:
-        """The old build sends `locations` with every edit, so ignoring it would silently
-        drop a place the diver had just added."""
-        await _patch({"start_date": "2026-03-01", "end_date": "2026-03-12", "locations": [MOALBOAL]})
-
-        (part,) = _written_parts(write_collaborators)
-        assert (part.start_date, part.end_date) == (date(2026, 3, 1), date(2026, 3, 12))
-
-    @pytest.mark.asyncio
-    async def test_a_patch_naming_none_of_them_leaves_the_parts_alone(
-        self, write_collaborators: dict[str, Any]
-    ) -> None:
-        await _patch({"notes": "Rebooked"})
-
-        write_collaborators["replace_parts"].assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_a_patch_sending_parts_ignores_the_old_members(self, write_collaborators: dict[str, Any]) -> None:
-        await _patch({"parts": [{"location": {"name": "Dahab"}}], "locations": [MOALBOAL]})
-
-        (part,) = _written_parts(write_collaborators)
-        assert part.location is not None
-        assert part.location.name == "Dahab"
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "locations",
-        [
-            pytest.param(None, id="no-locations"),
-            pytest.param([MOALBOAL], id="one-location"),
-            pytest.param([MOALBOAL, {"name": "Bohol"}], id="two-locations"),
-        ],
-    )
-    async def test_a_reversed_legacy_range_is_a_422_whatever_the_locations(
-        self, write_collaborators: dict[str, Any], locations: list[dict[str, Any]] | None
-    ) -> None:
-        """Parametrized over the location count because that is what decides where the
-        two dates land: on one part with none or one, on different parts with two, and
-        only the route-level check spans both.
-        """
-        body: dict[str, Any] = {"name": "Cebu 2026", "start_date": "2026-03-12", "end_date": "2026-03-01"}
-        if locations is not None:
-            body["locations"] = locations
-
-        with pytest.raises(UnprocessableEntityException) as excinfo:
-            await _write(**body)
-
-        assert DATE_RANGE_MESSAGE in str(excinfo.value.detail)
-        write_collaborators["replace_parts"].assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_a_reversed_legacy_range_on_a_patch_is_a_422_too(self, write_collaborators: dict[str, Any]) -> None:
-        with pytest.raises(UnprocessableEntityException) as excinfo:
-            await _patch({"start_date": "2026-03-12", "end_date": "2026-03-01", "locations": [MOALBOAL]})
-
-        assert DATE_RANGE_MESSAGE in str(excinfo.value.detail)
-        write_collaborators["replace_parts"].assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_equal_legacy_dates_are_a_one_day_trip(self, write_collaborators: dict[str, Any]) -> None:
-        """The boundary the check must not overrun, and the one two copies of the rule
-        would disagree on."""
-        await _write(name="Cebu 2026", start_date="2026-03-01", end_date="2026-03-01")
-
-        (part,) = _written_parts(write_collaborators)
-        assert part.start_date == part.end_date == date(2026, 3, 1)
-
-    @pytest.mark.asyncio
-    async def test_the_response_still_carries_a_derived_span_and_flat_locations(
-        self, write_collaborators: dict[str, Any]
-    ) -> None:
-        """What the old build reads. The span is the earliest start and the latest end
-        across the parts, and `locations` is the places of the parts that have one."""
-        write_collaborators["get_parts"].return_value = [
-            TripPartRead(start_date=date(2026, 3, 1), location=TripLocationRead(name="Moalboal")),
-            TripPartRead(start_date=date(2026, 3, 6), end_date=date(2026, 3, 12)),
-        ]
-
-        trip = await _write(name="Cebu 2026", parts=[{"location": MOALBOAL}])
-
-        assert (trip.start_date, trip.end_date) == (date(2026, 3, 1), date(2026, 3, 12))
-        assert [location.name for location in trip.locations] == ["Moalboal"]
-
-    @pytest.mark.asyncio
-    async def test_a_trip_whose_parts_carry_no_dates_reads_back_without_a_span(
-        self, write_collaborators: dict[str, Any]
-    ) -> None:
-        """The state the app has never had before. The old build gets nulls rather than an
-        error, which is what its own optional `end_date` handling already renders."""
-        write_collaborators["get_parts"].return_value = [_part("Moalboal")]
-
-        trip = await _write(name="Cebu 2026", parts=[{"location": MOALBOAL}])
-
-        assert (trip.start_date, trip.end_date) == (None, None)
 
 
 def _get_request() -> MagicMock:

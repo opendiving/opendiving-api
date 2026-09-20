@@ -2672,9 +2672,9 @@ references a part; dives point at trips. `name` says whether a part has a place,
 nullable and why `get_parts_for_trip` reads `location=None` off it. Order is the diver's, not date
 order: an undated part has no place in one, and parts may overlap or leave gaps.
 
-PATCH reads `model_fields_set`, so an omitted `parts` leaves them, `[]` clears, a list replaces.
-Trips keep an `OwnedResourceCache` for its key shapes alone — `search_columns` must stay non-empty
-and the hand-rolled helpers' kwarg names fill the placeholders.
+On PATCH an absent `parts` leaves them, `[]` clears, a list replaces. Trips keep an
+`OwnedResourceCache` for its key shapes alone — `search_columns` must stay non-empty and the
+hand-rolled helpers' kwarg names fill the placeholders.
 
 ## A bounding box is optional twice over, and west > east is a real box
 
@@ -3464,7 +3464,7 @@ path in the app, a query per page for something only the detail page renders.
 `get_species_for_dives` is batched for the day a list surface needs species chips: move it with the
 batched loader, never fetch per row. `DiveReadWithMixtures.species` has `default_factory=list`
 because `user_{id}_dive:{uuid}` entries live an hour and replay through this schema, so an entry
-written without the key must still validate; the `TripRead.locations` lesson.
+written without the key must still validate.
 
 ## ILIKE with no `pg_trgm`, and no manual DDL anywhere
 
@@ -6990,16 +6990,3 @@ No second index. `ix_trip_part_trip_id_position` leads with `trip_id`, so the co
 reads a handful of rows per trip. *Rejected:* `(trip_id, start_date)`, which changes what
 `tests/test_foreign_key_indexes.py` accounts for, for no measured gain; a change that finds the
 query plan says otherwise should add it and say so.
-
-## `TripCreate`, `TripUpdateRequest` and `TripRead` still speak the pre-parts shape
-
-Every write schema here is `extra="forbid"`, and the web build the flagship served before parts
-sends `start_date`, `end_date` and `locations` on `POST /trip` and `PATCH /trip/{uuid}`. The two
-repos deploy off their own pushes in an order nobody chose, so for that window the schemas accept
-all three and `TripRead` returns `locations` and a derived span. `parts` wins wherever it was sent,
-`[]` included; otherwise the three become parts by the rule the migration used. A PATCH reads them
-only when `parts` was absent — the old build sends `locations` with every edit, so ignoring them
-would drop a place it had just added.
-
-It names a live build rather than a hypothetical, which is what keeps it, and comes out whole —
-schemas, `_legacy`, `_parts_from_legacy`, `_parts_to_write`, `TestTheDeploySkewShim`.
