@@ -42,12 +42,14 @@ dependencies = [
     # not a validator*). It also carries the JSON Schema and the beyond-schema rules the
     # tests used to reach through a vendored copy.
     #
-    # 0.8.0 is the floor because it is the first release whose schema lets a course omit
-    # `agency` and whose readers spell a dive's number `number`. Resolved lower, an export
-    # of a course with no agency fails the conformance check the export tests run, and
-    # every UDDF or `.ssrf` dive `services/logbook_import/reader.py` converts on the
-    # request path lands on the placeholder `0` - a wrong logbook rather than an error.
-    "divejson>=0.8.0",
+    # 0.9.0 is the floor because it is the first release whose schema gives a trip
+    # `parts[]` and stops requiring `starts_on`. Resolved lower, every export of a trip
+    # fails the conformance check the export tests run - 0.8.0's `$defs/trip` forbids
+    # `parts` outright, `additionalProperties` being false. The floor also still carries
+    # what 0.8.0's did: a course may omit `agency`, and the readers spell a dive's number
+    # `number`, so a UDDF or `.ssrf` dive `services/logbook_import/reader.py` converts on
+    # the request path keeps its own number rather than the placeholder `0`.
+    "divejson>=0.9.0",
     "webauthn>=3.0.0",
     # Decodes and re-encodes uploaded avatars (`services/user_avatars.py`) - the only
     # image processing in the app. 12.0.0 is the first release with official Python 3.14

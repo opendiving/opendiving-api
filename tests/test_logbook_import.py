@@ -24,7 +24,7 @@ import io
 import json
 import uuid as uuid_pkg
 import zipfile
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -58,6 +58,7 @@ from src.app.models.gear_set import GearSet
 from src.app.models.gear_set_item import GearSetItem
 from src.app.models.species import Species
 from src.app.models.trip import Trip
+from src.app.models.trip_part import TripPart
 from src.app.schemas.certification import CertificationAgency
 from src.app.schemas.dive import DiveUpdateRequest
 from src.app.schemas.logbook_import import ImportNoteCode
@@ -1466,6 +1467,205 @@ class TestTheOldSpellingsAreUndefinedMembers:
         )
         assert stored_card.certification_number is None
         assert not [note for note in plan.notes if "number" in note.message.lower()]
+
+
+class TestATripArrivesAsItsParts:
+    """One `trip_part` row per part the document carries, in the document's own order.
+
+    The planner applies no rule of its own to the dates: which stretch was where is the
+    diver's record rather than something to re-derive from a span, and a part the source
+    dated at neither end is a real stretch of the trip.
+    """
+
+    @staticmethod
+    def _with_parts(document: bytes, parts: list[dict[str, Any]]) -> bytes:
+        parsed = json.loads(document)
+        parsed["trips"][0]["parts"] = parts
+        return json.dumps(parsed).encode()
+
+    @staticmethod
+    async def _parts_of(db: AsyncSession, user_id: int) -> list[TripPart]:
+        trip = (await db.execute(select(Trip).where(Trip.user_id == user_id))).scalars().one()
+        rows = await db.execute(select(TripPart).where(TripPart.trip_id == trip.id).order_by(TripPart.position))
+        return list(rows.scalars())
+
+    @pytest.mark.asyncio
+    async def test_each_part_arrives_with_its_own_dates_and_place(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        _, document = seeded
+        destination = create_user(db)
+
+        await _apply(
+            async_db,
+            destination.id,
+            self._with_parts(
+                document,
+                [
+                    {
+                        "starts_on": "2026-06-01",
+                        "ends_on": "2026-06-05",
+                        "location": {
+                            "name": "Dahab",
+                            "position": {"latitude": 28.5, "longitude": 34.5},
+                            "bbox": {"south": 28.4, "north": 28.6, "west": 34.4, "east": 34.6},
+                        },
+                    },
+                    {"starts_on": "2026-06-05", "ends_on": "2026-06-08"},
+                    {"location": {"name": "Dahab", "display_name": "Dahab, South Sinai, Egypt"}},
+                ],
+            ),
+        )
+
+        parts = await self._parts_of(async_db, destination.id)
+        assert [part.position for part in parts] == [0, 1, 2]
+        assert [part.name for part in parts] == ["Dahab", None, "Dahab"]
+        assert [(part.start_date, part.end_date) for part in parts] == [
+            (date(2026, 6, 1), date(2026, 6, 5)),
+            (date(2026, 6, 5), date(2026, 6, 8)),
+            (None, None),
+        ]
+        assert (parts[0].latitude, parts[0].bbox_south, parts[0].bbox_east) == (28.5, 28.4, 34.6)
+        # Two parts may name one place: a trip that goes back to Dahab is the shape a
+        # sequence of parts exists to record, and nothing here dedupes them.
+        assert parts[2].display_name == "Dahab, South Sinai, Egypt"
+
+    @pytest.mark.asyncio
+    async def test_a_box_the_geocoder_could_not_have_produced_leaves_the_place_standing(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """South above north has no reading, unlike west above east, which crosses the
+        antimeridian. The box goes and the named place stays - it is the nicety."""
+        _, document = seeded
+        destination = create_user(db)
+
+        plan = await _apply(
+            async_db,
+            destination.id,
+            self._with_parts(
+                document,
+                [
+                    {
+                        "location": {
+                            "name": "Dahab",
+                            "position": {"latitude": 28.5, "longitude": 34.5},
+                            "bbox": {"south": 28.6, "north": 28.4, "west": 34.4, "east": 34.6},
+                        }
+                    }
+                ],
+            ),
+        )
+
+        part = (await self._parts_of(async_db, destination.id))[0]
+        assert (part.name, part.latitude, part.bbox_south) == ("Dahab", 28.5, None)
+        assert ImportNoteCode.VALUE_DROPPED in _codes(plan)
+
+    @pytest.mark.asyncio
+    async def test_a_part_with_neither_a_date_nor_a_place_still_takes_its_turn(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """An empty part conforms (spec §6.9a), and dropping it would renumber the ones
+        after it - the diver's order is the record."""
+        _, document = seeded
+        destination = create_user(db)
+
+        await _apply(
+            async_db,
+            destination.id,
+            self._with_parts(document, [{"location": {"name": "Sharm"}}, {}, {"location": {"name": "Nuweiba"}}]),
+        )
+
+        assert [part.name for part in await self._parts_of(async_db, destination.id)] == ["Sharm", None, "Nuweiba"]
+
+    @pytest.mark.asyncio
+    async def test_a_part_whose_end_precedes_its_start_loses_the_end_and_says_so(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """`trip_part` carries no check constraint, and a reversed range is a rule the
+        format puts on writers - so the reader salvages the part rather than refusing the
+        trip, which is what `divejson-py`'s own reader does with the same pair."""
+        _, document = seeded
+        destination = create_user(db)
+
+        plan = await _apply(
+            async_db,
+            destination.id,
+            self._with_parts(document, [{"starts_on": "2026-06-08", "ends_on": "2026-06-01"}]),
+        )
+
+        assert _counts(plan)["trips"] == (1, 0, 0, 0)
+        part = (await self._parts_of(async_db, destination.id))[0]
+        assert (part.start_date, part.end_date) == (date(2026, 6, 8), None)
+        assert ImportNoteCode.VALUE_DROPPED in _codes(plan)
+
+    @pytest.mark.asyncio
+    async def test_a_part_whose_place_has_no_name_keeps_its_dates(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """§6.9 makes a location's `name` REQUIRED, so there is nothing to call the place;
+        the stretch of the trip it dates is still a stretch of the trip."""
+        _, document = seeded
+        destination = create_user(db)
+
+        plan = await _apply(
+            async_db,
+            destination.id,
+            self._with_parts(
+                document,
+                [{"starts_on": "2026-06-01", "ends_on": "2026-06-05", "location": {"display_name": "Somewhere"}}],
+            ),
+        )
+
+        part = (await self._parts_of(async_db, destination.id))[0]
+        assert (part.name, part.display_name) == (None, None)
+        assert (part.start_date, part.end_date) == (date(2026, 6, 1), date(2026, 6, 5))
+        assert ImportNoteCode.VALUE_DROPPED in _codes(plan)
+
+    @pytest.mark.asyncio
+    async def test_a_trip_with_no_parts_imports_and_a_nameless_one_still_does_not(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """A name is the whole of what a trip needs now. `parts` is OPTIONAL in §6.8 and a
+        trip whose stretches were never recorded has no span, which is a record."""
+        _, document = seeded
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, self._with_parts(document, []))
+        assert _counts(plan)["trips"] == (1, 0, 0, 0)
+        assert await self._parts_of(async_db, destination.id) == []
+
+        parsed = json.loads(document)
+        parsed["trips"][0]["name"] = "   "
+        other = create_user(db)
+        skipped = await _apply(async_db, other.id, json.dumps(parsed).encode())
+        assert _counts(skipped)["trips"] == (0, 0, 0, 1)
+
+    @pytest.mark.asyncio
+    async def test_a_document_written_before_parts_arrives_as_a_trip_with_none(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """An export this app wrote before the change spells a trip as a span and a flat
+        `locations` list, and nothing distinguishes the two documents - both declare
+        version 1.0. §5.6's answer to a member a reader does not know is to ignore it, so
+        the trip arrives with its name and notes and no parts, silently. Accepted rather
+        than overlooked: a translation would be a second reading of a shape the format no
+        longer has, and a note would report a loss on every such file.
+        """
+        parsed = json.loads(seeded[1])
+        trip = parsed["trips"][0]
+        del trip["parts"]
+        trip |= {"starts_on": "2026-06-01", "ends_on": "2026-06-08", "locations": [{"name": "Dahab"}]}
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["trips"] == (1, 0, 0, 0)
+        assert await self._parts_of(async_db, destination.id) == []
+        # The remap is this fixture's - the uuid is the source account's. Nothing else is
+        # said, which is the point: no value is reported dropped and no record skipped.
+        assert {note.code for note in plan.notes if note.collection == "trips"} == {
+            ImportNoteCode.RECORD_REMAPPED_REFERENCES_FOLLOW
+        }
 
 
 class TestNothingInventedNothingFatal:

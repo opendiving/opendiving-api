@@ -313,12 +313,20 @@ class ImportTripLocation(_ReadModel):
     bbox: ImportBoundingBox | None = None
 
 
+class ImportTripPart(_ReadModel):
+    starts_on: date | None = None
+    ends_on: date | None = None
+    location: ImportTripLocation | None = None
+
+
 class ImportTrip(_ReadModel):
     uuid: uuid_pkg.UUID
     name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
-    locations: Annotated[list[ImportTripLocation], Field(default_factory=list), _Collection]
-    starts_on: date | None = None
-    ends_on: date | None = None
+    # **A trip's `starts_on`, `ends_on` and `locations` are not members any more**, and
+    # this reader does not accept them under those names: `extra="ignore"` means a 1.0
+    # document written before the change is read as a trip with no parts rather than
+    # failing, the same tolerance §5.6 asks for that a dive's `recordings` gets above.
+    parts: Annotated[list[ImportTripPart], Field(default_factory=list), _Collection]
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
     created_at: datetime | None = None
 

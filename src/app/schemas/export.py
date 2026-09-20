@@ -343,11 +343,12 @@ class ExportDive(PublicUUIDSchema):
 
 
 class ExportTripLocation(BaseModel):
-    """One place a trip went, as the geocoder described it when the diver picked it.
+    """One place a part of a trip went, as the geocoder described it when the diver picked
+    it.
 
-    A value object with no `uuid`, because it has none to export: trip locations are
-    per-trip rows replaced wholesale with the trip, so nothing in this document - or in
-    the database - references one. The bounding box travels with the point because it is
+    A value object with no `uuid`, because it has none to export: trip parts are per-trip
+    rows replaced wholesale with the trip, so nothing in this document - or in the
+    database - references one. The bounding box travels with the point because it is
     what the geocoder said the place *covers*, and a reader redrawing the trip's map wants
     the region rather than a pin in the middle of a country.
     """
@@ -358,14 +359,32 @@ class ExportTripLocation(BaseModel):
     bbox: ExportBoundingBox | None = None
 
 
-class ExportTrip(PublicUUIDSchema):
-    name: str
-    locations: Annotated[
-        list[ExportTripLocation],
-        Field(default_factory=list, description="Places this trip went to, in the order the diver listed them"),
-    ]
-    starts_on: date
+class ExportTripPart(BaseModel):
+    """One stretch of a trip: an optional date range and an optional place (spec §6.9a).
+
+    Every member is optional and an empty object conforms - a part the diver added and
+    filled in neither half of is a stretch the source recorded nothing about, which the
+    format spells as absence rather than as an invented date.
+    """
+
+    starts_on: date | None = None
     ends_on: date | None = None
+    location: ExportTripLocation | None = None
+
+
+class ExportTrip(PublicUUIDSchema):
+    """A trip as a sequence of parts, with no dates of its own (spec §6.8).
+
+    Its span is the earliest `starts_on` among its parts and the latest `ends_on`, so
+    writing it here as well would put two statements of one fact in the same record. A
+    trip whose parts carry no dates has no span, and says so by carrying none.
+    """
+
+    name: str
+    parts: Annotated[
+        list[ExportTripPart],
+        Field(default_factory=list, description="The stretches of this trip, in the order the diver arranged them"),
+    ]
     notes: str | None = None
     created_at: datetime
 

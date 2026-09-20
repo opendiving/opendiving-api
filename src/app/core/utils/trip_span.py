@@ -18,12 +18,12 @@ def trip_span(parts: Iterable[_Dated]) -> tuple[date | None, date | None]:
     """A trip's span: the earliest `start_date` and the latest `end_date` across its parts.
 
     The one place this is derived in Python, so that the reads and the writers cannot
-    drift into two spellings of it: the public trip shape's deploy-skew span, `trips.csv`,
-    and the DiveJSON envelope. The UDDF writer is not among them and wants the opposite -
-    it gives each `<trippart>` that part's own dates, which is the whole of what this
-    change is for. Each pair is taken independently: a trip whose only dated part carries
-    an end and no start has an end and no start, which is what the data says rather than
-    an invented range.
+    drift into two spellings of it: the public trip shape's deploy-skew span and
+    `trips.csv`. Neither the UDDF writer nor the DiveJSON one is among them, and both want
+    the opposite - each gives a part its own dates, which is the whole of what this change
+    is for. Each pair is taken independently: a trip whose only dated part carries an end
+    and no start has an end and no start, which is what the data says rather than an
+    invented range.
 
     `(None, None)` for a trip with no parts or no dates on any of them. That is a state
     the app has never had before, and every caller has to answer for it rather than

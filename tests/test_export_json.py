@@ -36,7 +36,9 @@ from src.app.models.course import Course
 from src.app.models.gear_item import GearItem
 from src.app.models.gear_service_record import GearServiceRecord
 from src.app.models.gear_service_schedule import GearServiceSchedule
+from src.app.models.trip import Trip
 from src.app.schemas.export import DIVEJSON_FORMAT, DIVEJSON_VERSION, ExportCourse, ExportEnvelope
+from src.app.schemas.trip import TripLocationRead, TripPartRead
 from src.app.services.dive_profiles import MERGE_PARSER_KEY, LoadedProfile
 from src.app.services.export.envelope import write_divejson
 from src.app.services.export.paths import plan_archive_paths
@@ -126,6 +128,30 @@ class TestConformance:
         """The floor case: a fresh account with nothing in it still exports something a
         reader can dispatch on."""
         _assert_conforms(await _render(build_bundle(), monkeypatch))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("label", "parts"),
+        [
+            ("no dates anywhere", [TripPartRead(location=TripLocationRead(name="Dahab"))]),
+            ("an end and no start", [TripPartRead(end_date=date(2026, 6, 8))]),
+            ("no parts at all", []),
+        ],
+    )
+    async def test_a_trip_no_part_of_which_starts_is_a_document_like_any_other(self, monkeypatch, label, parts):
+        """The three shapes the envelope could not express while a trip carried a span.
+
+        `starts_on` was REQUIRED on a trip and §5.4 forbids inventing one, so each of these
+        used to fail the export outright rather than produce a document. A trip's span is
+        its parts' now, and a trip that has none simply has none.
+        """
+        trip = _with_id(Trip(user_id=1, name=f"Egypt, {label}", notes="", uuid=UUIDS["trip"], created_at=CREATED_AT), 1)
+        document = await _render(build_bundle(trips=[trip], parts_by_trip={1: parts}), monkeypatch)
+
+        _assert_conforms(document)
+        exported = document["trips"][0]
+        assert len(exported["parts"]) == len(parts)
+        assert "starts_on" not in exported
 
     @pytest.mark.asyncio
     async def test_an_archive_layout_stays_conforming(self, monkeypatch):
@@ -696,17 +722,26 @@ class TestReferences:
         assert document["dives"][0]["site_uuids"] == [str(UUIDS["site-reef"]), str(UUIDS["site-wall"])]
 
     @pytest.mark.asyncio
-    async def test_a_trip_carries_its_places_structured_and_in_order(self, monkeypatch):
-        """The flat formats join these into a string; this is the document that keeps what
-        the geocoder actually said, box included, so a reader can redraw the trip's map."""
+    async def test_a_trip_is_its_parts_each_with_its_own_dates_and_place(self, monkeypatch):
+        """The flat formats join the places into a string and collapse the dates into one
+        range; this is the document that keeps each stretch whole, box included, so a
+        reader can redraw the trip's map and say which week was where."""
         document = await _render(full_bundle(), monkeypatch)
-        locations = document["trips"][0]["locations"]
-        assert [location["name"] for location in locations] == ["Sharm el-Sheikh", "Ras Mohammed"]
-        assert locations[0]["position"] == {"latitude": 27.9158, "longitude": 34.33}
-        assert locations[0]["bbox"] == {"south": 27.8, "north": 28.0, "west": 34.2, "east": 34.4}
+        trip = document["trips"][0]
+        # No span of its own, derived or otherwise - the trip's dates are its parts' now.
+        assert "starts_on" not in trip and "ends_on" not in trip and "locations" not in trip
+
+        parts = trip["parts"]
+        assert [part.get("starts_on") for part in parts] == ["2026-05-30", "2026-06-02", None]
+        assert [part.get("ends_on") for part in parts] == ["2026-06-02", "2026-06-04", "2026-06-06"]
+        assert parts[0]["location"]["name"] == "Sharm el-Sheikh"
+        assert parts[0]["location"]["position"] == {"latitude": 27.9158, "longitude": 34.33}
+        assert parts[0]["location"]["bbox"] == {"south": 27.8, "north": 28.0, "west": 34.2, "east": 34.4}
         # The free-text one: a place the geocoder had no answer for is still a place, and
         # it says so by carrying nothing but its name.
-        assert locations[1] == {"name": "Ras Mohammed"}
+        assert parts[1]["location"] == {"name": "Ras Mohammed"}
+        # The placeless one: an end date and nothing else, which is a transit day home.
+        assert parts[2] == {"ends_on": "2026-06-06"}
 
     @pytest.mark.asyncio
     async def test_the_species_a_dive_saw_are_a_list_of_uuids_the_document_defines(self, monkeypatch):
