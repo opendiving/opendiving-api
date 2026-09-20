@@ -40,7 +40,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...crud.crud_dive_mixtures import get_mixtures_for_dives
-from ...crud.crud_trip_locations import get_locations_for_trips
+from ...crud.crud_trip_parts import get_parts_for_trips
+from ...crud.crud_trips import EARLIEST_PART_START
 from ...models.certification import Certification
 from ...models.certification_file import CertificationFile
 from ...models.course import Course
@@ -64,7 +65,7 @@ from ...models.user import User
 from ...schemas.certification import CertificationFileInfo
 from ...schemas.dive import DiveFileInfo
 from ...schemas.dive_mixture import DiveMixtureRead
-from ...schemas.trip import TripLocationRead
+from ...schemas.trip import TripPartRead
 from ..certification_files import get_file_infos_for_certifications
 from ..dive_profiles import ProfileGasAttribution, get_gas_attribution_for_dives
 from ..dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS, get_file_infos_for_recordings
@@ -132,9 +133,9 @@ class ExportBundle:
     recordings_by_dive: dict[int, list[ExportRecordingRow]]
     attribution_by_dive: dict[int, ProfileGasAttribution]
     trips: list[Trip]
-    # Keyed for every trip in `trips`, so a trip nobody named a place for reads as an empty
+    # Keyed for every trip in `trips`, so a trip with no parts at all reads as an empty
     # list rather than a `KeyError` in a writer - same contract as the `*_by_dive` maps.
-    locations_by_trip: dict[int, list[TripLocationRead]]
+    parts_by_trip: dict[int, list[TripPartRead]]
     courses: list[Course]
     dive_sites: list[DiveSite]
     gear_items: list[GearItem]
@@ -322,7 +323,7 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
     The order of the reads below still matters, though no longer for the reason it was
     written for - `_owned` used to need every referrer read before the table it referenced,
     so it knew which dead rows to bring back. What is left is ordinary data dependency:
-    `dive_ids` comes from `dives`, `item_ids_by_set` from `gear_sets`, `locations_by_trip`
+    `dive_ids` comes from `dives`, `item_ids_by_set` from `gear_sets`, `parts_by_trip`
     from `trips`, `cert_files_by_cert` from `certifications`, and `species` from the join
     rows `_ordered_ids_by_dive` read. Reorder on those, not on
     the strength of the resurrection having gone. `courses` has no such dependency - it is
@@ -359,10 +360,14 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
     schedules = await _owned(
         db, GearServiceSchedule, user_id=user_id, order_by=(GearServiceSchedule.gear_item_id, GearServiceSchedule.id)
     )
-    trips = await _owned(db, Trip, user_id=user_id, order_by=(Trip.start_date, Trip.id))
-    # `id` breaks ties rather than `uuid`, matching every other collection here: the
-    # bundle's contract is a stable order run after run, not the list endpoint's ordering
-    # (which runs newest-first with the dateless rows last).
+    # A trip stores no dates, so oldest-first is the same correlated aggregate the list
+    # endpoint orders by, read the other way up. `NULLS LAST` is spelled out because a trip
+    # whose parts carry none has no span to place, and the end of the bundle is where it
+    # belongs rather than the start.
+    trips = await _owned(db, Trip, user_id=user_id, order_by=(EARLIEST_PART_START.asc().nulls_last(), Trip.id))
+    # `id` breaks ties rather than `uuid`, for both of these and matching every other
+    # collection here: the bundle's contract is a stable order run after run, not the list
+    # endpoint's ordering (which runs newest-first with the dateless rows last).
     courses = await _owned(db, Course, user_id=user_id, order_by=(Course.start_date, Course.id))
     dive_sites = await _owned(db, DiveSite, user_id=user_id, order_by=(DiveSite.name, DiveSite.id))
     gear_items = await _owned(db, GearItem, user_id=user_id, order_by=(GearItem.name, GearItem.id))
@@ -381,7 +386,7 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
         attribution_by_dive=await get_gas_attribution_for_dives(db=db, dive_ids=dive_ids),
         trips=trips,
         # After the `trips` read above, which is what supplies the ids.
-        locations_by_trip=await get_locations_for_trips(db=db, trip_ids=[trip.id for trip in trips]),
+        parts_by_trip=await get_parts_for_trips(db=db, trip_ids=[trip.id for trip in trips]),
         courses=courses,
         dive_sites=dive_sites,
         gear_items=gear_items,

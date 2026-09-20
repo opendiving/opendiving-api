@@ -18,7 +18,7 @@ class DiveSpecies(Base):
 
     **Both cascades are dormant, for different reasons.** `Dive` is soft-deleted, so no
     `DELETE FROM dive` is ever issued and the `dive_id` cascade never fires - the same
-    asymmetry `TripLocation` documents. And nothing deletes a `Species` at all: the catalog
+    asymmetry `TripPart` documents. And nothing deletes a `Species` at all: the catalog
     is global and immutable in v1. They are declared anyway, because a table that outlives
     both of those decisions should not be the thing that has to be remembered.
     """

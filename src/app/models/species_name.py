@@ -11,7 +11,7 @@ class SpeciesName(Base):
     This is the search index, not a display source. `Species.common_name` is what any
     surface shows; these rows exist so that typing "clownfish", "カクレクマノミ" or the
     superseded *Manta birostris* all land on the same catalog row. They are value objects
-    like `TripLocation`: no public `uuid`, no ownership, nothing references one.
+    like `TripPart`: no public `uuid`, no ownership, nothing references one.
 
     **Multilingual on the way in, English on the way out.** WoRMS vernaculars arrive
     language-tagged and there are only a handful per taxon, so they are all kept - a name

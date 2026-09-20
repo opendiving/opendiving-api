@@ -31,8 +31,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.config import settings
 from ...core.utils.datetime_offset import combine_start_time
+from ...core.utils.trip_span import trip_span
 from ...models.course import Course
 from ...models.dive import Dive
+from ...models.trip import Trip
 from ...schemas.certification import CertificationAgency, CertificationSide
 from ...schemas.course import CourseStatus
 from ...schemas.dive import DecoAlgorithm, DiveMode, WaterType
@@ -63,7 +65,7 @@ from ...schemas.export import (
 )
 from ...schemas.gear_item import GearType
 from ...schemas.gear_service import ServiceKind
-from ...schemas.trip import TripLocationRead
+from ...schemas.trip import TripLocationRead, TripPartRead
 from ...schemas.user import CHECK_IN_FIELDS
 from ..dive_profiles import LoadedProfile, load_profile, to_read_schema
 from .loader import ExportBundle, ExportFileRow, ExportRecordingRow
@@ -284,6 +286,30 @@ def _trip_location(location: TripLocationRead) -> ExportTripLocation:
     )
 
 
+def _trip(trip: Trip, parts: list[TripPartRead]) -> ExportTrip:
+    """A trip as `$defs/trip` 0.8.0 describes it: a span and a flat list of places.
+
+    The span is derived from the parts, where it used to be two columns. **A trip whose
+    parts carry no dates cannot be expressed here at all**, and this raises: `starts_on` is
+    REQUIRED in the installed schema and spec §5.4 forbids inventing a value, so the export
+    refuses rather than shipping a document that will not validate. The format gains
+    `parts[]` in its next release, which is what closes it; until then any account holding
+    such a trip takes a 500 from the DiveJSON and archive endpoints, which is accepted.
+    """
+    starts_on, ends_on = trip_span(parts)
+    if starts_on is None:
+        raise ValueError(f"Trip {trip.uuid} has no dated part, and $defs/trip requires starts_on")
+    return ExportTrip(
+        uuid=trip.uuid,
+        name=trip.name,
+        locations=[_trip_location(part.location) for part in parts if part.location is not None],
+        starts_on=starts_on,
+        ends_on=ends_on,
+        notes=_text(trip.notes),
+        created_at=trip.created_at,
+    )
+
+
 def _stored_file(bundle: ExportBundle, file: ExportFileRow, paths: ArchivePaths | None) -> ExportStoredFile | None:
     """One stored export as the format's Stored File, or `None` if its digest has gone.
 
@@ -476,18 +502,7 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
     return [
         (
             "trips",
-            [
-                ExportTrip(
-                    uuid=trip.uuid,
-                    name=trip.name,
-                    locations=[_trip_location(location) for location in bundle.locations_by_trip[trip.id]],
-                    starts_on=trip.start_date,
-                    ends_on=trip.end_date,
-                    notes=_text(trip.notes),
-                    created_at=trip.created_at,
-                )
-                for trip in bundle.trips
-            ],
+            [_trip(trip, bundle.parts_by_trip[trip.id]) for trip in bundle.trips],
         ),
         (
             "courses",

@@ -100,9 +100,10 @@ from ...schemas.dive_profile import (
     ProfileEventType,
 )
 from ...schemas.gear_item import GearType
+from ...schemas.trip import TripPartRead
 from ..dive_profiles import load_profile
 from .loader import ExportBundle
-from .naming import gas_name, trip_location_names
+from .naming import gas_name
 
 UDDF_NAMESPACE = "http://www.streit.cc/uddf/3.2/"
 UDDF_VERSION = "3.2.2"
@@ -476,6 +477,41 @@ def _divesite_element(bundle: ExportBundle) -> ET.Element | None:
     return divesite
 
 
+def _trippart_element(trip_element: ET.Element, part: TripPartRead | None) -> ET.Element:
+    """One `<trippart>`, which is what a part is - the mapping is close to an identity.
+
+    `<name>` is mandatory (`trippartType` extends `simpleNamedType`) but is an
+    `xs:string`, so a part with no place gets an empty one rather than borrowing the
+    trip's name, which would invent a place the diver never picked. `part` is `None` for
+    the floor below.
+
+    `<dateoftrip>` is `minOccurs="0"`, so a part with no dates simply has none - the
+    absence is expressible here, unlike in `logbook.divejson`. Both of its attributes are
+    required when it is present, so a part with one date repeats it: a stretch that began
+    on a day and has no recorded end ends that day, which is what the pair already said
+    for a trip.
+    """
+    element = _sub(trip_element, "trippart")
+    location = None if part is None else part.location
+    _sub(element, "name", "" if location is None else location.name)
+    if part is not None and (part.start_date is not None or part.end_date is not None):
+        # The attributes are `xs:dateTime` while we store plain dates, so each is widened
+        # to midnight.
+        start_date = part.start_date or part.end_date
+        end_date = part.end_date or part.start_date
+        _sub(element, "dateoftrip", startdate=f"{start_date}T00:00:00", enddate=f"{end_date}T00:00:00")
+    if location is not None:
+        # A place per part, where the whole trip used to get one joined line - and the
+        # coordinates survive with it, `geographyType` allowing the single lat/lon pair a
+        # part has where a trip of three places had no one position to put there.
+        geography = _sub(element, "geography")
+        _sub(geography, "location", location.name)
+        if location.latitude is not None and location.longitude is not None:
+            _sub(geography, "latitude", _num(location.latitude))
+            _sub(geography, "longitude", _num(location.longitude))
+    return element
+
+
 def _divetrip_element(bundle: ExportBundle) -> ET.Element | None:
     if not bundle.trips:
         return None
@@ -483,23 +519,16 @@ def _divetrip_element(bundle: ExportBundle) -> ET.Element | None:
     for trip in bundle.trips:
         element = _sub(divetrip, "trip", id=_uddf_id("trip", trip.uuid))
         _sub(element, "name", trip.name)
-        # `tripType` requires at least one `<trippart>`, and a trip here has no parts -
-        # so it becomes a single part standing for the whole thing, named after it.
-        part = _sub(element, "trippart")
-        _sub(part, "name", trip.name)
-        # `dateoftrip`'s attributes are `xs:dateTime` while we store plain dates, so each
-        # is widened to midnight. A one-day trip with no end date ends the day it began.
-        end_date = trip.end_date or trip.start_date
-        _sub(part, "dateoftrip", startdate=f"{trip.start_date}T00:00:00", enddate=f"{end_date}T00:00:00")
-        # UDDF has one string here where a trip now has a list, so the places are joined
-        # into the line a diver would write themselves. The coordinates stay behind in
-        # `logbook.divejson`: `geographyType` allows a single lat/lon pair, and a trip that went
-        # to three of them has no one position to put there.
-        location = trip_location_names(bundle.locations_by_trip[trip.id])
-        if location:
-            _sub(_sub(part, "geography"), "location", location)
+        parts = bundle.parts_by_trip[trip.id]
+        # `tripType` requires at least one `<trippart>`, so a trip with no parts still
+        # gets one - nameless and dateless, standing for the trip itself. Without the
+        # floor the document would be silently invalid, and no fixture would catch it:
+        # every trip in every corpus document has a place.
+        elements = [_trippart_element(element, part) for part in parts] or [_trippart_element(element, None)]
         if trip.notes:
-            _sub(_sub(part, "notes"), "para", trip.notes)
+            # On the first part only. The reader joins every part's notes, so writing them
+            # on each one returns them N times through a round trip.
+            _sub(_sub(elements[0], "notes"), "para", trip.notes)
     return divetrip
 
 

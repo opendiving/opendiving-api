@@ -34,7 +34,7 @@ import math
 import uuid as uuid_pkg
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -981,16 +981,19 @@ class _Planner:
         record.values = {
             "user_id": self._user_id,
             "name": trip.name,
-            "start_date": trip.starts_on,
-            "end_date": ends_on,
             "notes": self._text(trip.notes),
             "created_at": self._created_at(trip.created_at),
         }
-        record.children = {"locations": self._plan_trip_locations(trip)}
+        record.children = {"parts": self._plan_trip_parts(trip, starts_on=trip.starts_on, ends_on=ends_on)}
         return record
 
-    def _plan_trip_locations(self, trip: ImportTrip) -> list[dict[str, Any]]:
-        """A trip's places, as `trip_location` rows.
+    def _plan_trip_parts(self, trip: ImportTrip, *, starts_on: date, ends_on: date | None) -> list[dict[str, Any]]:
+        """A trip's parts, as `trip_part` rows.
+
+        The document is DiveJSON 0.8.0, where a trip is still one span and a flat list of
+        places, so this applies the same rule the migration did: a part per place with the
+        start on the first and the end on the last, and one dated part with no place when
+        the document names none.
 
         Value objects with no uuid of their own (spec §6.9), replaced wholesale with the
         trip - so `position` is the list index rather than anything the document carries. A
@@ -1024,11 +1027,21 @@ class _Planner:
                     "name": location.name,
                     "display_name": location.display_name,
                     "position": len(rows),
+                    "start_date": None,
+                    "end_date": None,
                     "latitude": latitude,
                     "longitude": longitude,
                     **corners,
                 }
             )
+
+        if not rows:
+            # No place the planner kept, so the span has nowhere else to go: one part with
+            # both dates and no name, which is what a placeless part is.
+            return [{"position": 0, "start_date": starts_on, "end_date": ends_on}]
+
+        rows[0]["start_date"] = starts_on
+        rows[-1]["end_date"] = ends_on
         return rows
 
     async def _plan_courses(self) -> None:

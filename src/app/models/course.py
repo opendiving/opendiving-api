@@ -51,9 +51,9 @@ class Course(Base, PublicUUIDMixin, TimestampMixin):
     # The agency's name when `agency == "other"`, same pairing rule as a certification's -
     # and, a course's agency being optional, unnameable without one.
     agency_other: Mapped[str | None] = mapped_column(String(64), default=None)
-    # Both nullable, diverging from `Trip.start_date`: a `planned` course has no dates
-    # yet, and a referral course spans months with fuzzy edges. The ordering invariant
-    # (`end_date >= start_date`) is in `__table_args__` below.
+    # Both nullable: a `planned` course has no dates yet, and a referral course spans
+    # months with fuzzy edges. The ordering invariant (`end_date >= start_date`) is in
+    # `__table_args__` below.
     start_date: Mapped[date | None] = mapped_column(Date, default=None)
     end_date: Mapped[date | None] = mapped_column(Date, default=None)
     # The same three fields a certification carries, with the same names and lengths

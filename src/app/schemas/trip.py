@@ -12,7 +12,7 @@ from ..core.schemas import (
 )
 from .dive_site import WholeCoordinatePair
 
-MAX_TRIP_LOCATIONS = 20
+MAX_TRIP_PARTS = 20
 
 BBOX_MESSAGE = "bbox_south, bbox_north, bbox_west and bbox_east must be set together"
 BBOX_NEEDS_COORDINATES_MESSAGE = "a bounding box needs latitude and longitude"
@@ -20,12 +20,12 @@ BBOX_ORDER_MESSAGE = "bbox_south must be less than or equal to bbox_north"
 
 
 class TripLocationInput(WholeCoordinatePair):
-    """One place on a trip, as the geocoder described it when the diver picked it.
+    """The place half of a trip part, as the geocoder described it when the diver picked it.
 
-    A value object, not a reference: the name and position are snapshotted rather than
-    looked up, so nothing here resolves against a gazetteer on the way in. A location
-    the geocoder could not answer for arrives as a bare `name` - that free-text escape
-    hatch is what keeps a throttled provider from blocking a save.
+    A value object, not a reference: the name is snapshotted rather than looked up, so
+    nothing here resolves against a gazetteer on the way in. A location the geocoder could
+    not answer for arrives as a bare `name` - that free-text escape hatch is what keeps a
+    throttled provider from blocking a save.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -54,8 +54,8 @@ class TripLocationInput(WholeCoordinatePair):
 
 
 class TripLocationRead(BaseModel):
-    """Public shape of a trip location - a value object with no id of its own, because
-    there is nothing to address it by: locations are replaced wholesale with the trip.
+    """Public shape of a part's place - a value object with no id of its own, because
+    there is nothing to address it by: parts are replaced wholesale with the trip.
     """
 
     name: str
@@ -68,36 +68,67 @@ class TripLocationRead(BaseModel):
     bbox_east: float | None = None
 
 
-class TripBase(BaseModel):
-    name: Annotated[str, Field(min_length=1, max_length=255, examples=["Red Sea Liveaboard 2024"])]
+class TripPartInput(BaseModel):
+    """One stretch of a trip on the way in: an optional date range and an optional place.
+
+    Both halves are optional and each absence means something. Dates and no location is a
+    transit day or a week nobody geocoded; a location and no dates is a stop whose timing
+    the diver has not filled in. A part carries no name of its own - `location.name` is
+    the place's name, and a part without one is identified by its dates or its ordinal.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     start_date: Annotated[date | None, Field(default=None, examples=["2024-06-01"])]
     end_date: Annotated[date | None, Field(default=None, examples=["2024-06-08"])]
-    notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
+    location: TripLocationInput | None = None
 
     @model_validator(mode="after")
-    def check_date_range(self) -> TripBase:
+    def check_date_range(self) -> TripPartInput:
         validate_date_range(self.start_date, self.end_date)
         return self
+
+
+class TripPartRead(BaseModel):
+    """Public shape of a trip part. No id: parts are replaced wholesale with the trip, so
+    there is nothing to address one by."""
+
+    start_date: date | None = None
+    end_date: date | None = None
+    location: TripLocationRead | None = None
+
+
+class TripBase(BaseModel):
+    name: Annotated[str, Field(min_length=1, max_length=255, examples=["Red Sea Liveaboard 2024"])]
+    notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
 
 
 class TripRead(TripBase, PublicUUIDSchema):
     """Public representation of a trip, keyed by its opaque `uuid` rather than the
     sequential internal `id` (which is never exposed over the API).
+
+    `locations`, `start_date` and `end_date` are the deploy-skew shim: the web build the
+    flagship was serving before this one reads all three, and the two halves deploy off
+    their own pushes in an order nobody chose. They are derived from `parts` on the way
+    out and `api-3` deletes them.
     """
 
-    user_uuid: uuid_pkg.UUID
-    created_at: datetime
     # `default_factory` rather than a required field, and load-bearing: `trip_cache:{uuid}`
     # entries live an hour and replay through this schema, so entries written before this
-    # field existed have no `locations` key. Required, every warm read would 500 until the
+    # field existed have no `parts` key. Required, every warm read would 500 until the
     # last of them expired.
+    parts: Annotated[list[TripPartRead], Field(default_factory=list)]
     locations: Annotated[list[TripLocationRead], Field(default_factory=list)]
+    start_date: date | None = None
+    end_date: date | None = None
+    user_uuid: uuid_pkg.UUID
+    created_at: datetime
 
 
 class TripReadInternal(TripBase, PublicUUIDSchema):
     """Mirrors the actual `trip` table columns (integer PK/FK), for server-side lookups
     only - never returned directly over the API (use `TripRead` for the public shape,
-    which additionally resolves `user_id` to the owning user's `uuid`).
+    which additionally resolves `user_id` to the owning user's `uuid` and embeds the parts).
     """
 
     id: int
@@ -105,62 +136,69 @@ class TripReadInternal(TripBase, PublicUUIDSchema):
     created_at: datetime
 
 
-class TripCreate(TripBase):
-    model_config = ConfigDict(extra="forbid")
-    start_date: Annotated[date, Field(examples=["2024-06-01"])]
+class _LegacyTripDates(BaseModel):
+    """The members the previously deployed web build sends, kept accepted rather than
+    refused.
+
+    Every write schema here is `extra="forbid"`, so without this the build the flagship is
+    serving while the two halves deploy apart would take a 422 on every trip it created or
+    edited. When `parts` is present it wins and these are ignored; otherwise they are
+    translated into parts by the rule the migration used. `api-3` deletes this class and
+    both its users.
+    """
+
+    start_date: Annotated[date | None, Field(default=None, examples=["2024-06-01"])]
+    end_date: Annotated[date | None, Field(default=None, examples=["2024-06-08"])]
     locations: Annotated[
-        list[TripLocationInput],
+        list[TripLocationInput] | None,
+        Field(default=None, max_length=MAX_TRIP_PARTS, deprecated="Send `parts` instead."),
+    ]
+
+
+class TripCreate(TripBase, _LegacyTripDates):
+    model_config = ConfigDict(extra="forbid")
+
+    parts: Annotated[
+        list[TripPartInput],
         Field(
             default_factory=list,
-            max_length=MAX_TRIP_LOCATIONS,
-            description="Places this trip went to, in the order listed",
+            max_length=MAX_TRIP_PARTS,
+            description="The stretches this trip ran, in the order the diver arranged them",
         ),
     ]
 
 
 class TripCreateInternal(TripBase):
     model_config = ConfigDict(extra="forbid")
-    start_date: Annotated[date, Field(examples=["2024-06-01"])]
     user_id: int
 
 
 class TripUpdate(RejectsExplicitNulls):
     model_config = ConfigDict(extra="forbid")
 
-    # `end_date` stays off this list on purpose: an open-ended trip is a real state, so
-    # clearing it back to null is a legitimate edit. `start_date` is not - a trip without
-    # one has nothing to sort the list by.
-    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "start_date", "notes")
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "notes")
 
     name: Annotated[str | None, Field(min_length=1, max_length=255, default=None)]
-    start_date: Annotated[date | None, Field(default=None)]
-    end_date: Annotated[date | None, Field(default=None)]
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
 
-    @model_validator(mode="after")
-    def check_date_range(self) -> TripUpdate:
-        validate_date_range(self.start_date, self.end_date)
-        return self
 
+class TripUpdateRequest(TripUpdate, _LegacyTripDates):
+    """Request body for updating a trip, including replacing its parts.
 
-class TripUpdateRequest(TripUpdate):
-    """Request body for updating a trip, including replacing its locations.
+    Omit `parts` and the existing ones are left untouched; provide it - even as an empty
+    list - and they are replaced wholesale with what was sent.
 
-    Omit `locations` and the existing ones are left untouched; provide it - even as an
-    empty list - and they are replaced wholesale with what was sent.
-
-    Separate from `TripUpdate` rather than a field on it because `TripUpdate` is
-    CRUDAdmin's Trip form schema (and the shape `test_update_explicit_nulls.py` sweeps
-    against the `trip` table's columns), and `locations` is neither a column nor
-    something the admin form could render.
+    Separate from `TripUpdate` rather than fields on it because `TripUpdate` is CRUDAdmin's
+    Trip form schema (and the shape `test_update_explicit_nulls.py` sweeps against the
+    `trip` table's columns), and none of these is a trip column.
     """
 
-    locations: Annotated[
-        list[TripLocationInput] | None,
+    parts: Annotated[
+        list[TripPartInput] | None,
         Field(
             default=None,
-            max_length=MAX_TRIP_LOCATIONS,
-            description="Places this trip went to, in the order listed. Omit to leave them unchanged.",
+            max_length=MAX_TRIP_PARTS,
+            description="The stretches this trip ran, in order. Omit to leave them unchanged.",
         ),
     ]
 

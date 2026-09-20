@@ -24,7 +24,7 @@ from .invite_request import InviteRequest
 from .species import Species
 from .species_name import SpeciesName
 from .trip import Trip
-from .trip_location import TripLocation
+from .trip_part import TripPart
 from .user import User
 from .user_dive_stats import UserDiveStats
 from .user_session import UserSession
