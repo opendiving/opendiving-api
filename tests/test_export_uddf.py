@@ -536,8 +536,8 @@ class TestDiveContent:
 
     @pytest.mark.asyncio
     async def test_the_trip_is_linked_and_each_part_carries_its_own_dates(self, monkeypatch):
-        """The mapping is close to an identity: a `<trippart>` is a part, so the two parts
-        of the fixture trip emit their own ranges instead of the whole span landing on the
+        """The mapping is close to an identity: a `<trippart>` is a part, so each part of
+        the fixture trip emits its own range instead of the whole span landing on the
         first one."""
         document = await _render(full_bundle(), monkeypatch=monkeypatch)
         trip = _tree(document).find(f"{UDDF}divetrip/{UDDF}trip")
