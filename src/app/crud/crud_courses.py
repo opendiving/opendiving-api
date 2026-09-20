@@ -92,8 +92,9 @@ async def get_courses_page(
     *searched* branch needs it too, which is what makes this one query rather than two.
     `core/utils/search.py::search_multi` would serve the search branch otherwise, but it
     builds a bare `.desc()`/`.asc()` from a single `sort_column`, so neither the null
-    placement nor the `uuid` tie-break is reachable through it. Trips get away with
-    `search_multi` only because `trip.start_date` is `NOT NULL`.
+    placement nor the `uuid` tie-break is reachable through it. `get_trips_page` is the
+    third of these, for an ordering `search_multi` cannot express at all - a trip's
+    earliest start is an aggregate over another table rather than a column.
 
     Rows come back as plain dicts of every table column, matching `get_multi` called
     without a `schema_to_select`, so a caller can hand them to the same public-shape

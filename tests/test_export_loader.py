@@ -37,7 +37,7 @@ from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.gear_set import GearSet
 from src.app.models.gear_set_item import GearSetItem
 from src.app.models.trip import Trip
-from src.app.models.trip_location import TripLocation
+from src.app.models.trip_part import TripPart
 from src.app.models.user import User
 from src.app.services.export.loader import ExportBundle, load_export_bundle
 from tests.conftest import db_available
@@ -123,8 +123,8 @@ class TestScoping:
             [
                 DiveSite(user_id=owner.id, name="Mine", notes=""),
                 DiveSite(user_id=stranger.id, name="Theirs", notes=""),
-                Trip(user_id=owner.id, name="Mine", start_date=date(2026, 6, 1), notes=""),
-                Trip(user_id=stranger.id, name="Theirs", start_date=date(2026, 6, 1), notes=""),
+                Trip(user_id=owner.id, name="Mine", notes=""),
+                Trip(user_id=stranger.id, name="Theirs", notes=""),
                 Course(user_id=owner.id, name="Mine", agency="tdi", status="completed", notes=""),
                 Course(user_id=stranger.id, name="Theirs", agency="tdi", status="completed", notes=""),
                 GearItem(user_id=owner.id, name="Mine", notes=""),
@@ -240,7 +240,7 @@ class TestTheCascadeLeavesNothingDangling:
         """`SET NULL`, not `CASCADE` - the dive is the irreplaceable record and survives
         losing its trip. `trip_for` then answers `None` off the nulled column rather than
         off a lookup miss."""
-        trip = Trip(user_id=owner.id, name="Gone", start_date=date(2026, 6, 1), notes="")
+        trip = Trip(user_id=owner.id, name="Gone", notes="")
         db.add(trip)
         db.commit()
         dive = _dive(db, owner, number=1)
@@ -387,23 +387,49 @@ class TestOrdering:
         assert [m.oxygen for m in bundle.mixtures_by_dive[dive.id]] == [32.0, 50.0]
 
     @pytest.mark.asyncio
-    async def test_a_trips_places_keep_the_order_they_were_listed_in(self, db: Session, owner: User):
-        """The only thing that orders them - duplicate names are legal here, so `position`
-        is the whole answer - and it is what both flat formats join on."""
-        trip = Trip(user_id=owner.id, name="Visayas 2026", start_date=date(2026, 6, 1), notes="")
-        empty = Trip(user_id=owner.id, name="Somewhere", start_date=date(2026, 7, 1), notes="")
+    async def test_a_trips_parts_keep_the_order_the_diver_arranged_them_in(self, db: Session, owner: User):
+        """The only thing that orders them - duplicate names are legal here, and a part may
+        have no name at all, so `position` is the whole answer. Date order is explicitly
+        not it: the second part below starts before the first."""
+        trip = Trip(user_id=owner.id, name="Visayas 2026", notes="")
+        empty = Trip(user_id=owner.id, name="Somewhere", notes="")
         db.add_all([trip, empty])
         db.commit()
         # Added last-first, so only `position` can produce the expected answer.
         db.add_all(
             [
-                TripLocation(trip_id=trip.id, name="Bohol", position=1),
-                TripLocation(trip_id=trip.id, name="Moalboal", position=0),
+                TripPart(trip_id=trip.id, name="Bohol", position=1, start_date=date(2026, 6, 1)),
+                TripPart(trip_id=trip.id, name="Moalboal", position=0, start_date=date(2026, 6, 8)),
             ]
         )
         db.commit()
 
         bundle = await _load(owner.id)
-        assert [location.name for location in bundle.locations_by_trip[trip.id]] == ["Moalboal", "Bohol"]
+        assert [part.location.name for part in bundle.parts_by_trip[trip.id] if part.location] == [
+            "Moalboal",
+            "Bohol",
+        ]
         # Keyed for every trip, so a writer can index it without asking first.
-        assert bundle.locations_by_trip[empty.id] == []
+        assert bundle.parts_by_trip[empty.id] == []
+
+    @pytest.mark.asyncio
+    async def test_trips_are_ordered_oldest_first_with_the_dateless_ones_last(self, db: Session, owner: User):
+        """A trip stores no dates, so the bundle's order is the same correlated aggregate
+        the list endpoint uses, read the other way up. A trip whose parts carry none has no
+        span to place and belongs at the end rather than the start."""
+        later = Trip(user_id=owner.id, name="Later", notes="")
+        earlier = Trip(user_id=owner.id, name="Earlier", notes="")
+        undated = Trip(user_id=owner.id, name="Undated", notes="")
+        db.add_all([later, earlier, undated])
+        db.commit()
+        db.add_all(
+            [
+                TripPart(trip_id=later.id, position=0, start_date=date(2026, 7, 1)),
+                TripPart(trip_id=earlier.id, position=0, start_date=date(2026, 6, 1)),
+                TripPart(trip_id=undated.id, position=0, name="Nowhere in particular"),
+            ]
+        )
+        db.commit()
+
+        bundle = await _load(owner.id)
+        assert [trip.name for trip in bundle.trips] == ["Earlier", "Later", "Undated"]

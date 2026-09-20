@@ -213,7 +213,7 @@ class TestTheServedDocumentDeclaresNoOwner:
         components = document.get("components", {}).get("schemas", {})
         create_trip = next(operation for name, operation in _operations(document) if name.endswith("/api/v1/trip"))
 
-        assert {"name", "start_date"} <= _request_body_properties(create_trip, components)
+        assert {"name", "parts"} <= _request_body_properties(create_trip, components)
 
 
 def _internal_trip() -> TripReadInternal:
@@ -223,8 +223,8 @@ def _internal_trip() -> TripReadInternal:
 def _install_trip(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     created = AsyncMock(return_value=_internal_trip())
     monkeypatch.setattr(trips_module, "trip_name_exists", AsyncMock(return_value=False))
-    monkeypatch.setattr(trips_module, "replace_locations_for_trip", AsyncMock())
-    monkeypatch.setattr(trips_module, "get_locations_for_trip", AsyncMock(return_value=[]))
+    monkeypatch.setattr(trips_module, "replace_parts_for_trip", AsyncMock())
+    monkeypatch.setattr(trips_module, "get_parts_for_trip", AsyncMock(return_value=[]))
     monkeypatch.setattr(trips_module._trip_cache, "invalidate_list", AsyncMock())
     monkeypatch.setattr(trips_module.crud_trips, "create", created)
     monkeypatch.setattr(trips_module.crud_trips, "get", AsyncMock(return_value=_internal_trip()))
@@ -339,7 +339,7 @@ class CreateRoute:
 
 
 CREATE_ROUTES = (
-    CreateRoute("/trip", {"name": "Cebu 2026", "start_date": "2026-03-01"}, _install_trip),
+    CreateRoute("/trip", {"name": "Cebu 2026", "parts": []}, _install_trip),
     CreateRoute("/course", {"name": "Advanced Nitrox", "agency": "tdi"}, _install_course),
     CreateRoute(
         "/dive",

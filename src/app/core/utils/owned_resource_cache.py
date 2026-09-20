@@ -34,10 +34,14 @@ class OwnedResourceCache[InternalT, PublicT]:
       batches a service-schedule lookup across the page for the service badge.
     - `certifications.py` - batches a card-file lookup across the page, and resolves each
       row's course uuid in a second batched query.
-    - `trips.py` - batches a `trip_location` lookup across the page and embeds the rows, and
-      searches an EXISTS over that child table rather than columns of its own. It still
-      constructs one of these for `list_cache_key_prefix` and `invalidate_list`, so its
-      hand-rolled helpers keep the key shapes this factory defines.
+    - `trips.py` - opts out for both reasons at once. It batches a `trip_part` lookup
+      across the page and embeds the rows, and searches an EXISTS over that child table
+      rather than columns of its own; and a trip stores no dates, so the list's
+      `min(part.start_date) DESC NULLS LAST` is an aggregate over another table that no
+      `sort_columns` string can name. It still constructs one of these for
+      `list_cache_key_prefix` and `invalidate_list`, so its hand-rolled helpers keep the
+      key shapes this factory defines - and it is the one caller that passes no
+      `sort_columns` at all.
     - `courses.py` - the one that opts out for a **different reason**: not enrichment, an
       ordering. `GET /courses` sorts `start_date DESC NULLS LAST` with a `uuid` tie-break,
       and no path through this factory can produce it - `get_multi` and
@@ -84,7 +88,7 @@ class OwnedResourceCache[InternalT, PublicT]:
         crud: Any,
         schema_to_select: type[InternalT],
         to_public: Callable[[InternalT, uuid_pkg.UUID], PublicT],
-        sort_columns: str,
+        sort_columns: str | None = None,
         sort_orders: str = "asc",
         search_columns: tuple[str, ...] = (),
         list_expiration: int = 60,
@@ -107,7 +111,11 @@ class OwnedResourceCache[InternalT, PublicT]:
             Converts an internal row (as returned by `crud`) plus the owner's `user_uuid`
             into the resource's public response shape.
         sort_columns / sort_orders: str
-            Passed through to `crud.get_multi` for the list endpoint.
+            Passed through to `crud.get_multi` for the list endpoint. `sort_columns` may be
+            omitted only by a resource that opts out of `read_list` entirely and keeps an
+            instance for `list_cache_key_prefix`/`invalidate_list` alone - `trips.py` is
+            the one, its order being an aggregate over another table rather than a column
+            of its own. `read_list` then raises rather than sorting by nothing.
         search_columns: tuple[str, ...]
             Model column names a `search=` term matches against, OR'd together and matched
             case-insensitively as a substring, e.g. `("name", "location")`. Leave empty to
@@ -148,6 +156,18 @@ class OwnedResourceCache[InternalT, PublicT]:
             self._read_item_uncached
         )
 
+    @property
+    def _required_sort_column(self) -> str:
+        """The sort column, for the two paths that cannot proceed without one.
+
+        Reached only through `read_list`, which a resource that declared no sort column
+        has opted out of - so this raises rather than inventing an ordering that would
+        silently differ from the hand-written query the route actually serves.
+        """
+        if self._sort_columns is None:
+            raise RuntimeError(f"{self.resource_name} opted out of read_list and declared no sort column")
+        return self._sort_columns
+
     async def _read_list_uncached(
         self,
         request: Request,
@@ -174,7 +194,7 @@ class OwnedResourceCache[InternalT, PublicT]:
                 offset=offset,
                 limit=items_per_page,
                 user_id=user_id,
-                sort_columns=self._sort_columns,
+                sort_columns=self._required_sort_column,
                 sort_orders=self._sort_orders,
             )
         data["data"] = [self._to_public(item, user_uuid).model_dump() for item in data["data"]]  # type: ignore[attr-defined]
@@ -201,7 +221,7 @@ class OwnedResourceCache[InternalT, PublicT]:
             db=db,
             model=self._crud.model,
             conditions=self.search_conditions(user_id=user_id, term=term),
-            sort_column=self._sort_columns,
+            sort_column=self._required_sort_column,
             sort_order=self._sort_orders,
             offset=offset,
             limit=limit,

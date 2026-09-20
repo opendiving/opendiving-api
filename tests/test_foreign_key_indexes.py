@@ -148,7 +148,7 @@ class TestWhatCountsAsLeadingAnIndex:
         assert foreign_key_columns_without_a_leading_index(metadata) == []
 
     def test_a_composite_index_covers_it_when_it_comes_first(self) -> None:
-        """`ix_trip_location_trip_id_position` and `ix_dive_recording_user_id_start_time` are
+        """`ix_trip_part_trip_id_position` and `ix_dive_recording_user_id_start_time` are
         the whole of their columns' coverage in the real schema."""
         child = self._metadata().tables["child"]
         Index("ix_child_parent_id_sort_key", child.c.parent_id, child.c.sort_key)

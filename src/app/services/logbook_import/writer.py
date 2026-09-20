@@ -49,7 +49,7 @@ from ...models.gear_service_record import GearServiceRecord
 from ...models.gear_service_schedule import GearServiceSchedule
 from ...models.gear_set import GearSet
 from ...models.trip import Trip
-from ...models.trip_location import TripLocation
+from ...models.trip_part import TripPart
 from ...schemas.certification import CertificationSide
 from ...schemas.dive import DiveMode
 from ...schemas.dive_mixture import DiveMixtureCreate, as_create
@@ -255,9 +255,9 @@ class _Writer:
     async def _write_trips(self) -> None:
         for record in self._plan.writable("trips"):
             trip_id = await self._write_row("trips", Trip, record)
-            locations = record.children.get("locations") or []
-            if locations:
-                await self._db.execute(insert(TripLocation), [{"trip_id": trip_id, **row} for row in locations])
+            parts = record.children.get("parts") or []
+            if parts:
+                await self._db.execute(insert(TripPart), [{"trip_id": trip_id, **row} for row in parts])
 
     async def _write_courses(self) -> None:
         for record in self._plan.writable("courses"):

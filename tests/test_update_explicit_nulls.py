@@ -97,7 +97,7 @@ UNGUARDED_UPDATE_SCHEMAS = (
     "DiveMixtureUpdate",
     "UserDiveStatsUpdate",
     "DiveDiveSiteUpdate",
-    "TripLocationUpdate",
+    "TripPartUpdate",
     "DiveGearItemUpdate",
     "GearSetItemUpdate",
     "DiveSpeciesUpdate",

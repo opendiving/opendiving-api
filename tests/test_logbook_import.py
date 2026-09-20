@@ -2428,9 +2428,9 @@ class TestTheIntegerColumnCensus:
         ("user_dive_stats", "user_id"): "the caller's",
         ("user_dive_stats", "total_dives"): "a count of rows, derived by `recalculate_dive_stats`",
         ("user_dive_stats", "species_seen"): "a count of distinct rows, derived by `recalculate_dive_stats`",
-        ("trip_location", "id"): "the sequence's",
-        ("trip_location", "trip_id"): "resolved from a row this import wrote",
-        ("trip_location", "position"): "the list index, not the document's",
+        ("trip_part", "id"): "the sequence's",
+        ("trip_part", "trip_id"): "resolved from a row this import wrote",
+        ("trip_part", "position"): "the list index, not the document's",
         ("dive_file", "id"): "the sequence's",
         ("dive_file", "user_id"): "the caller's",
         ("dive_file", "recording_id"): "resolved from a row this import wrote",
@@ -2462,7 +2462,7 @@ class TestTheIntegerColumnCensus:
         from sqlalchemy import BigInteger, Integer
 
         from src.app.models.certification_file import CertificationFile
-        from src.app.models.trip_location import TripLocation
+        from src.app.models.trip_part import TripPart
         from src.app.models.user_dive_stats import UserDiveStats
 
         written: tuple[Any, ...] = (
@@ -2471,7 +2471,7 @@ class TestTheIntegerColumnCensus:
             DiveRecording,
             DiveProfile,
             Trip,
-            TripLocation,
+            TripPart,
             Course,
             DiveSite,
             GearItem,

@@ -59,18 +59,20 @@ already leads on it, and `Index("ix_dive_dive_site_dive_id_position", "dive_id",
 
 ## Hot list queries have composite indexes, not independent single-column ones
 
-The list endpoints (`_cached_read_dives`, `read_trips`, `read_dive_sites`) run
+The list endpoints (`_cached_read_dives`, `read_dive_sites`) run
 `WHERE user_id = ... ORDER BY <col> LIMIT ... OFFSET ...`; Postgres uses one index per scan and
 sorts separately, so single-column indexes on `user_id` and `is_deleted` cannot serve it. Each has
 one composite index matching its filter and sort, so the scan needs no sort step:
 `ix_dive_user_id_start_time` on `(user_id, start_time DESC) WHERE is_deleted = false`,
-`ix_trip_user_id_start_date` on `(user_id, start_date DESC)`, `ix_dive_site_user_id_name` on
-`(user_id, name)`. Only `dive` is soft-deleted, so only its index carries the partial predicate;
-trips and dive sites are hard-deleted. `ix_dive_site_user_id_name` is separate from
-`ux_dive_site_user_id_name_location_lower`, which is keyed on `lower(name)` and cannot satisfy a
-case-sensitive `ORDER BY name`. No table keeps a standalone `is_deleted` index; other lookups filter
-by `id` or use a `user_id`-leading unique index. `DROP COLUMN is_deleted` silently takes a partial
-index with it — see *The row goes, and so does everything pointing at it*.
+`ix_dive_site_user_id_name` on `(user_id, name)`. Only `dive` is soft-deleted, so only its index
+carries the partial predicate; dive sites are hard-deleted. `read_trips` is no longer one of these:
+a trip stores no dates, so it sorts by an aggregate over `trip_part` that no index on `trip` can
+serve — see *A trip's list order is an aggregate, so the query is hand-written*.
+`ix_dive_site_user_id_name` is separate from `ux_dive_site_user_id_name_location_lower`, which is
+keyed on `lower(name)` and cannot satisfy a case-sensitive `ORDER BY name`. No table keeps a
+standalone `is_deleted` index; other lookups filter by `id` or use a `user_id`-leading unique index.
+`DROP COLUMN is_deleted` silently takes a partial index with it — see *The row goes, and so does
+everything pointing at it*.
 
 ## `Mapped[X]` vs `Mapped[X | None]` on `MappedAsDataclass`
 
@@ -197,9 +199,10 @@ disambiguating from the path.
 
 ## Date-only vs datetime fields
 
-`Dive.start_time` is a `DateTime(timezone=True)` (ISO 8601 with time). `Trip.start_date`/`end_date`
-are plain `Date` (`YYYY-MM-DD`). Decide up front whether a new field is a point in time (`datetime`)
-or a calendar date (`date`); the web app handles each differently (see its `DECISIONS.md`).
+`Dive.start_time` is a `DateTime(timezone=True)` (ISO 8601 with time).
+`TripPart.start_date`/`end_date` and `Course.start_date`/`end_date` are plain `Date` (`YYYY-MM-DD`).
+Decide up front whether a new field is a point in time (`datetime`) or a calendar date (`date`); the
+web app handles each differently (see its `DECISIONS.md`).
 
 ## `start_time`'s UTC offset is stored separately, but the API only ever sees one field
 
@@ -2660,33 +2663,18 @@ half is rewritten: parentheses added to the unbound form fail `ruff format --che
 the bound form they are a `SyntaxError` ("multiple exception types must be parenthesized when using
 'as'"). Check for an `as` before concluding anything about a clause.
 
-## Trip locations are a value-object child table, not a `trip.location` column
+## A trip's parts are a value-object child table, and the trip itself stores no dates
 
-`trip_location` holds a trip's places as ordered rows (name, `display_name`, optional position and
-bounding box); `trip.location` is gone. Rows are value objects: no `uuid`, no `PublicUUIDMixin`, no
-unique constraint.
+`trip_part` holds a trip's stretches: an optional date range and an optional place. `trip` has no
+dates — its span is the earliest start and latest end across its parts, and a trip whose parts carry
+none has no span. Rows stay value objects (no `uuid`, no unique constraint) because nothing
+references a part; dives point at trips. `name` says whether a part has a place, which is why it is
+nullable and why `get_parts_for_trip` reads `location=None` off it. Order is the diver's, not date
+order: an undated part has no place in one, and parts may overlap or leave gaps.
 
-`replace_locations_for_trip` deletes and re-inserts with `position` = list index.
-`PATCH /trip/{uuid}` reads `model_fields_set`: omitted `locations` is untouched, `[]` clears, a list
-replaces. The body is `TripUpdateRequest(TripUpdate)`: `TripUpdate` is CRUDAdmin's form schema,
-swept by `tests/test_update_explicit_nulls.py`. A locations-only PATCH has empty `update_data`, so
-`if update_data or values.locations is not None` invalidates the list cache.
-
-Trips opt out of `OwnedResourceCache.read_list`/`read_item`;
-`_cached_read_trips`/`_cached_read_trip` reproduce its key shapes
-(`user_{id}_trips:page_{page}:items_per_page:{items_per_page}:search:{search}`,
-`trip_cache:{uuid}`), so `search_columns` must stay non-empty and the kwarg names fill the
-placeholders. Search is name OR an EXISTS over `trip_location` (`trips.py::_search_conditions`).
-`TripRead.locations` keeps its `default_factory` for warm cache entries. Exports compose from the
-rows (`ExportTripLocation`). Create is not atomic, like `POST /dive`; child inserts use
-`patch_dive`'s `except IntegrityError → rollback → UnprocessableEntityException`.
-
-DDL, order matters:
-
-```bash
-docker compose exec -T db psql -U postgres -d opendive -c "INSERT INTO trip_location (trip_id, name, position) SELECT id, left(location, 255), 0 FROM trip WHERE location IS NOT NULL AND btrim(location) <> '' AND NOT EXISTS (SELECT 1 FROM trip_location tl WHERE tl.trip_id = trip.id);"
-docker compose exec -T db psql -U postgres -d opendive -c "ALTER TABLE trip DROP COLUMN IF EXISTS location;"
-```
+PATCH reads `model_fields_set`, so an omitted `parts` leaves them, `[]` clears, a list replaces.
+Trips keep an `OwnedResourceCache` for its key shapes alone — `search_columns` must stay non-empty
+and the hand-rolled helpers' kwarg names fill the placeholders.
 
 ## A bounding box is optional twice over, and west > east is a real box
 
@@ -2939,7 +2927,7 @@ check: `trip_uuid: null` from a fresh read, the old value from cache, for an hou
 `Trip`, `DiveSite`, `GearItem`, `GearSet` and `GearServiceSchedule` are hard-deleted:
 `DELETE FROM dive_site WHERE id = :id` is the whole implementation, and the `ON DELETE` rule on
 every referencing FK fires — `SET NULL` on `dive.trip_id` and
-`gear_service_record.gear_service_schedule_id`, `CASCADE` on `trip_location.trip_id`,
+`gear_service_record.gear_service_schedule_id`, `CASCADE` on `trip_part.trip_id`,
 `dive_dive_site.dive_site_id`, `dive_gear_item.gear_item_id`, `gear_set_item.gear_item_id`,
 `gear_set_item.gear_set_id`, `gear_service_record.gear_item_id` and
 `gear_service_schedule.gear_item_id`.
@@ -4423,8 +4411,8 @@ partial-indexed FK seq-scans the child; `tests/test_foreign_key_indexes.py` chec
 `tests/test_user_cascade.py` is two halves: `TestEveryForeignKeyIntoUserCascades` walks
 `Base.metadata` to catch a bare `ForeignKey("user.id")`, and
 `TestDeletingAUserTakesEverythingWithIt` seeds one row per table plus second-order rows
-(`certification_file`, `dive_dive_site`, `gear_set_item`, `trip_location`) and issues the raw
-`DELETE` on Postgres (skipped without `POSTGRES_SERVER=localhost`).
+(`certification_file`, `dive_dive_site`, `gear_set_item`, `trip_part`) and issues the raw `DELETE`
+on Postgres (skipped without `POSTGRES_SERVER=localhost`).
 
 ## Deleting an account is two changes with a fortnight between them
 
@@ -5156,21 +5144,6 @@ Manifolded equivalence decides it: one row of volume `nV` and drop `d` reports
 `gas_used` and `rmv` compute. Equality is exact: volumes come from presets or one diver's hand, and
 a tolerance invents a threshold no agency defines.
 
-## A trip's date range is re-checked against the stored row on PATCH
-
-`TripBase.check_date_range` refuses `end_date < start_date`, covering `POST /trip` but not PATCH:
-`TripUpdate` sees only the keys sent, so a lone earlier `end_date` passes, and `trip` has no
-`CheckConstraint`. `patch_trip` merges incoming dates over stored ones and re-runs the rule, as
-`_validate_agency_pairing` does for `agency`/`agency_other`. It keys off which keys were sent, so a
-rename is never refused for an untouched range and an already-reversed row stays editable.
-
-Not duplicating the comparison, the route calls the public `validate_date_range` in a `try` and
-re-raises its `ValueError` as `UnprocessableEntityException`; equal dates are a one-day trip, a
-boundary two copies could disagree on. Both are 422; `getApiErrorMessage` normalises the `detail`
-shapes. `end_date` is not in `TripUpdate.NON_NULLABLE_FIELDS`, so `{"end_date": null}` merges to
-`None` and cannot conflict; `start_date` is, refusing an explicit null earlier. A `CheckConstraint`
-was rejected: its `IntegrityError` surfaces as a 500 and cannot express "only when a date was sent".
-
 ## The certification list spells out `NULLS LAST`, because `get_multi` cannot
 
 `ix_certification_user_id_certified_on` is `(user_id, certified_on DESC NULLS LAST)`, but
@@ -5204,7 +5177,7 @@ rather than `user_id`, which `DiveProfile` and `CertificationFile` lack.
 The second kind is a hand-written list a missing model escapes silently, so adding a model means
 walking it by hand: `TestListCacheKeys` and the search-column lists in `test_picker_search.py`
 (`Trip` is deliberately absent from `TestSearchClause`, going through
-`trips.py::_search_conditions`), the per-helper scoping classes in `test_owned_read_scoping.py`
+`crud_trips.search_conditions`), the per-helper scoping classes in `test_owned_read_scoping.py`
 (plus `tests/test_courses.py::TestCourseUuidLookupScoping`), and the `populated_diver` fixture with
 its two model tuples in `test_user_cascade.py`. Each encodes a judgement no predicate supplies.
 
@@ -5270,8 +5243,8 @@ list with §6.16's.
 
 ## Courses: Both dates are nullable, and three layers keep them ordered
 
-`Trip.start_date` is `NOT NULL`; a course's is not — a `planned` course has no dates yet. A stored
-course never has `end_date < start_date`:
+Both are nullable — a `planned` course has no dates yet. A stored course never has
+`end_date < start_date`:
 
 1. `CourseBase`'s both-present check, for 422s on create.
 2. `patch_course`'s merged check, the incoming date against the stored one — the layer
@@ -5280,23 +5253,24 @@ course never has `end_date < start_date`:
    date passes layer 1 without reaching layer 2. NULL semantics make it vacuous when either date is
    absent.
 
-`trip` has no such constraint, a fact about an existing table rather than a precedent.
-`agency`/`agency_other` takes the same three layers minus the constraint, for the reason
-`models/certification.py` gives. Each rule lives once — `validate_date_range` and
-`DATE_RANGE_MESSAGE` in `core/schemas.py`, `validate_agency_pairing` in `schemas/certification.py` —
-the routes differing only in reporting, a per-field 422 from a schema and a flat `{"detail": ...}`
-from a handler.
+`trip_part` gets no such constraint, which is a choice rather than an omission: a part arrives whole
+and `TripPartInput` checks it, so layer 2 has nothing to add and layer 3 would only cover the admin
+panel — the parity `trip` had, and the panel is being retired. `agency`/`agency_other` takes the
+same three layers minus the constraint, for the reason `models/certification.py` gives. Each rule
+lives once — `validate_date_range` and `DATE_RANGE_MESSAGE` in `core/schemas.py`,
+`validate_agency_pairing` in `schemas/certification.py` — the routes differing only in reporting, a
+per-field 422 from a schema and a flat `{"detail": ...}` from a handler.
 
 ## Courses: The list read is hand-rolled for an ordering, not for an enrichment
 
 `GET /courses` sorts `start_date DESC NULLS LAST` with a `uuid` tie-break, and no path through
 `OwnedResourceCache` produces it: `get_multi`'s `sort_orders` is `'asc'`/`'desc'` with no null
 placement, and `core/utils/search.py::search_multi` builds a bare `.desc()`/`.asc()` from a single
-`sort_column`. Trips get away with `search_multi` because `trip.start_date` is `NOT NULL`. So
-`crud_courses.get_courses_page` is one hand-written `select()` serving both branches, searched and
-unsearched — unlike the resources that leave the factory for an enrichment, and unlike
-`get_certifications_page`, which needs it for one branch. `OwnedResourceCache`'s docstring records
-the distinction.
+`sort_column`. So `crud_courses.get_courses_page` is one hand-written `select()` serving both
+branches, searched and unsearched — unlike the resources that leave the factory for an enrichment,
+and unlike `get_certifications_page`, which needs it for one branch. `get_trips_page` is the third,
+for an ordering `search_multi` cannot reach at all. `OwnedResourceCache`'s docstring records the
+distinction.
 
 A `planned` course has no dates; under Postgres's default `NULLS FIRST` a diver with two planned
 courses sees only those. `courses.py` keeps an `OwnedResourceCache` purely for
@@ -6656,7 +6630,7 @@ notices a `ForeignKey(...)` lacking `index=True`: autogenerate and `alembic chec
 `tests/test_foreign_key_indexes.py` walks `Base.metadata` without a database. Coverage means:
 
 - Leading, not merely present: `(dive_id, position)` covers `dive_id`, `(sort_key, parent_id)`
-  nothing; `trip_location.trip_id` and `dive_recording.user_id` depend on this.
+  nothing; `trip_part.trip_id` and `dive_recording.user_id` depend on this.
 - A unique index, primary key or `UniqueConstraint` counts (`dive_file.user_id` via
   `ux_dive_file_user_id_sha256`); the last two are absent from `Table.indexes` and asked separately.
 - A partial index (`postgresql_where`) counts as none, the lookup carrying no predicate;
@@ -7001,3 +6975,31 @@ from a panel that is off by default and being retired. On export they ride
 `diver.extensions.opendiving` beside the preferences, only where set: 1.0's Diver object is frozen
 and a writer may not invent a member. *"The `diver` member is read, reported, and never applied"*
 governs them on the way back in, as it does the preferences.
+
+## A trip's list order is an aggregate, so the query is hand-written
+
+`GET /trips` sorts by `min(trip_part.start_date) DESC NULLS LAST` with a `uuid` tie-break, and no
+path through `OwnedResourceCache` produces it: `get_multi`'s `sort_orders` is `'asc'`/`'desc'` with
+no null placement, and `search_multi` builds a bare `.desc()` from a single *named* column, which an
+aggregate over another table is not. So `crud_trips.get_trips_page` is one hand-written `select()`
+serving both branches. `NULLS LAST` is behaviour, not tidiness: a trip whose parts carry no dates is
+legal, and Postgres's `DESC` default would read it as "soonest" and float it to the top of every
+diver's list.
+
+No second index. `ix_trip_part_trip_id_position` leads with `trip_id`, so the correlated subquery
+reads a handful of rows per trip. *Rejected:* `(trip_id, start_date)`, which changes what
+`tests/test_foreign_key_indexes.py` accounts for, for no measured gain; a node that finds the query
+plan says otherwise should add it and say so.
+
+## `TripCreate`, `TripUpdateRequest` and `TripRead` still speak the pre-parts shape
+
+Every write schema here is `extra="forbid"`, and the web build the flagship served before parts
+sends `start_date`, `end_date` and `locations` on `POST /trip` and `PATCH /trip/{uuid}`. The two
+repos deploy off their own pushes in an order nobody chose, so for that window the schemas accept
+all three and `TripRead` returns `locations` and a derived span. `parts` wins wherever it was sent,
+`[]` included; otherwise the three become parts by the rule the migration used. A PATCH reads them
+only when `parts` was absent — the old build sends `locations` with every edit, so ignoring them
+would drop a place it had just added.
+
+It names a live build rather than a hypothetical, which is what keeps it, and comes out whole —
+schemas, `_legacy`, `_parts_from_legacy`, `_parts_to_write`, `TestTheDeploySkewShim`.

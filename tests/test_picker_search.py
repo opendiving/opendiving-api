@@ -79,8 +79,8 @@ class TestSearchClause:
 
         # OR'd, not AND'd: a site called "Dahab Canyon" and one merely *located* in Dahab
         # both have to match, and neither has the term in both columns. Trips are not here
-        # any more - they search one column and an EXISTS over `trip_location`, which is
-        # `trips.py::_search_conditions` rather than `search_clause`.
+        # any more - they search one column and an EXISTS over `trip_part`, which is
+        # `crud_trips.search_conditions` rather than `search_clause`.
         #
         # Courses are absent for a third reason again: they *do* go through `search_clause`,
         # but over one column, so there is no OR for this to find. Only the multi-column

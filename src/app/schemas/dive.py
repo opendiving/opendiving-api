@@ -51,8 +51,7 @@ def validate_depth_pair(avg_depth: float | None, max_depth: float | None) -> Non
     merged stored+incoming pair - the case an update schema cannot see, since a PATCH may
     carry either depth alone. `ck_dive_avg_depth_within_max` is underneath all three, so
     this is about answering with a sentence naming the fields rather than with an
-    `IntegrityError`; the same division of labour `validate_date_range` has on trips and
-    courses.
+    `IntegrityError`; the same division of labour `validate_date_range` has on courses.
 
     A mean cannot exceed a maximum, so a dive that says otherwise records at least one
     wrong number - and until this landed the app accepted it and exported it, which the

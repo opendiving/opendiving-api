@@ -4,7 +4,6 @@ from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
-from sqlalchemy import ColumnElement, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,20 +18,20 @@ from ...core.schemas import validate_date_range
 from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
-from ...core.utils.search import LIKE_ESCAPE_CHAR, escape_like, search_multi
+from ...core.utils.trip_span import trip_span
 from ...crud.crud_dives import reassign_dives_to_trip
-from ...crud.crud_trip_locations import (
-    get_locations_for_trip,
-    get_locations_for_trips,
-    replace_locations_for_trip,
+from ...crud.crud_trip_parts import (
+    get_parts_for_trip,
+    get_parts_for_trips,
+    replace_parts_for_trip,
 )
-from ...crud.crud_trips import crud_trips, resolve_trip_id_for_user, trip_name_exists
-from ...models.trip import Trip
-from ...models.trip_location import TripLocation
+from ...crud.crud_trips import crud_trips, get_trips_page, resolve_trip_id_for_user, trip_name_exists
 from ...schemas.trip import (
     TripCreate,
     TripCreateInternal,
-    TripLocationRead,
+    TripLocationInput,
+    TripPartInput,
+    TripPartRead,
     TripRead,
     TripReadInternal,
     TripUpdateRequest,
@@ -41,9 +40,9 @@ from ...services.cache_invalidation import invalidate_dive_caches
 
 router = APIRouter(tags=["trips"])
 
-# The only integrity failure the location writes below can hit is the trip row vanishing
+# The only integrity failure the part writes below can hit is the trip row vanishing
 # between the write and the insert (a concurrent hard delete): lengths and ranges are
-# already bounded by `TripLocationInput`, and there is no unique constraint to violate.
+# already bounded by `TripPartInput`, and there is no unique constraint to violate.
 # 422 rather than a raw 500, matching how `patch_dive` treats its child-row writes.
 #
 # Both routes raise before invalidating anything, so this path knowingly leaves the trip's
@@ -51,34 +50,55 @@ router = APIRouter(tags=["trips"])
 # as `patch_dive`, and the trade is deliberate: the trigger needs a hard delete, which no
 # route offers, and invalidating on the way out of a failed write would mean doing it in
 # two places for a case that cannot currently happen.
-_LOCATION_ERROR_DETAIL = "Trip locations could not be saved."
-
-# The list is ordered by most recent start date, in one place: `_trip_cache` no longer
-# reads it (its `read_list` is unused), but it still takes it, and `_cached_read_trips`
-# has two branches of its own. Three copies means changing the one that does nothing and
-# seeing no change.
-_SORT_COLUMN = "start_date"
-_SORT_ORDER = "desc"
+_PART_ERROR_DETAIL = "Trip parts could not be saved."
 
 
-def _validate_merged_date_range(start_date: date | None, end_date: date | None) -> None:
-    """Enforce `end_date >= start_date` on a PATCH's merged result.
+def _legacy(body: TripCreate | TripUpdateRequest) -> tuple[date | None, date | None, list[TripLocationInput] | None]:
+    """The three deploy-skew members, in the order `_parts_from_legacy` takes them.
 
-    `TripBase` already does this for whole-object writes, but a PATCH may carry either
-    date alone, so the pairing is only checkable once merged over the stored row - the
-    same shape as `_validate_agency_pairing` in `certifications.py`. The `trip` table has
-    no CHECK constraint behind it, so nothing else would refuse the reversed range.
+    One accessor so the two routes cannot read a different set, and one place to delete
+    from when the shim comes out.
+    """
+    return body.start_date, body.end_date, body.locations
 
-    The comparison itself lives in `core/schemas.validate_date_range` so no two of its
-    callers can drift apart - `TripBase`/`TripUpdate` and `CourseBase`/`CourseUpdate` on
-    the whole-object side, `patch_trip` and `patch_course` on this one. Only the way it is
-    reported differs, a `ValueError` there being a per-field 422 and this one the flat
-    `{"detail": ...}` every other route-level refusal returns.
+
+def _parts_from_legacy(
+    start_date: date | None, end_date: date | None, locations: list[TripLocationInput] | None
+) -> list[TripPartInput]:
+    """The previously deployed web build's `start_date`/`end_date`/`locations`, as parts.
+
+    The same rule the migration applied to stored rows: a part per location, the start on
+    the first and the end on the last, and one dated part with no place when there are no
+    locations at all. A body carrying none of the three yields no parts, which is the
+    empty trip a new client would express as `parts: []`.
+
+    **The pair is range-checked here, before any part is built**, because nothing else
+    checks it: these members sit on `_LegacyTripDates`, which carries no validator, and
+    spreading them across parts puts the two dates on different rows as soon as there are
+    two locations, where no per-part check can compare them. The 422 is the flat
+    `{"detail": ...}` shape `patch_course` uses for its own unschema'd pair.
+
+    Deploy-skew only, and goes with the members it reads.
     """
     try:
         validate_date_range(start_date, end_date)
     except ValueError as e:
         raise UnprocessableEntityException(str(e)) from e
+
+    if not locations:
+        if start_date is None and end_date is None:
+            return []
+        return [TripPartInput(start_date=start_date, end_date=end_date)]
+
+    last = len(locations) - 1
+    return [
+        TripPartInput(
+            start_date=start_date if index == 0 else None,
+            end_date=end_date if index == last else None,
+            location=location,
+        )
+        for index, location in enumerate(locations)
+    ]
 
 
 async def _get_owned_trip(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> TripReadInternal:
@@ -102,27 +122,38 @@ def _to_public_trip(
     db_trip: TripReadInternal | dict[str, Any],
     *,
     user_uuid: uuid_pkg.UUID,
-    locations: list[TripLocationRead] | None = None,
+    parts: list[TripPartRead] | None = None,
 ) -> TripRead:
     """Convert an internal trip representation (integer FKs) into its public shape
-    (owning user referenced by `uuid`, places embedded as read from the child table)."""
+    (owning user referenced by `uuid`, parts embedded as read from the child table).
+
+    `locations`, `start_date` and `end_date` are derived here for the deploy-skew shim:
+    the places of the parts that have one, and the span of the parts that carry dates. All
+    three go once the web build that reads them is no longer the one being served.
+    """
     data = db_trip if isinstance(db_trip, dict) else db_trip.model_dump()
+    parts = parts or []
+    start_date, end_date = trip_span(parts)
     return TripRead(
         **{k: v for k, v in data.items() if k not in ("id", "user_id")},
         user_uuid=user_uuid,
-        locations=locations or [],
+        parts=parts,
+        locations=[part.location for part in parts if part.location is not None],
+        start_date=start_date,
+        end_date=end_date,
     )
 
 
 # Kept for its `list_cache_key_prefix` and `invalidate_list` only - `read_list`/`read_item`
-# are no longer called. A trip read now embeds its locations, which is a second query
-# zipped back into the page, and that is precisely the step the factory has no room for
-# (see its docstring, which lists `dives.py` and the other opt-outs). The hand-rolled
+# are no longer called, and it is the one instance that declares no `sort_columns`, the
+# list's ordering being an aggregate over `trip_part` rather than a column of `trip`. A
+# trip read also embeds its parts, which is a second query zipped back into the page (see
+# the factory's docstring, which lists `dives.py` and the other opt-outs). The hand-rolled
 # helpers below reproduce its key shapes exactly, so invalidation is unaffected.
 #
 # `search_columns` still has to be non-empty: it is what keeps the `:search:{search}`
-# segment in the key. Only `name` remains a column - a trip's places moved to
-# `trip_location`, and `_search_conditions` below is what searches them.
+# segment in the key. Only `name` remains a column - a trip's places are rows in
+# `trip_part`, and `crud_trips.search_conditions` is what searches them.
 _trip_cache: OwnedResourceCache[TripReadInternal, TripRead] = OwnedResourceCache(
     resource_name="trips",
     resource_label="Trip",
@@ -130,38 +161,8 @@ _trip_cache: OwnedResourceCache[TripReadInternal, TripRead] = OwnedResourceCache
     crud=crud_trips,
     schema_to_select=TripReadInternal,
     to_public=lambda db_trip, user_uuid: _to_public_trip(db_trip, user_uuid=user_uuid),
-    sort_columns=_SORT_COLUMN,
-    sort_orders=_SORT_ORDER,
     search_columns=("name",),
 )
-
-
-def _search_conditions(user_id: int, term: str) -> tuple[ColumnElement[bool], ...]:
-    """The `WHERE` clauses matching a user's trips against a search term.
-
-    Hand-written rather than `OwnedResourceCache.search_conditions`, which can only OR
-    columns of one table: a trip is as often remembered by where it went as by what it
-    was called, and where it went is now rows in `trip_location`. The EXISTS is what
-    preserves that - typing "moalboal" finds the trip named "Cebu 2026" that went there.
-    """
-    pattern = f"%{escape_like(term)}%"
-    return (
-        Trip.user_id == user_id,
-        or_(
-            Trip.name.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
-            select(TripLocation.id)
-            .where(
-                TripLocation.trip_id == Trip.id,
-                or_(
-                    TripLocation.name.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
-                    # The display name too, so "philippines" finds a trip whose locations
-                    # are all named after towns.
-                    TripLocation.display_name.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
-                ),
-            )
-            .exists(),
-        ),
-    )
 
 
 @router.post("/trip", response_model=TripRead, status_code=201)
@@ -171,32 +172,37 @@ async def write_trip(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> TripRead:
-    """Create a trip for the authenticated user, together with the places it went to.
+    """Create a trip for the authenticated user, together with the parts it ran.
 
-    Trip names are unique per user, so reusing one that already exists is a 422.
-    `locations` keep the order given; index 0 is the one shown wherever only a single
-    place fits.
+    Trip names are unique per user, so reusing one that already exists is a 422. A trip
+    carries no dates of its own: each part has its own optional range and its own optional
+    place, and the trip's span is the earliest start and latest end across them. `parts`
+    keep the order given; index 0 is the one shown wherever only a single part fits.
 
-    The trip row commits before its locations do, so a failure inserting them leaves the
-    trip behind without them - the same accepted semantics as `POST /dive` and its
-    mixtures.
+    `start_date`, `end_date` and `locations` are still accepted for the previously
+    deployed web build and are translated into parts when `parts` is absent; send `parts`
+    and they are ignored.
+
+    The trip row commits before its parts do, so a failure inserting them leaves the trip
+    behind without them - the same accepted semantics as `POST /dive` and its mixtures.
     """
     if await trip_name_exists(db=db, user_id=current_user["id"], name=trip.name):
         raise DuplicateValueException("A trip with this name already exists")
 
-    # `locations` is excluded rather than filtered downstream: `TripCreateInternal` is
-    # `extra="forbid"`, and locations are rows in another table, not a trip column.
-    trip_internal_dict = trip.model_dump(exclude={"locations"})
-    trip_internal = TripCreateInternal(**trip_internal_dict, user_id=current_user["id"])
+    parts = trip.parts if "parts" in trip.model_fields_set else _parts_from_legacy(*_legacy(trip))
+
+    # Only the trip's own columns reach `TripCreateInternal`, which is `extra="forbid"`:
+    # parts are rows in another table, and the legacy members are not columns at all.
+    trip_internal = TripCreateInternal(name=trip.name, notes=trip.notes, user_id=current_user["id"])
     created_trip = await crud_trips.create(
         db=db, object=trip_internal, schema_to_select=TripReadInternal, return_as_model=True
     )
 
     try:
-        await replace_locations_for_trip(db=db, trip_id=created_trip.id, locations=trip.locations)
+        await replace_parts_for_trip(db=db, trip_id=created_trip.id, parts=parts)
     except IntegrityError as e:
         await db.rollback()
-        raise UnprocessableEntityException(_LOCATION_ERROR_DETAIL) from e
+        raise UnprocessableEntityException(_PART_ERROR_DETAIL) from e
 
     await _trip_cache.invalidate_list(current_user["id"])
 
@@ -204,8 +210,8 @@ async def write_trip(
     if trip_read is None:
         raise NotFoundException("Created trip not found")
 
-    locations = await get_locations_for_trip(db=db, trip_id=created_trip.id)
-    return _to_public_trip(cast(TripReadInternal, trip_read), user_uuid=current_user["uuid"], locations=locations)
+    stored_parts = await get_parts_for_trip(db=db, trip_id=created_trip.id)
+    return _to_public_trip(cast(TripReadInternal, trip_read), user_uuid=current_user["uuid"], parts=stored_parts)
 
 
 @cache(
@@ -222,7 +228,7 @@ async def _cached_read_trips(
     items_per_page: int,
     search: str | None,
 ) -> dict:
-    """Fetches (and caches) a user's paginated trip list, each trip with its locations.
+    """Fetches (and caches) a user's paginated trip list, each trip with its parts.
 
     Only ever called after `read_trips` below has checked the caller's authorization - a
     `@cache` hit skips this body entirely, authorization logic included.
@@ -231,40 +237,21 @@ async def _cached_read_trips(
     fill the placeholders in the key prefix this borrows from `_trip_cache`, which is
     what keeps the keys byte-identical to the ones `invalidate_list` sweeps.
     """
-    offset = compute_offset(page, items_per_page)
-    term = (search or "").strip()
+    trips_data = await get_trips_page(
+        db=db,
+        user_id=user_id,
+        offset=compute_offset(page, items_per_page),
+        limit=items_per_page,
+        search=search,
+    )
 
-    trips_data: dict[str, Any]
-    if term:
-        trips_data = await search_multi(
-            db=db,
-            model=Trip,
-            conditions=_search_conditions(user_id=user_id, term=term),
-            sort_column=_SORT_COLUMN,
-            sort_order=_SORT_ORDER,
-            offset=offset,
-            limit=items_per_page,
-        )
-    else:
-        trips_data = cast(
-            dict[str, Any],
-            await crud_trips.get_multi(
-                db=db,
-                offset=offset,
-                limit=items_per_page,
-                user_id=user_id,
-                sort_columns=_SORT_COLUMN,
-                sort_orders=_SORT_ORDER,
-            ),
-        )
-
-    # One batched query for the page rather than one per trip. Both branches above return
-    # full-column dicts (`get_multi` without a `schema_to_select`, and `search_multi` by
-    # construction), so the internal `id` the child rows hang off is there to read.
-    locations_by_trip = await get_locations_for_trips(db=db, trip_ids=[trip["id"] for trip in trips_data["data"]])
+    # One batched query for the page rather than one per trip. `get_trips_page` returns
+    # full-column dicts, matching `get_multi` without a `schema_to_select`, so the internal
+    # `id` the child rows hang off is there to read.
+    parts_by_trip = await get_parts_for_trips(db=db, trip_ids=[trip["id"] for trip in trips_data["data"]])
 
     trips_data["data"] = [
-        _to_public_trip(trip, user_uuid=user_uuid, locations=locations_by_trip.get(trip["id"], [])).model_dump()
+        _to_public_trip(trip, user_uuid=user_uuid, parts=parts_by_trip.get(trip["id"], [])).model_dump()
         for trip in trips_data["data"]
     ]
 
@@ -281,15 +268,18 @@ async def read_trips(
     items_per_page: int = 10,
     search: Annotated[
         str | None,
-        Query(max_length=255, description="Case-insensitive substring match on the trip's name or its locations"),
+        Query(max_length=255, description="Case-insensitive substring match on the trip's name or its places"),
     ] = None,
 ) -> dict:
-    """List the caller's trips, most recent start date first, each with its locations.
+    """List the caller's trips, most recent first, each with its parts.
+
+    A trip's position in the list is the earliest start date across its parts; a trip
+    whose parts carry no dates at all sorts after every trip that has one.
 
     `search` matches a case-insensitive substring against the trip's name and the names
-    of the places it went to, so a trip is findable by either. Out-of-range pagination
-    is clamped rather than rejected, so `items_per_page` above the ceiling returns the
-    ceiling instead of a 422.
+    of the places its parts went to, so a trip is findable by either. Out-of-range
+    pagination is clamped rather than rejected, so `items_per_page` above the ceiling
+    returns the ceiling instead of a 422.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
 
@@ -312,7 +302,7 @@ async def read_trips(
 async def _cached_read_trip(
     request: Request, uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession
 ) -> TripRead:
-    """Fetches (and caches) a single trip by uuid, with its locations attached.
+    """Fetches (and caches) a single trip by uuid, with its parts attached.
 
     Like `_cached_read_trips`, this must only be called once the route has established
     that the caller owns the trip: `@cache` can serve a hit without re-checking it.
@@ -322,8 +312,8 @@ async def _cached_read_trip(
         raise NotFoundException("Trip not found")
     db_trip = cast(TripReadInternal, db_trip)
 
-    locations = await get_locations_for_trip(db=db, trip_id=db_trip.id)
-    return _to_public_trip(db_trip, user_uuid=owner_uuid, locations=locations)
+    parts = await get_parts_for_trip(db=db, trip_id=db_trip.id)
+    return _to_public_trip(db_trip, user_uuid=owner_uuid, parts=parts)
 
 
 @router.get("/trip/{uuid}", response_model=TripRead)
@@ -333,7 +323,7 @@ async def read_trip(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> TripRead:
-    """Return a single trip by its public uuid, with the places it went to.
+    """Return a single trip by its public uuid, with the parts it ran.
 
     404 when no such trip exists - and the same 404 when it belongs to another user, so
     someone else's uuid stays unprobeable.
@@ -356,11 +346,14 @@ async def patch_trip(
     """Partially update a trip; omitted fields are left untouched.
 
     404 unless the caller owns it, exactly as for a trip that doesn't exist. Renaming to
-    a name the caller already has on another trip is a 422. `start_date` and `end_date`
-    are validated as a pair against the resulting values, so moving either one past the
-    stored other is a 422 rather than a trip that ends before it began. `locations` is
-    replaced wholesale when present rather than merged, so sending a shorter list removes
-    the difference and an empty list clears them; omitting the key leaves them alone.
+    a name the caller already has on another trip is a 422. `parts` is replaced wholesale
+    when present rather than merged, so sending a shorter list removes the difference and
+    an empty list clears them; omitting the key leaves them alone. Each part's own
+    `end_date` must be on or after its `start_date`, which is a 422 naming the part.
+
+    `start_date`, `end_date` and `locations` are still accepted for the previously
+    deployed web build. Any of them present without `parts` replaces the trip's parts by
+    the same rule `POST /trip` uses; send `parts` and they are ignored.
     """
     db_trip = await _get_owned_trip(db, uuid, current_user)
 
@@ -369,29 +362,46 @@ async def patch_trip(
     ):
         raise DuplicateValueException("A trip with this name already exists")
 
-    update_data = values.model_dump(exclude={"locations"}, exclude_unset=True)
-    if "start_date" in update_data or "end_date" in update_data:
-        _validate_merged_date_range(
-            update_data.get("start_date", db_trip.start_date),
-            update_data.get("end_date", db_trip.end_date),
-        )
+    update_data = values.model_dump(
+        include={"name", "notes"},
+        exclude_unset=True,
+    )
+
+    parts = _parts_to_write(values)
 
     if update_data:
         await crud_trips.update(db=db, object=update_data, uuid=uuid)
 
-    if values.locations is not None:
+    if parts is not None:
         try:
-            await replace_locations_for_trip(db=db, trip_id=db_trip.id, locations=values.locations)
+            await replace_parts_for_trip(db=db, trip_id=db_trip.id, parts=parts)
         except IntegrityError as e:
             await db.rollback()
-            raise UnprocessableEntityException(_LOCATION_ERROR_DETAIL) from e
+            raise UnprocessableEntityException(_PART_ERROR_DETAIL) from e
 
-    # A locations-only edit has an empty `update_data` but still changes what the list
-    # pages say: the decorator on this route only drops `trip_cache:{uuid}`.
-    if update_data or values.locations is not None:
+    # A parts-only edit has an empty `update_data` but still changes what the list pages
+    # say: the decorator on this route only drops `trip_cache:{uuid}`.
+    if update_data or parts is not None:
         await _trip_cache.invalidate_list(db_trip.user_id)
 
     return {"message": "Trip updated"}
+
+
+def _parts_to_write(values: TripUpdateRequest) -> list[TripPartInput] | None:
+    """The parts a PATCH replaces the trip's with, or `None` to leave them alone.
+
+    `parts` wins wherever it was sent, including as an empty list, which clears them. The
+    deploy-skew members only reach here when it was not: the old build sends `locations`
+    with every edit, so ignoring them would silently drop a place it had just added.
+    Everything below the first return goes with the shim.
+    """
+    if "parts" in values.model_fields_set:
+        return values.parts
+
+    sent = values.model_fields_set & {"start_date", "end_date", "locations"}
+    if not sent:
+        return None
+    return _parts_from_legacy(*_legacy(values))
 
 
 @router.delete("/trip/{uuid}")
@@ -413,7 +423,7 @@ async def erase_trip(
     used to be idempotent to insure against a half-failed multi-statement delete; one
     `DELETE FROM trip` in one transaction cannot half-fail.
 
-    `trip_location` rows go with it (`ON DELETE CASCADE`) and the dives logged on it survive
+    `trip_part` rows go with it (`ON DELETE CASCADE`) and the dives logged on it survive
     with `trip_id` nulled (`ON DELETE SET NULL`) - both rules were already declared on the
     FKs and finally fire. Re-point the dives with `move_dives_to` before deleting if the
     association matters; there is no way back after.

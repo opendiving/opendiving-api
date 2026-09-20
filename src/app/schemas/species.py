@@ -1,9 +1,9 @@
 """Wire and admin-panel schemas for the species catalog.
 
-Both, in one module, unlike `schemas/trip_location.py` - which is admin-only and says so.
+Both, in one module, unlike `schemas/trip_part.py` - which is admin-only and says so.
 `species` is a public resource with its own endpoints *and* three tables the panel renders,
 so `SpeciesRead` (what `GET /species/{uuid}` returns) and `SpeciesReadInternal` (the row
-shape) coexist here the way `TripLocationRead`/`TripLocationReadInternal` do across their
+shape) coexist here the way `TripPartRead`/`TripPartReadInternal` do across their
 two modules.
 
 Every string a provider wrote is bounded here, for the reason `GeocodeResult`'s are: they

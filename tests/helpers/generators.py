@@ -49,15 +49,12 @@ def create_dive_site(db: Session, user: models.User) -> models.DiveSite:
 
 
 def create_trip(db: Session, user: models.User) -> models.Trip:
-    return _persist(
-        db,
-        models.Trip(
-            user_id=user.id,
-            name=f"Visayas {uuid7().hex[-8:]}",
-            start_date=date(2026, 6, 1),
-            notes="",
-        ),
-    )
+    """A trip with one dated part, which is the shape the migration gives every trip that
+    had no place - and the shape every caller here was getting when a trip held its own
+    dates."""
+    trip = _persist(db, models.Trip(user_id=user.id, name=f"Visayas {uuid7().hex[-8:]}", notes=""))
+    _persist(db, models.TripPart(trip_id=trip.id, position=0, start_date=date(2026, 6, 1)))
+    return trip
 
 
 def create_certification(

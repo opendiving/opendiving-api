@@ -45,11 +45,12 @@ from collections.abc import Iterable, Iterator
 from typing import Any
 
 from ...core.utils.datetime_offset import combine_start_time
+from ...core.utils.trip_span import trip_span
 from ...models.dive import Dive
 from ...schemas.dive_mixture import DiveMixtureRead
 from ..dive_gas import resolve_gas_use
 from .loader import ExportBundle
-from .naming import gas_name, trip_location_names
+from .naming import gas_name, trip_place_names
 
 # Excel's cue that the file is UTF-8. See the module docstring.
 BOM = "\ufeff"
@@ -262,14 +263,20 @@ def write_trips_csv(bundle: ExportBundle) -> Iterator[str]:
 
     def rows() -> Iterator[tuple[Any, ...]]:
         for trip in bundle.trips:
+            parts = bundle.parts_by_trip[trip.id]
+            # The header is unchanged, so the span the two date cells held is derived from
+            # the parts. Both can now be absent - a trip whose parts carry no dates has no
+            # span - where `start_date` was previously a `NOT NULL` column and needed no
+            # branch.
+            start_date, end_date = trip_span(parts)
             yield (
                 trip.name,
                 # One cell where the trip has a list of places, joined the way the app
                 # shows them. A spreadsheet column is not a place to put a nested shape,
-                # and `logbook.divejson` is where the structured locations are.
-                trip_location_names(bundle.locations_by_trip[trip.id]),
-                trip.start_date.isoformat(),
-                None if trip.end_date is None else trip.end_date.isoformat(),
+                # and `logbook.divejson` is where the structured places are.
+                trip_place_names(parts),
+                None if start_date is None else start_date.isoformat(),
+                None if end_date is None else end_date.isoformat(),
                 counts.get(trip.id, 0),
                 trip.notes,
                 str(trip.uuid),

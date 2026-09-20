@@ -3,7 +3,7 @@
 Three of them, and they exist because the export is the first server-side consumer of
 strings the web client has always derived for itself: a gas needs a name in UDDF's
 `<mix>` (the element is `namedType`, so the name is not optional), a trip's places have to
-collapse onto one line wherever the format has a single location slot, and the download
+collapse onto one line where the format has a single location cell, and the download
 itself needs a filename. Paths *inside* the archive are `paths.py`.
 """
 
@@ -11,7 +11,7 @@ import re
 from collections.abc import Iterable
 from datetime import date
 
-from ...schemas.trip import TripLocationRead
+from ...schemas.trip import TripPartRead
 
 # Air is 20.9 % oxygen, devices variously record 20.9, 20.99 or 21, and divers call all
 # of them air. Mirrors `AIR_OXYGEN_MIN`/`AIR_OXYGEN_MAX`/`OXYGEN_MIN` in the web client's
@@ -61,19 +61,22 @@ def gas_name(oxygen: float | None, helium: float | None) -> str:
     return f"EAN{round(oxygen)}"
 
 
-def trip_location_names(locations: Iterable[TripLocationRead]) -> str:
+def trip_place_names(parts: Iterable[TripPartRead]) -> str:
     """A trip's places on one line: `Moalboal, Bohol`.
 
-    Only the flat formats need this. `logbook.divejson` carries the locations structured, but
-    UDDF's `<geography><location>` is a single string and `trips.csv` has a single
-    `location` cell, so both have to render the list the way the app does - and rendering
-    it twice is how the two would end up disagreeing.
+    Takes parts and skips the ones with no place, which is a real shape now - a transit
+    day, or a week nobody geocoded - so a trip of three parts may render two names or
+    none.
+
+    Only `trips.csv` needs this: it has a single `location` cell where a trip has a list.
+    `logbook.divejson` carries the places structured, and UDDF gives each part its own
+    `<geography>`, so neither collapses them any more.
 
     Comma-joined rather than the `;` the CSV uses for its lists (dive sites, cylinders):
     this is one prose location line, not a set of records folded into a cell, and it is
     the string a reader would expect to see in a "where did you go" column.
     """
-    return ", ".join(location.name for location in locations)
+    return ", ".join(part.location.name for part in parts if part.location is not None)
 
 
 def export_filename(username: str, exported_on: date, extension: str) -> str:
