@@ -175,8 +175,8 @@ class TestCourseSchema:
         assert (course.start_date, course.end_date) == (None, None)
 
     def test_a_course_needs_no_dates_at_all(self) -> None:
-        """The divergence from `TripCreate`, whose `start_date` is required: a `planned`
-        course has none yet, and a referral spans months with fuzzy edges."""
+        """A `planned` course has none yet, and a referral spans months with fuzzy
+        edges."""
         course = CourseCreate.model_validate({"name": "Fundamentals", "agency": "gue", "status": "planned"})
 
         assert course.start_date is None
@@ -321,8 +321,8 @@ class TestPatchCourse:
             pytest.param({"end_date": "2026-03-09"}, id="end_date-after-the-stored-start"),
             pytest.param({"end_date": "2026-03-02"}, id="end_date-on-the-stored-start"),
             pytest.param({"start_date": "2026-03-06"}, id="start_date-on-the-stored-end"),
-            # Both halves are nullable here, unlike a trip's `start_date`, so clearing
-            # either one can never conflict with whatever is stored on the other.
+            # Both halves are nullable, so clearing either one can never conflict with
+            # whatever is stored on the other.
             pytest.param({"end_date": None}, id="end_date-cleared"),
             pytest.param({"start_date": None}, id="start_date-cleared"),
         ],

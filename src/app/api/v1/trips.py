@@ -1,5 +1,4 @@
 import uuid as uuid_pkg
-from datetime import date
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -14,11 +13,9 @@ from ...core.exceptions.http_exceptions import (
     NotFoundException,
     UnprocessableEntityException,
 )
-from ...core.schemas import validate_date_range
 from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
-from ...core.utils.trip_span import trip_span
 from ...crud.crud_dives import reassign_dives_to_trip
 from ...crud.crud_trip_parts import (
     get_parts_for_trip,
@@ -29,8 +26,6 @@ from ...crud.crud_trips import crud_trips, get_trips_page, resolve_trip_id_for_u
 from ...schemas.trip import (
     TripCreate,
     TripCreateInternal,
-    TripLocationInput,
-    TripPartInput,
     TripPartRead,
     TripRead,
     TripReadInternal,
@@ -51,54 +46,6 @@ router = APIRouter(tags=["trips"])
 # route offers, and invalidating on the way out of a failed write would mean doing it in
 # two places for a case that cannot currently happen.
 _PART_ERROR_DETAIL = "Trip parts could not be saved."
-
-
-def _legacy(body: TripCreate | TripUpdateRequest) -> tuple[date | None, date | None, list[TripLocationInput] | None]:
-    """The three deploy-skew members, in the order `_parts_from_legacy` takes them.
-
-    One accessor so the two routes cannot read a different set, and one place to delete
-    from when the shim comes out.
-    """
-    return body.start_date, body.end_date, body.locations
-
-
-def _parts_from_legacy(
-    start_date: date | None, end_date: date | None, locations: list[TripLocationInput] | None
-) -> list[TripPartInput]:
-    """The previously deployed web build's `start_date`/`end_date`/`locations`, as parts.
-
-    The same rule the migration applied to stored rows: a part per location, the start on
-    the first and the end on the last, and one dated part with no place when there are no
-    locations at all. A body carrying none of the three yields no parts, which is the
-    empty trip a new client would express as `parts: []`.
-
-    **The pair is range-checked here, before any part is built**, because nothing else
-    checks it: these members sit on `_LegacyTripDates`, which carries no validator, and
-    spreading them across parts puts the two dates on different rows as soon as there are
-    two locations, where no per-part check can compare them. The 422 is the flat
-    `{"detail": ...}` shape `patch_course` uses for its own unschema'd pair.
-
-    Deploy-skew only, and goes with the members it reads.
-    """
-    try:
-        validate_date_range(start_date, end_date)
-    except ValueError as e:
-        raise UnprocessableEntityException(str(e)) from e
-
-    if not locations:
-        if start_date is None and end_date is None:
-            return []
-        return [TripPartInput(start_date=start_date, end_date=end_date)]
-
-    last = len(locations) - 1
-    return [
-        TripPartInput(
-            start_date=start_date if index == 0 else None,
-            end_date=end_date if index == last else None,
-            location=location,
-        )
-        for index, location in enumerate(locations)
-    ]
 
 
 async def _get_owned_trip(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> TripReadInternal:
@@ -126,21 +73,12 @@ def _to_public_trip(
 ) -> TripRead:
     """Convert an internal trip representation (integer FKs) into its public shape
     (owning user referenced by `uuid`, parts embedded as read from the child table).
-
-    `locations`, `start_date` and `end_date` are derived here for the deploy-skew shim:
-    the places of the parts that have one, and the span of the parts that carry dates. All
-    three go once the web build that reads them is no longer the one being served.
     """
     data = db_trip if isinstance(db_trip, dict) else db_trip.model_dump()
-    parts = parts or []
-    start_date, end_date = trip_span(parts)
     return TripRead(
         **{k: v for k, v in data.items() if k not in ("id", "user_id")},
         user_uuid=user_uuid,
-        parts=parts,
-        locations=[part.location for part in parts if part.location is not None],
-        start_date=start_date,
-        end_date=end_date,
+        parts=parts or [],
     )
 
 
@@ -179,27 +117,21 @@ async def write_trip(
     place, and the trip's span is the earliest start and latest end across them. `parts`
     keep the order given; index 0 is the one shown wherever only a single part fits.
 
-    `start_date`, `end_date` and `locations` are still accepted for the previously
-    deployed web build and are translated into parts when `parts` is absent; send `parts`
-    and they are ignored.
-
     The trip row commits before its parts do, so a failure inserting them leaves the trip
     behind without them - the same accepted semantics as `POST /dive` and its mixtures.
     """
     if await trip_name_exists(db=db, user_id=current_user["id"], name=trip.name):
         raise DuplicateValueException("A trip with this name already exists")
 
-    parts = trip.parts if "parts" in trip.model_fields_set else _parts_from_legacy(*_legacy(trip))
-
     # Only the trip's own columns reach `TripCreateInternal`, which is `extra="forbid"`:
-    # parts are rows in another table, and the legacy members are not columns at all.
+    # parts are rows in another table.
     trip_internal = TripCreateInternal(name=trip.name, notes=trip.notes, user_id=current_user["id"])
     created_trip = await crud_trips.create(
         db=db, object=trip_internal, schema_to_select=TripReadInternal, return_as_model=True
     )
 
     try:
-        await replace_parts_for_trip(db=db, trip_id=created_trip.id, parts=parts)
+        await replace_parts_for_trip(db=db, trip_id=created_trip.id, parts=trip.parts)
     except IntegrityError as e:
         await db.rollback()
         raise UnprocessableEntityException(_PART_ERROR_DETAIL) from e
@@ -350,10 +282,6 @@ async def patch_trip(
     when present rather than merged, so sending a shorter list removes the difference and
     an empty list clears them; omitting the key leaves them alone. Each part's own
     `end_date` must be on or after its `start_date`, which is a 422 naming the part.
-
-    `start_date`, `end_date` and `locations` are still accepted for the previously
-    deployed web build. Any of them present without `parts` replaces the trip's parts by
-    the same rule `POST /trip` uses; send `parts` and they are ignored.
     """
     db_trip = await _get_owned_trip(db, uuid, current_user)
 
@@ -367,7 +295,8 @@ async def patch_trip(
         exclude_unset=True,
     )
 
-    parts = _parts_to_write(values)
+    # `None` leaves the existing parts alone; `[]` is a diver clearing them.
+    parts = values.parts
 
     if update_data:
         await crud_trips.update(db=db, object=update_data, uuid=uuid)
@@ -385,23 +314,6 @@ async def patch_trip(
         await _trip_cache.invalidate_list(db_trip.user_id)
 
     return {"message": "Trip updated"}
-
-
-def _parts_to_write(values: TripUpdateRequest) -> list[TripPartInput] | None:
-    """The parts a PATCH replaces the trip's with, or `None` to leave them alone.
-
-    `parts` wins wherever it was sent, including as an empty list, which clears them. The
-    deploy-skew members only reach here when it was not: the old build sends `locations`
-    with every edit, so ignoring them would silently drop a place it had just added.
-    Everything below the first return goes with the shim.
-    """
-    if "parts" in values.model_fields_set:
-        return values.parts
-
-    sent = values.model_fields_set & {"start_date", "end_date", "locations"}
-    if not sent:
-        return None
-    return _parts_from_legacy(*_legacy(values))
 
 
 @router.delete("/trip/{uuid}")

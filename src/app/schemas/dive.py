@@ -716,8 +716,7 @@ class DiveReadWithMixtures(DiveRead):
     #
     # `default_factory=list` is load-bearing rather than tidy: `user_{id}_dive:{uuid}` entries
     # live an hour and replay through this schema, so every entry written before this field
-    # existed lacks the key and would fail validation on read. Same lesson as
-    # `TripRead.locations`.
+    # existed lacks the key and would fail validation on read.
     species: Annotated[list[SpeciesInfo], Field(default_factory=list)]
     # **`source_file` and `profile` are gone**, and `recordings` replaces both. A dive had
     # at most one of each while a dive had at most one record; it now has an ordered list of

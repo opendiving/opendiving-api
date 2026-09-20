@@ -4,8 +4,7 @@ from typing import Protocol
 
 
 class _Dated(Protocol):
-    """Anything shaped like a trip part. Both the ORM row and `TripPartRead` satisfy it,
-    which is the point: the rule must not be written twice."""
+    """Anything shaped like a trip part - the ORM row and `TripPartRead` both are."""
 
     @property
     def start_date(self) -> date | None: ...
@@ -17,11 +16,10 @@ class _Dated(Protocol):
 def trip_span(parts: Iterable[_Dated]) -> tuple[date | None, date | None]:
     """A trip's span: the earliest `start_date` and the latest `end_date` across its parts.
 
-    The one place this is derived in Python, so that the reads and the writers cannot
-    drift into two spellings of it: the public trip shape's deploy-skew span and
-    `trips.csv`. Neither the UDDF writer nor the DiveJSON one is among them, and both want
-    the opposite - each gives a part its own dates, which is the whole of what this change
-    is for. Each pair is taken independently: a trip whose only dated part carries an end
+    The one place this is derived in Python, so that a second caller cannot drift into a
+    second spelling of it. `trips.csv` is that caller today, and the only one: neither the
+    UDDF writer nor the DiveJSON one wants a span, each giving a part its own dates
+    instead. Each pair is taken independently: a trip whose only dated part carries an end
     and no start has an end and no start, which is what the data says rather than an
     invented range.
 
