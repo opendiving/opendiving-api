@@ -110,7 +110,7 @@ class TripRead(TripBase, PublicUUIDSchema):
     `locations`, `start_date` and `end_date` are the deploy-skew shim: the web build the
     flagship was serving before this one reads all three, and the two halves deploy off
     their own pushes in an order nobody chose. They are derived from `parts` on the way
-    out and `api-3` deletes them.
+    out, and go once that build is no longer the one being served.
     """
 
     # `default_factory` rather than a required field, and load-bearing: `trip_cache:{uuid}`
@@ -143,8 +143,8 @@ class _LegacyTripDates(BaseModel):
     Every write schema here is `extra="forbid"`, so without this the build the flagship is
     serving while the two halves deploy apart would take a 422 on every trip it created or
     edited. When `parts` is present it wins and these are ignored; otherwise they are
-    translated into parts by the rule the migration used. `api-3` deletes this class and
-    both its users.
+    translated into parts by the rule the migration used. This class and both its users go
+    once the new build is the one being served.
     """
 
     start_date: Annotated[date | None, Field(default=None, examples=["2024-06-01"])]

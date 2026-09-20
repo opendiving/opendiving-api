@@ -44,11 +44,11 @@ StoredVocabulary = str
 def validate_date_range(start_date: date | None, end_date: date | None) -> None:
     """The one place a `start_date`/`end_date` pair's ordering is decided.
 
-    Shared by `TripBase`/`TripUpdate` and `CourseBase`/`CourseUpdate`, and public because
-    `patch_trip`/`patch_course` each have to re-run it on a merged stored+incoming pair -
-    the one case an update schema cannot see, since a PATCH may carry either date alone.
-    Only `course` has a CHECK constraint underneath it; on `trip` this is the whole
-    enforcement.
+    Shared by `CourseBase`/`CourseUpdate` and by `TripPartInput`, and public because
+    `patch_course` has to re-run it on a merged stored+incoming pair - the one case an
+    update schema cannot see, since a PATCH may carry either date alone. A trip's parts
+    are replaced wholesale rather than merged, so nothing re-runs it there. Only `course`
+    has a CHECK constraint underneath it; on `trip_part` this is the whole enforcement.
 
     Lives here rather than beside either resource so the two cannot drift apart into two
     spellings of the same rule.

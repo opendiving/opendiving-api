@@ -5177,7 +5177,7 @@ rather than `user_id`, which `DiveProfile` and `CertificationFile` lack.
 The second kind is a hand-written list a missing model escapes silently, so adding a model means
 walking it by hand: `TestListCacheKeys` and the search-column lists in `test_picker_search.py`
 (`Trip` is deliberately absent from `TestSearchClause`, going through
-`trips.py::_search_conditions`), the per-helper scoping classes in `test_owned_read_scoping.py`
+`crud_trips.search_conditions`), the per-helper scoping classes in `test_owned_read_scoping.py`
 (plus `tests/test_courses.py::TestCourseUuidLookupScoping`), and the `populated_diver` fixture with
 its two model tuples in `test_user_cascade.py`. Each encodes a judgement no predicate supplies.
 

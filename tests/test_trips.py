@@ -21,9 +21,9 @@ moved five things that nothing else pins:
 
 **The deploy-skew shim is pinned here rather than walked.** `TripCreate`,
 `TripUpdateRequest` and `TripRead` go on speaking `start_date`, `end_date` and
-`locations` for the web build the flagship was serving before this one, and the walk that
-would otherwise cover it runs after the build it protects has been replaced. `api-3`
-deletes the shim and these tests with it.
+`locations` for the web build the flagship was serving before this one, and any walk over
+the running app happens after that build has been replaced, so it cannot reach them. These
+tests go when the shim does.
 
 Mostly without a database: the route's collaborators are stubbed and the assertions are
 on what it hands them (the `test_dive_update.py` style), and the search clause is asserted
@@ -187,9 +187,19 @@ class TestTripPartInput:
     reversed range."""
 
     def test_accepts_dates_and_a_place(self) -> None:
-        part = TripPartInput.model_validate({"start_date": "2026-03-01", "end_date": "2026-03-05", **{}})
+        """The ordinary part, and the only combination where both halves have to survive
+        the same parse - the place nested rather than flattened beside the dates."""
+        part = TripPartInput.model_validate(
+            {"start_date": "2026-03-01", "end_date": "2026-03-05", "location": MOALBOAL}
+        )
 
-        assert (part.start_date, part.end_date, part.location) == (date(2026, 3, 1), date(2026, 3, 5), None)
+        assert part.location is not None
+        assert (part.start_date, part.end_date, part.location.name, part.location.latitude) == (
+            date(2026, 3, 1),
+            date(2026, 3, 5),
+            "Moalboal",
+            9.94,
+        )
 
     def test_accepts_a_place_with_no_dates(self) -> None:
         """Every migrated middle part is this, and a diver can make one from the form."""
@@ -468,8 +478,8 @@ class TestTheDeploySkewShim:
 
     Every write schema here is `extra="forbid"`, so the build the flagship is serving
     while the two halves deploy apart would take a 422 on every trip it created or edited
-    without this. Walked nowhere, because by the time `## Verification` runs that build is
-    gone - these are its only coverage. `api-3` deletes the shim and this class.
+    without this. Nothing can walk it against the running app: by the time anyone could,
+    the build it protects is gone - so these are its only coverage, and they go with it.
     """
 
     @pytest.mark.asyncio

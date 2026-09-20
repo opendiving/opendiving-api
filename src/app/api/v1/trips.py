@@ -55,8 +55,8 @@ _PART_ERROR_DETAIL = "Trip parts could not be saved."
 def _legacy(body: TripCreate | TripUpdateRequest) -> tuple[date | None, date | None, list[TripLocationInput] | None]:
     """The three deploy-skew members, in the order `_parts_from_legacy` takes them.
 
-    One accessor so the two routes cannot read a different set, and one place for `api-3`
-    to delete.
+    One accessor so the two routes cannot read a different set, and one place to delete
+    from when the shim comes out.
     """
     return body.start_date, body.end_date, body.locations
 
@@ -71,7 +71,7 @@ def _parts_from_legacy(
     locations at all. A body carrying none of the three yields no parts, which is the
     empty trip a new client would express as `parts: []`.
 
-    Deploy-skew only - `api-3` deletes this along with the members it reads.
+    Deploy-skew only, and goes with the members it reads.
     """
     if not locations:
         if start_date is None and end_date is None:
@@ -116,8 +116,8 @@ def _to_public_trip(
     (owning user referenced by `uuid`, parts embedded as read from the child table).
 
     `locations`, `start_date` and `end_date` are derived here for the deploy-skew shim:
-    the places of the parts that have one, and the span of the parts that carry dates.
-    `api-3` deletes all three.
+    the places of the parts that have one, and the span of the parts that carry dates. All
+    three go once the web build that reads them is no longer the one being served.
     """
     data = db_trip if isinstance(db_trip, dict) else db_trip.model_dump()
     parts = parts or []
@@ -381,7 +381,7 @@ def _parts_to_write(values: TripUpdateRequest) -> list[TripPartInput] | None:
     `parts` wins wherever it was sent, including as an empty list, which clears them. The
     deploy-skew members only reach here when it was not: the old build sends `locations`
     with every edit, so ignoring them would silently drop a place it had just added.
-    `api-3` deletes everything below the first return.
+    Everything below the first return goes with the shim.
     """
     if "parts" in values.model_fields_set:
         return values.parts
