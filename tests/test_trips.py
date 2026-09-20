@@ -564,6 +564,52 @@ class TestTheDeploySkewShim:
         assert part.location.name == "Dahab"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "locations",
+        [
+            pytest.param(None, id="no-locations"),
+            pytest.param([MOALBOAL], id="one-location"),
+            pytest.param([MOALBOAL, {"name": "Bohol"}], id="two-locations"),
+        ],
+    )
+    async def test_a_reversed_legacy_range_is_a_422_whatever_the_locations(
+        self, write_collaborators: dict[str, Any], locations: list[dict[str, Any]] | None
+    ) -> None:
+        """`_LegacyTripDates` carries no validator, so nothing refuses the pair at
+        request-validation time the way `TripBase` used to - and the two location shapes
+        fail differently without the check. With none or one, both dates land on the same
+        part and `TripPartInput` raises out of the route body, which is a 500. With two
+        they land on different parts, nothing compares them, and a trip that ends before
+        it begins is stored.
+        """
+        body: dict[str, Any] = {"name": "Cebu 2026", "start_date": "2026-03-12", "end_date": "2026-03-01"}
+        if locations is not None:
+            body["locations"] = locations
+
+        with pytest.raises(UnprocessableEntityException) as excinfo:
+            await _write(**body)
+
+        assert DATE_RANGE_MESSAGE in str(excinfo.value.detail)
+        write_collaborators["replace_parts"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_reversed_legacy_range_on_a_patch_is_a_422_too(self, write_collaborators: dict[str, Any]) -> None:
+        with pytest.raises(UnprocessableEntityException) as excinfo:
+            await _patch({"start_date": "2026-03-12", "end_date": "2026-03-01", "locations": [MOALBOAL]})
+
+        assert DATE_RANGE_MESSAGE in str(excinfo.value.detail)
+        write_collaborators["replace_parts"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_equal_legacy_dates_are_a_one_day_trip(self, write_collaborators: dict[str, Any]) -> None:
+        """The boundary the check must not overrun, and the one two copies of the rule
+        would disagree on."""
+        await _write(name="Cebu 2026", start_date="2026-03-01", end_date="2026-03-01")
+
+        (part,) = _written_parts(write_collaborators)
+        assert part.start_date == part.end_date == date(2026, 3, 1)
+
+    @pytest.mark.asyncio
     async def test_the_response_still_carries_a_derived_span_and_flat_locations(
         self, write_collaborators: dict[str, Any]
     ) -> None:

@@ -14,6 +14,7 @@ from ...core.exceptions.http_exceptions import (
     NotFoundException,
     UnprocessableEntityException,
 )
+from ...core.schemas import validate_date_range
 from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
@@ -71,8 +72,23 @@ def _parts_from_legacy(
     locations at all. A body carrying none of the three yields no parts, which is the
     empty trip a new client would express as `parts: []`.
 
+    **The pair is range-checked here, before any part is built.** These members sit on
+    `_LegacyTripDates`, which carries no validator of its own, so nothing refuses a
+    reversed pair at request-validation time the way `TripBase` used to. Two shapes
+    follow from that and both are wrong: with no location or exactly one, the start and
+    the end land on the same part and `TripPartInput` raises out of the route body, which
+    is a 500 where the same body was a 422; with two or more they land on different parts,
+    nothing compares them, and a trip that ends before it begins is stored. Checking once
+    up front answers both with the 422 this always gave, in the flat `{"detail": ...}`
+    shape `patch_course` uses for its own merged pair.
+
     Deploy-skew only, and goes with the members it reads.
     """
+    try:
+        validate_date_range(start_date, end_date)
+    except ValueError as e:
+        raise UnprocessableEntityException(str(e)) from e
+
     if not locations:
         if start_date is None and end_date is None:
             return []

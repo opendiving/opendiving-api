@@ -5253,7 +5253,7 @@ Both are nullable — a `planned` course has no dates yet. A stored course never
    date passes layer 1 without reaching layer 2. NULL semantics make it vacuous when either date is
    absent.
 
-`trip` has no such constraint, a fact about an existing table rather than a precedent.
+`trip_part` has no such constraint, a fact about an existing table rather than a precedent.
 `agency`/`agency_other` takes the same three layers minus the constraint, for the reason
 `models/certification.py` gives. Each rule lives once — `validate_date_range` and
 `DATE_RANGE_MESSAGE` in `core/schemas.py`, `validate_agency_pairing` in `schemas/certification.py` —
