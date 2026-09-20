@@ -485,11 +485,15 @@ def _trippart_element(trip_element: ET.Element, part: TripPartRead | None) -> ET
     trip's name, which would invent a place the diver never picked. `part` is `None` for
     the floor below.
 
-    `<dateoftrip>` is `minOccurs="0"`, so a part with no dates simply has none - the
-    absence is expressible here, unlike in `logbook.divejson`. Both of its attributes are
-    required when it is present, so a part with one date repeats it: a stretch that began
-    on a day and has no recorded end ends that day, which is what the pair already said
-    for a trip.
+    `<dateoftrip>` is `minOccurs="0"` while both its attributes are `use="required"`, so
+    the rule is by count and symmetric: **neither** date and the element is left out
+    entirely - the absence is expressible here, unlike in `logbook.divejson` - and
+    **either one** is written into both attributes. A stretch that began on a day and has
+    no recorded end ends that day, and one that ended on a day with no recorded start
+    began it. The symmetry is not decoration: each date is independently optional and
+    `validate_date_range` only compares a pair, so an end-only part is reachable from
+    every write route, and formatting an absent start would emit `NoneT00:00:00` - not an
+    `xs:dateTime`, and invalid against the XSD.
     """
     element = _sub(trip_element, "trippart")
     location = None if part is None else part.location

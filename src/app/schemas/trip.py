@@ -113,10 +113,6 @@ class TripRead(TripBase, PublicUUIDSchema):
     out, and go once that build is no longer the one being served.
     """
 
-    # `default_factory` rather than a required field, and load-bearing: `trip_cache:{uuid}`
-    # entries live an hour and replay through this schema, so entries written before this
-    # field existed have no `parts` key. Required, every warm read would 500 until the
-    # last of them expired.
     parts: Annotated[list[TripPartRead], Field(default_factory=list)]
     locations: Annotated[list[TripLocationRead], Field(default_factory=list)]
     start_date: date | None = None

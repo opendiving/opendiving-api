@@ -550,7 +550,10 @@ class TestDiveContent:
         ]
         assert dates == [
             ("2026-05-30T00:00:00", "2026-06-02T00:00:00"),
-            ("2026-06-02T00:00:00", "2026-06-06T00:00:00"),
+            ("2026-06-02T00:00:00", "2026-06-04T00:00:00"),
+            # The end-only part: both attributes are required, so the one date it has
+            # fills both. Formatting the absent start would emit `NoneT00:00:00`.
+            ("2026-06-06T00:00:00", "2026-06-06T00:00:00"),
         ]
 
     @pytest.mark.asyncio
@@ -564,8 +567,9 @@ class TestDiveContent:
         assert [part.findtext(f"{UDDF}geography/{UDDF}location") for part in parts] == [
             "Sharm el-Sheikh",
             "Ras Mohammed",
+            None,
         ]
-        assert [part.findtext(f"{UDDF}geography/{UDDF}latitude") for part in parts] == ["27.9158", None]
+        assert [part.findtext(f"{UDDF}geography/{UDDF}latitude") for part in parts] == ["27.9158", None, None]
 
     @pytest.mark.asyncio
     async def test_a_part_with_no_place_gets_an_empty_name_and_no_geography(self, schema, monkeypatch):
@@ -592,11 +596,25 @@ class TestDiveContent:
         assert part.find(f"{UDDF}dateoftrip") is None
 
     @pytest.mark.asyncio
-    async def test_a_part_with_one_date_repeats_it(self, schema, monkeypatch):
-        """Both attributes are `use="required"`, so a stretch that began on a day and has
-        no recorded end ends that day."""
+    @pytest.mark.parametrize(
+        "part",
+        [
+            pytest.param(TripPartRead(start_date=date(2026, 5, 30)), id="start-only"),
+            pytest.param(TripPartRead(end_date=date(2026, 5, 30)), id="end-only"),
+        ],
+    )
+    async def test_a_part_with_one_date_repeats_it(self, schema, monkeypatch, part):
+        """Both attributes are `use="required"`, and the rule is symmetric: a stretch that
+        began on a day and has no recorded end ends that day, and one that ended on a day
+        with no recorded start began it.
+
+        The end-only direction is the one that bites. Each date is independently optional
+        and `validate_date_range` only compares a pair, so every write route accepts it -
+        and formatting the absent start would emit `NoneT00:00:00`, which `schema.validate`
+        below is what catches.
+        """
         bundle = full_bundle()
-        bundle.parts_by_trip[1] = [TripPartRead(start_date=date(2026, 5, 30))]
+        bundle.parts_by_trip[1] = [part]
         document = await _render(bundle, monkeypatch=monkeypatch)
         schema.validate(document)
         dates = _tree(document).find(f"{UDDF}divetrip/{UDDF}trip/{UDDF}trippart/{UDDF}dateoftrip")
@@ -622,7 +640,7 @@ class TestDiveContent:
         document = await _render(full_bundle(), monkeypatch=monkeypatch)
         schema.validate(document)
         parts = _tree(document).findall(f"{UDDF}divetrip/{UDDF}trip/{UDDF}trippart")
-        assert [part.findtext(f"{UDDF}notes/{UDDF}para") for part in parts] == ["Liveaboard", None]
+        assert [part.findtext(f"{UDDF}notes/{UDDF}para") for part in parts] == ["Liveaboard", None, None]
 
 
 class TestDiveSiteGeography:

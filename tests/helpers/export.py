@@ -297,11 +297,13 @@ def full_bundle() -> ExportBundle:
         ),
         1,
     )
-    # Two dated parts, whose places are deliberately unalike: one as the geocoder returned
-    # it, box and all, and one the diver typed when the provider had nothing - the
-    # free-text escape hatch, which every writer has to render without coordinates to lean
-    # on. Their span is 2026-05-30 to 2026-06-06, which is what the trip used to carry
-    # itself, so every writer that renders a range still has one to render.
+    # Three parts, deliberately unalike, because each is a branch a writer has to take.
+    # The first place is as the geocoder returned it, box and all; the second is what the
+    # diver typed when the provider had nothing, the free-text escape hatch every writer
+    # has to render without coordinates to lean on; and the third has an end date and no
+    # place at all, which is the asymmetric case `<dateoftrip>` would otherwise format a
+    # `None` into. Their span is still 2026-05-30 to 2026-06-06, which is what the trip
+    # used to carry itself, so every writer that renders a range still has one to render.
     trip_parts = [
         TripPartRead(
             start_date=date(2026, 5, 30),
@@ -319,9 +321,10 @@ def full_bundle() -> ExportBundle:
         ),
         TripPartRead(
             start_date=date(2026, 6, 2),
-            end_date=date(2026, 6, 6),
+            end_date=date(2026, 6, 4),
             location=TripLocationRead(name="Ras Mohammed"),
         ),
+        TripPartRead(end_date=date(2026, 6, 6)),
     ]
     # A completed course with every optional field filled in, so nothing about it is
     # exercised only by its absence. The `air` dive is logged on it and the certification

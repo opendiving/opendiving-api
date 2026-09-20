@@ -289,16 +289,18 @@ def _trip_location(location: TripLocationRead) -> ExportTripLocation:
 def _trip(trip: Trip, parts: list[TripPartRead]) -> ExportTrip:
     """A trip as `$defs/trip` 0.8.0 describes it: a span and a flat list of places.
 
-    The span is derived from the parts, where it used to be two columns. **A trip whose
-    parts carry no dates cannot be expressed here at all**, and this raises: `starts_on` is
-    REQUIRED in the installed schema and spec §5.4 forbids inventing a value, so the export
-    refuses rather than shipping a document that will not validate. The format gains
-    `parts[]` in its next release, which is what closes it; until then any account holding
-    such a trip takes a 500 from the DiveJSON and archive endpoints, which is accepted.
+    The span is derived from the parts, where it used to be two columns. **A trip with no
+    part carrying a start date cannot be expressed here at all**, and this raises: an
+    all-undated trip satisfies that, and so does one whose every part carries only an end.
+    `starts_on` is REQUIRED in the installed schema and §5.4 forbids inventing a value, so
+    the export refuses rather than shipping a document that will not validate. The format
+    gains `parts[]` in its next release, which is what closes it; until then any account
+    holding such a trip takes a 500 from the DiveJSON and archive endpoints, which is
+    accepted.
     """
     starts_on, ends_on = trip_span(parts)
     if starts_on is None:
-        raise ValueError(f"Trip {trip.uuid} has no dated part, and $defs/trip requires starts_on")
+        raise ValueError(f"Trip {trip.uuid} has no part with a start date, and $defs/trip requires starts_on")
     return ExportTrip(
         uuid=trip.uuid,
         name=trip.name,
