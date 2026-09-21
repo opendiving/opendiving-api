@@ -251,7 +251,7 @@ class TestTheNormalizedFiles:
         """A spreadsheet column is no place for a nested shape, so the list is rendered the
         way the app shows it and the structured version stays in `logbook.divejson`."""
         rows = _parse(_render(write_trips_csv(full_bundle())))
-        assert rows[1][TRIPS_HEADER.index("location")] == "Sharm el-Sheikh, Ras Mohammed"
+        assert rows[1][TRIPS_HEADER.index("location")] == "Sharm el-Sheikh, Egypt; Ras Mohammed"
 
     def test_dive_sites_count_visits_not_dives(self):
         """Yolanda is the second site of one dive and the only site of another."""

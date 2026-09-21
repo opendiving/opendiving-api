@@ -60,15 +60,17 @@ from src.app.crud.crud_trips import get_trips_page
 from src.app.models.trip import Trip
 from src.app.models.trip_part import TripPart
 from src.app.models.user import User
-from src.app.schemas.dive_site import COORDINATE_PAIR_MESSAGE
-from src.app.schemas.trip import (
+from src.app.schemas.location import (
     BBOX_MESSAGE,
     BBOX_NEEDS_COORDINATES_MESSAGE,
     BBOX_ORDER_MESSAGE,
+    COORDINATE_PAIR_MESSAGE,
+    LocationInput,
+    LocationRead,
+)
+from src.app.schemas.trip import (
     MAX_TRIP_PARTS,
     TripCreate,
-    TripLocationInput,
-    TripLocationRead,
     TripPartInput,
     TripPartRead,
     TripReadInternal,
@@ -81,8 +83,8 @@ USER_ID = 1
 USER_UUID = uuid7()
 
 MOALBOAL = {
-    "name": "Moalboal",
-    "display_name": "Moalboal, Cebu, Philippines",
+    "name": "Moalboal, Philippines",
+    "full_name": "Moalboal, Cebu, Philippines",
     "latitude": 9.94,
     "longitude": 123.39,
     "bbox_south": 9.89,
@@ -111,7 +113,7 @@ def _part(
     **location_fields: Any,
 ) -> TripPartRead:
     """A part, by the name of its place - `None` for one that has no place at all."""
-    location = None if name is None else TripLocationRead(name=name, **location_fields)
+    location = None if name is None else LocationRead(name=name, **location_fields)
     return TripPartRead(start_date=start_date, end_date=end_date, location=location)
 
 
@@ -129,12 +131,12 @@ def _as_sql(*conditions: Any) -> str:
     )
 
 
-class TestTripLocationInput:
+class TestLocationInput:
     """What the schema refuses of a part's place. Every one of these would otherwise reach
     the table as a place the map cannot draw, and nothing downstream re-checks them."""
 
     def test_accepts_a_geocoded_place(self) -> None:
-        location = TripLocationInput.model_validate(MOALBOAL)
+        location = LocationInput.model_validate(MOALBOAL)
 
         assert (location.latitude, location.bbox_east) == (9.94, 123.44)
 
@@ -142,9 +144,9 @@ class TestTripLocationInput:
         """The free-text escape hatch: a query the geocoder could not answer (or answered
         `[]` for while throttled) still has to be saveable, or an outage at the provider
         blocks the diver from recording where they went."""
-        location = TripLocationInput.model_validate({"name": "Uncle Bert's house reef"})
+        location = LocationInput.model_validate({"name": "Uncle Bert's house reef"})
 
-        assert (location.latitude, location.longitude, location.display_name) == (None, None, None)
+        assert (location.latitude, location.longitude, location.full_name) == (None, None, None)
 
     @pytest.mark.parametrize(
         ("body", "message"),
@@ -159,12 +161,12 @@ class TestTripLocationInput:
     )
     def test_refuses_half_a_place(self, body: dict, message: str) -> None:
         with pytest.raises(ValidationError, match=message):
-            TripLocationInput.model_validate(body)
+            LocationInput.model_validate(body)
 
     def test_accepts_a_box_that_crosses_the_antimeridian(self) -> None:
         """West > east is a real box, not a swapped pair - Nominatim returns those for
         Fiji and the Chukchi Sea. Ordering only means something north to south."""
-        location = TripLocationInput.model_validate({**MOALBOAL, "bbox_west": 179.9, "bbox_east": -179.9})
+        location = LocationInput.model_validate({**MOALBOAL, "bbox_west": 179.9, "bbox_east": -179.9})
 
         assert (location.bbox_west, location.bbox_east) == (179.9, -179.9)
 
@@ -172,7 +174,7 @@ class TestTripLocationInput:
         """`extra="forbid"`, so a client sending the geocoder's raw row is told rather
         than having the half it does not recognize dropped on the floor."""
         with pytest.raises(ValidationError, match="extra_forbidden"):
-            TripLocationInput.model_validate({**MOALBOAL, "osm_id": 12345})
+            LocationInput.model_validate({**MOALBOAL, "osm_id": 12345})
 
 
 class TestTripPartInput:
@@ -190,7 +192,7 @@ class TestTripPartInput:
         assert (part.start_date, part.end_date, part.location.name, part.location.latitude) == (
             date(2026, 3, 1),
             date(2026, 3, 5),
-            "Moalboal",
+            "Moalboal, Philippines",
             9.94,
         )
 
@@ -199,7 +201,7 @@ class TestTripPartInput:
         part = TripPartInput.model_validate({"location": MOALBOAL})
 
         assert part.location is not None
-        assert (part.location.name, part.start_date, part.end_date) == ("Moalboal", None, None)
+        assert (part.location.name, part.start_date, part.end_date) == ("Moalboal, Philippines", None, None)
 
     def test_accepts_dates_with_no_place(self) -> None:
         """A transit day, or a week nobody ever geocoded - which is what every migrated
@@ -270,7 +272,7 @@ class TestPartsOnAnUpdate:
         values = TripUpdateRequest.model_validate({"parts": [{"location": MOALBOAL}, {"location": {"name": "Bohol"}}]})
 
         assert values.parts is not None
-        assert [part.location.name for part in values.parts if part.location] == ["Moalboal", "Bohol"]
+        assert [part.location.name for part in values.parts if part.location] == ["Moalboal, Philippines", "Bohol"]
 
 
 class _FakeRedis:
@@ -359,7 +361,10 @@ class TestWriteTrip:
         assert write_collaborators["replace_parts"].await_args.kwargs["trip_id"] == write_collaborators["created"].id
         # Position is the index in the list the client sent, so the order it sent is the
         # order every read gives back - index 0 is what a single-part surface shows.
-        assert [p.location.name for p in _written_parts(write_collaborators) if p.location] == ["Moalboal", "Bohol"]
+        assert [p.location.name for p in _written_parts(write_collaborators) if p.location] == [
+            "Moalboal, Philippines",
+            "Bohol",
+        ]
 
     @pytest.mark.asyncio
     async def test_the_trip_row_never_sees_a_parts_key(self, write_collaborators: dict[str, Any]) -> None:
@@ -379,7 +384,7 @@ class TestWriteTrip:
             TripPartRead(
                 start_date=date(2026, 3, 1),
                 end_date=date(2026, 3, 5),
-                location=TripLocationRead(name="Moalboal", latitude=9.94, longitude=123.39),
+                location=LocationRead(name="Moalboal", latitude=9.94, longitude=123.39),
             )
         ]
 
@@ -415,7 +420,10 @@ class TestPatchTrip:
     async def test_a_list_replaces_them_in_order(self, write_collaborators: dict[str, Any]) -> None:
         await _patch({"parts": [{"location": {"name": "Bohol"}}, {"location": MOALBOAL}]})
 
-        assert [p.location.name for p in _written_parts(write_collaborators) if p.location] == ["Bohol", "Moalboal"]
+        assert [p.location.name for p in _written_parts(write_collaborators) if p.location] == [
+            "Bohol",
+            "Moalboal, Philippines",
+        ]
 
     @pytest.mark.asyncio
     async def test_an_empty_list_clears_them(self, write_collaborators: dict[str, Any]) -> None:
@@ -615,8 +623,8 @@ class TestSearchConditions:
         assert "trip.name ILIKE '%moalboal%'" in sql
         assert "EXISTS" in sql
         assert "trip_part.name ILIKE '%moalboal%'" in sql
-        # The display name too, so "philippines" finds a trip whose places are all towns.
-        assert "trip_part.display_name ILIKE '%moalboal%'" in sql
+        # The fuller name too, so "cebu" finds a trip whose places stop at the country.
+        assert "trip_part.full_name ILIKE '%moalboal%'" in sql
 
     def test_the_exists_is_correlated_to_the_trip_being_matched(self) -> None:
         """Without the correlation every trip matches as soon as *any* trip in the table
@@ -662,7 +670,7 @@ class TestReplaceParts:
 
     @staticmethod
     def _inputs(*names: str) -> list[TripPartInput]:
-        return [TripPartInput(location=TripLocationInput(name=name)) for name in names]
+        return [TripPartInput(location=LocationInput(name=name)) for name in names]
 
     @staticmethod
     def _rows(db: Session, trip: Trip) -> list[tuple[str | None, int]]:
@@ -744,7 +752,7 @@ class TestReplaceParts:
     @pytest.mark.asyncio
     async def test_what_was_written_is_what_reads_back(self, db: Session, async_db: AsyncSession, trip: Trip) -> None:
         """Round-trips every column, including the antimeridian-legal `west > east`."""
-        location = TripLocationInput(**{**MOALBOAL, "bbox_west": 179.9, "bbox_east": -179.9})
+        location = LocationInput(**{**MOALBOAL, "bbox_west": 179.9, "bbox_east": -179.9})
         written = TripPartInput(start_date=date(2026, 3, 1), end_date=date(2026, 3, 12), location=location)
 
         await replace_parts_for_trip(db=async_db, trip_id=trip.id, parts=[written])
@@ -868,9 +876,7 @@ class TestSearchAgainstPostgres:
             trip_id=went.id,
             parts=[
                 TripPartInput(
-                    location=TripLocationInput(
-                        name=f"Moalboal {tag}", display_name=f"Moalboal, Cebu, Philippines {tag}"
-                    )
+                    location=LocationInput(name=f"Moalboal {tag}", full_name=f"Moalboal, Cebu, Philippines {tag}")
                 )
             ],
         )
@@ -886,10 +892,12 @@ class TestSearchAgainstPostgres:
         assert await self._matching_names(async_db, diver.id, f"moalboal {tag}") == [went]
 
     @pytest.mark.asyncio
-    async def test_the_display_name_matches_too(
+    async def test_the_fuller_name_matches_too(
         self, async_db: AsyncSession, diver: User, _seeded: tuple[str, str]
     ) -> None:
-        """ "philippines" has to find a trip whose places are all named after towns."""
+        """ "philippines" has to find a trip whose places are all named after towns - the
+        member nothing renders is still the one a diver may remember.
+        """
         went, _ = _seeded
         tag = went.rsplit(" ", 1)[-1]
 

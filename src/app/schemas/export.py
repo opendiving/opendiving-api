@@ -342,19 +342,22 @@ class ExportDive(PublicUUIDSchema):
     created_at: datetime
 
 
-class ExportTripLocation(BaseModel):
-    """One place a part of a trip went, as the geocoder described it when the diver picked
-    it.
+class ExportLocation(BaseModel):
+    """A named place (spec §6.9) - where a part of a trip went, or the locality a dive site
+    is in. One object on both hosts, as the format defines it once.
 
-    A value object with no `uuid`, because it has none to export: trip parts are per-trip
-    rows replaced wholesale with the trip, so nothing in this document - or in the
-    database - references one. The bounding box travels with the point because it is
-    what the geocoder said the place *covers*, and a reader redrawing the trip's map wants
-    the region rather than a pin in the middle of a country.
+    A value object with no `uuid`, because it has none to export: neither host's place is
+    addressed by anything in this document or in the database. The bounding box travels
+    with the point because it is what the geocoder said the place *covers*, and a reader
+    redrawing the map wants the region rather than a pin in the middle of a country.
+
+    `name` is the place as a person writes it and `full_name` the fullest form the source
+    held; nothing binds the two, and `full_name` is not required to contain `name` or to be
+    longer than it.
     """
 
     name: str
-    display_name: str | None = None
+    full_name: str | None = None
     position: ExportPosition | None = None
     bbox: ExportBoundingBox | None = None
 
@@ -369,7 +372,7 @@ class ExportTripPart(BaseModel):
 
     starts_on: date | None = None
     ends_on: date | None = None
-    location: ExportTripLocation | None = None
+    location: ExportLocation | None = None
 
 
 class ExportTrip(PublicUUIDSchema):
@@ -420,8 +423,16 @@ class ExportCourse(PublicUUIDSchema):
 
 
 class ExportDiveSite(PublicUUIDSchema):
+    """One dive site (spec §6.10).
+
+    **Two positions, and they are different facts.** `position` is the site - the pin a
+    diver dropped, the entry point, the wreck. `location.position` is the centre of the
+    locality it sits in and `location.bbox` that locality's extent, which is an area rather
+    than a point. Neither is ever filled from the other, here or anywhere upstream of here.
+    """
+
     name: str
-    location: str | None = None
+    location: ExportLocation | None = None
     position: ExportPosition | None = None
     notes: str | None = None
     created_at: datetime

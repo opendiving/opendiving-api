@@ -487,7 +487,14 @@ class TestUniquenessNeverFailsAnImport:
         destination = create_user(db)
         original = parse_document(document)
         clash = original["sites"][0]
-        db.add(DiveSite(user_id=destination.id, name=clash["name"], location=clash.get("location"), notes=""))
+        db.add(
+            DiveSite(
+                user_id=destination.id,
+                name=clash["name"],
+                location_name=(clash.get("location") or {}).get("name"),
+                notes="",
+            )
+        )
         db.commit()
 
         plan = await _apply(async_db, destination.id, document)
@@ -507,7 +514,12 @@ class TestUniquenessNeverFailsAnImport:
         destination = create_user(db)
         original = parse_document(document)
         clash = original["sites"][0]
-        existing = DiveSite(user_id=destination.id, name=clash["name"], location=clash.get("location"), notes="")
+        existing = DiveSite(
+            user_id=destination.id,
+            name=clash["name"],
+            location_name=(clash.get("location") or {}).get("name"),
+            notes="",
+        )
         db.add(existing)
         db.commit()
         db.refresh(existing)
@@ -1423,6 +1435,74 @@ class TestTheReaderRefusesOnlyWhatItMust:
             await load_import(_upload(b'{"format": "divejson", "version": "1.0", "dives": "not a list"}'))
 
 
+class TestADocumentWrittenBeforeAPlaceWasAnObject:
+    """A dive site's `location` was a string and is now §6.9's object, so an export written
+    before that change is genuinely non-conforming and the refusal is the schema working.
+
+    What is *not* free is the sentence. A type error renders a member path and "input
+    should be a valid dictionary", which tells a diver nothing they can act on - and this
+    is a cause they can act on with one click, because re-exporting from the app produces a
+    document that imports clean. `reader.py`'s own rule is that a message names what a
+    diver can do something about.
+    """
+
+    @staticmethod
+    def _with_site_location(location: Any) -> bytes:
+        document = {
+            "format": "divejson",
+            "version": "1.0",
+            "exported_at": "2026-06-01T10:00:00Z",
+            "sites": [{"uuid": str(uuid7()), "name": "Blue Hole", "location": location}],
+        }
+        return json.dumps(document).encode()
+
+    @pytest.mark.asyncio
+    async def test_a_string_location_is_refused_with_its_cause_and_its_remedy(self) -> None:
+        with pytest.raises(MalformedImportError) as caught:
+            await load_import(_upload(self._with_site_location("Dahab, Egypt")))
+
+        message = str(caught.value)
+        assert "before a dive site's location became a structured place" in message
+        assert "Export your logbook again" in message
+        # The member path on its own is what this sentence exists to replace.
+        assert "sites.0.location" not in message
+
+    @pytest.mark.asyncio
+    async def test_the_object_form_is_read(self) -> None:
+        """The other half of the claim: the refusal is about the old spelling and not about
+        sites in general."""
+        loaded = await load_import(_upload(self._with_site_location({"name": "Dahab, Egypt"})))
+
+        with loaded:
+            assert loaded.document.sites[0].location is not None
+            assert loaded.document.sites[0].location.name == "Dahab, Egypt"
+
+    @pytest.mark.asyncio
+    async def test_a_trip_parts_old_label_is_ignored_rather_than_refused(self) -> None:
+        """`display_name` left the place object too, but a member a reader does not know is
+        ignored (§5.6) rather than fatal - so a pre-change document fails on its sites and
+        would otherwise have imported its trips with the fuller names dropped.
+        """
+        document = {
+            "format": "divejson",
+            "version": "1.0",
+            "exported_at": "2026-06-01T10:00:00Z",
+            "trips": [
+                {
+                    "uuid": str(uuid7()),
+                    "name": "Red Sea",
+                    "parts": [{"location": {"name": "Dahab", "display_name": "Dahab, South Sinai, Egypt"}}],
+                }
+            ],
+        }
+        loaded = await load_import(_upload(json.dumps(document).encode()))
+
+        with loaded:
+            place = loaded.document.trips[0].parts[0].location
+            assert place is not None
+            assert (place.name, place.full_name) == ("Dahab", None)
+
+
 class TestTheOldSpellingsAreUndefinedMembers:
     """`dive_number` on a dive and `certification_number` on a certification are members
     this format no longer has, and the reader has no alias for either.
@@ -1470,6 +1550,92 @@ class TestTheOldSpellingsAreUndefinedMembers:
         assert not [note for note in plan.notes if "number" in note.message.lower()]
 
 
+class TestADiveSitesLocalityArrivesWhole:
+    """The site half of §6.9's object, which `_place` reads for both hosts.
+
+    Worth its own class because the site is where the two positions can be crossed: the
+    locality's centre and the pin a diver dropped are different facts (§6.10), and they
+    land in differently named columns that a single careless mapping would merge.
+    """
+
+    @staticmethod
+    def _with_site_location(document: bytes, location: Any) -> bytes:
+        parsed = json.loads(document)
+        parsed["sites"] = parsed["sites"][:1]
+        parsed["sites"][0]["location"] = location
+        parsed["sites"][0]["position"] = {"latitude": 28.5717, "longitude": 34.5372}
+        parsed["dives"] = []
+        return json.dumps(parsed).encode()
+
+    @staticmethod
+    async def _site_of(db: AsyncSession, user_id: int) -> DiveSite:
+        rows = await db.execute(select(DiveSite).where(DiveSite.user_id == user_id))
+        return rows.scalars().one()
+
+    @pytest.mark.asyncio
+    async def test_every_member_of_the_place_reaches_its_own_column(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        _, document = seeded
+        destination = create_user(db)
+
+        await _apply(
+            async_db,
+            destination.id,
+            self._with_site_location(
+                document,
+                {
+                    "name": "Dahab, Egypt",
+                    "full_name": "Dahab, South Sinai Governorate, Egypt",
+                    "position": {"latitude": 28.4949, "longitude": 34.5136},
+                    "bbox": {"south": 28.44, "north": 28.54, "west": 34.46, "east": 34.56},
+                },
+            ),
+        )
+
+        site = await self._site_of(async_db, destination.id)
+        assert (site.location_name, site.location_full_name) == (
+            "Dahab, Egypt",
+            "Dahab, South Sinai Governorate, Egypt",
+        )
+        assert (site.location_latitude, site.location_longitude) == (28.4949, 34.5136)
+        assert (site.location_bbox_south, site.location_bbox_north) == (28.44, 28.54)
+        # The site's own pin, which the locality's centre must not have overwritten.
+        assert (site.latitude, site.longitude) == (28.5717, 34.5372)
+
+    @pytest.mark.asyncio
+    async def test_a_locality_with_no_name_is_dropped_and_the_site_stays(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """§6.9 makes `name` REQUIRED, so there is nothing to call this place - and a
+        reader salvages, so the site keeps everything else and the loss is reported."""
+        _, document = seeded
+        destination = create_user(db)
+
+        plan = await _apply(
+            async_db,
+            destination.id,
+            self._with_site_location(document, {"position": {"latitude": 28.4949, "longitude": 34.5136}}),
+        )
+
+        site = await self._site_of(async_db, destination.id)
+        assert (site.location_name, site.location_latitude) == (None, None)
+        assert [note for note in plan.notes if "had no name" in note.message]
+
+    @pytest.mark.asyncio
+    async def test_a_typed_locality_arrives_as_a_name_and_nothing_else(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        _, document = seeded
+        destination = create_user(db)
+
+        await _apply(async_db, destination.id, self._with_site_location(document, {"name": "Uncle Bert's reef"}))
+
+        site = await self._site_of(async_db, destination.id)
+        assert site.location_name == "Uncle Bert's reef"
+        assert (site.location_full_name, site.location_latitude, site.location_bbox_west) == (None, None, None)
+
+
 class TestATripArrivesAsItsParts:
     """One `trip_part` row per part the document carries, in the document's own order.
 
@@ -1513,14 +1679,14 @@ class TestATripArrivesAsItsParts:
                         },
                     },
                     {"starts_on": "2026-06-05", "ends_on": "2026-06-08"},
-                    {"location": {"name": "Dahab", "display_name": "Dahab, South Sinai, Egypt"}},
+                    {"location": {"name": "Dahab, Egypt", "full_name": "Dahab, South Sinai, Egypt"}},
                 ],
             ),
         )
 
         parts = await self._parts_of(async_db, destination.id)
         assert [part.position for part in parts] == [0, 1, 2]
-        assert [part.name for part in parts] == ["Dahab", None, "Dahab"]
+        assert [part.name for part in parts] == ["Dahab", None, "Dahab, Egypt"]
         assert [(part.start_date, part.end_date) for part in parts] == [
             (date(2026, 6, 1), date(2026, 6, 5)),
             (date(2026, 6, 5), date(2026, 6, 8)),
@@ -1529,7 +1695,7 @@ class TestATripArrivesAsItsParts:
         assert (parts[0].latitude, parts[0].bbox_south, parts[0].bbox_east) == (28.5, 28.4, 34.6)
         # Two parts may name one place: a trip that goes back to Dahab is the shape a
         # sequence of parts exists to record, and nothing here dedupes them.
-        assert parts[2].display_name == "Dahab, South Sinai, Egypt"
+        assert (parts[2].name, parts[2].full_name) == ("Dahab, Egypt", "Dahab, South Sinai, Egypt")
 
     @pytest.mark.asyncio
     async def test_a_box_the_geocoder_could_not_have_produced_leaves_the_place_standing(
@@ -1613,12 +1779,12 @@ class TestATripArrivesAsItsParts:
             destination.id,
             self._with_parts(
                 document,
-                [{"starts_on": "2026-06-01", "ends_on": "2026-06-05", "location": {"display_name": "Somewhere"}}],
+                [{"starts_on": "2026-06-01", "ends_on": "2026-06-05", "location": {"full_name": "Somewhere"}}],
             ),
         )
 
         part = (await self._parts_of(async_db, destination.id))[0]
-        assert (part.name, part.display_name) == (None, None)
+        assert (part.name, part.full_name) == (None, None)
         assert (part.start_date, part.end_date) == (date(2026, 6, 1), date(2026, 6, 5))
         assert ImportNoteCode.VALUE_DROPPED in _codes(plan)
 

@@ -49,7 +49,7 @@ dependencies = [
     # what 0.8.0's did: a course may omit `agency`, and the readers spell a dive's number
     # `number`, so a UDDF or `.ssrf` dive `services/logbook_import/reader.py` converts on
     # the request path keeps its own number rather than the placeholder `0`.
-    "divejson>=0.9.0",
+    "divejson>=0.10.0",
     "webauthn>=3.0.0",
     # Decodes and re-encodes uploaded avatars (`services/user_avatars.py`) - the only
     # image processing in the app. 12.0.0 is the first release with official Python 3.14

@@ -57,7 +57,7 @@ from .gear_service import ServiceKind
 _NAME_MAX = 255
 _LABEL_MAX = 120
 _SHORT_MAX = 64
-_DISPLAY_NAME_MAX = 512
+_FULL_NAME_MAX = 512
 _QID_MAX = 32
 _SHA256_LENGTH = 64
 # §6.4b's own bounds on a device's members, and the widths of `dive_recording`'s columns.
@@ -306,9 +306,16 @@ class ImportDive(_ReadModel):
     created_at: datetime | None = None
 
 
-class ImportTripLocation(_ReadModel):
+class ImportLocation(_ReadModel):
+    """A named place (spec §6.9), read the same way on both hosts.
+
+    `name` is REQUIRED in the format and optional here, because a reader salvages rather
+    than grades: a place with no name is something the planner drops with a note, not a
+    document it refuses.
+    """
+
     name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
-    display_name: Annotated[str | None, Field(default=None, max_length=_DISPLAY_NAME_MAX)]
+    full_name: Annotated[str | None, Field(default=None, max_length=_FULL_NAME_MAX)]
     position: ImportPosition | None = None
     bbox: ImportBoundingBox | None = None
 
@@ -316,7 +323,7 @@ class ImportTripLocation(_ReadModel):
 class ImportTripPart(_ReadModel):
     starts_on: date | None = None
     ends_on: date | None = None
-    location: ImportTripLocation | None = None
+    location: ImportLocation | None = None
 
 
 class ImportTrip(_ReadModel):
@@ -347,9 +354,20 @@ class ImportCourse(_ReadModel):
 
 
 class ImportDiveSite(_ReadModel):
+    """One dive site (spec §6.10).
+
+    **`location` is an object, and a document that spells it as a string is refused** - not
+    read as a name, not salvaged. §6.9 defines one shape and this reader implements it;
+    `reader.py` turns the resulting type error into a sentence naming the cause, because a
+    diver holding an export written before the change can do something about it.
+
+    `position` is the site's own pin. The locality's centre is `location.position`, and
+    neither is read into the other.
+    """
+
     uuid: uuid_pkg.UUID
     name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
-    location: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
+    location: ImportLocation | None = None
     position: ImportPosition | None = None
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
     created_at: datetime | None = None

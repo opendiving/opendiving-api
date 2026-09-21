@@ -8,6 +8,7 @@ from ..models.dive import Dive
 from ..models.dive_dive_site import DiveDiveSite
 from ..models.dive_site import DiveSite
 from ..schemas.dive import DiveSiteInfo
+from ..schemas.location import DIVE_SITE_LOCATION_PREFIX, LOCATION_FIELDS, location_from_row
 
 # The `dive_site` columns making up a `DiveSiteInfo` (the site summary embedded in a dive
 # read), in the order `dive_site_info_from_row` unpacks them. Both loaders below select the
@@ -17,9 +18,9 @@ from ..schemas.dive import DiveSiteInfo
 DIVE_SITE_INFO_COLUMNS = (
     DiveSite.uuid,
     DiveSite.name,
-    DiveSite.location,
     DiveSite.latitude,
     DiveSite.longitude,
+    *(getattr(DiveSite, f"{DIVE_SITE_LOCATION_PREFIX}{field}") for field in LOCATION_FIELDS),
 )
 
 
@@ -28,12 +29,14 @@ def dive_site_info_from_row(row: Any) -> DiveSiteInfo:
 
     The one place a column is paired with a field, which matters most for the position:
     `latitude=row.longitude` is a valid float in a valid range, so a transposed pair would
-    pass every schema check and place the pin in the wrong hemisphere.
+    pass every schema check and place the pin in the wrong hemisphere. The row carries two
+    positions now and the prefix is what tells them apart - the locality's centre is not
+    the site's pin, and neither is a fallback for the other.
     """
     return DiveSiteInfo(
         uuid=row.uuid,
         name=row.name,
-        location=row.location,
+        location=location_from_row(row, DIVE_SITE_LOCATION_PREFIX),
         latitude=row.latitude,
         longitude=row.longitude,
     )

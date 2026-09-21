@@ -2,51 +2,50 @@ import uuid as uuid_pkg
 from datetime import datetime
 from typing import Annotated, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls
-
-Latitude = Annotated[float | None, Field(default=None, ge=-90, le=90, examples=[27.8506])]
-Longitude = Annotated[float | None, Field(default=None, ge=-180, le=180, examples=[34.3136])]
-
-COORDINATE_PAIR_MESSAGE = "latitude and longitude must be set together"
+from .location import (
+    LOCATION_FULL_NAME_MAX,
+    LOCATION_NAME_MAX,
+    Latitude,
+    LocationInput,
+    LocationRead,
+    Longitude,
+    WholeCoordinatePair,
+)
 
 
 class DiveSiteBase(BaseModel):
+    """What every shape of a dive site carries apart from its locality.
+
+    The locality is split out because the wire nests it and the table does not: a
+    `DiveSiteRead` carries one `location` object, while `DiveSiteReadInternal` mirrors the
+    eight `location_*` columns behind it so FastCRUD can select them by name.
+    """
+
     name: Annotated[str, Field(min_length=1, max_length=255, examples=["Blue Hole"])]
-    location: Annotated[str | None, Field(default=None, max_length=255, examples=["Koh Tao, Thailand"])]
     latitude: Latitude
     longitude: Longitude
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
 
 
-class WholeCoordinatePair(BaseModel):
-    """Rejects half a position on the way in - a latitude without a longitude is not a
-    partial position, it is a meaningless one.
+class DiveSiteLocationColumns(BaseModel):
+    """The locality as `dive_site` stores it: flat, prefixed, beside the site's own pin.
 
-    Two conditions, because a PATCH can produce a half pair two ways: **naming** one
-    coordinate and not the other (`{"latitude": 27.7}` writes one column and leaves the
-    stale other), or naming both with only one **value** (`{"latitude": 27.7,
-    "longitude": null}`). Sending the pair or nothing keeps a whole row whole without the
-    route ever reading the stored one - which also means two concurrent PATCHes cannot
-    interleave into a half pair the way a read-then-compare check would allow.
-
-    The rule lives on the *write* schemas only - every application path in, the admin
-    panel included, goes through one of them, so only raw SQL can put a half pair in the
-    table. That is reason enough to keep it off the read schemas: a row like that should
-    read back as half a position rather than turn every read of it into a 500.
+    Never on the wire. The prefix is what keeps the two positions apart in the table - a
+    site's `latitude` is the pin a diver dropped, `location_latitude` is the centre of the
+    town the geocoder resolved, and nothing fills either from the other.
     """
 
-    latitude: Latitude
-    longitude: Longitude
-
-    @model_validator(mode="after")
-    def _coordinates_are_a_pair(self) -> WholeCoordinatePair:
-        if len({"latitude", "longitude"} & self.model_fields_set) == 1:
-            raise ValueError(COORDINATE_PAIR_MESSAGE)
-        if (self.latitude is None) != (self.longitude is None):
-            raise ValueError(COORDINATE_PAIR_MESSAGE)
-        return self
+    location_name: Annotated[str | None, Field(default=None, max_length=LOCATION_NAME_MAX)]
+    location_full_name: Annotated[str | None, Field(default=None, max_length=LOCATION_FULL_NAME_MAX)]
+    location_latitude: Latitude
+    location_longitude: Longitude
+    location_bbox_south: Annotated[float | None, Field(default=None, ge=-90, le=90)]
+    location_bbox_north: Annotated[float | None, Field(default=None, ge=-90, le=90)]
+    location_bbox_west: Annotated[float | None, Field(default=None, ge=-180, le=180)]
+    location_bbox_east: Annotated[float | None, Field(default=None, ge=-180, le=180)]
 
 
 class DiveSiteRead(DiveSiteBase, PublicUUIDSchema):
@@ -54,14 +53,16 @@ class DiveSiteRead(DiveSiteBase, PublicUUIDSchema):
     sequential internal `id` (which is never exposed over the API).
     """
 
+    location: LocationRead | None = None
     user_uuid: uuid_pkg.UUID
     created_at: datetime
 
 
-class DiveSiteReadInternal(DiveSiteBase, PublicUUIDSchema):
+class DiveSiteReadInternal(DiveSiteBase, DiveSiteLocationColumns, PublicUUIDSchema):
     """Mirrors the actual `dive_site` table columns (integer PK/FK), for server-side
     lookups only - never returned directly over the API (use `DiveSiteRead` for the
-    public shape, which additionally resolves `user_id` to the owning user's `uuid`).
+    public shape, which additionally resolves `user_id` to the owning user's `uuid` and
+    nests the locality).
     """
 
     id: int
@@ -72,18 +73,26 @@ class DiveSiteReadInternal(DiveSiteBase, PublicUUIDSchema):
 class DiveSiteCreate(DiveSiteBase, WholeCoordinatePair):
     model_config = ConfigDict(extra="forbid")
 
+    location: LocationInput | None = None
 
-class DiveSiteCreateInternal(DiveSiteBase, WholeCoordinatePair):
+
+class DiveSiteCreateInternal(DiveSiteBase, DiveSiteLocationColumns, WholeCoordinatePair):
+    """What reaches FastCRUD, so the locality is flat here where `DiveSiteCreate` nests it."""
+
     model_config = ConfigDict(extra="forbid")
 
     user_id: int
 
 
-class DiveSiteUpdate(WholeCoordinatePair, RejectsExplicitNulls):
-    model_config = ConfigDict(extra="forbid")
+class _DiveSiteUpdateFields(WholeCoordinatePair, RejectsExplicitNulls):
+    """What both update shapes carry, which is everything but the locality.
 
-    # `location` is genuinely nullable and stays off this list: clearing it is how a site
-    # entered with the wrong location gets corrected back to "not recorded", and
+    The two differ only in how they spell a place: `DiveSiteUpdate` is column-shaped for
+    CRUDAdmin and the `NOT NULL` sweep, `DiveSiteUpdateRequest` nests it for the API.
+    """
+
+    # The locality is genuinely nullable and stays off this list: clearing it is how a
+    # site entered with the wrong one gets corrected back to "not recorded", and
     # `patch_dive_site` reads that explicit null through `model_fields_set`.
     #
     # So are the coordinates, but they answer to `WholeCoordinatePair` above instead:
@@ -93,8 +102,30 @@ class DiveSiteUpdate(WholeCoordinatePair, RejectsExplicitNulls):
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "notes")
 
     name: Annotated[str | None, Field(min_length=1, max_length=255, default=None)]
-    location: Annotated[str | None, Field(default=None, max_length=255, examples=["Koh Tao, Thailand"])]
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
+
+
+class DiveSiteUpdate(_DiveSiteUpdateFields, DiveSiteLocationColumns):
+    """CRUDAdmin's Dive Site form, and the shape `test_update_explicit_nulls.py` sweeps
+    against the `dive_site` table's columns - so the locality is flat here, as the table
+    has it. `TripUpdate` is split from `TripUpdateRequest` for the same reason.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class DiveSiteUpdateRequest(_DiveSiteUpdateFields):
+    """Request body for `PATCH /dive-site/{uuid}`.
+
+    Naming `location` **replaces** the stored place wholesale rather than merging into it:
+    it is a value object with no identity, so there is nothing to merge into, and a
+    partial update would leave a cleared locality's centre and box behind. An explicit
+    null clears it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    location: LocationInput | None = None
 
 
 class DiveSiteUpdateInternal(DiveSiteUpdate):

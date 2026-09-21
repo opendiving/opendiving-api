@@ -42,7 +42,7 @@ def create_dive_site(db: Session, user: models.User) -> models.DiveSite:
         models.DiveSite(
             user_id=user.id,
             name=f"Pescador {uuid7().hex[-8:]}",
-            location="Moalboal",
+            location_name="Moalboal, Philippines",
             notes="",
         ),
     )

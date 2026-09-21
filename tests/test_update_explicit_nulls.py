@@ -56,6 +56,7 @@ from src.app.schemas.dive_site import DiveSiteUpdate
 from src.app.schemas.gear_item import GearItemUpdate
 from src.app.schemas.gear_service import GearServiceRecordUpdate, GearServiceScheduleUpdate
 from src.app.schemas.gear_set import GearSetUpdate
+from src.app.schemas.location import DIVE_SITE_LOCATION_PREFIX, LOCATION_FIELDS
 from src.app.schemas.trip import TripUpdate
 from src.app.schemas.user import UserAdminUpdate, UserUpdate
 from src.app.schemas.webauthn_credential import WebauthnCredentialUpdate
@@ -305,7 +306,9 @@ class TestTheNullNeverReachesTheDatabase:
         self, signed_in_client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # The other half: clearing `location` is how a mistyped one is corrected, so the
-        # guard must not turn it into a 422.
+        # guard must not turn it into a 422. It clears the whole place - every column of
+        # it, not just the name - because a place is a value object with nothing to merge
+        # a partial clear into.
         update = AsyncMock()
         # Unlike the 422 above, this one runs the handler to completion - and
         # `patch_dive_site` is `@cache`-decorated, so it reaches Redis on the way out.
@@ -320,4 +323,6 @@ class TestTheNullNeverReachesTheDatabase:
 
         assert response.status_code == 200
         update.assert_awaited_once()
-        assert update.await_args_list[0].kwargs["object"] == {"location": None}
+        assert update.await_args_list[0].kwargs["object"] == {
+            f"{DIVE_SITE_LOCATION_PREFIX}{field}": None for field in LOCATION_FIELDS
+        }

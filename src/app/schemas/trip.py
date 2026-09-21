@@ -10,62 +10,9 @@ from ..core.schemas import (
     RejectsExplicitNulls,
     validate_date_range,
 )
-from .dive_site import WholeCoordinatePair
+from .location import LocationInput, LocationRead
 
 MAX_TRIP_PARTS = 20
-
-BBOX_MESSAGE = "bbox_south, bbox_north, bbox_west and bbox_east must be set together"
-BBOX_NEEDS_COORDINATES_MESSAGE = "a bounding box needs latitude and longitude"
-BBOX_ORDER_MESSAGE = "bbox_south must be less than or equal to bbox_north"
-
-
-class TripLocationInput(WholeCoordinatePair):
-    """The place half of a trip part, as the geocoder described it when the diver picked it.
-
-    A value object, not a reference: the name is snapshotted rather than looked up, so
-    nothing here resolves against a gazetteer on the way in. A location the geocoder could
-    not answer for arrives as a bare `name` - that free-text escape hatch is what keeps a
-    throttled provider from blocking a save.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: Annotated[str, Field(min_length=1, max_length=255, examples=["Moalboal"])]
-    display_name: Annotated[str | None, Field(default=None, max_length=512, examples=["Moalboal, Cebu, Philippines"])]
-    bbox_south: Annotated[float | None, Field(default=None, ge=-90, le=90, examples=[9.89])]
-    bbox_north: Annotated[float | None, Field(default=None, ge=-90, le=90, examples=[9.98])]
-    bbox_west: Annotated[float | None, Field(default=None, ge=-180, le=180, examples=[123.35])]
-    bbox_east: Annotated[float | None, Field(default=None, ge=-180, le=180, examples=[123.44])]
-
-    @model_validator(mode="after")
-    def _bounding_box_is_whole(self) -> TripLocationInput:
-        corners = (self.bbox_south, self.bbox_north, self.bbox_west, self.bbox_east)
-        if any(corner is not None for corner in corners):
-            if not all(corner is not None for corner in corners):
-                raise ValueError(BBOX_MESSAGE)
-            if self.latitude is None or self.longitude is None:
-                raise ValueError(BBOX_NEEDS_COORDINATES_MESSAGE)
-            # Only the north/south pair is ordered. West > east is a legitimate box that
-            # crosses the antimeridian, and Nominatim returns those for real places -
-            # rejecting it would refuse to record Fiji or the Chukchi Sea.
-            if self.bbox_south is not None and self.bbox_north is not None and self.bbox_south > self.bbox_north:
-                raise ValueError(BBOX_ORDER_MESSAGE)
-        return self
-
-
-class TripLocationRead(BaseModel):
-    """Public shape of a part's place - a value object with no id of its own, because
-    there is nothing to address it by: parts are replaced wholesale with the trip.
-    """
-
-    name: str
-    display_name: str | None = None
-    latitude: float | None = None
-    longitude: float | None = None
-    bbox_south: float | None = None
-    bbox_north: float | None = None
-    bbox_west: float | None = None
-    bbox_east: float | None = None
 
 
 class TripPartInput(BaseModel):
@@ -81,7 +28,7 @@ class TripPartInput(BaseModel):
 
     start_date: Annotated[date | None, Field(default=None, examples=["2024-06-01"])]
     end_date: Annotated[date | None, Field(default=None, examples=["2024-06-08"])]
-    location: TripLocationInput | None = None
+    location: LocationInput | None = None
 
     @model_validator(mode="after")
     def check_date_range(self) -> TripPartInput:
@@ -95,7 +42,7 @@ class TripPartRead(BaseModel):
 
     start_date: date | None = None
     end_date: date | None = None
-    location: TripLocationRead | None = None
+    location: LocationRead | None = None
 
 
 class TripBase(BaseModel):

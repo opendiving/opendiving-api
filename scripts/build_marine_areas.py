@@ -39,8 +39,8 @@ _DOWNLOAD_TIMEOUT_SECONDS = 60
 
 def _name(properties: dict[str, Any]) -> str | None:
     """Natural Earth shouts two of the ocean names - `SOUTHERN OCEAN`, `INDIAN OCEAN` - while
-    every other row is title case. This value is headed for `dive_site.location`, so it is
-    normalized here rather than left for a client to guess at."""
+    every other row is title case. This value is headed for a dive site locality's `name`, so
+    it is normalized here rather than left for a client to guess at."""
     name = properties.get("name")
     if not isinstance(name, str) or not name.strip():
         return None

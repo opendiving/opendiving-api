@@ -462,13 +462,19 @@ def _divesite_element(bundle: ExportBundle) -> ET.Element | None:
         # A lone coordinate is not a position and the write side won't store one, so a
         # pair is all or nothing here too.
         position = (site.latitude, site.longitude) if site.latitude is not None and site.longitude is not None else None
-        if site.location or position is not None:
+        if site.location_name or position is not None:
             # `geographyType` makes `<location>` mandatory, so a site with nothing to put
             # in a `<geography>` gets none at all rather than an empty one - and a site
             # that has only coordinates repeats its name there, since dropping the
-            # position to stay silent about the location would lose the more useful half.
+            # position to stay silent about the locality would lose the more useful half.
+            #
+            # The locality's **name**, not its fuller form: `divejson-py` reads this element
+            # back into `location.name`, so a document round-tripping through it comes back
+            # with the place it went out with. The fuller name, the locality's own centre
+            # and its box have no slot in `geographyType` at all and are lost here - the
+            # `<latitude>`/`<longitude>` below are the *site's* pin.
             geography = _sub(element, "geography")
-            _sub(geography, "location", site.location or site.name)
+            _sub(geography, "location", site.location_name or site.name)
             if position is not None:
                 _sub(geography, "latitude", _num(position[0]))
                 _sub(geography, "longitude", _num(position[1]))

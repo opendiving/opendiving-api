@@ -50,9 +50,12 @@ class TripPart(Base):
     start_date: Mapped[date | None] = mapped_column(Date, default=None)
     end_date: Mapped[date | None] = mapped_column(Date, default=None)
     # Nullable, unlike the column this table replaces: a part with no place has no name,
-    # and naming it after the trip would invent a place the diver never picked.
+    # and naming it after the trip would invent a place the diver never picked. `name` is
+    # the place as a person writes it and `full_name` the fullest form the lookup returned
+    # - the same pair a dive site's locality carries, under the same names
+    # (`schemas/location.py`).
     name: Mapped[str | None] = mapped_column(String(255), default=None)
-    display_name: Mapped[str | None] = mapped_column(String(512), default=None)
+    full_name: Mapped[str | None] = mapped_column(String(512), default=None)
     latitude: Mapped[float | None] = mapped_column(Float, default=None)
     longitude: Mapped[float | None] = mapped_column(Float, default=None)
     bbox_south: Mapped[float | None] = mapped_column(Float, default=None)

@@ -43,22 +43,23 @@ async def resolve_dive_site_ids_for_user(
 
 
 async def dive_site_name_exists(
-    db: AsyncSession, user_id: int, name: str, location: str | None = None, exclude_id: int | None = None
+    db: AsyncSession, user_id: int, name: str, location_name: str | None = None, exclude_id: int | None = None
 ) -> bool:
-    """Case-insensitive check for whether a dive site with the same (name, location) already
-    exists for the user.
+    """Case-insensitive check for whether a dive site with the same (name, locality name)
+    already exists for the user.
 
-    Mirrors the `ux_dive_site_user_id_name_location_lower` unique index. Two sites with NULL
-    location and the same name are treated as duplicates.
+    Mirrors the `ux_dive_site_user_id_name_location_lower` unique index, which keys on the
+    locality's *name* and none of its other members. Two sites with no locality and the same
+    name are treated as duplicates.
     """
     stmt = select(DiveSite.id).where(
         DiveSite.user_id == user_id,
         func.lower(DiveSite.name) == name.strip().lower(),
     )
-    if location is None:
-        stmt = stmt.where(DiveSite.location.is_(None))
+    if location_name is None:
+        stmt = stmt.where(DiveSite.location_name.is_(None))
     else:
-        stmt = stmt.where(func.lower(DiveSite.location) == location.strip().lower())
+        stmt = stmt.where(func.lower(DiveSite.location_name) == location_name.strip().lower())
     if exclude_id is not None:
         stmt = stmt.where(DiveSite.id != exclude_id)
 

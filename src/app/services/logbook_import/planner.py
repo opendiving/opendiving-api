@@ -59,6 +59,7 @@ from ...schemas.certification import AGENCY_OTHER_NOT_ALLOWED_MESSAGE, Certifica
 from ...schemas.dive_profile import DEPTH_SCALE, SINGLE_SERIES_CHANNELS, ProfileEventType
 from ...schemas.export import DIVEJSON_PRODUCER_KEY
 from ...schemas.gear_item import GearType
+from ...schemas.location import DIVE_SITE_LOCATION_PREFIX, LOCATION_FIELDS
 from ...schemas.logbook_import import (
     ImportCertification,
     ImportCollectionReport,
@@ -71,6 +72,7 @@ from ...schemas.logbook_import import (
     ImportGearServiceRecord,
     ImportGearServiceSchedule,
     ImportGearSet,
+    ImportLocation,
     ImportNote,
     ImportNoteCode,
     ImportProfile,
@@ -826,6 +828,54 @@ class _Planner:
             return None, None
         return latitude, longitude
 
+    def _place(
+        self, collection: str, record_uuid: uuid_pkg.UUID, location: ImportLocation | None, label: str, prefix: str = ""
+    ) -> dict[str, Any]:
+        """A Location object as its eight columns, for either host (spec §6.9).
+
+        One reader, because the format defines one object: a trip part and a dive site's
+        locality land in differently named columns and mean exactly the same thing, so a
+        second copy of these rules is how the two would come to drop different things.
+
+        Every column is present, `None` where there is no place: the trip parts go to
+        Postgres as one executemany, which takes its column list from the first row.
+
+        `name` is REQUIRED (§6.9) and a place without one cannot be called anything, so the
+        whole place goes and its host keeps everything else. A bounding box needs its
+        point - a rectangle with no centre frames nothing a reader can place, and the
+        writer's own rule is the same one.
+        """
+        place: dict[str, Any] = {f"{prefix}{field}": None for field in LOCATION_FIELDS}
+        if location is not None and not (location.name or "").strip():
+            self._dropped(collection, record_uuid, f"A {label} location had no name, and the location was dropped")
+            location = None
+        if location is None:
+            return place
+
+        latitude, longitude = self._position(collection, record_uuid, location.position, label)
+        place |= {
+            f"{prefix}name": location.name,
+            f"{prefix}full_name": location.full_name,
+            f"{prefix}latitude": latitude,
+            f"{prefix}longitude": longitude,
+        }
+        bbox = location.bbox
+        if bbox is not None and latitude is not None:
+            if bbox.south <= bbox.north and all(
+                _finite(corner) for corner in (bbox.south, bbox.north, bbox.west, bbox.east)
+            ):
+                place |= {
+                    f"{prefix}bbox_south": bbox.south,
+                    f"{prefix}bbox_north": bbox.north,
+                    f"{prefix}bbox_west": bbox.west,
+                    f"{prefix}bbox_east": bbox.east,
+                }
+            else:
+                self._dropped(
+                    collection, record_uuid, "A bounding box the geocoder could not have produced was dropped"
+                )
+        return place
+
     def _agency(self, collection: str, record_uuid: uuid_pkg.UUID, source: Any) -> tuple[str, str | None] | None:
         """The `agency`/`agency_other` pair, or `None` when the document names no agency
         this app can read.
@@ -993,12 +1043,8 @@ class _Planner:
 
         A part's own date range is checked here because nothing below catches it -
         `trip_part` has no check constraint, and a reversed range is what the format's
-        §3 rule 2 forbids a writer rather than something a reader refuses. A bounding box
-        needs its point: a rectangle with no centre frames nothing a reader can place, and
-        the writer's own rule is the same one.
-
-        Every row carries every column, the placeless ones as `None`: these go to Postgres
-        as one executemany, which takes its column list from the first row.
+        §3 rule 2 forbids a writer rather than something a reader refuses. The place goes
+        through `_place`, which is the dive site's reader too.
         """
         rows: list[dict[str, Any]] = []
         for part in trip.parts:
@@ -1006,38 +1052,7 @@ class _Planner:
             if ends_on is not None and part.starts_on is not None and ends_on < part.starts_on:
                 self._dropped("trips", trip.uuid, "A part's end date preceded its start date, and was dropped")
                 ends_on = None
-            location = part.location
-            if location is not None and not (location.name or "").strip():
-                # §6.9 makes a location's `name` REQUIRED, so there is nothing to call this
-                # place; the part keeps its dates and loses the place, rather than going.
-                self._dropped("trips", trip.uuid, "A part's location had no name, and the location was dropped")
-                location = None
-            place: dict[str, Any] = dict.fromkeys(
-                ("name", "display_name", "latitude", "longitude", "bbox_south", "bbox_north", "bbox_west", "bbox_east")
-            )
-            if location is not None:
-                latitude, longitude = self._position("trips", trip.uuid, location.position, "trip part's")
-                place |= {
-                    "name": location.name,
-                    "display_name": location.display_name,
-                    "latitude": latitude,
-                    "longitude": longitude,
-                }
-                bbox = location.bbox
-                if bbox is not None and latitude is not None:
-                    if bbox.south <= bbox.north and all(
-                        _finite(corner) for corner in (bbox.south, bbox.north, bbox.west, bbox.east)
-                    ):
-                        place |= {
-                            "bbox_south": bbox.south,
-                            "bbox_north": bbox.north,
-                            "bbox_west": bbox.west,
-                            "bbox_east": bbox.east,
-                        }
-                    else:
-                        self._dropped(
-                            "trips", trip.uuid, "A bounding box the geocoder could not have produced was dropped"
-                        )
+            place = self._place("trips", trip.uuid, part.location, "trip part's")
             rows.append({"position": len(rows), "start_date": part.starts_on, "end_date": ends_on, **place})
         return rows
 
@@ -1091,7 +1106,7 @@ class _Planner:
     async def _plan_sites(self) -> None:
         existing = await self._rows_by_uuid(DiveSite, [site.uuid for site in self._document.sites])
         index = await self._existing_by_key(
-            DiveSite, (DiveSite.name, DiveSite.location), lambda row: _key(row[0], row[1])
+            DiveSite, (DiveSite.name, DiveSite.location_name), lambda row: _key(row[0], row[1])
         )
         aliases: dict[tuple[str, ...], uuid_pkg.UUID] = {}
         for site in self._document.sites:
@@ -1107,9 +1122,12 @@ class _Planner:
     ) -> PlannedRecord:
         if not (site.name or "").strip():
             return self._skip("sites", site.uuid, "A dive site needs a name, and this one has none.")
+        # The locality is read before the uniqueness claim, because the index keys on its
+        # *name* and a place the reader drops takes the key with it.
+        place = self._place("sites", site.uuid, site.location, "dive site's locality", DIVE_SITE_LOCATION_PREFIX)
         record = self._resolve("sites", site.uuid, existing)
         if record.action is Action.CREATE:
-            site_key = _key(site.name, site.location)
+            site_key = _key(site.name, place[f"{DIVE_SITE_LOCATION_PREFIX}name"])
             record = self._claim_unique("sites", record, index, aliases, site_key, "dive site", index_key=site_key)
         if record.action not in (Action.CREATE, Action.RESTORE):
             return record
@@ -1118,11 +1136,11 @@ class _Planner:
         record.values = {
             "user_id": self._user_id,
             "name": site.name,
-            "location": site.location,
             "latitude": latitude,
             "longitude": longitude,
             "notes": self._text(site.notes),
             "created_at": self._created_at(site.created_at),
+            **place,
         }
         return record
 
