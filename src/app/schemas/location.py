@@ -146,9 +146,9 @@ class LocationRead(BaseModel):
 def location_columns(location: LocationInput | None, prefix: str = "") -> dict[str, Any]:
     """A place spread across its host's columns, every one of them named.
 
-    All eight are always present, as `None` where there is no place: a partial mapping
-    would leave a cleared locality's stale centre behind on an update, and the trip part
-    writer hands these to one `executemany` whose column list comes from the first row.
+    All eight are always present, as `None` where there is no place, because a partial
+    mapping would leave a cleared locality's stale centre and box behind on an update -
+    a place is replaced whole, and half of one is the old place wearing a new name.
     """
     return {f"{prefix}{field}": None if location is None else getattr(location, field) for field in LOCATION_FIELDS}
 
@@ -159,8 +159,11 @@ def location_from_row(row: Any, prefix: str = "") -> LocationRead | None:
     `name` is what says whether there is a place at all: it is the one member a location
     must have, so a row with none never had one.
 
-    Takes a result row, a model instance or a plain mapping, because all three reach this:
-    FastCRUD hands back dicts on the searched path and models on the unsearched one.
+    Takes a `Row`, a model instance or a plain mapping, because all three reach it: the two
+    summary loaders select columns and pass the `Row` (`crud_trip_parts`,
+    `crud_dive_dive_sites`), the export loader holds whole `DiveSite` instances
+    (`services/export/envelope.py`), and the dive-site routes hand over a dict they have
+    already flattened with `model_dump()`.
     """
     read = (lambda field: row[field]) if isinstance(row, Mapping) else (lambda field: getattr(row, field))
     if read(f"{prefix}name") is None:
