@@ -475,8 +475,8 @@ class TestTheEndpoint:
         and fills Name from `name`.
 
         Two absences are load-bearing. There is no `country_code` - the catalog carries one
-        internally, and putting an ISO code on the wire invites it into a Location field whose
-        own example is `Koh Tao, Thailand`. And there is no distance, because the web tier
+        internally, and putting an ISO code on the wire invites it into a place's `name`, whose
+        own example is `Dahab, Egypt`. And there is no distance, because the web tier
         already formats one against the diver's unit preference and a pre-formatted or
         metric-only field on the wire would silently break that."""
         body = client.get("/api/v1/dive-sites/suggest", params={"q": "thistlegorm"}).json()

@@ -1620,7 +1620,11 @@ class TestADiveSitesLocalityArrivesWhole:
 
         site = await self._site_of(async_db, destination.id)
         assert (site.location_name, site.location_latitude) == (None, None)
-        assert [note for note in plan.notes if "had no name" in note.message]
+        # The whole sentence, because the note has to name the locality rather than the
+        # site: a report saying "the site's position was dropped" beside a site that kept
+        # its pin is the §6.10 confusion, in every import report the app produces.
+        dropped = "A dive site's locality had no name, and the place was dropped"
+        assert [note for note in plan.notes if note.message == dropped]
 
     @pytest.mark.asyncio
     async def test_a_typed_locality_arrives_as_a_name_and_nothing_else(

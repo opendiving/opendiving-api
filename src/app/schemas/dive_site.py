@@ -156,9 +156,9 @@ class DiveSiteSuggestion(BaseModel):
     because a site with no country is still a site.
 
     **There is no country code here, and that is deliberate.** The catalog carries one
-    internally as its stable key, but the field a client writes this into is an ordinary text
-    input whose own example is `Koh Tao, Thailand`; putting `EG` on the wire invites it into
-    a Location field or a menu hint, which is wrong on both.
+    internally as its stable key, but the field a client writes this into is a place's own
+    `name`, an ordinary text input whose example is `Dahab, Egypt`; putting `EG` on the wire
+    invites it into a Location field or a menu hint, which is wrong on both.
 
     **There is no distance either**, for a reason that is a decision rather than an omission.
     The endpoint ranks by distance when it is given a position, but the web client already

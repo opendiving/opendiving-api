@@ -7003,3 +7003,15 @@ and the two positions must not read alike. `ux_dive_site_user_id_name_location_l
 collide whether or not a geocoder filled a centre in for one of them. *Rejected:* a nested JSON
 column, which no functional index and no `ilike` picker search can reach; and keying on the name
 plus a rounded position, which collapses to the name for almost every row.
+
+## The dive-site location contract changes without a write shim
+
+`POST`/`PATCH /dive-site` take `location` as a place object and nothing accepts the string that
+preceded it, so between this API's deploy and the web client's every site write is a 422 and every
+rendered site throws on an object child. That window is accepted rather than covered: the only
+affected client is one this project deploys itself, and its matching change follows immediately.
+*Rejected:* the optional-and-ignored write shim the trip-parts rename used, which reads both shapes
+for the few minutes of skew and then costs a second pass over the same schemas, routes and tests to
+take out — and which, held longer than that, is a second spelling of a member the format defines
+once. The migration is a separate question and keeps its guards: it is about data already stored,
+not about a window.

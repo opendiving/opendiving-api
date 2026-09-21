@@ -954,8 +954,8 @@ class TestAttribution:
 
 
 class TestShortLocation:
-    """`location` is what gets persisted onto `dive_site.location`, so it is composed from
-    the structured address rather than trimmed out of `display_name`."""
+    """`location` is what gets persisted as a place's `name`, so it is composed from the
+    structured address rather than trimmed out of `display_name`."""
 
     @pytest.mark.parametrize(
         "address,expected",

@@ -829,7 +829,14 @@ class _Planner:
         return latitude, longitude
 
     def _place(
-        self, collection: str, record_uuid: uuid_pkg.UUID, location: ImportLocation | None, label: str, prefix: str = ""
+        self,
+        collection: str,
+        record_uuid: uuid_pkg.UUID,
+        location: ImportLocation | None,
+        *,
+        label: str,
+        centre_label: str,
+        prefix: str = "",
     ) -> dict[str, Any]:
         """A Location object as its eight columns, for either host (spec §6.9).
 
@@ -844,15 +851,19 @@ class _Planner:
         whole place goes and its host keeps everything else. A bounding box needs its
         point - a rectangle with no centre frames nothing a reader can place, and the
         writer's own rule is the same one.
+
+        Two labels, because the two notes name different things and a dive site has a
+        position of its own for the locality's to be confused with: `label` names the place
+        that was dropped, `centre_label` the position inside it.
         """
         place: dict[str, Any] = {f"{prefix}{field}": None for field in LOCATION_FIELDS}
         if location is not None and not (location.name or "").strip():
-            self._dropped(collection, record_uuid, f"A {label} location had no name, and the location was dropped")
+            self._dropped(collection, record_uuid, f"A {label} had no name, and the place was dropped")
             location = None
         if location is None:
             return place
 
-        latitude, longitude = self._position(collection, record_uuid, location.position, label)
+        latitude, longitude = self._position(collection, record_uuid, location.position, centre_label)
         place |= {
             f"{prefix}name": location.name,
             f"{prefix}full_name": location.full_name,
@@ -1052,7 +1063,9 @@ class _Planner:
             if ends_on is not None and part.starts_on is not None and ends_on < part.starts_on:
                 self._dropped("trips", trip.uuid, "A part's end date preceded its start date, and was dropped")
                 ends_on = None
-            place = self._place("trips", trip.uuid, part.location, "trip part's")
+            place = self._place(
+                "trips", trip.uuid, part.location, label="trip part's location", centre_label="trip part's"
+            )
             rows.append({"position": len(rows), "start_date": part.starts_on, "end_date": ends_on, **place})
         return rows
 
@@ -1124,7 +1137,14 @@ class _Planner:
             return self._skip("sites", site.uuid, "A dive site needs a name, and this one has none.")
         # The locality is read before the uniqueness claim, because the index keys on its
         # *name* and a place the reader drops takes the key with it.
-        place = self._place("sites", site.uuid, site.location, "dive site's locality", DIVE_SITE_LOCATION_PREFIX)
+        place = self._place(
+            "sites",
+            site.uuid,
+            site.location,
+            label="dive site's locality",
+            centre_label="dive site locality's",
+            prefix=DIVE_SITE_LOCATION_PREFIX,
+        )
         record = self._resolve("sites", site.uuid, existing)
         if record.action is Action.CREATE:
             site_key = _key(site.name, place[f"{DIVE_SITE_LOCATION_PREFIX}name"])

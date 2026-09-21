@@ -38,8 +38,8 @@ class TestNames:
         "raw,expected",
         [
             ("Red Sea", "Red Sea"),
-            # Natural Earth shouts exactly two of them, and this value is headed for
-            # `dive_site.location`.
+            # Natural Earth shouts exactly two of them, and this value is headed for a dive
+            # site locality's `name`.
             ("SOUTHERN OCEAN", "Southern Ocean"),
             ("INDIAN OCEAN", "Indian Ocean"),
             ("  Coral Sea  ", "Coral Sea"),
