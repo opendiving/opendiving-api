@@ -24,12 +24,30 @@ from ...schemas.dive_site import (
     DiveSiteReadInternal,
     DiveSiteSuggestion,
     DiveSiteSuggestResponse,
-    DiveSiteUpdate,
+    DiveSiteUpdateRequest,
+)
+from ...schemas.location import (
+    DIVE_SITE_LOCATION_PREFIX,
+    LOCATION_FIELDS,
+    location_columns,
+    location_from_row,
 )
 from ...services.cache_invalidation import invalidate_dive_caches
 from ...services.dive_site_catalog import search_sites
 
 router = APIRouter(tags=["dive-sites"])
+
+# What `GET /dive-sites?search=` matches against. A diver with hundreds of logged sites
+# can't usefully scroll them, so the dive form's picker narrows the list server-side as you
+# type. The locality is searched alongside the name because that's how people remember
+# sites they haven't dived in a while ("that wall in Dahab") - see DECISIONS.md. Both of
+# its text members are in: the fuller one is never rendered, but a diver typing the
+# governorate they remember should still reach the site.
+#
+# Named rather than inlined, on `COURSE_SEARCH_COLUMNS`' precedent: `test_picker_search.py`
+# asserts these columns exist on the model, and a second spelling of the tuple is a second
+# thing to keep true.
+DIVE_SITE_SEARCH_COLUMNS = ("name", "location_name", "location_full_name")
 
 
 async def _get_owned_dive_site(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> DiveSiteReadInternal:
@@ -52,10 +70,15 @@ async def _get_owned_dive_site(db: AsyncSession, uuid: uuid_pkg.UUID, current_us
 def _to_public_dive_site(
     db_dive_site: DiveSiteReadInternal | dict[str, Any], *, user_uuid: uuid_pkg.UUID
 ) -> DiveSiteRead:
-    """Convert an internal dive site representation (integer FKs) into its public shape
-    (owning user referenced by `uuid`)."""
+    """Convert an internal dive site representation (integer FKs, flat locality columns)
+    into its public shape (owning user referenced by `uuid`, locality nested)."""
     data = db_dive_site if isinstance(db_dive_site, dict) else db_dive_site.model_dump()
-    return DiveSiteRead(**{k: v for k, v in data.items() if k not in ("id", "user_id")}, user_uuid=user_uuid)
+    dropped = {"id", "user_id"} | {f"{DIVE_SITE_LOCATION_PREFIX}{field}" for field in LOCATION_FIELDS}
+    return DiveSiteRead(
+        **{k: v for k, v in data.items() if k not in dropped},
+        location=location_from_row(data, DIVE_SITE_LOCATION_PREFIX),
+        user_uuid=user_uuid,
+    )
 
 
 _dive_site_cache: OwnedResourceCache[DiveSiteReadInternal, DiveSiteRead] = OwnedResourceCache(
@@ -67,11 +90,7 @@ _dive_site_cache: OwnedResourceCache[DiveSiteReadInternal, DiveSiteRead] = Owned
     to_public=lambda db_dive_site, user_uuid: _to_public_dive_site(db_dive_site, user_uuid=user_uuid),
     sort_columns="name",
     sort_orders="asc",
-    # A diver with hundreds of logged sites can't usefully scroll them, so the dive form's
-    # picker narrows the list server-side as you type. Location is searched alongside the
-    # name because that's how people remember sites they haven't dived in a while ("that
-    # wall in Dahab") - see DECISIONS.md.
-    search_columns=("name", "location"),
+    search_columns=DIVE_SITE_SEARCH_COLUMNS,
 )
 
 
@@ -84,14 +103,30 @@ async def write_dive_site(
 ) -> DiveSiteRead:
     """Create a dive site for the authenticated user.
 
-    Uniqueness is on name *and* location together, so the same site name at a different
-    location is allowed; a genuine repeat is a 422. `latitude` and `longitude` are one
-    value: send both or neither, since half a pair is a 422 as well.
+    Uniqueness is on the site's name *and* its locality's name together, so the same site
+    name in a different place is allowed; a genuine repeat is a 422. `latitude` and
+    `longitude` are one value: send both or neither, since half a pair is a 422 as well.
+
+    `location` is the whole place - the name it is known by, the fuller form a lookup
+    returned, the locality's own centre and its extent - and every member but the name is
+    optional, so a locality the diver typed is a name and nothing else. Its position is the
+    *place's*, never the site's: filling it from the site's own pin would claim the town
+    sits exactly where the marker was dropped.
     """
-    if await dive_site_name_exists(db=db, user_id=current_user["id"], name=dive_site.name, location=dive_site.location):
+    location = dive_site.location
+    if await dive_site_name_exists(
+        db=db,
+        user_id=current_user["id"],
+        name=dive_site.name,
+        location_name=None if location is None else location.name,
+    ):
         raise DuplicateValueException("A dive site with this name already exists at this location")
 
-    dive_site_internal = DiveSiteCreateInternal(**dive_site.model_dump(), user_id=current_user["id"])
+    dive_site_internal = DiveSiteCreateInternal(
+        **dive_site.model_dump(exclude={"location"}),
+        **location_columns(location, DIVE_SITE_LOCATION_PREFIX),
+        user_id=current_user["id"],
+    )
     created_dive_site = await crud_dive_sites.create(
         db=db, object=dive_site_internal, schema_to_select=DiveSiteReadInternal, return_as_model=True
     )
@@ -115,15 +150,15 @@ async def read_dive_sites(
     items_per_page: int = 10,
     search: Annotated[
         str | None,
-        Query(max_length=255, description="Case-insensitive substring match on name or location"),
+        Query(max_length=255, description="Case-insensitive substring match on name or locality"),
     ] = None,
 ) -> dict:
     """List the caller's dive sites.
 
-    `search` matches a case-insensitive substring against name and location, which is
-    what backs the dive form's picker: it narrows server-side as you type rather than
-    shipping the whole list to the browser. Out-of-range pagination is clamped, not
-    rejected.
+    `search` matches a case-insensitive substring against the site's name and both of its
+    locality's names, which is what backs the dive form's picker: it narrows server-side as
+    you type rather than shipping the whole list to the browser. Out-of-range pagination is
+    clamped, not rejected.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
 
@@ -163,51 +198,64 @@ async def read_dive_site(
 async def patch_dive_site(
     request: Request,
     uuid: uuid_pkg.UUID,
-    values: DiveSiteUpdate,
+    values: DiveSiteUpdateRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
     """Partially update a dive site; omitted fields are left untouched.
 
     404 unless the caller owns it, exactly as for a site that doesn't exist. Uniqueness
-    is re-checked against the *resulting* name and location, so moving a site to a
-    location where that name is already taken is a 422. `latitude` and `longitude` are
+    is re-checked against the *resulting* name and locality name, so moving a site to a
+    place where that name is already taken is a 422. `latitude` and `longitude` are
     one value: a body naming one without the other is a 422, so moving a site means
     sending both and clearing it means sending both as null. Because dive reads embed
-    this site's name, location and position, a change to any of them also invalidates
+    this site's name, locality and position, a change to any of them also invalidates
     every cached dive logged here.
+
+    Naming `location` **replaces** the stored place whole - it is a value object with no
+    identity, so there is nothing to merge a partial one into, and a body carrying only a
+    name would otherwise leave the previous locality's centre and box behind. An explicit
+    `null` clears it, which is how a site entered with the wrong place is corrected back to
+    "not recorded".
     """
     db_dive_site = await _get_owned_dive_site(db, uuid, current_user)
 
     # Two gates, not one, because the two questions have different answers. Uniqueness is
-    # a rule about name-at-location and nothing else; staleness is about every field
-    # `DiveSiteInfo` embeds, which now includes the position. Only `latitude` is tested
-    # here: `WholeCoordinatePair` has already refused any body that names one coordinate
-    # without the other, so longitude never travels alone.
-    touches_name_or_location = values.name is not None or "location" in values.model_fields_set
+    # a rule about name-at-locality and nothing else; staleness is about every field
+    # `DiveSiteInfo` embeds, which is the whole place object and the position. Only
+    # `latitude` is tested here: `WholeCoordinatePair` has already refused any body that
+    # names one coordinate without the other, so longitude never travels alone.
+    replaces_location = "location" in values.model_fields_set
+    touches_name_or_location = values.name is not None or replaces_location
     touches_dive_summary = touches_name_or_location or "latitude" in values.model_fields_set
     effective_name = values.name if values.name is not None else db_dive_site.name
-    effective_location = values.location if "location" in values.model_fields_set else db_dive_site.location
+    effective_location_name = (
+        (None if values.location is None else values.location.name) if replaces_location else db_dive_site.location_name
+    )
 
     if touches_name_or_location and await dive_site_name_exists(
         db=db,
         user_id=db_dive_site.user_id,
         name=effective_name,
-        location=effective_location,
+        location_name=effective_location_name,
         exclude_id=db_dive_site.id,
     ):
         raise DuplicateValueException("A dive site with this name already exists at this location")
 
-    update_data = values.model_dump(exclude_unset=True)
+    update_data = values.model_dump(exclude_unset=True, exclude={"location"})
+    if replaces_location:
+        update_data |= location_columns(values.location, DIVE_SITE_LOCATION_PREFIX)
     if update_data:
         await crud_dive_sites.update(db=db, object=update_data, uuid=uuid)
         await _dive_site_cache.invalidate_list(db_dive_site.user_id)
-        # Dive reads embed this site's name, location and position, so a rename or a
-        # dragged marker makes every cached dive logged here stale - the bug that used to
-        # be documented as a known limitation, fixable now that the single-dive cache key
-        # is user-scoped. Those three and nothing else: `DiveSiteInfo` carries no notes,
-        # and dropping every cached dive a diver has because they retyped a description
-        # would be a real cost for no staleness avoided.
+        # Dive reads embed this site's name, locality and position, so a rename, a new
+        # place or a dragged marker makes every cached dive logged here stale - the bug
+        # that used to be documented as a known limitation, fixable now that the
+        # single-dive cache key is user-scoped. The locality counts whole: a body that
+        # only moves the place's centre still reshapes `DiveSiteInfo`. Those three and
+        # nothing else - `DiveSiteInfo` carries no notes, and dropping every cached dive a
+        # diver has because they retyped a description would be a real cost for no
+        # staleness avoided.
         if touches_dive_summary:
             await invalidate_dive_caches(db_dive_site.user_id)
 

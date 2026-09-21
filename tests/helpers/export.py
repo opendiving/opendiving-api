@@ -31,7 +31,8 @@ from src.app.models.user import User
 from src.app.schemas.certification import CertificationFileInfo, CertificationSide
 from src.app.schemas.dive import DiveFileInfo
 from src.app.schemas.dive_mixture import DiveMixtureRead
-from src.app.schemas.trip import TripLocationRead, TripPartRead
+from src.app.schemas.location import LocationRead
+from src.app.schemas.trip import TripPartRead
 from src.app.services.dive_profiles import ProfileGasAttribution
 from src.app.services.export.loader import ExportBundle, ExportFileRow, ExportRecordingRow
 
@@ -281,11 +282,23 @@ def full_bundle() -> ExportBundle:
         1,
         UUIDS["site-reef"],
         name="Shark Reef",
-        location="Ras Mohammed",
         latitude=27.7278,
         longitude=34.2564,
+        # The corpus's one rich locality on a site, so the whole place object is exercised
+        # rather than just the member the string used to be. Its centre and box are the
+        # *locality's* and are deliberately a different point from the pin above - a writer
+        # that filled either from the other would go unnoticed if they agreed.
+        location_name="Ras Mohammed, Egypt",
+        location_full_name="Ras Muhammad National Park, South Sinai, Egypt",
+        location_latitude=27.7333,
+        location_longitude=34.2500,
+        location_bbox_south=27.68,
+        location_bbox_north=27.83,
+        location_bbox_west=34.18,
+        location_bbox_east=34.30,
         notes="Current picks up after slack.",
     )
+    # No locality at all, which is the common shape and the one UDDF has to fall back on.
     wall = make_dive_site(2, UUIDS["site-wall"])
     trip = _with_id(
         Trip(
@@ -308,9 +321,9 @@ def full_bundle() -> ExportBundle:
         TripPartRead(
             start_date=date(2026, 5, 30),
             end_date=date(2026, 6, 2),
-            location=TripLocationRead(
-                name="Sharm el-Sheikh",
-                display_name="Sharm el-Sheikh, South Sinai, Egypt",
+            location=LocationRead(
+                name="Sharm el-Sheikh, Egypt",
+                full_name="Sharm el-Sheikh, South Sinai, Egypt",
                 latitude=27.9158,
                 longitude=34.3300,
                 bbox_south=27.8,
@@ -322,7 +335,7 @@ def full_bundle() -> ExportBundle:
         TripPartRead(
             start_date=date(2026, 6, 2),
             end_date=date(2026, 6, 4),
-            location=TripLocationRead(name="Ras Mohammed"),
+            location=LocationRead(name="Ras Mohammed"),
         ),
         TripPartRead(end_date=date(2026, 6, 6)),
     ]

@@ -41,7 +41,8 @@ from uuid6 import uuid7
 from src.app.models.gear_item import GearItem
 from src.app.schemas.dive import DiveMode
 from src.app.schemas.gear_item import GearType
-from src.app.schemas.trip import TripLocationRead, TripPartRead
+from src.app.schemas.location import LocationRead
+from src.app.schemas.trip import TripPartRead
 from src.app.services.dive_profiles import LoadedProfile
 from src.app.services.export.uddf import (
     _DIVE_MODE_TYPE,
@@ -565,7 +566,7 @@ class TestDiveContent:
         schema.validate(document)
         parts = _tree(document).findall(f"{UDDF}divetrip/{UDDF}trip/{UDDF}trippart")
         assert [part.findtext(f"{UDDF}geography/{UDDF}location") for part in parts] == [
-            "Sharm el-Sheikh",
+            "Sharm el-Sheikh, Egypt",
             "Ras Mohammed",
             None,
         ]
@@ -589,7 +590,7 @@ class TestDiveContent:
         """`<dateoftrip>` is `minOccurs="0"`, so the absence is expressible here - unlike
         in `logbook.divejson`, where the span is REQUIRED."""
         bundle = full_bundle()
-        bundle.parts_by_trip[1] = [TripPartRead(location=TripLocationRead(name="Dahab"))]
+        bundle.parts_by_trip[1] = [TripPartRead(location=LocationRead(name="Dahab"))]
         document = await _render(bundle, monkeypatch=monkeypatch)
         schema.validate(document)
         (part,) = _tree(document).findall(f"{UDDF}divetrip/{UDDF}trip/{UDDF}trippart")
@@ -660,7 +661,23 @@ class TestDiveSiteGeography:
         document = await _render(full_bundle(), monkeypatch=monkeypatch)
         schema.validate(document)
         geography = self._site(_tree(document), 0).find(f"{UDDF}geography")
-        assert _text(geography, f"{UDDF}location") == "Ras Mohammed"
+        assert _text(geography, f"{UDDF}location") == "Ras Mohammed, Egypt"
+        assert (_text(geography, f"{UDDF}latitude"), _text(geography, f"{UDDF}longitude")) == ("27.7278", "34.2564")
+
+    @pytest.mark.asyncio
+    async def test_the_element_carries_the_localitys_name_and_loses_the_rest_of_the_place(self, schema, monkeypatch):
+        """`geographyType` has one text slot and `divejson-py` reads it back into
+        `location.name`, so the name is what goes in it: a document round-tripping through
+        that reader comes back with the place it went out with. The fuller name, the
+        locality's own centre and its box have no slot at all - and the coordinates that
+        *are* written are the site's pin, which is the confusion §6.10 forbids.
+        """
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        schema.validate(document)
+        geography = self._site(_tree(document), 0).find(f"{UDDF}geography")
+
+        assert "Ras Muhammad National Park" not in ET.tostring(geography, encoding="unicode")
+        # 27.7333/34.25 is the locality's centre; 27.7278/34.2564 is the site's own pin.
         assert (_text(geography, f"{UDDF}latitude"), _text(geography, f"{UDDF}longitude")) == ("27.7278", "34.2564")
 
     @pytest.mark.asyncio

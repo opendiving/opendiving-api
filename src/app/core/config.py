@@ -414,7 +414,7 @@ class GeocodingSettings(BaseSettings):
 
     # Asked for explicitly, because the alternative is not "no preference" - it is the
     # *local* script. Left unset, a reverse lookup of the Blue Hole answers "دهب, مصر",
-    # which then lands in `dive_site.location` and is neither readable nor typeable for
+    # which then lands in a dive site locality's `name` and is neither readable nor typeable for
     # most of the divers who log that site. One instance-wide value rather than the
     # caller's `Accept-Language`: it is part of the cache key, and per-caller languages
     # would multiply both the cache and the outbound calls by the number of locales.

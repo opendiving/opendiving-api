@@ -55,17 +55,18 @@ from ...schemas.export import (
     ExportGearServiceSchedule,
     ExportGearSet,
     ExportGenerator,
+    ExportLocation,
     ExportPosition,
     ExportRecording,
     ExportSpecies,
     ExportStoredFile,
     ExportTrip,
-    ExportTripLocation,
     ExportTripPart,
 )
 from ...schemas.gear_item import GearType
 from ...schemas.gear_service import ServiceKind
-from ...schemas.trip import TripLocationRead, TripPartRead
+from ...schemas.location import DIVE_SITE_LOCATION_PREFIX, LocationRead, location_from_row
+from ...schemas.trip import TripPartRead
 from ...schemas.user import CHECK_IN_FIELDS
 from ..dive_profiles import LoadedProfile, load_profile, to_read_schema
 from .loader import ExportBundle, ExportFileRow, ExportRecordingRow
@@ -269,7 +270,14 @@ def _diver(bundle: ExportBundle) -> ExportDiver:
     )
 
 
-def _trip_location(location: TripLocationRead) -> ExportTripLocation:
+def _location(location: LocationRead | None) -> ExportLocation | None:
+    """One place, for either host - a trip part's or a dive site's locality.
+
+    Shared because §6.9 defines the object once: a second copy for the site half is how the
+    two would come to spell the same place differently.
+    """
+    if location is None:
+        return None
     position = _position(location.latitude, location.longitude)
     corners = (location.bbox_south, location.bbox_north, location.bbox_west, location.bbox_east)
     # A box needs its point: the spec makes `bbox` depend on `position`, because a rectangle
@@ -278,9 +286,9 @@ def _trip_location(location: TripLocationRead) -> ExportTripLocation:
     if position is not None and all(corner is not None for corner in corners):
         south, north, west, east = corners
         bbox = ExportBoundingBox(south=south, north=north, west=west, east=east)  # type: ignore[arg-type]
-    return ExportTripLocation(
+    return ExportLocation(
         name=location.name,
-        display_name=location.display_name,
+        full_name=location.full_name,
         position=position,
         bbox=bbox,
     )
@@ -290,7 +298,7 @@ def _trip_part(part: TripPartRead) -> ExportTripPart:
     return ExportTripPart(
         starts_on=part.start_date,
         ends_on=part.end_date,
-        location=None if part.location is None else _trip_location(part.location),
+        location=_location(part.location),
     )
 
 
@@ -518,7 +526,9 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                 ExportDiveSite(
                     uuid=site.uuid,
                     name=site.name,
-                    location=site.location,
+                    # The locality's own centre and box, never the site's pin - which goes
+                    # in `position` below and is a different fact (spec §6.10).
+                    location=_location(location_from_row(site, DIVE_SITE_LOCATION_PREFIX)),
                     position=_position(site.latitude, site.longitude),
                     notes=_text(site.notes),
                     created_at=site.created_at,

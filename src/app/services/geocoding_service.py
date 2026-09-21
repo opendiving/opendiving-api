@@ -87,8 +87,9 @@ _CACHE_VERSION = "v3"
 
 # Mirror `schemas.geocoding.GeocodeResult`'s bounds. Applied by truncating here rather than
 # by letting an over-long provider string raise a ValidationError inside `_normalize`, which
-# would turn one verbose row into a failed lookup. `_LOCATION_MAX_LENGTH` is the width of
-# `dive_site.location`, which is where that field is headed.
+# would turn one verbose row into a failed lookup. `_LOCATION_MAX_LENGTH` is the width of a
+# place's `name` column (`schemas.location.LOCATION_NAME_MAX`), which is where that field is
+# headed; `_DISPLAY_NAME_MAX_LENGTH` is `full_name`'s.
 _LOCATION_MAX_LENGTH = 255
 _DISPLAY_NAME_MAX_LENGTH = 512
 _NAME_MAX_LENGTH = 255

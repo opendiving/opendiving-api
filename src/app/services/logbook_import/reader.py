@@ -425,12 +425,42 @@ def _validate_envelope(raw: Any) -> ImportDocument:
         raise MalformedImportError(_first_error(exc)) from exc
 
 
+# What a document written before a dive site's `location` became an object looks like from
+# here, and what to tell the diver holding one. §6.9 defines one shape and this reader
+# implements it, so the refusal is the schema working rather than a gap - but a member path
+# and "input should be a valid dictionary" sends nobody anywhere, and this is a cause a
+# diver can act on with one click.
+PRE_CHANGE_SITE_LOCATION = (
+    "This logbook was exported before a dive site's location became a structured place, so this app cannot read "
+    "it: its sites carry a location as plain text where the format now defines an object with a name of its own. "
+    "Export your logbook again from the app and import that file."
+)
+
+
+def _is_pre_change_site_location(exc: ValidationError) -> bool:
+    """Whether the document spells a site's `location` as the string 1.0 used to define.
+
+    Keyed on the member path and on the value's own type rather than on Pydantic's error
+    code, which names an implementation detail of how the union is built and would stop
+    matching on an upgrade.
+    """
+    return any(
+        len(error["loc"]) >= 3
+        and error["loc"][0] == "sites"
+        and error["loc"][-1] == "location"
+        and isinstance(error.get("input"), str)
+        for error in exc.errors()
+    )
+
+
 def _first_error(exc: ValidationError) -> str:
     """One sentence naming where the document broke.
 
     The first error rather than all of them: a structurally wrong document produces one
     per record, and a diver needs the location more than the count.
     """
+    if _is_pre_change_site_location(exc):
+        return PRE_CHANGE_SITE_LOCATION
     errors = exc.errors()
     if not errors:
         return "This DiveJSON document could not be read."

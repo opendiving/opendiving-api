@@ -140,7 +140,8 @@ add filters, related uuids and mixtures. New simple owned resources use `OwnedRe
 
 `GET /dive-sites`, `GET /trips` and `GET /gear-items` take `search=`, a case-insensitive substring
 match, with `items_per_page` capped at 100 (`MAX_DIVE_SITES_PER_PAGE`, `MAX_TRIPS_PER_PAGE`,
-`MAX_GEAR_ITEMS_PER_PAGE`). Sites and trips match `name` and `location`; gear matches `name` and
+`MAX_GEAR_ITEMS_PER_PAGE`). Sites match `name` and both of the locality's text columns
+(`DIVE_SITE_SEARCH_COLUMNS`), trips their own name and both of their parts'; gear matches `name` and
 `brand`, not `type` — `type` is a closed vocabulary with its own filter, and "reg" would match every
 regulator. `core/utils/search.py` builds the `select()` by hand: FastCRUD's `__ilike` filters AND
 together and `__or` groups operators on one column, not columns. It selects
@@ -2582,7 +2583,7 @@ the importer's migration guide.
 
 `dive_site.latitude`/`longitude` are plain `Float` columns, `Mapped[float | None]`, not PostGIS
 `geography(Point)`, which costs every self-hoster an extension install. Revisit if "sites near me"
-ships. They stay out of `ux_dive_site_user_id_name_location_lower`: same name and location is a
+ships. They stay out of `ux_dive_site_user_id_name_location_lower`: same name and locality name is a
 duplicate whatever the coordinates.
 
 `WholeCoordinatePair`, inherited by `DiveSiteCreate` and `DiveSiteUpdate`, requires a body to name
@@ -2592,9 +2593,9 @@ position. Validating the *effective* pair over the stored row is rejected: it ne
 between PATCHes, and splits one invariant in two. It is not on `DiveSiteBase`: a half pair from raw
 SQL must not 500 every read.
 
-UDDF emits `<geography>` for a location or a position, repeating the name as the mandatory
-`<location>` when only coordinates exist. `dive-sites.csv` writes `latitude`/`longitude` as stored,
-empty where absent, never `0`.
+UDDF emits `<geography>` for a locality or a position, writing the locality's `name` into the
+mandatory `<location>` and repeating the site's own name there when only coordinates exist.
+`dive-sites.csv` writes `latitude`/`longitude` as stored, empty where absent, never `0`.
 
 ## Geocoding is a server-side proxy, and Nominatim's terms are three concrete obligations
 
@@ -2678,8 +2679,8 @@ hand-rolled helpers' kwarg names fill the placeholders.
 
 ## A bounding box is optional twice over, and west > east is a real box
 
-`GeocodeResult` and `TripLocationInput` carry `bbox_south/north/west/east` as four named floats, not
-nested, because a client writes a picked search result back onto a trip location. Nominatim sends
+`GeocodeResult` and `LocationInput` carry `bbox_south/north/west/east` as four named floats, not
+nested, because a client writes a picked search result straight onto a place. Nominatim sends
 `boundingbox` as four strings ordered south, north, west, east; `_bounding_box` checks each
 assumption. A missing, short, unparseable or impossible box leaves all four `None` and keeps the
 result; the box is a nicety. The bounds check is the chain `-90 <= south <= north <= 90`, so a `nan`
@@ -2687,7 +2688,7 @@ corner is rejected.
 
 `bbox_west > bbox_east` is valid and never "corrected": it crosses the antimeridian, and swapping
 the pair frames the whole planet. South > north has no such reading and is refused. Only forward
-search gets a box (`_normalize(..., with_bounding_box=True)`), and `TripLocationInput` refuses a box
+search gets a box (`_normalize(..., with_bounding_box=True)`), and `LocationInput` refuses a box
 with no coordinates. Cache entries hold normalized `GeocodeResult`s for a month, so adding a field
 means bumping `_CACHE_VERSION`; nothing fails if skipped.
 
@@ -5574,8 +5575,8 @@ no `source` key there, so it cannot become a record source by accident.
 
 Results follow `SpeciesSearchResponse`'s shape, capped at 10, no `clamp_pagination`; each carries
 exactly `name`, `name_en`, `latitude`, `longitude`, `country`, `region`, `source`, `source_id` and
-`attribution`. `country_code` stays off the wire: the field a client fills is `dive_site.location`,
-free text — display name to the UI, code to the data. No distance field: the web tier has
+`attribution`. `country_code` stays off the wire: the field a client fills is a place's `name`, free
+text — display name to the UI, code to the data. No distance field: the web tier has
 `haversineMeters` and a `formatDistance` wired to the unit preference. Name fills from `name`, not
 `name_en`; both are searched, so a Latin keyboard reaches 砂辺.
 
@@ -6990,3 +6991,27 @@ No second index. `ix_trip_part_trip_id_position` leads with `trip_id`, so the co
 reads a handful of rows per trip. *Rejected:* `(trip_id, start_date)`, which changes what
 `tests/test_foreign_key_indexes.py` accounts for, for no measured gain; a change that finds the
 query plan says otherwise should add it and say so.
+
+## A place is one object, stored flat, and the index keys on its name
+
+A dive site's locality and a trip part's place are one thing — DiveJSON §6.9's Location: `name` (the
+place as a person writes it, "Dahab, Egypt"), `full_name` (the fullest form a lookup returned), a
+centre and a box. `schemas/location.py` holds the one validator both hosts use. Storage is flat,
+bare on `trip_part` and under `location_` on `dive_site`, because a site carries its own pin as well
+and the two positions must not read alike. `ux_dive_site_user_id_name_location_lower` keys on
+`location_name` alone: a place is identified by what it is called, so two sites in "Dahab, Egypt"
+collide whether or not a geocoder filled a centre in for one of them. *Rejected:* a nested JSON
+column, which no functional index and no `ilike` picker search can reach; and keying on the name
+plus a rounded position, which collapses to the name for almost every row.
+
+## The dive-site location contract changes without a write shim
+
+`POST`/`PATCH /dive-site` take `location` as a place object and nothing accepts the string that
+preceded it, so between this API's deploy and the web client's every site write is a 422 and every
+rendered site throws on an object child. That window is accepted rather than covered: the only
+affected client is one this project deploys itself, and its matching change follows immediately.
+*Rejected:* the optional-and-ignored write shim the trip-parts rename used, which reads both shapes
+for the few minutes of skew and then costs a second pass over the same schemas, routes and tests to
+take out — and which, held longer than that, is a second spelling of a member the format defines
+once. The migration is a separate question and keeps its guards: it is about data already stored,
+not about a window.

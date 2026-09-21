@@ -14,8 +14,8 @@ from ..core.schemas import (
 from ..core.utils.datetime_offset import require_utc_offset
 from .dive_mixture import DiveMixtureCreate, DiveMixtureRead
 from .dive_profile import DiveProfileInfo
-from .dive_site import Latitude, Longitude
 from .gear_item import GearItemInfo
+from .location import Latitude, LocationRead, Longitude
 
 _START_TIME_EXAMPLE = "2021-04-04T10:04:47.910+02:00"
 _LOCAL_START_TIME_EXAMPLE = "2021-04-04T10:04:47.910"
@@ -275,10 +275,14 @@ class DiveSiteInfo(PublicUUIDSchema):
 
     The position is the site's own, half of a dive's location story; the other half is
     the `entry_*`/`exit_*` fix recorded by the dive computer on `DiveTechScalars`.
+
+    The locality is the whole place object, not a trimmed copy of it: one shape named
+    `location` on the wire, wherever it appears. Its own `latitude`/`longitude` are the
+    locality's centre and are a different fact from the site's pin above.
     """
 
     name: str
-    location: str | None = None
+    location: LocationRead | None = None
     latitude: Latitude
     longitude: Longitude
 

@@ -16,7 +16,7 @@ from sqlalchemy import ColumnElement, select
 from sqlalchemy.dialects import postgresql
 
 from src.app.api.v1.courses import _course_cache
-from src.app.api.v1.dive_sites import _dive_site_cache
+from src.app.api.v1.dive_sites import DIVE_SITE_SEARCH_COLUMNS, _dive_site_cache
 from src.app.api.v1.gear_items import GEAR_ITEM_SEARCH_COLUMNS
 from src.app.api.v1.trips import _trip_cache
 from src.app.core.utils.owned_resource_cache import OwnedResourceCache
@@ -68,7 +68,7 @@ class TestSearchClause:
     @pytest.mark.parametrize(
         ("model", "columns", "table"),
         [
-            (DiveSite, ("name", "location"), "dive_site"),
+            (DiveSite, DIVE_SITE_SEARCH_COLUMNS, "dive_site"),
             (GearItem, GEAR_ITEM_SEARCH_COLUMNS, "gear_item"),
         ],
     )
@@ -108,7 +108,8 @@ class TestOwnedResourceSearchConditions:
         assert (
             "dive_site.user_id = 42 "
             "AND (dive_site.name ILIKE '%dahab%' ESCAPE '\\\\' "
-            "OR dive_site.location ILIKE '%dahab%' ESCAPE '\\\\')" in sql
+            "OR dive_site.location_name ILIKE '%dahab%' ESCAPE '\\\\' "
+            "OR dive_site.location_full_name ILIKE '%dahab%' ESCAPE '\\\\')" in sql
         )
 
     def test_trips_are_scoped_the_same_way(self) -> None:
@@ -290,7 +291,7 @@ class TestPageSizeCaps:
 @pytest.mark.parametrize(
     ("model", "columns"),
     [
-        (DiveSite, ("name", "location")),
+        (DiveSite, DIVE_SITE_SEARCH_COLUMNS),
         (Trip, ("name",)),
         (Course, COURSE_SEARCH_COLUMNS),
         (GearItem, GEAR_ITEM_SEARCH_COLUMNS),

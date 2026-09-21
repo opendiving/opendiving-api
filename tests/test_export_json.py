@@ -38,7 +38,8 @@ from src.app.models.gear_service_record import GearServiceRecord
 from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.trip import Trip
 from src.app.schemas.export import DIVEJSON_FORMAT, DIVEJSON_VERSION, ExportCourse, ExportEnvelope
-from src.app.schemas.trip import TripLocationRead, TripPartRead
+from src.app.schemas.location import LocationRead
+from src.app.schemas.trip import TripPartRead
 from src.app.services.dive_profiles import MERGE_PARSER_KEY, LoadedProfile
 from src.app.services.export.envelope import write_divejson
 from src.app.services.export.paths import plan_archive_paths
@@ -133,7 +134,7 @@ class TestConformance:
     @pytest.mark.parametrize(
         ("label", "parts"),
         [
-            ("no dates anywhere", [TripPartRead(location=TripLocationRead(name="Dahab"))]),
+            ("no dates anywhere", [TripPartRead(location=LocationRead(name="Dahab"))]),
             ("an end and no start", [TripPartRead(end_date=date(2026, 6, 8))]),
             ("no parts at all", []),
         ],
@@ -709,6 +710,32 @@ class TestReferences:
         assert document["sites"][0]["position"] == {"latitude": 27.7278, "longitude": 34.2564}
 
     @pytest.mark.asyncio
+    async def test_a_dive_sites_locality_is_the_whole_place_and_not_its_pin(self, monkeypatch):
+        """§6.9's object on a site, and §6.10's rule that its two positions are different
+        facts: the locality's centre and box are the *place's*, and the site's own pin is
+        the `position` beside them. A writer that filled either from the other would pass
+        every other assertion in this file.
+        """
+        document = await _render(full_bundle(), monkeypatch)
+        site = document["sites"][0]
+
+        assert site["location"] == {
+            "name": "Ras Mohammed, Egypt",
+            "full_name": "Ras Muhammad National Park, South Sinai, Egypt",
+            "position": {"latitude": 27.7333, "longitude": 34.25},
+            "bbox": {"south": 27.68, "north": 27.83, "west": 34.18, "east": 34.3},
+        }
+        assert site["location"]["position"] != site["position"]
+
+    @pytest.mark.asyncio
+    async def test_a_dive_site_with_no_locality_carries_no_location_member(self, monkeypatch):
+        """The common shape, and absence is how the format spells it (§5.4) - not an empty
+        object and not a null."""
+        document = await _render(full_bundle(), monkeypatch)
+
+        assert "location" not in document["sites"][1]
+
+    @pytest.mark.asyncio
     async def test_multi_site_visit_order_is_a_list_not_a_primary_site(self, monkeypatch):
         """A dive's sites are an ordered list with the primary at index 0, which is what a
         drift dive needs and what a single `site_uuid` could not express.
@@ -734,7 +761,8 @@ class TestReferences:
         parts = trip["parts"]
         assert [part.get("starts_on") for part in parts] == ["2026-05-30", "2026-06-02", None]
         assert [part.get("ends_on") for part in parts] == ["2026-06-02", "2026-06-04", "2026-06-06"]
-        assert parts[0]["location"]["name"] == "Sharm el-Sheikh"
+        assert parts[0]["location"]["name"] == "Sharm el-Sheikh, Egypt"
+        assert parts[0]["location"]["full_name"] == "Sharm el-Sheikh, South Sinai, Egypt"
         assert parts[0]["location"]["position"] == {"latitude": 27.9158, "longitude": 34.33}
         assert parts[0]["location"]["bbox"] == {"south": 27.8, "north": 28.0, "west": 34.2, "east": 34.4}
         # The free-text one: a place the geocoder had no answer for is still a place, and

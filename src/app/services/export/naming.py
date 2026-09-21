@@ -62,7 +62,7 @@ def gas_name(oxygen: float | None, helium: float | None) -> str:
 
 
 def trip_place_names(parts: Iterable[TripPartRead]) -> str:
-    """A trip's places on one line: `Moalboal, Bohol`.
+    """A trip's places on one line: `Moalboal, Philippines; Bohol, Philippines`.
 
     Takes parts and skips the ones with no place, which is a real shape now - a transit
     day, or a week nobody geocoded - so a trip of three parts may render two names or
@@ -72,11 +72,14 @@ def trip_place_names(parts: Iterable[TripPartRead]) -> str:
     `logbook.divejson` carries the places structured, and UDDF gives each part its own
     `<geography>`, so neither collapses them any more.
 
-    Comma-joined rather than the `;` the CSV uses for its lists (dive sites, cylinders):
-    this is one prose location line, not a set of records folded into a cell, and it is
-    the string a reader would expect to see in a "where did you go" column.
+    Joined with the `;` the CSV already means *list* by, rather than a comma: a place's
+    name now carries its country, so a comma join renders
+    `Dahab, Egypt, Sharm El Sheikh, Egypt` and a reader cannot tell the separators from the
+    commas inside each name. ` / ` separates more sharply still and is rejected for the
+    same reason in a different place - `"Hurghada/Marsa Alam, Egypt"` is a real place name
+    with one inside it.
     """
-    return ", ".join(part.location.name for part in parts if part.location is not None)
+    return "; ".join(part.location.name for part in parts if part.location is not None)
 
 
 def export_filename(username: str, exported_on: date, extension: str) -> str:

@@ -271,9 +271,9 @@ def write_trips_csv(bundle: ExportBundle) -> Iterator[str]:
             start_date, end_date = trip_span(parts)
             yield (
                 trip.name,
-                # One cell where the trip has a list of places, joined the way the app
-                # shows them. A spreadsheet column is not a place to put a nested shape,
-                # and `logbook.divejson` is where the structured places are.
+                # One cell where the trip has a list of places, joined with the `;` this
+                # file means *list* by. A spreadsheet column is not a place to put a nested
+                # shape, and `logbook.divejson` is where the structured places are.
                 trip_place_names(parts),
                 None if start_date is None else start_date.isoformat(),
                 None if end_date is None else end_date.isoformat(),
@@ -354,7 +354,7 @@ def write_dive_sites_csv(bundle: ExportBundle) -> Iterator[str]:
         for site in bundle.dive_sites:
             yield (
                 site.name,
-                site.location,
+                site.location_name,
                 site.latitude,
                 site.longitude,
                 counts.get(site.id, 0),

@@ -41,7 +41,13 @@ from src.app.crud.crud_dive_dive_sites import (
     get_dive_sites_for_dives,
 )
 from src.app.schemas.dive import DiveSiteInfo
-from src.app.schemas.dive_site import DiveSiteCreate, DiveSiteUpdate, WholeCoordinatePair
+from src.app.schemas.dive_site import DiveSiteCreate, DiveSiteUpdateRequest
+from src.app.schemas.location import (
+    DIVE_SITE_LOCATION_PREFIX,
+    LOCATION_FIELDS,
+    LocationRead,
+    WholeCoordinatePair,
+)
 
 USER_UUID = uuid7()
 # The Blue Hole, Dahab - a real pair, so a transposed lat/lon is visible in a diff.
@@ -50,7 +56,7 @@ BLUE_HOLE = (28.5721, 34.5372)
 # Both write schemas carry the same rule, and both are worth running every case through:
 # `DiveSiteCreate` is the one with no stored row behind it, `DiveSiteUpdate` the one where
 # an omitted key means "unchanged" and could quietly write half a position.
-WRITE_SCHEMAS: list[type[WholeCoordinatePair]] = [DiveSiteCreate, DiveSiteUpdate]
+WRITE_SCHEMAS: list[type[WholeCoordinatePair]] = [DiveSiteCreate, DiveSiteUpdateRequest]
 
 
 def _body(schema: type[WholeCoordinatePair], **overrides: Any) -> dict[str, Any]:
@@ -141,7 +147,7 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     db_dive_site.id = 11
     db_dive_site.user_id = 1
     db_dive_site.name = "Blue Hole"
-    db_dive_site.location = "Dahab, Egypt"
+    db_dive_site.location_name = "Dahab, Egypt"
     db_dive_site.latitude = None
     db_dive_site.longitude = None
     seen["db_dive_site"] = db_dive_site
@@ -168,7 +174,7 @@ async def _patch(values: dict[str, Any], mock_redis: Any) -> None:
         await dive_sites_module.patch_dive_site(
             request=request,
             uuid=uuid7(),
-            values=DiveSiteUpdate.model_validate(values),
+            values=DiveSiteUpdateRequest.model_validate(values),
             current_user={"id": 1, "uuid": USER_UUID},
             db=MagicMock(),
         )
@@ -274,7 +280,11 @@ class TestTheEmbeddedSiteSummary:
 
     def test_a_positioned_site_carries_its_coordinates(self) -> None:
         site = DiveSiteInfo(
-            uuid=uuid7(), name="Blue Hole", location="Dahab, Egypt", latitude=BLUE_HOLE[0], longitude=BLUE_HOLE[1]
+            uuid=uuid7(),
+            name="Blue Hole",
+            location=LocationRead(name="Dahab, Egypt"),
+            latitude=BLUE_HOLE[0],
+            longitude=BLUE_HOLE[1],
         )
 
         assert (site.model_dump()["latitude"], site.model_dump()["longitude"]) == BLUE_HOLE
@@ -290,6 +300,20 @@ class TestTheEmbeddedSiteSummary:
         check comes along - a row that could only exist via raw SQL fails loudly here."""
         with pytest.raises(ValidationError):
             DiveSiteInfo(uuid=uuid7(), name="Null Island Adjacent", latitude=91.0, longitude=0.0)
+
+
+def _expected_locality() -> LocationRead:
+    """The place `TestTheSummaryLoaders._row` carries, nested as a read returns it."""
+    return LocationRead(
+        name="Dahab, Egypt",
+        full_name="Dahab, South Sinai, Egypt",
+        latitude=28.4949,
+        longitude=34.5136,
+        bbox_south=28.4,
+        bbox_north=28.6,
+        bbox_west=34.4,
+        bbox_east=34.6,
+    )
 
 
 class TestTheSummaryLoaders:
@@ -319,9 +343,19 @@ class TestTheSummaryLoaders:
         columns: dict[str, Any] = {
             "uuid": uuid7(),
             "name": "Blue Hole",
-            "location": "Dahab, Egypt",
             "latitude": BLUE_HOLE[0],
             "longitude": BLUE_HOLE[1],
+            # The locality's own centre, deliberately a different point from the pin
+            # above: the two are different facts, and a loader that fed one from the other
+            # would pass every assertion here if they agreed.
+            "location_name": "Dahab, Egypt",
+            "location_full_name": "Dahab, South Sinai, Egypt",
+            "location_latitude": 28.4949,
+            "location_longitude": 34.5136,
+            "location_bbox_south": 28.4,
+            "location_bbox_north": 28.6,
+            "location_bbox_west": 34.4,
+            "location_bbox_east": 34.6,
         }
         return SimpleNamespace(**(columns | overrides))
 
@@ -332,7 +366,7 @@ class TestTheSummaryLoaders:
         sites = await get_dive_sites_for_dive(self._db([row]), dive_id=7)
 
         assert [(s.uuid, s.name, s.location, s.latitude, s.longitude) for s in sites] == [
-            (row.uuid, "Blue Hole", "Dahab, Egypt", BLUE_HOLE[0], BLUE_HOLE[1])
+            (row.uuid, "Blue Hole", _expected_locality(), BLUE_HOLE[0], BLUE_HOLE[1])
         ]
 
     @pytest.mark.asyncio
@@ -351,28 +385,44 @@ class TestTheSummaryLoaders:
 
         assert by_dive[8] == []
         assert [(s.uuid, s.name, s.location, s.latitude, s.longitude) for s in by_dive[7]] == [
-            (row.uuid, "Blue Hole", "Dahab, Egypt", BLUE_HOLE[0], BLUE_HOLE[1])
+            (row.uuid, "Blue Hole", _expected_locality(), BLUE_HOLE[0], BLUE_HOLE[1])
         ]
 
     def test_the_shared_columns_cover_every_field_of_the_summary(self) -> None:
         """One way a field can still go missing: `DiveSiteInfo` grows one and the tuple is
         left alone. `location`, `latitude` and `longitude` all default, so a new field
         alongside them reads back absent rather than raising anywhere.
+
+        The locality is one field over eight columns, so the two sets are compared with it
+        expanded - which is also what catches a column of the place going missing from the
+        tuple while the schema goes on promising the whole object.
         """
-        assert {column.key for column in DIVE_SITE_INFO_COLUMNS} == set(DiveSiteInfo.model_fields)
+        expected = (set(DiveSiteInfo.model_fields) - {"location"}) | {
+            f"{DIVE_SITE_LOCATION_PREFIX}{field}" for field in LOCATION_FIELDS
+        }
+
+        assert {column.key for column in DIVE_SITE_INFO_COLUMNS} == expected
 
     def test_the_constructor_consumes_every_shared_column(self) -> None:
         """The other way, and the one the assertion above cannot see: tuple and schema both
         grow the field, `dive_site_info_from_row` does not. The mapping tests hard-code
-        their five-tuples, so nothing else would notice it defaulting.
+        their tuples, so nothing else would notice it defaulting.
 
         Comparing field name against column name rather than position also refuses a
-        transposed pair, from the other side than the tests above.
+        transposed pair, from the other side than the tests above - the locality's centre
+        included, which is the pair most easily crossed with the site's own.
         """
         row = self._row()
 
         info = dive_site_info_from_row(row)
 
-        assert {field: getattr(info, field) for field in DiveSiteInfo.model_fields} == {
-            column.key: getattr(row, column.key) for column in DIVE_SITE_INFO_COLUMNS
+        read = {
+            column.key: (
+                getattr(info.location, column.key.removeprefix(DIVE_SITE_LOCATION_PREFIX))
+                if column.key.startswith(DIVE_SITE_LOCATION_PREFIX)
+                else getattr(info, column.key)
+            )
+            for column in DIVE_SITE_INFO_COLUMNS
         }
+
+        assert read == {column.key: getattr(row, column.key) for column in DIVE_SITE_INFO_COLUMNS}

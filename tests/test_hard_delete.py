@@ -157,7 +157,7 @@ HARD_DELETED_RESOURCES: dict[type[Base], Resource] = {
         create=create_dive_site,
         resolve=_resolves_through_fetch_owned(crud_dive_sites, DiveSiteReadInternal),
         name_exists=lambda session, diver, row: dive_site_name_exists(
-            session, user_id=diver.id, name=row.name, location=row.location
+            session, user_id=diver.id, name=row.name, location_name=row.location_name
         ),
     ),
     GearItem: Resource(

@@ -4,43 +4,19 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.trip_part import TripPart
-from ..schemas.trip import TripLocationRead, TripPartInput, TripPartRead
+from ..schemas.location import LOCATION_FIELDS, location_columns, location_from_row
+from ..schemas.trip import TripPartInput, TripPartRead
 
-_LOCATION_COLUMNS = (
-    TripPart.name,
-    TripPart.display_name,
-    TripPart.latitude,
-    TripPart.longitude,
-    TripPart.bbox_south,
-    TripPart.bbox_north,
-    TripPart.bbox_west,
-    TripPart.bbox_east,
-)
+# The place's columns, bare: a part has no position of its own for the locality's to be
+# confused with, which is why these carry none of the `location_` prefix a dive site's do.
+_LOCATION_COLUMNS = tuple(getattr(TripPart, field) for field in LOCATION_FIELDS)
 
 _READ_COLUMNS = (TripPart.start_date, TripPart.end_date, *_LOCATION_COLUMNS)
 
 
 def _to_read(row: Any) -> TripPartRead:
-    """A row into a part, with the place nested rather than flattened beside the dates.
-
-    `name` is what says whether there is a place at all: it is the one column a location
-    must have, so a row with none is a part the diver gave dates and no place.
-    """
-    location = (
-        None
-        if row.name is None
-        else TripLocationRead(
-            name=row.name,
-            display_name=row.display_name,
-            latitude=row.latitude,
-            longitude=row.longitude,
-            bbox_south=row.bbox_south,
-            bbox_north=row.bbox_north,
-            bbox_west=row.bbox_west,
-            bbox_east=row.bbox_east,
-        )
-    )
-    return TripPartRead(start_date=row.start_date, end_date=row.end_date, location=location)
+    """A row into a part, with the place nested rather than flattened beside the dates."""
+    return TripPartRead(start_date=row.start_date, end_date=row.end_date, location=location_from_row(row))
 
 
 async def get_parts_for_trip(db: AsyncSession, trip_id: int) -> list[TripPartRead]:
@@ -80,21 +56,13 @@ async def replace_parts_for_trip(
     """
     await db.execute(delete(TripPart).where(TripPart.trip_id == trip_id))
     for position, part in enumerate(parts):
-        location = part.location
         db.add(
             TripPart(
                 trip_id=trip_id,
                 position=position,
                 start_date=part.start_date,
                 end_date=part.end_date,
-                name=None if location is None else location.name,
-                display_name=None if location is None else location.display_name,
-                latitude=None if location is None else location.latitude,
-                longitude=None if location is None else location.longitude,
-                bbox_south=None if location is None else location.bbox_south,
-                bbox_north=None if location is None else location.bbox_north,
-                bbox_west=None if location is None else location.bbox_west,
-                bbox_east=None if location is None else location.bbox_east,
+                **location_columns(part.location),
             )
         )
     if commit:

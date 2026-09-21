@@ -79,8 +79,8 @@ class CatalogSite:
     the generator ships them anyway, because a site with no country is still a site.
 
     `country_code` never leaves this module. It is the stable key the file is built on; what
-    a client gets is the English display name. Writing `EG` into a Location field whose own
-    schema example is `Koh Tao, Thailand` is the mistake it exists to make impossible.
+    a client gets is the English display name. Writing `EG` into a place's `name`, whose own
+    schema example is `Dahab, Egypt`, is the mistake it exists to make impossible.
     """
 
     name: str

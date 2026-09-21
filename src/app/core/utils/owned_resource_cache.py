@@ -118,7 +118,7 @@ class OwnedResourceCache[InternalT, PublicT]:
             of its own. `read_list` then raises rather than sorting by nothing.
         search_columns: tuple[str, ...]
             Model column names a `search=` term matches against, OR'd together and matched
-            case-insensitively as a substring, e.g. `("name", "location")`. Leave empty to
+            case-insensitively as a substring, e.g. `("name", "location_name")`. Leave empty to
             opt out of search entirely, in which case `read_list` takes no `search` argument
             and the cache key is unchanged.
         list_expiration: int

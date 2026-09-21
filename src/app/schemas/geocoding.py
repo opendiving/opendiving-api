@@ -9,19 +9,21 @@ class GeocodeResult(BaseModel):
     The shape is deliberately provider-neutral so `GEOCODER_URL` can point somewhere else
     without the web and iOS clients noticing (see `services.geocoding_service`).
 
-    `location` and `display_name` are both here because they answer different questions.
-    `location` is short, composed from the provider's structured address, and is what gets
-    persisted onto `dive_site.location` - divers write "Dahab, Egypt", not a seven-part
-    postal address. `display_name` is the provider's full label, which is what makes two
-    otherwise identical entries in a search picker distinguishable.
+    `location` and `display_name` are both here because they answer different questions,
+    and both are stored now. `location` is short, composed from the provider's structured
+    address, and becomes a place's `name` - divers write "Dahab, Egypt", not a seven-part
+    postal address. `display_name` is the provider's full label, which becomes `full_name`
+    and is what makes two otherwise identical entries in a search picker distinguishable.
+    Neither member is renamed by that: these are the geocoder's own wire names, and the
+    place object's are `schemas.location`'s.
     """
 
     latitude: Annotated[float, Field(ge=-90, le=90, examples=[28.5717])]
     longitude: Annotated[float, Field(ge=-180, le=180, examples=[34.5372])]
     # Every string below is bounded, because every one of them is written by a third party,
     # cached for a month and handed to every client. The provider is trusted to be honest,
-    # not to be terse. `location`'s bound is the width of `dive_site.location`, since that
-    # is where it is headed; the others are simply sane ceilings. `services.geocoding_service`
+    # not to be terse. `location`'s bound is the width of a place's `name` column, since
+    # that is where it is headed; the others are simply sane ceilings. `services.geocoding_service`
     # truncates to these rather than letting an over-long value raise inside the normalizer.
     location: Annotated[str, Field(max_length=255, examples=["Dahab, Egypt"])]
     display_name: Annotated[str, Field(max_length=512, examples=["Blue Hole, Dahab, South Sinai, Egypt"])]
@@ -46,8 +48,8 @@ class GeocodeResult(BaseModel):
         ),
     ]
     # The place's extent, when the provider sends one. Four named floats rather than a
-    # nested object or a list, because that is how a trip location stores them
-    # (`schemas.trip.TripLocationInput`) and a client that picks a result writes it
+    # nested object or a list, because that is how a place stores them
+    # (`schemas.location.LocationInput`) and a client that picks a result writes it
     # straight back - a shape change in between would be a mapping nobody needs.
     #
     # All four or none of them: a partial box is not a box. They are absent for a result
