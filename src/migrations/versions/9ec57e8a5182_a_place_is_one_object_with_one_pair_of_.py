@@ -13,10 +13,12 @@ sees none of the copies below, which are the whole of what makes this revision s
 logbook that already exists.
 
 **The dive site: `nullif(location, '')`, not the column.** The new `name` is REQUIRED and
-1-255, and a blank locality is reachable in the shipped app - `DiveSiteUpdate` bounds that
-field's length and not its emptiness. Migrated as-is, `''` would become a place with an
-empty name and fail `response_model` validation on every read of that site. A blank is an
-absence spelled wrongly, so it migrates to absence.
+1-255, and a blank locality is reachable in the shipped app, whose update schema bounds that
+field's length and not its emptiness. Migrated as-is it would become a place whose name is
+the empty string §6.9 forbids: a nameless place on every read of that site, and a
+`location.name` the format's own schema rejects on export. A blank is an absence spelled
+wrongly, so it migrates to absence - and `DiveSiteLocationColumnsInput` is what stops a new
+one arriving.
 
 **The trip part: which column a label belongs in depends on what kind of label it is.**
 `display_name` holds two populations. A place picked recently carries the app's own

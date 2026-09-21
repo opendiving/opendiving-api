@@ -36,6 +36,12 @@ class DiveSiteLocationColumns(BaseModel):
     Never on the wire. The prefix is what keeps the two positions apart in the table - a
     site's `latitude` is the pin a diver dropped, `location_latitude` is the centre of the
     town the geocoder resolved, and nothing fills either from the other.
+
+    **Permissive on purpose**, which is why the write shapes take the subclass below
+    instead: this is what `DiveSiteReadInternal` mirrors the table with, and a row that
+    only raw SQL could have written - an empty locality name, say - should read back as
+    the odd thing it is rather than turn every read of that site into a 500. Same split,
+    and the same reason, as `WholeCoordinatePair` not being on `DiveSiteBase`.
     """
 
     location_name: Annotated[str | None, Field(default=None, max_length=LOCATION_NAME_MAX)]
@@ -46,6 +52,23 @@ class DiveSiteLocationColumns(BaseModel):
     location_bbox_north: Annotated[float | None, Field(default=None, ge=-90, le=90)]
     location_bbox_west: Annotated[float | None, Field(default=None, ge=-180, le=180)]
     location_bbox_east: Annotated[float | None, Field(default=None, ge=-180, le=180)]
+
+
+class DiveSiteLocationColumnsInput(DiveSiteLocationColumns):
+    """The same columns on the way in, where an empty locality name is refused.
+
+    §6.9 makes a place's `name` 1-255, so `""` is not a short name but a place with none:
+    it exports a `location.name` the format's schema rejects and reads back as a nameless
+    place. `LocationInput` already refuses it for every API caller; this closes the same
+    hole on the admin panel's own form, which writes these columns directly. The
+    migration's `nullif(location, '')` clears the rows the old unbounded field left behind,
+    and this is what stops a new one arriving.
+
+    Clearing the locality is untouched: `None` is still how a site entered with the wrong
+    place is corrected back to "not recorded", and a minimum length says nothing about it.
+    """
+
+    location_name: Annotated[str | None, Field(default=None, min_length=1, max_length=LOCATION_NAME_MAX)]
 
 
 class DiveSiteRead(DiveSiteBase, PublicUUIDSchema):
@@ -76,7 +99,7 @@ class DiveSiteCreate(DiveSiteBase, WholeCoordinatePair):
     location: LocationInput | None = None
 
 
-class DiveSiteCreateInternal(DiveSiteBase, DiveSiteLocationColumns, WholeCoordinatePair):
+class DiveSiteCreateInternal(DiveSiteBase, DiveSiteLocationColumnsInput, WholeCoordinatePair):
     """What reaches FastCRUD, so the locality is flat here where `DiveSiteCreate` nests it."""
 
     model_config = ConfigDict(extra="forbid")
@@ -105,7 +128,7 @@ class _DiveSiteUpdateFields(WholeCoordinatePair, RejectsExplicitNulls):
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
 
 
-class DiveSiteUpdate(_DiveSiteUpdateFields, DiveSiteLocationColumns):
+class DiveSiteUpdate(_DiveSiteUpdateFields, DiveSiteLocationColumnsInput):
     """CRUDAdmin's Dive Site form, and the shape `test_update_explicit_nulls.py` sweeps
     against the `dive_site` table's columns - so the locality is flat here, as the table
     has it. `TripUpdate` is split from `TripUpdateRequest` for the same reason.

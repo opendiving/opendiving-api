@@ -21,6 +21,7 @@ The coordinate-pair rule and the dive summary's staleness gates are
 
 import uuid as uuid_pkg
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -35,8 +36,14 @@ from src.app.core.utils import cache as cache_module
 from src.app.crud.crud_dive_sites import dive_site_name_exists
 from src.app.models.dive_site import DiveSite
 from src.app.models.user import User
-from src.app.schemas.dive_site import DiveSiteCreate, DiveSiteRead, DiveSiteUpdateRequest
-from src.app.schemas.location import DIVE_SITE_LOCATION_PREFIX, LOCATION_FIELDS
+from src.app.schemas.dive_site import (
+    DiveSiteCreate,
+    DiveSiteCreateInternal,
+    DiveSiteRead,
+    DiveSiteUpdate,
+    DiveSiteUpdateRequest,
+)
+from src.app.schemas.location import DIVE_SITE_LOCATION_PREFIX, LOCATION_FIELDS, location_from_row
 from tests.conftest import db_available
 
 USER_UUID = uuid7()
@@ -104,6 +111,58 @@ class TestWhatTheWireCarries:
         assert dumped["location"] == DAHAB
         assert (dumped["latitude"], dumped["longitude"]) == BLUE_HOLE
         assert dumped["location"]["latitude"] != dumped["latitude"]
+
+
+class TestAnEmptyLocalityNameIsRefusedOnTheWayInOnly:
+    """`""` is not a short name, it is a place with none - §6.9 makes `name` 1-255, so an
+    empty one exports a `location.name` the format's schema rejects and reads back as a
+    nameless place. Every way in refuses it; nothing on the way out does.
+
+    The asymmetry is deliberate and is `WholeCoordinatePair`'s: a row only raw SQL could
+    have written should read back as the odd thing it is rather than turn every read of
+    that site into a 500. The migration's `nullif` clears the rows the old unbounded field
+    left behind, and these schemas are what stop a new one arriving.
+    """
+
+    def test_the_api_refuses_it(self) -> None:
+        with pytest.raises(ValueError):
+            DiveSiteCreate.model_validate({"name": "Blue Hole", "location": {"name": ""}})
+
+    @pytest.mark.parametrize(
+        ("schema", "body"),
+        [
+            (DiveSiteCreateInternal, {"name": "Blue Hole", "user_id": 1}),
+            (DiveSiteUpdate, {"name": "Blue Hole"}),
+        ],
+        ids=["DiveSiteCreateInternal", "DiveSiteUpdate"],
+    )
+    def test_the_admin_form_refuses_it_too(self, schema: Any, body: dict[str, Any]) -> None:
+        """Those two are what `admin/views.py` registers for this table, and they write the
+        columns directly rather than through `LocationInput`."""
+        with pytest.raises(ValueError):
+            schema.model_validate({**body, "location_name": ""})
+
+    @pytest.mark.parametrize(
+        ("schema", "body"),
+        [
+            (DiveSiteCreateInternal, {"name": "Blue Hole", "user_id": 1}),
+            (DiveSiteUpdate, {"name": "Blue Hole"}),
+        ],
+        ids=["DiveSiteCreateInternal", "DiveSiteUpdate"],
+    )
+    def test_clearing_the_locality_is_untouched(self, schema: Any, body: dict[str, Any]) -> None:
+        """A minimum length says nothing about absence, and clearing is how a site entered
+        with the wrong place is corrected."""
+        assert schema.model_validate({**body, "location_name": None}).location_name is None
+
+    def test_a_row_that_already_holds_one_still_reads_back(self) -> None:
+        row = SimpleNamespace(**{f"{DIVE_SITE_LOCATION_PREFIX}{field}": None for field in LOCATION_FIELDS})
+        row.location_name = ""
+
+        place = location_from_row(row, DIVE_SITE_LOCATION_PREFIX)
+
+        assert place is not None
+        assert place.name == ""
 
 
 @pytest.fixture
