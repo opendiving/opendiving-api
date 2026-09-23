@@ -61,8 +61,14 @@ from src.app.models.trip import Trip
 from src.app.models.trip_part import TripPart
 from src.app.schemas.certification import CertificationAgency
 from src.app.schemas.dive import DiveUpdateRequest
-from src.app.schemas.logbook_import import ImportNoteCode
-from src.app.services.export import load_export_bundle, write_divejson
+from src.app.schemas.logbook_import import (
+    ImportCheckInEmergencyContact,
+    ImportCheckInInsurance,
+    ImportCheckInSubmission,
+    ImportNoteCode,
+)
+from src.app.schemas.user import CHECK_IN_FIELDS
+from src.app.services.export import load_export_bundle, write_divejson, write_uddf
 from src.app.services.export.archive import DIVEJSON_NAME
 from src.app.services.export.paths import plan_archive_paths
 from src.app.services.logbook_import import (
@@ -135,7 +141,13 @@ async def _preview(db: AsyncSession, user_id: int, data: bytes, filename: str = 
         return await plan_import(db, user_id=user_id, loaded=loaded)
 
 
-async def _apply(db: AsyncSession, user_id: int, data: bytes, filename: str = "logbook.divejson") -> Any:
+async def _apply(
+    db: AsyncSession,
+    user_id: int,
+    data: bytes,
+    filename: str = "logbook.divejson",
+    check_in: ImportCheckInSubmission | None = None,
+) -> Any:
     """Plan and write in one transaction, exactly as `POST /import/logbook` does.
 
     The species pre-pass is deliberately absent: it makes an outbound call, and every
@@ -143,7 +155,7 @@ async def _apply(db: AsyncSession, user_id: int, data: bytes, filename: str = "l
     unresolvable. `resolution_ran=True` is what tells the planner to say so.
     """
     with await load_import(_upload(data, filename)) as loaded:
-        plan = await plan_import(db, user_id=user_id, loaded=loaded, resolution_ran=True)
+        plan = await plan_import(db, user_id=user_id, loaded=loaded, resolution_ran=True, check_in=check_in)
         await write_import(db, user_id=user_id, loaded=loaded, plan=plan)
         await db.commit()
         return plan
@@ -2347,7 +2359,7 @@ class TestAServiceRecordOnAScheduleTheImportDidNotWrite:
         assert refreshed.next_due_on is not None
 
 
-class TestTheDiverIsNeverApplied:
+class TestTheDiversIdentityAndSettingsAreNeverApplied:
     @pytest.mark.asyncio
     async def test_the_destination_keeps_its_own_identity_and_settings(
         self, seeded: Any, db: Session, async_db: AsyncSession
@@ -2380,7 +2392,7 @@ class TestTheDiverIsNeverApplied:
     async def test_the_destination_gains_none_of_the_documents_dive_form_presets(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
-        """The presets ride in the `diver` member's extension, and that member is read,
+        """The presets ride in the `diver` member's extension, whose settings are read,
         reported and never applied - so a restore does not hand this account somebody else's
         idea of which fields to hide. The note says so in as many words; this is the half
         that checks the rows.
@@ -2399,6 +2411,247 @@ class TestTheDiverIsNeverApplied:
             .all()
         )
         assert list(presets) == []
+
+
+FILLED_CHECK_IN: dict[str, Any] = {
+    "date_of_birth": date(1988, 4, 12),
+    "phone": "+20 100 123 4567",
+    "emergency_contact_name": "Grace Hopper",
+    "emergency_contact_phone": "+1 202 555 0143",
+    "emergency_contact_relationship": "Partner",
+    "insurance_provider": "DAN Europe",
+    "insurance_policy_number": "DE-4471902",
+    "insurance_expires_on": date(2027, 6, 30),
+}
+
+
+def _fill_check_in(db: Session, user: Any, **columns: Any) -> None:
+    for column, value in columns.items():
+        setattr(user, column, value)
+    db.commit()
+
+
+async def _check_in_row(db: AsyncSession, user_id: int) -> dict[str, Any]:
+    from src.app.models.user import User
+
+    row = (
+        await db.execute(select(*(getattr(User, column) for column in CHECK_IN_FIELDS)).where(User.id == user_id))
+    ).one()
+    return row._asdict()
+
+
+def _diver_document(**diver: Any) -> bytes:
+    """A document carrying a diver and nothing else, for the shapes this app's own writer
+    cannot produce: a second contact, a contact nobody is named in, a stranger's insurer."""
+    return json.dumps({"format": "divejson", "version": "1.0", "diver": diver}).encode()
+
+
+def _details(plan: Any) -> dict[str, Any]:
+    return {entry.detail: entry for entry in plan.check_in_details}
+
+
+def _as_proposed(plan: Any) -> ImportCheckInSubmission:
+    """Every detail the preview offered, kept exactly as proposed."""
+    return ImportCheckInSubmission.model_validate({detail: entry.proposed for detail, entry in _details(plan).items()})
+
+
+class TestTheCheckInDetails:
+    """Offered in the preview beside the account's own, and written only as submitted.
+
+    The importer cannot tell a restore from a buddy's file, so nothing here is written on
+    the document's say-so: a client that shows no section and sends nothing writes nothing.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_preview_offers_each_detail_the_document_carries(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        source = create_user(db)
+        _fill_check_in(db, source, **FILLED_CHECK_IN)
+        document = await _export(async_db, source.id)
+        destination = create_user(db)
+
+        plan = await _preview(async_db, destination.id, document)
+        details = _details(plan)
+
+        assert list(details) == ["born_on", "phone", "emergency_contact", "insurance"]
+        assert all(entry.account is None for entry in details.values())
+        assert details["born_on"].proposed == date(1988, 4, 12)
+        assert details["phone"].proposed == "+20 100 123 4567"
+        assert details["emergency_contact"].proposed == ImportCheckInEmergencyContact(
+            name="Grace Hopper", phone="+1 202 555 0143", relationship="Partner"
+        )
+        assert details["insurance"].proposed == ImportCheckInInsurance(
+            provider="DAN Europe", number="DE-4471902", expires_on=date(2027, 6, 30)
+        )
+        assert plan.check_in_values == {}
+
+    @pytest.mark.asyncio
+    async def test_the_apply_writes_exactly_what_was_submitted(self, db: Session, async_db: AsyncSession) -> None:
+        source = create_user(db)
+        _fill_check_in(db, source, **FILLED_CHECK_IN)
+        document = await _export(async_db, source.id)
+        destination = create_user(db)
+        submission = ImportCheckInSubmission.model_validate(
+            {
+                "born_on": "1988-04-12",
+                "phone": "+20 100 123 4567",
+                "emergency_contact": {"name": "Grace Hopper", "phone": "+1 202 555 0199"},
+                "insurance": None,
+            }
+        )
+
+        plan = await _apply(async_db, destination.id, document, check_in=submission)
+
+        assert await _check_in_row(async_db, destination.id) == {
+            **dict.fromkeys(CHECK_IN_FIELDS),
+            "date_of_birth": date(1988, 4, 12),
+            "phone": "+20 100 123 4567",
+            "emergency_contact_name": "Grace Hopper",
+            "emergency_contact_phone": "+1 202 555 0199",
+        }
+        assert [note.code for note in plan.notes].count(ImportNoteCode.CHECK_IN_DETAIL_WRITTEN) == 3
+
+    @pytest.mark.asyncio
+    async def test_nothing_submitted_writes_nothing(self, db: Session, async_db: AsyncSession) -> None:
+        """What a client that never showed the section sends - and what keeps a shop's
+        contact from being overwritten by a buddy's export."""
+        source = create_user(db)
+        _fill_check_in(db, source, **FILLED_CHECK_IN)
+        document = await _export(async_db, source.id)
+        destination = create_user(db)
+        _fill_check_in(db, destination, emergency_contact_name="Ada's sister")
+
+        plan = await _apply(async_db, destination.id, document)
+
+        assert await _check_in_row(async_db, destination.id) == {
+            **dict.fromkeys(CHECK_IN_FIELDS),
+            "emergency_contact_name": "Ada's sister",
+        }
+        assert ImportNoteCode.CHECK_IN_DETAIL_WRITTEN not in _codes(plan)
+
+    @pytest.mark.asyncio
+    async def test_a_detail_left_out_of_the_submission_keeps_the_account_s(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        source = create_user(db)
+        _fill_check_in(db, source, **FILLED_CHECK_IN)
+        document = await _export(async_db, source.id)
+        destination = create_user(db)
+        _fill_check_in(db, destination, insurance_provider="Aqua Med")
+
+        await _apply(async_db, destination.id, document, check_in=ImportCheckInSubmission(phone="+20 100 123 4567"))
+
+        row = await _check_in_row(async_db, destination.id)
+        assert (row["phone"], row["insurance_provider"], row["date_of_birth"]) == ("+20 100 123 4567", "Aqua Med", None)
+
+    @pytest.mark.asyncio
+    async def test_a_detail_the_document_does_not_carry_is_not_written(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """This app's own UDDF never carries a contact, so a client sending one back beside
+        it must not be able to clear or replace the account's."""
+        destination = create_user(db)
+        _fill_check_in(db, destination, emergency_contact_name="Ada's sister")
+        submission = ImportCheckInSubmission.model_validate({"emergency_contact": None})
+
+        plan = await _apply(async_db, destination.id, _diver_document(phone="+20 100 123 4567"), check_in=submission)
+
+        assert (await _check_in_row(async_db, destination.id))["emergency_contact_name"] == "Ada's sister"
+        assert list(_details(plan)) == ["phone"]
+
+    @pytest.mark.asyncio
+    async def test_the_same_submission_twice_writes_nothing_the_second_time(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        source = create_user(db)
+        _fill_check_in(db, source, **FILLED_CHECK_IN)
+        document = await _export(async_db, source.id)
+        destination = create_user(db)
+        submission = _as_proposed(await _preview(async_db, destination.id, document))
+
+        await _apply(async_db, destination.id, document, check_in=submission)
+        second = await _apply(async_db, destination.id, document, check_in=submission)
+
+        assert await _check_in_row(async_db, destination.id) == FILLED_CHECK_IN
+        assert second.check_in_values == {}
+        assert ImportNoteCode.CHECK_IN_DETAIL_WRITTEN not in _codes(second)
+
+    @pytest.mark.asyncio
+    async def test_an_insurance_whose_every_member_matches_is_proposed_as_the_account_s(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The document lacks the policy number, as this app's own UDDF always does - so the
+        proposal is the account's insurance, number included, and applying it unedited
+        changes nothing."""
+        destination = create_user(db)
+        _fill_check_in(
+            db,
+            destination,
+            insurance_provider="DAN Europe",
+            insurance_policy_number="DE-4471902",
+            insurance_expires_on=date(2027, 6, 30),
+        )
+        document = _diver_document(insurances=[{"provider": "DAN Europe", "expires_on": "2027-06-30"}])
+
+        plan = await _preview(async_db, destination.id, document)
+
+        assert _details(plan)["insurance"].proposed == ImportCheckInInsurance(
+            provider="DAN Europe", number="DE-4471902", expires_on=date(2027, 6, 30)
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_insurance_that_differs_is_proposed_as_the_document_s_alone(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """Nothing is taken from the account's: its policy number beside another insurer's
+        name would be a policy nobody holds."""
+        destination = create_user(db)
+        _fill_check_in(db, destination, insurance_provider="DAN Europe", insurance_policy_number="DE-4471902")
+        document = _diver_document(insurances=[{"provider": "Aqua Med", "expires_on": "2027-06-30"}])
+
+        plan = await _preview(async_db, destination.id, document)
+        insurance = _details(plan)["insurance"]
+
+        assert insurance.account == ImportCheckInInsurance(provider="DAN Europe", number="DE-4471902")
+        assert insurance.proposed == ImportCheckInInsurance(provider="Aqua Med", expires_on=date(2027, 6, 30))
+
+    @pytest.mark.asyncio
+    async def test_an_unnamed_contact_and_every_one_after_the_first_are_dropped_with_a_note(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The account stores one contact, so the second is dropped rather than chosen
+        between; one nobody is named in is no contact at all, and does not take the first
+        place from a real one."""
+        destination = create_user(db)
+        document = _diver_document(
+            emergency_contacts=[{"phone": "+1 202 555 0100"}, {"name": "Grace Hopper"}, {"name": "Alan Turing"}],
+            insurances=[{"provider": "", "number": "DE-4471902"}],
+        )
+
+        plan = await _preview(async_db, destination.id, document)
+
+        assert list(_details(plan)) == ["emergency_contact"]
+        assert _details(plan)["emergency_contact"].proposed == ImportCheckInEmergencyContact(name="Grace Hopper")
+        assert [note.code for note in plan.notes].count(ImportNoteCode.CHECK_IN_DETAIL_DROPPED) == 3
+
+    @pytest.mark.asyncio
+    async def test_the_app_s_own_uddf_back_in_changes_nothing(self, db: Session, async_db: AsyncSession) -> None:
+        """The date of birth, the phone and the insurance are offered - the insurance as the
+        account's own, policy number and all - and no contact at all, UDDF having no slot
+        for one."""
+        owner = create_user(db)
+        _fill_check_in(db, owner, **FILLED_CHECK_IN)
+        bundle = await load_export_bundle(async_db, user_id=owner.id)
+        uddf = b"".join([chunk async for chunk in write_uddf(async_db, bundle, exported_at=datetime.now(UTC))])
+
+        preview = await _preview(async_db, owner.id, uddf, "logbook.uddf")
+        plan = await _apply(async_db, owner.id, uddf, "logbook.uddf", check_in=_as_proposed(preview))
+
+        assert list(_details(preview)) == ["born_on", "phone", "insurance"]
+        assert _details(preview)["insurance"].proposed.number == "DE-4471902"
+        assert await _check_in_row(async_db, owner.id) == FILLED_CHECK_IN
+        assert ImportNoteCode.CHECK_IN_DETAIL_WRITTEN not in _codes(plan)
 
 
 class TestTheBoundsCensus:

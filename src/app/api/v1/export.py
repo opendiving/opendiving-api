@@ -115,8 +115,10 @@ async def export_divejson(
     (<https://divejson.org>) and this app is its reference implementation, so this file is
     lossless where UDDF is not: it carries the dives with their full sample profiles,
     cylinders, sites, trips, training courses, marine-life sightings, gear and its service
-    history, and c-card records - everything the account holds except the binaries
-    themselves, which the file references by digest.
+    history, c-card records and the check-in details a dive shop asks for - everything the
+    account holds except the binaries themselves, which the file references by digest, and
+    an emergency contact with no name or an insurance with no provider, which the format
+    cannot carry until the contact is named or the insurer is.
 
     For a copy that carries those binaries too, use `/export/archive`, whose
     `logbook.divejson` member is this same document.
@@ -140,9 +142,10 @@ async def export_uddf(
 
     UDDF is the older interchange format Subsurface, divelogs.de and MacDive import, so
     this is the file to hand one of those. It carries the dives, their sites, trips,
-    gases, cylinders, gear and full sample profiles - but not the things the format has no
-    slot for (gear sets, service history, c-cards, training courses, per-cylinder role and
-    usage, the deco ceiling).
+    gases, cylinders, gear and full sample profiles, and the diver's date of birth, phone
+    and dive insurance - but not the things the format has no slot for (gear sets, service
+    history, c-cards, training courses, per-cylinder role and usage, the deco ceiling, the
+    emergency contact, the insurance policy number).
     For a lossless structured copy, use `/export/divejson`; for one that carries the
     stored files as well, `/export/archive`.
     """
@@ -199,8 +202,9 @@ async def export_archive(
     full CSV set, every stored dive-computer file and both sides of every c-card.
 
     This is the complete copy - nothing in the account is reachable only through the app
-    after taking it. **It includes the certification card images**, which are personal
-    documents, so treat the file accordingly.
+    after taking it, bar an emergency contact with no name or an insurance with no provider,
+    which DiveJSON cannot carry until they are completed. **It includes the certification
+    card images**, which are personal documents, so treat the file accordingly.
     """
     await _enforce_export_limit(current_user["id"])
     bundle = await load_export_bundle(db, user_id=current_user["id"])

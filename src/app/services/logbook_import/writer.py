@@ -50,6 +50,7 @@ from ...models.gear_service_schedule import GearServiceSchedule
 from ...models.gear_set import GearSet
 from ...models.trip import Trip
 from ...models.trip_part import TripPart
+from ...models.user import User
 from ...schemas.certification import CertificationSide
 from ...schemas.dive import DiveMode
 from ...schemas.dive_mixture import DiveMixtureCreate, as_create
@@ -238,6 +239,7 @@ class _Writer:
     # ------------------------------------------------------------------ collections
 
     async def write(self) -> None:
+        await self._write_check_in()
         await self._write_trips()
         await self._write_courses()
         await self._write_sites()
@@ -251,6 +253,12 @@ class _Writer:
         # and writing them last keeps that true of the order as well as of the plan.
         await self._write_recording_matches()
         await self._recalculate()
+
+    async def _write_check_in(self) -> None:
+        if self._plan.check_in_values:
+            await self._db.execute(
+                update(User).where(User.id == self._user_id).values(**self._plan.check_in_values, updated_at=self._now)
+            )
 
     async def _write_trips(self) -> None:
         for record in self._plan.writable("trips"):

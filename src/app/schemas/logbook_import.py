@@ -39,7 +39,7 @@ and every one of these limits is also the width of the column it lands in.
 import uuid as uuid_pkg
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
@@ -50,6 +50,17 @@ from .dive import DecoAlgorithm, DiveMode, WaterType
 from .dive_mixture import GasRole, TankUsage
 from .dive_profile import ProfileEventType
 from .gear_service import ServiceKind
+from .user import (
+    ANCHOR_REQUIRED_MESSAGES,
+    EMERGENCY_CONTACT_FIELDS,
+    INSURANCE_FIELDS,
+    BirthDate,
+    CheckInName,
+    CheckInPhone,
+    CheckInShortText,
+    is_blank,
+    lacks_its_anchor,
+)
 
 # The spec's own string bounds (§6). Named rather than repeated inline because each one
 # governs several members, and because each is also the width of the column behind it -
@@ -63,6 +74,8 @@ _SHA256_LENGTH = 64
 # §6.4b's own bounds on a device's members, and the widths of `dive_recording`'s columns.
 _DEVICE_MAX = 64
 _FIRMWARE_MAX = 32
+# §6.1's bound on a phone number, the diver's and an emergency contact's alike.
+_PHONE_MAX = 32
 
 
 def _unknown_is_absent(enum: type[StrEnum]) -> BeforeValidator:
@@ -126,15 +139,38 @@ class ImportBoundingBox(_ReadModel):
     east: float
 
 
+class ImportEmergencyContact(_ReadModel):
+    """`name` is REQUIRED in the format and optional here: the importer grades nothing, and
+    the planner drops a contact nobody is named in with a note rather than offering it."""
+
+    name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
+    phone: Annotated[str | None, Field(default=None, max_length=_PHONE_MAX)]
+    relationship: Annotated[str | None, Field(default=None, max_length=_SHORT_MAX)]
+
+
+class ImportInsurance(_ReadModel):
+    """`provider` is optional here for the reason `ImportEmergencyContact.name` is."""
+
+    provider: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
+    number: Annotated[str | None, Field(default=None, max_length=_SHORT_MAX)]
+    expires_on: date | None = None
+
+
 class ImportDiver(_ReadModel):
-    """Read, reported, and never applied - see `DECISIONS.md`. Every member is optional
-    because §6.1 makes them so: a converter whose source records nothing about an owner
-    omits the whole object rather than minting identity for a person."""
+    """Whose logbook the document is. Its identity and settings are read and reported, and
+    never applied; its check-in details are offered in the preview and written as the diver
+    confirms them - see `DECISIONS.md`. Every member is optional because §6.1 makes them
+    so: a converter whose source records nothing about an owner omits the whole object
+    rather than minting identity for a person."""
 
     uuid: uuid_pkg.UUID | None = None
     name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
-    username: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
+    username: Annotated[str | None, Field(default=None, max_length=_SHORT_MAX)]
     email: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
+    phone: Annotated[str | None, Field(default=None, max_length=_PHONE_MAX)]
+    born_on: date | None = None
+    emergency_contacts: Annotated[list[ImportEmergencyContact], Field(default_factory=list), _Collection]
+    insurances: Annotated[list[ImportInsurance], Field(default_factory=list), _Collection]
     created_at: datetime | None = None
     extensions: dict[str, Any] | None = None
 
@@ -543,8 +579,13 @@ class ImportNoteCode(StrEnum):
     # A recording matched one the caller already has - the same device, the same start -
     # so it filled that recording's blanks rather than being added beside it.
     RECORDING_FILLED = "recording_filled"
-    # The `diver` member was read and deliberately not applied.
+    # The `diver` member's identity and settings were read and deliberately not applied.
     DIVER_NOT_APPLIED = "diver_not_applied"
+    # An emergency contact or an insurance in the document is not offered: it names nobody
+    # or no insurer, or it comes after the first and the account holds one of each.
+    CHECK_IN_DETAIL_DROPPED = "check_in_detail_dropped"
+    # A check-in detail the diver confirmed in the preview was written to the account.
+    CHECK_IN_DETAIL_WRITTEN = "check_in_detail_written"
 
 
 class ImportNote(BaseModel):
@@ -643,9 +684,9 @@ class ConversionReport(BaseModel):
     Grouped here rather than in the browser, and rather than folded into `notes`: one source
     habit makes one finding per record - eight dives with no UTC offset are eight findings -
     and the converter's list is unbounded, where `notes` has the planner's 500-note cap. The
-    grouping is where a cap can live at all, which is also why these are not a twelfth
+    grouping is where a cap can live at all, which is also why these are not another
     `ImportNoteCode`: a conversion finding has a source path rather than a uuid and a
-    collection, and none of the eleven codes describes it.
+    collection, and none of those codes describes it.
     """
 
     format: Annotated[
@@ -663,6 +704,130 @@ class ConversionReport(BaseModel):
             description="Groups beyond the cap that are not in `groups`. Non-zero means the list above is a prefix.",
         ),
     ]
+
+
+# ---------------------------------------------------------------- the check-in details
+
+
+class ImportCheckInEmergencyContact(BaseModel):
+    """An emergency contact as the preview shows it and as the diver sends it back.
+
+    One shape for both directions, so a client edits the proposal and submits what it holds.
+    The bounds are `UserUpdate`'s for the same columns, which is what a submission has to
+    meet; `name` is optional in the shape because the account's own contact may lack one,
+    and a submission that leaves it out beside a phone or a relationship is refused.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: CheckInName | None = None
+    phone: CheckInPhone | None = None
+    relationship: CheckInShortText | None = None
+
+
+class ImportCheckInInsurance(BaseModel):
+    """A dive insurance, on `ImportCheckInEmergencyContact`'s terms, `provider` its anchor."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: CheckInName | None = None
+    number: CheckInShortText | None = None
+    expires_on: date | None = None
+
+
+class ImportBornOnDetail(BaseModel):
+    """The date of birth: what the account holds, and what the document proposes."""
+
+    detail: Literal["born_on"] = "born_on"
+    account: date | None = None
+    proposed: date
+
+
+class ImportPhoneDetail(BaseModel):
+    detail: Literal["phone"] = "phone"
+    account: str | None = None
+    proposed: str
+
+
+class ImportEmergencyContactDetail(BaseModel):
+    """The proposal is whole: the account's contact where every member the document's
+    carries equals the account's, otherwise the document's contact alone."""
+
+    detail: Literal["emergency_contact"] = "emergency_contact"
+    account: ImportCheckInEmergencyContact | None = None
+    proposed: ImportCheckInEmergencyContact
+
+
+class ImportInsuranceDetail(BaseModel):
+    """Proposed whole, on `ImportEmergencyContactDetail`'s terms."""
+
+    detail: Literal["insurance"] = "insurance"
+    account: ImportCheckInInsurance | None = None
+    proposed: ImportCheckInInsurance
+
+
+ImportCheckInDetail = Annotated[
+    ImportBornOnDetail | ImportPhoneDetail | ImportEmergencyContactDetail | ImportInsuranceDetail,
+    Field(discriminator="detail"),
+]
+
+
+class ImportCheckInSubmission(BaseModel):
+    """The check-in details the diver confirmed in the preview, sent back beside the token.
+
+    A detail left out is not written; one sent as `null` is cleared. An object replaces the
+    account's whole, so a member it leaves out is cleared with it. A detail the document
+    does not carry is not written whatever is sent for it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    born_on: BirthDate | None = None
+    phone: CheckInPhone | None = None
+    emergency_contact: ImportCheckInEmergencyContact | None = None
+    insurance: ImportCheckInInsurance | None = None
+
+    def columns(self) -> dict[str, dict[str, Any]]:
+        """Each submitted detail as the account columns it writes, keyed by detail.
+
+        A blank string is written as `null`, the columns' one spelling of unset.
+        """
+        contact = self.emergency_contact or ImportCheckInEmergencyContact()
+        insurance = self.insurance or ImportCheckInInsurance()
+        every: dict[str, dict[str, Any]] = {
+            "born_on": {"date_of_birth": self.born_on},
+            "phone": {"phone": self.phone},
+            "emergency_contact": dict(
+                zip(EMERGENCY_CONTACT_FIELDS, (contact.name, contact.phone, contact.relationship), strict=True)
+            ),
+            "insurance": dict(
+                zip(INSURANCE_FIELDS, (insurance.provider, insurance.number, insurance.expires_on), strict=True)
+            ),
+        }
+        return {
+            detail: {column: None if is_blank(value) else value for column, value in columns.items()}
+            for detail, columns in every.items()
+            if detail in self.model_fields_set
+        }
+
+    def anchor_errors(self) -> list[dict[str, Any]]:
+        """`PATCH /user`'s anchor rule, as validation errors located inside this body."""
+        columns = self.columns()
+        errors = []
+        for detail, fields, member in (
+            ("emergency_contact", EMERGENCY_CONTACT_FIELDS, "name"),
+            ("insurance", INSURANCE_FIELDS, "provider"),
+        ):
+            if detail in columns and lacks_its_anchor(columns[detail], fields):
+                errors.append(
+                    {
+                        "type": "missing",
+                        "loc": (detail, member),
+                        "msg": ANCHOR_REQUIRED_MESSAGES[fields[0]],
+                        "input": None,
+                    }
+                )
+        return errors
 
 
 class ImportReport(BaseModel):
@@ -730,6 +895,14 @@ class ImportPreview(ImportReport):
         Field(
             description="Hand this back to `POST /import/logbook` with the same file. It attests which bytes this "
             "report describes and nothing else - the import re-reads, re-converts and re-plans from scratch."
+        ),
+    ]
+    check_in_details: Annotated[
+        list[ImportCheckInDetail],
+        Field(
+            default_factory=list,
+            description="One entry per check-in detail the document carries, the account's value beside the "
+            "proposal. Send back the ones the diver keeps or edits as `check_in_details`; nothing else is written.",
         ),
     ]
 

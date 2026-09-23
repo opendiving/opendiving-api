@@ -4,7 +4,8 @@ Eight nullable columns and nothing else on this side: no route of their own, no 
 their own, no conversion. So what is worth pinning is the shape. `CHECK_IN_FIELDS` is the
 list the model, `UserRead` and `UserUpdate` are each checked against here, because all
 three spell the fields out and one added to a single declaration is invisible until a
-client asks for it.
+client asks for it. The widths are checked against DiveJSON's own schema, since an import
+writes whatever a conforming document carries.
 
 `test_update_explicit_nulls.py` covers the explicit-null half structurally, off the
 SQLAlchemy metadata. The contact-clearing case below is the same guard at the wire, which
@@ -19,9 +20,11 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
+import divejson
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from sqlalchemy import String
 
 from src.app.api import router
 from src.app.api.dependencies import get_current_user
@@ -111,6 +114,46 @@ class TestTheColumnsAndTheSchemasAgree:
         assert field in UserRead.model_fields
         assert field in UserUpdate.model_fields
         assert field not in UserUpdate.NON_NULLABLE_FIELDS
+
+
+# Each bounded column, and the member DiveJSON §6.1 carries it as: `$defs` name, property.
+FORMAT_MEMBERS: dict[str, tuple[str, str]] = {
+    "phone": ("diver", "phone"),
+    "emergency_contact_name": ("emergency_contact", "name"),
+    "emergency_contact_phone": ("emergency_contact", "phone"),
+    "emergency_contact_relationship": ("emergency_contact", "relationship"),
+    "insurance_provider": ("insurance", "provider"),
+    "insurance_policy_number": ("insurance", "number"),
+}
+
+
+def _width(column: str) -> int:
+    column_type = User.__table__.columns[column].type
+    assert isinstance(column_type, String) and column_type.length is not None
+    return column_type.length
+
+
+class TestTheWidthsAreTheFormats:
+    """An import writes what a conforming document carries, so a column narrower than the
+    member it travels as would refuse a value the document is entitled to hold, and one
+    wider would let the settings form save what the export then cannot write."""
+
+    @pytest.mark.parametrize("column", sorted(FORMAT_MEMBERS))
+    def test_the_column_is_as_wide_as_the_member(self, column: str) -> None:
+        definition, member = FORMAT_MEMBERS[column]
+        bound = divejson.load_schema()["$defs"][definition]["properties"][member]["maxLength"]
+
+        assert _width(column) == bound
+
+    @pytest.mark.parametrize("column", sorted(FORMAT_MEMBERS))
+    def test_the_update_schema_takes_exactly_the_column_s_width(self, column: str) -> None:
+        width = _width(column)
+
+        UserUpdate.model_validate({column: "x" * width})
+        with pytest.raises(ValidationError) as exc_info:
+            UserUpdate.model_validate({column: "x" * (width + 1)})
+
+        assert column in str(exc_info.value)
 
 
 class TestReadingThem:
@@ -215,10 +258,96 @@ class TestWritingThem:
         assert response.status_code == 422
         update.assert_not_awaited()
 
-    def test_a_detail_longer_than_its_column_is_refused(self) -> None:
-        """The columns are bounded, so the schema has to be - otherwise the length check is
-        Postgres's and arrives as a 500."""
-        with pytest.raises(ValidationError) as exc_info:
-            UserUpdate(insurance_provider="D" * 101)
 
-        assert "insurance_provider" in str(exc_info.value)
+class TestTheAnchor:
+    """A contact nobody is named in, or a policy number with no insurer, is not a detail the
+    format admits, so `PATCH /user` refuses to leave one behind. Checked against the row as
+    it will be, and only when the patch touches that object's fields."""
+
+    def _patch(self, app: Any, monkeypatch: pytest.MonkeyPatch, body: dict[str, Any], **row: Any) -> Any:
+        update = AsyncMock()
+        monkeypatch.setattr(users_module.crud_users, "update", update)
+        with _signed_in(app, **{**dict.fromkeys(CHECK_IN_FIELDS), **row}) as client:
+            response = client.patch("/api/v1/user", json=body)
+        return response, update
+
+    def test_a_contact_phone_without_a_name_is_a_422_naming_the_name(
+        self, check_in_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        response, update = self._patch(check_in_app, monkeypatch, {"emergency_contact_phone": "+1 202 555 0143"})
+
+        assert response.status_code == 422
+        assert [error["loc"] for error in response.json()["detail"]] == [["body", "emergency_contact_name"]]
+        update.assert_not_awaited()
+
+    def test_clearing_the_name_while_the_phone_stands_is_a_422(
+        self, check_in_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        response, update = self._patch(
+            check_in_app,
+            monkeypatch,
+            {"emergency_contact_name": None},
+            emergency_contact_name="Grace Hopper",
+            emergency_contact_phone="+1 202 555 0143",
+        )
+
+        assert response.status_code == 422
+        update.assert_not_awaited()
+
+    def test_a_blank_name_is_no_name(self, check_in_app: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        response, _ = self._patch(
+            check_in_app, monkeypatch, {"emergency_contact_name": "  ", "emergency_contact_relationship": "Partner"}
+        )
+
+        assert response.status_code == 422
+
+    def test_a_policy_number_without_a_provider_is_a_422_naming_the_provider(
+        self, check_in_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        response, _ = self._patch(check_in_app, monkeypatch, {"insurance_policy_number": "DE-4471902"})
+
+        assert response.status_code == 422
+        assert [error["loc"] for error in response.json()["detail"]] == [["body", "insurance_provider"]]
+
+    def test_an_expiry_without_a_provider_is_a_422(self, check_in_app: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        response, _ = self._patch(check_in_app, monkeypatch, {"insurance_expires_on": "2027-06-30"})
+
+        assert response.status_code == 422
+
+    def test_a_phone_beside_a_stored_name_saves(self, check_in_app: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        response, update = self._patch(
+            check_in_app,
+            monkeypatch,
+            {"emergency_contact_phone": "+1 202 555 0143"},
+            emergency_contact_name="Grace Hopper",
+        )
+
+        assert response.status_code == 200
+        update.assert_awaited_once()
+
+    def test_clearing_the_whole_contact_from_an_anchorless_row_saves(
+        self, check_in_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        response, _ = self._patch(
+            check_in_app,
+            monkeypatch,
+            {"emergency_contact_phone": None},
+            emergency_contact_phone="+1 202 555 0143",
+        )
+
+        assert response.status_code == 200
+
+    def test_an_unrelated_save_on_an_anchorless_row_is_untouched(
+        self, check_in_app: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A row saved before the rule existed can hold a phone and no name. Refusing every
+        later save until the diver fixes it would lock the settings page for a units toggle."""
+        response, _ = self._patch(
+            check_in_app,
+            monkeypatch,
+            {"units": "imperial"},
+            emergency_contact_phone="+1 202 555 0143",
+            insurance_policy_number="DE-4471902",
+        )
+
+        assert response.status_code == 200

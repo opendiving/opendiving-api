@@ -34,6 +34,7 @@ from ...core.utils.datetime_offset import combine_start_time
 from ...models.course import Course
 from ...models.dive import Dive
 from ...models.trip import Trip
+from ...models.user import User
 from ...schemas.certification import CertificationAgency, CertificationSide
 from ...schemas.course import CourseStatus
 from ...schemas.dive import DecoAlgorithm, DiveMode, WaterType
@@ -50,11 +51,13 @@ from ...schemas.export import (
     ExportDive,
     ExportDiver,
     ExportDiveSite,
+    ExportEmergencyContact,
     ExportGearItem,
     ExportGearServiceRecord,
     ExportGearServiceSchedule,
     ExportGearSet,
     ExportGenerator,
+    ExportInsurance,
     ExportLocation,
     ExportPosition,
     ExportRecording,
@@ -67,7 +70,7 @@ from ...schemas.gear_item import GearType
 from ...schemas.gear_service import ServiceKind
 from ...schemas.location import DIVE_SITE_LOCATION_PREFIX, LocationRead, location_from_row
 from ...schemas.trip import TripPartRead
-from ...schemas.user import CHECK_IN_FIELDS
+from ...schemas.user import EMERGENCY_CONTACT_FIELDS, INSURANCE_FIELDS, is_blank
 from ..dive_profiles import LoadedProfile, load_profile, to_read_schema
 from .loader import ExportBundle, ExportFileRow, ExportRecordingRow
 from .paths import ArchivePaths
@@ -229,6 +232,33 @@ def _mixture(mixture: DiveMixtureRead) -> DiveMixtureBase:
     )
 
 
+def _filled(value: str | None) -> str | None:
+    """A check-in text column as the format spells it: `""` is absent, never an empty member."""
+    return None if is_blank(value) else value
+
+
+def _emergency_contacts(user: User) -> list[ExportEmergencyContact] | None:
+    """The account's one contact, or nothing - and nothing, too, for one with no name.
+
+    `name` is REQUIRED in the format and a row saved before `PATCH /user` required it can
+    still lack one. The diver still sees it in the app; the export leaves it out until they
+    name someone, since the app's writer has no report channel to say it dropped anything.
+    """
+    name, phone, relationship = (getattr(user, field) for field in EMERGENCY_CONTACT_FIELDS)
+    if is_blank(name):
+        return None
+    return [ExportEmergencyContact(name=name, phone=_filled(phone), relationship=_filled(relationship))]
+
+
+def _insurances(user: User) -> list[ExportInsurance] | None:
+    """The account's one policy, or nothing, on `_emergency_contacts`'s terms: no provider,
+    no policy."""
+    provider, number, expires_on = (getattr(user, field) for field in INSURANCE_FIELDS)
+    if is_blank(provider):
+        return None
+    return [ExportInsurance(provider=provider, number=_filled(number), expires_on=expires_on)]
+
+
 def _diver(bundle: ExportBundle) -> ExportDiver:
     user = bundle.user
     return ExportDiver(
@@ -236,6 +266,10 @@ def _diver(bundle: ExportBundle) -> ExportDiver:
         name=user.name,
         username=user.username,
         email=user.email,
+        phone=_filled(user.phone),
+        born_on=user.date_of_birth,
+        emergency_contacts=_emergency_contacts(user),
+        insurances=_insurances(user),
         created_at=user.created_at,
         # The account-level preferences. They are here because `/export/archive` says
         # nothing in the account is reachable only through the app - and under this
@@ -257,14 +291,6 @@ def _diver(bundle: ExportBundle) -> ExportDiver:
                     {"name": preset.name, "hidden_fields": list(preset.hidden_fields)}
                     for preset in bundle.dive_form_presets
                 ],
-                # The check-in details, beside the preferences for the same reason and under
-                # the same key: a shop's desk asks for them, the format gives them no core
-                # member, and a writer may not invent one. A detail the diver never filled in
-                # is *absent* rather than null - the format has one spelling of "not
-                # applicable" (spec §6.7) - so an all-empty account's entry is exactly the
-                # four preferences above. Out only: nothing reads them back in (see
-                # `logbook_import/planner.py`, which restores no preference either).
-                **{field: value for field in CHECK_IN_FIELDS if (value := getattr(user, field)) is not None},
             }
         },
     )
