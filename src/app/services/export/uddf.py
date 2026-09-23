@@ -49,6 +49,10 @@ reading the XSD, and each is exported in `logbook.divejson`/CSV instead:
   surface gradient factor - not a mandatory attribute we cannot fill, simply no slot. The
   per-waypoint `<gradientfactor>` above is the leading tissue's now, which is
   `gradient_factor` and not the surface figure beside it.
+- **The emergency contact and the insurance policy number.** UDDF has no element for a
+  person to call, and `insuranceType` is a name, aliases, two dates and notes - no number.
+  `<membership memberid>` is not one either: a membership is not a policy, and a reader
+  could not tell a club from an insurer.
 - **Gas `role`, tank `usage`, service schedules and training courses.** No slot for any
   of them. A course is the one that looks close to having one - `<divetrip>` carries a
   name and a date range - but a training course is not a trip, and folding it in would
@@ -78,7 +82,7 @@ import uuid as uuid_pkg
 import xml.etree.ElementTree as ET
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -101,6 +105,7 @@ from ...schemas.dive_profile import (
 )
 from ...schemas.gear_item import GearType
 from ...schemas.trip import TripPartRead
+from ...schemas.user import is_blank
 from ..dive_profiles import load_profile
 from .loader import ExportBundle
 from .naming import gas_name
@@ -435,20 +440,43 @@ def _equipment_element(bundle: ExportBundle) -> ET.Element | None:
     return equipment
 
 
+def _midnight(value: date) -> str:
+    """A plain date in an `xs:dateTime` slot, widened to midnight. The date-typed reader
+    slices it back off the front, so nothing is invented on the round trip."""
+    return f"{value}T00:00:00"
+
+
 def _diver_element(bundle: ExportBundle) -> ET.Element:
+    """The owner, in the XSD's order: `personal`, `contact`, `equipment`, `diveinsurances`.
+
+    The date of birth, the phone and the insurance go out, being what a shop's desk asks for.
+    The emergency contact and the policy number have no element and stay in
+    `logbook.divejson`; an insurance whose provider is blank is not written, `<name>` being
+    mandatory.
+    """
+    user = bundle.user
     diver = ET.Element("diver")
     owner = _sub(diver, "owner", id="owner")
     personal = _sub(owner, "personal")
-    first, last = _person_names(bundle.user.name, bundle.user.username)
+    first, last = _person_names(user.name, user.username)
     _sub(personal, "firstname", first)
     _sub(personal, "lastname", last)
+    if user.date_of_birth is not None:
+        _sub(_sub(personal, "birthdate"), "datetime", _midnight(user.date_of_birth))
 
     # No `<contact><email>`, although the schema has the slot: a UDDF file is the thing a
     # diver hands to a dive shop or uploads to divelogs.de, and their address riding along
     # in it would be a surprise. It is in `logbook.divejson`, which is the diver's own copy.
+    if not is_blank(user.phone):
+        _sub(_sub(owner, "contact"), "phone", user.phone)
     equipment = _equipment_element(bundle)
     if equipment is not None:
         owner.append(equipment)
+    if not is_blank(user.insurance_provider):
+        insurance = _sub(_sub(owner, "diveinsurances"), "insurance")
+        _sub(insurance, "name", user.insurance_provider)
+        if user.insurance_expires_on is not None:
+            _sub(_sub(insurance, "validdate"), "datetime", _midnight(user.insurance_expires_on))
     return diver
 
 

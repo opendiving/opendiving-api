@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Cookie, Depends, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -42,7 +43,16 @@ from ...schemas.email_change import (
     EmailChangeVerifyResponse,
 )
 from ...schemas.species import SpeciesLifeListEntry
-from ...schemas.user import AccountDeletionResponse, AvatarRead, UserRead, UserUpdate
+from ...schemas.user import (
+    ANCHOR_REQUIRED_MESSAGES,
+    EMERGENCY_CONTACT_FIELDS,
+    INSURANCE_FIELDS,
+    AccountDeletionResponse,
+    AvatarRead,
+    UserRead,
+    UserUpdate,
+    lacks_its_anchor,
+)
 from ...schemas.user_dive_stats import UserDiveStatsRead, UserDiveStatsReadInternal
 from ...services.dive_activity import dive_activity
 from ...services.dive_gas import gas_use_history
@@ -131,9 +141,33 @@ async def patch_user(
     is per-IP: the availability check below answers a distinguishable "Username not
     available", so unthrottled it is a wordlist oracle over who exists. The rest of the
     profile isn't limited.
+
+    An emergency contact needs a name and an insurance needs a provider: a patch that would
+    leave either holding its other fields without one is a 422 naming the missing field.
+    Only a patch touching that object's fields is checked, so clearing a whole contact
+    passes, and so does a units toggle on an account whose contact has no name yet.
     """
     # Note: `email` is deliberately not part of `UserUpdate` - see
     # `POST /user/email-change/request` for how email changes work instead.
+    patch = values.model_dump(exclude_unset=True)
+    after = {**current_user, **patch}
+    unanchored = [
+        fields[0]
+        for fields in (EMERGENCY_CONTACT_FIELDS, INSURANCE_FIELDS)
+        if patch.keys() & set(fields) and lacks_its_anchor(after, fields)
+    ]
+    if unanchored:
+        raise RequestValidationError(
+            [
+                {
+                    "type": "missing",
+                    "loc": ("body", anchor),
+                    "msg": ANCHOR_REQUIRED_MESSAGES[anchor],
+                    "input": after.get(anchor),
+                }
+                for anchor in unanchored
+            ]
+        )
     if values.username is not None and values.username != current_user["username"]:
         await enforce_rate_limit(
             f"username-change:user:{current_user['id']}",

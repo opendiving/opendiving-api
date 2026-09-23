@@ -40,6 +40,7 @@ from src.app.models.trip import Trip
 from src.app.schemas.export import DIVEJSON_FORMAT, DIVEJSON_VERSION, ExportCourse, ExportEnvelope
 from src.app.schemas.location import LocationRead
 from src.app.schemas.trip import TripPartRead
+from src.app.schemas.user import CHECK_IN_FIELDS
 from src.app.services.dive_profiles import MERGE_PARSER_KEY, LoadedProfile
 from src.app.services.export.envelope import write_divejson
 from src.app.services.export.paths import plan_archive_paths
@@ -338,9 +339,7 @@ class TestWhatUddfCannotHold:
     @pytest.mark.asyncio
     async def test_the_account_preferences_travel_under_this_producer_s_key(self, monkeypatch):
         """`/export/archive` promises nothing in the account is reachable only through the
-        app, and these are the whole of what a diver can set *as a preference* - the
-        check-in details beside them are data a shop asks for, and travel under the same key
-        for a different reason (the test below).
+        app, and these are the whole of what a diver can set *as a preference*.
 
         They ride `extensions.opendiving` because they are application preferences, not
         logbook data, and the format gives them no core member (spec §6.1) - a writer may
@@ -352,8 +351,7 @@ class TestWhatUddfCannotHold:
         a form no reader of this document has. A preset travels as `{name, hidden_fields}`:
         its uuid and timestamps identify a row in *this* instance and mean nothing anywhere
         else. Asserting the whole extension object rather than its keys one at a time is the
-        point - a preference added without a decision fails here, and so does a check-in
-        detail written for a diver who never entered one.
+        point - a preference added without a decision fails here.
         """
         document = await _render(full_bundle(), monkeypatch)
         assert document["diver"]["extensions"] == {
@@ -371,41 +369,6 @@ class TestWhatUddfCannotHold:
             }
         }
         assert document["dives"][0]["max_depth"] == 28.4
-
-    @pytest.mark.asyncio
-    async def test_the_check_in_details_travel_under_the_same_key(self, monkeypatch):
-        """1.0's Diver object is frozen at `uuid`, `name`, `username`, `email` and
-        `created_at`, so what a dive shop's desk asks for has no core member to go in and a
-        writer may not invent one - it rides this producer's key beside the preferences.
-
-        Only what the diver filled in is written. The three left unset here are *absent*
-        rather than null, which is the format's one spelling of "not applicable" (spec
-        §6.7) and what the assertion on the whole key set above pins for an account that
-        entered none of them.
-        """
-        bundle = replace(
-            full_bundle(),
-            user=make_user(
-                dive_form_hidden_fields=["altitude", "mixture.po2_limit"],
-                date_of_birth=date(1988, 4, 12),
-                phone="+20 100 123 4567",
-                emergency_contact_name="Grace Hopper",
-                emergency_contact_phone="+1 202 555 0143",
-                insurance_provider="DAN Europe",
-                insurance_expires_on=date(2027, 6, 30),
-            ),
-        )
-
-        entry = (await _render(bundle, monkeypatch))["diver"]["extensions"]["opendiving"]
-
-        assert entry["date_of_birth"] == "1988-04-12"
-        assert entry["phone"] == "+20 100 123 4567"
-        assert (entry["emergency_contact_name"], entry["emergency_contact_phone"]) == (
-            "Grace Hopper",
-            "+1 202 555 0143",
-        )
-        assert (entry["insurance_provider"], entry["insurance_expires_on"]) == ("DAN Europe", "2027-06-30")
-        assert set(entry) & {"emergency_contact_relationship", "insurance_policy_number"} == set()
 
     @pytest.mark.asyncio
     async def test_the_per_cylinder_role_ppo2_limit_and_usage_survive(self, monkeypatch):
@@ -487,6 +450,67 @@ class TestWhatUddfCannotHold:
         """UDDF drops it (`<decostop>` needs a duration we do not have); this must not."""
         document = await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
         assert document["dives"][1]["recordings"][0]["profile"]["ceiling"] == {"times": [60, 90], "values": [600, 300]}
+
+
+class TestTheCheckInDetails:
+    """What a dive shop's desk asks for, as core Diver members (spec §6.1)."""
+
+    @pytest.mark.asyncio
+    async def test_they_are_core_diver_members(self, monkeypatch):
+        """The contact and the insurance are one-element arrays, the account holding one of
+        each. The two members left unset are absent rather than null, the format's one
+        spelling of "not recorded". The producer entry keeps the preferences and none of
+        these, and the document conforms - no other test here validates a diver carrying
+        them, which is what makes this the check on the `divejson` floor.
+        """
+        bundle = replace(
+            full_bundle(),
+            user=make_user(
+                dive_form_hidden_fields=["altitude", "mixture.po2_limit"],
+                date_of_birth=date(1988, 4, 12),
+                phone="+20 100 123 4567",
+                emergency_contact_name="Grace Hopper",
+                emergency_contact_phone="+1 202 555 0143",
+                insurance_provider="DAN Europe",
+                insurance_expires_on=date(2027, 6, 30),
+            ),
+        )
+
+        document = await _render(bundle, monkeypatch)
+        diver = document["diver"]
+
+        assert diver["born_on"] == "1988-04-12"
+        assert diver["phone"] == "+20 100 123 4567"
+        assert diver["emergency_contacts"] == [{"name": "Grace Hopper", "phone": "+1 202 555 0143"}]
+        assert diver["insurances"] == [{"provider": "DAN Europe", "expires_on": "2027-06-30"}]
+        assert set(diver["extensions"]["opendiving"]).isdisjoint(CHECK_IN_FIELDS)
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_an_account_that_filled_in_none_carries_none(self, monkeypatch):
+        diver = (await _render(full_bundle(), monkeypatch))["diver"]
+
+        assert set(diver).isdisjoint({"born_on", "phone", "emergency_contacts", "insurances"})
+
+    @pytest.mark.asyncio
+    async def test_a_contact_with_no_name_and_a_policy_with_no_provider_are_left_out(self, monkeypatch):
+        """Their anchors are REQUIRED in the format, and a row saved before `PATCH /user`
+        required them can lack one. A blank string is no anchor either, and a blank phone
+        is no phone."""
+        bundle = replace(
+            full_bundle(),
+            user=make_user(
+                phone=" ",
+                emergency_contact_name="",
+                emergency_contact_phone="+1 202 555 0143",
+                insurance_policy_number="DE-4471902",
+            ),
+        )
+
+        document = await _render(bundle, monkeypatch)
+
+        assert set(document["diver"]).isdisjoint({"phone", "emergency_contacts", "insurances"})
+        _assert_conforms(document)
 
 
 class TestTheProfileVocabulary:

@@ -2392,7 +2392,8 @@ ceiling cannot supply); the `cns_start`/`cns_end`/`otu_start`/`otu_end` scalars
 only the per-sample `cns` channel goes out); gas `role`, gear sets, service records, c-cards,
 courses (no elements; `<divetrip>` is not a course); species (`<observations>` demands UDDF's
 mixed-rank taxonomy mapped from the WoRMS `phylum`/`class_name` strings `models/species.py` passes
-through — a mapping this repo would get quietly wrong; `species.csv` carries them).
+through — a mapping this repo would get quietly wrong; `species.csv` carries them); the emergency
+contact and the policy number (no elements; `<membership memberid>` is not a policy).
 
 Allowed: `po2_limit` maps to `<mix><maximumpo2>`, so `_MixKey` includes it;
 `informationbeforedive/link` is `maxOccurs="unbounded"`, so every site goes out in visit order.
@@ -2401,7 +2402,8 @@ Forced: `<greatestdepth>` is mandatory and `Dive.max_depth` is not — deepest p
 `0`; `<tankpressurebegin>` is mandatory in `tankdataType`, so a cylinder without one is skipped, its
 gas still in `<gasdefinitions>`.
 
-The owner's email stays out of `contactType`; a UDDF file gets handed to shops.
+The owner's email stays out of `contactType`, though the phone goes in; a UDDF file gets handed to
+shops.
 
 ## Gas mixes dedupe on a rounded key, because the corpus carries float noise
 
@@ -6087,22 +6089,19 @@ Six invalidators run after commit: `invalidate_dive_caches`, `invalidate_certifi
 `OwnedResourceCache` instances in `api/v1/dive_sites.py` and `api/v1/trips.py`; they share
 `OwnedResourceCache.list_cache_pattern` with `invalidate_list` rather than importing a route module.
 
-## The `diver` member is read, reported, and never applied
+## The `diver` member's identity and settings are never applied, and its check-in details only as confirmed
 
-A document carries its owner — name, username, email, `created_at` — and, under this producer's
-extension key, its preferences (`units`, `gear_service_emails`, `dive_form_hidden_fields`,
-`dive_form_presets`) and whichever of the check-in details (`CHECK_IN_FIELDS` in `schemas/user.py`)
-the diver filled in. None is applied, and the preview says so. Import's contract is the logbook:
-flipping a live account's notification or unit preference, rearranging its dive form, or overwriting
-the emergency contact a shop is about to read, as a side effect of a restore is a worse surprise
-than entering them once. The `created_at`-imports rule governs logbook records, not a member that
-never imports. The archive's `avatar.webp` is the same decision's blob half and is not restored; the
-importing account has its own identity.
+A document's owner — name, username, email, `created_at` — and its preferences under this producer's
+key are never applied: changing a live account's identity or settings as a side effect of a restore
+is a worse surprise than setting them once. The archive's `avatar.webp` is not restored either.
 
-Rejected: restore-means-restore extended to preferences. Defensible for a fresh-instance migration,
-but the same path serves restores into accounts that were never empty, and the member rides in the
-export so that nothing in the account is reachable only through the app, not so that import applies
-it.
+The check-in details — date of birth, phone, emergency contact, insurance — are shown in the preview
+beside the account's, and the apply writes exactly those the diver submits (§6.1's SHOULD NOT). The
+importer cannot tell a restore from a buddy's file, so writing on the document's say-so would take a
+stranger's contact. An object is proposed whole, never merged member by member, which would pair one
+insurer's name with another's policy number.
+
+Rejected: restore-means-restore for preferences; filling only empty details.
 
 ## The certification agency vocabulary is the format's, value for value, and cannot grow again
 
@@ -6322,14 +6321,14 @@ state through the path `units` already takes.
 ## Presets and the hidden-fields preference travel in the archive
 
 Both ride the `diver` member's `extensions.opendiving` payload beside `units` and
-`gear_service_emails`; logbook import reports them and never applies them, per *The `diver` member
-is read, reported, and never applied*. They are UI configuration, but `/export/archive`'s docstring
-promises nothing in the account is reachable only through the app, and leaving them out would make
-that false. The producer key is the format's extension mechanism (spec §5.5), so the DiveJSON spec
-is untouched and an unrecognising reader must not fail. A preset travels as `{name, hidden_fields}`
-only: `uuid`, `user_uuid` and `created_at` identify a row in this instance and mean nothing
-elsewhere. The empty set is written as `[]` rather than omitted, so "Technical hides nothing" is
-distinguishable from a failed export.
+`gear_service_emails`; logbook import reports them and never applies them, per *The `diver` member's
+identity and settings are never applied, and its check-in details only as confirmed*. They are UI
+configuration, but `/export/archive`'s docstring promises nothing in the account is reachable only
+through the app, and leaving them out would make that false. The producer key is the format's
+extension mechanism (spec §5.5), so the DiveJSON spec is untouched and an unrecognising reader must
+not fail. A preset travels as `{name, hidden_fields}` only: `uuid`, `user_uuid` and `created_at`
+identify a row in this instance and mean nothing elsewhere. The empty set is written as `[]` rather
+than omitted, so "Technical hides nothing" is distinguishable from a failed export.
 
 ## `PROJECT_OPERATED` is the first setting that knows who runs the instance, and it selects copy only
 
@@ -6968,14 +6967,14 @@ as a query parameter, so a schema written later cannot reintroduce it unnoticed.
 Date of birth, phone, the emergency contact's three fields and the insurance provider, policy number
 and expiry are eight nullable columns on `user`, listed once as `CHECK_IN_FIELDS` in
 `schemas/user.py`. *Rejected:* a diver-owned table allowing several policies or contacts — it buys a
-second policy nobody asked for and costs a new model and its admin-panel classification. Nullable
-rather than defaulted: unfilled is the ordinary state, and `{"emergency_contact_name": null}` is how
-a diver removes a contact, so none of them joins `NON_NULLABLE_FIELDS`. They reach the admin panel
-the way `units` does, through `UserAdminUpdate`'s inheritance, with no `select_schema` hiding them
-from a panel that is off by default and being retired. On export they ride
-`diver.extensions.opendiving` beside the preferences, only where set: 1.0's Diver object is frozen
-and a writer may not invent a member. *"The `diver` member is read, reported, and never applied"*
-governs them on the way back in, as it does the preferences.
+second policy nobody asked for. Nullable rather than defaulted: unfilled is the ordinary state, and
+`{"emergency_contact_name": null}` is how a diver removes a contact, so none of them joins
+`NON_NULLABLE_FIELDS`. They reach the admin panel through `UserAdminUpdate`'s inheritance, unhidden,
+the panel being off by default and retiring. On export they are the Diver's `born_on`, `phone`,
+`emergency_contacts` and `insurances` (§6.1), each column as wide as its member, and import applies
+them per *The `diver` member's identity and settings are never applied, and its check-in details
+only as confirmed*. `PATCH /user` refuses a contact without a name or an insurance without a
+provider, the format's anchors; the export omits an older row in that state.
 
 ## A trip's list order is an aggregate, so the query is hand-written
 

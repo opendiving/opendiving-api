@@ -65,6 +65,7 @@ from tests.helpers.export import (
     full_bundle,
     make_dive,
     make_dive_site,
+    make_user,
     mixture,
 )
 
@@ -1036,6 +1037,92 @@ class TestWhatUddfCannotHold:
         """The schema has a slot. A UDDF file is what a diver hands to a dive shop."""
         document = await _render(full_bundle(), monkeypatch=monkeypatch)
         assert b"ada@example.com" not in document
+
+    @pytest.mark.asyncio
+    async def test_the_emergency_contact_and_the_policy_number_are_not_in_the_file(self, monkeypatch):
+        """UDDF has no element for a person to call and none for a policy number."""
+        bundle = replace(
+            full_bundle(),
+            user=make_user(
+                emergency_contact_name="Grace Hopper",
+                emergency_contact_phone="+1 202 555 0143",
+                insurance_provider="DAN Europe",
+                insurance_policy_number="DE-4471902",
+            ),
+        )
+
+        document = await _render(bundle, monkeypatch=monkeypatch)
+
+        assert b"Grace Hopper" not in document
+        assert b"+1 202 555 0143" not in document
+        assert b"DE-4471902" not in document
+
+
+class TestTheOwner:
+    """What a shop's desk asks for, where UDDF's `<owner>` has a slot for it."""
+
+    @staticmethod
+    def _owner(document: bytes) -> ET.Element:
+        owner = _tree(document).find(f"{UDDF}diver/{UDDF}owner")
+        assert owner is not None
+        return owner
+
+    @pytest.mark.asyncio
+    async def test_the_birthdate_phone_and_insurance_go_out_in_the_xsd_s_order(self, schema, monkeypatch):
+        """`<contact>` sits between `<personal>` and `<equipment>`, `<diveinsurances>` after
+        it, and both dates are `xs:dateTime`, so they go out widened to midnight - the XSD
+        rejects a bare date there."""
+        bundle = replace(
+            full_bundle(),
+            user=make_user(
+                date_of_birth=date(1988, 4, 12),
+                phone="+20 100 123 4567",
+                insurance_provider="DAN Europe",
+                insurance_policy_number="DE-4471902",
+                insurance_expires_on=date(2027, 6, 30),
+            ),
+        )
+
+        document = await _render(bundle, monkeypatch=monkeypatch)
+        owner = self._owner(document)
+
+        schema.validate(document)
+        assert [child.tag.removeprefix(UDDF) for child in owner] == [
+            "personal",
+            "contact",
+            "equipment",
+            "diveinsurances",
+        ]
+        assert _text(owner, f"{UDDF}personal/{UDDF}birthdate/{UDDF}datetime") == "1988-04-12T00:00:00"
+        assert [phone.text for phone in owner.findall(f"{UDDF}contact/*")] == ["+20 100 123 4567"]
+        insurance = owner.find(f"{UDDF}diveinsurances/{UDDF}insurance")
+        assert insurance is not None
+        assert _text(insurance, f"{UDDF}name") == "DAN Europe"
+        assert _text(insurance, f"{UDDF}validdate/{UDDF}datetime") == "2027-06-30T00:00:00"
+
+    @pytest.mark.asyncio
+    async def test_an_account_that_filled_in_none_writes_names_and_gear_only(self, monkeypatch):
+        owner = self._owner(await _render(full_bundle(), monkeypatch=monkeypatch))
+
+        assert [child.tag.removeprefix(UDDF) for child in owner] == ["personal", "equipment"]
+        assert owner.find(f"{UDDF}personal/{UDDF}birthdate") is None
+
+    @pytest.mark.asyncio
+    async def test_an_insurance_with_no_provider_is_not_written(self, schema, monkeypatch):
+        """`<name>` is mandatory in `insuranceType`, and a blank string is no provider."""
+        bundle = replace(
+            full_bundle(),
+            user=make_user(
+                phone="",
+                insurance_provider=" ",
+                insurance_expires_on=date(2027, 6, 30),
+            ),
+        )
+
+        document = await _render(bundle, monkeypatch=monkeypatch)
+
+        schema.validate(document)
+        assert [child.tag.removeprefix(UDDF) for child in self._owner(document)] == ["personal", "equipment"]
 
 
 class TestDecoReadouts:

@@ -24,6 +24,7 @@ import threading
 import uuid as uuid_pkg
 import zipfile
 from collections.abc import Generator
+from datetime import date
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -41,6 +42,7 @@ from src.app.core.db.database import async_get_db
 from src.app.core.exceptions.http_exceptions import RateLimitException
 from src.app.core.security import create_logbook_import_token
 from src.app.core.setup import create_application
+from src.app.schemas.logbook_import import ImportBornOnDetail, ImportCheckInInsurance, ImportInsuranceDetail
 from src.app.services.logbook_import import reader
 
 PREVIEW_PATH = "/api/v1/import/logbook/preview"
@@ -211,6 +213,35 @@ class TestPreview:
         assert body["archive"] is False
         assert body["token"]
         assert body["notes_truncated"] == 0
+
+    def test_it_carries_the_planner_s_check_in_section(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        stub = import_route.plan_import
+
+        async def plan_with_a_section(db: Any, **kwargs: Any) -> Any:
+            plan = await stub(db, **kwargs)
+            plan.check_in_details = [
+                ImportBornOnDetail(proposed=date(1988, 4, 12)),
+                ImportInsuranceDetail(
+                    account=ImportCheckInInsurance(provider="DAN Europe", number="DE-4471902"),
+                    proposed=ImportCheckInInsurance(provider="Aqua Med"),
+                ),
+            ]
+            return plan
+
+        monkeypatch.setattr(import_route, "plan_import", plan_with_a_section)
+
+        body = client.post(PREVIEW_PATH, files=_files()).json()
+
+        assert body["check_in_details"] == [
+            {"detail": "born_on", "account": None, "proposed": "1988-04-12"},
+            {
+                "detail": "insurance",
+                "account": {"provider": "DAN Europe", "number": "DE-4471902", "expires_on": None},
+                "proposed": {"provider": "Aqua Med", "number": None, "expires_on": None},
+            },
+        ]
 
     def test_a_file_that_is_not_divejson_is_415(self, signed_in: Any, client: TestClient) -> None:
         response = client.post(PREVIEW_PATH, files=_files(b'{"format": "uddf", "version": "3.2.2"}'))
@@ -666,6 +697,68 @@ class TestApply:
         response = client.post(APPLY_PATH, files=_files(), data={"token": "not-a-token"})
 
         assert response.status_code == 422
+
+    def _planned_check_in(self, monkeypatch: Any) -> list[Any]:
+        """Wraps the stubbed planner to record the submission the route hands it."""
+        seen: list[Any] = []
+        stub = import_route.plan_import
+
+        async def recording_plan(db: Any, **kwargs: Any) -> Any:
+            seen.append(kwargs.get("check_in"))
+            return await stub(db, **kwargs)
+
+        monkeypatch.setattr(import_route, "plan_import", recording_plan)
+        return seen
+
+    def test_the_confirmed_check_in_details_reach_the_planner(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        seen = self._planned_check_in(monkeypatch)
+        submitted = {"born_on": "1988-04-12", "emergency_contact": {"name": "Grace Hopper"}, "insurance": None}
+
+        response = client.post(
+            APPLY_PATH, files=_files(), data={"token": self._token(), "check_in_details": json.dumps(submitted)}
+        )
+
+        assert response.status_code == 200
+        (submission,) = seen
+        assert submission.model_fields_set == {"born_on", "emergency_contact", "insurance"}
+        assert submission.insurance is None
+
+    def test_an_apply_without_them_submits_nothing(self, signed_in: Any, client: TestClient, monkeypatch: Any) -> None:
+        """A client that never showed the section - the web build before this field existed
+        among them - writes no detail at all."""
+        seen = self._planned_check_in(monkeypatch)
+
+        client.post(APPLY_PATH, files=_files(), data={"token": self._token()})
+
+        assert seen == [None]
+
+    @pytest.mark.parametrize(
+        ("submitted", "loc"),
+        [
+            ({"emergency_contact": {"phone": "+1 202 555 0143"}}, ["emergency_contact", "name"]),
+            ({"insurance": {"provider": " ", "number": "DE-4471902"}}, ["insurance", "provider"]),
+            ({"born_on": "2999-01-01"}, ["born_on"]),
+            ({"phone": "1" * 33}, ["phone"]),
+            ({"emergency_contact": {"name": "G" * 256}}, ["emergency_contact", "name"]),
+            ({"address": "Dahab"}, ["address"]),
+        ],
+    )
+    def test_a_submission_patch_user_would_refuse_is_a_422_naming_the_field(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any, submitted: dict[str, Any], loc: list[str]
+    ) -> None:
+        """The bounds, the future-date guard and the anchor rule `PATCH /user` applies to the
+        same columns, refused before anything is read or planned."""
+        seen = self._planned_check_in(monkeypatch)
+
+        response = client.post(
+            APPLY_PATH, files=_files(), data={"token": self._token(), "check_in_details": json.dumps(submitted)}
+        )
+
+        assert response.status_code == 422
+        assert [error["loc"] for error in response.json()["detail"]] == [["body", "check_in_details", *loc]]
+        assert seen == []
 
     def test_the_caches_are_dropped_after_the_commit(
         self, signed_in: Any, client: TestClient, monkeypatch: Any

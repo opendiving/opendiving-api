@@ -55,6 +55,7 @@ from ...models.gear_service_schedule import GearServiceSchedule
 from ...models.gear_set import GearSet
 from ...models.species import Species
 from ...models.trip import Trip
+from ...models.user import User
 from ...schemas.certification import AGENCY_OTHER_NOT_ALLOWED_MESSAGE, CertificationAgency, CertificationSide
 from ...schemas.dive_profile import DEPTH_SCALE, SINGLE_SERIES_CHANNELS, ProfileEventType
 from ...schemas.export import DIVEJSON_PRODUCER_KEY
@@ -62,6 +63,8 @@ from ...schemas.gear_item import GearType
 from ...schemas.location import DIVE_SITE_LOCATION_PREFIX, LOCATION_FIELDS
 from ...schemas.logbook_import import (
     ImportCertification,
+    ImportCheckInDetail,
+    ImportCheckInSubmission,
     ImportCollectionReport,
     ImportCourse,
     ImportDecoModel,
@@ -80,6 +83,7 @@ from ...schemas.logbook_import import (
     ImportStoredFile,
     ImportTrip,
 )
+from ...schemas.user import CHECK_IN_FIELDS
 from ..certification_files import MAX_CARD_FILE_SIZE
 from ..dive_files import MAX_DIVE_FILE_SIZE
 from ..dive_parsers import PARSER_BY_KEY
@@ -104,6 +108,7 @@ from ..dive_recordings import (
     is_same_recording,
     load_candidates,
 )
+from .check_in import propose, to_write
 from .reader import LoadedImport
 
 # The collections the envelope declares, in the order it declares them (spec §4). The
@@ -353,6 +358,10 @@ class ImportPlan:
     files_restored: int
     files_not_contained: int
     files_skipped: int
+    # The preview's section, one entry per check-in detail the document carries, and the
+    # account columns the apply writes from what the diver submitted - see `check_in.py`.
+    check_in_details: list[ImportCheckInDetail] = field(default_factory=list)
+    check_in_values: dict[str, Any] = field(default_factory=dict)
 
     def collection_reports(self) -> list[ImportCollectionReport]:
         reports = []
@@ -537,6 +546,7 @@ class _Planner:
         loaded: LoadedImport,
         resolution_ran: bool = False,
         newly_resolved_aphia_ids: frozenset[int] = frozenset(),
+        check_in: ImportCheckInSubmission | None = None,
     ) -> None:
         self._db = db
         self._user_id = user_id
@@ -548,6 +558,9 @@ class _Planner:
         # could not answer for.
         self._resolution_ran = resolution_ran
         self._newly_resolved = newly_resolved_aphia_ids
+        self._check_in = check_in
+        self._check_in_details: list[ImportCheckInDetail] = []
+        self._check_in_values: dict[str, Any] = {}
         self._records: dict[str, dict[uuid_pkg.UUID, PlannedRecord]] = {name: {} for name in COLLECTIONS}
         self._notes: list[ImportNote] = []
         self._notes_dropped = 0
@@ -982,13 +995,7 @@ class _Planner:
     # ------------------------------------------------------------------ collections
 
     async def plan(self) -> ImportPlan:
-        if self._document.diver is not None:
-            self._note(
-                ImportNoteCode.DIVER_NOT_APPLIED,
-                "The document names its own diver, with a display name, email, unit preference, dive form "
-                "settings and check-in details. None of that is applied: this account keeps its own identity, "
-                "settings and details.",
-            )
+        await self._plan_diver()
         await self._plan_trips()
         await self._plan_courses()
         await self._plan_sites()
@@ -1009,7 +1016,29 @@ class _Planner:
             files_restored=self._files_restored,
             files_not_contained=self._files_not_contained,
             files_skipped=self._files_skipped,
+            check_in_details=self._check_in_details,
+            check_in_values=self._check_in_values,
         )
+
+    async def _plan_diver(self) -> None:
+        """The document's own identity and settings are never applied; its check-in details
+        are offered, and written as the diver submitted them (`check_in.py`)."""
+        diver = self._document.diver
+        if diver is None:
+            return
+        if diver.name or diver.username or diver.email or diver.extensions:
+            self._note(
+                ImportNoteCode.DIVER_NOT_APPLIED,
+                "The document's own name, email and settings are not applied: this account keeps its own.",
+            )
+        row = (
+            await self._db.execute(
+                select(*(getattr(User, column) for column in CHECK_IN_FIELDS)).where(User.id == self._user_id)
+            )
+        ).one()
+        account = row._asdict()
+        self._check_in_details = propose(diver, account, self._note)
+        self._check_in_values = to_write(self._check_in_details, self._check_in, account, self._note)
 
     async def _plan_trips(self) -> None:
         existing = await self._rows_by_uuid(Trip, [trip.uuid for trip in self._document.trips])
@@ -2305,14 +2334,20 @@ async def plan_import(
     loaded: LoadedImport,
     resolution_ran: bool = False,
     newly_resolved_aphia_ids: frozenset[int] = frozenset(),
+    check_in: ImportCheckInSubmission | None = None,
 ) -> ImportPlan:
-    """Plan an import of `loaded` into `user_id`'s logbook. Writes nothing."""
+    """Plan an import of `loaded` into `user_id`'s logbook. Writes nothing.
+
+    `check_in` is what the diver confirmed in the preview; the apply passes it and the
+    preview, which has nothing submitted yet, does not.
+    """
     planner = _Planner(
         db,
         user_id=user_id,
         loaded=loaded,
         resolution_ran=resolution_ran,
         newly_resolved_aphia_ids=newly_resolved_aphia_ids,
+        check_in=check_in,
     )
     return await planner.plan()
 

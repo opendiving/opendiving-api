@@ -95,13 +95,14 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # explicit `null` on `PATCH /user`.
     #
     # The phone numbers are free text bounded by length - shops in six countries write them
-    # six ways, and nothing here dials one.
+    # six ways, and nothing here dials one. Every width is DiveJSON §6.1's bound on the member
+    # the column travels as, so an import can write whatever a conforming document carries.
     date_of_birth: Mapped[date | None] = mapped_column(Date, default=None)
     phone: Mapped[str | None] = mapped_column(String(32), default=None)
-    emergency_contact_name: Mapped[str | None] = mapped_column(String(100), default=None)
+    emergency_contact_name: Mapped[str | None] = mapped_column(String(255), default=None)
     emergency_contact_phone: Mapped[str | None] = mapped_column(String(32), default=None)
-    emergency_contact_relationship: Mapped[str | None] = mapped_column(String(50), default=None)
-    insurance_provider: Mapped[str | None] = mapped_column(String(100), default=None)
+    emergency_contact_relationship: Mapped[str | None] = mapped_column(String(64), default=None)
+    insurance_provider: Mapped[str | None] = mapped_column(String(255), default=None)
     insurance_policy_number: Mapped[str | None] = mapped_column(String(64), default=None)
     insurance_expires_on: Mapped[date | None] = mapped_column(Date, default=None)
 

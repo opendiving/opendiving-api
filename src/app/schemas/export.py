@@ -119,25 +119,46 @@ class ExportBoundingBox(BaseModel):
     east: float
 
 
+class ExportEmergencyContact(BaseModel):
+    """Who to call (spec §6.1). `name` is REQUIRED: a stored contact without one is not
+    written at all, since the format has no contact nobody is named in."""
+
+    name: str
+    phone: str | None = None
+    relationship: str | None = None
+
+
+class ExportInsurance(BaseModel):
+    """A dive insurance policy (spec §6.1). `provider` is REQUIRED, for the reason
+    `ExportEmergencyContact.name` is: a policy number with no insurer is not written."""
+
+    provider: str
+    number: str | None = None
+    expires_on: date | None = None
+
+
 class ExportDiver(PublicUUIDSchema):
     """Whose logbook this is.
+
+    The check-in details a dive shop's desk asks for are core members (spec §6.1): the date
+    of birth, the phone, and the emergency contact and the insurance as one-element arrays,
+    since the account stores one of each and the format orders several. Each is absent where
+    the diver filled nothing in.
 
     `units`, `gear_service_emails` and the dive form's hidden fields and presets are
     application preferences rather than logbook data, so the format gives them no core
     member and they travel under this producer's key (spec §6.1). They are here at all
     because `/export/archive` promises nothing in the account is reachable only through the
     app - which is the whole reason the presets ride along too, UI configuration or not.
-
-    The check-in details - date of birth, phone, the emergency contact's name, phone and
-    relationship, and the insurance provider, policy number and expiry - travel under that
-    same key for the same reason: 1.0's Diver object is frozen at `uuid`, `name`,
-    `username`, `email` and `created_at`, and a writer may not invent a member. Only the
-    ones the diver filled in are written, and nothing reads any of them back in.
     """
 
     name: str
     username: str
     email: str
+    phone: str | None = None
+    born_on: date | None = None
+    emergency_contacts: list[ExportEmergencyContact] | None = None
+    insurances: list[ExportInsurance] | None = None
     created_at: datetime
     extensions: ExportExtensions = None
 
