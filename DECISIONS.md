@@ -33,7 +33,9 @@ build selects every column it maps (`read_account`, on every signed-in request),
 the revision that unmaps it fails those requests until the switch. The first deploy keeps the column
 on the table and off the mapper (`exclude_properties`), writing it while the previous build reads
 it; the second drops it once the first is serving, after reconciling whatever the previous build
-wrote alone during that overlap.
+wrote alone during that overlap. The second deploy's own overlap still fails the first build's
+writes and reads of the column until the switch: a failed write or job run, where the one-step drop
+fails every request.
 
 ## Domain `CheckConstraint`s need a manual `ALTER TABLE` on existing DBs
 
