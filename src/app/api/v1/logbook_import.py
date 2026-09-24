@@ -138,8 +138,8 @@ async def preview_logbook_import(
     existing record of yours already carries that identifier, or that name), **restored** (a
     record you deleted here, coming back under its original identifier) or **skipped**.
     `notes` explains every decision that is not a plain create, one sentence at a time, and
-    `files` says how many stored binaries the logbook references and how many of them it
-    actually contains - only the full-export archive carries any.
+    `files` says how many dive-computer files and card images the logbook references and how
+    many of them it actually contains - only the full-export archive carries any.
 
     `conversion` is present when the file was not DiveJSON already, and says what the
     conversion could not carry: findings grouped by kind and message, each with up to three
